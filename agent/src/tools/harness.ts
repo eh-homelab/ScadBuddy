@@ -2,6 +2,7 @@ import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-
 import type { Context } from '@opentelemetry/api'
 import { harnessPrincipal, hasTier, type Principal, TIERS } from '../auth/principal.js'
 import type { ApprovalPreparer, TierResolver } from '../harness/permissions.js'
+import type { SeamLedger } from '../harness/seamLedger.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import { OWN_PLUGIN_NAME } from '../plugins/packages/vet.js'
 import type { TurnPrincipal } from '../sessions/manager.js'
@@ -31,13 +32,22 @@ import { effectiveTool, isRefusal, isTransient, type Tool, ToolError, toolErrorT
 //     `read` default of a non-browser owner.
 
 export type HarnessTools = {
+  /** The registry tools the harness is given, for the seam's per-call access read (access/live.ts). */
+  tools: readonly Tool[]
   tierOf: TierResolver
   /** Each call's title for the panel (#782, registry.ts `ToolSpec.title`); undefined for any other name. */
   titleOf: TitleResolver
   mcpServers: (
     session: { id?: string; owner: Owner },
     turn?: TurnPrincipal,
-    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy; secrets?: () => readonly string[] },
+    extras?: {
+      waitForTab?: WaitForTab
+      turnContext?: () => Context
+      builtIn?: BuiltInPolicy
+      secrets?: () => readonly string[]
+      /** The tier the seam applied to each of the turn's calls (#2171, harness/seamLedger.ts), over `builtIn`'s. */
+      ledger?: Pick<SeamLedger, 'tierOf'>
+    },
   ) => Record<string, McpSdkServerConfigWithInstance>
   /**
    * What an outward call of a tool with its own `prepareApproval` parks (#4442): the input
@@ -49,6 +59,7 @@ export type HarnessTools = {
 export function harnessTools(services: ToolServices, tools: readonly Tool[] = ALL_TOOLS): HarnessTools {
   const byName = new Map(tools.map((t) => [`mcp__${SERVER_NAME}__${t.name}`, t]))
   return {
+    tools,
     tierOf: (name) => byName.get(name)?.risk,
     titleOf: (name, input) => byName.get(name)?.title(input),
     prepareApproval: (session, turn) => {
@@ -87,9 +98,13 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
       // Settings → Plugins (#1953): a disabled tool is not offered, and one raised
       // past the principal's tiers is not either.
       const builtIn = extras?.builtIn
-      const seamTierOf = (t: Tool) => (builtIn ? builtIn.tierOf(`mcp__${SERVER_NAME}__${t.name}`, t.risk) : t.risk)
+      const turnTierOf = (t: Tool) => (builtIn ? builtIn.tierOf(`mcp__${SERVER_NAME}__${t.name}`, t.risk) : t.risk)
+      // The tier the seam applied to this very call when it recorded one (#2171: it reads
+      // each call's access), else the turn's.
+      const ledger = extras?.ledger
+      const seamTierOf = (t: Tool, toolUseId?: string) => ledger?.tierOf(toolUseId) ?? turnTierOf(t)
       const allowed = tools.filter((t) =>
-        builtIn ? !builtIn.isDisabled(OWN_PLUGIN_NAME, t.name) && hasTier(principal, seamTierOf(t)) : hasTier(principal, t.risk),
+        builtIn ? !builtIn.isDisabled(OWN_PLUGIN_NAME, t.name) && hasTier(principal, turnTierOf(t)) : hasTier(principal, t.risk),
       )
       // The turn's own secrets (its credentials and plugin tokens) beside every
       // saved credential's, for workspace_read to redact (#2329).

@@ -20,6 +20,7 @@ import {
   type ApprovalGate,
   type ApprovalPreparer,
   type DecisionListener,
+  type LiveSeam,
   makeCanUseTool,
   makePreToolUseHook,
   makeResultScreenHook,
@@ -193,6 +194,11 @@ export type HarnessRun = {
    * here, and disabled tools, put in `disallowedTools`.
    */
   builtInPolicy?: BuiltInPolicy
+  /**
+   * Each call's access as it is now (#2171, spec §4.4, permissions.ts `LiveSeam`): read by
+   * the seam before it decides, over every tier above, so a change applies mid-turn.
+   */
+  live?: LiveSeam
   onDecision?: DecisionListener
   /**
    * Parks outward calls until a human decides (#258, src/approvals/). Without
@@ -407,7 +413,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   }
   const browser = run.browser
   const guard = browser ? (name: string, input: unknown) => browser.check(name, input) : undefined
-  const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard, run.prepareApproval)
+  const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard, run.prepareApproval, run.live)
   const abort = new AbortController()
   const options: Options = {
     ...base,
@@ -427,7 +433,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       mergeHooks(
         {
           PreToolUse: [
-            makePreToolUseHook(tierOf, run.onDecision, gate, guard),
+            makePreToolUseHook(tierOf, run.onDecision, gate, guard, run.live),
             // Claude Code's own WebFetch, which an allowed package may be given, fetches
             // where the agent's egress check does not reach; this checks it first.
             webFetchEgressHook(run.resolve),

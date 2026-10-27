@@ -14,6 +14,8 @@ import { type Context, ROOT_CONTEXT } from '@opentelemetry/api'
 import { NoUsableCredentialError, type PooledCredential } from '../harness/fallback.js'
 import { BUILTIN_SOURCES, type ToolAccess } from '../access/model.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
+import { liveAccess } from '../access/live.js'
+import { SeamLedger } from '../harness/seamLedger.js'
 import { HTTP_SERVER, HTTP_TOOL, httpAccessTierOf, httpRequestServer, httpTierOf } from '../harness/httpRequest.js'
 import type { RiskTier, TierResolver } from '../harness/permissions.js'
 import { isQuestionTool } from '../harness/questions.js'
@@ -34,7 +36,7 @@ import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
 import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
-import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnSlot } from './turnSlot.js'
+import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnContext, type TurnSlot } from './turnSlot.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { nestedQueries } from '../builtins/nested.js'
 import { browserGuard } from '../browser/guard.js'
@@ -48,6 +50,7 @@ export type TurnRunnerDeps = Pick<
   | 'credentials'
   | 'settings'
   | 'access'
+  | 'tools'
   | 'tierOf'
   | 'mcpServers'
   | 'prepareApproval'
@@ -178,6 +181,7 @@ export class TurnRunner {
     'tierOf',
     'browser',
     'builtInPolicy',
+    'live',
     'approvalGate',
     'prepareApproval',
     'questionGate',
@@ -215,6 +219,7 @@ export class TurnRunner {
     maxRetries: 'transientRetries', // the fallback's bound on Claude Code's retries, set per attempt (warmTurn.ts)
     tierOf: 'plugins', // the registry's tiers, widened by each plugin's `toolTiers` (http_request's: `httpTier`)
     builtInPolicy: 'raisedTiers', // Settings -> Plugins' raised tiers and disabled built-ins (`disabledTools`)
+    live: 'plugins', // reads each call's access as it runs; the sources it reads are the plugins' (its ledger is the slot's turn's)
     approvalGate: 'slot',
     prepareApproval: 'tiers', // bound to the principal, as `mcpServers` is (#4442)
     questionGate: 'slot', // present only for a browser-owned session, which `owner` fingerprints
@@ -341,6 +346,19 @@ export class TurnRunner {
           : undefined
       remotePlugins.push(...(packageServers?.plugins ?? []))
       secrets.push(...(packageServers?.secrets ?? []))
+      // Each call's access as it is now (#2171, spec §4.4), read by the seam over the turn's
+      // tiers; the tier it applies goes in the current turn's ledger, for the server's #2100 check.
+      const ledger = turnLedger(slot)
+      const live = this.deps.access
+        ? {
+            access: liveAccess(this.deps.access, {
+              tools: this.deps.tools ?? [],
+              remote: (forwarded?.plugins ?? []).map((p) => p.name),
+              packageServers: packageServers?.servers ?? [],
+            }),
+            ledger,
+          }
+        : undefined
       const pluginTiers = harnessTierOf({
         remotePlugins,
         tierOf,
@@ -465,6 +483,7 @@ export class TurnRunner {
           plugins: remotePlugins.map((p) => p.name),
         }),
         ...(builtIn ? { builtInPolicy: builtIn } : {}),
+        ...(live ? { live } : {}),
         approvalGate: (request) => {
           const turn = slot.current
           return turn ? turn.approvalGate(request) : Promise.resolve({ approved: false, message: NO_TURN })
@@ -504,6 +523,7 @@ export class TurnRunner {
                         : {}),
                       turnContext: () => slot.current?.trace.context() ?? ROOT_CONTEXT,
                       ...(builtIn ? { builtIn } : {}),
+                      ...(live ? { ledger } : {}),
                       // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
                       secrets: () => secrets,
                     })
@@ -667,5 +687,27 @@ export class TurnRunner {
           recordMemoryActivity({ audit: this.deps.audit, events: this.deps.events }, session, turnId, activity, secrets),
       })
     return { hooks, recallMaxQueryChars }
+  }
+}
+
+/**
+ * The seam's ledger (harness/seamLedger.ts) as the assembly's callbacks see it: a fresh
+ * one for each turn the slot holds, dropped with it, so a warm process that serves many
+ * turns never holds more than one turn's calls. With no turn it records nothing.
+ */
+function turnLedger(slot: TurnSlot): Pick<SeamLedger, 'record' | 'tierOf'> {
+  const ledgers = new WeakMap<TurnContext, SeamLedger>()
+  return {
+    record(toolUseId, tier) {
+      const turn = slot.current
+      if (!turn) return
+      let ledger = ledgers.get(turn)
+      if (!ledger) ledgers.set(turn, (ledger = new SeamLedger()))
+      ledger.record(toolUseId, tier)
+    },
+    tierOf(toolUseId) {
+      const turn = slot.current
+      return turn ? ledgers.get(turn)?.tierOf(toolUseId) : undefined
+    },
   }
 }

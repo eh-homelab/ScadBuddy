@@ -92,8 +92,11 @@ export function createHarnessServer(
   session?: string,
   /** The turn's open segment (telemetry/turn.ts TurnTrace.context): where a call with no bound span is traced. */
   turnContext?: () => Context,
-  /** The tier the turn's permission seam applies to each tool (registry.ts ToolContext.seamTier); its own by default. */
-  seamTierOf: (tool: Tool) => Risk = (tool) => tool.risk,
+  /**
+   * The tier the turn's permission seam applied to this call, by its tool_use id when the
+   * seam recorded one (registry.ts ToolContext.seamTier, harness/seamLedger.ts); its own by default.
+   */
+  seamTierOf: (tool: Tool, toolUseId?: string) => Risk = (tool) => tool.risk,
 ): McpSdkServerConfigWithInstance {
   const lookup = lookupIn(tools)
   return createSdkMcpServer({
@@ -116,21 +119,22 @@ export function createHarnessServer(
           // In the call's own span (telemetry/turn.ts TurnTrace), found by the
           // tool_use id Claude Code sends in `_meta`: the SDK runs this handler
           // in the query's context, not the tool's (telemetry/trace.ts).
-          otelContext.with(toolContextFor(extra, turnContext), () =>
+          otelContext.with(toolContextFor(extra, turnContext), () => {
+            const toolUseId = toolUseIdFrom(extra)
             // `gate: 'harness'`: the query's permission seam has already parked
             // an outward call for approval (registry.ts ToolContext.gate).
-            runTool(t, args, {
+            return runTool(t, args, {
               ...services,
               principal,
               session,
-              ...callIds(session, toolUseIdFrom(extra)),
+              ...callIds(session, toolUseId),
               progress: progressFrom(extra),
               signal: signalFrom(extra),
               lookup,
               gate: 'harness',
-              seamTier: seamTierOf(t),
-            }),
-          ),
+              seamTier: seamTierOf(t, toolUseId),
+            })
+          }),
         { annotations: t.annotations },
       ),
     ),

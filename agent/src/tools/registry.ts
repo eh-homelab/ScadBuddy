@@ -196,10 +196,11 @@ export type ToolContext = ToolServices & {
    */
   gate?: 'harness' | 'workflow'
   /**
-   * Under `harness`: the tier the turn's permission seam applied to this tool.
-   * The seam reads Settings → Plugins once per turn (sessions/manager.ts), so a
-   * tool raised to `outward` since then was not parked, and is refused here
-   * rather than run unasked (#2100).
+   * Under `harness`: the tier the turn's permission seam applied to this call. The
+   * seam reads each call's access (#2171, access/live.ts) and records the tier it
+   * applied (harness/seamLedger.ts); without a record this is the tier the turn read
+   * at its start. A tool raised to `outward` after the seam let it through was not
+   * parked, and is refused here rather than run unasked (#2100).
    */
   seamTier?: Risk
   /**

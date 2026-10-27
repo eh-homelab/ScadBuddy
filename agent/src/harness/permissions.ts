@@ -1,5 +1,7 @@
 import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
+import type { LiveAccess } from '../access/live.js'
 import { screenedText } from '../browser/origins.js'
+import type { SeamLedger } from './seamLedger.js'
 
 // The permission seam between the SDK and ScadBuddy's risk tiers (spec §8.1–§8.2,
 // issue #258). Every tool call is mapped to a tier and the tier to a decision:
@@ -219,15 +221,51 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+/**
+ * Each call's access as it is now (#2171, spec §4.4): read at the seam before it decides,
+ * so a tier changed mid-turn applies from the next call. `off` is refused, a tier replaces
+ * the turn's own (`tierOf`), undefined leaves it. The tier applied goes in `ledger` under
+ * the call's tool_use id, for the in-process server's #2100 check (tools/projections.ts).
+ */
+export type LiveSeam = { access: LiveAccess; ledger?: Pick<SeamLedger, 'record' | 'tierOf'> }
+
+/** `decide` over the call's live access; a read that fails, or does not answer in time, refuses the call. */
+async function decideLive(
+  toolName: string,
+  tierOf: TierResolver,
+  input: unknown,
+  guard: InputGuard | undefined,
+  live: LiveSeam | undefined,
+  toolUseId: string | undefined,
+): Promise<ToolDecision> {
+  let access: Awaited<ReturnType<LiveAccess>>
+  try {
+    access = live ? await within(live.access(toolName), GUARD_DEADLINE_MS) : undefined
+  } catch {
+    const tier = tierOf(toolName, input) ?? 'outward'
+    return { decision: 'deny', tier, reason: `${toolName} is refused: its Settings → Plugins entry cannot be read` }
+  }
+  if (access === 'off') {
+    const tier = tierOf(toolName, input) ?? 'outward'
+    return { decision: 'deny', tier, reason: `${toolName} is disabled in Settings → Plugins; the user can turn it back on there` }
+  }
+  const resolve: TierResolver = access === undefined ? tierOf : () => access
+  const decision = decide(toolName, resolve, input, await judgeInput(guard, toolName, input))
+  if (toolUseId !== undefined) live?.ledger?.record(toolUseId, decision.tier)
+  return decision
+}
+
 export function makeCanUseTool(
   tierOf: TierResolver,
   onDecision?: DecisionListener,
   gate?: ApprovalGate,
   guard?: InputGuard,
   prepare?: ApprovalPreparer,
+  live?: LiveSeam,
 ): CanUseTool {
   return async (toolName, input, options): Promise<PermissionResult> => {
-    const decision = decide(toolName, tierOf, input, await judgeInput(guard, toolName, input))
+    // The live tier first, so `prepare` runs only for a call that parks by it (#4442).
+    const decision = await decideLive(toolName, tierOf, input, guard, live, options.toolUseID)
     onDecision?.(toolName, decision)
     // The SDK passes the input to the tool from `updatedInput` when set; an
     // allowed call gets its own input back unchanged, unless the guard rewrote it.
@@ -269,12 +307,13 @@ export function makePreToolUseHook(
   onDecision?: DecisionListener,
   gate?: ApprovalGate,
   guard?: InputGuard,
+  live?: LiveSeam,
 ): HookCallbackMatcher {
   return {
     hooks: [
       async (input) => {
         if (input.hook_event_name !== 'PreToolUse') return {}
-        const decision = decide(input.tool_name, tierOf, input.tool_input, await judgeInput(guard, input.tool_name, input.tool_input))
+        const decision = await decideLive(input.tool_name, tierOf, input.tool_input, guard, live, input.tool_use_id)
         if (decision.decision === 'allow') return {}
         if (decision.decision === 'needs_approval' && gate) {
           // Force the prompt; canUseTool parks the call and reports the decision.

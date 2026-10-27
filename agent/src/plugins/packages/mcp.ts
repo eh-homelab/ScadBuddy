@@ -42,6 +42,8 @@ import { packageLedgerId } from '../pluginSessions.js'
 
 export type PackageServers = {
   plugins: HarnessPlugin[]
+  /** Each of `plugins`, in order: its package and server, whose ai_access source the seam reads per call (access/live.ts). */
+  servers?: { name: string; pkg: string; server: string }[]
   /** Each server's `pluginEndpoint` (its declared URL and header), in `plugins` order. */
   endpoints?: PluginEndpoint[]
   problems: string[]
@@ -77,6 +79,7 @@ export async function forwardPackageServers(
 ): Promise<PackageServers> {
   const { access, ...forwardOptions } = options
   const plugins: HarnessPlugin[] = []
+  const servers: NonNullable<PackageServers['servers']> = []
   const endpoints: PluginEndpoint[] = []
   const problems: string[] = []
   const secrets: string[] = []
@@ -130,12 +133,14 @@ export async function forwardPackageServers(
         if (header) secrets.push(...headerSecretVariants(header.value))
         secrets.push(registration.url)
         plugins.push({ name, url: registration.url, toolTiers, disabledTools })
+        servers.push({ name, pkg: pkg.name, server })
         endpoints.push(pluginEndpoint(plugin))
       }
     }
   }
   return {
     plugins,
+    servers,
     endpoints,
     problems,
     secrets,
