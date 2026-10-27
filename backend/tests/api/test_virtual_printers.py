@@ -121,6 +121,7 @@ def test_a_code_sealed_before_a_kek_rotation_opens_under_the_previous_key(
     }
     # A store of its own (#4921): the app's shared one keeps its keys for other tests.
     shared = registry(client).store
+    keys_before = (shared.kek, shared.previous_kek)
     store = PrinterStore(shared.pool, ROTATED, previous_kek=KEK)
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     kinds = {
@@ -141,7 +142,7 @@ def test_a_code_sealed_before_a_kek_rotation_opens_under_the_previous_key(
     with pytest.raises(ApiError) as refused:
         asyncio.run(kinds["bambuddy_vp_create"].run(request, {}))
     assert refused.value.status == 503
-    assert shared.kek is not ROTATED and shared.previous_kek is None
+    assert (shared.kek, shared.previous_kek) == keys_before
 
 
 def test_open_access_code_tries_the_previous_key_after_the_current_one() -> None:
