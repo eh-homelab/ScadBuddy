@@ -519,8 +519,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # No `--with-deps` (#4882). ubuntu-latest already carries every library
+      # chromium needs; `--with-deps` only adds CJK/Thai/unifont fonts and
+      # upgrades, ~26 MB from azure.archive.ubuntu.com. That fetch normally
+      # takes 0-3 s, but at times trickles at 24-58 kB/s for 7-12 minutes, and
+      # every single-shard timeout here was that, not a test. The step timeout
+      # makes a stalled browser download fail this step by name.
       - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
+        timeout-minutes: 5
+        run: pnpm exec playwright install chromium
 
       # `--list` needs no server. Its last line is "Total: N tests in M files".
       - name: Count this shard's tests
@@ -1110,10 +1117,12 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      # No `--with-deps`: see the frontend-e2e job (#4882).
       - name: Install Playwright browsers
         if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
         working-directory: frontend
-        run: pnpm exec playwright install --with-deps chromium
+        timeout-minutes: 5
+        run: pnpm exec playwright install chromium
 
       # The install-on-demand test is the only thing in this repo that depends
       # on a service outside it, and `CI Summary` — the one required check —
