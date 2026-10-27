@@ -482,7 +482,8 @@ sniffed as `%PDF-` goes only to the viewer, never to the HTML parser, and
 publishes `INLINE`, `SHOWN_IMAGES` and `THUMBNAILED` on `Attachment.media_type`
 (`x-inline`, `x-shown-images`, `x-thumbnailed`), and the browser's copy is tested
 against them (`attachmentMedia.test.ts`, #4679). `role` adds `reference` (the
-customer's sketch, logo or drawing) and `issue` (a print's problem) to the roles below. The blob is `attachment-<sha256>` (one file,
+customer's sketch, logo or drawing) and `issue` (a print's problem) to the roles below.
+The blob is `attachment-<sha256>` (one file,
 `file`); identical bytes share it, and each row holds it. The `blob_refs` row
 `(attachment, <id>)` is written and deleted **in the attachment row's own transaction**
 (as `slicing/store.py` does), not before it as §3.4's quote holds are: the blob was
@@ -497,7 +498,8 @@ removes those files first. Adding, captioning, re-roling and removing are record
 not steps: allowed in every state, on hold and after close, and each is on the audit
 line (`attachment.added`, `attachment.caption`, `attachment.role`,
 `attachment.removed`). Only an image a browser draws (PNG, JPEG, WebP, GIF, AVIF) may
-be marked delivered. `order_items.delivered_attachment_id` (`ON DELETE SET NULL`) names the item's image a person marked as what was actually delivered; the
+be marked delivered. `order_items.delivered_attachment_id` (`ON DELETE SET NULL`) names
+the item's image a person marked as what was actually delivered; the
 order page shows it as the item's picture, before it the item's output's thumbnail, then
 its template's.
 

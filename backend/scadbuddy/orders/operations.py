@@ -46,6 +46,7 @@ from scadbuddy.orders.quote import (
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.render.job_models import Job
 from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
+from scadbuddy.store.cache import StaleBlobError
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
@@ -266,6 +267,13 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
                 "this request's upload is no longer held; send it again",
+            ) from None
+        except StaleBlobError:
+            # The same bytes are stored on the other backend of a `/store/migrate`
+            # (`CachedBlobStore.claim`): the upload works once the store has moved.
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "the store is moving to another backend; send the file again once it has",
             ) from None
         try:
             attachment = await to_thread_to_end(

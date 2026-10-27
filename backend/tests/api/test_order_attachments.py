@@ -13,7 +13,9 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from scadbuddy.orders import attachments as attachments_module
 from scadbuddy.orders.store import ATTACHMENT_HOLDER
+from scadbuddy.store.cache import StaleBlobError
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import AGENT, create_order
 from tests.api.test_orders_lifecycle import add_item
@@ -344,3 +346,19 @@ def test_an_item_past_draft_keeps_its_files_when_its_delete_is_refused(
     detail = client.get(f"/api/v1/orders/{order['id']}").json()
     assert [a["id"] for a in detail["attachments"]] == [kept["id"]]
     assert holders(client) == {kept["id"]: f"attachment-{kept['sha256']}"}
+
+
+def test_an_upload_while_the_store_moves_is_told_to_wait(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mid `/store/migrate`, bytes stored on the other backend lose the publish's swap
+    (`CachedBlobStore.claim`): the answer says to send them again, not a bare failure."""
+    order, _ = shop(client)
+
+    async def moving(*_: object) -> str:
+        raise StaleBlobError("piece attachment-x was published by a later attempt")
+
+    monkeypatch.setattr(attachments_module, "keep", moving)
+    answer = attach(client, order["id"], PDF, "brief.pdf")
+    assert answer.status_code == 503, answer.text
+    assert "store is moving" in answer.json()["detail"]
