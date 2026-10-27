@@ -28,13 +28,33 @@ export interface RegisterOptions {
 
 type Catalog = typeof CatalogModule
 
-/** zod and the schemas load on first use, so the entry chunk carries neither. */
+/** Loads the tool catalogue; `undefined` is a preload error the stale-chunk reload swallowed. */
 export type CatalogLoader = () => Promise<Catalog | undefined>
 
+/** zod and the schemas load on first use, so the entry chunk carries neither. */
 const importCatalog: CatalogLoader = () => import('./catalog')
 
 /** What `listTools()` answers: the tools, or the typed error `call()` would give. */
 export type ListToolsResult = { ok: true; tools: ToolInfo[] } | { ok: false; error: ToolError }
+
+/**
+ * A module the browser could not fetch, as each engine words it. Matched on message text,
+ * so an engine that rewords its message turns a stale tab back into `failed`. Read from
+ * each engine's source on its main branch as of 2026-10-27 (no release pinned):
+ * - Chromium: "Failed to fetch dynamically imported module: <url>"
+ *   (`third_party/blink/renderer/core/script/dynamic_module_resolver.cc`);
+ * - Firefox: "error loading dynamically imported module: <url>"
+ *   (`JSMSG_DYNAMIC_IMPORT_FAILED`, `js/public/friend/ErrorNumbers.msg`);
+ * - WebKit/Safari: "Importing a module script failed."
+ *   (`Source/WebCore/bindings/js/ScriptModuleLoader.cpp`);
+ * - Vite 8.3.5's preload helper: "Unable to preload CSS for <url>".
+ */
+const MODULE_FETCH_FAILURE =
+  /dynamically imported module|Importing a module script failed|Unable to preload CSS/i
+
+function isModuleFetchFailure(cause: unknown): boolean {
+  return cause instanceof Error && MODULE_FETCH_FAILURE.test(cause.message)
+}
 
 /**
  * The lazy tool catalogue, or the `stale_tab` error (#4884). On a tab from an older
@@ -47,19 +67,6 @@ export type ListToolsResult = { ok: true; tools: ToolInfo[] } | { ok: false; err
  * code has to pair again. Any other rejection (the catalogue throwing as it evaluates)
  * is not staleness, and reloading would not help: that answers `failed`.
  */
-/**
- * A module the browser could not fetch, as each engine words it: Chromium's "Failed to
- * fetch dynamically imported module", Firefox's "error loading dynamically imported
- * module", Safari's "Importing a module script failed.", or Vite's preload helper's
- * "Unable to preload CSS for …".
- */
-const MODULE_FETCH_FAILURE =
-  /dynamically imported module|Importing a module script failed|Unable to preload CSS/i
-
-function isModuleFetchFailure(cause: unknown): boolean {
-  return cause instanceof Error && MODULE_FETCH_FAILURE.test(cause.message)
-}
-
 async function loadOrStale<T>(load: () => Promise<T | undefined>): Promise<{ module: T } | { error: ToolError }> {
   let module: T | undefined
   try {
