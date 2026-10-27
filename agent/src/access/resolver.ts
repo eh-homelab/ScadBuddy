@@ -34,6 +34,7 @@ export class AccessResolver {
       of: async (tool) => {
         const own = this.risk.get(tool)
         if (own === undefined) return { disabled: false }
+        // `item`, not `switchedItem`: a `builtin:browser` `*` off is enforced only on the classic seam until #4757.
         const access = await this.item(registrySource(tool), tool, own)
         if (access === 'off') return { disabled: true }
         return { ...(access === own ? {} : { tier: access }), disabled: false }
