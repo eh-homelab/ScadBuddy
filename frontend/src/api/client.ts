@@ -112,6 +112,7 @@ import type {
   PrinterCreate,
   PrinterPatch,
   DiscoveredPrinter,
+  PrinterSyncResult,
   LanLink,
   QueueItem,
   ArchiveStats,
@@ -1967,6 +1968,9 @@ export const api = {
   deletePrinter: (id: string) => request<void>(`/printers/${seg(id)}`, { method: 'DELETE' }),
   /** Bambuddy's active printers, each with the row linking it, if any. */
   discoverPrinters: () => request<DiscoveredPrinter[]>('/printers/discover'),
+  /** #4439, #4747: import and link Bambuddy's printers and virtual printers; idempotent. */
+  syncPrintersFromBambuddy: (dryRun = false) =>
+    request<PrinterSyncResult>(`/printers/sync-bambuddy?dry_run=${dryRun}`, { method: 'POST' }),
   linkPrinterBambuddy: (id: string, bambuddyPrinterId: number) =>
     request<PrinterRow>(`/printers/${seg(id)}/bambuddy`, {
       method: 'PUT',

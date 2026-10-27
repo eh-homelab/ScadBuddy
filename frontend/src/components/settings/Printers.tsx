@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { api, ApiError } from '../../api/client'
-import type { DiscoveredPrinter, PrinterRow, PrintPath } from '../../api/types'
-import { PRINTER_TOPICS as TOPICS, registryNews } from '../../lib/printerRegistry'
+import type { DiscoveredPrinter, PrinterRow, PrinterSyncEntry, PrinterSyncResult, PrintPath } from '../../api/types'
+import { PRINTER_TOPICS as TOPICS, registryNews, syncSummary } from '../../lib/printerRegistry'
 import { useAsync } from '../../lib/useAsync'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -19,6 +19,11 @@ import { Spinner } from '../ui/spinner'
  * code is sent once and never shown again: the row says only whether one is stored. The
  * path says how a print reaches it. Every change applies at once, and the list follows
  * the `printers` topic, so another tab's change shows here.
+ *
+ * #4439, #4747: "Import from Bambuddy" runs the Bambuddy sync (`POST /printers/sync-bambuddy`)
+ * and shows what it did. A linked row shows Bambuddy's own values beside ScadBuddy's, a
+ * difference marked; a Bambuddy virtual printer's row says what it forwards to, and is not a
+ * printer to print on, so it has no path and no links of its own to make here.
  */
 
 const PATHS: { value: PrintPath; label: string }[] = [
@@ -31,7 +36,7 @@ function problem(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.detail : fallback
 }
 
-export function PrintersPanel() {
+export function PrintersPanel({ bambuddyConfigured = false }: { bambuddyConfigured?: boolean }) {
   const printers = useAsync(() => api.listPrinters(), [], TOPICS, registryNews)
   // Bambuddy's list is a convenience here: unreadable, nothing is offered to link.
   const discovered = useAsync(
@@ -57,15 +62,24 @@ export function PrintersPanel() {
   }
   if (!rows) return <LoadingLines label="Loading the printers" />
   const free = (discovered.data ?? []).filter((printer) => !printer.linked_to)
+  const named = new Map(rows.map((row) => [row.id, row.name]))
   return (
     <div className="space-y-3">
+      <ImportFromBambuddy
+        configured={bambuddyConfigured}
+        onDone={() => {
+          printers.refresh()
+          discovered.refresh()
+        }}
+      />
       {rows.length === 0 && <p className="text-xs text-muted-foreground">No printers yet.</p>}
       <ul className="space-y-3" aria-label="Printers">
         {rows.map((row) => (
           <PrinterItem
             key={row.id}
             row={row}
-            free={row.bambuddy_printer_id == null ? free : []}
+            targetName={row.forwards_to ? (named.get(row.forwards_to) ?? null) : null}
+            free={row.bambuddy_printer_id == null && row.kind === 'physical' ? free : []}
             onChanged={replace}
             onGone={() => show(rows.filter((entry) => entry.id !== row.id))}
           />
@@ -78,11 +92,13 @@ export function PrintersPanel() {
 
 function PrinterItem({
   row,
+  targetName,
   free,
   onChanged,
   onGone,
 }: {
   row: PrinterRow
+  targetName: string | null
   free: DiscoveredPrinter[]
   onChanged: (row: PrinterRow) => void
   onGone: () => void
@@ -105,6 +121,7 @@ function PrinterItem({
   }
 
   const bambuddy = row.bambuddy_printer_id
+  const virtual = row.kind === 'bambuddy_virtual'
   return (
     <li aria-label={`Printer ${row.name}`}>
       <Card size="sm" className="py-0">
@@ -118,6 +135,7 @@ function PrinterItem({
                 {row.model ? ` · ${row.model}` : ''}
               </p>
             </div>
+            {!virtual && (
             <ChoiceSelect
               aria-label={`How ${row.name} prints`}
               size="sm"
@@ -129,10 +147,13 @@ function PrinterItem({
                 void act(() => api.patchPrinter(row.id, { preferred_path: next as PrintPath }), 'Could not save the path.')
               }
             />
+            )}
           </div>
 
+          {virtual ? <VirtualLine row={row} targetName={targetName} /> : <BambuddyLine row={row} />}
+
           <div className="flex flex-wrap items-center gap-2 text-xs">
-            {bambuddy != null ? (
+            {virtual ? null : bambuddy != null ? (
               <>
                 <Badge variant="outline">Bambuddy printer {bambuddy}</Badge>
                 <Button
@@ -196,7 +217,13 @@ function PrinterItem({
             </div>
           )}
 
-          {!row.lan_host && <LanForm row={row} onLinked={onChanged} />}
+          {row.lan_sync_error && (
+            <p className="text-xs text-warn" aria-label={`Bambuddy sync note for ${row.name}`}>
+              {row.lan_sync_error}
+            </p>
+          )}
+
+          {!row.lan_host && !virtual && <LanForm row={row} onLinked={onChanged} />}
 
           <div className="flex items-center gap-2">
             <Button
@@ -219,6 +246,142 @@ function PrinterItem({
         </CardContent>
       </Card>
     </li>
+  )
+}
+
+/** One value of Bambuddy's beside ScadBuddy's; marked when they differ. */
+function Compared({ label, ours, theirs }: { label: string; ours?: string | null; theirs?: string | null }) {
+  if (theirs == null || theirs === '') return null
+  const differs = ours != null && ours !== '' && ours !== theirs
+  return (
+    <span className={differs ? 'text-warn' : undefined} data-differs={differs || undefined}>
+      {label} {theirs}
+      {differs ? ` (ScadBuddy: ${ours})` : ''}
+    </span>
+  )
+}
+
+/** #4747 item 1: what Bambuddy reports for a linked printer, as of the last sync. */
+function BambuddyLine({ row }: { row: PrinterRow }) {
+  const view = row.bambuddy_view
+  if (!view || row.bambuddy_printer_id == null) return null
+  const parts = [
+    <Compared key="name" label="name" ours={row.name} theirs={view.name} />,
+    <Compared key="model" label="model" ours={row.model} theirs={view.model} />,
+    <Compared key="ip" label="IP" ours={row.lan_host} theirs={view.ip_address} />,
+    <span key="active">{view.is_active === false ? 'inactive' : 'active'}</span>,
+    view.nozzle_count != null ? <span key="nozzles">{view.nozzle_count} nozzles</span> : null,
+  ].filter(Boolean)
+  return (
+    <p className="flex flex-wrap gap-x-2 text-xs text-muted-foreground" aria-label={`Bambuddy's view of ${row.name}`}>
+      <span className="font-medium">In Bambuddy:</span>
+      {parts}
+    </p>
+  )
+}
+
+/** #4747 item 3: a Bambuddy virtual printer, what it forwards to, and its mode. */
+function VirtualLine({ row, targetName }: { row: PrinterRow; targetName: string | null }) {
+  const view = row.bambuddy_view
+  const model = view?.model ?? row.model ?? 'printer'
+  const target = view?.target_printer_id == null ? `any ${model}` : (targetName ?? `Bambuddy printer ${view.target_printer_id}`)
+  const mode = row.vp_mode ?? view?.mode
+  return (
+    <div className="space-y-1 text-xs">
+      <p>
+        <Badge variant="outline">Bambuddy virtual printer</Badge> → {target}
+        {mode ? ` (${mode})` : ''}
+      </p>
+      {view && (
+        <p className="flex flex-wrap gap-x-2 text-muted-foreground">
+          <span>{view.enabled ? 'enabled' : 'disabled'}</span>
+          <span>{view.running ? 'running' : 'stopped'}</span>
+          {view.bind_ip ? <span>bind IP {view.bind_ip}</span> : null}
+          {view.remote_interface_ip ? <span>interface {view.remote_interface_ip}</span> : null}
+          <span>Not a printer to print on: print on the printer it forwards to.</span>
+        </p>
+      )}
+    </div>
+  )
+}
+
+const OUTCOMES: Record<PrinterSyncEntry['action'], string> = {
+  created: 'added',
+  linked: 'linked',
+  already_linked: 'already linked',
+  skipped: 'skipped',
+  conflict: 'conflict',
+  missing: 'no longer in Bambuddy',
+}
+
+/**
+ * #4439 item 2: "Import from Bambuddy", the same sync the server runs on its own Schedule.
+ * User-only, as the agent's tool is outward: it stores access codes Bambuddy gives.
+ */
+function ImportFromBambuddy({ configured, onDone }: { configured: boolean; onDone: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<PrinterSyncResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  async function run() {
+    setBusy(true)
+    setError(null)
+    try {
+      setResult(await api.syncPrintersFromBambuddy())
+      onDone()
+    } catch (cause) {
+      setError(problem(cause, 'Could not import the printers from Bambuddy.'))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const notable = (result?.entries ?? []).filter(
+    (entry) => entry.reason || entry.lan_reason || entry.action === 'conflict' || entry.action === 'skipped',
+  )
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={busy || !configured}
+          aria-busy={busy}
+          onClick={() => void run()}
+          {...USER_ONLY}
+        >
+          {busy && <Spinner />}
+          Import from Bambuddy
+        </Button>
+        {!configured && (
+          <span className="text-xs text-muted-foreground">Set up the Bambuddy connection first, under Connection.</span>
+        )}
+      </div>
+      {result && (
+        <div role="status" className="space-y-1 text-xs">
+          <p>{syncSummary(result)}.</p>
+          {result.virtual_printers_error && (
+            <p className="text-warn">Virtual printers not read: {result.virtual_printers_error}</p>
+          )}
+          {notable.length > 0 && (
+            <ul className="list-disc space-y-0.5 pl-4">
+              {notable.map((entry, index) => (
+                <li key={`${entry.kind}-${entry.bambuddy_printer_id ?? entry.bambuddy_vp_id ?? index}`}>
+                  {entry.name}: {OUTCOMES[entry.action]}
+                  {entry.reason ? ` (${entry.reason})` : ''}
+                  {entry.lan_reason ? `. LAN: ${entry.lan_reason}` : ''}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="text-xs text-warn">
+          {error}
+        </p>
+      )}
+    </div>
   )
 }
 

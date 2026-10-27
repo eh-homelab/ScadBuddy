@@ -408,6 +408,20 @@ def test_now_uses_report_for_lan_only_printer(client: TestClient) -> None:
     assert (card["activity"], card["job_name"], card["progress"]) == ("printing", "Bracket", 30.0)
 
 
+def test_a_lan_linked_virtual_printer_is_not_on_the_strip(client: TestClient) -> None:
+    """#4747: a Bambuddy virtual printer is never counted as hardware, even with the
+    LAN link prod's hand-made row has."""
+    pid = _lan_printer(client, serial="09400A391800001", name="H2C virtual")
+    with _registry(client).store.pool.connection() as conn:
+        conn.execute(
+            "UPDATE printers SET kind = 'bambuddy_virtual', bambuddy_vp_id = 1 WHERE id = %s",
+            (pid,),
+        )
+    _registry(client).reports.put(pid, {"gcode_state": "IDLE"}, datetime.now(UTC))
+
+    assert client.get("/api/v1/print/printers/now").json()["printers"] == []
+
+
 def test_a_stale_report_is_offline(client: TestClient) -> None:
     """Review Focus 5: past `STALE_AFTER` without a report the card is offline."""
     pid = _lan_printer(client)

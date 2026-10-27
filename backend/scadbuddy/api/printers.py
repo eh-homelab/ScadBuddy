@@ -17,15 +17,20 @@ from scadbuddy.api.deps import SettingsStoreDep
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.core.problems import ApiError
-from scadbuddy.printers.address import UnsafeAddressError, lan_address
-from scadbuddy.printers.component import PROBE_TIMEOUT, PrintersDep
+from scadbuddy.printers.address import UnsafeAddressError
+from scadbuddy.printers.bambuddy_sync import (
+    PrinterSyncResult,
+    fill_lan_after_link,
+    sync_printers,
+)
+from scadbuddy.printers.component import PrintersDep
+from scadbuddy.printers.lan_link import LanProbeFailedError, probe_and_link
 from scadbuddy.printers.models import (
     BambuddyLink,
     LanLink,
     PrinterCreate,
     PrinterPatch,
     PrinterRow,
-    is_synthetic_serial,
 )
 from scadbuddy.printers.store import (
     BambuddyLinkTakenError,
@@ -33,6 +38,7 @@ from scadbuddy.printers.store import (
     PrinterNotFoundError,
     SerialTakenError,
     SerialUnknownError,
+    VirtualPrinterRowError,
 )
 
 logger = logging.getLogger(__name__)
@@ -85,6 +91,12 @@ async def _call[T](work: Callable[[], T]) -> T:
         raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, KEK_MISSING) from None
     except SerialUnknownError:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, SERIAL_UNKNOWN) from None
+    except VirtualPrinterRowError as error:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"printer {error.printer_id} is a Bambuddy virtual printer; it links no"
+            " Bambuddy printer",
+        ) from None
 
 
 async def _bambuddy_printers(store: SettingsStoreDep) -> list[Printer]:
@@ -142,6 +154,28 @@ async def discover_printers(
     ]
 
 
+@router.post(
+    "/sync-bambuddy",
+    response_model=PrinterSyncResult,
+    summary="Import and link Bambuddy's printers and virtual printers",
+    description=(
+        "One idempotent pass (#4439, #4747): a row, linked, for every active Bambuddy "
+        "printer that reports a serial; an empty LAN link filled from Bambuddy's address "
+        "and access code through the same probe as `PUT /printers/{id}/lan` (Bambuddy "
+        "gives an API key the code only while its auth is off); a `bambuddy_virtual` row "
+        "for every Bambuddy virtual printer. Never unlinks, deletes or overwrites: "
+        "skips and conflicts are reported. `dry_run` plans and writes nothing. The "
+        "access code is never returned. 409 when no Bambuddy is configured."
+    ),
+)
+async def sync_bambuddy(
+    printers: PrintersDep, store: SettingsStoreDep, dry_run: bool = False
+) -> PrinterSyncResult:
+    settings = await asyncio.to_thread(store.load)
+    async with client_for(settings) as client:
+        return await sync_printers(printers, client, dry_run=dry_run)
+
+
 @router.get("/{printer_id}", response_model=PrinterRow, summary="One printer")
 async def get_printer(printers: PrintersDep, printer_id: str) -> PrinterRow:
     return await _call(lambda: printers.store.require(printer_id))
@@ -184,27 +218,40 @@ async def delete_printer(printers: PrintersDep, printer_id: str) -> Response:
     summary="Link a Bambuddy printer",
     description=(
         "409 when another row holds that Bambuddy printer, or this row holds another; "
-        "422 when Bambuddy reports a serial other than this row's."
+        "422 when Bambuddy reports a serial other than this row's. A row with no LAN link "
+        "then gets one from Bambuddy's address and access code, through the LAN link's "
+        "probe (#4747), when Bambuddy gives the code; a failure is the row's "
+        "`lan_sync_error`, never the link's."
     ),
 )
 async def link_bambuddy(
     printers: PrintersDep, store: SettingsStoreDep, printer_id: str, body: BambuddyLink
 ) -> PrinterRow:
     row = await _call(lambda: printers.store.require(printer_id))
-    found = {printer.id: printer for printer in await _bambuddy_printers(store)}
-    printer = found.get(body.bambuddy_printer_id)
-    if printer is None:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND, f"Bambuddy has no printer {body.bambuddy_printer_id}"
+    async with client_for(await asyncio.to_thread(store.load)) as client:
+        found = {printer.id: printer for printer in await client.printers()}
+        printer = found.get(body.bambuddy_printer_id)
+        if printer is None:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND, f"Bambuddy has no printer {body.bambuddy_printer_id}"
+            )
+        if printer.serial_number is not None and printer.serial_number != row.serial:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Bambuddy printer {printer.id} reports another serial than this printer's",
+            )
+        linked = await _call(
+            lambda: printers.store.link_bambuddy(printer_id, body.bambuddy_printer_id)
         )
-    if printer.serial_number is not None and printer.serial_number != row.serial:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"Bambuddy printer {printer.id} reports another serial than this printer's",
-        )
-    linked = await _call(lambda: printers.store.link_bambuddy(printer_id, body.bambuddy_printer_id))
-    printers.changed(printer_id)
-    return linked
+        printers.changed(printer_id)
+        try:
+            return await fill_lan_after_link(printers, client, linked, printer)
+        except Exception:
+            # The link stands; the next sync fills the LAN link.
+            logger.warning(
+                "could not fill a LAN link from Bambuddy", extra={"printer_id": linked.id}
+            )
+            return linked
 
 
 @router.delete(
@@ -238,27 +285,18 @@ PROBE_FAILED = (
 )
 async def link_lan(printers: PrintersDep, printer_id: str, body: LanLink) -> PrinterRow:
     row = await _call(lambda: printers.store.require(printer_id))
-    if is_synthetic_serial(row.serial):  # before the code goes anywhere
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, SERIAL_UNKNOWN)
-    if printers.kek is None:
-        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, KEK_MISSING)
     try:
-        async with asyncio.timeout(PROBE_TIMEOUT):
-            # Refused before anything is dialled; the probe checks again as it connects.
-            await lan_address(body.host)
-            _, cert_sha256 = await printers.probe(body.host, row.serial, body.access_code)
+        return await probe_and_link(printers, row, body)
+    except SerialUnknownError:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, SERIAL_UNKNOWN) from None
+    except KekMissingError:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, KEK_MISSING) from None
     except UnsafeAddressError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    except Exception as error:  # every failure is the one 502
-        # The kind only: never the host, the code, or the error's text.
-        logger.debug(
-            "LAN probe failed", extra={"printer_id": printer_id, "error": type(error).__name__}
-        )
+    except LanProbeFailedError:
         raise ApiError(status.HTTP_502_BAD_GATEWAY, PROBE_FAILED) from None
-    linked = await _call(lambda: printers.store.link_lan(printer_id, body, cert_sha256=cert_sha256))
-    await printers.watches.restart(linked.id)
-    printers.changed(printer_id)
-    return linked
+    except PrinterNotFoundError as error:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {error.printer_id}") from None
 
 
 @router.delete("/{printer_id}/lan", response_model=PrinterRow, summary="Unlink its LAN link")

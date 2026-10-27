@@ -305,6 +305,10 @@ export type PrinterCreate = Schemas['PrinterCreate']
 export type PrinterPatch = Schemas['PrinterPatch']
 export type PrintPath = PrinterRow['preferred_path']
 export type DiscoveredPrinter = Schemas['DiscoveredPrinter']
+/** #4439, #4747 — the Bambuddy printer sync's summary, and what Bambuddy reports per row. */
+export type PrinterSyncResult = Schemas['PrinterSyncResult']
+export type PrinterSyncEntry = Schemas['SyncEntry']
+export type BambuddyView = Schemas['BambuddyView']
 /** The LAN link as typed: the access code goes once and never comes back. */
 export type LanLink = Schemas['LanLink']
 /** #308 — ScadBuddy's print history: one linked Bambuddy archive per print. */

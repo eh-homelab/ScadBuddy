@@ -86,6 +86,28 @@ Added for #1912 on 2026-10-09, from the live Bambuddy **1.2.6b1** over the ingre
 - An archive's `status` can be `archived`, beside `printing`, `completed`, `failed` and
   `cancelled`.
 
+Added for #4747 on 2026-10-26. This file is **built, not recorded**. Its shape is
+Bambuddy's `_vp_to_dict` and `VIRTUAL_PRINTER_MODELS` (`backend/app/api/routes/virtual_printers.py`
+lines 94-135 and `services/virtual_printer/manager.py` lines 44-67, maziggy/bambuddy
+`v1.3.0b1-daily.20261025`). Its values are those #4747 measured on prod: mode `queue`,
+`bind_ip` `0.0.0.0`, empty `remote_interface_ip`, serial `09400A391800001`, running.
+
+| File | Source |
+|---|---|
+| `virtual-printers.json` | `GET /api/v1/virtual-printers` (the shape, as above) |
+
+- **The modes on the wire are `archive`, `review`, `queue` and `proxy`.** `immediate` and
+  `print_queue` are accepted as aliases and stored as `archive` and `queue`
+  (`backend/app/models/virtual_printer.py` `VP_MODE_VALUES`, `_VP_MODE_ALIASES`).
+- **A proxy VP's `serial` is its target's real serial** (`_vp_to_dict`).
+- **An API key never gets a printer's `access_code`** (`routes/printers.py`
+  `_caller_can_view_printer_secrets`, lines 126-150). It gets the code only while
+  Bambuddy's auth is off, which is how prod runs (`GET /api/v1/auth/status`
+  `{"auth_enabled": false}`, 2026-10-26).
+- **An API key cannot write virtual printers.** The writes need `SETTINGS_UPDATE`, which no
+  API-key scope maps to (`core/auth.py` `_APIKEY_SCOPE_BY_PERMISSION`, lines 79-82). The
+  reads need `SETTINGS_READ`, which Read Status grants (line 130).
+
 ## What the recordings settle
 
 - **`/api/v1/printers` 404s.** Only `/api/v1/printers/` exists. The design spec and the
