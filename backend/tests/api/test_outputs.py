@@ -381,6 +381,108 @@ def test_a_draw_past_its_budget_keeps_its_slot_until_it_ends(
     _until(lambda: store.draws_running == 0)
 
 
+def _recording_events(state: Any, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Every event the app publishes, as it publishes them."""
+    published: list[Any] = []
+    publish = state.events.publish
+
+    def recorded(event: Any) -> None:
+        published.append(event)
+        publish(event)
+
+    monkeypatch.setattr(state.events, "publish", recorded)
+    return published
+
+
+def _output_updates(published: list[Any]) -> list[Any]:
+    return [e for e in published if getattr(e, "kind", None) == "output.updated"]
+
+
+def test_a_draw_that_ends_after_its_read_gave_up_is_announced(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #4811: the page that got the 503 shows "No preview" until its list is read again.
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    budget = state.config
+    state.config = dataclasses.replace(budget, render_timeout=0.2)
+    published = _recording_events(state, monkeypatch)
+    release = threading.Event()
+    draw = draw_view
+
+    def slow(*args: Any) -> bytes | None:
+        release.wait(30)
+        return draw(*args)
+
+    _counting_draws(monkeypatch, slow)
+    url = f"/api/v1/outputs/{created['id']}/thumbnail"
+    assert client.get(url).status_code == 503
+    assert _output_updates(published) == []
+
+    release.set()
+    store: OutputStore = state.outputs
+    _until(lambda: store.draws_running == 0)
+    updated = _output_updates(published)
+    assert [(e.output_id, e.slug) for e in updated] == [(created["id"], model)]
+    state.config = budget
+    assert client.get(url).status_code == 200
+
+
+def test_a_draw_its_read_waited_for_is_not_announced(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The read itself answers with it: a History page of new outputs is not re-listed
+    # once per drawn thumbnail.
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    published = _recording_events(state, monkeypatch)
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 200
+    assert _output_updates(published) == []
+
+
+def test_a_timeout_that_lands_as_the_draw_ends_serves_the_drawing(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    published = _recording_events(state, monkeypatch)
+    calls = _counting_draws(monkeypatch, draw_view)
+
+    async def late(awaitable: Any, timeout: float | None) -> Any:
+        if not isinstance(awaitable, asyncio.Future):
+            return await asyncio.wait_for(awaitable, timeout)
+        # The draw ends, then the budget runs out before the read resumes.
+        await awaitable
+        raise TimeoutError
+
+    # Only the route module's `asyncio`: the rest of the app keeps the real one.
+    patched = SimpleNamespace(**{**vars(asyncio), "wait_for": late})
+    monkeypatch.setattr(outputs_api, "asyncio", patched)
+    url = f"/api/v1/outputs/{created['id']}/thumbnail"
+    response = client.get(url)
+    assert response.status_code == 200
+    assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+    # Not remembered as undrawable, and not announced: this read answered with it.
+    assert state.outputs.drawable_thumbnail(created["id"]) is True
+    assert _output_updates(published) == []
+    assert calls == [created["id"]]
+
+
 def test_a_read_queued_behind_a_failed_draw_does_not_draw_again(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
