@@ -9,6 +9,32 @@
     <link rel="icon" href="/logo.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>ScadBuddy</title>
+    <!--
+      #4873: during a rollout this HTML can name one build's entry while the request for it
+      reaches a pod of the other build, which has no such file (a real 404, #395). The
+      entry never runs, so lib/staleChunks.ts cannot help; this reloads instead. Once per
+      URL: a URL that already failed in this tab is not reloaded for again, so a rollout
+      costs at most a reload per build and a later deploy still recovers. Without
+      sessionStorage there is no guard, so no reload. Its sha256 is in PAGE_CSP
+      (backend/scadbuddy/api/static.py, frontend/page-csp.txt); src/entryReload.test.ts
+      fails when they drift.
+    -->
+    <script>
+      addEventListener('error', function (event) {
+        var el = event.target
+        var url = el instanceof HTMLScriptElement ? el.src : el instanceof HTMLLinkElement && el.rel === 'stylesheet' ? el.href : ''
+        if (!url || url.indexOf(location.origin + '/assets/') !== 0) return
+        try {
+          var key = 'scadbuddy:entry-reload'
+          var failed = JSON.parse(sessionStorage.getItem(key) || '[]')
+          if (failed.indexOf(url) >= 0) return
+          sessionStorage.setItem(key, JSON.stringify(failed.concat(url).slice(-10)))
+        } catch (error) {
+          return
+        }
+        location.reload()
+      }, true)
+    </script>
   </head>
   <body>
     <div id="root"></div>
