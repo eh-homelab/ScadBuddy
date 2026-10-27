@@ -26,9 +26,17 @@ async function seeded() {
   await screen.findByLabelText('Render timeout')
 }
 
-/** Every microtask queued so far, and every one they queue: a macrotask runs only after them.
- *  Needs real timers: under `vi.useFakeTimers()` this `setTimeout` never fires (#4831 review). */
-const flushMicrotasks = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+/**
+ * Every microtask queued so far, and every one they queue, however many promise steps a
+ * chain takes (a failed read's `failed` callbacks come several after it): a zero-delay
+ * timer fires only once the microtask queue is empty, which `await act(async () => {})`
+ * does not wait for. The timer must be real (#4833): under `vi.useFakeTimers()` it would
+ * never fire and the test would hang, so it throws there; advance the fake clock instead.
+ */
+const flushMicrotasks = () => {
+  if (vi.isFakeTimers()) throw new Error('flushMicrotasks needs real timers; use vi.runAllTimersAsync() under fake ones')
+  return new Promise<void>((resolve) => setTimeout(resolve, 0))
+}
 
 describe('Settings saves, resets and reads in order (#4776)', () => {
   // A failed test's spies would wrap the next test's.
@@ -251,8 +259,11 @@ describe('Settings saves, resets and reads in order (#4776)', () => {
     expect(await screen.findByText('The reset was refused.')).toBeInTheDocument()
     await act(async () => newest.release())
     await waitFor(() => expect(within(region('Connection')).queryByText('Unsaved')).toBeNull())
-    await act(async () => older.release())
-    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    // The older save's answer, awaited after the page's own wait on it, which has run by then.
+    await act(async () => {
+      older.release()
+      await put.mock.results[0]?.value
+    })
     expect(field).toHaveValue('https://newest.test')
     expect(within(region('Connection')).queryByText('Unsaved')).toBeNull()
     expect(timeout).toHaveValue(45)
@@ -577,5 +588,69 @@ describe('Settings saves, resets and reads in order (#4776)', () => {
     await user.click(await screen.findByRole('button', { name: 'Load the latest' }))
     await waitFor(() => expect(screen.queryByText(note)).toBeNull())
     expect(within(region('Rendering')).getByText('Bad gateway.')).toBeInTheDocument()
+  })
+
+  it('lets a shown note go once a newer save’s answer is cached whole (#4849)', async () => {
+    const { user } = renderSaves()
+    await seeded()
+    const timeout = screen.getByLabelText('Render timeout')
+    const save = api.putSettings.bind(api)
+    let lost = true
+    vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      const saved = await save(body)
+      if (lost) {
+        lost = false
+        throw new ApiError(502, 'Bad gateway.')
+      }
+      return saved
+    })
+    vi.spyOn(api, 'getSettings').mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const note = /Could not confirm what the server stored\./
+
+    // Rendering's answer is lost, and so is its reread: the note shows on Rendering.
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+    expect(await within(region('Rendering')).findByText(/^Bad gateway\. Could not confirm/)).toBeInTheDocument()
+
+    // Connection saves: its answer is the whole of what is stored, Rendering's 45 with it.
+    const url = screen.getByLabelText('Bambuddy URL')
+    await user.clear(url)
+    await enter(user, url, 'https://later.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(within(region('Connection')).queryByText('Unsaved')).toBeNull())
+    expect(screen.queryByText(note)).toBeNull()
+    expect(within(region('Rendering')).getByText('Bad gateway.')).toBeInTheDocument()
+    expect(within(region('Rendering')).queryByText('Unsaved')).toBeNull()
+  })
+
+  it('keeps the note when the answer that lands was sent before the write was lost (#4849)', async () => {
+    const { user } = renderSaves()
+    await seeded()
+    // Rendering's save is sent first and its answer held; Connection's reset is lost at
+    // once, and so is its reread. The held answer may predate that lost reset.
+    const save = api.putSettings.bind(api)
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      const saved = await save(body)
+      if ('reset' in body) throw new ApiError(502, 'Bad gateway.')
+      await held
+      return saved
+    })
+    vi.spyOn(api, 'getSettings').mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+    await user.click(
+      within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }),
+    )
+    const lost = /^Bad gateway\. Could not confirm what the server stored\./
+    expect(await within(region('Connection')).findByText(lost)).toBeInTheDocument()
+
+    await act(async () => release())
+    await waitFor(() => expect(screen.getByTestId('source-render_timeout')).toHaveTextContent('Set here'))
+    expect(within(region('Connection')).getByText(lost)).toBeInTheDocument()
   })
 })
