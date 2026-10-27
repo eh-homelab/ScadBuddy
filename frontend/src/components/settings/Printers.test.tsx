@@ -246,6 +246,7 @@ describe('PrintersPanel (#3823)', () => {
           conflicts: 0,
           lan_linked: 0,
           lan_failed: 0,
+          target_missing: 1,
           entries: [
             {
               kind: 'bambuddy_virtual',
@@ -266,7 +267,7 @@ describe('PrintersPanel (#3823)', () => {
     await user.click(screen.getByRole('button', { name: 'Import from Bambuddy' }))
     const status = await screen.findByRole('status')
     expect(status).toHaveTextContent('1 added, 0 linked, 0 already linked, 0 skipped, 0 conflicts')
-    expect(status).toHaveTextContent('1 virtual printers forwarding to a printer not here')
+    expect(status).toHaveTextContent('1 virtual printer forwarding to a printer not here')
     expect(status).toHaveTextContent(`Lonely VP: added (${reason})`)
   })
 

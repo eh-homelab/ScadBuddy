@@ -170,6 +170,12 @@ class PrinterSyncResult(BaseModel):
     def lan_failed(self) -> int:
         return sum(1 for entry in self.entries if entry.lan in ("failed", "withheld"))
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def target_missing(self) -> int:
+        """Virtual printers imported whose Bambuddy target has no row here (#4858)."""
+        return sum(1 for entry in self.entries if entry.target_missing)
+
 
 # ── planning (pure) ──────────────────────────────────────────────────────────────
 
@@ -311,7 +317,9 @@ async def _sync_printer(
 ) -> SyncEntry:
     store = printers.store
     action, row, reason = plan_printer(printer, rows)
-    planned = None if row is None else _sync_fields(row)
+    # Created or linked here: written. An `already_linked` row is written only by an
+    # adoption (its synthetic serial replaced) or by `record_bambuddy_view`.
+    wrote = action != "already_linked"
     entry = SyncEntry(
         kind="physical",
         name=printer.name,
@@ -351,6 +359,7 @@ async def _sync_printer(
             assert row is not None
             if printer.serial_number is not None and is_synthetic_serial(row.serial):
                 # The serial is known now: the strip's own adoption (or merge).
+                synthetic = row.serial
                 row = await asyncio.to_thread(
                     store.ensure_bambuddy,
                     printer.id,
@@ -358,6 +367,7 @@ async def _sync_printer(
                     name=printer.name,
                     model=printer.model,
                 )
+                wrote = row.serial != synthetic
     except (SerialTakenError, BambuddyLinkTakenError, VirtualPrinterRowError):
         entry.action, entry.reason = "conflict", RACE
         return entry
@@ -367,25 +377,20 @@ async def _sync_printer(
     assert row is not None
     entry.printer_id = row.id
     previous_ip = None if row.bambuddy_view is None else row.bambuddy_view.ip_address
-    row = await asyncio.to_thread(
+    viewed, recorded = await asyncio.to_thread(
         store.record_bambuddy_view, row.id, printer_view(printer, now), model=printer.model
     )
-    # What this pass wrote, never `updated_at`: a write by anything else meanwhile (a
-    # watch, a no-op patch) is not the sync's change (#4850 review).
-    wrote = planned is None or _sync_fields(row) != planned
+    # What this pass wrote, never `updated_at` or a value someone else changed after the
+    # pass read its rows: `record_bambuddy_view` says whether it wrote, judged under the
+    # row's lock (#4850, #4858 reviews).
+    wrote = wrote or recorded
     if wrote:
-        printers.changed(row.id)
+        printers.changed(viewed.id)
     entry.lan, entry.lan_reason, lan_wrote = await _sync_lan(
-        printers, client, row, printer, previous_ip
+        printers, client, viewed, printer, previous_ip
     )
     entry.changed = wrote or lan_wrote
     return entry
-
-
-def _sync_fields(row: PrinterRow) -> tuple[object, ...]:
-    """The values `_sync_printer` writes before the LAN link, which `_sync_lan` reports
-    on its own."""
-    return (row.id, row.serial, row.name, row.model, row.bambuddy_printer_id, row.bambuddy_view)
 
 
 async def fill_lan_after_link(
@@ -396,7 +401,7 @@ async def fill_lan_after_link(
     would. Best effort: a failure is the row's `lan_sync_error`, never the link's."""
     store = printers.store
     previous_ip = None if row.bambuddy_view is None else row.bambuddy_view.ip_address
-    row = await asyncio.to_thread(
+    row, _ = await asyncio.to_thread(
         store.record_bambuddy_view, row.id, printer_view(printer, datetime.now(UTC)), model=None
     )
     await _sync_lan(printers, client, row, printer, previous_ip)
