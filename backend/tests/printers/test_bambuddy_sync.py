@@ -15,6 +15,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.bambuddy_sync import (
     LAN_PROBE_FAILED,
     LAN_WITHHELD,
+    VP_TARGET_MISSING,
     PrinterSyncResult,
     may_adopt,
     plan_printer,
@@ -428,6 +429,38 @@ async def test_virtual_printers_import_with_their_target(
     assert rows[5].vp_mode == "queue" and rows[5].lan_host is None
     assert [e.target_model for e in result.entries if e.bambuddy_vp_id == 7] == ["H2C"]
     assert printers.probes == [("192.168.1.10", SERIAL, CODE)]  # never a VP
+
+
+async def test_a_vp_whose_target_has_no_row_is_a_conflict_never_any(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4797: Bambuddy forwards the VP to printer 1, which has no row here (no serial,
+    so it was skipped). Its NULL `forwards_to` is not "any H2C": the entry says so,
+    and the row keeps Bambuddy's target id in its view."""
+    result = await run(printers, FakeClient([bambuddy(1, None)], [vp(5, VP_SERIAL, 1)]))
+    entry = next(e for e in result.entries if e.bambuddy_vp_id == 5)
+    assert entry.action == "conflict" and entry.reason == VP_TARGET_MISSING.format(target=1)
+    assert entry.forwards_to is None and entry.target_model is None
+    row = next(r for r in store.list() if r.bambuddy_vp_id == 5)
+    assert row.forwards_to is None
+    assert row.bambuddy_view is not None and row.bambuddy_view.target_printer_id == 1
+    dry = await run(printers, FakeClient([bambuddy(1, None)], [vp(5, VP_SERIAL, 1)]), dry_run=True)
+    assert [e.action for e in dry.entries if e.bambuddy_vp_id == 5] == ["conflict"]
+
+
+async def test_a_vp_whose_target_row_was_deleted_is_a_conflict(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4797: deleting the target row sets `forwards_to` NULL (ON DELETE SET NULL);
+    the next sync reports it rather than reading it as "any <model>"."""
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], [vp(5, VP_SERIAL, 1)], codes={1: CODE}))
+    target = store.by_serial(SERIAL)
+    assert target is not None
+    store.delete(target.id)
+    gone = FakeClient([bambuddy(1, SERIAL, is_active=False)], [vp(5, VP_SERIAL, 1)])
+    result = await run(printers, gone)
+    (entry,) = result.entries
+    assert entry.action == "conflict" and entry.reason == VP_TARGET_MISSING.format(target=1)
 
 
 async def test_a_hand_made_row_with_the_vps_serial_is_adopted_with_its_lan_link(

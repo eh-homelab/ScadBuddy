@@ -37,7 +37,9 @@ const ROW_FIELDS =
   'Bambuddy printer it is, or null), `lan_host` and `has_access_code` (its LAN link, the code itself never ' +
   'shown), `preferred_path` and `bambuddy_active`; `kind` (`physical`, or `bambuddy_virtual` for one of ' +
   "Bambuddy's virtual printers, never a printer to print on: `bambuddy_vp_id`, `vp_mode`, and `forwards_to`, " +
-  "the registry printer it forwards to, null for Bambuddy's 'any printer of its model'); `bambuddy_view`, " +
+  "the registry printer it forwards to: null with `bambuddy_view.target_printer_id` null is Bambuddy's 'any " +
+  "printer of its model', but null with a `target_printer_id` means its target has no row here, never 'any'); " +
+  '`bambuddy_view`, ' +
   "Bambuddy's own values at the last sync (name, model, IP, active, nozzle count; a virtual printer's " +
   'settings); and `lan_sync_error`, why the sync could not fill or move the LAN link.'
 

@@ -13,7 +13,8 @@ one idempotent pass that brings the registry up to what Bambuddy knows.
   withheld. The code goes from that read to the probe and the sealed column, and nowhere
   else: no log, span, response, activity row or Temporal payload.
 - Each Bambuddy virtual printer gets a ``bambuddy_virtual`` row (Ruling 4), naming the
-  printer it forwards to, or none ("any <model>").
+  printer it forwards to, or none ("any <model>"). One whose Bambuddy target has no row
+  here is a ``conflict`` (#4797), never "any".
 
 The pass runs in the API, from ``POST /printers/sync-bambuddy`` and from the housekeeping
 sweep ``housekeeping_sync_bambuddy_printers`` on the ``library`` worker (the API's own
@@ -80,6 +81,10 @@ SERIAL_KEPT = (
     " printer has a row of its own, bambuddy-vp-{vp_id}"
 )
 NOT_LISTED = "Bambuddy no longer lists this virtual printer; the row is kept"
+VP_TARGET_MISSING = (
+    "Bambuddy forwards this virtual printer to Bambuddy printer {target}, which no printer"
+    " here is linked to: it does not forward to any printer of its model"
+)
 
 LAN_WITHHELD = (
     "Bambuddy withholds the access code from API keys while its auth is on: link the"
@@ -533,8 +538,15 @@ async def _sync_virtual(
         forwards_to=None if target is None else target.id,
         target_model=(vp.model_name or vp.model) if vp.target_printer_id is None else None,
     )
+    # #4797: a target with no row here leaves `forwards_to` NULL, which on its own reads
+    # as "any <model>"; the row still keeps Bambuddy's target id in its view.
+    target_missing = (
+        None
+        if vp.target_printer_id is None or target is not None
+        else VP_TARGET_MISSING.format(target=vp.target_printer_id)
+    )
     if dry_run:
-        return entry
+        return _target_conflict(entry, target_missing)
     try:
         synced, done, changed = await asyncio.to_thread(
             printers.store.upsert_virtual,
@@ -555,4 +567,15 @@ async def _sync_virtual(
         entry.reason = SERIAL_KEPT.format(vp_id=vp.id)
     if changed:
         printers.changed(synced.id)
+    return _target_conflict(entry, target_missing)
+
+
+def _target_conflict(entry: SyncEntry, target_missing: str | None) -> SyncEntry:
+    """The entry as a ``conflict`` naming the missing target, beside any other reason.
+    The row is still written: only what it forwards to is unknown."""
+    if target_missing is not None:
+        entry.action = "conflict"
+        entry.reason = (
+            target_missing if entry.reason is None else f"{entry.reason}; {target_missing}"
+        )
     return entry
