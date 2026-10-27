@@ -74,7 +74,7 @@ export function foldIdsOf(sections: readonly SettingsSection[]): string[] {
 }
 
 /** Where the anchors of the one long page (and the assistant's old sections) now live. */
-export const LEGACY_ANCHORS: Readonly<Record<string, { area: AreaId; section?: string }>> = {
+export const LEGACY_ANCHORS: Readonly<Record<string, { area: AreaId; section: string }>> = {
   assistant: { area: 'assistant', section: 'assistant-credentials' },
   'assistant-browser': { area: 'tools', section: 'builtin' },
   'assistant-tools': { area: 'tools', section: 'builtin' },
@@ -95,7 +95,7 @@ export function settingsTarget(
   const id = sectionId(hash)
   if (Object.hasOwn(LEGACY_ANCHORS, id)) {
     const { area, section } = LEGACY_ANCHORS[id]!
-    return { area, hash: section ? `#${section}` : '' }
+    return { area, hash: `#${section}` }
   }
   const found = sections.find((section) => section.id === id)
   return found ? { area: found.area, hash: `#${found.id}` } : null

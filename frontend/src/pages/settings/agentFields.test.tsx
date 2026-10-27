@@ -3,6 +3,9 @@ import { useState } from 'react'
 import { useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { bridge } from '../../agent/bridge'
+import { committed } from '../../agent/highlight'
+import type * as Highlight from '../../agent/highlight'
+import { AgentToolError } from '../../agent/types'
 import type { ConnectionTest } from '../../api/types'
 import { mockSettings } from '../../mocks/handlers'
 import { renderPage } from '../../test/utils'
@@ -13,6 +16,12 @@ import { Section } from './controls'
 import { SettingsDirtyProvider, useReportDirty } from './dirty'
 import type { SettingsSection } from './registry'
 import { baseline } from './values'
+
+// The real wait, watched: a test can make one move to another area outlast its timeout.
+vi.mock('../../agent/highlight', async (importOriginal) => {
+  const real = await importOriginal<typeof Highlight>()
+  return { ...real, committed: vi.fn(real.committed) }
+})
 
 const testStored = vi.fn(async (): Promise<ConnectionTest> => ({ ok: true, detail: 'Connected' }) as ConnectionTest)
 
@@ -104,6 +113,26 @@ describe('the settings agent scope', () => {
       ok: true,
       result: { unsaved: true, values: { display_unit: 'in' } },
     })
+  })
+
+  it('sets the field before the slow move to its area, and gives that move 10 s (#2171)', async () => {
+    const real = vi.mocked(committed).getMockImplementation()!
+    vi.mocked(committed).mockImplementation((check, what, timeout) =>
+      what?.endsWith('settings to open')
+        ? Promise.reject(new AgentToolError('timeout', `Gave up after ${timeout} ms waiting for ${what}.`))
+        : real(check, what, timeout),
+    )
+    try {
+      renderShell()
+      await screen.findByLabelText('Show dimensions in')
+      const slow = await bridge.call('set_field', { field: 'display_unit', value: 'in' })
+      expect(!slow.ok && slow.error.code).toBe('timeout')
+      expect(committed).toHaveBeenCalledWith(expect.any(Function), 'the library settings to open', 10_000)
+      // The edit was made in the hidden area before the move, so it stands.
+      await waitFor(() => expect(screen.getByLabelText('Show dimensions in')).toHaveValue('in'))
+    } finally {
+      vi.mocked(committed).mockImplementation(real)
+    }
   })
 
   it('refuses a value that is not a choice', async () => {

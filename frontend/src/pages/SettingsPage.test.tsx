@@ -2,7 +2,7 @@ import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { BrowserRouter, MemoryRouter, Link, Route, Routes, useLocation, useNavigate } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { resetAiAvailability } from '../agent/chat/availability'
 import { api } from '../api/client'
 import { emitRealtime } from '../mocks/realtime'
@@ -612,6 +612,9 @@ describe('SettingsPage folded sections (#2173)', () => {
     return within(region(name)).getByRole('button', { name })
   }
 
+  // Cleared even when a test fails, so no fold leaks into the next one.
+  afterEach(() => localStorage.clear())
+
   it('folds a section from its heading, and the next visit keeps it folded', async () => {
     localStorage.clear()
     const { user, unmount } = renderPage(<SettingsPage />, { route: '/settings/library' })
@@ -626,7 +629,6 @@ describe('SettingsPage folded sections (#2173)', () => {
     await seeded()
     expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'false')
     expect(region('Connection').querySelector('h2 button')).toHaveAttribute('aria-expanded', 'true')
-    localStorage.clear()
   })
 
   it('keeps a folded section’s edits, its Unsaved badge and its Save bar', async () => {
@@ -642,7 +644,6 @@ describe('SettingsPage folded sections (#2173)', () => {
     expect(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' })).toBeEnabled()
     await user.click(fold('Rendering'))
     expect(screen.getByLabelText('Render timeout')).toHaveValue(45)
-    localStorage.clear()
   })
 
   it('keeps every fold the page renders in the stored list (#3415 review)', async () => {
@@ -653,13 +654,9 @@ describe('SettingsPage folded sections (#2173)', () => {
     expect(ids.length).toBeGreaterThan(0)
     first.unmount()
     localStorage.setItem('scadbuddy.settings.collapsed', JSON.stringify(ids))
-    try {
-      renderPage(<SettingsPage />, { route: '/settings/general' })
-      await seeded()
-      expect(JSON.parse(localStorage.getItem('scadbuddy.settings.collapsed') ?? '[]')).toEqual(ids)
-    } finally {
-      localStorage.clear()
-    }
+    renderPage(<SettingsPage />, { route: '/settings/general' })
+    await seeded()
+    expect(JSON.parse(localStorage.getItem('scadbuddy.settings.collapsed') ?? '[]')).toEqual(ids)
   })
 
   it('unfolds the section a link or the nav goes to', async () => {
@@ -672,6 +669,5 @@ describe('SettingsPage folded sections (#2173)', () => {
     const nav = screen.getByRole('navigation', { name: 'Settings sections' })
     await user.click(within(nav).getByRole('link', { name: 'Rendering' }))
     await waitFor(() => expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'true'))
-    localStorage.clear()
   })
 })

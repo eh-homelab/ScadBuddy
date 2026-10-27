@@ -132,7 +132,6 @@ describe('registry', () => {
 
   it('sends every old anchor to a section that exists in its area', () => {
     for (const [anchor, { area, section }] of Object.entries(LEGACY_ANCHORS)) {
-      expect(section, anchor).toBeDefined()
       expect(SECTION_REGISTRY.find((s) => s.id === section)?.area, anchor).toBe(area)
       expect(settingsTarget(`#${anchor}`)).toEqual({ area, hash: `#${section}` })
     }
