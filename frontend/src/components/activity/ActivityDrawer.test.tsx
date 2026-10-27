@@ -60,7 +60,8 @@ describe('ActivityDrawer', () => {
       'href',
       expect.stringContaining('op-model_import'),
     )
-    expect(screen.getByRole('link', { name: 'import_model' })).toHaveAttribute('href', '/settings/tools#builtin')
+    // ScadBuddy's own tools' tier and disable tables are in the Remote MCP plugins section (#2171).
+    expect(screen.getByRole('link', { name: 'import_model' })).toHaveAttribute('href', '/settings/tools#remote')
     expect(screen.getByText(/"url": "https:\/\/x"/)).toBeInTheDocument()
   })
 

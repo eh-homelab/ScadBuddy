@@ -30,12 +30,17 @@ interface Stage {
   status: string
 }
 
-/** The stages a source recorded in `detail.stages`; anything not shaped like one is left out. */
-/** A `<server>__<tool>` name is a remote plugin's tool; any other is one of ScadBuddy's own. */
-export function toolSettingsPath(viaTool: string): string {
-  return viaTool.includes('__') ? '/settings/tools#remote' : '/settings/tools#builtin'
+/**
+ * Where a tool's tier and disable settings are. A `<server>__<tool>` name is a remote
+ * plugin's tool, and any other name is one of ScadBuddy's own. Both are in Remote MCP plugins
+ * for now: ScadBuddy's own tools' tables are in that section (`RemotePlugins.tsx`) until they
+ * move. The function stays so that the move changes only this one place.
+ */
+export function toolSettingsPath(_viaTool: string): string {
+  return '/settings/tools#remote'
 }
 
+/** The stages a source recorded in `detail.stages`; anything not shaped like one is left out. */
 function stagesOf(detail: Record<string, unknown>): Stage[] {
   const raw = detail.stages
   if (!Array.isArray(raw)) return []
