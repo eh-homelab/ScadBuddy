@@ -241,7 +241,7 @@ def _thumbnail_version(path: Path) -> str | None:
     rename or a link), and its time and size tell apart an inode used again."""
     try:
         stat = path.stat()
-    except FileNotFoundError:
+    except OSError:  # as `is_file()` before it: no readable file is no thumbnail
         return None
     return f"{stat.st_ino:x}-{stat.st_mtime_ns:x}-{stat.st_size:x}"
 

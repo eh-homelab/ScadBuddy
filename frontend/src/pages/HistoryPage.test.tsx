@@ -738,25 +738,33 @@ describe('HistoryPage', () => {
     expect(await within(await row('Reagan')).findByRole('button', { name: 'Preview Reagan' })).toBeInTheDocument()
   })
 
-  it('fetches a replaced thumbnail, in the row and in the larger preview (#4841)', async () => {
+  it('fetches a drawn or replaced thumbnail, in the row and in the larger preview (#4841)', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     onTestFinished(() => {
       vi.useRealTimers()
     })
     const realtime = fakeRealtime({ confirm: false })
     const reagan = outputs.find((o) => o.name === 'Reagan')!
-    const listed = (version: string) =>
+    const listed = (version: string | null) =>
       server.use(
         http.get('/api/v1/models/:slug/outputs', () =>
           HttpResponse.json(outputs.map((o) => (o.id === reagan.id ? { ...o, thumbnail_version: version } : o))),
         ),
       )
-    listed('a1')
+    // No file yet: the first read draws one, with no version to name.
+    listed(null)
     const { user } = render()
     const picture = async () =>
       within(await row('Reagan')).getByRole('button', { name: 'Preview Reagan' }).querySelector('img')
-    expect(await picture()).toHaveAttribute('src', `/api/v1/outputs/${reagan.id}/thumbnail?v=a1`)
+    expect(await picture()).toHaveAttribute('src', `/api/v1/outputs/${reagan.id}/thumbnail`)
     await waitFor(() => expect(realtime.following()).toContain('model:name-keychain'))
+
+    // The draw ended and said so: the list names the file it wrote.
+    listed('a1')
+    await realtime.signal('model:name-keychain', 'output.updated')
+    await waitFor(async () =>
+      expect(await picture()).toHaveAttribute('src', `/api/v1/outputs/${reagan.id}/thumbnail?v=a1`),
+    )
 
     // An upload replaced the image while the larger preview was open: the same
     // elements would never fetch it again.
