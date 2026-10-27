@@ -16,9 +16,12 @@
       Only the tags parsed from this HTML: the listener goes at DOMContentLoaded, which
       waits for the entry script and, before it runs, the stylesheets parsed ahead of it.
       A lazy chunk's CSS fails later and stays with staleChunks.ts's per-build guard and
-      loadOptionalChunk's exemption (#4874).
-      Up to 3 reloads per URL, each a little later than the last, as the next one can
-      reach an old pod again; then the URL is left failed for this tab, so it cannot loop
+      loadOptionalChunk's exemption (#4874). So the entry must not start a lazy chunk's
+      load synchronously, at module top level before DOMContentLoaded: that chunk's CSS
+      could then fail into this handler and the split with staleChunks.ts would break.
+      Up to 3 reloads per URL, as the next one can reach an old pod again. A failed script
+      waits a little longer each time (0, 0.5, 1 s); a failed stylesheet reloads at once,
+      as the entry script may already be rendering and a late reload would flash; then the URL is left failed for this tab, so it cannot loop
       and a later deploy (new names) still recovers. Without sessionStorage there is no
       guard, so no reload. Its sha256 is in PAGE_CSP (backend/scadbuddy/api/static.py,
       frontend/page-csp.txt); src/entryReload.test.ts fails when they drift.
@@ -40,7 +43,7 @@
             return
           }
           removeEventListener('error', onError, true)
-          setTimeout(function () { location.reload() }, 500 * tries)
+          setTimeout(function () { location.reload() }, el instanceof HTMLLinkElement ? 0 : 500 * tries)
         }
         addEventListener('error', onError, true)
         addEventListener('DOMContentLoaded', function () { removeEventListener('error', onError, true) })
