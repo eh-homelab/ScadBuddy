@@ -469,6 +469,18 @@ async def test_a_vp_whose_target_has_no_row_is_a_conflict_never_any(
     assert [e.action for e in dry.entries if e.bambuddy_vp_id == 5] == ["conflict"]
 
 
+async def test_a_vp_whose_target_this_sync_makes_is_not_missing(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4797 review: the target is created in the same pass. A dry run writes no row
+    for it, so only the plan says it is there; neither run calls it missing."""
+    client = FakeClient([bambuddy(1, SERIAL)], [vp(5, VP_SERIAL, 1)], codes={1: CODE})
+    dry = await run(printers, client, dry_run=True)
+    assert [(e.action, e.reason) for e in dry.entries] == [("created", None), ("created", None)]
+    real = await run(printers, client)
+    assert [(e.action, e.reason) for e in real.entries] == [("created", None), ("created", None)]
+
+
 async def test_a_vp_whose_target_row_was_deleted_is_a_conflict(
     printers: FakePrinters, store: PrinterStore
 ) -> None:

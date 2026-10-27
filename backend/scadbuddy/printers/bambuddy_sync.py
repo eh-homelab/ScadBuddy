@@ -14,7 +14,7 @@ one idempotent pass that brings the registry up to what Bambuddy knows.
   else: no log, span, response, activity row or Temporal payload.
 - Each Bambuddy virtual printer gets a ``bambuddy_virtual`` row (Ruling 4), naming the
   printer it forwards to, or none ("any <model>"). One whose Bambuddy target has no row
-  here is a ``conflict`` (#4797), never "any".
+  here, and gets none from this pass, is a ``conflict`` (#4797), never "any".
 
 The pass runs in the API, from ``POST /printers/sync-bambuddy`` and from the housekeeping
 sweep ``housekeeping_sync_bambuddy_printers`` on the ``library`` worker (the API's own
@@ -267,9 +267,16 @@ async def sync_printers(
         entries.append(await _sync_printer(printers, client, printer, rows, now, dry_run=dry_run))
     rows = await asyncio.to_thread(store.list)
     physical_serials = {p.serial_number for p in active if p.serial_number is not None}
+    # The Bambuddy printers this pass gives a row: a dry run wrote none, so a VP's target
+    # is there when the plan says so, not only when a row is (#4797).
+    in_pass = {
+        e.bambuddy_printer_id
+        for e in entries
+        if e.action in ("created", "linked", "already_linked") and e.bambuddy_printer_id is not None
+    }
     for vp in vps:
         entries.append(
-            await _sync_virtual(printers, vp, rows, physical_serials, now, dry_run=dry_run)
+            await _sync_virtual(printers, vp, rows, physical_serials, in_pass, now, dry_run=dry_run)
         )
     if vp_error is None:
         listed = {vp.id for vp in vps}
@@ -523,6 +530,7 @@ async def _sync_virtual(
     vp: VirtualPrinter,
     rows: list[PrinterRow],
     physical_serials: set[str],
+    in_pass: set[int],
     now: datetime,
     *,
     dry_run: bool,
@@ -544,10 +552,11 @@ async def _sync_virtual(
         target_model=(vp.model_name or vp.model) if vp.target_printer_id is None else None,
     )
     # #4797: a target with no row here leaves `forwards_to` NULL, which on its own reads
-    # as "any <model>"; the row still keeps Bambuddy's target id in its view.
+    # as "any <model>"; the row still keeps Bambuddy's target id in its view. A target this
+    # pass creates or links is not missing, in a dry run too.
     target_missing = (
         None
-        if vp.target_printer_id is None or target is not None
+        if vp.target_printer_id is None or target is not None or vp.target_printer_id in in_pass
         else VP_TARGET_MISSING.format(target=vp.target_printer_id)
     )
     if dry_run:
