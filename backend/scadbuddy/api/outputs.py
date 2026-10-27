@@ -1108,20 +1108,27 @@ async def _draw_thumbnail(outputs: OutputStore, output_id: str, path: Path, conf
     slots = outputs.thumbnail_draws
     await slots.acquire()
     try:
-        # Another read drew it while this one waited.
-        if await asyncio.to_thread(path.is_file):
-            slots.release()
-            return
+        # Another read drew it, or its draw came to nothing, while this one waited.
+        drawn_meanwhile, drawable = await asyncio.to_thread(
+            lambda: (path.is_file(), outputs.drawable_thumbnail(output_id))
+        )
     except BaseException:
         slots.release()
         raise
+    if drawn_meanwhile or not drawable:
+        slots.release()
+        if drawn_meanwhile:
+            return
+        raise missing
     # The slot goes back when the thread ends, not when this read stops waiting for
     # it: `wait_for` cannot stop a thread, and a draw past its budget still runs.
+    outputs.draws_running += 1
     drawing = asyncio.ensure_future(asyncio.to_thread(_draw_and_keep, outputs, output_id, path))
     _DRAWING.add(drawing)
 
     def ended(task: asyncio.Future[bool]) -> None:
         _DRAWING.discard(task)
+        outputs.draws_running -= 1
         slots.release()
         if not task.cancelled() and task.exception() is not None:
             logger.error(
@@ -1129,13 +1136,13 @@ async def _draw_thumbnail(outputs: OutputStore, output_id: str, path: Path, conf
                 exc_info=task.exception(),
                 extra={"id": output_id},
             )
-            outputs.remember_undrawable(output_id)
+            outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
 
     drawing.add_done_callback(ended)
     try:
         drawn = await asyncio.wait_for(asyncio.shield(drawing), timeout=config.render_timeout)
     except TimeoutError:
-        outputs.remember_undrawable(output_id)
+        outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             f"drawing the thumbnail took longer than {config.render_timeout:g}s",
@@ -1145,6 +1152,10 @@ async def _draw_thumbnail(outputs: OutputStore, output_id: str, path: Path, conf
     if not drawn:
         raise missing
 
+
+#: Seconds before a draw that timed out or failed is tried again: a busy moment, not
+#: the mesh, may be why. An empty mesh is never tried again.
+RETRY_DRAW_AFTER = 600.0
 
 #: Draws still running, so none is collected before its thread ends.
 _DRAWING: set[asyncio.Future[bool]] = set()

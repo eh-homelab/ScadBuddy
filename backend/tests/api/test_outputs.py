@@ -11,6 +11,7 @@ import threading
 import time
 import zipfile
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -22,6 +23,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.jobs import draw_view
 from scadbuddy.core.gitrepo import GitError, GitTimeoutError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
@@ -330,12 +332,22 @@ def test_an_output_with_nothing_to_draw_shows_no_thumbnail(
         headers=press(),
     ).json()
     calls = _counting_draws(monkeypatch, lambda *_: None)
+    # An empty mesh stays empty: remembered for good, however long the wait.
+    monkeypatch.setattr(outputs_api, "RETRY_DRAW_AFTER", 0.05)
 
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
+    time.sleep(0.1)
     # Remembered: listed with no thumbnail, and not drawn again on the next read.
     assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
     assert calls == [created["id"]]
+
+
+def _until(condition: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + 10
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert condition()
 
 
 def test_a_draw_past_its_budget_keeps_its_slot_until_it_ends(
@@ -356,21 +368,91 @@ def test_a_draw_past_its_budget_keeps_its_slot_until_it_ends(
         return None
 
     calls = _counting_draws(monkeypatch, stuck)
-    slots: asyncio.Semaphore = state.outputs.thumbnail_draws
-    free = slots._value
+    store: OutputStore = state.outputs
 
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 503
     # The thread still runs, so it still holds its slot.
-    assert slots._value == free - 1
+    assert store.draws_running == 1
     assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
     assert calls == [created["id"]]
 
     release.set()
-    deadline = time.monotonic() + 10
-    while slots._value != free and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert slots._value == free
+    _until(lambda: store.draws_running == 0)
+
+
+def test_a_read_queued_behind_a_failed_draw_does_not_draw_again(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+    # One slot, so the second read waits for the first draw's.
+    store.thumbnail_draws = asyncio.Semaphore(1)
+    release = threading.Event()
+
+    def stuck(*_: Any) -> bytes | None:
+        release.wait(30)
+        return None
+
+    calls = _counting_draws(monkeypatch, stuck)
+    url = f"/api/v1/outputs/{created['id']}/thumbnail"
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(client.get, url)
+        _until(lambda: len(calls) == 1)
+        second = pool.submit(client.get, url)
+        # Long enough for the second read to pass its first check and queue.
+        time.sleep(0.3)
+        release.set()
+        assert first.result().status_code == 404
+        assert second.result().status_code == 404
+    assert calls == [created["id"]]
+
+
+@pytest.mark.parametrize("outcome", ["timeout", "error"])
+def test_a_draw_that_timed_out_or_failed_is_tried_again_later(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    budget = state.config
+    state.config = dataclasses.replace(budget, render_timeout=0.2)
+    monkeypatch.setattr(outputs_api, "RETRY_DRAW_AFTER", 3.0)
+    draw = draw_view
+    failing = [True]
+
+    def flaky(*args: Any) -> bytes | None:
+        if failing[0]:
+            if outcome == "timeout":
+                time.sleep(0.5)
+            raise OSError("the preview mesh is unreadable")
+        return draw(*args)
+
+    _counting_draws(monkeypatch, flaky)
+    url = f"/api/v1/outputs/{created['id']}/thumbnail"
+    assert client.get(url).status_code == (503 if outcome == "timeout" else 404)
+    store: OutputStore = state.outputs
+    _until(lambda: store.draws_running == 0)
+    failing[0] = False
+    state.config = budget
+    # Not right away: a busy moment is not retried on every read.
+    assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
+    assert client.get(url).status_code == 404
+
+    _until(lambda: store.drawable_thumbnail(created["id"]))
+    assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is True
+    response = client.get(url)
+    assert response.status_code == 200
+    assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_a_thumbnail_that_is_not_a_png_is_refused(client: TestClient, model: str) -> None:
