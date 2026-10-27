@@ -68,8 +68,13 @@ export function connectWebMcp(bridge: AgentBridge, preference: WebMcpPreference 
     const { signal } = controller
     const listed = await bridge.listTools()
     if (mine !== generation) return
-    // A stale tab (#4884) is reloading; the next page load registers the tools.
-    if (!listed.ok) return
+    // A stale tab (#4884) usually reloads and the next page load registers the tools. If
+    // it does not (the stale-chunk guard already spent its reload), say why the browser
+    // lists no ScadBuddy tools; the next route change tries again.
+    if (!listed.ok) {
+      console.warn(`ScadBuddy: WebMCP tools not registered (${listed.error.code}): ${listed.error.message}`)
+      return
+    }
     for (const tool of listed.tools) {
       await context!
         .registerTool(

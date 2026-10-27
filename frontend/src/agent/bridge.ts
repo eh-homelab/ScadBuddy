@@ -41,22 +41,41 @@ export type ListToolsResult = { ok: true; tools: ToolInfo[] } | { ok: false; err
  * build the chunk is gone from the server: `installStaleChunkReload` `preventDefault()`s
  * Vite's `vite:preloadError` and reloads, and Vite's preload helper then resolves the
  * import with `undefined` rather than rejecting. Without the reload (the same build
- * failed already, or there is no sessionStorage) the import rejects instead. Either way
- * the agent is told the tab is stale, never handed a TypeError. The reload starts a new
- * tab id (`tabId.ts`), so an agent that paired by code has to pair again.
+ * failed already, or there is no sessionStorage) the import rejects instead, with a
+ * failed fetch of a module. Either way the agent is told the tab is stale, never handed
+ * a TypeError. The reload starts a new tab id (`tabId.ts`), so an agent that paired by
+ * code has to pair again. Any other rejection (the catalogue throwing as it evaluates)
+ * is not staleness, and reloading would not help: that answers `failed`.
  */
+/**
+ * A module the browser could not fetch, as each engine words it: Chromium's "Failed to
+ * fetch dynamically imported module", Firefox's "error loading dynamically imported
+ * module", Safari's "Importing a module script failed.", or Vite's preload helper's
+ * "Unable to preload CSS for …".
+ */
+const MODULE_FETCH_FAILURE =
+  /dynamically imported module|Importing a module script failed|Unable to preload CSS/i
+
+function isModuleFetchFailure(cause: unknown): boolean {
+  return cause instanceof Error && MODULE_FETCH_FAILURE.test(cause.message)
+}
+
 async function loadOrStale<T>(load: () => Promise<T | undefined>): Promise<{ module: T } | { error: ToolError }> {
   let module: T | undefined
   try {
     module = await load()
   } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause)
+    if (!isModuleFetchFailure(cause)) {
+      return { error: { code: 'failed', message: `The tab's tool catalogue failed to load: ${reason}` } }
+    }
     return {
       error: {
         code: 'stale_tab',
         message:
-          `The tab could not load its tool catalogue (${cause instanceof Error ? cause.message : String(cause)}); ` +
-          'it is probably running an older ScadBuddy build. Ask the user to reload the tab; an agent ' +
-          'that paired by code must then pair again with browser_pair.',
+          `The tab could not load its tool catalogue (${reason}); it is probably running an older ` +
+          'ScadBuddy build. Ask the user to reload the tab; an agent that paired by code must then ' +
+          'pair again with browser_pair.',
       },
     }
   }

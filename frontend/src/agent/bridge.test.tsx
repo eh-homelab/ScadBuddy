@@ -178,6 +178,32 @@ describe('AgentBridge', () => {
       expect(listed.ok).toBe(false)
       expect(!listed.ok && listed.error.code).toBe('stale_tab')
     })
+
+    it.each([
+      'error loading dynamically imported module: /assets/catalog-old.js',
+      'Importing a module script failed.',
+      'Unable to preload CSS for /assets/catalog-old.css',
+    ])('takes the other engines\' fetch failures as stale too: %s', async (message) => {
+      const bridge = new AgentBridge(() => Promise.reject(new TypeError(message)))
+      const called = await bridge.call('get_params', {})
+      expect(!called.ok && called.error.code).toBe('stale_tab')
+    })
+
+    it('answers failed, not stale_tab, when the catalogue throws as it evaluates', async () => {
+      // A current build whose catalogue is broken: reloading and pairing again would not help.
+      const bridge = new AgentBridge(() => Promise.reject(new TypeError("Cannot read properties of undefined (reading 'shape')")))
+
+      const called = await bridge.call('get_params', {})
+      expect(called).toEqual({
+        ok: false,
+        error: {
+          code: 'failed',
+          message: "The tab's tool catalogue failed to load: Cannot read properties of undefined (reading 'shape')",
+        },
+      })
+      const listed = await bridge.listTools()
+      expect(!listed.ok && listed.error.code).toBe('failed')
+    })
   })
 
   it('tells subscribers when the live tools change', () => {
