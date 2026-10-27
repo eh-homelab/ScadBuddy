@@ -1105,25 +1105,60 @@ async def _draw_thumbnail(outputs: OutputStore, output_id: str, path: Path, conf
     missing = ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no thumbnail")
     if not await asyncio.to_thread(outputs.drawable_thumbnail, output_id):
         raise missing
-    async with outputs.thumbnail_draws:
+    slots = outputs.thumbnail_draws
+    await slots.acquire()
+    try:
         # Another read drew it while this one waited.
         if await asyncio.to_thread(path.is_file):
+            slots.release()
             return
-        try:
-            png = await asyncio.wait_for(
-                asyncio.to_thread(
-                    draw_view, path.with_name(PREVIEW_NAME), "iso", PLATE_PNG_SIZE, None
-                ),
-                timeout=config.render_timeout,
+    except BaseException:
+        slots.release()
+        raise
+    # The slot goes back when the thread ends, not when this read stops waiting for
+    # it: `wait_for` cannot stop a thread, and a draw past its budget still runs.
+    drawing = asyncio.ensure_future(asyncio.to_thread(_draw_and_keep, outputs, output_id, path))
+    _DRAWING.add(drawing)
+
+    def ended(task: asyncio.Future[bool]) -> None:
+        _DRAWING.discard(task)
+        slots.release()
+        if not task.cancelled() and task.exception() is not None:
+            logger.error(
+                "could not draw an output's thumbnail",
+                exc_info=task.exception(),
+                extra={"id": output_id},
             )
-        except TimeoutError:
-            raise ApiError(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                f"drawing the thumbnail took longer than {config.render_timeout:g}s",
-            ) from None
-        if png is None:
-            raise missing
-        await asyncio.to_thread(outputs.write_drawn_thumbnail, output_id, png)
+            outputs.remember_undrawable(output_id)
+
+    drawing.add_done_callback(ended)
+    try:
+        drawn = await asyncio.wait_for(asyncio.shield(drawing), timeout=config.render_timeout)
+    except TimeoutError:
+        outputs.remember_undrawable(output_id)
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"drawing the thumbnail took longer than {config.render_timeout:g}s",
+        ) from None
+    except Exception:
+        raise missing from None
+    if not drawn:
+        raise missing
+
+
+#: Draws still running, so none is collected before its thread ends.
+_DRAWING: set[asyncio.Future[bool]] = set()
+
+
+def _draw_and_keep(outputs: OutputStore, output_id: str, path: Path) -> bool:
+    """The `iso` view of the output's preview mesh, kept as its thumbnail unless one
+    landed first; False, and remembered, when the mesh has nothing to draw."""
+    png = draw_view(path.with_name(PREVIEW_NAME), "iso", PLATE_PNG_SIZE, None)
+    if png is None:
+        outputs.remember_undrawable(output_id)
+        return False
+    outputs.write_drawn_thumbnail(output_id, png)
+    return True
 
 
 @router.get(
