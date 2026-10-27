@@ -19,7 +19,7 @@ from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
 from scadbuddy_durable.gate.ids import durable_request_id
-from scadbuddy_durable.session import tools
+from scadbuddy_durable.session import access, tools
 from scadbuddy_durable.session.models import (
     SEND_MESSAGE_UPDATE,
     TOOLS_QUEUE,
@@ -103,8 +103,8 @@ class StandInTools:
     """agent-tools as the agent service serves it, played here: each call is recorded,
     an outward call runs only with its approval row (Ruling 10), an answer tool returns
     its recorded response, and describe_call answers a fixed summary and hash.
-    render_preview applies Settings → Plugins as toolActivities.ts does (#2088): disabled,
-    it is refused naming Settings; raised to outward, it runs only with its approval."""
+    The registry tools apply ai_access as toolActivities.ts does (#2088, #2171): off, a
+    tool is refused naming Settings; at outward, it runs only with its approval."""
 
     def __init__(self, connect: Connect) -> None:
         self._connect = connect
@@ -148,38 +148,42 @@ class StandInTools:
 
     async def _overrides(self) -> tuple[dict[str, str], list[str]]:
         async with self._connect() as conn:
-            cur = await conn.execute(
-                "SELECT value FROM ai_settings WHERE key = %s", (tools.OVERRIDES_SETTING,)
+            rows = await access.read_rows(conn, access.REGISTRY_SOURCES)
+        return tools.sanitise_overrides(tools.manifest(), rows)
+
+    async def _gated(self, name: str, own: str) -> None:
+        """What toolActivities.ts checks before a registry tool runs: refused when off, and
+        run only with its approval when its effective tier is outward."""
+        tiers, disabled = await self._overrides()
+        if name in disabled:
+            raise ApplicationError(
+                f"{name} is disabled in Settings → Plugins; the user can turn it back on there",
+                type="ToolError",
+                non_retryable=True,
             )
-            row = await cur.fetchone()
-        value = None if row is None else (json.loads(row[0]) if isinstance(row[0], str) else row[0])
-        return tools.sanitise_overrides(MANIFEST, value)
+        if tiers.get(name, own) == "outward":
+            recorded = await self._response(name)
+            if recorded is None or recorded[0] != "approved":
+                raise ApplicationError("no approval", type="NotApproved", non_retryable=True)
 
     def activities(self) -> list[Callable[..., Any]]:
         @activity.defn(name="render_preview")
         async def render_preview(args: dict[str, Any]) -> str:
-            tiers, disabled = await self._overrides()
-            if "render_preview" in disabled:
-                raise ApplicationError(
-                    "render_preview is disabled in Settings → Plugins; the user can turn it"
-                    " back on there",
-                    type="ToolError",
-                    non_retryable=True,
-                )
-            if tiers.get("render_preview") == "outward":
-                recorded = await self._response("render_preview")
-                if recorded is None or recorded[0] != "approved":
-                    raise ApplicationError("no approval", type="NotApproved", non_retryable=True)
+            await self._gated("render_preview", "read")
             self.ran.append(("render_preview", args))
             return "rendered"
 
         @activity.defn(name="print_output")
         async def print_output(args: dict[str, Any]) -> str:
-            recorded = await self._response("print_output")
-            if recorded is None or recorded[0] != "approved":
-                raise ApplicationError("no approval", type="NotApproved", non_retryable=True)
+            await self._gated("print_output", "outward")
             self.ran.append(("print_output", args))
             return "printed"
+
+        @activity.defn(name="get_printer_camera")
+        async def get_printer_camera(args: dict[str, Any]) -> str:
+            await self._gated("get_printer_camera", "read")
+            self.ran.append(("get_printer_camera", args))
+            return "a frame"
 
         @activity.defn(name="ask_user")
         async def ask_user(args: dict[str, Any]) -> str:
@@ -265,6 +269,7 @@ class StandInTools:
         return [
             render_preview,
             print_output,
+            get_printer_camera,
             ask_user,
             wait_for_user,
             describe_call,

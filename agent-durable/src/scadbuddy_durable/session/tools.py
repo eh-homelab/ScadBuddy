@@ -4,9 +4,10 @@
 durable-only answer tools) is read once, when the worker starts, from
 ``SCADBUDDY_DURABLE_TOOLS_JSON``. Each entry becomes an ``activity_as_tool`` on
 ``agent-tools``, where the agent service serves it under its name; the stub here
-names the activity and never runs. A call parks at the session's gate when the tool
-has a ``hitl`` kind (``needs_approval``), or when Settings → Plugins raised it to
-``outward`` (#2088): ``apply_overrides``, each turn, from what ``gate_settings`` read.
+names the activity and never runs. A call parks at the session's gate by the tool's
+effective tier, its manifest tier as Settings → Tools & plugins set it in ``ai_access``,
+raised or lowered (#2088, #2171): ``apply_overrides``, each turn, from what
+``gate_settings`` read.
 
 The workflow sandbox imports this module through, so the manifest the worker loaded is
 the one every DurableSession declares.
@@ -26,15 +27,13 @@ from temporalio import activity, workflow
 from temporalio.claude_agent_sdk import DurableTool, activity_as_tool
 from temporalio.common import RetryPolicy
 
+from scadbuddy_durable.session.access import AccessRow, registry_source, tool_access
 from scadbuddy_durable.session.models import TOOLS_QUEUE, TurnTool
 
 Hitl = Literal["approval", "answer"]
 
 # agent/src/harness/permissions.ts RISK_TIERS, least to most.
 RISK_TIERS = ("read", "write", "outward")
-# agent/src/plugins/builtInTools.ts builtInToolsSetting(OWN_PLUGIN_NAME): the overrides
-# of the tools a durable session calls.
-OVERRIDES_SETTING = "builtin_tools.scadbuddy"
 
 log = logging.getLogger(__name__)
 
@@ -128,31 +127,24 @@ def durable_tools(entries: Sequence[ManifestEntry]) -> list[DurableTool]:
 
 
 def sanitise_overrides(
-    entries: Sequence[ManifestEntry], stored: Any
+    entries: Sequence[ManifestEntry], rows: Sequence[AccessRow]
 ) -> tuple[dict[str, str], list[str]]:
-    """What Settings stored for the set, as builtInTools.ts ``sanitise`` keeps it:
-    TIGHTEN ONLY. A tier counts only where it raises a known tool above its own tier, and
-    a disabled tool only where it is known, so a stale or hand-edited row never lowers or
-    invents anything. The answer tools are durable-only, in no Settings set."""
-    if not isinstance(stored, dict):
-        return {}, []
-    own = {e.name: e.tier for e in entries if e.hitl != "answer"}
-
-    def rank(tier: str) -> int:
-        return RISK_TIERS.index(tier) if tier in RISK_TIERS else -1
-
+    """The registry tools' overrides from their ``ai_access`` rows, as resolve.ts
+    ``registryOverrides`` has them: every effective tier that differs from the tool's own,
+    raised or lowered, and every ``off``, by name. A row of another source, naming no tool,
+    or holding no access counts for nothing; a migrated row only where it raises or is
+    ``off``. A manifest tier that is no tier still takes a stored tier (#3882). The answer
+    tools are durable-only, in no source."""
+    by_key = {(r.source, r.item): r for r in rows}
     tiers: dict[str, str] = {}
-    raw_tiers = stored.get("tool_tiers")
-    if isinstance(raw_tiers, dict):
-        for name, tier in raw_tiers.items():
-            if name in own and tier in RISK_TIERS and rank(tier) > rank(own[name]):
-                tiers[name] = tier
-    raw_disabled = stored.get("disabled_tools")
-    disabled = (
-        sorted({t for t in raw_disabled if isinstance(t, str) and t in own})
-        if isinstance(raw_disabled, list)
-        else []
-    )
+    disabled: list[str] = []
+    for e in sorted((e for e in entries if e.hitl != "answer"), key=lambda e: e.name):
+        row = by_key.get((registry_source(e.name), e.name))
+        effective = tool_access(e.tier, row, migrated_raises_only=True)
+        if effective == "off":
+            disabled.append(e.name)
+        elif effective != e.tier:
+            tiers[e.name] = effective
     return tiers, disabled
 
 
@@ -161,19 +153,24 @@ def apply_overrides(
     entries: Sequence[ManifestEntry],
     tool_tiers: Mapping[str, str],
     disabled: Collection[str],
+    *,
+    per_call: bool = False,
 ) -> None:
     """Sets each tool's gate from its effective tier, as effectiveTool (registry.ts) has
-    it: a tool raised to ``outward`` parks for approval and runs at most once, like any
-    outward tool. A disabled tool never parks: its call goes straight to agent-tools,
-    which refuses it naming Settings → Plugins. Computed from the manifest every time,
-    so an override taken away is gone on the next turn."""
+    it: at ``outward`` a tool parks for approval and runs at most once; lowered below it,
+    an outward tool runs without parking (still at most once, if it asks for approval in
+    the manifest). An answer tool always parks. With ``per_call`` every call parks, and the
+    gate asks the tool's access as it is then. A disabled tool never parks: its call goes
+    straight to agent-tools, which refuses it naming Settings. Computed from the manifest
+    every time, so an override taken away is gone on the next turn."""
     for e in entries:
         tool = tools.get(e.name)
         if tool is None:
             continue
-        raised = tool_tiers.get(e.name) == "outward" and e.tier != "outward"
-        tool.needs_approval = e.name not in disabled and (e.hitl is not None or raised)
-        tool.retry_policy = _ONCE if e.hitl == "approval" or raised else _RETRY
+        effective = tool_tiers.get(e.name, e.tier)
+        outward = effective == "outward" and (e.hitl == "approval" or e.tier != "outward")
+        tool.needs_approval = e.name not in disabled and (e.hitl == "answer" or per_call or outward)
+        tool.retry_policy = _ONCE if e.hitl == "approval" or effective == "outward" else _RETRY
 
 
 # agent/src/temporal/turnTools.ts: the activity a turn tool's call runs as.

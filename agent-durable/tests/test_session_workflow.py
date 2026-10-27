@@ -21,6 +21,7 @@ import pytest
 from session_support import (
     MANIFEST,
     ME,
+    SCHEMA,
     Conn,
     Connect,
     StandInTools,
@@ -66,6 +67,7 @@ from scadbuddy_durable.gate.store import OpenInput, ResolveInput
 from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import subagents, tools
+from scadbuddy_durable.session.access import REGISTRY_SOURCES, registry_source
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
@@ -115,6 +117,7 @@ def policy(prompt: str, history: list[HistoryItem]) -> ToolCall | Final:
         ("ask badly", ("ask_user", {"questions": "red?"})),
         ("wait for me", ("wait_for_user", WAIT)),
         ("render it", ("render_preview", {"model": "m"})),
+        ("watch it", ("get_printer_camera", {"printer_id": 1})),
         ("get it", ("notes__post", {"method": "GET", "body": "y"})),
         ("post it", ("notes__post", {"method": "POST", "body": "x"})),
         ("run it", ("Bash", {"command": "make notes"})),
@@ -976,14 +979,16 @@ async def test_an_expiry_in_flight_as_the_turn_ends_is_still_written(
 
 
 async def _overrides(conn: Conn, tool_tiers: dict[str, str], disabled: list[str]) -> None:
-    await conn.execute(
-        "INSERT INTO ai_settings (key, value) VALUES (%s, %s)"
-        " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-        (
-            tools.OVERRIDES_SETTING,
-            json.dumps({"tool_tiers": tool_tiers, "disabled_tools": disabled}),
-        ),
-    )
+    """The registry tools' ai_access rows as rowsFromOverrides (agent test/support/
+    memoryAccess.ts) writes them: a disabled tool is off, whatever its tier."""
+    rows = [(t, "off") for t in disabled]
+    rows += [(t, a) for t, a in tool_tiers.items() if t not in disabled]
+    await conn.execute("DELETE FROM ai_access WHERE source = ANY(%s)", (list(REGISTRY_SOURCES),))
+    for item, value in rows:
+        await conn.execute(
+            "INSERT INTO ai_access (source, item, access, updated_by) VALUES (%s, %s, %s, %s)",
+            (registry_source(item), item, value, "browser:browser"),
+        )
 
 
 async def _replays(harness: Harness, handle: WorkflowHandle[Any, Any]) -> None:
@@ -1024,20 +1029,61 @@ async def test_a_tool_raised_to_outward_parks_and_runs_once_approved(
     await _replays(harness, handle)
 
 
-async def test_an_override_never_lowers_a_tool_below_its_own_tier(
+async def test_an_outward_tool_lowered_to_read_runs_without_parking(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:
-    """TIGHTEN ONLY (builtInTools.ts): an outward tool set to read still parks."""
+    """#2171: Settings may lower a tool. print_output at read runs with no approval."""
     await _overrides(agent_db, {"print_output": "read"}, [])
     sid, handle = await harness.session(agent_db)
     await send(handle, "print it")
-    [entry] = await _parked(handle)
-    assert entry["kind"] == "approval"
-    await handle.execute_update(
-        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "deny"})
+    assert await settled(connect, sid) == "idle"
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    assert [r[0] for r in harness.stand_in.ran] == ["print_output"]
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert texts == ["print_output: ok: printed"]
+    await _replays(harness, handle)
+
+
+async def test_gate_settings_reads_lowered_raised_and_off_from_ai_access(
+    agent_db: Conn, connect: Connect
+) -> None:
+    tools.use_manifest(MANIFEST)
+    acts = SessionActivities(connect)
+    await _overrides(agent_db, {"render_preview": "outward", "print_output": "write"}, [])
+    await agent_db.execute(
+        "INSERT INTO ai_access (source, item, access, updated_by) VALUES"
+        " ('builtin:scadbuddy', 'wait_for_user', 'off', 'browser:browser'),"
+        " ('remote:hs', 'print_output', 'off', 'browser:browser')"
     )
+    read = await acts.gate_settings()
+    assert read.tool_tiers == {"render_preview": "outward", "print_output": "write"}
+    assert read.disabled_tools == []  # an answer tool is in no source; remote:hs is not ours
+    await _overrides(agent_db, {}, ["print_output"])
+    off = await acts.gate_settings()
+    assert (off.tool_tiers, off.disabled_tools) == ({}, ["print_output"])
+
+
+async def test_the_camera_off_is_refused_by_the_durable_gate_and_never_parks(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """The camera switch is the camera's row (#2171): off, a durable call of it is refused
+    naming Settings, never parked, and the segment runner leaves it undeclared."""
+    camera = tools.ManifestEntry("get_printer_camera", "A frame.", SCHEMA, "read", None)
+    tools.use_manifest([*MANIFEST, camera])
+    await _overrides(agent_db, {}, ["get_printer_camera"])
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "watch it")
     assert await settled(connect, sid) == "idle"
     assert harness.stand_in.ran == []
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    [text] = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert text.startswith("get_printer_camera: error")
+    assert "disabled in Settings → Plugins" in text
+    context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+    assert context.disabled_tools == ["get_printer_camera"]
+    await _replays(harness, handle)
 
 
 async def test_a_disabled_tool_is_refused_naming_settings_and_never_parks(

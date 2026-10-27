@@ -162,16 +162,10 @@ async def test_gate_settings_read_the_tools_overrides_sanitised(
     none = await acts.gate_settings()
     assert (none.tool_tiers, none.disabled_tools) == ({}, [])
     await agent_db.execute(
-        "INSERT INTO ai_settings (key, value) VALUES (%s, %s)",
-        (
-            tools.OVERRIDES_SETTING,
-            json.dumps(
-                {
-                    "tool_tiers": {"render_preview": "outward", "print_output": "read"},
-                    "disabled_tools": ["print_output", "gone"],
-                }
-            ),
-        ),
+        "INSERT INTO ai_access (source, item, access, updated_by) VALUES"
+        " ('builtin:scadbuddy', 'render_preview', 'outward', 'browser:browser'),"
+        " ('builtin:scadbuddy', 'print_output', 'off', 'browser:browser'),"
+        " ('builtin:scadbuddy', 'gone', 'off', 'browser:browser')"
     )
     read = await acts.gate_settings()
     assert read.tool_tiers == {"render_preview": "outward"}

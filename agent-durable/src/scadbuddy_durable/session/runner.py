@@ -98,7 +98,7 @@ from scadbuddy_durable.credentials import (
     usable_credentials,
 )
 from scadbuddy_durable.secrets import Kek
-from scadbuddy_durable.session import subagents
+from scadbuddy_durable.session import access, subagents
 from scadbuddy_durable.session.fallback import classify, credentials_fault
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
@@ -207,10 +207,8 @@ IMAGES_BYTES_MAX = 8 * 1024 * 1024 * 3 // 4
 LONG_EDGE_KEY = "image_long_edge"
 DEFAULT_LONG_EDGE = 1568
 MIN_LONG_EDGE, MAX_LONG_EDGE = 200, 2576
-# agent/src/sessions/manager.ts SETTING_MODEL; plugins/packages/builtins.ts, the own
-# plugin's switch (on unless stored false).
+# agent/src/sessions/manager.ts SETTING_MODEL.
 MODEL_KEY = "model"
-OWN_PLUGIN_KEY = "scadbuddy_plugin_enabled"
 # agent/src/routes/durableSubagents.ts SETTING_DURABLE_SUBAGENTS: `{url, peers}`; a string
 # `url` replaces the worker's own subagent URL (an agent-durable outside the agent's pod).
 SUBAGENTS_KEY = "durable_subagents"
@@ -742,10 +740,12 @@ class ScadBuddyRunner:
         async with self._connect() as conn:
             cur = await conn.execute(
                 "SELECT key, value FROM ai_settings WHERE key = ANY(%s)",
-                ([LONG_EDGE_KEY, MODEL_KEY, OWN_PLUGIN_KEY],),
+                ([LONG_EDGE_KEY, MODEL_KEY],),
             )
             # psycopg hands jsonb back decoded: a stored string is already a str.
             values = dict(await cur.fetchall())
+            # The own plugin's switch (#2171): its ai_access '*' row, on unless off.
+            plugin_rows = await access.read_rows(conn, [access.OWN_PLUGIN_SOURCE])
             cur = await conn.execute(
                 "SELECT agent_model, agent_effort, agent_type FROM ai_sessions WHERE id = %s",
                 (session,),
@@ -758,7 +758,7 @@ class ScadBuddyRunner:
         return TurnSettings(
             long_edge=min(max(edge, MIN_LONG_EDGE), MAX_LONG_EDGE),
             model=model if isinstance(model, str) and model else None,
-            own_plugin=values.get(OWN_PLUGIN_KEY) is not False,
+            own_plugin=access.source_enabled(access.OWN_PLUGIN_SOURCE, plugin_rows),
             effort=own[1],
             agent_type=own[2],
         )
