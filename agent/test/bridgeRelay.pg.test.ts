@@ -267,9 +267,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
     const start = vi.fn(() => Promise.reject(new Error('Temporal must not be used')))
     a.temporal.useClient({ client: { workflow: { start } } as never, dropKey: async () => {} })
     const t = await tab(b.hub, () => ({ ok: true, result: 'from the old build' }))
-    // B's claim, as an old build would never have written it.
-    await until(async () => (await db.sql`SELECT 1 FROM ai_tab_owners WHERE tab_id = ${TAB}`).length === 1)
-    await db.sql`DELETE FROM ai_tab_owners WHERE tab_id = ${TAB}`
+    // B serves no bridge.tab (no hostActivities), so it claims nothing, as an old build.
+    expect(await db.sql`SELECT 1 FROM ai_tab_owners WHERE tab_id = ${TAB}`).toHaveLength(0)
     a.hub.pairSession('s1', TAB)
     expect(await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })).toEqual({
       ok: true,

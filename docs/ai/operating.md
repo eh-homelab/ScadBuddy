@@ -74,6 +74,22 @@ covers the same ground more briefly.
   calls have no such fallback: one slower than 30 s that lands on an old replica times
   out, a read up to three times and a write at once, and the script sees the error
   (`flow_session_check` retries without limit).
+- **Browser calls across a rollout of #4780.** Since #4780 a browser_* call for a tab on
+  another replica is a `BridgeCall` workflow on `agent-tools`, whose one activity runs
+  on the queue of the replica that holds the tab (`ai_tab_owners`;
+  [browser-bridge.md](browser-bridge.md#replicas)). For one release (#4868) the
+  Postgres relay of #1916 runs beside it, so replicas on the two builds still reach
+  each other's tabs: an old replica claims no `ai_tab_owners` row, and a new one takes
+  the old relay for any tab it finds no live owner for. `agent-tools` is unversioned,
+  so while an old replica still polls it, it can take a `BridgeCall` workflow task. It
+  has no such workflow, so it fails the task, and Temporal gives the task again to a
+  replica that may be another old one. The workflow's execution timeout leaves 15 s
+  past the call's own time for that (`WORKFLOW_SLACK_MS`,
+  [`agent/src/bridge/relay.ts`](../../agent/src/bridge/relay.ts)), about one failed task
+  and its retry. A call whose workflow still times out is logged, and it takes the old
+  relay, or without it answers `no_answer`; it never fails the tool. Once no replica
+  runs a build before #4780, nothing takes those tasks but replicas that have the
+  workflow.
 
 ### 1.1 Routing the UI's origin to the agent
 

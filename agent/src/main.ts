@@ -821,7 +821,8 @@ const hostWorkers =
           // A classic session's Monitor commands, in its directory on this replica.
           ...(background ? { bg_monitor_command: background.bg_monitor_command } : {}),
           // Other replicas' browser_* calls for a tab connected here (#4780).
-          ...(tabRelay ? tabRelay.activities() : {}),
+          // Taking them is what makes this replica claim its tabs (TemporalTabRelay.hostActivities).
+          ...(tabRelay ? tabRelay.hostActivities() : {}),
         },
         ...(sessionHosting
           ? {

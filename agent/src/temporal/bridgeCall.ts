@@ -1,4 +1,4 @@
-import { ActivityFailure, proxyActivities, TimeoutFailure } from '@temporalio/workflow'
+import { ActivityFailure, isCancellation, proxyActivities, TimeoutFailure } from '@temporalio/workflow'
 import type { CallOutcome } from '../bridge/protocol.js'
 
 // A browser_* call for a tab whose bridge socket is on another agent replica (#4780,
@@ -51,21 +51,22 @@ export async function BridgeCall(input: BridgeCallInput): Promise<BridgeCallAnsw
   try {
     return await owner[BRIDGE_TAB_ACTIVITY]!(input.tabId, input.request)
   } catch (err) {
-    const cause = err instanceof ActivityFailure ? err.cause : undefined
-    if (!(cause instanceof TimeoutFailure)) throw err
-    if (cause.timeoutType === 'SCHEDULE_TO_START') return { op: 'unreachable' }
-    // The owner took the request and went away, or stopped answering: the tab may still act.
+    // The caller cancelled: the workflow ends cancelled, as asked.
+    if (isCancellation(err) || !(err instanceof ActivityFailure)) throw err
+    const cause = err.cause
+    if (cause instanceof TimeoutFailure && cause.timeoutType === 'SCHEDULE_TO_START') return { op: 'unreachable' }
     if (input.request.op !== 'call') return { op: 'gone' }
+    // The owner took the request and went away, stopped answering, or failed while it ran it:
+    // the tab may still act. An answer, as the old relay's (no_answer), never a failed workflow.
+    const message =
+      cause instanceof TimeoutFailure
+        ? `the agent replica holding the tab did not answer within ${Math.round(runMs / 1000)} s; `
+        : 'the agent replica holding the tab failed while it ran the call; '
     return {
       op: 'call',
       outcome: {
         ok: false,
-        error: {
-          code: 'no_answer',
-          message:
-            `the agent replica holding the tab did not answer within ${Math.round(runMs / 1000)} s; ` +
-            'the call may still finish, so take a snapshot before trying again',
-        },
+        error: { code: 'no_answer', message: `${message}the call may still finish, so take a snapshot before trying again` },
       },
     }
   }

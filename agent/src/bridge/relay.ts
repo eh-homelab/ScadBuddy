@@ -68,8 +68,13 @@ export const ACK_TIMEOUT_MS = 3_000
  * (frontend link.ts MAX_RESULT_BYTES, 200 000), and sealed well under Temporal's 2 MB payload limit.
  */
 export const MAX_BRIDGE_BYTES = 1_000_000
-/** Past the owner's own time: the workflow's whole run, for a workflow task that is slow to start. */
-const WORKFLOW_SLACK_MS = 10_000
+/**
+ * Past the owner's own time: the workflow's whole run, for a workflow task that is slow to start.
+ * Room for one failed first workflow task too: during a rolling deploy a replica still on the
+ * build before #4780 polls the unversioned `agent-tools`, has no BridgeCall, and fails the task,
+ * which Temporal then gives to another replica (docs/ai/operating.md, "Rolling deploys").
+ */
+const WORKFLOW_SLACK_MS = 15_000
 
 /** A call's workflow ID, and the subject its payloads are sealed under. */
 export const bridgeWorkflowId = (): string => `bridge-${randomUUID()}`
@@ -97,7 +102,7 @@ export interface TabRelay {
 
 export type TemporalTabRelayOptions = {
   owners: TabOwnerStore
-  /** This replica's own queue (main.ts HOST_QUEUE), which its host worker polls with `activities()`. */
+  /** This replica's own queue (main.ts HOST_QUEUE), which its host worker polls with `hostActivities()`. */
   hostQueue: string
   /** Where BridgeCall runs: `agent-tools`, which every replica's worker polls with the workflow bundle. */
   workflowQueue?: string
@@ -121,6 +126,19 @@ const SEALING_NEEDED =
   'no browser attached: the tab is connected to another agent replica, and reaching it there needs the agent ' +
   "service's secret key (SCADBUDDY_SECRET_KEY_FILE), which seals the call's contents in Temporal. Ask the operator to mount it."
 
+const NO_ANSWER: RelayAnswer = {
+  op: 'call',
+  outcome: {
+    ok: false,
+    error: {
+      code: 'no_answer',
+      message:
+        'the call to the agent replica holding the tab failed on its way (see the agent log); ' +
+        'it may still have run, so take a snapshot before trying again',
+    },
+  },
+}
+
 export class TemporalTabRelay implements TabRelay {
   readonly #owners: TabOwnerStore
   readonly hostQueue: string
@@ -131,6 +149,8 @@ export class TemporalTabRelay implements TabRelay {
   readonly #fallback: LegacyTabRelay | undefined
   #client: SealingClient | undefined
   #owner: RelayOwner | undefined
+  /** Whether this replica's host worker serves `bridge.tab` (`hostActivities`): only then is a tab claimed here. */
+  #hosting = false
   /** One owner-row write at a time, in order: a tab's release never lands before its claim. */
   #writes: Promise<void> = Promise.resolve()
 
@@ -154,8 +174,13 @@ export class TemporalTabRelay implements TabRelay {
     this.#fallback?.serve(owner)
   }
 
-  /** The owner's activity, for this replica's host worker on `hostQueue`. */
-  activities(): Record<string, (tabId: string, request: RelayRequest) => Promise<RelayAnswer>> {
+  /**
+   * The owner's activity, for this replica's host worker on `hostQueue`. Taking it is what
+   * makes this replica claim its tabs in ai_tab_owners: a claim with nothing serving the
+   * queue would send every call there to wait out the ack timeout.
+   */
+  hostActivities(): Record<string, (tabId: string, request: RelayRequest) => Promise<RelayAnswer>> {
+    this.#hosting = true
     return {
       [BRIDGE_TAB_ACTIVITY]: async (tabId, request) => {
         if (!this.#owner) return { op: 'gone' }
@@ -171,11 +196,11 @@ export class TemporalTabRelay implements TabRelay {
   }
 
   attached(tabId: string): void {
-    void this.#write(() => this.#owners.claim(tabId, this.hostQueue))
+    if (this.#hosting) void this.#write(() => this.#owners.claim(tabId, this.hostQueue))
   }
 
   detached(tabId: string): void {
-    void this.#write(() => this.#owners.release(tabId, this.hostQueue))
+    if (this.#hosting) void this.#write(() => this.#owners.release(tabId, this.hostQueue))
   }
 
   #write(write: () => Promise<void>): Promise<void> {
@@ -197,11 +222,21 @@ export class TemporalTabRelay implements TabRelay {
     if (options.signal.aborted) throw abortError()
     if (jsonBytes(request) > MAX_BRIDGE_BYTES) return request.op === 'call' ? tooLarge('request') : undefined
     const sealing = this.#client
+    let failed = false
     if (sealing) {
-      const answer = await this.#viaTemporal(sealing, tabId, request, options.signal)
-      if (answer !== undefined) return answer
+      try {
+        const answer = await this.#viaTemporal(sealing, tabId, request, options.signal)
+        if (answer !== undefined) return answer
+      } catch (err) {
+        if (options.signal.aborted) throw abortError()
+        // Temporal refused the start, or the workflow failed or timed out: never a throw
+        // from the tool. The old relay may still reach the tab; else the call may have run.
+        this.#failed(err)
+        failed = true
+      }
     }
     if (this.#fallback) return this.#fallback.forward(tabId, request, options)
+    if (failed) return request.op === 'call' ? NO_ANSWER : undefined
     // Refused rather than sent to Temporal unsealed.
     if (!sealing && request.op === 'call') return { op: 'call', outcome: { ok: false, error: { code: 'no_browser', message: SEALING_NEEDED } } }
     return undefined

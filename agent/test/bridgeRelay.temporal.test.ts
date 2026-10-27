@@ -98,7 +98,7 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       const worker = await Worker.create({
         connection: env.nativeConnection,
         taskQueue: queue,
-        activities: relay.activities(),
+        activities: relay.hostActivities(),
         dataConverter,
       })
       const r: Replica = { hub, relay, queue, worker, running: worker.run() }
@@ -309,6 +309,19 @@ describe.skipIf(!TEST_DATABASE_URL || !TEMPORAL_CLI)(
       a.hub.pairSession('s1', TAB)
       const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
       expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser', message: expect.stringMatching(/tab is not connected/) } })
+    })
+
+    it("answers no_answer, and the workflow completes, when the owner's run throws", async () => {
+      const a = await replica('a')
+      const b = await replica('b')
+      await tab(b.hub, () => ({ ok: true, result: 'never' }))
+      await owned(TAB, b.queue)
+      b.relay.serve({ holds: () => true, run: async () => Promise.reject(new Error('the hub broke')) })
+      a.hub.pairSession('s1', TAB)
+      const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
+      expect(outcome).toMatchObject({ ok: false, error: { code: 'no_answer', message: expect.stringMatching(/failed while it ran the call/) } })
+      expect(started).toHaveLength(1)
+      expect((await env.client.workflow.getHandle(started[0]!).describe()).status.name).toBe('COMPLETED')
     })
 
     it('gives up on an owner that took the call and never answered', async () => {
