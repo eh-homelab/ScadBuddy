@@ -100,6 +100,20 @@ describe('VirtualPrintersPanel (#4747)', () => {
     expect(virtualWrites()[0]).toEqual({ enabled: false })
   })
 
+  it('sends no model for a VP that has none when an edit leaves it alone (review #4784)', async () => {
+    virtualState()[0] = { ...virtualState()[0]!, model: null, model_name: null }
+    const { user } = renderPage(<PrintersPanel bambuddyConfigured />)
+    const vp = await screen.findByRole('listitem', { name: H2C_VP })
+    await user.click(within(vp).getByRole('button', { name: 'Edit' }))
+    const form = within(vp).getByRole('form', { name: 'Edit H2C Virtual' })
+    const name = within(form).getByLabelText('Name')
+    await user.clear(name)
+    await user.type(name, 'Renamed')
+    await user.click(within(form).getByRole('button', { name: 'Save in Bambuddy' }))
+    await waitFor(() => expect(virtualWrites()).toHaveLength(1))
+    expect(virtualWrites()[0]).toEqual({ name: 'Renamed' })
+  })
+
   it("says why a write is refused while Bambuddy's auth is on", async () => {
     setVirtualAuth(true)
     const { user } = renderPage(<PrintersPanel bambuddyConfigured />)

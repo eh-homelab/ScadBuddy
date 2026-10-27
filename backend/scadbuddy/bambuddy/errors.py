@@ -152,6 +152,13 @@ def _answered(error: ApiError, answer: UpstreamAnswer) -> ApiError:
     return error
 
 
+def _detail(response: httpx.Response, scope: Scope) -> str | None:
+    """Bambuddy's message: scrubbed of request values for a settings write."""
+    if scope == Scope.ADMIN_SETTINGS:
+        return scrubbed_detail(response)
+    return upstream_detail(response)
+
+
 def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiError:
     """Turn a failed Bambuddy response into the problem the browser should see, with
     Bambuddy's own answer kept on it (`UpstreamAnswer`).
@@ -162,7 +169,7 @@ def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiErr
     answer = UpstreamAnswer(
         status=response.status_code,
         retry_after=retry_after(response.headers.get("Retry-After")),
-        detail=upstream_detail(response),
+        detail=_detail(response, scope),
     )
     return _answered(_mapped(response, scope=scope, what=what, answer=answer), answer)
 
@@ -171,8 +178,11 @@ def _mapped(
     response: httpx.Response, *, scope: Scope, what: str, answer: UpstreamAnswer
 ) -> ApiError:
     code = response.status_code
-    detail = upstream_detail(response)
+    detail = _detail(response, scope)
     suffix = f": {detail}" if detail else ""
+    # A settings write may carry a secret (a virtual printer's access code, #4747), which
+    # Bambuddy's body could echo: its detail is scrubbed and its body never kept.
+    body = None if scope == Scope.ADMIN_SETTINGS else upstream_body(response)
 
     if code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
         if scope == Scope.ADMIN_SETTINGS and code == status.HTTP_403_FORBIDDEN:
@@ -210,7 +220,7 @@ def _mapped(
             f"Bambuddy reported a conflict when asked to {what}{suffix}",
             type_=CONFLICT_PROBLEM,
             bambuddy_status=code,
-            bambuddy_body=upstream_body(response),
+            bambuddy_body=body,
         )
     if code == status.HTTP_422_UNPROCESSABLE_CONTENT:
         return ApiError(
@@ -218,7 +228,7 @@ def _mapped(
             f"Bambuddy rejected the request to {what}{suffix}",
             type_=REJECTED_PROBLEM,
             bambuddy_status=code,
-            bambuddy_body=upstream_body(response),
+            bambuddy_body=body,
         )
     if code == status.HTTP_429_TOO_MANY_REQUESTS:
         wait = (

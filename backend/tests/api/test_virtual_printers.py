@@ -355,3 +355,46 @@ def test_bambuddys_validation_error_never_echoes_the_code(client: TestClient) ->
     with registry(client).store.pool.connection() as conn:
         rows = conn.execute("SELECT coalesce(error::text, '') AS e FROM operations").fetchall()
     assert all(CODE not in row["e"] for row in rows)
+
+
+@respx.mock
+def test_an_update_that_drops_the_target_may_set_a_code(client: TestClient) -> None:
+    """Review #4784: `target: null` with a new code is an untargeted VP's code, so it
+    is sent to Bambuddy, and no read of the VP's current target refuses it."""
+    configure(client)
+    registry(client).store.kek = KEK
+    bambuddy([])
+    current = respx.get(f"{API}/virtual-printers/1").mock(
+        return_value=httpx.Response(200, json=vp(1, 1))
+    )
+    changed = respx.put(f"{API}/virtual-printers/1").mock(
+        return_value=httpx.Response(200, json=vp(1, None))
+    )
+    response = client.put(
+        "/api/v1/printers/virtual/1",
+        json={"target": None, "access_code": CODE},
+        headers=press(),
+    )
+    assert response.status_code == 200, response.text
+    assert CODE not in response.text
+    sent = json.loads(changed.calls.last.request.read())
+    assert sent == {"target_printer_id": None, "access_code": CODE}
+    assert not current.called
+
+
+@respx.mock
+def test_a_refused_write_never_echoes_bambuddys_values(client: TestClient) -> None:
+    """Review #4784: the 403's detail is scrubbed as a 400's is."""
+    configure(client)
+    registry(client).store.kek = KEK
+    bambuddy([], auth=True)
+    respx.post(f"{API}/virtual-printers").mock(
+        return_value=httpx.Response(
+            403, json={"detail": [{"loc": ["body", "access_code"], "msg": "no", "input": CODE}]}
+        )
+    )
+    response = client.post(
+        "/api/v1/printers/virtual", json={"name": "X", "access_code": CODE}, headers=press()
+    )
+    assert response.status_code == 409, response.text
+    assert CODE not in response.text

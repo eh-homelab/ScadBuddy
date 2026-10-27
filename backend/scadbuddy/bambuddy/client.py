@@ -502,7 +502,11 @@ class BambuddyClient:
         except ApiError as error:
             logger.debug("could not read Bambuddy's auth status", extra={"type": error.type})
             return None
-        body = response.json()
+        try:
+            body = response.json()
+        except ValueError:
+            logger.debug("Bambuddy's auth status is not JSON")
+            return None
         enabled = body.get("auth_enabled") if isinstance(body, dict) else None
         return enabled if isinstance(enabled, bool) else None
 

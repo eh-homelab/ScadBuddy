@@ -106,9 +106,11 @@ function bodyOf(form: Form): VirtualPrinterCreate {
  * An edit's PUT: only what the user changed, so a save never sends a field it did not
  * touch (the PUT changes only what is sent). An unregistered target is never sent.
  */
-function changesOf(form: Form, vp: VirtualPrinter): VirtualPrinterUpdate {
+function changesOf(form: Form, vp: VirtualPrinter, defaultModel: string): VirtualPrinterUpdate {
   const next = bodyOf(form) as Record<string, unknown>
-  const before = bodyOf(formOf(vp, vp.model ?? '')) as Record<string, unknown>
+  // The baseline is the form as it opened, with the same default model, so an edit of
+  // a VP with no model does not send the default as a change (review #4784).
+  const before = bodyOf(formOf(vp, defaultModel)) as Record<string, unknown>
   const changes: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(next)) {
     if (key === 'access_code' || value !== before[key]) changes[key] = value
@@ -337,7 +339,8 @@ function VirtualPrinterForm({
   onCancel: () => void
 }) {
   const models = Object.entries(data.models)
-  const [form, setForm] = useState<Form>(() => formOf(vp, models[0]?.[0] ?? ''))
+  const defaultModel = models[0]?.[0] ?? ''
+  const [form, setForm] = useState<Form>(() => formOf(vp, defaultModel))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const set = <K extends keyof Form>(key: K, value: Form[K]) => setForm((prev) => ({ ...prev, [key]: value }))
@@ -348,7 +351,7 @@ function VirtualPrinterForm({
     setError(null)
     try {
       const body = bodyOf(form)
-      if (vp) await api.updateVirtualPrinter(vp.id, changesOf(form, vp))
+      if (vp) await api.updateVirtualPrinter(vp.id, changesOf(form, vp, defaultModel))
       else await api.createVirtualPrinter(body)
       set('access_code', '')
       onDone()
