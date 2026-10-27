@@ -162,7 +162,7 @@ export class AccessStore implements AccessReader, AccessWriter {
   /**
    * The old ai_settings keys of the sources `edits` touch, as they will stand, written before
    * the ai_access rows: the mirror trigger an older replica's writes need
-   * (20261027T0514Z_access_settings_mirror.sql) then fires first, and the rows written after
+   * (20261026T2201Z_access_copy.sql) then fires first, and the rows written after
    * it win. Drop next release (#4828).
    */
   private async writeLegacy(tx: TransactionSql, edits: readonly Edit[], by: string): Promise<void> {

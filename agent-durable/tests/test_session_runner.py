@@ -704,7 +704,7 @@ async def test_the_own_plugin_off_in_ai_access_is_not_loaded(
     """#2171: the own plugin's switch is its ai_access row, as a classic turn reads it
     (builtin:own-plugin, item '*'); the old ai_settings key no longer decides. It is
     written past the rolling deploy's mirror trigger, which would carry it into ai_access
-    (agent migration 20261027T0514Z_access_settings_mirror.sql, #4828)."""
+    (agent migration 20261026T2201Z_access_copy.sql, #4828)."""
     await agent_db.execute("ALTER TABLE ai_settings DISABLE TRIGGER ai_settings_mirror_access")
     await _setting(agent_db, "scadbuddy_plugin_enabled", "false")
     on = await _segment_options(temporal_env, agent_db, connect, tmp_path, plugin_dir="/skills")

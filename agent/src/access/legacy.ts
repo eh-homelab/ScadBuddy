@@ -4,8 +4,8 @@ import { registryOverrides, sourceEnabled } from './resolve.js'
 
 // #2171 (#4756), rolling deploy: the ai_settings keys an older replica still reads and writes.
 // The new code writes them from ai_access's rows (access/store.ts), in the same transaction
-// and before its ai_access write; migration 20261027T0514Z_access_settings_mirror.sql mirrors
-// an older replica's write of them the other way. Drop both next release (#4828).
+// and before its ai_access write; the ai_settings trigger of migration
+// 20261026T2201Z_access_copy.sql mirrors an older replica's write of them the other way. Drop both next release (#4828).
 
 export const LEGACY_SOURCES: readonly string[] = Object.values(BUILTIN_SOURCES)
 

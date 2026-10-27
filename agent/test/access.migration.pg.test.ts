@@ -128,7 +128,7 @@ describe.skipIf(skip !== '')(`the tool-access migrations${skip}`, () => {
     expect(p).toEqual({ tool_tiers: { recall: 'read' }, disabled_tools: [], enabled: true })
   })
 
-  it('the copy file creates the ai_plugins mirror before it copies, so no old-replica write falls between them', async () => {
+  it('the copy file creates the ai_plugins and ai_settings mirrors before it copies, so no old-replica write falls between them', async () => {
     await migrate(
       db.sql,
       MIGRATIONS.filter((m) => m.id <= COPY),
@@ -136,6 +136,10 @@ describe.skipIf(skip !== '')(`the tool-access migrations${skip}`, () => {
     const triggers = await db.sql`SELECT tgname FROM pg_trigger WHERE tgrelid = 'ai_plugins'::regclass AND NOT tgisinternal`
     expect(triggers.map((t) => t.tgname)).toEqual(['ai_plugins_mirror_access'])
     expect(MIGRATIONS.some((m) => m.id === '20261026T2358Z_access_plugins_mirror')).toBe(false)
+    // The ai_settings mirror (the four old keys) is made in the same file, before the copy too.
+    const settingsTriggers = await db.sql`SELECT tgname FROM pg_trigger WHERE tgrelid = 'ai_settings'::regclass AND NOT tgisinternal`
+    expect(settingsTriggers.map((t) => t.tgname)).toEqual(['ai_settings_mirror_access'])
+    expect(MIGRATIONS.some((m) => m.id === '20261027T0514Z_access_settings_mirror')).toBe(false)
     await plugin('hs', false, {}, ['recall'])
     expect(await rows('remote:%')).toEqual([
       { source: 'remote:hs', item: '*', access: 'off', updated_by: BY },
