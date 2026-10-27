@@ -3,7 +3,7 @@ import { useState } from 'react'
 import { useLocation } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { bridge } from '../../agent/bridge'
-import { committed } from '../../agent/highlight'
+import { committed, touchAfterRender } from '../../agent/highlight'
 import type * as Highlight from '../../agent/highlight'
 import { AgentToolError } from '../../agent/types'
 import type { ConnectionTest } from '../../api/types'
@@ -20,7 +20,7 @@ import { baseline } from './values'
 // The real wait, watched: a test can make one move to another area outlast its timeout.
 vi.mock('../../agent/highlight', async (importOriginal) => {
   const real = await importOriginal<typeof Highlight>()
-  return { ...real, committed: vi.fn(real.committed) }
+  return { ...real, committed: vi.fn(real.committed), touchAfterRender: vi.fn(real.touchAfterRender) }
 })
 
 const testStored = vi.fn(async (): Promise<ConnectionTest> => ({ ok: true, detail: 'Connected' }) as ConnectionTest)
@@ -93,6 +93,8 @@ function renderShell() {
 afterEach(() => {
   localStorage.clear()
   testStored.mockClear()
+  vi.mocked(committed).mockClear()
+  vi.mocked(touchAfterRender).mockClear()
 })
 
 describe('the settings agent scope', () => {
@@ -128,10 +130,30 @@ describe('the settings agent scope', () => {
       const slow = await bridge.call('set_field', { field: 'display_unit', value: 'in' })
       expect(!slow.ok && slow.error.code).toBe('timeout')
       expect(committed).toHaveBeenCalledWith(expect.any(Function), 'the library settings to open', 10_000)
-      // The edit was made in the hidden area before the move, so it stands.
+      // The edit was made in the hidden area before the move, so it stands, and is outlined.
       await waitFor(() => expect(screen.getByLabelText('Show dimensions in')).toHaveValue('in'))
+      expect(touchAfterRender).toHaveBeenCalled()
     } finally {
       vi.mocked(committed).mockImplementation(real)
+    }
+  })
+
+  it('outlines the field once its area shows, not while it is still hidden (#2171)', async () => {
+    const real = vi.mocked(touchAfterRender).getMockImplementation()!
+    const seenAt: string[] = []
+    vi.mocked(touchAfterRender).mockImplementation((find) => {
+      seenAt.push(screen.getByTestId('where').textContent ?? '')
+      real(find)
+    })
+    try {
+      renderShell()
+      await screen.findByLabelText('Show dimensions in')
+      expect(await bridge.call('set_field', { field: 'display_unit', value: 'in' })).toMatchObject({ ok: true })
+      expect(seenAt).toEqual(['/settings/library'])
+      expect(touchAfterRender).toHaveBeenLastCalledWith(expect.any(Function))
+      expect(vi.mocked(touchAfterRender).mock.lastCall![0]()).toBe(document.getElementById('display-unit'))
+    } finally {
+      vi.mocked(touchAfterRender).mockImplementation(real)
     }
   })
 

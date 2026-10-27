@@ -165,8 +165,12 @@ export function SettingsAgentProvider({ sections, children }: { sections: readon
         binding.current.set(next)
         // A folded section's field is hidden: unfold it first, so the edit is seen (#3414).
         reveal(home.domId)
-        touchAfterRender(() => document.getElementById(home.domId))
-        await goTo(home.section)
+        try {
+          await goTo(home.section)
+        } finally {
+          // Once its area shows (or the move gave up), so it can be scrolled into view.
+          touchAfterRender(() => document.getElementById(home.domId))
+        }
         await committed(() => binding.current.value() === next)
         return { field, value: next, saved: false, note: 'The user saves each section with its own Save button.' }
       },
