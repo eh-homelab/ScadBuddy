@@ -46,7 +46,9 @@ class BlobStore(Protocol):
     async def claim(self, key: str) -> bool:
         """Whether the store holds a blob under ``key``, without fetching its bytes.
         It touches the blob first, as `dir_for` and `fetch` do, so a claimant that
-        adds its `BlobRefs` hold next keeps it from both sweeps."""
+        adds its `BlobRefs` hold next keeps it from both sweeps. Not a pure read: on a
+        remote store it forgets an index row whose object is gone
+        (`ContentStore.stat`), as `fetch` does, so the caller can store it again."""
         ...
 
     async def checkout(self, key: str) -> str | None:

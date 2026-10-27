@@ -12,7 +12,7 @@ import pytest
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders.attachments import BLOB_FILE, blob_key, blob_path, keep
 from scadbuddy.orders.store import ATTACHMENT_HOLDER, OrderStore, order_subject
-from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.cache import CachedBlobStore, StaleBlobError
 from scadbuddy.store.content import ContentStore
 from scadbuddy.store.local import LocalBlobStore
 from tests.conftest import PgPool
@@ -100,6 +100,23 @@ async def test_bytes_whose_stored_object_was_lost_are_stored_again(
     assert await keep(a, claims, sha, sha) == key
     path = await blob_path(replica(tmp_path / "d", content), key)
     assert path is not None and path.read_bytes() == VIDEO
+
+
+async def test_bytes_stored_on_the_other_backend_of_a_migration_fail_as_stale(
+    tmp_path: Path, content: ContentStore, pool: PgPool
+) -> None:
+    """Mid `/store/migrate` the row names the other backend: not this store's blob
+    (`claim` is False), and the publish loses the swap against that row, so `keep`
+    raises `StaleBlobError`, which `attachment_run` answers with a 503."""
+    a = replica(tmp_path / "a", content)
+    claims, sha = claim(tmp_path)
+    key = await keep(a, claims, sha, sha)
+    with pool.connection() as conn:
+        conn.execute("UPDATE store_blobs SET backend = 'elsewhere' WHERE key = %s", (key,))
+    b = replica(tmp_path / "b", content)
+    assert not await b.claim(key)
+    with pytest.raises(StaleBlobError):
+        await keep(b, claims, sha, sha)
 
 
 async def test_a_local_blob_left_half_written_is_written_again(tmp_path: Path) -> None:

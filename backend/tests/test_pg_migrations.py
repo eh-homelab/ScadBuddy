@@ -4,6 +4,7 @@ positional ledger from before #491."""
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 
@@ -41,12 +42,15 @@ def test_no_column_is_added_to_order_attachments_while_its_old_name_is_a_view() 
     dropped = next(
         (i for i, m in enumerate(later) if "DROP VIEW IF EXISTS attachments" in m.sql), len(later)
     )
+    # `ALTER TABLE [IF EXISTS] [ONLY] order_attachments` and, in the same statement, a
+    # column added (with or without `COLUMN`), dropped, altered or renamed.
+    changes_a_column = re.compile(
+        r"alter table (if exists )?(only )?order_attachments\b[^;]*?"
+        r"\b(add (?!constraint\b)|drop column\b|alter column\b|rename column\b)"
+    )
     for migration in later[:dropped]:
         sql = " ".join(migration.sql.lower().split())
-        # Any spelling (`ALTER TABLE ONLY`, `IF EXISTS`): a migration that names the
-        # table and changes a column.
-        changes = ("add column", "drop column", "rename column", "alter column")
-        assert not ("order_attachments" in sql and any(c in sql for c in changes)), migration.id
+        assert not changes_a_column.search(sql), migration.id
 
 
 def test_load_refuses_a_misnamed_file(tmp_path: Path) -> None:

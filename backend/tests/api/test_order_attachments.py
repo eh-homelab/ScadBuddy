@@ -361,4 +361,4 @@ def test_an_upload_while_the_store_moves_is_told_to_wait(
     monkeypatch.setattr(attachments_module, "keep", moving)
     answer = attach(client, order["id"], PDF, "brief.pdf")
     assert answer.status_code == 503, answer.text
-    assert "store is moving" in answer.json()["detail"]
+    assert "not on this store's backend" in answer.json()["detail"]

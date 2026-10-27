@@ -305,8 +305,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             # (`CachedBlobStore.claim`): the upload works once the store has moved.
             raise ApiError(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
-                "the store is moving to another backend; send the file again once"
-                " `/store/migrate` has flipped `store_backend` and the API has restarted",
+                "the stored copy of these bytes is not on this store's backend (a"
+                " `/store/migrate` in progress?); send the file again once it has flipped"
+                " `store_backend` and the API has restarted",
             ) from None
         try:
             attachment = await to_thread_to_end(
