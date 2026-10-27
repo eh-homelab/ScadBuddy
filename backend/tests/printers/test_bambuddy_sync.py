@@ -19,6 +19,7 @@ from scadbuddy.printers.bambuddy_sync import (
     PrinterSyncResult,
     may_adopt,
     plan_printer,
+    printer_view,
     sync_printers,
 )
 from scadbuddy.printers.component import Printers
@@ -232,6 +233,41 @@ async def test_a_rename_landing_before_the_view_is_recorded_is_not_the_syncs_cha
     again = await run(printers, client)
     assert store.require(row.id).name == "Mine"
     assert again.entries[0].changed is False
+
+
+async def test_an_adoption_the_strip_made_meanwhile_is_not_the_syncs_change(
+    printers: FakePrinters, store: PrinterStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4861 review: the pass read the row with its synthetic serial, then the strip's own
+    `ensure_bambuddy` adopted the real one before the sync's. The sync wrote nothing, so
+    its entry is not `changed`, though the serial it read did change."""
+    synthetic = store.ensure_bambuddy(1, serial=None, name="P1", model="H2C")
+    printer = Printer.model_validate(bambuddy(1, SERIAL, ip=None))
+    store.record_bambuddy_view(synthetic.id, printer_view(printer, datetime.now(UTC)))
+    real_list = store.list
+
+    def listed_then_adopted() -> list[PrinterRow]:
+        rows = real_list()
+        monkeypatch.setattr(store, "list", real_list)
+        store.ensure_bambuddy(1, serial=SERIAL, name="P1", model="H2C")  # the strip
+        return rows
+
+    monkeypatch.setattr(store, "list", listed_then_adopted)
+    result = await run(printers, FakeClient([bambuddy(1, SERIAL, ip=None)]))
+    (entry,) = result.entries
+    assert entry.action == "already_linked" and store.require(synthetic.id).serial == SERIAL
+    assert entry.changed is False
+
+
+async def test_the_syncs_own_adoption_is_its_change(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    synthetic = store.ensure_bambuddy(1, serial=None, name="P1", model="H2C")
+    printer = Printer.model_validate(bambuddy(1, SERIAL, ip=None))
+    store.record_bambuddy_view(synthetic.id, printer_view(printer, datetime.now(UTC)))
+    result = await run(printers, FakeClient([bambuddy(1, SERIAL, ip=None)]))
+    (entry,) = result.entries
+    assert store.require(synthetic.id).serial == SERIAL and entry.changed is True
 
 
 async def test_a_write_by_something_else_during_a_sync_is_not_its_change(
@@ -709,28 +745,27 @@ async def test_the_access_code_reaches_no_log_and_no_result(
     assert CODE not in result.model_dump_json() and CODE not in result2.model_dump_json()
 
 
-async def test_the_housekeeping_sweep_logs_a_vp_whose_target_is_missing(
+async def test_the_housekeeping_sweep_logs_a_missing_target_quietly_unless_there_is_news(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """#4858 review: a sync whose only news is a VP with a missing target still logs it."""
+    """#4858 review: a sync whose only news is a VP with a missing target still logs it.
+    #4861 review: at DEBUG, as that VP repeats it on every sweep until its target has a
+    row; at INFO beside real news (a printer created)."""
     from types import SimpleNamespace
 
     from scadbuddy import main
     from scadbuddy.printers.bambuddy_sync import SyncEntry
 
-    result = PrinterSyncResult(
-        dry_run=False,
-        entries=[
-            SyncEntry(
-                kind="bambuddy_virtual",
-                name="VP5",
-                bambuddy_vp_id=5,
-                action="already_linked",
-                reason=VP_TARGET_MISSING.format(target=1),
-                target_missing=True,
-            )
-        ],
+    missing = SyncEntry(
+        kind="bambuddy_virtual",
+        name="VP5",
+        bambuddy_vp_id=5,
+        action="already_linked",
+        reason=VP_TARGET_MISSING.format(target=1),
+        target_missing=True,
     )
+    created = SyncEntry(kind="physical", name="P1", bambuddy_printer_id=1, action="created")
+    result = PrinterSyncResult(dry_run=False, entries=[missing])
 
     async def synced(*_: object) -> PrinterSyncResult:
         return result
@@ -740,8 +775,19 @@ async def test_the_housekeeping_sweep_logs_a_vp_whose_target_is_missing(
 
     monkeypatch.setattr(main, "sync_printers", synced)
     monkeypatch.setattr(main, "_with_bambuddy", with_bambuddy)
-    caplog.set_level(logging.INFO, logger=main.logger.name)
+    caplog.set_level(logging.DEBUG, logger=main.logger.name)
     state = SimpleNamespace(components=SimpleNamespace(get=lambda _key: None))
+
+    def logged() -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.getMessage() == "synced the printers from Bambuddy"]
+
     await main._sync_bambuddy_printers_logged(cast(Any, state))
-    (record,) = [r for r in caplog.records if r.getMessage() == "synced the printers from Bambuddy"]
+    (record,) = logged()
     assert getattr(record, "target_missing", None) == 1
+    assert record.levelno == logging.DEBUG
+
+    caplog.clear()
+    result = PrinterSyncResult(dry_run=False, entries=[created, missing])
+    await main._sync_bambuddy_printers_logged(cast(Any, state))
+    (record,) = logged()
+    assert record.levelno == logging.INFO and getattr(record, "target_missing", None) == 1

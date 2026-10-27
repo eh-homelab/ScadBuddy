@@ -738,14 +738,12 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
         except Exception:
             logger.exception("could not sync the printers from Bambuddy")
             raise
-        if (
-            result.created
-            or result.linked
-            or result.lan_linked
-            or result.conflicts
-            or result.target_missing
-        ):
-            logger.info(
+        news = result.created or result.linked or result.lan_linked or result.conflicts
+        if news or result.target_missing:
+            # A VP whose target never gets a row repeats on every sweep: alone, it is
+            # DEBUG, not an INFO line per sweep (#4861).
+            logger.log(
+                logging.INFO if news else logging.DEBUG,
                 "synced the printers from Bambuddy",
                 extra={
                     # Not "created": a LogRecord attribute, which `extra` may not
