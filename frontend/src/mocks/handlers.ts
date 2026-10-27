@@ -3205,7 +3205,8 @@ export const handlers = [
     const form = await request.formData()
     if (!form.get('file')) return problem(422, 'Missing file')
     state.outputs = state.outputs.map((o) =>
-      o.id === params['id'] ? { ...o, has_thumbnail: true } : o,
+      // A new file each upload, as the server's `thumbnail_version` (#4841).
+      o.id === params['id'] ? { ...o, has_thumbnail: true, thumbnail_version: crypto.randomUUID() } : o,
     )
     return new HttpResponse(null, { status: 204 })
   }),

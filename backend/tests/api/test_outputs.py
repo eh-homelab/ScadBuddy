@@ -14,7 +14,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import trimesh
@@ -292,6 +292,40 @@ def test_an_uploaded_thumbnail_is_announced(
     assert put.status_code == 204
     updated = _output_updates(published)
     assert [(e.output_id, e.slug) for e in updated] == [(created["id"], model)]
+
+
+def test_a_replaced_thumbnail_has_a_new_version(client: TestClient, model: str) -> None:
+    # #4841: an open History page reads the list again, but an unchanged image URL is
+    # never fetched again, so the record says which image the thumbnail is.
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    assert created["thumbnail_version"] is None
+    store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+
+    def version() -> str | None:
+        detail = client.get(f"/api/v1/outputs/{created['id']}").json()
+        listed = client.get(f"/api/v1/models/{model}/outputs").json()
+        assert [o["thumbnail_version"] for o in listed if o["id"] == created["id"]] == [
+            detail["thumbnail_version"]
+        ]
+        return cast("str | None", detail["thumbnail_version"])
+
+    assert store.write_drawn_thumbnail(created["id"], b"\x89PNG\r\n\x1a\ndrawn") is True
+    drawn = version()
+    assert drawn is not None
+    put = client.put(
+        f"/api/v1/outputs/{created['id']}/thumbnail",
+        files={"file": ("capture.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert put.status_code == 204
+    uploaded = version()
+    assert uploaded is not None
+    assert uploaded != drawn
+    assert version() == uploaded
 
 
 def test_a_refused_thumbnail_upload_is_not_announced(

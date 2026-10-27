@@ -132,6 +132,8 @@ export function HistoryPage() {
   const schema = schemaState.data
   /** #2287 — the arranged result's row as the list has it now: gone once deleted. */
   const arrangedRow = arrangedOutput ? outputsState.data?.find((o) => o.id === arrangedOutput.id) : undefined
+  /** #4841 — the open preview's record as the list has it now, so a replaced image shows. */
+  const previewShown = previewFor && (outputsState.data?.find((o) => o.id === previewFor.id) ?? previewFor)
 
   return (
     <div className="h-full overflow-y-auto">
@@ -275,12 +277,14 @@ export function HistoryPage() {
           printsState.refresh()
         }}
       />
-      <Dialog open={previewFor !== undefined} onOpenChange={(open) => !open && setPreviewFor(undefined)}>
+      <Dialog open={previewShown !== undefined} onOpenChange={(open) => !open && setPreviewFor(undefined)}>
         <DialogContent className="sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{previewFor ? (previewFor.name ?? shortId(previewFor.id)) : ''}</DialogTitle>
+            <DialogTitle>{previewShown ? (previewShown.name ?? shortId(previewShown.id)) : ''}</DialogTitle>
           </DialogHeader>
-          {previewFor && <LargePreview key={previewFor.id} output={previewFor} />}
+          {previewShown && (
+            <LargePreview key={`${previewShown.id}.${previewShown.thumbnail_version ?? ''}`} output={previewShown} />
+          )}
         </DialogContent>
       </Dialog>
       <SendDialog
@@ -501,7 +505,7 @@ function LargePreview({ output }: { output: Output }) {
   if (broken) return <p className="py-8 text-center text-sm text-muted-foreground">No preview</p>
   return (
     <img
-      src={api.outputThumbnailUrl(output.id)}
+      src={api.outputThumbnailUrl(output.id, output.thumbnail_version)}
       alt={`Preview of ${output.name ?? shortId(output.id)}`}
       className="mx-auto max-h-[70vh] w-auto rounded-lg bg-muted"
       onError={() => setBroken(true)}
@@ -613,7 +617,7 @@ function OutputRow({
             className="shrink-0 rounded-lg border bg-muted outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
           >
             <img
-              src={api.outputThumbnailUrl(output.id)}
+              src={api.outputThumbnailUrl(output.id, output.thumbnail_version)}
               alt=""
               className="h-16 w-16 rounded-lg object-contain"
               onError={() => setThumbnailBroken(true)}
