@@ -289,6 +289,17 @@ def test_an_unknown_record_or_spool_is_404(client: TestClient, lan_printer: str)
     assert spool.status_code == 404
 
 
+def test_a_virtual_printer_has_no_trays(client: TestClient, lan_printer: str) -> None:
+    """#4747: a Bambuddy virtual printer is not hardware, so no spool goes in its trays."""
+    with _printers(client).store.pool.connection() as conn:
+        conn.execute(
+            "UPDATE printers SET kind = 'bambuddy_virtual', bambuddy_vp_id = 1 WHERE id = %s",
+            (lan_printer,),
+        )
+    response = client.put(_path(lan_printer), json={"provider": "bambuddy", "record_id": "1"})
+    assert response.status_code == 409 and "virtual" in response.json()["detail"]
+
+
 def test_an_unknown_printer_is_404(client: TestClient) -> None:
     for printer_id in ("8d6f3c1e-0000-4000-8000-000000000001", "not-a-uuid"):
         assert (

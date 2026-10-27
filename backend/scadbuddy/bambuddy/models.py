@@ -170,6 +170,54 @@ class Printer(BambuddyModel):
         return upper if _SERIAL.fullmatch(upper) else None
 
 
+class VirtualPrinterStatus(BambuddyModel):
+    running: bool = False
+    pending_files: int = 0
+
+
+class VirtualPrinter(BambuddyModel):
+    """One entry of ``GET /api/v1/virtual-printers`` (#4747): ``_vp_to_dict`` in
+    ``backend/app/api/routes/virtual_printers.py`` (maziggy/bambuddy
+    v1.3.0b1-daily.20261025, lines 94-135). It never carries the access code, only
+    ``access_code_set``. In ``proxy`` mode ``serial`` is the target printer's own; in
+    the other modes a serial Bambuddy made for the VP. ``model`` is an SSDP model code
+    (``O1C``), ``model_name`` its display name (``H2C``)."""
+
+    id: int
+    name: str
+    enabled: bool = False
+    mode: str
+    model: str | None = None
+    model_name: str | None = None
+    serial: str | None = None
+    target_printer_id: int | None = None
+    auto_dispatch: bool = True
+    queue_force_color_match: bool = False
+    save_ams_mapping: bool = False
+    gcode_injection: bool = False
+    bind_ip: str | None = None
+    remote_interface_ip: str | None = None
+    tailscale_disabled: bool = False
+    access_code_set: bool = False
+    position: int | None = None
+    status: VirtualPrinterStatus = Field(default_factory=VirtualPrinterStatus)
+
+    @field_validator("serial", mode="before")
+    @classmethod
+    def _serial(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        upper = str(value).strip().upper()
+        return upper if _SERIAL.fullmatch(upper) else None
+
+
+class VirtualPrinterList(BambuddyModel):
+    """``GET /api/v1/virtual-printers``: the VPs, and every model code with its name."""
+
+    printers: list[VirtualPrinter] = Field(default_factory=list)
+    models: dict[str, str] = Field(default_factory=dict)
+
+
 class Archive(BambuddyModel):
     """A row of ``GET /api/v1/archives/`` — one past print (or upload).
 

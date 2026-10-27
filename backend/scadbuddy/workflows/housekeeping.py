@@ -147,6 +147,14 @@ PRINTER_WATCHES_PATCH = "housekeeping-printer-watches"
 #: prune Schedule too, so a lost drop leaks a blob for at most `PRUNE_INTERVAL`.
 QUOTE_HOLDS_SWEEP = "housekeeping_reap_quote_holds"
 QUOTE_HOLDS_PATCH = "housekeeping-reap-quote-holds"
+#: #4439, #4747: the Bambuddy printer sync (`printers/bambuddy_sync.py`): import and link
+#: Bambuddy's printers and virtual printers, and fill an empty LAN link (a failed probe is
+#: tried again on the next pass). Last, behind its own patch; on the sweeps' Schedule
+#: only, since it calls Bambuddy (not in `PRUNE_SWEEPS`). Runs in the API's process (the
+#: ``library`` worker), so the access code it reads from Bambuddy never crosses a process
+#: or a payload.
+PRINTER_SYNC_SWEEP = "housekeeping_sync_bambuddy_printers"
+PRINTER_SYNC_PATCH = "housekeeping-sync-bambuddy-printers"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -168,6 +176,7 @@ SWEEPS = (
     LOST_NATIVE_SLICES_SWEEP,
     PRINTER_WATCHES_SWEEP,
     QUOTE_HOLDS_SWEEP,
+    PRINTER_SYNC_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -185,7 +194,10 @@ SWEEPS = (
 #: records (`TRANSFER_PUTS_SWEEP`) are pruned here too, behind their patch. And the
 #: printer watches (#3823), behind `PRINTER_WATCHES_PATCH`: a lost one is started again
 #: within the interval, not the sweeps' day. And the quote holds' reaper (#4250), behind
-#: `QUOTE_HOLDS_PATCH`, so a release lost after its commit leaks for one interval.
+#: `QUOTE_HOLDS_PATCH`, so a release lost after its commit leaks for one interval. Not the
+#: Bambuddy printer sync (#4439, #4747): it calls Bambuddy, so it obeys the sweeps'
+#: switch, and the import button, a passing connection test and each virtual printer's
+#: write run it besides.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
@@ -234,6 +246,9 @@ TRANSFER_PUTS_TIMEOUT = timedelta(minutes=2)
 PRINTER_WATCHES_TIMEOUT = timedelta(minutes=2)
 #: One read of the quotes that stand and one delete.
 QUOTE_HOLDS_TIMEOUT = timedelta(minutes=2)
+#: Two Bambuddy lists, then per printer with an empty LAN link a read and one probe
+#: (`printers.component.PROBE_TIMEOUT`, 10 s), each in turn.
+PRINTER_SYNC_TIMEOUT = timedelta(minutes=5)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -264,6 +279,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return PRINTER_WATCHES_TIMEOUT
     if sweep == QUOTE_HOLDS_SWEEP:
         return QUOTE_HOLDS_TIMEOUT
+    if sweep == PRINTER_SYNC_SWEEP:
+        return PRINTER_SYNC_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -306,6 +323,8 @@ class Housekeeping:
             if sweep == PRINTER_WATCHES_SWEEP and not workflow.patched(PRINTER_WATCHES_PATCH):
                 continue
             if sweep == QUOTE_HOLDS_SWEEP and not workflow.patched(QUOTE_HOLDS_PATCH):
+                continue
+            if sweep == PRINTER_SYNC_SWEEP and not workflow.patched(PRINTER_SYNC_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

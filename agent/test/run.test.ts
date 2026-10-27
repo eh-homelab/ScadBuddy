@@ -346,12 +346,15 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
       const sent = JSON.stringify(fake.messageCalls().at(-1)?.body?.messages)
       expect(sent).toContain('The user prints boxes in PETG.')
       expect(sent).toContain(UNTRUSTED_KEY)
-      // Retain upserted the conversation, without the injected memories.
+      // Retain upserted the conversation, without the injected memories. The reply's line
+      // has a timestamp when the transcript already held it at Stop, none when it came from
+      // `last_assistant_message`; Claude Code 2.1.309 does either.
       const [retain] = hindsight.retains()
       const item = (retain!.body as { items: { document_id: string; content: string }[] }).items[0]!
       expect(item.document_id).toBe(`conversation:${sessionId}`)
       expect(item.content).toContain('{"role":"user","content":"Say hello"')
-      expect(item.content).toContain('{"role":"assistant","content":"Hello from the fake."}')
+      expect(item.content).toContain('{"role":"assistant","content":"Hello from the fake."')
+      expect(item.content.split('"content":"Hello from the fake."')).toHaveLength(2)
       expect(item.content).not.toContain('PETG')
       expect(item.content).not.toContain(GATEWAY_TOKEN)
     } finally {
