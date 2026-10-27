@@ -300,6 +300,47 @@ describe('settings cache', () => {
     expect(b.confirm).toHaveBeenCalled()
   })
 
+  it('seeds every seeder all when a newer write of this tab refuses Load the latest (#4847 review)', async () => {
+    const order: string[] = []
+    const a = fakeSeeder('a', order)
+    renderPage(
+      <Providers>
+        <Probe />
+        <Loaded />
+        <Section id="a" dirty seeder={a.seeder} />
+      </Providers>,
+    )
+    await screen.findByTestId('loaded')
+    await emitUntil(() => expect(cache.changedElsewhere).toBe(true))
+
+    // Load the latest's read is held; a write sent after it lands first and refuses it.
+    const read = api.getSettings.bind(api)
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const get = vi.spyOn(api, 'getSettings').mockImplementationOnce(async () => {
+      await held
+      return read()
+    })
+    act(() => cache.loadLatest())
+    await waitFor(() => expect(get).toHaveBeenCalled())
+    let next: Awaited<ReturnType<typeof api.putSettings>> | undefined
+    await act(async () => {
+      next = await cache.write(['store_backend'], () => api.putSettings({ store_backend: 'local' }), {
+        written: ['store_backend'],
+        unconfirmed: () => {},
+      })
+    })
+    expect(a.seed).not.toHaveBeenCalledWith('all', expect.anything())
+
+    await act(async () => release())
+    // The drafts Load the latest drops are seeded from the newer write's answer.
+    await waitFor(() => expect(a.seed).toHaveBeenCalledWith('all', a.since))
+    expect(cache.settings).toEqual(next)
+    expect(cache.settings).not.toBe(next)
+    expect(cache.changedElsewhere).toBe(false)
+    get.mockRestore()
+  })
+
   it('Keep mine clears the notice and seeds nothing', async () => {
     const order: string[] = []
     const a = fakeSeeder('a', order)

@@ -549,14 +549,16 @@ describe('Settings saves, resets and reads in order (#4776)', () => {
     const get = vi.spyOn(api, 'getSettings').mockRejectedValue(new TypeError('Failed to fetch'))
     const note = /Could not confirm what the server stored\./
 
-    // A lost reset puts the note on the page error, where the reset reports.
+    // A lost reset puts the note on Connection's reset error, where the reset reports.
     await user.click(
       within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }),
     )
-    expect(await screen.findByText(/^Bad gateway\. Could not confirm what the server stored\./)).toBeInTheDocument()
+    expect(
+      await within(region('Connection')).findByText(/^Bad gateway\. Could not confirm what the server stored\./),
+    ).toBeInTheDocument()
     const calls = get.mock.calls.length
 
-    // A lost Rendering save puts it on Rendering, and adds no second one to the page error.
+    // A lost Rendering save puts it on Rendering, and adds no second one to Connection's reset error.
     await user.clear(timeout)
     await user.type(timeout, '45')
     await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))

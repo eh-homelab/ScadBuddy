@@ -212,6 +212,53 @@ describe('useBackendSettings', () => {
     put.mockRestore()
   })
 
+  it('stays saving until the last of two saves in flight settles (#4847 review)', async () => {
+    const save = api.putSettings.bind(api)
+    const holds: (() => void)[] = []
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      await new Promise<void>((resolve) => holds.push(resolve))
+      return save(body)
+    })
+    let form: ReturnType<typeof useBackendSettings> | undefined
+    function Probe() {
+      const seen = useBackendSettings('diagnostics', ['job_ttl'])
+      useEffect(() => {
+        form = seen
+      })
+      return null
+    }
+    renderPage(
+      <Harness>
+        <Probe />
+      </Harness>,
+    )
+    await waitFor(() => expect(form).toBeDefined())
+    act(() => form?.setField('job_ttl', '45'))
+    let first: Promise<boolean> | undefined
+    let second: Promise<boolean> | undefined
+    act(() => {
+      first = form?.save()
+    })
+    act(() => form?.setField('job_ttl', '46'))
+    act(() => {
+      second = form?.save()
+    })
+    await waitFor(() => expect(holds).toHaveLength(2))
+    expect(form?.saving).toBe(true)
+
+    await act(async () => {
+      holds[0]?.()
+      await first
+    })
+    expect(form?.saving).toBe(true)
+    await act(async () => {
+      holds[1]?.()
+      await second
+    })
+    expect(form?.saving).toBe(false)
+    put.mockRestore()
+  })
+
   it('refuses a negative number before sending, tied to the field', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = await renderHarness()

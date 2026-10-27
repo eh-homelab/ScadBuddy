@@ -66,6 +66,8 @@ export function useBackendSettings(id: SectionId, fields: FieldsOf, options: Bac
   const [draft, setDraft] = useState<Draft>({})
   const [clearing, setClearing] = useState<Secret[]>([])
   const [saving, setSaving] = useState(false)
+  /** Saves in flight: Test connection can send one beside another (#4847 review). */
+  const inFlight = useRef(0)
   const [savedAt, setSavedAt] = useState<string | undefined>(undefined)
   const [errors, setErrors] = useState<Partial<Record<FieldName, string>>>({})
   const [sectionError, setSectionError] = useState<string | undefined>(undefined)
@@ -160,6 +162,7 @@ export function useBackendSettings(id: SectionId, fields: FieldsOf, options: Bac
     if (patch === null) return false
     const { body, also } = patch
     if (Object.keys(body).length === 0) return true
+    inFlight.current++
     setSaving(true)
     setSectionError(undefined)
     setSaveUnconfirmed(false)
@@ -185,7 +188,8 @@ export function useBackendSettings(id: SectionId, fields: FieldsOf, options: Bac
       }
       return false
     } finally {
-      setSaving(false)
+      inFlight.current--
+      setSaving(inFlight.current > 0)
     }
   }
 

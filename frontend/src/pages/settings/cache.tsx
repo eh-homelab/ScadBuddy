@@ -196,14 +196,17 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
    * from the same event as another must not rely on its own `seed` (or `onAccept`) being used.
    */
   const numberedRead = useCallback(
-    (onAccept: () => Begun | undefined, seed: 'all' | readonly FieldName[] = 'all') => {
+    (onAccept: () => Begun | undefined, seed: 'all' | readonly FieldName[] = 'all', onNewer?: () => void) => {
       const sent = ++writeSent.current
       refresh(
         (next) => {
           // It landed, so what is stored is known, whether or not it is taken (#4837 review).
           unconfirmedWrites.current = []
           // #4803: a save or reset sent after this read has landed already, and is newer.
-          if (sent <= writeLanded.current) return false
+          if (sent <= writeLanded.current) {
+            onNewer?.()
+            return false
+          }
           // `onAccept` must not land a write between the check above and `landed(sent)`.
           const begun = onAccept()
           if (begun === undefined) return false
@@ -295,8 +298,18 @@ export function SettingsCacheProvider({ children }: { children: ReactNode }) {
   const loadLatest = useCallback(() => {
     setChangedElsewhere(false)
     const begun = begin()
-    numberedRead(() => begun)
-  }, [begin, numberedRead])
+    // A write of this tab's that landed first refuses the read, yet the drafts were asked to
+    // go, and the banner has: they are seeded from that newer answer instead (#4847 review).
+    // A new object, so each section's seed effect runs.
+    const reseed = () => {
+      const current = cached.current
+      if (!current) return
+      for (const [seeder, since] of begun) if (seeders.current.has(seeder)) seeder.seed('all', since)
+      cached.current = { ...current }
+      setData(cached.current)
+    }
+    numberedRead(() => begun, 'all', reseed)
+  }, [begin, numberedRead, setData])
   const keepMine = useCallback(() => setChangedElsewhere(false), [])
 
   const value = useMemo<SettingsCache>(
