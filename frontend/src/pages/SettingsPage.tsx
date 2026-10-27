@@ -312,14 +312,14 @@ const groupTitle = (id: (typeof ASSISTANT_GROUPS)[number]['id']): string =>
 /** #4818 review — a write whose answer was lost, and the settings could not be read again. */
 const UNCONFIRMED = 'Could not confirm what the server stored. Reload the page to see the saved settings.'
 /** Whether `message` carries the note, in either form `withUnconfirmed` builds (#4831 review). */
-const hasUnconfirmed = (message: string | null | undefined): message is string =>
-  message === UNCONFIRMED || !!message?.endsWith(` ${UNCONFIRMED}`)
+const hasUnconfirmed = (message: string): boolean =>
+  message === UNCONFIRMED || message.endsWith(` ${UNCONFIRMED}`)
 /** `message` with the note added once: merged rereads call every caller's `failed`. */
 const withUnconfirmed = (message: string | null | undefined): string =>
   !message ? UNCONFIRMED : hasUnconfirmed(message) ? message : `${message} ${UNCONFIRMED}`
 /** `message` without the note, once a read has confirmed what is stored. */
 const confirmed = (message: string | null | undefined): string | undefined =>
-  hasUnconfirmed(message)
+  message != null && hasUnconfirmed(message)
     ? message === UNCONFIRMED
       ? undefined
       : message.slice(0, -(UNCONFIRMED.length + 1))
@@ -453,9 +453,12 @@ function SettingsSections() {
   const writeSent = useRef(0)
   const writeLanded = useRef(0)
   /**
-   * #4837 — the notes of lost writes whose reread has not confirmed what is stored yet. A
-   * newer read supersedes that reread, and `useAsync` then drops its `failed`; so every read
-   * says them when it fails, and a taken read lets them go.
+   * #4837 — the notes of lost writes that nothing has confirmed what is stored for yet. A
+   * newer read supersedes a lost write's reread, and `useAsync` then drops its `failed`; so
+   * every read says them when it fails. Whatever learns what is stored lets them go: a
+   * write's answer cached whole (`cacheWrite`), and any read that lands, taken or refused.
+   * A refused read still returned what is stored, whether a newer write landed first (whose
+   * cached answer let them go already) or the form is edited.
    */
   const unconfirmedWrites = useRef<(() => void)[]>([])
   /** Whether the answer to `sent` is the newest yet; it is then the newest landed. */
@@ -491,6 +494,8 @@ function SettingsSections() {
     requestSeed(seed, since)
     priorWriter.current.delete(sent)
     if (landed(sent) || !cached.current) {
+      // The whole of what is stored, newer than any lost write's (#4837 review).
+      unconfirmedWrites.current = []
       cached.current = next
       settingsState.setData(next)
       return next
@@ -554,17 +559,16 @@ function SettingsSections() {
    * it confirms what is stored, so a note that it could not be goes, and so do the lost
    * writes still waiting for one (`unconfirmedWrites`). A read that fails says those.
    *
-   * `seed` does not survive a merge: `useAsync.refresh` reads calls made in the same
-   * microtask once, deciding by the last caller's accept, so the other callers' `onAccept`
-   * and `seed` are dropped. Left so on purpose: the three
-   * callers are each started by a different event (a write's failure, a click, a realtime
-   * signal), and two events never share a microtask, so only `writeThrew`'s own reads can
-   * merge, and they all seed `[]`. A new caller started from the same event as another
-   * must not rely on its own `seed` (or `onAccept`) being used.
+   * `useAsync.refresh` reads calls made in the same microtask once, deciding by the last
+   * caller's accept, so the other callers' `onAccept` and `seed` are dropped. The notes
+   * survive a merge: they are kept in `unconfirmedWrites`, not in a caller. A caller started
+   * from the same event as another must not rely on its own `seed` (or `onAccept`) being used.
    */
   const numberedRead = (onAccept: () => Edits | undefined, seed: 'all' | FieldName[] = 'all') => {
     const sent = ++writeSent.current
     settingsState.refresh((next) => {
+      // It landed, so what is stored is known, whether or not it is taken (#4837 review).
+      unconfirmedWrites.current = []
       // #4803: a save or reset sent after this read has landed already, and is newer.
       if (sent <= writeLanded.current) return false
       // `onAccept` must not land a write between the check above and `landed(sent)`.
@@ -573,11 +577,10 @@ function SettingsSections() {
       landed(sent)
       requestSeed(seed, since)
       cached.current = next
-      unconfirmedWrites.current = []
       setError((current) => confirmed(current) ?? null)
       // Keep `current` when no section carries the note: nothing changed, so React bails out.
       setSectionError((current) =>
-        Object.values(current).some(hasUnconfirmed)
+        Object.values(current).some((m) => m != null && hasUnconfirmed(m))
           ? Object.fromEntries(Object.entries(current).map(([id, message]) => [id, confirmed(message)]))
           : current,
       )

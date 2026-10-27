@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import type { UserEvent } from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { BrowserRouter, MemoryRouter, Link, Route, Routes, useLocation, useNavigate } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, type MockInstance } from 'vitest'
 import { ApiError, api } from '../api/client'
 import type { Settings } from '../api/types'
 import { restartMockBackend } from '../mocks/features/settings'
@@ -888,6 +888,148 @@ describe('SettingsPage sections (#322)', () => {
     const shown = await within(region('Rendering')).findByText(/^Bad gateway\. Could not confirm what the server stored\./)
     expect(shown.textContent?.match(new RegExp(note, 'g'))).toHaveLength(1)
     expect(screen.getAllByText(note)).toHaveLength(1)
+    get.mockRestore()
+    put.mockRestore()
+  })
+
+  /** A `getSettings` answer that waits for `release`, then reads (or fails, with `fail`). */
+  function heldRead() {
+    const read = api.getSettings.bind(api)
+    let release: () => void = () => undefined
+    let fail: () => void = () => undefined
+    const answer = new Promise<Settings>((resolve, reject) => {
+      release = () => resolve(read())
+      fail = () => reject(new TypeError('Failed to fetch'))
+    })
+    return { answer, release, fail }
+  }
+
+  /** Every read from here on fails; reads one, through "Load the latest" when it is offered. */
+  async function failNextRead(user: UserEvent, get: MockInstance<typeof api.getSettings>) {
+    get.mockRejectedValue(new TypeError('Failed to fetch'))
+    const calls = get.mock.calls.length
+    emitRealtime('settings.changed', ['settings'], { section: 'rendering' })
+    await act(flushMicrotasks)
+    const latest = screen.queryByRole('button', { name: 'Load the latest' })
+    if (latest) await user.click(latest)
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(calls + 1))
+    await act(flushMicrotasks)
+  }
+
+  it.each([
+    ['', false],
+    [', and Rendering saved again', true],
+  ])(
+    'forgets a lost save\u2019s note once its reread is refused for a newer write%s (#4837 review)',
+    async (_, saveAgain) => {
+      const { user } = renderPage(<SettingsPage />)
+      await seeded()
+      const timeout = screen.getByLabelText('Render timeout')
+      const save = api.putSettings.bind(api)
+      let lost = true
+      const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+        const saved = await save(body)
+        if ('render_timeout' in body && lost) {
+          lost = false
+          throw new ApiError(502, 'Bad gateway.')
+        }
+        return saved
+      })
+      const reread = heldRead()
+      const get = vi.spyOn(api, 'getSettings').mockImplementationOnce(() => reread.answer)
+
+      // 1. Rendering's answer is lost: its reread is held.
+      await user.clear(timeout)
+      await user.type(timeout, '45')
+      await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+      expect(await within(region('Rendering')).findByText('Bad gateway.')).toBeInTheDocument()
+      // 2. Connection's save lands first, a newer write.
+      const url = screen.getByLabelText('Bambuddy URL')
+      await user.clear(url)
+      await enter(user, url, 'https://later.test')
+      await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+      await waitFor(() => expect(within(region('Connection')).queryByText('Unsaved')).toBeNull())
+      // 3. The reread lands, and is refused: Connection's answer is newer.
+      await act(async () => reread.release())
+      await act(flushMicrotasks)
+      // 4. Rendering saves, and its answer is cached whole.
+      if (saveAgain) {
+        await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+        await waitFor(() => expect(within(region('Rendering')).queryByText('Unsaved')).toBeNull())
+      }
+      // 5. A later read fails: nothing is left unconfirmed.
+      await failNextRead(user, get)
+      expect(screen.queryByText(/Could not confirm what the server stored\./)).toBeNull()
+      get.mockRestore()
+      put.mockRestore()
+    },
+  )
+
+  it('forgets a lost save\u2019s note once a newer save\u2019s answer is cached whole (#4837 review)', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const timeout = screen.getByLabelText('Render timeout')
+    const save = api.putSettings.bind(api)
+    let lost = true
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      const saved = await save(body)
+      if (lost) {
+        lost = false
+        throw new ApiError(502, 'Bad gateway.')
+      }
+      return saved
+    })
+    const reread = heldRead()
+    const get = vi.spyOn(api, 'getSettings').mockImplementationOnce(() => reread.answer)
+
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+    expect(await within(region('Rendering')).findByText('Bad gateway.')).toBeInTheDocument()
+    // Saved again before the reread answers: that answer is the whole of what is stored.
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+    await waitFor(() => expect(within(region('Rendering')).queryByText('Unsaved')).toBeNull())
+    // The reread, still the newest read, fails.
+    await act(async () => reread.fail())
+    await act(flushMicrotasks)
+    expect(screen.queryByText(/Could not confirm what the server stored\./)).toBeNull()
+    get.mockRestore()
+    put.mockRestore()
+  })
+
+  it('forgets a lost reset\u2019s note once a read lands while the form is edited (#4837 review)', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const save = api.putSettings.bind(api)
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      await save(body)
+      throw new ApiError(502, 'Bad gateway.')
+    })
+    const reread = heldRead()
+    const signalRead = heldRead()
+    const get = vi
+      .spyOn(api, 'getSettings')
+      .mockImplementationOnce(() => reread.answer)
+      .mockImplementationOnce(() => signalRead.answer)
+
+    await user.click(
+      within(screen.getByTestId('source-bambuddy_url')).getByRole('button', { name: 'Reset to deployment value: Bambuddy URL' }),
+    )
+    expect(await screen.findByText('Bad gateway.')).toBeInTheDocument()
+    // A realtime signal on a clean form reads; the form is edited before it lands, so the
+    // read is refused, yet it returned what is stored.
+    emitRealtime('settings.changed', ['settings'], { section: 'rendering' })
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await act(async () => signalRead.release())
+    await act(flushMicrotasks)
+    // The superseded reread fails, dropped, and a later read fails.
+    await act(async () => reread.fail())
+    await failNextRead(user, get)
+    expect(screen.queryByText(/Could not confirm what the server stored\./)).toBeNull()
+    expect(screen.getByText('Bad gateway.')).toBeInTheDocument()
     get.mockRestore()
     put.mockRestore()
   })
