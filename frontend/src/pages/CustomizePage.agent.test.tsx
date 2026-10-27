@@ -424,12 +424,11 @@ describe('customizer tools', () => {
     } finally {
       release()
     }
-    // One preview render of name-keychain, and no second one hiding behind the first: once
-    // every held request has gone through and gridfinity-bin has rendered, the page is
-    // settled, so a render the release set off has had its chance to start.
+    // One preview render of name-keychain, and no second one hiding behind the first.
+    // `passed === held` orders this check after the release: once every held request has
+    // gone through and gridfinity-bin has rendered, the page is settled, so a render the
+    // release set off has had its chance to start.
     await waitFor(() => {
-      // `passed === held` is what orders this check after the release: until the held
-      // request has gone through, the render it unblocks has not had its chance.
       expect(passed).toBe(held)
       expect(bridge.snapshot().page.customize).toMatchObject({ slug: 'gridfinity-bin', render: 'done' })
     })
