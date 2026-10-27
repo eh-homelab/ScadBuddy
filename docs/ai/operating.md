@@ -1011,13 +1011,17 @@ and "Plugins", the list of `/api/v1/ai/plugins`
 ([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)): ScadBuddy's
 own tool set first (#1953, `built_in: true`; `scadbuddy` is every registry tool, from
 [`agent/src/plugins/builtInTools.ts`](../../agent/src/plugins/builtInTools.ts)), then the
-remote MCP plugins. A built-in tool's tier can be raised or the tool disabled, never lowered
-below the tier its code declares (a lower one answers 400); the overrides are
+remote MCP plugins. A built-in tool's tier can be raised, lowered or the tool disabled (a patch is checked for
+known tools and valid tiers only, in either direction; anything else answers 400:
+`validateOverrides` in `agent/src/plugins/builtInTools.ts`); the overrides are
 `ai_access` rows (`builtin:scadbuddy`, or `builtin:browser` for the browser tools; see
 "Tool access" below), applied at the
-harness seam, on `/mcp` and in the durable `agent-tools` activities. The durable session
-workflow parks a call by the manifest's tier, so a tool raised to outward is not parked
-there: its activity finds no recorded approval and refuses it (NotApproved). Adding, removing,
+harness seam, on `/mcp` and in the durable `agent-tools` activities. Under the patch
+`tool-access-2171`, every registry call in a durable session stops at the gate, which asks
+`tool_tier` for the tool's access as it is then and lets the call through unless it is
+`outward` (`agent-durable/src/scadbuddy_durable/session/workflow.py`, module docstring).
+So a tool raised to `outward` parks, and one lowered stops parking, from its next call.
+Adding, removing,
 testing or re-pointing a built-in answers 409 with `built_in: true`.
 You install, review, approve and re-pin packages there. The approval dialog shows the
 full commit SHA and content hash, and you must tick a confirmation before it sends
@@ -1153,7 +1157,16 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   Remote plugins and packages are off until turned on (`enabledByDefault` in
   `agent/src/access/resolve.ts`).
 - Any other item is a tool, with `off`, `read`, `write` or `outward`. A tool with no row has
-  its declared tier. The user may set it above or below that tier.
+  its declared tier. The user may set it above or below that tier, with one exception.
+  On the registry sources (`builtin:scadbuddy`, `builtin:browser`), a row that the copy
+  migration wrote (`updated_by` is `migration:2171`) counts only when it is `off` or above
+  the declared tier. A copied lower tier is ignored, because the old registry overrides
+  could only raise (`toolAccess` in `agent/src/access/resolve.ts`;
+  `tool_access` in `agent-durable/src/scadbuddy_durable/session/access.py`). A row the
+  user writes later counts in either direction.
+- `on` is also allowed on a single item, but only in `package:*` sources and in
+  `builtin:own-plugin` (its skills, subagents and hooks). The table's CHECK enforces this
+  (`agent/src/db/migrations/20261026T2200Z_access.sql`).
 - Only overrides are stored. The resolver reads the rows at each call, so a change applies
   from the next call, in either direction, also in a turn or flow run under way
   (spec §4.4; `agent/src/access/resolver.ts`).
@@ -1178,8 +1191,10 @@ Session turns get an `http_request` tool ("curl"; `agent/src/harness/httpRequest
 unless Settings → Tools & plugins turns it off. It is on by default; the
 switch is the `ai_access` row (`builtin:http`, `*`) (`off` turns it off),
 written by `PUT /api/v1/ai/settings/http-request`
-([`agent/src/routes/httpRequest.ts`](../../agent/src/routes/httpRequest.ts)) and read at the
-start of every turn, so a change applies from the next turn.
+([`agent/src/routes/httpRequest.ts`](../../agent/src/routes/httpRequest.ts)). The turn's tool
+list is fixed when the turn starts (`agent/src/sessions/turnRunner.ts`), so turning the
+tool on or off changes what the next turn offers. The access of each call is read per
+call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
 
 - **Reach is open until the sandbox** (decided 2026-09-30): the internet, the LAN and
   cluster services, plain `http:` included. Only link-local and cloud metadata

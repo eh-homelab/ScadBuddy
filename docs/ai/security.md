@@ -749,7 +749,11 @@ design is [spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-de
   (spec §4.1).
 - **What a row does.** A tool has `off`, `read`, `write` or `outward`. `off` leaves the tool
   out of every list the model or `/mcp` sees, and refuses a call (spec §4.4). The
-  declared tier is a default, not a floor: the user may lower or raise it.
+  declared tier is a default, not a floor: the user may lower or raise it. One exception:
+  on the registry sources (`builtin:scadbuddy`, `builtin:browser`), a row the copy migration
+  wrote (`updated_by` is `migration:2171`) counts only when it is `off` or above the
+  declared tier, so a copied lower tier is ignored (`toolAccess` in
+  `agent/src/access/resolve.ts`).
 - **One answer for every caller.** The main agent, a subagent, a classic or durable turn,
   a flow run and `/mcp` get the same access for the same item. A principal's tier cap
   still applies on top (spec §4.1, §4.5).
