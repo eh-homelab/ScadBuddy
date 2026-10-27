@@ -1668,7 +1668,13 @@ export const api = {
       body: JSON.stringify({ slug }),
     }),
 
-  outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,
+  /**
+   * `version` is the output's `thumbnail_version` (#4841): an `<img>` already on the
+   * page does not fetch the same URL again, so a replaced image needs a new one, as
+   * `modelThumbnailUrl`'s `v`. Left out, the URL is the bare one.
+   */
+  outputThumbnailUrl: (id: string, version?: string | null) =>
+    `${API_BASE}/outputs/${seg(id)}/thumbnail${version ? `?v=${seg(version)}` : ''}`,
 
   /** #83 — the 3MF's plates; ScadBuddy's own renders are always one. */
   getOutputPlates: (id: string) => request<OutputPlate[]>(`/outputs/${seg(id)}/plates`),

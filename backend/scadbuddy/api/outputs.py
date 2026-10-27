@@ -137,6 +137,10 @@ THREE_MF_MEDIA_TYPE = "model/3mf"
 
 class OutputSummary(OutputMeta):
     has_thumbnail: bool
+    #: Which image `/outputs/{id}/thumbnail` serves (#4841): changes when an upload or a
+    #: draw replaces it, so a page can put it in the URL and fetch the new one. None
+    #: while there is no file, also when ``has_thumbnail`` says one would be drawn.
+    thumbnail_version: str | None = None
     #: Every copy of ``model.3mf`` ScadBuddy has put in Bambuddy's file library (#316),
     #: in upload order, read from `BambuddyUploadStore` (#455). One per (folder,
     #: target): a project's folder keeps the file each of its prints came from.
@@ -214,11 +218,11 @@ def detail(
     failed_before_queueing: bool = False,
 ) -> OutputDetail:
     params = store.params(meta.id)
+    thumbnail_version = _thumbnail_version(store.thumbnail_path(meta.id))
     return OutputDetail(
         **meta.model_dump(),
-        has_thumbnail=(
-            store.thumbnail_path(meta.id).is_file() or store.drawable_thumbnail(meta.id)
-        ),
+        has_thumbnail=thumbnail_version is not None or store.drawable_thumbnail(meta.id),
+        thumbnail_version=thumbnail_version,
         params=params,
         inputs=store.inputs(meta.id, params),
         bom=store.bom(meta.id),
@@ -230,6 +234,16 @@ def detail(
         library_files=library_files,
         failed_before_queueing=failed_before_queueing,
     )
+
+
+def _thumbnail_version(path: Path) -> str | None:
+    """The file's identity: every write puts a new file in place (a new inode, by a
+    rename or a link), and its time and size tell apart an inode used again."""
+    try:
+        stat = path.stat()
+    except OSError:  # as `is_file()` before it: no readable file is no thumbnail
+        return None
+    return f"{stat.st_ino:x}-{stat.st_mtime_ns:x}-{stat.st_size:x}"
 
 
 async def _failed_before_queueing(runs: PrintRunStore, metas: list[OutputMeta]) -> set[str]:
