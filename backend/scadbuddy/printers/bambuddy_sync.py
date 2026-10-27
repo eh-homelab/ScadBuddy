@@ -318,7 +318,7 @@ async def _sync_printer(
     store = printers.store
     action, row, reason = plan_printer(printer, rows)
     # Created or linked here: written. An `already_linked` row is written only by an
-    # adoption (its synthetic serial replaced) or by `record_bambuddy_view`.
+    # adoption `ensure_bambuddy_written` made, or by `record_bambuddy_view`.
     wrote = action != "already_linked"
     entry = SyncEntry(
         kind="physical",
@@ -359,15 +359,13 @@ async def _sync_printer(
             assert row is not None
             if printer.serial_number is not None and is_synthetic_serial(row.serial):
                 # The serial is known now: the strip's own adoption (or merge).
-                synthetic = row.serial
-                row = await asyncio.to_thread(
-                    store.ensure_bambuddy,
+                row, wrote = await asyncio.to_thread(
+                    store.ensure_bambuddy_written,
                     printer.id,
                     serial=printer.serial_number,
                     name=printer.name,
                     model=printer.model,
                 )
-                wrote = row.serial != synthetic
     except (SerialTakenError, BambuddyLinkTakenError, VirtualPrinterRowError):
         entry.action, entry.reason = "conflict", RACE
         return entry
