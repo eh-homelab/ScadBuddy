@@ -300,7 +300,10 @@ def _at_defaults(inputs: Mapping[str, Any], schema: CustomizerSchema | None) -> 
     if schema is None:
         return dict(inputs)
     params = inputs.get("params", {})
-    return {**inputs, "params": with_defaults(schema, params if isinstance(params, dict) else {})}
+    if not isinstance(params, dict):
+        # A malformed row is compared exactly, never read as an all-defaults render.
+        return dict(inputs)
+    return {**inputs, "params": with_defaults(schema, params)}
 
 
 async def ensure_output(

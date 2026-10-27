@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import zipfile
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import numpy as np
@@ -25,10 +25,13 @@ from scadbuddy.analyzers.context import AnalysisContext
 from scadbuddy.analyzers.decisions import PostgresDecisionStore
 from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic, Fix, Source, change
 from scadbuddy.analyzers.sources import ACCESSED
+from scadbuddy.api.analyzers import _newest_render
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
 from tests.api.test_events import Recorded
@@ -153,6 +156,63 @@ def test_an_all_defaults_configuration_finds_its_render(client: TestClient, mode
     for target in ({"slug": model}, {"slug": model, "params": {}}):
         report = _ok(client.post("/api/v1/analyzers/run", json={"target": target}))
         assert report["output_id"] == output_id, target
+
+
+class _Outputs:
+    """The two reads `_newest_render` makes of the output store, newest first."""
+
+    def __init__(self, *rows: tuple[str, str, dict[str, ParamValue]]) -> None:
+        self.rows = rows
+
+    def list_for(self, slug: str) -> list[OutputMeta]:
+        return [
+            OutputMeta.model_construct(id=output_id, slug=slug, model_version=version)
+            for output_id, version, _ in self.rows
+        ]
+
+    def params(self, output_id: str) -> dict[str, ParamValue]:
+        return next(params for row_id, _, params in self.rows if row_id == output_id)
+
+
+def _labelled(default: str) -> CustomizerSchema:
+    return CustomizerSchema(
+        parameters=[
+            Parameter(name="width", type="number", initial=10),
+            Parameter(name="label", type="string", initial=default),
+        ]
+    )
+
+
+async def test_an_output_is_filled_at_the_defaults_of_its_own_revision() -> None:
+    """#4774: an output saved before renders filled defaults records only `width`. At
+    its revision `label` defaulted to "old"; it is no render of a target that names
+    today's "hi", while one rendered at a revision whose default is "hi" is."""
+    schemas = {"a" * 40: _labelled("old"), "b" * 40: _labelled("hi")}
+
+    async def schema_at(version: str | None) -> CustomizerSchema | None:
+        return schemas.get(version or "")
+
+    target: dict[str, ParamValue] = {"width": 12, "label": "hi"}
+    old = _Outputs(("old", "a" * 40, {"width": 12}))
+    assert await _newest_render("demo", target, cast(OutputStore, old), schema_at) is None
+    later = _Outputs(("new", "b" * 40, {"width": 12}), ("old", "a" * 40, {"width": 12}))
+    found = await _newest_render("demo", target, cast(OutputStore, later), schema_at)
+    assert found is not None and found.id == "new"
+
+
+async def test_a_target_its_newest_output_records_reads_no_schema() -> None:
+    """#4774: an all-defaults target whose newest output records the same params is
+    found without a schema read, which could run openscad."""
+    reads: list[str | None] = []
+
+    async def schema_at(version: str | None) -> CustomizerSchema | None:
+        reads.append(version)
+        return _labelled("hi")
+
+    outputs = _Outputs(("new", "b" * 40, {}), ("old", "a" * 40, {"width": 12}))
+    found = await _newest_render("demo", {}, cast(OutputStore, outputs), schema_at)
+    assert found is not None and found.id == "new"
+    assert reads == []
 
 
 @pytest.mark.parametrize(

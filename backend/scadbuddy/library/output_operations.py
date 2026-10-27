@@ -29,6 +29,7 @@ from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.tracing import span
+from scadbuddy.library.catalogue import declares_pipeline
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import answered_as_routes
 from scadbuddy.library.outputs import MODEL_NAME, hold_parts, release_parts, require_output
@@ -92,12 +93,14 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         """``sent`` with each parameter it omits at its default in the job's revision
         (#4774), if that makes them the job's own: the render route fills them so, and a
         caller that saves with the params it sent (an agent's ``save_output``) names the
-        same render. Otherwise, or with no schema to read, ``refusal`` as before."""
+        same render. Not for a pipeline template, whose params the route leaves as sent:
+        they need not be `model.scad`'s. Otherwise, or with no schema to read,
+        ``refusal`` as before."""
         given = normalize_inputs(sent, None)
         # The slow path: only a save whose params disagree with the job's gets here, and
         # the read can run openscad when the revision's schema is not cached yet.
         try:
-            _, schema = await schema_of(
+            source, schema = await schema_of(
                 job.slug,
                 job.model_version,
                 paths=state.paths,
@@ -107,6 +110,8 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
             )
         except (ApiError, OpenSCADError):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, refusal) from None
+        if await asyncio.to_thread(declares_pipeline, source.scad.parent, job.slug):
+            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, refusal)
         filled = {**given.data, "params": with_defaults(schema, given.params)}
         try:
             return normalize_inputs(filled, job.params).data
