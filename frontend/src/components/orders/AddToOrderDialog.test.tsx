@@ -9,9 +9,11 @@ import { choose } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { AddToOrderDialog } from './AddToOrderDialog'
 
-/** An order number as a whole word, so ORD-2026-3 never matches ORD-2026-30 (#4753, #4764 reviews). */
-const orderNumber = (number: string) =>
-  new RegExp(`\\b${number.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`)
+/** The text as a whole token, so ORD-2026-3 never matches ORD-2026-30. Lookarounds rather
+ *  than `\b`, so it holds for text that starts or ends with a non-word character too
+ *  (#4753, #4764, #4779 reviews). */
+const orderNumber = (text: string) =>
+  new RegExp(`(?<![\\w-])${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`)
 
 function Location() {
   const location = useLocation()
