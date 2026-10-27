@@ -24,17 +24,48 @@ export function Toasts() {
           onBlur={() => releaseToast(one.id, 'focus')}
           className="pointer-events-auto flex items-center gap-2 rounded-xl bg-popover py-2 pr-2 pl-4 text-sm text-popover-foreground shadow-lg ring-1 ring-foreground/10 duration-200 animate-in fade-in-0 slide-in-from-bottom-2"
         >
-          {one.href ? (
-            <Link
-              to={one.href}
-              className="min-w-0 flex-1 truncate font-medium underline-offset-4 hover:underline"
-              onClick={() => dismissToast(one.id)}
-            >
-              {one.title}
-            </Link>
-          ) : (
-            <span className="min-w-0 flex-1 truncate font-medium">{one.title}</span>
-          )}
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            {one.href ? (
+              <Link
+                to={one.href}
+                className="truncate font-medium underline-offset-4 hover:underline"
+                onClick={() => dismissToast(one.id)}
+              >
+                {one.title}
+              </Link>
+            ) : (
+              <span className="truncate font-medium">{one.title}</span>
+            )}
+            {one.detail && <span className="line-clamp-3 text-xs break-words text-muted-foreground">{one.detail}</span>}
+            {one.actions && one.actions.length > 0 && (
+              <div className="flex gap-2">
+                {one.actions.map((action, i) => {
+                  const act = () => {
+                    dismissToast(one.id)
+                    action.onClick?.()
+                  }
+                  return (
+                    <Button
+                      key={i}
+                      size="xs"
+                      variant={action.destructive ? 'destructive' : action.href ? 'outline' : 'default'}
+                      // An action a person must take (an approval), never the browser bridge (#254).
+                      {...(action.userOnly ? { 'data-agent-user-only': '' } : {})}
+                      {...(action.href ? { asChild: true } : { onClick: act })}
+                    >
+                      {action.href ? (
+                        <Link to={action.href} onClick={act}>
+                          {action.label}
+                        </Link>
+                      ) : (
+                        action.label
+                      )}
+                    </Button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
           <Button variant="ghost" size="icon-xs" aria-label="Dismiss" onClick={() => dismissToast(one.id)}>
             <XIcon aria-hidden="true" />
           </Button>
