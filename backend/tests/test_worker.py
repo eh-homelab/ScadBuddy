@@ -504,21 +504,24 @@ def _described(*pollers: PollerInfo) -> Client:
 
 
 @pytest.mark.parametrize(
-    ("poller", "elsewhere"),
+    ("identity", "build_id", "age", "deployment", "elsewhere"),
     [
-        (_poller("other@pod-b", "b1", age=1), True),
-        (_poller("other@pod-b", "b1", age=POLLER_SEEN_WITHIN - 5), True),
-        (_poller("me@pod-a", "b1", age=1), False),  # this worker's own poll
-        (_poller("other@pod-b", "b2", age=1), False),  # the rollout's new build
-        (_poller("other@pod-b", "b1", age=1, deployment="scadbuddy-print"), False),
-        (_poller("other@pod-b", "b1", age=POLLER_SEEN_WITHIN + 5), False),  # gone
+        ("other@pod-b", "b1", 1, DEPLOYMENT_NAME, True),
+        ("other@pod-b", "b1", POLLER_SEEN_WITHIN - 5, DEPLOYMENT_NAME, True),
+        ("me@pod-a", "b1", 1, DEPLOYMENT_NAME, False),  # this worker's own poll
+        ("other@pod-b", "b2", 1, DEPLOYMENT_NAME, False),  # the rollout's new build
+        ("other@pod-b", "b1", 1, "scadbuddy-print", False),
+        ("other@pod-b", "b1", POLLER_SEEN_WITHIN + 5, DEPLOYMENT_NAME, False),  # gone
     ],
 )
 async def test_polled_elsewhere_counts_only_a_recent_poller_of_this_build_not_this_worker(
-    poller: PollerInfo, elsewhere: bool
+    identity: str, build_id: str, age: float, deployment: str, elsewhere: bool
 ) -> None:
-    """#4869: what lets a stopping worker leave its pinned runs to another."""
-    client = _described(_poller("me@pod-a", "b1", age=0), poller)
+    """#4869: what lets a stopping worker leave its pinned runs to another. The ages are
+    taken as the test runs, not at collection, which a slow session ran past."""
+    client = _described(
+        _poller("me@pod-a", "b1", age=0), _poller(identity, build_id, age, deployment)
+    )
     assert (
         await polled_elsewhere(
             client,
@@ -1891,6 +1894,67 @@ async def test_readyz_waits_for_the_queue_to_route_to_the_build(tmp_path: Path) 
         ready.set()
         answer = await http.get("/readyz")
     assert answer.status_code == 200 and answer.json()["task_queue"] == "projects"
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.requires_temporal
+async def test_the_render_workers_readyz_waits_for_the_render_queue_to_route_to_it(
+    settings: Settings,
+    pg_conninfo: str,
+    tmp_path: Path,
+    health_socket: socket.socket,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4869: a new pod ready before its build is current let the rollout stop the old
+    pods while the old build was still current, so each saw "current" and left its
+    pinned runs. Ready now waits for routing, as the print and projects workers do
+    (#4146); /healthz, the liveness probe's, never waits on it."""
+    queue = f"t-{uuid.uuid4().hex[:8]}"
+    build_id = f"test-{uuid.uuid4().hex[:8]}"
+    cfg = settings.model_copy(
+        update={
+            "openscad": fake_3mf_openscad(tmp_path / "bin"),
+            "temporal_task_queue_render": queue,
+            "revision": build_id,
+        }
+    )
+    route = asyncio.Event()
+    asked: list[tuple[str, str, str]] = []
+
+    async def routes_to(_: Client, task_queue: str, *, deployment_name: str, build_id: str) -> bool:
+        asked.append((task_queue, deployment_name, build_id))
+        return route.is_set()
+
+    monkeypatch.setattr(worker_module, "routes_to", routes_to)
+    monkeypatch.setattr(worker_module, "ROUTED_POLL", 0.05)
+    port = health_socket.getsockname()[1]
+    # The API's migrations, which the worker waits for and never applies (#601).
+    migrated = JobProjection(pg_conninfo, pool_size=1)
+    migrated.open()
+    migrated.close()
+    async with temporal_client() as client:
+        stop = asyncio.Event()
+        worker = asyncio.create_task(
+            run_worker(cfg, stop=stop, health_port=health_socket, client=client)
+        )
+        try:
+            async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
+                await _healthy(http, worker)
+                async with asyncio.timeout(MAKE_CURRENT_WITHIN):
+                    while not asked:
+                        assert not worker.done(), worker.result()
+                        await asyncio.sleep(0.05)
+                assert (await http.get("/readyz")).status_code == 503
+                assert (await http.get("/healthz")).status_code == 200
+                route.set()
+                async with asyncio.timeout(10):
+                    while (answer := await http.get("/readyz")).status_code != 200:
+                        await asyncio.sleep(0.05)
+        finally:
+            stop.set()
+            await asyncio.wait_for(worker, timeout=30)
+    assert answer.json()["task_queue"] == queue
+    assert asked[0] == (queue, DEPLOYMENT_NAME, build_id)
 
 
 async def test_wait_until_routed_gives_up_and_says_so(

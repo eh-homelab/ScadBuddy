@@ -476,7 +476,10 @@ async def _poll(
     *,
     drain: bool,
     stop_now: asyncio.Event | None = None,
+    routed: asyncio.Event | None = None,
 ) -> None:
+    """``routed`` is set once the render queue routes to this build, for `/readyz`
+    (#4869): a rollout that stops the old pods sooner finds their build still current."""
     config = deps.config
     build_id = settings.revision
     # What every output's record names (§8.4): this image and its openscad. The
@@ -505,6 +508,7 @@ async def _poll(
         task_queue=settings.temporal_task_queue_render,
         drain_timeout=2 * config.activity_timeout + 120 if drain else None,
         stop_now=stop_now,
+        ready=(settings.temporal_task_queue_render, routed) if routed is not None else None,
     )
 
 
@@ -931,6 +935,7 @@ async def run_worker(
     evicting = _start_housekeeping(deps, deps.config.asset_sweep_interval)
     try:
         client, sdk_port = await _own_client(settings, client)
+        routed = asyncio.Event()
         server = (
             _health_server(
                 settings,
@@ -939,6 +944,7 @@ async def run_worker(
                 health_port,
                 settings.temporal_task_queue_render,
                 sdk_port,
+                routed,
             )
             if health_port is not None
             else None
@@ -946,7 +952,9 @@ async def run_worker(
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
             async with LoopWatch(deps.metrics):
-                await _poll(settings, deps, client, stop, drain=True, stop_now=stop_now)
+                await _poll(
+                    settings, deps, client, stop, drain=True, stop_now=stop_now, routed=routed
+                )
         finally:
             if server is not None and serving is not None:
                 server.should_exit = True
