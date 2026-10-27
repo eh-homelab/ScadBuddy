@@ -22,6 +22,7 @@ from scadbuddy.api.deps import (
     AssetsDep,
     CatalogueDep,
     ConfigDep,
+    EventsDep,
     FetcherDep,
     FontsDep,
     HistoryDep,
@@ -86,6 +87,7 @@ from scadbuddy.bambuddy.runs import PrintRunStore
 from scadbuddy.bambuddy.send import SendRequest, SendResult
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.config import Config
+from scadbuddy.core.events import EventBus, OutputEvent, emit
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, PROBLEM_MEDIA_TYPE, ApiError
@@ -1088,20 +1090,25 @@ def output_file(output_id: OutputIdPath, name: str, outputs: OutputsDep) -> File
     ),
 )
 async def get_output_thumbnail(
-    output_id: OutputIdPath, outputs: OutputsDep, config: ConfigDep
+    output_id: OutputIdPath, outputs: OutputsDep, config: ConfigDep, events: EventsDep
 ) -> FileResponse:
-    await asyncio.to_thread(require_output, outputs, output_id)
+    meta = await asyncio.to_thread(require_output, outputs, output_id)
     path = await asyncio.to_thread(lambda: outputs.directory(output_id) / THUMBNAIL_NAME)
     if not await asyncio.to_thread(path.is_file):
-        await _draw_thumbnail(outputs, output_id, path, config)
+        await _draw_thumbnail(outputs, meta, path, config, events)
     return FileResponse(path, media_type="image/png")
 
 
-async def _draw_thumbnail(outputs: OutputStore, output_id: str, path: Path, config: Config) -> None:
+async def _draw_thumbnail(
+    outputs: OutputStore, meta: OutputMeta, path: Path, config: Config, events: EventBus
+) -> None:
     """#4775: a thumbnail for an output saved with none (the agent's, a flow's, an order
     quote's), from its preview mesh, as the `iso` view draws it. Lazy, so outputs saved
     before this get one too, and a browser save that uploads its capture right away
-    never pays for a draw. An upload that lands first stays."""
+    never pays for a draw. An upload that lands first stays. A draw that ends after its
+    read stopped waiting is announced as ``output.updated`` (#4811), so a page that got
+    the 503 reads the list again."""
+    output_id = meta.id
     missing = ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no thumbnail")
     if not await asyncio.to_thread(outputs.drawable_thumbnail, output_id):
         raise missing
@@ -1125,23 +1132,32 @@ async def _draw_thumbnail(outputs: OutputStore, output_id: str, path: Path, conf
     outputs.draws_running += 1
     drawing = asyncio.ensure_future(asyncio.to_thread(_draw_and_keep, outputs, output_id, path))
     _DRAWING.add(drawing)
+    waiting = True
 
     def ended(task: asyncio.Future[bool]) -> None:
         _DRAWING.discard(task)
         outputs.draws_running -= 1
         slots.release()
-        if not task.cancelled() and task.exception() is not None:
+        if task.cancelled():
+            return
+        if task.exception() is not None:
             logger.error(
                 "could not draw an output's thumbnail",
                 exc_info=task.exception(),
                 extra={"id": output_id},
             )
             outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
+        elif task.result() and not waiting:
+            emit(events, OutputEvent(kind="output.updated", output_id=output_id, slug=meta.slug))
 
+    # Before the shield's own callback, so a read still waiting is answered, not told.
     drawing.add_done_callback(ended)
     try:
         drawn = await asyncio.wait_for(asyncio.shield(drawing), timeout=config.render_timeout)
     except TimeoutError:
+        if _drawn(drawing):
+            # It ended as the budget ran out, while this read still waited.
+            return
         outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1149,8 +1165,19 @@ async def _draw_thumbnail(outputs: OutputStore, output_id: str, path: Path, conf
         ) from None
     except Exception:
         raise missing from None
+    finally:
+        waiting = False
     if not drawn:
         raise missing
+
+
+def _drawn(drawing: asyncio.Future[bool]) -> bool:
+    return (
+        drawing.done()
+        and not drawing.cancelled()
+        and drawing.exception() is None
+        and drawing.result()
+    )
 
 
 #: Seconds before a draw that timed out or failed is tried again: a busy moment, not

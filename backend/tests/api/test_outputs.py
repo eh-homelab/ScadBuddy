@@ -381,6 +381,72 @@ def test_a_draw_past_its_budget_keeps_its_slot_until_it_ends(
     _until(lambda: store.draws_running == 0)
 
 
+def test_a_draw_that_ends_after_its_read_gave_up_is_announced(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #4811: the page that got the 503 shows "No preview" until its list is read again.
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    budget = state.config
+    state.config = dataclasses.replace(budget, render_timeout=0.2)
+    published: list[Any] = []
+    publish = state.events.publish
+
+    def recorded(event: Any) -> None:
+        published.append(event)
+        publish(event)
+
+    monkeypatch.setattr(state.events, "publish", recorded)
+    release = threading.Event()
+    draw = draw_view
+
+    def slow(*args: Any) -> bytes | None:
+        release.wait(30)
+        return draw(*args)
+
+    _counting_draws(monkeypatch, slow)
+    url = f"/api/v1/outputs/{created['id']}/thumbnail"
+    assert client.get(url).status_code == 503
+    assert [e for e in published if getattr(e, "kind", None) == "output.updated"] == []
+
+    release.set()
+    store: OutputStore = state.outputs
+    _until(lambda: store.draws_running == 0)
+    updated = [e for e in published if getattr(e, "kind", None) == "output.updated"]
+    assert [(e.output_id, e.slug) for e in updated] == [(created["id"], model)]
+    state.config = budget
+    assert client.get(url).status_code == 200
+
+
+def test_a_draw_its_read_waited_for_is_not_announced(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The read itself answers with it: a History page of new outputs is not re-listed
+    # once per drawn thumbnail.
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    published: list[Any] = []
+    publish = state.events.publish
+
+    def recorded(event: Any) -> None:
+        published.append(event)
+        publish(event)
+
+    monkeypatch.setattr(state.events, "publish", recorded)
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 200
+    assert [e for e in published if getattr(e, "kind", None) == "output.updated"] == []
+
+
 def test_a_read_queued_behind_a_failed_draw_does_not_draw_again(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

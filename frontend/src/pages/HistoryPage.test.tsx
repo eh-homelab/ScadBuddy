@@ -720,6 +720,24 @@ describe('HistoryPage', () => {
     expect(await within(await row('Reagan')).findByRole('button', { name: 'Preview Reagan' })).toBeInTheDocument()
   })
 
+  it('tries a thumbnail again each time the list is read, though it still says it has one (#4811)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    render()
+    const item = await row('Reagan')
+    // The draw outlived its read (a 503); it said it had one, and still does.
+    fireEvent.error(within(item).getByRole('button', { name: 'Preview Reagan' }).querySelector('img')!)
+    expect(within(item).getByLabelText('No preview of Reagan')).toBeInTheDocument()
+    await waitFor(() => expect(realtime.following()).toContain('model:name-keychain'))
+
+    // The draw ended and said so: the list is read again, with has_thumbnail unchanged.
+    await realtime.signal('model:name-keychain', 'output.updated')
+    expect(await within(await row('Reagan')).findByRole('button', { name: 'Preview Reagan' })).toBeInTheDocument()
+  })
+
   it('offers Queue, Download 3MF and Rename on every output (#2288)', async () => {
     const { user } = render()
     for (const name of ['Reagan', 'Nova', 'Workshop']) {
