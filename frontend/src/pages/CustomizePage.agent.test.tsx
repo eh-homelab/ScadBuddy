@@ -370,17 +370,53 @@ describe('customizer tools', () => {
 
   it('answers unavailable, not for another model, when the page moves while a call waits (#4894)', async () => {
     const release = holdSchema('name-keychain')
-    await openLoading()
+    try {
+      await openLoading()
 
-    const params = call('get_params')
-    const rendered = call('render', { timeout_ms: 10_000 })
-    await new Promise((resolve) => setTimeout(resolve, 100))
-    expect(await call('navigate', { route: '/m/gridfinity-bin' })).toMatchObject({ ok: true })
-    await waitFor(() => expect(bridge.snapshot().page.customize).toMatchObject({ slug: 'gridfinity-bin', loaded: true }))
+      const params = call('get_params')
+      const rendered = call('render', { timeout_ms: 10_000 })
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(await call('navigate', { route: '/m/gridfinity-bin' })).toMatchObject({ ok: true })
+      await waitFor(() => expect(bridge.snapshot().page.customize).toMatchObject({ slug: 'gridfinity-bin', loaded: true }))
 
-    expect(await params).toMatchObject({ ok: false, error: { code: 'unavailable' } })
-    expect(await rendered).toMatchObject({ ok: false, error: { code: 'unavailable' } })
-    release()
+      expect(await params).toMatchObject({ ok: false, error: { code: 'unavailable' } })
+      expect(await rendered).toMatchObject({ ok: false, error: { code: 'unavailable' } })
+    } finally {
+      release()
+    }
+  })
+
+  it('render answers unavailable when the page moves while it waits for the preview (#4900)', async () => {
+    // The schema loads; name-keychain's first render is held, so `render` is past the
+    // schema wait and waiting for the preview when the page moves.
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    server.use(
+      http.post('/api/v1/models/:slug/render', async ({ params }) => {
+        if (params['slug'] !== 'name-keychain') return undefined
+        await gate
+        return undefined
+      }),
+    )
+    try {
+      renderPage(
+        <Shell>
+          <CustomizePage />
+        </Shell>,
+        { route: '/m/name-keychain', path: '/m/:slug' },
+      )
+      await waitFor(() => expect(bridge.snapshot().page.customize).toMatchObject({ slug: 'name-keychain', loaded: true }))
+
+      const rendered = call('render', { timeout_ms: 10_000 })
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(await call('navigate', { route: '/m/gridfinity-bin' })).toMatchObject({ ok: true })
+
+      expect(await rendered).toMatchObject({ ok: false, error: { code: 'unavailable' } })
+    } finally {
+      release()
+    }
   })
 
   it('answers at once when the schema fails to load while a call waits (#4894)', async () => {
