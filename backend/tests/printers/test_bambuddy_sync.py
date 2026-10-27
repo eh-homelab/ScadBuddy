@@ -265,9 +265,45 @@ async def test_the_syncs_own_adoption_is_its_change(
     synthetic = store.ensure_bambuddy(1, serial=None, name="P1", model="H2C")
     printer = Printer.model_validate(bambuddy(1, SERIAL, ip=None))
     store.record_bambuddy_view(synthetic.id, printer_view(printer, datetime.now(UTC)))
+    # #4864 review: the view the sync records is the one already there, so the adoption
+    # is the only write that can make the entry `changed`.
+    _, recorded = store.record_bambuddy_view(
+        synthetic.id, printer_view(printer, datetime.now(UTC)), model="H2C"
+    )
+    assert recorded is False
     result = await run(printers, FakeClient([bambuddy(1, SERIAL, ip=None)]))
     (entry,) = result.entries
     assert store.require(synthetic.id).serial == SERIAL and entry.changed is True
+
+
+async def test_the_syncs_merge_into_the_serials_row_is_its_change(
+    printers: FakePrinters, store: PrinterStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4864 review: `_ensure_locked`'s merge path. The Bambuddy printer's synthetic row
+    learns its serial, which an unlinked physical row already holds: the synthetic row is
+    merged into that one, which takes the link, and both are announced."""
+    synthetic = store.ensure_bambuddy(1, serial=None, name="P1", model="H2C")
+    printer = Printer.model_validate(bambuddy(1, SERIAL, ip=None))
+    store.record_bambuddy_view(synthetic.id, printer_view(printer, datetime.now(UTC)))
+    holder = store.create(PrinterCreate(serial=SERIAL, name="Mine", model="H2C"))
+    store.record_bambuddy_view(holder.id, printer_view(printer, datetime.now(UTC)))
+    # As above: the view is already the holder's, so only the merge can be the write.
+    _, recorded = store.record_bambuddy_view(
+        holder.id, printer_view(printer, datetime.now(UTC)), model="H2C"
+    )
+    assert recorded is False
+    announced: list[str] = []
+    monkeypatch.setattr(store, "_announce", lambda *ids: announced.extend(ids))
+
+    result = await run(printers, FakeClient([bambuddy(1, SERIAL, ip=None)]))
+
+    (entry,) = result.entries
+    assert (entry.action, entry.printer_id, entry.changed) == ("already_linked", holder.id, True)
+    assert announced == [synthetic.id, holder.id]
+    assert store.get(synthetic.id) is None
+    merged = store.require(holder.id)
+    assert merged.bambuddy_printer_id == 1 and merged.name == "Mine"
+    assert holder.id in printers.changed_ids
 
 
 async def test_a_write_by_something_else_during_a_sync_is_not_its_change(
