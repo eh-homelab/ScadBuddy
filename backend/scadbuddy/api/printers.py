@@ -20,7 +20,6 @@ from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     IdempotencyKey,
     operation_answer,
-    recorded,
     run_operation,
 )
 from scadbuddy.bambuddy.client import client_for
@@ -214,16 +213,6 @@ def _views(vps: list[VirtualPrinter], rows: list[PrinterRow]) -> list[VirtualPri
     ]
 
 
-async def _resync(printers: Printers, store: SettingsStoreDep) -> None:
-    """After a virtual printer's write, the registry follows it (#4747): best effort,
-    as the housekeeping sync is the backstop."""
-    try:
-        async with client_for(await asyncio.to_thread(store.load)) as client:
-            await sync_printers(printers, client)
-    except Exception:
-        logger.warning("could not sync the printers after a virtual printer's write")
-
-
 @router.get(
     "/virtual",
     response_model=VirtualPrintersView,
@@ -286,31 +275,23 @@ def _sealed(
 async def _vp_write(
     ops: OperationCommands,
     response: Response,
-    printers: Printers,
-    store: SettingsStoreDep,
     *,
     kind: str,
     subject: str,
     request: dict[str, Any],
     idempotency_key: str | None,
 ) -> dict[str, Any] | OperationAccepted:
-    """Run a virtual printer's write; the registry follows a write this request made
-    (`_resync`), not a repeat answered from its record."""
-    operation = ops.kinds[kind]
-    repeat = await recorded(
-        ops, kind=operation, subject=subject, request=request, idempotency_key=idempotency_key
-    )
-    result = await run_operation(
+    """Run a virtual printer's write. Its run syncs the registry's virtual printers once
+    Bambuddy took it (`virtual_printer_kinds`), so a write answered with 202 is followed
+    too, and a repeat answered from its record syncs nothing."""
+    return await run_operation(
         ops,
         response,
-        kind=operation,
+        kind=ops.kinds[kind],
         subject=subject,
         request=request,
         idempotency_key=idempotency_key,
     )
-    if repeat is None and not isinstance(result, OperationAccepted):
-        await _resync(printers, store)
-    return result
 
 
 VP_WRITES = (
@@ -345,8 +326,6 @@ async def create_virtual_printer(
     result = await _vp_write(
         ops,
         response,
-        printers,
-        store,
         kind="bambuddy_vp_create",
         subject="bambuddy_vp:new",
         request={
@@ -378,8 +357,6 @@ async def update_virtual_printer(
     result = await _vp_write(
         ops,
         response,
-        printers,
-        store,
         kind="bambuddy_vp_update",
         subject=f"bambuddy_vp:{vp_id}",
         request={
@@ -413,8 +390,6 @@ async def delete_virtual_printer(
     result = await _vp_write(
         ops,
         response,
-        printers,
-        store,
         kind="bambuddy_vp_delete",
         subject=f"bambuddy_vp:{vp_id}",
         request={"vp_id": vp_id},

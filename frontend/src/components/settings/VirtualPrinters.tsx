@@ -149,7 +149,7 @@ export function VirtualPrintersPanel({ rows, onChanged }: { rows: PrinterRow[]; 
           {data.printers.length === 0 && <p className="text-xs text-muted-foreground">No virtual printers.</p>}
           <ul className="space-y-3" aria-label="Virtual printers">
             {data.printers.map((vp) => (
-              <VirtualPrinterItem key={vp.id} vp={vp} data={data} targets={targets} onChanged={refresh} />
+              <VirtualPrinterItem key={vp.id} vp={vp} data={data} rows={rows} targets={targets} onChanged={refresh} />
             ))}
           </ul>
           {adding ? (
@@ -185,14 +185,20 @@ function AuthBadge({ enabled }: { enabled: boolean | null }) {
 function VirtualPrinterItem({
   vp,
   data,
-  targets,
+  rows,
+  targets: offered,
   onChanged,
 }: {
   vp: VirtualPrinter
   data: VirtualPrinters
+  rows: PrinterRow[]
   targets: PrinterRow[]
   onChanged: () => void
 }) {
+  // Its current target is offered and named even when it is no longer one a new VP may
+  // take (review #4784): a row that is not physical, or no longer linked to Bambuddy.
+  const current = vp.target && !offered.some((row) => row.id === vp.target) ? rows.filter((row) => row.id === vp.target) : []
+  const targets = [...offered, ...current]
   const [editing, setEditing] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -283,6 +289,7 @@ function VirtualPrinterItem({
               targets={targets}
               onDone={() => {
                 setEditing(false)
+                setDiagnostic(null)
                 onChanged()
               }}
               onCancel={() => setEditing(false)}

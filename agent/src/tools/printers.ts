@@ -183,7 +183,12 @@ function virtualPrinterTools(): Tool[] {
       description:
         'Changes a Bambuddy virtual printer: only the fields given change; `target` null takes its target off.' +
         VP_WRITE,
-      input: z.object({ vp_id: vpId, name: z.string().min(1).max(80).optional(), ...vpFields }),
+      input: z.object({
+        vp_id: vpId,
+        name: z.string().min(1).max(80).optional(),
+        ...vpFields,
+        tailscale_disabled: z.boolean().optional().describe("Turn off Bambuddy's Tailscale address for it"),
+      }),
       risk: 'outward',
       source: VP_SOURCE,
       routes: ['PUT /api/v1/printers/virtual/{vp_id}'],

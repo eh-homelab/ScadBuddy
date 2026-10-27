@@ -87,6 +87,19 @@ describe('VirtualPrintersPanel (#4747)', () => {
     expect(virtualWrites()[0]).toEqual({ name: 'Renamed' })
   })
 
+  it('clears the shown checks once an edit is saved (review #4784)', async () => {
+    const { user } = renderPage(<PrintersPanel bambuddyConfigured />)
+    const vp = await screen.findByRole('listitem', { name: H2C_VP })
+    await user.click(within(vp).getByRole('button', { name: 'Check' }))
+    await within(vp).findByRole('status', { name: 'Checks for H2C Virtual' })
+    await user.click(within(vp).getByRole('button', { name: 'Edit' }))
+    const form = within(vp).getByRole('form', { name: 'Edit H2C Virtual' })
+    await user.click(within(form).getByRole('switch', { name: 'Enabled' }))
+    await user.click(within(form).getByRole('button', { name: 'Save in Bambuddy' }))
+    await waitFor(() => expect(within(vp).queryByRole('status', { name: 'Checks for H2C Virtual' })).toBeNull())
+    expect(virtualWrites()[0]).toEqual({ enabled: false })
+  })
+
   it("says why a write is refused while Bambuddy's auth is on", async () => {
     setVirtualAuth(true)
     const { user } = renderPage(<PrintersPanel bambuddyConfigured />)

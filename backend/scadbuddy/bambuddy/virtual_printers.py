@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import logging
 from typing import Any
 
 from cryptography.hazmat.primitives import hashes
@@ -34,14 +35,17 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field
 
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.models import VirtualPrinter
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import Kek, SealError, open_bytes, seal_bytes
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
+from scadbuddy.printers.bambuddy_sync import StoreRegistry, sync_virtual_printers
 from scadbuddy.printers.models import VirtualPrinterMode
 from scadbuddy.printers.store import PrinterStore
+
+logger = logging.getLogger(__name__)
 
 #: Bambuddy's bound: "Access code must be exactly 8 characters" (lines 189-190).
 ACCESS_CODE_LENGTH = 8
@@ -235,6 +239,17 @@ def virtual_printer_kinds(
             )
         return checked
 
+    async def follow(client: BambuddyClient) -> None:
+        """The registry follows the write, here on the worker that made it, so a write
+        that outlives the route's deadline is followed too. Best effort: the write is
+        done whatever this says, and the daily sweep is the backstop."""
+        if printers is None:
+            return
+        try:
+            await sync_virtual_printers(StoreRegistry(printers), client)
+        except Exception:
+            logger.warning("could not sync the virtual printers after a write")
+
     def body_of(
         request: dict[str, Any], checked: dict[str, Any], vp_id: int | None
     ) -> dict[str, Any]:
@@ -265,6 +280,7 @@ def virtual_printer_kinds(
         body = body_of(request, checked, None)
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             created = await client.create_virtual_printer(body)
+            await follow(client)
         return created.model_dump(mode="json")
 
     async def update_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -272,6 +288,7 @@ def virtual_printer_kinds(
         body = body_of(request, checked, vp_id)
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             updated = await client.update_virtual_printer(vp_id, body)
+            await follow(client)
         return updated.model_dump(mode="json")
 
     async def delete_check(request: dict[str, Any]) -> dict[str, Any]:
@@ -284,6 +301,7 @@ def virtual_printer_kinds(
         vp_id = int(request["vp_id"])
         async with client_for(await asyncio.to_thread(settings_store.load)) as client:
             await client.delete_virtual_printer(vp_id)
+            await follow(client)
         return {"deleted": vp_id}
 
     where = "Bambuddy's Settings > Virtual Printer"
