@@ -15,7 +15,7 @@ export const order = 10
 export function Component() {
   const webMcp = useWebMcpEnabled()
   return (
-    <Section id={id} title={title} description="Applied at once; not part of any saved section.">
+    <Section id={id} title={title}>
       {/* Per browser and applied at once. Only the user may flip it: an agent must
           not grant itself access (#254). */}
       <div className="space-y-1.5">
