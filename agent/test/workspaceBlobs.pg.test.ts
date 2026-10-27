@@ -311,8 +311,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
       expect((error as Error).message).toMatch(/nothing was written/)
       expect(await row('a.txt')).toBeUndefined()
       const status = await target.bytesStatus()
-      expect(status.store).toBe('refused')
-      expect(status.reason).toMatch(cause)
+      expect(status).toMatchObject({ store: 'refused', reason: expect.stringMatching(cause) })
     }
 
     it('refuses a write when this agent has no KEK to seal it with', async () => {

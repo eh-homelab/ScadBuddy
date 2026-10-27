@@ -1184,20 +1184,39 @@ the pod's disk, so every replica, classic and durable sessions and `/mcp` see th
 files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), tools in
 [`agent/src/tools/workspace.ts`](../../agent/src/tools/workspace.ts)).
 
-- Where the bytes are (#4789): with the KEK mounted, a blob of the backend's content
-  store (`store_backend` s3 or bambuddy), `workspace-<sha256 of the sealed bytes>`. The
-  agent asks the backend's hidden `/api/v1/internal/workspace-blobs` routes for a URL to
-  PUT the bytes to (the internal blob route) and one to GET them (S3's presigned URL on
-  s3); it holds no store credential and mints no token. The bytes are sealed under a key
-  of the file's own, in 1 MiB segments ([`agent/src/workspace/sealing.ts`](../../agent/src/workspace/sealing.ts));
-  that key is wrapped under the session's data key (`ai_payload_keys`), or under the KEK
-  for a principal's file (re-wrapped at a rotation). A trigger on `ai_session_files`
-  writes and removes each row's holder `(ai_session_file, <workspace>/<path>)` in
-  `blob_refs` with the row, so the blob sweep keeps a blob while a row names it. A fork's
-  row names the parent's blob with the key wrapped again for the child: no bytes are
-  copied. On `store_backend` local (the routes answer 404), or without the KEK, the bytes
-  stay in `data` as before. At start the agent moves rows still in `data` to blobs
-  (`SessionFiles.moveToBlobs`); a later migration drops `data`.
+- Where the bytes are (#4789): a blob of the backend's content store (`store_backend` s3
+  or bambuddy), `workspace-<sha256 of the sealed bytes>`. The agent reads which store the
+  backend runs on from its `/healthz` (`store.backend`), and asks its hidden
+  `/api/v1/internal/workspace-blobs` routes for a URL to PUT the bytes to (the internal
+  blob route) and one to GET them (S3's presigned URL on s3); it holds no store credential
+  and mints no token. The bytes are sealed under a key of the file's own, in 1 MiB segments
+  ([`agent/src/workspace/sealing.ts`](../../agent/src/workspace/sealing.ts)); that key is
+  wrapped under the session's data key (`ai_payload_keys`), or under the KEK for a
+  principal's file (re-wrapped at a rotation). A fork's row names the parent's blob with
+  the key wrapped again for the child: no bytes are copied. At start the agent moves rows
+  still in `data` to blobs (`SessionFiles.moveToBlobs`); a later migration drops `data`.
+- Only on `store_backend` local (no content store; the routes answer 404) do the bytes
+  stay in `data`, in plaintext, as before. On any other backend a write is refused
+  (`unavailable`, HTTP 503 on the panel's Files routes) and nothing is kept in plaintext
+  when the agent has no `SCADBUDDY_SECRET_KEY_FILE`, when the backend cannot mint the URLs
+  (no `SCADBUDDY_API_INTERNAL_URL` or KEK: its routes answer 503 saying which), when the
+  backend is older than the routes (404), or when it cannot be reached. `moveToBlobs`
+  refuses the same way and moves nothing. The agent logs the cause once at start, and
+  `GET /api/v1/ai/status` shows it as `workspace_files` (`{store: "blobs" | "postgres" |
+  "refused", ...}`, checked at most once a minute).
+- The holder: a trigger on `ai_session_files` (migration
+  `20261027T0114Z_session_files_blobs.sql`) writes and removes each row's holder
+  `(ai_session_file, <workspace>/<path>)` in the backend's `blob_refs`, in the
+  transaction that writes or removes the row (a delete, the sweep, a session's cascade,
+  `forgetSubject`), so the blob sweep keeps a blob while a row names it. This assumes
+  **one database and one role for both services**: the agent's
+  `SCADBUDDY_DATABASE_URL` is the backend's, and its role may write `blob_refs` (the
+  agent already reads the backend's `workflow_runs` the same way). Giving the agent a
+  database or role of its own breaks every workspace write on s3.
+  `agent/test/workspaceBlobs.backend.e2e.test.ts` pins the trigger to the backend's
+  table: it migrates both services into one database, runs the real API on moto's S3
+  (`backend/tests/support/workspace_backend.py`), and checks the `blob_refs` row; a
+  change to that table the trigger does not follow fails it.
 - A session's files go with the session (deleting it, or `forgetSubject`, deletes them,
   and forgetting deletes the key that opens its blobs); a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
   principal's own workspace, whose files are swept 24 h after their last write (every

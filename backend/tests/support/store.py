@@ -95,6 +95,13 @@ def pool(pg_conninfo: str) -> Iterator[Pool]:
 @pytest.fixture
 def s3() -> Iterator[S3Settings]:
     """moto's S3 on a free port with the bucket ``sb-test`` (S3 needs three characters or more)."""
+    with moto_s3() as settings:
+        yield settings
+
+
+@contextmanager
+def moto_s3() -> Iterator[S3Settings]:
+    """The `s3` fixture's server, for a process that is not a test (`workspace_backend.py`)."""
     from moto.server import ThreadedMotoServer
 
     with socket.socket() as probe:
