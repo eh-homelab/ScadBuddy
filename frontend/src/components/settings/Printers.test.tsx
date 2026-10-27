@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { act, screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { takeSnapshot } from '../../agent/snapshot'
@@ -229,6 +230,44 @@ describe('PrintersPanel (#3823)', () => {
     const garage = screen.getByRole('listitem', { name: GARAGE })
     await waitFor(() => expect(garage).toHaveTextContent('Bambuddy printer 2'))
     expect(within(garage).getByLabelText('Bambuddy sync note for Garage')).toHaveTextContent('withholds the access code')
+  })
+
+  it('counts a virtual printer whose target is missing as imported, and says the target is missing (#4850)', async () => {
+    const reason = 'Bambuddy forwards this virtual printer to Bambuddy printer 4, which no printer here is linked to'
+    server.use(
+      http.post('/api/v1/printers/sync-bambuddy', () =>
+        HttpResponse.json({
+          dry_run: false,
+          virtual_printers_error: null,
+          created: 1,
+          linked: 0,
+          already_linked: 0,
+          skipped: 0,
+          conflicts: 0,
+          lan_linked: 0,
+          lan_failed: 0,
+          entries: [
+            {
+              kind: 'bambuddy_virtual',
+              name: 'Lonely VP',
+              bambuddy_vp_id: 4,
+              printer_id: '00000000-0000-4000-8000-0000000000f4',
+              action: 'created',
+              reason,
+              changed: true,
+              target_missing: true,
+            },
+          ],
+        }),
+      ),
+    )
+    const { user } = renderPage(<PrintersPanel bambuddyConfigured />)
+    await screen.findByRole('listitem', { name: GARAGE })
+    await user.click(screen.getByRole('button', { name: 'Import from Bambuddy' }))
+    const status = await screen.findByRole('status')
+    expect(status).toHaveTextContent('1 added, 0 linked, 0 already linked, 0 skipped, 0 conflicts')
+    expect(status).toHaveTextContent('1 virtual printers forwarding to a printer not here')
+    expect(status).toHaveTextContent(`Lonely VP: added (${reason})`)
   })
 
   it('says why Import from Bambuddy is off without a Bambuddy (#4439)', async () => {

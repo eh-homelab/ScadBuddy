@@ -131,9 +131,9 @@ function sync(dryRun: boolean): PrinterSyncResult {
     const holder = state.printers.find((row) => row.serial === printer.serial)
     const base = { kind: 'physical' as const, name: printer.name, bambuddy_printer_id: printer.bambuddy_printer_id }
     if (linked) {
-      entries.push({ ...base, printer_id: linked.id, action: 'already_linked', lan: linked.lan_host ? 'kept' : 'none', changed: false })
+      entries.push({ ...base, printer_id: linked.id, action: 'already_linked', lan: linked.lan_host ? 'kept' : 'none', changed: false, target_missing: false })
     } else if (!printer.serial) {
-      entries.push({ ...base, action: 'skipped', reason: NO_SERIAL, changed: false })
+      entries.push({ ...base, action: 'skipped', reason: NO_SERIAL, changed: false, target_missing: false })
     } else if (holder) {
       entries.push({
         ...base,
@@ -142,6 +142,7 @@ function sync(dryRun: boolean): PrinterSyncResult {
         lan: dryRun ? 'would_try' : 'withheld',
         lan_reason: dryRun ? null : LAN_WITHHELD,
         changed: !dryRun,
+        target_missing: false,
       })
       if (!dryRun) update(holder.id, { bambuddy_printer_id: printer.bambuddy_printer_id, lan_sync_error: LAN_WITHHELD })
     }
@@ -156,6 +157,7 @@ function sync(dryRun: boolean): PrinterSyncResult {
     action: virtual ? 'already_linked' : 'created',
     forwards_to: target?.id ?? null,
     changed: !virtual && !dryRun,
+    target_missing: false,
   })
   if (!virtual && !dryRun) {
     state.printers = [
