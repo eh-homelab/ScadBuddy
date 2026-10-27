@@ -146,7 +146,7 @@ describe('assistant panel', () => {
     const panel = await screen.findByRole('complementary', { name: 'Assistant' })
     const banner = await within(panel).findByTestId('mcp-auth-banner')
     expect(banner).toHaveTextContent('with read-only access')
-    expect(within(banner).getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings#assistant')
+    expect(within(banner).getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings/mcp#mcp-auth-mode')
   })
 
   it('has no banner while /mcp needs a token (#1921)', async () => {

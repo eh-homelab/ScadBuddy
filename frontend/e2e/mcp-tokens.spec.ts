@@ -32,7 +32,7 @@ test.describe('MCP access tokens', () => {
     baseURL,
   }) => {
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: baseURL })
-    await page.goto('/settings')
+    await page.goto('/settings/mcp')
     const { section, panel, token } = await createToken(page, 'Claude Code')
 
     await panel.getByRole('button', { name: 'Copy token' }).click()
@@ -58,13 +58,13 @@ test.describe('MCP access tokens', () => {
 
   test('copies the token inside Bambuddy’s sandboxed frame', async ({ page, baseURL }) => {
     // No allow="clipboard-write" on Bambuddy's frame: the async Clipboard API is not granted to it.
-    const frame = await bambuddyFrame(page, baseURL, '/settings')
+    const frame = await bambuddyFrame(page, baseURL, '/settings/mcp')
     const { panel, token } = await createToken(frame, 'In the frame')
 
     await panel.getByRole('button', { name: 'Copy token' }).click()
     // Either the fallback copy worked, or the token is selected for Ctrl+C.
     await expect(panel.getByRole('status')).toHaveText(/Copied to the clipboard\.|press Ctrl\+C/)
-    const app = page.frames().find((candidate) => candidate.url().endsWith('/settings'))
+    const app = page.frames().find((candidate) => candidate.url().endsWith('/settings/mcp'))
     if (!app) throw new Error('the ScadBuddy frame is not loaded')
     const status = await panel.getByRole('status').textContent()
     if (status?.includes('Ctrl+C')) {

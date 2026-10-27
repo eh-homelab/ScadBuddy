@@ -62,7 +62,7 @@ test.describe('real agent (#249)', () => {
 
   test('the panel runs a whole turn through the agent', async ({ page }) => {
     test.setTimeout(120_000)
-    await page.goto('/settings')
+    await page.goto('/settings/assistant')
     await expect(page.getByTestId('ai-status')).toHaveAttribute('data-state', 'configured')
 
     await page.getByRole('button', { name: 'Assistant' }).click()

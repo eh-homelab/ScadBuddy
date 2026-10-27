@@ -1,32 +1,20 @@
 import type { Settings, SettingsUpdate } from '../../api/types'
 
 /**
- * #322 — the Settings page's sections, in page order. `id` is the in-page anchor.
+ * #2171 — the Settings sections that save runtime fields (`RUNTIME_FIELDS`, `HAND_LAID`).
+ * `printers` and `inventory` own none, so they are not here.
  */
-export const SECTIONS = [
-  { id: 'connection', title: 'Connection' },
-  { id: 'printing', title: 'Printing defaults' },
-  { id: 'printers', title: 'Printers' },
-  { id: 'inventory', title: 'Spool inventory' },
-  { id: 'orders', title: 'Orders' },
-  { id: 'projects', title: 'Projects & files' },
-  { id: 'uploads', title: 'Uploads' },
-  { id: 'rendering', title: 'Rendering' },
-  { id: 'fonts', title: 'Fonts' },
-  { id: 'libraries', title: 'Libraries' },
-  { id: 'preview', title: 'Preview' },
-  { id: 'remembered', title: 'Remembered choices' },
-  { id: 'assistant', title: 'Assistant' },
-  { id: 'diagnostics', title: 'Diagnostics' },
-  { id: 'administration', title: 'Administration' },
-  { id: 'about', title: 'About' },
-] as const
-
-export type SectionId = (typeof SECTIONS)[number]['id']
-
-export function sectionTitle(id: SectionId): string {
-  return SECTIONS.find((section) => section.id === id)?.title ?? id
-}
+export type SectionId =
+  | 'connection'
+  | 'printing'
+  | 'orders'
+  | 'projects'
+  | 'uploads'
+  | 'rendering'
+  | 'fonts'
+  | 'preview'
+  | 'diagnostics'
+  | 'administration'
 
 /** How a field is edited. Every value travels as a string in the form. */
 export type FieldKind =

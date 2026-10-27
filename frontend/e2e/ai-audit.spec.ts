@@ -6,7 +6,7 @@ test.describe('AI activity in Settings (#258)', () => {
   test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
 
   test('lists the audit log, filters it, and saves the retention', async ({ page }) => {
-    await page.goto('/settings')
+    await page.goto('/settings/audits')
     const section = page.getByRole('region', { name: 'AI activity' })
     await expect(section).toBeVisible()
 

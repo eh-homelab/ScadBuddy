@@ -829,9 +829,9 @@ function Frame({ children }: { children: ReactNode }) {
   return (
     <Card role="region" className="mt-4" aria-labelledby="ai-credential-heading" {...USER_ONLY}>
       <CardHeader className="border-b">
-        <h2 id="ai-credential-heading" className="font-heading text-sm font-medium">
+        <h4 id="ai-credential-heading" className="font-heading text-sm font-medium">
           Claude credentials
-        </h2>
+        </h4>
       </CardHeader>
       <CardContent className="flex flex-col gap-3 text-[13px]">{children}</CardContent>
     </Card>

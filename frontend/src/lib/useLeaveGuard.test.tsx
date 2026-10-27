@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useState } from 'react'
-import { MemoryRouter } from 'react-router'
+import { BrowserRouter, Link, MemoryRouter, useLocation, useNavigate } from 'react-router'
+import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
 import { useLeaveGuard } from './useLeaveGuard'
 
@@ -63,5 +64,129 @@ describe('useLeaveGuard (#322)', () => {
     await act(() => pop)
     expect(onSentinel()).toBe(false)
     expect(screen.getByTestId('guard')).toHaveTextContent('quiet')
+  })
+
+  describe('with within', () => {
+    function Settings() {
+      const guard = useLeaveGuard(true, { within: '/settings' })
+      const location = useLocation()
+      const navigate = useNavigate()
+      return (
+        <>
+          <Link to="/settings/library">Library</Link>
+          <Link to="/settings#fonts">Fonts</Link>
+          <Link to="/">Home</Link>
+          <button onClick={() => void navigate('/settings#fonts')}>Go fonts</button>
+          <button onClick={() => void navigate('/')}>Go home</button>
+          <p data-testid="where">{location.pathname + location.hash}</p>
+          <p data-testid="pending">{guard.pending === null ? 'none' : String(guard.pending)}</p>
+        </>
+      )
+    }
+    const mount = () => {
+      window.history.replaceState(null, '', '/settings/general')
+      render(
+        <BrowserRouter>
+          <Settings />
+        </BrowserRouter>,
+      )
+    }
+
+    it('lets a link to another path under it through while dirty', async () => {
+      mount()
+      await userEvent.setup().click(screen.getByRole('link', { name: 'Library' }))
+      expect(screen.getByTestId('where')).toHaveTextContent('/settings/library')
+      expect(screen.getByTestId('pending')).toHaveTextContent('none')
+    })
+
+    it('lets a programmatic navigation under it through', () => {
+      mount()
+      press('Go fonts')
+      expect(screen.getByTestId('where')).toHaveTextContent('/settings#fonts')
+      expect(screen.getByTestId('pending')).toHaveTextContent('none')
+    })
+
+    it('still holds a link out of it', async () => {
+      mount()
+      await userEvent.setup().click(screen.getByRole('link', { name: 'Home' }))
+      expect(screen.getByTestId('where')).toHaveTextContent('/settings/general')
+      expect(screen.getByTestId('pending')).toHaveTextContent('/')
+    })
+
+    it('still holds a programmatic navigation out of it', () => {
+      mount()
+      press('Go home')
+      expect(screen.getByTestId('where')).toHaveTextContent('/settings/general')
+      expect(screen.getByTestId('pending')).toHaveTextContent('/')
+    })
+
+    it('Back from a second Settings path returns to the first without asking', async () => {
+      mount()
+      await userEvent.setup().click(screen.getByRole('link', { name: 'Library' }))
+      const back = popped()
+      window.history.back()
+      await act(() => back)
+      await waitFor(() => expect(window.location.pathname).toBe('/settings/general'))
+      expect(screen.getByTestId('pending')).toHaveTextContent('none')
+    })
+
+    it('with within, Back to another path under it passes while dirty, and Back out of it is still held', async () => {
+      // Dirtied only after the move, so the sentinel sits above the second path, not the first.
+      function Later() {
+        const [dirty, setDirty] = useState(false)
+        const guard = useLeaveGuard(dirty, { within: '/settings' })
+        const location = useLocation()
+        return (
+          <>
+            <Link to="/settings/library">Library</Link>
+            <button onClick={() => setDirty(true)}>Type</button>
+            <p data-testid="where">{location.pathname}</p>
+            <p data-testid="pending">{guard.pending === null ? 'none' : String(guard.pending)}</p>
+          </>
+        )
+      }
+      window.history.replaceState(null, '', '/settings/general')
+      render(
+        <BrowserRouter>
+          <Later />
+        </BrowserRouter>,
+      )
+      await userEvent.setup().click(screen.getByRole('link', { name: 'Library' }))
+      press('Type')
+      expect(onSentinel()).toBe(true)
+
+      window.history.back()
+      await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent('/settings/general'))
+      expect(window.location.pathname).toBe('/settings/general')
+      expect(screen.getByTestId('pending')).toHaveTextContent('none')
+      // Re-armed where it landed: Back from here would leave Settings, so it is held.
+      await waitFor(() => expect(onSentinel()).toBe(true))
+
+      const out = popped()
+      window.history.back()
+      await act(() => out)
+      await waitFor(() => expect(screen.getByTestId('pending')).toHaveTextContent('Symbol(back)'))
+      expect(screen.getByTestId('where')).toHaveTextContent('/settings/general')
+    })
+  })
+
+  it('without options, a link to another path is still held', async () => {
+    function Plain() {
+      const guard = useLeaveGuard(true)
+      return (
+        <>
+          <Link to="/settings/library">Library</Link>
+          <p data-testid="pending">{guard.pending === null ? 'none' : String(guard.pending)}</p>
+        </>
+      )
+    }
+    window.history.replaceState(null, '', '/settings/general')
+    render(
+      <BrowserRouter>
+        <Plain />
+      </BrowserRouter>,
+    )
+    await userEvent.setup().click(screen.getByRole('link', { name: 'Library' }))
+    expect(screen.getByTestId('pending')).toHaveTextContent('/settings/library')
   })
 })

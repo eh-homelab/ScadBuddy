@@ -1,9 +1,10 @@
 import { useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
-import type { McpAuthMode, McpToken, McpTokenTier, MintedMcpToken } from '../api/mcpTokens'
+import type { McpToken, McpTokenTier, MintedMcpToken } from '../api/mcpTokens'
 import { copyText, selectContents } from '../lib/clipboard'
 import { timeAgo } from '../lib/format'
+import { useMcpAuthVersion } from '../lib/mcpAuthChanges'
 import { useAsync } from '../lib/useAsync'
 import { McpConnectSnippet } from './McpConnectSnippet'
 import {
@@ -131,17 +132,16 @@ function TokenRow({ token, onRevoke }: { token: McpToken; onRevoke: (token: McpT
 }
 
 interface Props {
-  /**
-   * The mode just saved in "MCP authentication" (McpAuthSection), which is newer than
-   * the one this list was loaded with.
-   */
-  authMode?: McpAuthMode | undefined
   /** SCADBUDDY_PUBLIC_URL as Settings has it, for the connect snippet (#1910); this page's origin when unset. */
   publicUrl?: string | null | undefined
 }
 
-export function McpTokensSection({ authMode: savedMode, publicUrl }: Props = {}) {
+export function McpTokensSection({ publicUrl }: Props = {}) {
   const listState = useAsync(() => api.listMcpTokens(), [])
+  // The mode as "MCP authentication" last saved it, wherever on the page that is (#1921):
+  // newer than the one this list was loaded with.
+  const authVersion = useMcpAuthVersion()
+  const auth = useAsync(() => api.getMcpAuth(), [authVersion])
   const [name, setName] = useState('')
   const [tier, setTier] = useState<McpTokenTier>('read')
   const [expiry, setExpiry] = useState('90')
@@ -156,7 +156,7 @@ export function McpTokensSection({ authMode: savedMode, publicUrl }: Props = {})
   const tokenRef = useRef<HTMLElement>(null)
 
   const list = listState.data
-  const authMode = savedMode ?? list?.auth_mode ?? null
+  const authMode = auth.data?.mode ?? list?.auth_mode ?? null
 
   async function create(event: FormEvent) {
     event.preventDefault()

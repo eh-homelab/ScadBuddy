@@ -151,7 +151,7 @@ export function FilamentsEditor() {
 
   return (
     <section className="flex flex-col gap-2" aria-label="Filaments">
-      <h3 className="text-sm font-medium">Filaments</h3>
+      <h4 className="text-sm font-medium">Filaments</h4>
       <p className="text-xs text-muted-foreground">
         What a kilogram of each filament costs, in {book.data?.currency ?? 'the orders currency'}. A slice quote prices each colour at the filament it names; archiving one hides it from new quotes.
       </p>
