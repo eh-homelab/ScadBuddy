@@ -16,7 +16,7 @@ import { expect, test, type FrameLocator, type Page } from '@playwright/test'
  *                         (pairings and MCP tokens are in Postgres; no credential or key
  *                         file is needed, since no model runs). Unset, this file skips.
  *
- * For example: `docker run -d -e POSTGRES_PASSWORD=postgres -p 55433:5432 postgres:17`,
+ * For example: `docker run -d -e POSTGRES_PASSWORD=postgres -p 55433:5432 postgres:18`,
  * then in agent/ `pnpm build && SCADBUDDY_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:55433/postgres
  * SCADBUDDY_BACKEND_URL=http://127.0.0.1:9 node --import ./dist/telemetry.js dist/main.js`, and here
  * `E2E_AGENT_BRIDGE_URL=http://127.0.0.1:8081 pnpm exec playwright test agent-link.real`.
