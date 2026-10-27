@@ -221,8 +221,14 @@ class _Renders:
         inputs: Mapping[str, Any] | None = None,
         whole_inputs: bool = False,
     ) -> Job:
+        # The quote reads the done job's outputs only, so a finished one will do (#4870).
         return await self.core.render.submit(
-            slug, params, model_version=model_version, inputs=inputs, whole_inputs=whole_inputs
+            slug,
+            params,
+            model_version=model_version,
+            inputs=inputs,
+            whole_inputs=whole_inputs,
+            reuse_finished=True,
         )
 
     def read(self, job_id: str) -> Job:

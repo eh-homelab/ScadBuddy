@@ -219,10 +219,14 @@ class RenderService:
         whole_inputs: bool = False,
         request_id: str | None = None,
         accept_within: timedelta | None = None,
+        reuse_finished: bool = False,
     ) -> Job:
         """Start the job's execution, or join the open one rendering the same content,
-        and answer the row its first activity wrote; or answer the finished job of the
-        same content whose result is still held (`JobProjection.reuse_done`).
+        and answer the row its first activity wrote. With ``reuse_finished``, a finished
+        job of the same content whose result is still held answers instead
+        (`JobProjection.reuse_done`, #4870): for a caller that needs only the job's
+        answer. One whose work follows the run (a backfill attaches on the settling
+        event of the job it recorded) leaves it False and gets a run.
         ``whole_inputs``: a pipeline template's job, keyed on all of its inputs (§3.4).
         ``request_id`` (the request's `Idempotency-Key`) makes a re-sent request the
         same claim, not another: it is the `accepted` Update's id, which Temporal
@@ -243,6 +247,7 @@ class RenderService:
                     whole_inputs=whole_inputs,
                     request_id=request_id,
                     accept_within=accept_within,
+                    reuse_finished=reuse_finished,
                 )
             except (ApiError, QueueFullError) as error:
                 if isinstance(error, ApiError) and error.status >= 500:
@@ -275,6 +280,7 @@ class RenderService:
         whole_inputs: bool = False,
         request_id: str | None = None,
         accept_within: timedelta | None = None,
+        reuse_finished: bool = False,
     ) -> tuple[Job, bool]:
         if self.snapshots is not None:
             # The bambuddy store (spec §6.1): workers read the source from the store,
@@ -318,7 +324,11 @@ class RenderService:
         # finished would run its pipeline again. A done job of the key whose result is
         # still held is the answer, with no row and no run; the key decides, so a newer
         # revision or a changed keyed input is another key and renders.
-        done = await asyncio.to_thread(self.store.reuse_done, start.render_key)
+        done = (
+            await asyncio.to_thread(self.store.reuse_done, start.render_key)
+            if reuse_finished
+            else None
+        )
         if done is not None:
             if previous is not None:
                 # Never raises: a release that fails is a warning, as in `_started`.

@@ -1484,7 +1484,9 @@ async def test_a_submit_after_its_render_finished_is_answered_with_that_job(
             assert first.workflow_id is not None
             handle = client.get_workflow_handle(first.workflow_id)
             await asyncio.wait_for(handle.result(), timeout=30)
-            again = await service.submit(SLUG, {"width": width}, request_id=uuid.uuid4().hex)
+            again = await service.submit(
+                SLUG, {"width": width}, request_id=uuid.uuid4().hex, reuse_finished=True
+            )
             described = await handle.describe()
         await service.aclose()
 
@@ -1492,6 +1494,33 @@ async def test_a_submit_after_its_render_finished_is_answered_with_that_job(
     assert described.run_id == first.workflow_run_id
     assert acts.accepts == 1
     assert _sample(service.metrics, "scadbuddy_render_jobs_coalesced_total", RENDER) == 1
+
+
+async def test_a_submit_that_does_not_ask_for_reuse_starts_a_run(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    """Reuse is the caller's to ask for: one whose work follows the run (an output's
+    backfill attaches on the settling event of the job it recorded) gets a new run and
+    a new job, even with a finished, held job of the key."""
+    width = _w()
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = ProjectingActivities(deps)
+        async with _worker(client, queue, acts):
+            first = await service.submit(SLUG, {"width": width})
+            await _settled(projection, first.id)
+            assert first.workflow_id is not None
+            await asyncio.wait_for(
+                client.get_workflow_handle(first.workflow_id).result(), timeout=30
+            )
+            again = await service.submit(SLUG, {"width": width})
+            done = await _settled(projection, again.id)
+        await service.aclose()
+
+    assert again.id != first.id and done.state == "done", done.error
+    assert again.workflow_run_id != first.workflow_run_id
+    assert acts.accepts == 2
 
 
 async def test_a_finished_job_whose_result_is_no_longer_held_renders_again(
@@ -1507,7 +1536,7 @@ async def test_a_finished_job_whose_result_is_no_longer_held_renders_again(
             first = await service.submit(SLUG, {"width": width})
             await _settled(projection, first.id)
             await asyncio.to_thread(_drop_refs, projection, first.id)
-            again = await service.submit(SLUG, {"width": width})
+            again = await service.submit(SLUG, {"width": width}, reuse_finished=True)
             done = await _settled(projection, again.id)
         await service.aclose()
 
@@ -1525,7 +1554,7 @@ async def test_a_failed_job_is_never_reused(
         async with _worker(client, queue, ProjectingActivities(deps, fail_main=True)):
             first = await service.submit(SLUG, {"width": width})
             assert (await _settled(projection, first.id)).state == "failed"
-            again = await service.submit(SLUG, {"width": width})
+            again = await service.submit(SLUG, {"width": width}, reuse_finished=True)
             await _settled(projection, again.id)
         await service.aclose()
 
@@ -1547,7 +1576,7 @@ async def test_a_reused_job_is_kept_by_the_prune_for_another_ttl(
             first = await service.submit(SLUG, {"width": width})
             await _settled(projection, first.id)
             await asyncio.to_thread(_finished_ago, projection, first.id, timedelta(days=2))
-            again = await service.submit(SLUG, {"width": width})
+            again = await service.submit(SLUG, {"width": width}, reuse_finished=True)
             await service.prune()
         await service.aclose()
 
@@ -1583,7 +1612,9 @@ async def test_a_reuse_still_releases_the_render_it_supersedes(
             await _settled(projection, first.id)
             gate.clear()
             moved = await service.submit(SLUG, {"width": _w()})
-            back = await service.submit(SLUG, a, supersedes=moved.id, request_id=uuid.uuid4().hex)
+            back = await service.submit(
+                SLUG, a, supersedes=moved.id, request_id=uuid.uuid4().hex, reuse_finished=True
+            )
             dropped = await _settled(projection, moved.id)
             gate.set()
         await service.aclose()
