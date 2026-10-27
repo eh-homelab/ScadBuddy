@@ -240,7 +240,7 @@ async function decideLive(
 ): Promise<ToolDecision> {
   let access: Awaited<ReturnType<LiveAccess>>
   try {
-    access = live ? await within(live.access(toolName), GUARD_DEADLINE_MS) : undefined
+    access = live ? await within(live.access(toolName, input), GUARD_DEADLINE_MS) : undefined
   } catch {
     const tier = tierOf(toolName, input) ?? 'outward'
     return { decision: 'deny', tier, reason: `${toolName} is refused: its Settings → Plugins entry cannot be read` }
@@ -251,6 +251,7 @@ async function decideLive(
   }
   const resolve: TierResolver = access === undefined ? tierOf : () => access
   const decision = decide(toolName, resolve, input, await judgeInput(guard, toolName, input))
+  // A deny is recorded too, harmlessly: a denied call never reaches the server that reads it.
   if (toolUseId !== undefined) live?.ledger?.record(toolUseId, decision.tier)
   return decision
 }

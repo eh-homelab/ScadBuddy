@@ -705,7 +705,7 @@ export type SessionManagerDeps = {
    * Tool access (#2171, ai_access): the http_request and own-plugin switches, and http_request's
    * tier, per turn; with it, the seam also reads each call's access (access/live.ts). Defaults without it.
    */
-  access?: Pick<AccessResolver, 'enabled' | 'entry' | 'item'>
+  access?: Pick<AccessResolver, 'enabled' | 'entry' | 'item' | 'switchedItem'>
   /** The registry tools the in-process server offers (tools/harness.ts), whose access the seam reads per call. */
   tools?: readonly Tool[]
   tierOf?: TierResolver

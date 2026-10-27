@@ -54,6 +54,17 @@ export class AccessResolver {
     return { enabled: sourceEnabled(source, rows), access: row && isToolAccess(row.access) ? row.access : undefined }
   }
 
+  /**
+   * One item's access with its source's switch, in one read: `off` when the source is
+   * switched off as a whole, else as `item`.
+   */
+  async switchedItem(source: string, item: string, declared: RiskTier): Promise<ToolAccess> {
+    if (!this.reader) return declared
+    const rows = await this.reader.rows([source])
+    if (!sourceEnabled(source, rows)) return 'off'
+    return toolAccess(declared, rows.find((r) => r.source === source && r.item === item), isRegistrySource(source))
+  }
+
   /** One item's access: its row, else `declared`. */
   async item(source: string, item: string, declared: RiskTier): Promise<ToolAccess> {
     if (!this.reader) return declared

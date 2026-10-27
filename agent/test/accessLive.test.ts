@@ -5,11 +5,11 @@ import type { HookInput } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { liveAccess } from '../src/access/live.js'
-import { type AccessRow, BUILTIN_SOURCES, packageServerSource, registrySource, remoteSource } from '../src/access/model.js'
+import { type AccessRow, BUILTIN_SOURCES, packageServerSource, registrySource, remoteSource, SOURCE_ITEM } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import type { AccessReader } from '../src/access/store.js'
 import { createBackendClient } from '../src/api/backend.js'
-import { HTTP_TOOL, HTTP_TOOL_NAME } from '../src/harness/httpRequest.js'
+import { HTTP_TOOL, HTTP_TOOL_NAME, httpAccessTierOf } from '../src/harness/httpRequest.js'
 import type { ApprovalGate } from '../src/harness/permissions.js'
 import { buildHarnessOptions, type HarnessRun } from '../src/harness/run.js'
 import { SeamLedger } from '../src/harness/seamLedger.js'
@@ -62,7 +62,8 @@ async function turnOver(reader: AccessReader, run: Partial<HarnessRun> = {}, too
     live: { access: liveAccess(new AccessResolver(reader, tools), { tools, remote: ['hs'], packageServers: [] }), ledger },
     ...run,
   })
-  const ask = (name: string, toolUseID = 't') => options.canUseTool!(name, {}, { signal, toolUseID, requestId: 'r' })
+  const ask = (name: string, toolUseID = 't', input: Record<string, unknown> = {}) =>
+    options.canUseTool!(name, input, { signal, toolUseID, requestId: 'r' })
   const hook = (name: string, toolUseId = 'toolu_1') =>
     options.hooks!.PreToolUse![0]!.hooks[0]!(
       { hook_event_name: 'PreToolUse', tool_name: name, tool_input: {}, tool_use_id: toolUseId, session_id: 's', transcript_path: '/dev/null', cwd: '/tmp' } as HookInput,
@@ -81,6 +82,9 @@ async function listVia(server: McpServer) {
 }
 
 const row = (source: string, item: string, access: string): AccessRow => ({ source, item, access, updated_by: BY })
+/** A remote plugin a turn offers is switched on. */
+const on = (source: string): AccessRow => row(source, SOURCE_ITEM, 'on')
+const browserTool = ALL_TOOLS.find((t) => t.name.startsWith('browser_') && bare(t))!
 
 describe('the classic seam reads access per call', () => {
   it('a tier lowered mid-turn stops parking on the next call', async () => {
@@ -139,13 +143,44 @@ describe('the classic seam reads access per call', () => {
   })
 
   it('a remote tool lowered mid-turn stops parking', async () => {
-    const { access } = memoryAccess()
+    const { access } = memoryAccess([on(remoteSource('hs'))])
     const { ask } = await turnOver(access, {
       remotePlugins: [{ name: 'hs', url: 'http://127.0.0.1:1/p/token', toolTiers: {}, disabledTools: [] }],
     })
     expect(await ask('mcp__hs__recall')).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/approval/) })
     await access.setItem(remoteSource('hs'), 'recall', 'read')
     expect(await ask('mcp__hs__recall')).toMatchObject({ behavior: 'allow' })
+  })
+
+  it('a remote plugin switched off mid-turn is refused at the seam', async () => {
+    const { access } = memoryAccess([on(remoteSource('hs')), row(remoteSource('hs'), 'recall', 'read')])
+    const { ask, hook } = await turnOver(access, {
+      approvalGate: approveAll,
+      remotePlugins: [{ name: 'hs', url: 'http://127.0.0.1:1/p/token', toolTiers: { recall: 'read' }, disabledTools: [] }],
+    })
+    expect(await ask('mcp__hs__recall')).toMatchObject({ behavior: 'allow' })
+    await access.setEnabled(remoteSource('hs'), false)
+    expect(await ask('mcp__hs__recall')).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/disabled in Settings/) })
+    expect(await hook('mcp__hs__recall')).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
+  })
+
+  it('a browser tool is refused at the seam once builtin:browser is switched off mid-turn', async () => {
+    const { access } = memoryAccess()
+    const { ask } = await turnOver(access, { approvalGate: approveAll })
+    expect(await ask(OWN(browserTool.name))).not.toMatchObject({ message: expect.stringMatching(/disabled in Settings/) })
+    await access.setEnabled(BUILTIN_SOURCES.browser, false)
+    expect(await ask(OWN(browserTool.name))).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/disabled in Settings/) })
+  })
+
+  it('an http_request item reset mid-turn parks a POST again', async () => {
+    const { access } = memoryAccess([row(BUILTIN_SOURCES.http, HTTP_TOOL, 'read')])
+    // The turn read http_request's item at its start: `read`, whatever the method.
+    const { ask } = await turnOver(access, { tierOf: httpAccessTierOf('read') })
+    const post = { method: 'POST', url: 'https://example.com/' }
+    expect(await ask(HTTP_TOOL_NAME, 't', post)).toMatchObject({ behavior: 'allow' })
+    await access.resetItem(BUILTIN_SOURCES.http, HTTP_TOOL)
+    expect(await ask(HTTP_TOOL_NAME, 't', post)).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/approval/) })
+    expect(await ask(HTTP_TOOL_NAME, 't', { method: 'GET', url: 'https://example.com/' })).toMatchObject({ behavior: 'allow' })
   })
 
   it('the seam fails closed when access cannot be read', async () => {
@@ -183,6 +218,7 @@ describe('the classic seam reads access per call', () => {
 describe('liveAccess', () => {
   it("reads each call from its own source, and leaves what ai_access does not cover to the turn", async () => {
     const { access } = memoryAccess([
+      on(remoteSource('hs')),
       row(packageServerSource('pkg', 'srv'), 'find', 'read'),
       row(BUILTIN_SOURCES.http, HTTP_TOOL, 'write'),
     ])
@@ -198,7 +234,12 @@ describe('liveAccess', () => {
     await access.setEnabled(BUILTIN_SOURCES.http, false)
     expect(await read(HTTP_TOOL_NAME)).toBe('off')
     await access.forget(BUILTIN_SOURCES.http)
-    expect(await read(HTTP_TOOL_NAME)).toBeUndefined()
+    expect(await read(HTTP_TOOL_NAME, { method: 'DELETE' })).toBe('outward')
+    expect(await read(HTTP_TOOL_NAME, { method: 'HEAD' })).toBe('read')
+    // A package server has no switch here yet (#4757): its tools answer with no '*' row.
+    expect(await read('mcp__plugin_pkg_srv__find')).toBe('read')
+    await access.setEnabled(remoteSource('hs'), false)
+    expect(await read('mcp__hs__recall')).toBe('off')
     for (const name of ['Skill', 'Agent', 'Bash', OWN(outwardTool.name), 'mcp__other__x']) expect(await read(name)).toBeUndefined()
   })
 })
@@ -208,7 +249,7 @@ describe('a classic turn (TurnRunner)', () => {
     // The turn's own tiers say read; ai_access says off, and the seam reads that.
     const { runner, session, principal, gateCalls } = await turnRunnerForTest({
       pluginToolTiers: { recall: 'read' },
-      access: [row(remoteSource('hindsight'), 'recall', 'off')],
+      access: [on(remoteSource('hindsight')), row(remoteSource('hindsight'), 'recall', 'off')],
     })
     const turn = await runner.assemble(session, principal)
     turn.release()
