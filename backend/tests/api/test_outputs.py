@@ -483,41 +483,6 @@ def test_a_timeout_that_lands_as_the_draw_ends_serves_the_drawing(
     assert calls == [created["id"]]
 
 
-def test_a_read_queued_behind_a_draw_past_its_budget_answers_503_in_its_own(
-    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _drawing_thumbnails(client)
-    first, second = (
-        client.post(
-            f"/api/v1/models/{model}/outputs",
-            json={"job_id": _finished_job(client, model, width)},
-            headers=press(),
-        ).json()["id"]
-        for width in (12, 13)
-    )
-    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    state.config = dataclasses.replace(state.config, render_timeout=0.2)
-    store: OutputStore = state.outputs
-    # One slot, held by the first output's draw past its budget.
-    store.thumbnail_draws = asyncio.Semaphore(1)
-    release = threading.Event()
-
-    def stuck(*_: Any) -> bytes | None:
-        release.wait(30)
-        return None
-
-    calls = _counting_draws(monkeypatch, stuck)
-    assert client.get(f"/api/v1/outputs/{first}/thumbnail").status_code == 503
-    started = time.monotonic()
-    assert client.get(f"/api/v1/outputs/{second}/thumbnail").status_code == 503
-    assert time.monotonic() - started < 10
-    # It never drew, so it is not held off: drawable again once a slot is free.
-    assert calls == [first]
-    release.set()
-    _until(lambda: store.draws_running == 0)
-    assert store.drawable_thumbnail(second) is True
-
-
 def test_a_read_queued_behind_a_failed_draw_does_not_draw_again(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

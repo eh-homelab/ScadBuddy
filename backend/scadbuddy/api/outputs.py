@@ -1113,15 +1113,10 @@ async def _draw_thumbnail(
     if not await asyncio.to_thread(outputs.drawable_thumbnail, output_id):
         raise missing
     slots = outputs.thumbnail_draws
-    busy = ApiError(
-        status.HTTP_503_SERVICE_UNAVAILABLE,
-        f"drawing the thumbnail took longer than {config.render_timeout:g}s",
-    )
-    try:
-        # A read queued behind draws past their budget answers as theirs did.
-        await asyncio.wait_for(slots.acquire(), timeout=config.render_timeout)
-    except TimeoutError:
-        raise busy from None
+    # No deadline here: a read queued behind a draw past its budget waits for a slot
+    # and then answers with the image. A 503 now would start no draw, and so nothing
+    # would announce the thumbnail to the page that got it.
+    await slots.acquire()
     try:
         # Another read drew it, or its draw came to nothing, while this one waited.
         drawn_meanwhile, drawable = await asyncio.to_thread(
@@ -1168,7 +1163,10 @@ async def _draw_thumbnail(
             return
         gave_up = True
         outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
-        raise busy from None
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"drawing the thumbnail took longer than {config.render_timeout:g}s",
+        ) from None
     except asyncio.CancelledError:
         # The request went away; the draw goes on.
         gave_up = True
