@@ -1147,6 +1147,7 @@ async def _draw_thumbnail(
                 extra={"id": output_id},
             )
             outputs.remember_undrawable(output_id, retry_after=RETRY_DRAW_AFTER)
+        # True also when an upload landed first and stayed: either way it has one now.
         elif task.result() and gave_up:
             emit(events, OutputEvent(kind="output.updated", output_id=output_id, slug=meta.slug))
 
