@@ -571,6 +571,8 @@ function OutputRow({
   const [thumbnailBroken, setThumbnailBroken] = useState(false)
   // Until the list is read again (#4811): each read is a new record, so a later upload
   // or a draw that outlived its read is tried again, though `has_thumbnail` was true all along.
+  // This relies on the parent passing `useAsync`'s records as they are: a copy made per
+  // render would reset the flag on every render.
   const [thumbnailOf, setThumbnailOf] = useState(output)
   if (thumbnailOf !== output) {
     setThumbnailOf(output)
