@@ -37,6 +37,6 @@ describe('Assistant sections', () => {
       </>,
       { route: '/settings/assistant' },
     )
-    expect(await screen.findByText('Model', { selector: 'h2 button' })).toBeInTheDocument()
+    expect(await screen.findByText('Model', { selector: 'h3 button' })).toBeInTheDocument()
   })
 })

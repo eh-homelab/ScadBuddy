@@ -92,6 +92,8 @@ describe('SettingsPage, every area at once (#2171)', () => {
     const area = screen.getByRole('heading', { level: 2, name: 'General' })
     expect(area).toBe(document.querySelector('[data-area="general"]')?.firstElementChild)
     expect(screen.queryByRole('heading', { level: 2, name: 'Printing' })).toBeNull()
+    // Each section's heading sits under the area's.
+    for (const { id } of SECTION_REGISTRY) expect(document.getElementById(`${id}-heading`)?.tagName, id).toBe('H3')
   })
 })
 
@@ -634,7 +636,7 @@ describe('SettingsPage folded sections (#2173)', () => {
     renderPage(<SettingsPage />, { route: '/settings/library' })
     await seeded()
     expect(fold('Rendering')).toHaveAttribute('aria-expanded', 'false')
-    expect(region('Connection').querySelector('h2 button')).toHaveAttribute('aria-expanded', 'true')
+    expect(region('Connection').querySelector('h3 button')).toHaveAttribute('aria-expanded', 'true')
   })
 
   it('keeps a folded section’s edits, its Unsaved badge and its Save bar', async () => {

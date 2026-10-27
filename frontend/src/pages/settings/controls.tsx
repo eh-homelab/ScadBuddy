@@ -365,7 +365,8 @@ export function Section({
         <Card className="gap-0 py-0">
         <div className={cn('flex min-h-11 items-center gap-2 px-4 py-1.5', open && 'border-b')}>
           {/* #2346 — focusable from script only: a section link moves focus here. */}
-          <h2 id={headingId} tabIndex={-1} className="font-heading text-sm font-medium outline-none">
+          {/* h3: under the area's own heading (SettingsShell). */}
+          <h3 id={headingId} tabIndex={-1} className="font-heading text-sm font-medium outline-none">
             <CollapsibleTrigger aria-controls={`${id}-body`} className="flex min-h-6 items-center gap-1.5 text-left">
               <ChevronRightIcon
                 aria-hidden="true"
@@ -373,7 +374,7 @@ export function Section({
               />
               {title}
             </CollapsibleTrigger>
-          </h2>
+          </h3>
           {dirty && (
             <Badge className="bg-primary/15 text-primary" data-testid={`${id}-unsaved`}>
               Unsaved
