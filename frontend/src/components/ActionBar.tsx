@@ -494,6 +494,8 @@ export function ActionBar({
             if (!live.current.settled) return undefined
             if (!requested) {
               requested = true
+              // Safe in the poll: this runs in the handler, outside React's render, and
+              // the latest `request` only sets the hook's state.
               live.current.requestProjects()
             }
             return live.current.listed || live.current.projectsError ? true : undefined

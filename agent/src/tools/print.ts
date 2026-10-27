@@ -1099,6 +1099,9 @@ export const printTools: Tool[] = [
       '`result` (warnings, queue item ids; over the LAN, `path: "native"` and a `follow` handle instead), or ' +
       'hands back the still-running run to poll with get_print_run. Then follow the print with ' +
       'get_print_progress. ' +
+      "A `printer` that links a Bambuddy printer is checked against the print's choices (as get_print_choices " +
+      'reads them) before the approval and again before the run, to learn whether it prints over the LAN: ' +
+      'if that read fails, the call fails with it and nothing is approved or sent. ' +
       FOLLOW_NAMES,
     input: PRINT_OUTPUT_INPUT,
     risk: 'outward',

@@ -55,6 +55,10 @@ on:
       - backend/scadbuddy/workflows/print*.py
       - backend/scadbuddy/workflows/slicing*.py
       - backend/tests/support/fake_lan.py
+      - backend/tests/conftest.py
+      - backend/tests/api/conftest.py
+      - backend/pyproject.toml
+      - backend/uv.lock
       - backend/tests/test_print_native_workflow.py
       - backend/tests/api/test_hot_path_native.py
 
