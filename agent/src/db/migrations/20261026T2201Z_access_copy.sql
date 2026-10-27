@@ -106,6 +106,9 @@ BEGIN
     RETURN NULL;
   END IF;
 
+  -- The sibling key is read as it stands now. Safe: the new code's dual writes hold one
+  -- advisory lock (access/store.ts), and the old code writes one key per INSERT statement
+  -- (SettingsStore.set and setMany), so this row's sibling is as earlier statements left it.
   IF NEW.key = 'builtin_tools.scadbuddy' THEN
     old_tools := old_value;
     new_tools := NEW.value;
