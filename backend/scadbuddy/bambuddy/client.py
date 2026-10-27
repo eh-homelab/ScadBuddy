@@ -499,7 +499,8 @@ class BambuddyClient:
                 operation="auth.status",
                 what="read whether Bambuddy's auth is on",
             )
-        except ApiError:
+        except ApiError as error:
+            logger.debug("could not read Bambuddy's auth status", extra={"type": error.type})
             return None
         body = response.json()
         enabled = body.get("auth_enabled") if isinstance(body, dict) else None

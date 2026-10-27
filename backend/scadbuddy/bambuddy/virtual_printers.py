@@ -269,13 +269,15 @@ def virtual_printer_kinds(
             assert printers is not None and printers.kek is not None
             # The run derives the context, never reads it from the request: an update's
             # seal opens only for this VP (its AAD), a create's only for its own key.
-            context = seal_context(vp_id=vp_id, idempotency_key=str(request.get(KEY_FIELD, "")))
+            # A sealed code always comes with its key (`access_code_request`): a request
+            # without one fails here rather than binding to an empty key.
+            context = seal_context(vp_id=vp_id, idempotency_key=str(request[KEY_FIELD]))
             try:
                 fields["access_code"] = open_access_code(printers.kek, sealed, context)
             except SealError:
                 raise ApiError(
                     status.HTTP_503_SERVICE_UNAVAILABLE,
-                    "the access code was sealed under another key; send it again",
+                    "the access code was sealed under another key; send it again as a new request",
                 ) from None
         return fields
 
