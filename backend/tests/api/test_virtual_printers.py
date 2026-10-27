@@ -27,6 +27,7 @@ from scadbuddy.bambuddy.virtual_printers import (
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.secrets import SealError, kek_from_base64
 from scadbuddy.printers.component import PRINTERS, Printers
+from scadbuddy.printers.store import PrinterStore
 from tests.api.test_send import API, configure
 from tests.bambuddy.conftest import recording
 from tests.printers.conftest import KEK
@@ -118,8 +119,9 @@ def test_a_code_sealed_before_a_kek_rotation_opens_under_the_previous_key(
         "fields": {"name": "X"},
         **access_code_request(KEK, CODE, vp_id=None, idempotency_key="k-rotate"),
     }
-    store = registry(client).store
-    store.kek, store.previous_kek = ROTATED, KEK
+    # A store of its own (#4921): the app's shared one keeps its keys for other tests.
+    shared = registry(client).store
+    store = PrinterStore(shared.pool, ROTATED, previous_kek=KEK)
     state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     kinds = {
         kind.name: kind
@@ -128,10 +130,18 @@ def test_a_code_sealed_before_a_kek_rotation_opens_under_the_previous_key(
     asyncio.run(kinds["bambuddy_vp_create"].run(request, {}))
     assert json.loads(created.calls.last.request.read())["access_code"] == CODE
 
-    store.previous_kek = None  # without the previous key, the same seal does not open
+    # Without the previous key, the same seal does not open.
+    rotated_only = PrinterStore(shared.pool, ROTATED)
+    kinds = {
+        kind.name: kind
+        for kind in virtual_printer_kinds(
+            settings_store=state.settings_store, printers=rotated_only
+        )
+    }
     with pytest.raises(ApiError) as refused:
         asyncio.run(kinds["bambuddy_vp_create"].run(request, {}))
     assert refused.value.status == 503
+    assert shared.kek is not ROTATED and shared.previous_kek is None
 
 
 def test_open_access_code_tries_the_previous_key_after_the_current_one() -> None:

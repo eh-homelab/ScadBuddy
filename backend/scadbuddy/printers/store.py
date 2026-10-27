@@ -426,7 +426,7 @@ class PrinterStore:
         with self.pool.connection() as conn:
             conn.execute(
                 "UPDATE printers SET bambuddy_active = (bambuddy_printer_id = ANY(%s)),"
-                " updated_at = now() WHERE bambuddy_printer_id IS NOT NULL"
+                " updated_at = now() WHERE kind = 'physical' AND bambuddy_printer_id IS NOT NULL"
                 " AND bambuddy_active IS DISTINCT FROM (bambuddy_printer_id = ANY(%s))",
                 (ids, ids),
             )
@@ -434,12 +434,14 @@ class PrinterStore:
     def mark_virtual_listed(self, listed: Iterable[int]) -> tuple[str, ...]:
         """Record which virtual printers Bambuddy lists now on their rows' ``bambuddy_active``
         (#4889): a VP's row is kept when Bambuddy drops the VP, marked no longer listed.
-        Writes only the rows that change, and returns their ids."""
+        Writes only the rows that change, and returns their ids. Each of this and
+        `mark_bambuddy_active` writes ``bambuddy_active`` on its own kind of row only
+        (#4921), so neither can overwrite the other's whatever links a row holds."""
         ids = sorted(set(listed))
         with self.pool.connection() as conn:
             changed = conn.execute(
                 "UPDATE printers SET bambuddy_active = (bambuddy_vp_id = ANY(%s)),"
-                " updated_at = now() WHERE bambuddy_vp_id IS NOT NULL"
+                " updated_at = now() WHERE kind = 'bambuddy_virtual' AND bambuddy_vp_id IS NOT NULL"
                 " AND bambuddy_active IS DISTINCT FROM (bambuddy_vp_id = ANY(%s))"
                 " RETURNING id",
                 (ids, ids),
