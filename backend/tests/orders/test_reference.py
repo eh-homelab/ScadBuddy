@@ -120,11 +120,11 @@ async def test_reference_from_an_output_copies_commit_libraries_and_colours(
     resolved = await library.resolve(slug=None, commit=None, inputs=None, output_id="out1")
     reference = resolved.reference  # type: ignore[attr-defined]
     assert (reference.slug, reference.commit) == ("demo", commit)
-    # #4774: one rule for every item: its inputs at the commit's defaults where they
-    # omit one (the output recorded only `width`), which is what its key hashes.
-    full: dict[str, ParamValue] = {"width": 12, "label": "hi"}
-    assert reference.inputs == {"params": full, "v": 1}
-    assert reference.render_key == render_key("demo", full, commit)
+    # #4774: an item made from an output keeps the inputs it recorded (only `width`, as
+    # outputs saved before renders filled defaults do), and its key hashes those, so
+    # `quote.py` `output_matches` still finds that output.
+    assert reference.inputs == {"params": {"width": 12}, "v": 1}
+    assert reference.render_key == render_key("demo", {"width": 12}, commit)
     assert [lib.name for lib in reference.libraries] == ["BOSL2"]
     assert resolved.colours == [  # type: ignore[attr-defined]
         ColourSlot(slot=0, colour="#FF0000"),
@@ -159,7 +159,8 @@ async def test_a_commit_or_inputs_beside_an_output_must_be_the_outputs(
     # `label` agrees, and another `label` does not.
     full = {"params": {"width": 12, "label": "hi"}, "v": 1}
     filled = await library.resolve(slug=None, commit=None, inputs=full, output_id="out1")
-    assert filled.reference.inputs == full  # type: ignore[attr-defined]
+    # The output's own, as it recorded them.
+    assert filled.reference.inputs == {"params": {"width": 12}, "v": 1}  # type: ignore[attr-defined]
     with pytest.raises(ReferenceError) as refused:
         await library.resolve(
             slug=None,

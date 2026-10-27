@@ -94,6 +94,8 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         caller that saves with the params it sent (an agent's ``save_output``) names the
         same render. Otherwise, or with no schema to read, ``refusal`` as before."""
         given = normalize_inputs(sent, None)
+        # The slow path: only a save whose params disagree with the job's gets here, and
+        # the read can run openscad when the revision's schema is not cached yet.
         try:
             _, schema = await schema_of(
                 job.slug,

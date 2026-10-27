@@ -30,9 +30,11 @@ from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.split import ColourPart
+from tests.api.conftest import wait_for_job
 from tests.api.test_events import Recorded
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
+from tests.support.operations import press
 from tests.test_bambu3mf import add_plate
 
 API = f"{BASE}/api/v1"
@@ -138,6 +140,19 @@ def test_a_configuration_is_judged_on_its_newest_render(client: TestClient, mode
     geometry = next(row for row in report["inputs"] if row["name"] == "geometry")
     assert geometry["reason"] == "this configuration has not been rendered yet"
     assert "print" not in [scope["kind"] for scope in report["scopes"]]
+
+
+def test_an_all_defaults_configuration_finds_its_render(client: TestClient, model: str) -> None:
+    """#4774: a render of the defaults records them whole, so a target that leaves its
+    params out (or sends none) names that output too."""
+    job_id = client.post(f"/api/v1/models/{model}/render", json={}).json()["job_id"]
+    wait_for_job(client, job_id)
+    output_id = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
+    ).json()["id"]
+    for target in ({"slug": model}, {"slug": model, "params": {}}):
+        report = _ok(client.post("/api/v1/analyzers/run", json={"target": target}))
+        assert report["output_id"] == output_id, target
 
 
 @pytest.mark.parametrize(

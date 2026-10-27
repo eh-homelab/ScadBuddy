@@ -84,7 +84,7 @@ from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.hot_path import native_backends
 from scadbuddy.render.read_budget import ReadBudget, budget_of
-from scadbuddy.render.runner import with_defaults
+from scadbuddy.render.runner import OpenSCADError, with_defaults
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 from scadbuddy.spools.component import Spools, SpoolsDep
 from scadbuddy.store.download_cache import DownloadCache
@@ -257,10 +257,25 @@ class ParamsCheck:
 
     async def __call__(self, target: AnalysisTarget) -> CustomizerSchema | None:
         """The live schema the params were checked against, for `_subject`'s match;
-        None when there were none to check."""
-        if target.slug is None or not target.params:
+        None for a target that names no template."""
+        if target.slug is None:
             return None
         require_model_exists(self.catalogue, target.slug)
+        if not target.params:
+            # Nothing to refuse, but an all-defaults target still matches at the
+            # defaults (#4774). With no schema to read, it is matched as sent.
+            try:
+                _, schema = await schema_of(
+                    target.slug,
+                    None,
+                    paths=self.paths,
+                    history=self.history,
+                    config=self.config,
+                    fetcher=self.fetcher,
+                )
+            except (ApiError, OpenSCADError):
+                return None
+            return schema
         _, schema = await schema_of(
             target.slug,
             None,
