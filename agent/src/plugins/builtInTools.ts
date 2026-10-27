@@ -198,14 +198,15 @@ export class BuiltInTools {
     patch: { tool_tiers?: Record<string, string> | undefined; disabled_tools?: readonly string[] | undefined },
     context: AuditContext,
   ): Promise<BuiltInPluginView> {
-    const replaceTools = this.#access?.replaceTools?.bind(this.#access)
-    if (!replaceTools) throw new PluginError('built-in tool settings need the database', 503)
+    const replaceToolsOf = this.#access?.replaceToolsOf?.bind(this.#access)
+    if (!replaceToolsOf) throw new PluginError('built-in tool settings need the database', 503)
     const next = validateOverrides(set, patch, await this.overrides(set))
     // A tool's own tier is not stored; a disabled tool is `off`, whatever its tier.
     const rows = new Map<string, Record<string, ToolAccess>>(REGISTRY_SOURCES.map((source) => [source, {}]))
     for (const [tool, tier] of Object.entries(next.tool_tiers)) rows.get(registrySource(tool))![tool] = tier
     for (const tool of next.disabled_tools) rows.get(registrySource(tool))![tool] = 'off'
-    for (const [source, tools] of rows) await replaceTools(source, tools, context)
+    // Both sources in one transaction; one whose rows do not change is left alone.
+    await replaceToolsOf(Object.fromEntries(rows), context)
     return this.view(set)
   }
 

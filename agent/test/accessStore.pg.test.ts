@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AccessError, AccessStore } from '../src/access/store.js'
+import { BuiltInTools } from '../src/plugins/builtInTools.js'
+import { OWN_PLUGIN_NAME } from '../src/plugins/packages/vet.js'
 import type { Database } from '../src/db.js'
 import type { AuditContext } from '../src/audit/log.js'
 import { MemoryAudit } from './support/memoryAudit.js'
@@ -98,5 +100,43 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
       actor: ctx.actor,
       detail: 'builtin:scadbuddy/get_model = "read"',
     })
+  })
+  it('replaceToolsOf writes every source in one transaction: a failure on the second leaves the first unchanged', async () => {
+    await store.setItem(SCAD, 'get_model', 'outward', ctx)
+    await db.sql.unsafe(`
+      CREATE FUNCTION test_refuse_browser() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'refused for the test'; END $$;
+      CREATE TRIGGER test_refuse_browser BEFORE INSERT ON ai_access
+        FOR EACH ROW WHEN (NEW.source = 'builtin:browser') EXECUTE FUNCTION test_refuse_browser();`)
+    await expect(store.replaceToolsOf({ [SCAD]: { list_models: 'off' }, 'builtin:browser': { browser_click: 'off' } }, ctx)).rejects.toThrow(
+      /refused for the test/,
+    )
+    expect(await store.rows([SCAD, 'builtin:browser'])).toMatchObject([{ source: SCAD, item: 'get_model', access: 'outward' }])
+    expect(audit.entries.at(-1)).toMatchObject({ outcome: 'error' })
+  })
+
+  it('replaceToolsOf skips a source whose rows do not change: no audit row names it', async () => {
+    await store.replaceToolsOf({ [SCAD]: { get_model: 'outward' }, 'builtin:browser': { browser_click: 'off' } }, ctx)
+    expect(audit.entries).toHaveLength(1)
+    await store.replaceToolsOf({ [SCAD]: { get_model: 'outward' }, 'builtin:browser': {} }, ctx)
+    expect(audit.entries).toHaveLength(2)
+    expect(audit.entries[1]!.detail).not.toContain(SCAD)
+    expect(audit.entries[1]!.detail).toContain('builtin:browser')
+    await store.replaceToolsOf({ [SCAD]: { get_model: 'outward' }, 'builtin:browser': {} }, ctx)
+    expect(audit.entries).toHaveLength(2)
+    expect(await store.rows([SCAD, 'builtin:browser'])).toMatchObject([{ source: SCAD, item: 'get_model', access: 'outward' }])
+  })
+
+  it('BuiltInTools.update writes both registry sources in one transaction', async () => {
+    const tools = new BuiltInTools(store)
+    const set = tools.named(OWN_PLUGIN_NAME)!
+    await tools.update(set, { tool_tiers: { get_model: 'outward' } }, ctx)
+    await db.sql.unsafe(`
+      CREATE FUNCTION test_refuse_browser() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'refused for the test'; END $$;
+      CREATE TRIGGER test_refuse_browser BEFORE INSERT ON ai_access
+        FOR EACH ROW WHEN (NEW.source = 'builtin:browser') EXECUTE FUNCTION test_refuse_browser();`)
+    await expect(tools.update(set, { tool_tiers: {}, disabled_tools: ['list_models', 'browser_click'] }, ctx)).rejects.toThrow(/refused for the test/)
+    expect(await store.rows([SCAD, 'builtin:browser'])).toMatchObject([{ source: SCAD, item: 'get_model', access: 'outward' }])
   })
 })

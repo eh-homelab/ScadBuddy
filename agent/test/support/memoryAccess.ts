@@ -36,6 +36,9 @@ export function memoryAccess(initial: AccessRow[] = []): { access: AccessReader 
       drop((r) => !(r.source === source && r.item !== SOURCE_ITEM))
       for (const [item, tier] of Object.entries(tools)) put(source, item, tier, by(context))
     },
+    async replaceToolsOf(bySource, context) {
+      for (const [source, tools] of Object.entries(bySource)) await access.replaceTools(source, tools, context)
+    },
     async forget(source) {
       drop((r) => r.source !== source)
     },
