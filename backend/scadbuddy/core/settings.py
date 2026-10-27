@@ -568,8 +568,9 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             " protects would protect nothing."
         ),
         "secret_key_previous_file": (
-            "The key before a rotation of the one above, so a value sealed under it still"
-            " opens. A key kept in the database would protect nothing."
+            "The key before a rotation of the one above. The backend reads it for virtual"
+            " printers' access codes only, so one sealed before the rotation still opens."
+            " A key kept in the database would protect nothing."
         ),
         "allowed_origins": (
             "Which pages may open the realtime socket and make writes. Like the agent's"
