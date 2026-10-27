@@ -56,7 +56,7 @@ def test_persisting_a_job_writes_the_documented_layout(
     assert body["slug"] == model
     assert body["name"] == "First Try"
     assert body["job_id"] == job_id
-    assert body["params"] == {"width": 12}
+    assert body["params"] == {"width": 12, "label": "hi"}
     assert body["colors"] == ["#FF0000"]
     assert body["has_thumbnail"] is False
     # Reserved for the Bambuddy epic.
@@ -75,7 +75,10 @@ def test_persisting_a_job_writes_the_documented_layout(
         "preview.glb",
         "record.json",
     ]
-    assert json.loads((directory / "params.json").read_text(encoding="utf-8")) == {"width": 12}
+    assert json.loads((directory / "params.json").read_text(encoding="utf-8")) == {
+        "width": 12,
+        "label": "hi",
+    }
 
 
 @pytest.mark.requires_postgres
@@ -327,7 +330,7 @@ def test_every_output_records_its_model_version_and_stamps_the_3mf(
         model=model,
         version=expected,
         output=body["id"],
-        params={"width": 12},
+        params={"width": 12, "label": "hi"},
         edit_url=f"https://scad.test/edit/{body['id']}",
     )
 
@@ -404,8 +407,8 @@ def test_the_edit_target_comes_from_the_record(client: TestClient, model: str) -
         "output_id": created["id"],
         "slug": model,
         "name": "Reagan",
-        "params": {"width": 12},
-        "inputs": {"params": {"width": 12}, "v": 0},
+        "params": {"width": 12, "label": "hi"},
+        "inputs": {"params": {"width": 12, "label": "hi"}, "v": 0},
         "model_version": created["model_version"],
         "source": "record",
         "arranged_from": [],
@@ -430,8 +433,8 @@ def test_the_edit_target_falls_back_to_the_3mf_when_the_record_is_gone(
         "output_id": created["id"],
         "slug": model,
         "name": None,
-        "params": {"width": 12},
-        "inputs": {"params": {"width": 12}, "v": 0},
+        "params": {"width": 12, "label": "hi"},
+        "inputs": {"params": {"width": 12, "label": "hi"}, "v": 0},
         "model_version": created["model_version"],
         "source": "3mf",
         "arranged_from": [],
@@ -654,7 +657,9 @@ def test_an_output_records_the_inputs_it_was_saved_with(client: TestClient, mode
     )
     assert created.status_code == 201, created.text
     output = created.json()
-    assert output["inputs"] == {**sent, "v": 0}
+    # #4774: the job filled the omitted `label`, and a save that leaves it out (an
+    # agent's) still names the job's parameters: the output records them whole.
+    assert output["inputs"] == {"params": {"width": 12, "label": "hi"}, "ui": {"tab": "b"}, "v": 0}
     assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == output["inputs"]
     assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == output["inputs"]
 
@@ -666,6 +671,9 @@ def test_an_output_records_the_inputs_it_was_saved_with(client: TestClient, mode
         # Type as well as value, as the store checks them: 12.0 is not 12, True is not 1.
         ({"width": 12}, {"width": 12.0}),
         ({"width": 1}, {"width": True}),
+        # #4774: the job filled `label` at "hi"; filling the save's own omissions does
+        # not make another `label` agree.
+        ({"width": 12}, {"width": 12, "label": "bye"}),
         # A job that rendered the defaults did not render a width.
         ({}, {"width": 12}),
     ],
@@ -737,7 +745,7 @@ def test_a_corrupt_inputs_file_reads_as_the_params_the_output_rendered(
     ).json()
     inputs_path = paths.output_dir(model, output["id"]) / "inputs.json"
     inputs_path.write_text("{not json", encoding="utf-8")
-    expected = {"params": {"width": 12}, "v": 0}
+    expected = {"params": {"width": 12, "label": "hi"}, "v": 0}
     assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == expected
     assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == expected
 
@@ -747,7 +755,7 @@ def test_an_output_saved_without_inputs_records_the_jobs(client: TestClient, mod
     output = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id}, headers=press()
     ).json()
-    assert output["inputs"] == {"params": {"width": 12}, "ui": {"tab": "a"}, "v": 0}
+    assert output["inputs"] == {"params": {"width": 12, "label": "hi"}, "ui": {"tab": "a"}, "v": 0}
 
 
 def test_an_output_from_before_inputs_reads_as_params_v0(
@@ -759,11 +767,11 @@ def test_an_output_from_before_inputs_reads_as_params_v0(
     ).json()
     (paths.output_dir(model, output["id"]) / "inputs.json").unlink()
     assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"] == {
-        "params": {"width": 12},
+        "params": {"width": 12, "label": "hi"},
         "v": 0,
     }
     assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"] == {
-        "params": {"width": 12},
+        "params": {"width": 12, "label": "hi"},
         "v": 0,
     }
 
@@ -784,11 +792,15 @@ def test_an_output_from_before_inputs_reads_its_params_once_per_request(
         return params(self, output_id)
 
     monkeypatch.setattr(OutputStore, "params", counting)
-    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"]["params"] == {"width": 12}
+    assert client.get(f"/api/v1/outputs/{output['id']}").json()["inputs"]["params"] == {
+        "width": 12,
+        "label": "hi",
+    }
     assert reads == [output["id"]]
     reads.clear()
     assert client.get(f"/api/v1/outputs/{output['id']}/edit").json()["inputs"]["params"] == {
-        "width": 12
+        "width": 12,
+        "label": "hi",
     }
     assert reads == [output["id"]]
 
