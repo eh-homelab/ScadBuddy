@@ -176,7 +176,7 @@ function BrowserApprovalButtons({
           size="sm"
           data-agent-user-only=""
           disabled={busy}
-          onClick={() => void remember(() => api.allowBrowserOrigin(nav.origin), `Saved: ${nav.origin} is on the allow list (Settings → Assistant).`)}
+          onClick={() => void remember(() => api.allowBrowserOrigin(nav.origin), `Saved: ${nav.origin} is on the allow list (Settings → Tools & plugins).`)}
         >
           Always allow {rule}
         </Button>

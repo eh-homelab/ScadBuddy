@@ -551,8 +551,8 @@ Assistant setting. Asked to press one, the assistant is told to ask you instead
 ### Connecting Claude Code or Claude Desktop
 
 Other Claude clients reach ScadBuddy's tools at `https://<your ScadBuddy>/mcp` (plain
-HTTP is refused, except on loopback). They sign in with a token from **Settings →
-Assistant → MCP access tokens** ([operating.md §4.1](ai/operating.md#41-mcp-access-tokens)),
+HTTP is refused, except on loopback). They sign in with a token from **Settings → MCP access →
+Tokens** ([operating.md §4.1](ai/operating.md#41-mcp-access-tokens)),
 or through your identity provider when the operator has turned on **MCP sign-in
 (OIDC)** ([operating.md §6a](ai/operating.md#6a-mcp-sign-in-with-oidc)).
 
@@ -655,7 +655,7 @@ are set ([headless-browser.md](ai/headless-browser.md)).
 
 ### Plugins
 
-**Settings → Assistant → Assistant plugins** adds to what the assistant can do
+**Settings → Tools & plugins → Packages** adds to what the assistant can do
 ([operating.md §9](ai/operating.md#9-plugin-packages-297),
 [security.md](ai/security.md#plugin-packages)). ScadBuddy's own plugin is built in, with
 **Enable**/**Disable**.
