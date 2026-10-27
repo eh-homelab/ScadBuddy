@@ -178,7 +178,7 @@ def _mapped(
     response: httpx.Response, *, scope: Scope, what: str, answer: UpstreamAnswer
 ) -> ApiError:
     code = response.status_code
-    detail = _detail(response, scope)
+    detail = answer.detail  # `_detail`: scrubbed for a settings write
     suffix = f": {detail}" if detail else ""
     # A settings write may carry a secret (a virtual printer's access code, #4747), which
     # Bambuddy's body could echo: its detail is scrubbed and its body never kept.

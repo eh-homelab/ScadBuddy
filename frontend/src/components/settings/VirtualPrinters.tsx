@@ -131,7 +131,7 @@ export function VirtualPrintersPanel({ rows, onChanged }: { rows: PrinterRow[]; 
   return (
     <section aria-label="Bambuddy virtual printers" className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="text-sm font-medium">Bambuddy virtual printers</h3>
+        <h4 className="text-sm font-medium">Bambuddy virtual printers</h4>
         {data && <AuthBadge enabled={data.auth_enabled ?? null} />}
       </div>
       {listed.error ? (
