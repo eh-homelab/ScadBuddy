@@ -129,6 +129,8 @@ describe('the settings agent scope', () => {
       await screen.findByLabelText('Show dimensions in')
       const slow = await bridge.call('set_field', { field: 'display_unit', value: 'in' })
       expect(!slow.ok && slow.error.code).toBe('timeout')
+      // It says the edit stands, so the agent does not set the field again blindly.
+      expect(!slow.ok && slow.error.message).toContain('display_unit was made in its section')
       expect(committed).toHaveBeenCalledWith(expect.any(Function), 'the library settings to open', 10_000)
       // The edit was made in the hidden area before the move, so it stands, and is outlined.
       await waitFor(() => expect(screen.getByLabelText('Show dimensions in')).toHaveValue('in'))

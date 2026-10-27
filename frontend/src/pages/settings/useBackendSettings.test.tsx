@@ -259,6 +259,51 @@ describe('useBackendSettings', () => {
     put.mockRestore()
   })
 
+  it('keeps the newer reset showing until it settles, when an older one settles first (#4847 review)', async () => {
+    const save = api.putSettings.bind(api)
+    const holds: (() => void)[] = []
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      await new Promise<void>((resolve) => holds.push(resolve))
+      return save(body)
+    })
+    let form: ReturnType<typeof useBackendSettings> | undefined
+    function Probe() {
+      const seen = useBackendSettings('diagnostics', ['job_ttl', 'render_timeout'])
+      useEffect(() => {
+        form = seen
+      })
+      return null
+    }
+    renderPage(
+      <Harness>
+        <Probe />
+      </Harness>,
+    )
+    await waitFor(() => expect(form).toBeDefined())
+    let first: Promise<void> | undefined
+    let second: Promise<void> | undefined
+    act(() => {
+      first = form?.reset('job_ttl')
+    })
+    act(() => {
+      second = form?.reset('render_timeout')
+    })
+    await waitFor(() => expect(holds).toHaveLength(2))
+    expect(form?.resetting).toBe('render_timeout')
+
+    await act(async () => {
+      holds[0]?.()
+      await first
+    })
+    expect(form?.resetting).toBe('render_timeout')
+    await act(async () => {
+      holds[1]?.()
+      await second
+    })
+    expect(form?.resetting).toBeNull()
+    put.mockRestore()
+  })
+
   it('refuses a negative number before sending, tied to the field', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = await renderHarness()

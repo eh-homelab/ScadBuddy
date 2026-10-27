@@ -167,6 +167,15 @@ export function SettingsAgentProvider({ sections, children }: { sections: readon
         reveal(home.domId)
         try {
           await goTo(home.section)
+        } catch (cause) {
+          // The edit stands although its area did not open: say so, or the agent retries blindly.
+          if (cause instanceof AgentToolError) {
+            throw new AgentToolError(
+              cause.code,
+              `${cause.message} The edit to ${field} was made in its section's draft, unsaved; do not set it again.`,
+            )
+          }
+          throw cause
         } finally {
           // Once its area shows (or the move gave up), so it can be scrolled into view.
           touchAfterRender(() => document.getElementById(home.domId))

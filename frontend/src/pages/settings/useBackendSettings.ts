@@ -220,7 +220,8 @@ export function useBackendSettings(id: SectionId, fields: FieldsOf, options: Bac
     } catch (cause) {
       setResetError(cause instanceof ApiError ? cause.detail : 'Could not reset the setting.')
     } finally {
-      setResetting(null)
+      // A newer reset of another field may still be in flight: it keeps showing (#4847 review).
+      setResetting((current) => (current === name ? null : current))
     }
   }
 
