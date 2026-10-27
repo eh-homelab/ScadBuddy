@@ -21,6 +21,8 @@ describe("the panel's respond bodies", () => {
     const bodies = {
       approve: decisionBody(true),
       deny: decisionBody(false),
+      // #4813: a sessionless approval's card sends the entry's input hash.
+      hashed: decisionBody(true, 'a'.repeat(64)),
       answers: answerBody([question('Which draft?'), question('Labels?')], ['Approve', 'my own words'], false),
       choice: answerBody([question('Go on?')], ['Approve'], true),
       text: answerBody([question('Go on?')], ['wait for me'], true),
@@ -29,6 +31,7 @@ describe("the panel's respond bodies", () => {
     expect(bodies).toEqual({
       approve: { kind: 'approval', decision: 'approve' },
       deny: { kind: 'approval', decision: 'deny' },
+      hashed: { kind: 'approval', decision: 'approve', input_hash: 'a'.repeat(64) },
       answers: { kind: 'answer', answers: { 'Which draft?': 'Approve', 'Labels?': 'my own words' } },
       choice: { kind: 'answer', choice: 'Approve' },
       text: { kind: 'answer', text: 'wait for me' },

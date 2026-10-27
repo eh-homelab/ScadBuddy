@@ -136,6 +136,8 @@ export interface PendingApproval {
   /** Who prepared it (an MCP token's label), when the agent says. */
   by?: string
   expiresAt?: string
+  /** The call's input hash, sent with the decision so it holds only for the summary shown. */
+  inputHash?: string
 }
 
 /** The badge's own read, and a way to read it again once one is decided; null outside the shell. */
@@ -152,6 +154,7 @@ function unattached(entries: readonly PendingEntry[]): PendingApproval[] {
       summary: entry.summary ?? '',
       ...(entry.requested_by ? { by: entry.requested_by.label } : {}),
       ...(entry.expires_at ? { expiresAt: entry.expires_at } : {}),
+      ...(entry.input_hash ? { inputHash: entry.input_hash } : {}),
     })
   }
   return approvals

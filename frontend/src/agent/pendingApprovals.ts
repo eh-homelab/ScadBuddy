@@ -5,8 +5,8 @@ import type { PendingApproval } from './attention'
 import { decisionBody, respond, RespondError, type RespondOutcome } from './respond'
 
 /** Decides a pending approval through the one respond route (`respond.ts`), as the chat feed's cards do. */
-export const decidePendingApproval = (id: string, approve: boolean): Promise<RespondOutcome> =>
-  traceAction('assistant.respond', { 'scadbuddy.respond_kind': 'approval' }, () => respond(id, decisionBody(approve)))
+export const decidePendingApproval = (a: PendingApproval, approve: boolean): Promise<RespondOutcome> =>
+  traceAction('assistant.respond', { 'scadbuddy.respond_kind': 'approval' }, () => respond(a.id, decisionBody(approve, a.inputHash)))
 
 /** Who prepared it, and with which tool: "print_output, asked by Claude Code". */
 export function preparedBy(a: PendingApproval): string {
@@ -16,7 +16,7 @@ export function preparedBy(a: PendingApproval): string {
 /** Where a toast's Review goes: the page that lists every approval waiting with its whole card. */
 export const APPROVALS_PAGE = '/activity'
 
-/** How long an approval's toast stays when the agent did not say when it expires (`approval_expiry_seconds`'s default). */
+/** The longest an approval's toast stays, and how long when the agent did not say when it expires (`approval_expiry_seconds`'s default). */
 const APPROVAL_TOAST_MS = 10 * 60_000
 
 /** The most approval toasts shown at once; past it, one toast says more wait, and links to them all. */
@@ -35,9 +35,10 @@ const isShown = (toastId: number | undefined) => toastId !== undefined && getToa
  * a person at the screen need not go looking. It offers Review (the Activity page, where the card
  * shows the whole summary) and Deny, never Approve: its detail is clipped, and nobody approves what
  * they could not read in full. Denying runs nothing, so it is safe from a clipped line. It stays
- * until the approval expires ({@link APPROVAL_TOAST_MS} when it does not say), and goes once the
+ * until the approval expires (at most {@link APPROVAL_TOAST_MS}), and goes once the
  * approval no longer waits (decided elsewhere, or expired). Each approval is toasted once per page,
- * and at most {@link MAX_APPROVAL_TOASTS} at once: past that, one toast says more wait.
+ * and at most {@link MAX_APPROVAL_TOASTS} at once: past that, one toast says more wait, and the
+ * rest get their own as places free up.
  */
 export function useApprovalToasts(approvals: readonly PendingApproval[], refresh: () => void): void {
   const seen = useRef(new Set<string>())
@@ -53,15 +54,16 @@ export function useApprovalToasts(approvals: readonly PendingApproval[], refresh
     let overflow = 0
     for (const approval of approvals) {
       if (seen.current.has(approval.id)) continue
-      seen.current.add(approval.id)
+      // Past the cap it waits, unseen, for a place: a decided or dismissed toast frees one.
       if (shown.current.size >= MAX_APPROVAL_TOASTS) {
         overflow += 1
         continue
       }
+      seen.current.add(approval.id)
       const left = approval.expiresAt ? new Date(approval.expiresAt).getTime() - Date.now() : NaN
       const deny = () => {
         shown.current.delete(approval.id)
-        decidePendingApproval(approval.id, false).then(refresh, (err: unknown) => {
+        decidePendingApproval(approval, false).then(refresh, (err: unknown) => {
           refresh()
           toast({ title: notTakenText(err) })
         })
@@ -71,7 +73,8 @@ export function useApprovalToasts(approvals: readonly PendingApproval[], refresh
         toast({
           title: 'Needs your approval',
           detail: approval.summary ? `${preparedBy(approval)}: ${approval.summary}` : preparedBy(approval),
-          ms: Number.isNaN(left) ? APPROVAL_TOAST_MS : Math.max(left, TOAST_MS),
+          // Never past the default window: a far `expires_at` would overflow setTimeout, and Activity lists it anyway.
+          ms: Number.isNaN(left) ? APPROVAL_TOAST_MS : Math.min(Math.max(left, TOAST_MS), APPROVAL_TOAST_MS),
           actions: [
             { label: 'Review', href: APPROVALS_PAGE, onClick: () => shown.current.delete(approval.id) },
             { label: 'Deny', userOnly: true, destructive: true, onClick: deny },
@@ -79,10 +82,11 @@ export function useApprovalToasts(approvals: readonly PendingApproval[], refresh
         }),
       )
     }
-    if (approvals.length === 0) {
+    // One toast says more wait while any does without its own (shown again on a later read if it timed out).
+    if (overflow === 0) {
       if (more.current !== undefined) dismissToast(more.current)
       more.current = undefined
-    } else if (overflow > 0 && !isShown(more.current)) {
+    } else if (!isShown(more.current)) {
       more.current = toast({
         title: 'More approvals wait for you',
         ms: APPROVAL_TOAST_MS,

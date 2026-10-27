@@ -382,7 +382,7 @@ describe('assistant panel', () => {
     for (const deny of toasts.getAllByRole('button', { name: 'Deny' })) expect(deny).toHaveAttribute('data-agent-user-only')
     await user.click(toasts.getAllByRole('button', { name: 'Deny' })[0]!)
     await waitFor(() => expect(respondRequests()).toHaveLength(1))
-    expect(respondRequests()[0]!.body).toEqual({ kind: 'approval', decision: 'deny' })
+    expect(respondRequests()[0]!.body).toEqual({ kind: 'approval', decision: 'deny', input_hash: '0'.repeat(64) })
     // Decided, it leaves the badge's read; the other one waits in the panel the badge opens,
     // whose card shows the summary in full beside its Approve.
     await user.click(await screen.findByRole('button', { name: 'Assistant, 1 waiting for you' }))
@@ -391,7 +391,7 @@ describe('assistant panel', () => {
     // Its toast goes too once it is decided in the panel.
     await user.click(within(listed).getByRole('button', { name: 'Approve' }))
     await waitFor(() => expect(toasts.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument())
-    expect(respondRequests()[1]!.body).toEqual({ kind: 'approval', decision: 'approve' })
+    expect(respondRequests()[1]!.body).toEqual({ kind: 'approval', decision: 'approve', input_hash: '0'.repeat(64) })
   })
 
   it('shows a running session on the header button with the panel closed, apart from what waits (#1125)', async () => {

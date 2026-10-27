@@ -14,6 +14,7 @@ const approval: PendingApproval = {
   summary: '{"output_id":"o1"}',
   by: 'Claude Code',
   expiresAt: '2026-10-27T10:10:00.000Z',
+  inputHash: 'b'.repeat(64),
 }
 
 /** The agent's respond route, answering as it does; returns what it was sent. */
@@ -50,7 +51,8 @@ describe('ApprovalsWaiting', () => {
     expect(approve).toHaveAttribute('data-agent-user-only')
     await user.click(approve)
     expect(await card.findByRole('status')).toHaveTextContent('Approved.')
-    expect(sent).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'approve' } }])
+    // With the call's input hash: the decision holds only for the summary shown.
+    expect(sent).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'approve', input_hash: 'b'.repeat(64) } }])
     // The badge reads again, so the card goes once the agent no longer lists it.
     expect(refresh).toHaveBeenCalled()
   })
@@ -60,7 +62,7 @@ describe('ApprovalsWaiting', () => {
     const { user } = shown([approval])
     await user.click(screen.getByRole('button', { name: 'Deny' }))
     expect(await screen.findByRole('status')).toHaveTextContent('Denied.')
-    expect(sent).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'deny' } }])
+    expect(sent).toEqual([{ id: 'approval:a1', body: { kind: 'approval', decision: 'deny', input_hash: 'b'.repeat(64) } }])
   })
 
   it('says why a decision was not taken once the approval no longer waits', async () => {

@@ -22,7 +22,7 @@ function PendingApprovalCard({ approval, onDecided }: { approval: PendingApprova
   const headingId = `pending-approval-${approval.id}`
   const decide = (approve: boolean) => {
     setState({ kind: 'sending' })
-    decidePendingApproval(approval.id, approve).then(
+    decidePendingApproval(approval, approve).then(
       (outcome) => {
         setState({ kind: 'done', outcome })
         onDecided()

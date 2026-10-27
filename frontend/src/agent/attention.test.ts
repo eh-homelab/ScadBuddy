@@ -42,6 +42,7 @@ describe('fetchPendingInput', () => {
       summary: '{"output_id":"o1"}',
       requested_by: { kind: 'bearer', id: 'token:t1', label: 'Claude Code' },
       expires_at: '2026-10-27T10:10:00.000Z',
+      input_hash: 'a'.repeat(64),
     }
     server.use(
       http.get('/api/v1/ai/pending-input', () =>
@@ -64,8 +65,15 @@ describe('fetchPendingInput', () => {
     const counts = await fetchPendingInput()
     expect(counts?.approvals).toBe(5)
     expect(counts?.unattached).toEqual([
-      { id: 'approval:a1', tool: 'print_output', summary: '{"output_id":"o1"}', by: 'Claude Code', expiresAt: '2026-10-27T10:10:00.000Z' },
-      { id: 'approval:a5', tool: 'print_output', summary: '{"output_id":"o1"}', by: 'Robot' },
+      {
+        id: 'approval:a1',
+        tool: 'print_output',
+        summary: '{"output_id":"o1"}',
+        by: 'Claude Code',
+        expiresAt: '2026-10-27T10:10:00.000Z',
+        inputHash: 'a'.repeat(64),
+      },
+      { id: 'approval:a5', tool: 'print_output', summary: '{"output_id":"o1"}', by: 'Robot', inputHash: 'a'.repeat(64) },
     ])
   })
 
