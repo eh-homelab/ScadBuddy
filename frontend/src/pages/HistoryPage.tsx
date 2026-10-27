@@ -569,10 +569,14 @@ function OutputRow({
   const label = output.name ?? shortId(output.id)
   /** #4775 — the thumbnail would not load (the server could not draw one): say so. */
   const [thumbnailBroken, setThumbnailBroken] = useState(false)
-  // Until the server says otherwise: a later upload or draw is tried again.
-  const [thumbnailSaid, setThumbnailSaid] = useState(output.has_thumbnail)
-  if (thumbnailSaid !== output.has_thumbnail) {
-    setThumbnailSaid(output.has_thumbnail)
+  // Until the list is read again (#4811): each read is a new record, so a later upload
+  // or a draw that outlived its read is tried again, though `has_thumbnail` was true all along.
+  // A rename's record (`onRenamed`) retries it too, which costs one request. This relies
+  // on the parent passing `useAsync`'s records as they are: a copy made per render would
+  // reset the flag on every render.
+  const [thumbnailOf, setThumbnailOf] = useState(output)
+  if (thumbnailOf !== output) {
+    setThumbnailOf(output)
     setThumbnailBroken(false)
   }
   /** #2288 — the name being typed, while Rename is open. */
