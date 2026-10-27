@@ -661,6 +661,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   with a banner), `elements.ts` (`sb-param`/`sb-preview`/`sb-generate`, rendered by portal). Inputs are `{params, v, …ui state}` (`backend/scadbuddy/render/inputs.py`);
   `backend/scadbuddy/api/template_ui.py` serves `ui/**` live and at `/versions/{commit}/`;
   `api/static.py` `PAGE_CSP` (mirrored in `frontend/page-csp.txt`) is the page's policy.
+  Its one `script-src` hash is `frontend/index.html`'s inline entry-reload handler (#4873):
+  a page whose entry `index-*.js` 404s mid-rollout reloads once per failed URL. Editing
+  that script changes the hash; `src/entryReload.test.ts` names the new one.
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
   as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,

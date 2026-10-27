@@ -44,9 +44,13 @@ def _is_api(path: str) -> bool:
 #: `frontend/src/lib/fonts.ts` `googleFontsCssUrl`). The policy does NOT stop same-origin
 #: abuse: a module can call every /api/v1 route with the user's session. Nor does it stop
 #: exfiltration by top-level navigation, window.open or WebRTC. No frame-ancestors:
-#: Bambuddy's origin, which frames this page, is not known here.
+#: Bambuddy's origin, which frames this page, is not known here. The one hash in
+#: script-src is index.html's inline entry-reload handler (#4873); the frontend's
+#: src/entryReload.test.ts fails when it no longer matches.
 PAGE_CSP = (
-    "default-src 'self'; script-src 'self'; connect-src 'self'; "
+    "default-src 'self'; "
+    "script-src 'self' 'sha256-BcCNGzlHEDKhjqrB3sHPMmAl0jxOKO/vOgBqN5UM2+g='; "
+    "connect-src 'self'; "
     "img-src 'self' data: blob:; media-src 'self' blob:; "
     "font-src 'self' data: https://fonts.gstatic.com; "
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
