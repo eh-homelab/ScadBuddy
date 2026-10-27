@@ -36,6 +36,7 @@ function row(fields: Partial<PrinterRow> & Pick<PrinterRow, 'id' | 'serial' | 'n
     lan_cert_sha256: null,
     has_access_code: false,
     preferred_path: 'auto',
+    lan_move_pending: false,
     created_at: STAMP,
     updated_at: STAMP,
     ...fields,
@@ -212,9 +213,9 @@ function sync(dryRun: boolean): PrinterSyncResult {
     const holder = state.printers.find((row) => row.serial === printer.serial)
     const base = { kind: 'physical' as const, name: printer.name, bambuddy_printer_id: printer.bambuddy_printer_id }
     if (linked) {
-      entries.push({ ...base, printer_id: linked.id, action: 'already_linked', lan: linked.lan_host ? 'kept' : 'none' })
+      entries.push({ ...base, printer_id: linked.id, action: 'already_linked', lan: linked.lan_host ? 'kept' : 'none', changed: false, target_missing: false })
     } else if (!printer.serial) {
-      entries.push({ ...base, action: 'skipped', reason: NO_SERIAL })
+      entries.push({ ...base, action: 'skipped', reason: NO_SERIAL, changed: false, target_missing: false })
     } else if (holder) {
       entries.push({
         ...base,
@@ -222,6 +223,8 @@ function sync(dryRun: boolean): PrinterSyncResult {
         action: 'linked',
         lan: dryRun ? 'would_try' : 'withheld',
         lan_reason: dryRun ? null : LAN_WITHHELD,
+        changed: !dryRun,
+        target_missing: false,
       })
       if (!dryRun) update(holder.id, { bambuddy_printer_id: printer.bambuddy_printer_id, lan_sync_error: LAN_WITHHELD })
     }
@@ -235,6 +238,8 @@ function sync(dryRun: boolean): PrinterSyncResult {
     printer_id: virtual?.id ?? (dryRun ? null : VIRTUAL_ID),
     action: virtual ? 'already_linked' : 'created',
     forwards_to: target?.id ?? null,
+    changed: !virtual && !dryRun,
+    target_missing: false,
   })
   if (!virtual && !dryRun) {
     state.printers = [
@@ -278,6 +283,7 @@ function sync(dryRun: boolean): PrinterSyncResult {
     conflicts: count('conflict'),
     lan_linked: entries.filter((entry) => entry.lan === 'linked' || entry.lan === 'relinked').length,
     lan_failed: entries.filter((entry) => entry.lan === 'failed' || entry.lan === 'withheld').length,
+    target_missing: entries.filter((entry) => entry.target_missing).length,
   }
 }
 

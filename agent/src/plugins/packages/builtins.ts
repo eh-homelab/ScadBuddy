@@ -1,5 +1,8 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
+import { BUILTIN_SOURCES } from '../../access/model.js'
+import { sourceEnabled } from '../../access/resolve.js'
+import type { AccessReader, AccessWriter } from '../../access/store.js'
 import type { AuditContext } from '../../audit/log.js'
 import { OWN_PLUGIN_DIR } from '../../harness/ownPlugin.js'
 import type { PackageFileEntry } from './files.js'
@@ -11,8 +14,10 @@ import { OWN_PLUGIN_NAME, type PackageReview, vetPackage } from './vet.js'
 // of the same name is never installed (install.ts BuiltInPluginError).
 //
 //   - `scadbuddy`: ScadBuddy's own plugin (harness/ownPlugin.ts, #896), its
-//     skills and subagents. On unless `scadbuddy_plugin_enabled` is stored false.
+//     skills and subagents. On unless its source `builtin:own-plugin` is
+//     switched off in `ai_access` (#2171).
 
+/** The `ai_settings` key its switch was kept under until #2171; the access migration copied it. */
 export const SETTING_OWN_PLUGIN = 'scadbuddy_plugin_enabled'
 
 type BuiltIn = {
@@ -20,9 +25,8 @@ type BuiltIn = {
   dir: string
   /** Where it lives in the repository, for the source line. */
   path: string
-  setting: string
-  /** Whether it is on when its setting was never stored. */
-  enabledByDefault: boolean
+  /** Its source in `ai_access`, whose `*` row is its switch (on by default, as every `builtin:` source). */
+  source: string
   /** Shown when an install names it. */
   installRefusal: string
   version?: string
@@ -33,8 +37,7 @@ export const BUILT_INS: readonly BuiltIn[] = [
     name: OWN_PLUGIN_NAME,
     dir: OWN_PLUGIN_DIR,
     path: 'agent/plugins/scadbuddy',
-    setting: SETTING_OWN_PLUGIN,
-    enabledByDefault: true,
+    source: BUILTIN_SOURCES.ownPlugin,
     installRefusal:
       "ScadBuddy's own plugin is built in: the assistant already loads its skills and subagents, with its tools in-process. There is nothing to install.",
   },
@@ -53,11 +56,6 @@ export type BuiltInPackageView = {
   /** Always: it ships with the image, so there is no pin to approve. */
   approved: true
   enabled: boolean
-}
-
-type Settings = {
-  get<T>(key: string): Promise<T | undefined>
-  set(key: string, value: unknown, context: AuditContext): Promise<void>
 }
 
 const reviews = new Map<string, PackageReview>()
@@ -119,46 +117,45 @@ export function readBuiltInFile(name: string, rel: string): Buffer | undefined {
   return readFileSync(path.join(b.dir, rel))
 }
 
-export async function builtInEnabled(settings: Pick<Settings, 'get'> | undefined, b: BuiltIn): Promise<boolean> {
-  const stored = await settings?.get<unknown>(b.setting)
-  return b.enabledByDefault ? stored !== false : stored === true
+export async function builtInEnabled(access: AccessReader | undefined, b: BuiltIn): Promise<boolean> {
+  return sourceEnabled(b.source, access ? await access.rows([b.source]) : [])
 }
 
-/** Whether ScadBuddy's own plugin loads (sessions/manager.ts). */
-export function ownPluginEnabled(settings: Pick<Settings, 'get'> | undefined): Promise<boolean> {
-  return builtInEnabled(settings, builtInNamed(OWN_PLUGIN_NAME)!)
+/** Whether ScadBuddy's own plugin loads (sessions/turnRunner.ts reads the same through AccessResolver). */
+export function ownPluginEnabled(access: AccessReader | undefined): Promise<boolean> {
+  return builtInEnabled(access, builtInNamed(OWN_PLUGIN_NAME)!)
 }
 
-async function view(settings: Settings, b: BuiltIn): Promise<BuiltInPackageView> {
+async function view(access: AccessReader, b: BuiltIn): Promise<BuiltInPackageView> {
   return {
     name: b.name,
     built_in: true,
     source: { kind: 'built_in', path: b.path },
     review: reviewOf(b),
     approved: true,
-    enabled: await builtInEnabled(settings, b),
+    enabled: await builtInEnabled(access, b),
   }
 }
 
 export class BuiltInPackages {
-  private readonly settings: Settings
-  constructor(settings: Settings) {
-    this.settings = settings
+  private readonly access: AccessReader & AccessWriter
+  constructor(access: AccessReader & AccessWriter) {
+    this.access = access
   }
 
   list(): Promise<BuiltInPackageView[]> {
-    return Promise.all(BUILT_INS.map((b) => view(this.settings, b)))
+    return Promise.all(BUILT_INS.map((b) => view(this.access, b)))
   }
 
   async get(name: string): Promise<BuiltInPackageView | undefined> {
     const b = builtInNamed(name)
-    return b ? view(this.settings, b) : undefined
+    return b ? view(this.access, b) : undefined
   }
 
   async setEnabled(name: string, enabled: boolean, context: AuditContext): Promise<BuiltInPackageView | undefined> {
     const b = builtInNamed(name)
     if (!b) return undefined
-    await this.settings.set(b.setting, enabled, context)
-    return view(this.settings, b)
+    await this.access.setEnabled(b.source, enabled, context)
+    return view(this.access, b)
   }
 }

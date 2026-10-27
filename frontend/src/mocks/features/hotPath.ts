@@ -70,6 +70,7 @@ export const HOT_PRINTER: PrinterRow = {
   lan_cert_sha256: null,
   has_access_code: true,
   preferred_path: 'native',
+  lan_move_pending: false,
   created_at: '2026-10-18T12:00:00Z',
   updated_at: '2026-10-18T12:00:00Z',
 }

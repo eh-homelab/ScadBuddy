@@ -474,17 +474,26 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   unlink_printer_bambuddy: (input) => setting(registryPrinter(input.printer)),
   unlink_printer_lan: (input) => setting(registryPrinter(input.printer)),
   delete_printer: (input) => setting(registryPrinter(input.printer), { action: 'deleted' }),
-  // #4439, #4747: every row the sync made or changed; a dry run touched nothing.
+  // #4439, #4747: every row the sync made or changed; a dry run touched nothing. #4798: the
+  // backend's `changed` covers an `already_linked` row whose name, view or target moved, and a
+  // LAN link moved to Bambuddy's new address (`relinked`) is a change in any case. A VP whose
+  // target is missing (`target_missing`) keeps its own action, so it is recorded as any other.
   sync_printers_from_bambuddy: (_input, result) => {
     const entries = field(result, 'entries')
     if (field(result, 'dry_run') !== false || !Array.isArray(entries)) return []
-    return entries.flatMap((entry) =>
-      field(entry, 'action') === 'created' || field(entry, 'action') === 'linked' || field(entry, 'lan') === 'linked'
-        ? setting(registryPrinter(field(entry, 'printer_id')), {
-            action: field(entry, 'action') === 'created' ? 'created' : 'modified',
-          })
-        : [],
-    )
+    return entries.flatMap((entry) => {
+      const action = field(entry, 'action')
+      const lan = field(entry, 'lan')
+      const wrote =
+        field(entry, 'changed') === true ||
+        action === 'created' ||
+        action === 'linked' ||
+        lan === 'linked' ||
+        lan === 'relinked'
+      return wrote
+        ? setting(registryPrinter(field(entry, 'printer_id')), { action: action === 'created' ? 'created' : 'modified' })
+        : []
+    })
   },
   // #4747: a Bambuddy virtual printer, by its Bambuddy id (the registry row follows it).
   create_virtual_printer: (_input, result) =>

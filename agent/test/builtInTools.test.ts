@@ -11,7 +11,8 @@ import { createApp } from '../src/app.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { buildHarnessOptions, type HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
-import { BuiltInTools, builtInToolSets, builtInToolsSetting } from '../src/plugins/builtInTools.js'
+import { BUILTIN_SOURCES, MIGRATED_BY, registrySource, type ToolAccess } from '../src/access/model.js'
+import { BuiltInTools, builtInToolSets, type BuiltInToolSet } from '../src/plugins/builtInTools.js'
 import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import type { PluginRepo } from '../src/plugins/registry.js'
 import type { SettingsRepo } from '../src/routes/httpRequest.js'
@@ -20,15 +21,17 @@ import { toolActivities } from '../src/temporal/toolActivities.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { createExternalServer, refreshOfferedTools } from '../src/tools/projections.js'
-import { defineTool, json, runToolWithOutcome, type Tool } from '../src/tools/registry.js'
+import { defineTool, effectiveTool, json, runToolWithOutcome, type Tool } from '../src/tools/registry.js'
 import { createBackendClient } from '../src/api/backend.js'
 import { BACKEND, services } from './helpers/mcp.js'
+import { memoryAccess, rowsFromOverrides } from './support/memoryAccess.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 
 // #1953: ScadBuddy's own tool sets are listed and permissioned like a remote
-// MCP plugin (a tier per tool, disabled tools), tighten-only, and can never be
-// added, removed or pointed elsewhere. The override applies on every gate: the
-// harness seam and its tool list, /mcp, and the durable activities.
+// MCP plugin (a tier per tool, disabled tools), and can never be added, removed
+// or pointed elsewhere. #2171: the access lives in `ai_access` and moves either
+// way. The override applies on every gate: the harness seam and its tool list,
+// /mcp, and the durable activities.
 
 function memorySettings(initial: Record<string, unknown> = {}) {
   const values = new Map<string, unknown>(Object.entries(initial))
@@ -57,9 +60,28 @@ const writeTool = ALL_TOOLS.find((t) => t.risk === 'write')!
 const outwardTool = ALL_TOOLS.find((t) => t.risk === 'outward')!
 const OWN = (tool: string) => `mcp__scadbuddy__${tool}`
 
-/** Overrides stored as Settings would store them, for ScadBuddy's own set. */
+const OWN_SOURCE = BUILTIN_SOURCES.scadbuddy
+
+/** Overrides as `ai_access` tool rows: disabled wins, as the migration copies them. */
+function toolRows(tool_tiers: Record<string, string>, disabled_tools: string[]): Record<string, ToolAccess> {
+  return Object.fromEntries(rowsFromOverrides(OWN_SOURCE, tool_tiers, disabled_tools).map((r) => [r.item, r.access as ToolAccess]))
+}
+
+/** Overrides stored in ai_access, for ScadBuddy's own set. */
 function withOverrides(tool_tiers: Record<string, string>, disabled_tools: string[]) {
-  return memorySettings({ [builtInToolsSetting('scadbuddy')]: { tool_tiers, disabled_tools } })
+  return memoryAccess(rowsFromOverrides(OWN_SOURCE, tool_tiers, disabled_tools))
+}
+
+/** A one-set list with `tools` as ScadBuddy's own. */
+function ownSet(tools: readonly Tool[]): BuiltInToolSet[] {
+  return [
+    {
+      name: 'scadbuddy',
+      tool_prefix: 'mcp__scadbuddy__',
+      switchable: false,
+      tools: tools.map((t) => ({ name: t.name, harness_name: `mcp__scadbuddy__${t.name}`, risk: t.risk })),
+    },
+  ]
 }
 
 describe('the built-in tool sets', () => {
@@ -71,13 +93,20 @@ describe('the built-in tool sets', () => {
     expect(own.tools[0]!.harness_name).toBe(OWN(ALL_TOOLS[0]!.name))
   })
 
-  it('ignore a stored entry that would lower a tier or names no tool', async () => {
-    const { settings } = withOverrides({ [writeTool.name]: 'read', nope: 'outward', [readTool.name]: 'write' }, ['nope'])
-    const tools = new BuiltInTools(settings)
+  it('ignores a stored row naming no tool, and keeps a lowered tier', async () => {
+    const { access } = withOverrides({ [writeTool.name]: 'read', nope: 'outward', [readTool.name]: 'write' }, ['nope'])
+    const tools = new BuiltInTools(access)
     expect(await tools.overrides(tools.named('scadbuddy')!)).toEqual({
-      tool_tiers: { [readTool.name]: 'write' },
+      tool_tiers: { [writeTool.name]: 'read', [readTool.name]: 'write' },
       disabled_tools: [],
     })
+  })
+
+  it('a migrated row that lowers is ignored by every gate', async () => {
+    const { access } = memoryAccess([{ source: registrySource(outwardTool.name), item: outwardTool.name, access: 'write', updated_by: MIGRATED_BY }])
+    const tools = new BuiltInTools(access)
+    expect((await effectiveTool(outwardTool, { toolOverrides: tools.registryOverrides() })).risk).toBe('outward')
+    expect((await tools.policy()).tierOf(OWN(outwardTool.name), 'outward')).toBe('outward')
   })
 })
 
@@ -119,8 +148,9 @@ function remoteRepo(): PluginRepo {
   }
 }
 
-function app(settings: SettingsRepo, plugins: PluginRepo = remoteRepo()) {
+function app(settings: SettingsRepo, plugins: PluginRepo = remoteRepo(), access = memoryAccess().access) {
   return createApp({
+    access: access as never,
     database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
     backend: () => Promise.resolve(true),
     kek: { ok: true, kek },
@@ -156,9 +186,10 @@ describe('/api/v1/ai/plugins with built-ins', () => {
     expect(list[0]!.enabled).toBe(true)
   })
 
-  it('accepts a raised tier and a disabled tool, and stores them in ai_settings', async () => {
-    const { settings, values } = memorySettings()
-    const res = await patch(app(settings), 'scadbuddy', {
+  it('accepts a raised tier and a disabled tool, and stores them in ai_access', async () => {
+    const { settings } = memorySettings()
+    const { access, rows } = memoryAccess()
+    const res = await patch(app(settings, remoteRepo(), access), 'scadbuddy', {
       tool_tiers: { [readTool.name]: 'outward', [writeTool.name]: 'write' },
       disabled_tools: [otherReadTool.name],
     })
@@ -168,30 +199,45 @@ describe('/api/v1/ai/plugins with built-ins', () => {
     // A tool's own tier is no override.
     expect(view.tool_tiers).toEqual({ [readTool.name]: 'outward' })
     expect(view.disabled_tools).toEqual([otherReadTool.name])
-    expect(values.get(builtInToolsSetting('scadbuddy'))).toEqual({
-      tool_tiers: { [readTool.name]: 'outward' },
-      disabled_tools: [otherReadTool.name],
-    })
-    const one = await app(settings).request('/api/v1/ai/plugins/scadbuddy', { headers: READ })
+    const stored = rows.map(({ source, item, access }) => ({ source, item, access }))
+    expect(stored).toHaveLength(2)
+    expect(stored).toEqual(
+      expect.arrayContaining([
+        { source: registrySource(otherReadTool.name), item: otherReadTool.name, access: 'off' },
+        { source: registrySource(readTool.name), item: readTool.name, access: 'outward' },
+      ]),
+    )
+    const one = await app(settings, remoteRepo(), access).request('/api/v1/ai/plugins/scadbuddy', { headers: READ })
     expect(((await one.json()) as { tool_tiers: unknown }).tool_tiers).toEqual({ [readTool.name]: 'outward' })
   })
 
   it.each([
-    ['a write tool lowered to read', { tool_tiers: { [writeTool.name]: 'read' } }],
-    ['an outward tool lowered to write', { tool_tiers: { [outwardTool.name]: 'write' } }],
     ['a tier that is none', { tool_tiers: { [readTool.name]: 'none' } }],
     ['a tool the set does not have', { tool_tiers: { no_such_tool: 'outward' } }],
     ['disabling a tool the set does not have', { disabled_tools: ['no_such_tool'] }],
   ])('answers 400 for %s, and stores nothing', async (_label, body) => {
     const { settings, values } = memorySettings()
-    expect((await patch(app(settings), 'scadbuddy', body)).status).toBe(400)
+    const { access, rows } = memoryAccess()
+    expect((await patch(app(settings, remoteRepo(), access), 'scadbuddy', body)).status).toBe(400)
     expect(values.size).toBe(0)
+    expect(rows).toEqual([])
+  })
+
+  it('accepts a lowered tier and stores it in ai_access', async () => {
+    const { settings } = memorySettings()
+    const { access, rows } = memoryAccess()
+    const res = await patch(app(settings, remoteRepo(), access), 'scadbuddy', { tool_tiers: { [outwardTool.name]: 'write' } })
+    expect(res.status).toBe(200)
+    const view = (await res.json()) as { tool_tiers: Record<string, string> }
+    expect(view.tool_tiers).toEqual({ [outwardTool.name]: 'write' })
+    expect(rows).toContainEqual(expect.objectContaining({ source: 'builtin:scadbuddy', item: outwardTool.name, access: 'write' }))
   })
 
   it('answers 409 built_in to add, remove, test, re-point or switch off a built-in', async () => {
     const { settings, values } = memorySettings()
+    const { access, rows } = memoryAccess()
     const repo = remoteRepo()
-    const a = app(settings, repo)
+    const a = app(settings, repo, access)
     const answers = [
       await a.request('/api/v1/ai/plugins', {
         method: 'POST',
@@ -212,6 +258,7 @@ describe('/api/v1/ai/plugins with built-ins', () => {
     expect(repo.create).not.toHaveBeenCalled()
     expect(repo.delete).not.toHaveBeenCalled()
     expect(values.size).toBe(0)
+    expect(rows).toEqual([])
   })
 })
 
@@ -247,8 +294,8 @@ describe('the harness', () => {
   }
 
   it('does not offer a disabled tool, in its tool list or to the model', async () => {
-    const { settings } = withOverrides({}, [readTool.name])
-    const policy = await new BuiltInTools(settings).policy()
+    const { access } = withOverrides({}, [readTool.name])
+    const policy = await new BuiltInTools(access).policy()
     const tools = harnessTools(services())
     const servers = tools.mcpServers({ owner: { kind: 'browser', id: 'b', label: 'You' } }, undefined, { builtIn: policy })
     const client = await listVia(servers.scadbuddy!.instance)
@@ -261,8 +308,8 @@ describe('the harness', () => {
   })
 
   it('enforces a raised tier at the seam: canUseTool and PreToolUse', async () => {
-    const { settings } = withOverrides({ [readTool.name]: 'outward' }, [])
-    const policy = await new BuiltInTools(settings).policy()
+    const { access } = withOverrides({ [readTool.name]: 'outward' }, [])
+    const policy = await new BuiltInTools(access).policy()
     const { tierOf } = harnessTools(services())
     const options = buildHarnessOptions({ ...base, tierOf, builtInPolicy: policy })
     const ask = (name: string) => options.canUseTool!(name, {}, { signal, toolUseID: 't', requestId: 'r' })
@@ -279,13 +326,13 @@ describe('the harness', () => {
   // #2100: the seam reads the policy once per turn and the in-process server
   // trusts it, so a tool raised to outward mid-turn would otherwise run unasked.
   it('refuses a call raised to outward after the turn read its policy, and runs one the seam parked', async () => {
-    const { settings, values } = withOverrides({}, [])
+    const { access } = withOverrides({}, [])
     let calls = 0
     const backend = createBackendClient(BACKEND, async () => {
       calls++
       return Response.json({})
     })
-    const svc = services({ backend, toolOverrides: new BuiltInTools(settings).registryOverrides() })
+    const svc = services({ backend, toolOverrides: new BuiltInTools(access).registryOverrides() })
     const owner = { kind: 'browser' as const, id: 'b', label: 'You' }
     const call = async (policy: Awaited<ReturnType<BuiltInTools['policy']>>) => {
       const servers = harnessTools(svc).mcpServers({ owner }, undefined, { builtIn: policy })
@@ -295,22 +342,30 @@ describe('the harness', () => {
       return JSON.stringify(result)
     }
 
-    const atTurnStart = await new BuiltInTools(settings).policy()
-    values.set(builtInToolsSetting('scadbuddy'), { tool_tiers: { [readTool.name]: 'outward' }, disabled_tools: [] })
+    const atTurnStart = await new BuiltInTools(access).policy()
+    await access.replaceTools(OWN_SOURCE, toolRows({ [readTool.name]: 'outward' }, []))
     expect(await call(atTurnStart)).toMatch(/raised to \\"outward\\" during this turn/)
     expect(calls).toBe(0)
 
     // Raised before the turn: the seam parked the call and a human approved it.
-    await call(await new BuiltInTools(settings).policy())
+    await call(await new BuiltInTools(access).policy())
     expect(calls).toBeGreaterThan(0)
   })
 
+  it('the harness seam allows a lowered outward tool', async () => {
+    const { access } = memoryAccess(rowsFromOverrides(registrySource(outwardTool.name), { [outwardTool.name]: 'write' }, []))
+    const policy = await new BuiltInTools(access).policy()
+    const { tierOf } = harnessTools(services())
+    const options = buildHarnessOptions({ ...base, tierOf, builtInPolicy: policy })
+    const ask = (name: string) => options.canUseTool!(name, {}, { signal, toolUseID: 't', requestId: 'r' })
+    expect(await ask(OWN(outwardTool.name))).toMatchObject({ behavior: 'allow' })
+  })
 })
 
 describe('/mcp', () => {
   it('lists no disabled tool and answers a raised one with a pending approval', async () => {
-    const { settings, values } = withOverrides({ [readTool.name]: 'outward' }, [otherReadTool.name])
-    const svc = services({ toolOverrides: new BuiltInTools(settings).registryOverrides() })
+    const { access } = withOverrides({ [readTool.name]: 'outward' }, [otherReadTool.name])
+    const svc = services({ toolOverrides: new BuiltInTools(access).registryOverrides() })
     const server = createExternalServer(ALL_TOOLS, svc)
     await refreshOfferedTools(server)
     const client = await listVia(server)
@@ -327,16 +382,16 @@ describe('/mcp', () => {
     expect(disabled.detail).toMatch(/disabled in Settings/)
 
     // Turned back on: offered again from the next request.
-    values.set(builtInToolsSetting('scadbuddy'), { tool_tiers: {}, disabled_tools: [] })
+    await access.replaceTools(OWN_SOURCE, {})
     await refreshOfferedTools(server)
     expect((await client.listTools()).tools.map((t) => t.name)).toContain(otherReadTool.name)
     await client.close()
   })
 
   it('refuses a caller whose tiers stop below the raised tier', async () => {
-    const { settings } = withOverrides({ [readTool.name]: 'write' }, [])
+    const { access } = withOverrides({ [readTool.name]: 'write' }, [])
     const ctx = {
-      ...services({ toolOverrides: new BuiltInTools(settings).registryOverrides() }),
+      ...services({ toolOverrides: new BuiltInTools(access).registryOverrides() }),
       principal: { id: 'token:2', kind: 'bearer' as const, tiers: tiersUpTo('read') },
       progress: async () => {},
       signal,
@@ -349,7 +404,7 @@ describe('/mcp', () => {
   it('fails closed when the overrides cannot be read', async () => {
     const ctx = {
       ...services({
-        toolOverrides: new BuiltInTools({ get: () => Promise.reject(new Error('db down')), set: vi.fn() }).registryOverrides(),
+        toolOverrides: new BuiltInTools({ rows: () => Promise.reject(new Error('db down')) }).registryOverrides(),
       }),
       principal: { id: 'token:3', kind: 'bearer' as const, tiers: tiersUpTo('outward') },
       progress: async () => {},
@@ -357,18 +412,35 @@ describe('/mcp', () => {
     }
     expect((await runToolWithOutcome(readTool, {}, ctx)).detail).toMatch(/cannot be read/)
   })
+
+  it('a lowered outward tool runs over /mcp without a pending approval', async () => {
+    const handler = vi.fn(async () => json({ sent: true }))
+    const send = defineTool({ name: 'send_it', description: 'sends', input: z.object({}), risk: 'outward', routes: [], handler })
+    const { access } = memoryAccess(rowsFromOverrides(OWN_SOURCE, { send_it: 'write' }, []))
+    const ctx = {
+      ...services({ toolOverrides: new BuiltInTools(access, ownSet([send])).registryOverrides() }),
+      principal: { id: 'token:4', kind: 'bearer' as const, tiers: tiersUpTo('outward') },
+      progress: async () => {},
+      signal,
+    }
+    const run = await runToolWithOutcome(send, {}, ctx)
+    expect(run.outcome).not.toBe('refused')
+    expect(JSON.stringify(run.result)).not.toMatch(/pending_approval/)
+    expect(handler).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('the durable activities', () => {
   const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
-  const whoami: Tool = defineTool({
+  const whoamiSpec = {
     name: 'whoami',
     description: 'who runs this',
     input: z.object({}),
-    risk: 'read',
+    risk: 'read' as const,
     routes: [],
     handler: async () => json({ ok: true }),
-  })
+  }
+  const whoami: Tool = defineTool(whoamiSpec)
   const env = (activityId: string) =>
     new MockActivityEnvironment({
       activityId,
@@ -377,11 +449,10 @@ describe('the durable activities', () => {
       taskQueue: 'agent-tools',
     })
 
-  function activities(tool_tiers: Record<string, string>, disabled_tools: string[]) {
-    const { settings } = memorySettings({ [builtInToolsSetting('scadbuddy')]: { tool_tiers, disabled_tools } })
-    const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: [{ name: 'whoami', harness_name: 'mcp__scadbuddy__whoami', risk: 'read' as const }] }]
-    return toolActivities([whoami], {
-      services: services({ toolOverrides: new BuiltInTools(settings, sets).registryOverrides() }),
+  function activities(tool_tiers: Record<string, string>, disabled_tools: string[], tool: Tool = whoami) {
+    const { access } = memoryAccess(rowsFromOverrides(OWN_SOURCE, tool_tiers, disabled_tools))
+    return toolActivities([tool], {
+      services: services({ toolOverrides: new BuiltInTools(access, ownSet([tool])).registryOverrides() }),
       sessions: { ownerOf: async () => ({ kind: 'browser', id: 'browser', label: 'You' }) },
       approvals: { approved: async (requestId) => requestId.endsWith(':toolu_approved') },
     })
@@ -418,31 +489,26 @@ describe('the durable activities', () => {
     expect((err as ApplicationFailure).message).toMatch(/disabled in Settings/)
   })
 
+  it('the durable activities run a lowered outward tool with no approval recorded', async () => {
+    const outwardWhoami = defineTool({ ...whoamiSpec, risk: 'outward' })
+    const a = activities({ whoami: 'write' }, [], outwardWhoami)
+    expect(await env('tool-toolu_04').run(a.whoami!, {})).toMatch(/ok/)
+  })
+
   // #2088: the workflow decides whether to park from the overrides as its turn started;
   // the activity decides whether to run from the overrides as the call runs, once.
   describe('decide from Settings as the call runs, in one read', () => {
-    const sets = [{ name: 'scadbuddy', tool_prefix: 'mcp__scadbuddy__', switchable: false, tools: [{ name: 'counted', harness_name: 'mcp__scadbuddy__counted', risk: 'read' as const }] }]
-    const KEY = builtInToolsSetting('scadbuddy')
-
     function rig(approve: (requestId: string, call?: { inputHash: string }) => boolean) {
-      const { settings, values } = memorySettings({ [KEY]: { tool_tiers: {}, disabled_tools: [] } })
-      const reads = { n: 0 }
-      const counting: SettingsRepo = {
-        get: <T>(key: string) => {
-          if (key === KEY) reads.n += 1
-          return settings.get<T>(key)
-        },
-        set: settings.set,
-      }
+      const { access, reads } = memoryAccess()
       const handler = vi.fn(async () => json({ ok: true }))
       const counted = defineTool({ name: 'counted', description: 'counts', input: z.object({ n: z.number().optional() }), risk: 'read', routes: [], handler })
       const a = toolActivities([counted], {
-        services: services({ toolOverrides: new BuiltInTools(counting, sets).registryOverrides() }),
+        services: services({ toolOverrides: new BuiltInTools(access, ownSet([counted])).registryOverrides() }),
         sessions: { ownerOf: async () => ({ kind: 'browser', id: 'browser', label: 'You' }) },
         approvals: { approved: async (requestId, call) => approve(requestId, call) },
         audit: { record: vi.fn(async () => {}), hash: (t, i) => `${t}:${JSON.stringify(i)}`, summarise: () => '' },
       })
-      const set = (tool_tiers: Record<string, string>, disabled_tools: string[]) => values.set(KEY, { tool_tiers, disabled_tools })
+      const set = (tool_tiers: Record<string, string>, disabled_tools: string[]) => access.replaceTools(OWN_SOURCE, toolRows(tool_tiers, disabled_tools))
       const run = (id: string, input: Record<string, unknown> = {}) =>
         env(`tool-${id}`).run(a.counted!, input).then(
           (v: unknown) => v,
@@ -455,7 +521,7 @@ describe('the durable activities', () => {
       const r = rig(() => false)
       // The turn read no override, so the workflow scheduled the call without parking it;
       // Settings raises the tool before the activity runs.
-      r.set({ counted: 'outward' }, [])
+      await r.set({ counted: 'outward' }, [])
       const err = await r.run('toolu_raised')
       expect((err as ApplicationFailure).type).toBe('NotApproved')
       expect(r.handler).not.toHaveBeenCalled()
@@ -463,7 +529,7 @@ describe('the durable activities', () => {
 
     it('refuse a call disabled between its approval and its run', async () => {
       const r = rig(() => true)
-      r.set({ counted: 'outward' }, ['counted'])
+      await r.set({ counted: 'outward' }, ['counted'])
       const err = await r.run('toolu_approved_then_disabled')
       expect((err as ApplicationFailure).type).toBe('ToolError')
       expect((err as ApplicationFailure).message).toMatch(/disabled in Settings/)
@@ -472,7 +538,7 @@ describe('the durable activities', () => {
 
     it('read the overrides once per call, so the check and the run cannot disagree', async () => {
       const r = rig(() => true)
-      r.set({ counted: 'outward' }, [])
+      await r.set({ counted: 'outward' }, [])
       expect(await r.run('toolu_once')).toMatch(/ok/)
       expect(r.handler).toHaveBeenCalledTimes(1)
       expect(r.reads.n).toBe(1)
@@ -484,7 +550,7 @@ describe('the durable activities', () => {
         seen.push(call?.inputHash)
         return call?.inputHash === 'counted:{"n":1}'
       })
-      r.set({ counted: 'outward' }, [])
+      await r.set({ counted: 'outward' }, [])
       expect(await r.run('toolu_same', { n: 1 })).toMatch(/ok/)
       const err = await r.run('toolu_other', { n: 2 })
       expect((err as ApplicationFailure).type).toBe('NotApproved')

@@ -738,14 +738,21 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
         except Exception:
             logger.exception("could not sync the printers from Bambuddy")
             raise
-        if result.created or result.linked or result.lan_linked or result.conflicts:
-            logger.info(
+        news = result.created or result.linked or result.lan_linked or result.conflicts
+        if news or result.target_missing:
+            # A VP whose target never gets a row repeats on every sweep: alone, it is
+            # DEBUG, not an INFO line per sweep (#4861).
+            logger.log(
+                logging.INFO if news else logging.DEBUG,
                 "synced the printers from Bambuddy",
                 extra={
-                    "created": result.created,
+                    # Not "created": a LogRecord attribute, which `extra` may not
+                    # overwrite (it raised KeyError and lost the line, #4858).
+                    "printers_created": result.created,
                     "linked": result.linked,
                     "lan_linked": result.lan_linked,
                     "conflicts": result.conflicts,
+                    "target_missing": result.target_missing,
                 },
             )
 

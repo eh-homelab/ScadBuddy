@@ -6,7 +6,6 @@ import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
-import { raiseTier } from '../harness/permissions.js'
 import type { BrowserTabs } from '../bridge/hub.js'
 import type { SessionManager } from '../sessions/manager.js'
 import type { TouchedSink } from '../sessions/touched.js'
@@ -15,7 +14,6 @@ import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untr
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 import type { RenderLimiter } from './renderLimits.js'
-import type { SwitchedOff } from './switches.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -116,17 +114,15 @@ export type ToolServices = {
   waitForTab?: WaitForTab | undefined
   /** Where a session's calls that ran (succeeded or failed) are reported, for what it touched (sessions/touched.ts, #931). */
   touched?: TouchedSink | undefined
-  /** Tools Settings turned off (switches.ts, #1911): a call is refused before its handler runs. Every tool is on without it. */
-  switchedOff?: SwitchedOff | undefined
   /**
-   * Settings → Plugins' overrides of these tools (#1953, plugins/builtInTools.ts):
-   * a raised tier or a disabled tool, read at each call. Every tool runs at its
+   * Settings → Tools & plugins' overrides of these tools (#1953, plugins/builtInTools.ts):
+   * a raised or lowered tier or a disabled tool, from `ai_access` (#2171), read at each call. Every tool runs at its
    * own tier without it.
    */
   toolOverrides?: ToolOverrides | undefined
 }
 
-/** One tool's override: a tier at or above its own, and whether it is disabled. */
+/** One tool's override: a tier other than its own (raised or lowered, #2171), and whether it is disabled. */
 export type ToolOverride = { tier?: Risk; disabled: boolean }
 
 export type ToolOverrides = {
@@ -135,18 +131,19 @@ export type ToolOverrides = {
   disabled(): Promise<ReadonlySet<string>>
 }
 
-/** What a tool runs at now: its tier raised by any override, whether that gates it, and whether it is disabled. */
+/** What a tool runs at now: its override's tier or its own, whether that gates it, and whether it is disabled. */
 export type EffectiveTool = { risk: Risk; gated: boolean; disabled: boolean }
 
 /**
- * A tool's tier and gate with Settings' override applied (#1953). An override
- * only raises, so a tool raised to `outward` is gated like any outward tool
- * (`approval: 'none'` tools are outward already, so this never gates them).
+ * A tool's tier and gate with Settings' override applied (#1953, #2171). An
+ * override moves the tier either way: a tool raised to `outward` is gated like
+ * any outward tool (`approval: 'none'` tools are outward already, so this never
+ * gates them), and an outward tool lowered below it is not gated at all.
  */
 export async function effectiveTool(tool: Tool, services: Pick<ToolServices, 'toolOverrides'>): Promise<EffectiveTool> {
   const override = await services.toolOverrides?.of(tool.name)
-  const risk = raiseTier(tool.risk, override?.tier)
-  return { risk, gated: tool.gated || (risk === 'outward' && tool.risk !== 'outward'), disabled: override?.disabled === true }
+  const risk = override?.tier ?? tool.risk
+  return { risk, gated: risk === 'outward' && (tool.gated || tool.risk !== 'outward'), disabled: override?.disabled === true }
 }
 
 /** A flow run's own images (#2477, temporal/flowBlobs.ts): what a `flow_image` reference names. */
@@ -206,10 +203,11 @@ export type ToolContext = ToolServices & {
    */
   gate?: 'harness' | 'workflow'
   /**
-   * Under `harness`: the tier the turn's permission seam applied to this tool.
-   * The seam reads Settings → Plugins once per turn (sessions/manager.ts), so a
-   * tool raised to `outward` since then was not parked, and is refused here
-   * rather than run unasked (#2100).
+   * Under `harness`: the tier the turn's permission seam applied to this call. The
+   * seam reads each call's access (#2171, access/live.ts) and records the tier it
+   * applied (harness/seamLedger.ts); without a record this is the tier the turn read
+   * at its start. A tool raised to `outward` after the seam let it through was not
+   * parked, and is refused here rather than run unasked (#2100).
    */
   seamTier?: Risk
   /**
@@ -623,18 +621,16 @@ async function runJudgedByResult(
     effective = ctx.effective ?? (await effectiveTool(tool, ctx))
   } catch {
     // Fails closed: a database blip never runs a tool Settings disabled.
-    return refused(`${tool.name} is refused: its Settings → Plugins entry cannot be read`)
+    return refused(`${tool.name} is refused: its Settings → Tools & plugins entry cannot be read`)
   }
   if (effective.disabled) {
-    return refused(`${tool.name} is disabled in Settings → Plugins; the user can turn it back on there`)
+    return refused(`${tool.name} is disabled in Settings → Tools & plugins; the user can turn it back on there`)
   }
   if (!hasTier(ctx.principal, effective.risk)) {
     return refused(
       `${tool.name} needs the "${effective.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
     )
   }
-  const off = await ctx.switchedOff?.(tool.name)
-  if (off) return refused(off)
   if (ctx.gate === 'harness' && effective.risk === 'outward' && ctx.seamTier !== undefined && ctx.seamTier !== 'outward') {
     return refused(
       `${tool.name} was raised to "outward" during this turn, so it needs a human approval this turn did not ask for; ` +

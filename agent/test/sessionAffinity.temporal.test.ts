@@ -853,7 +853,9 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     // One request on A, one on the restart: each once, whichever landed first. Increments, so
     // no write is lost to another's order.
     expect({ before: before.costUsd, after: row.costUsd }).toEqual({ before: expect.closeTo(REPLY_COST_USD, 12), after: expect.closeTo(2 * REPLY_COST_USD, 12) })
-    expect(await turnCosts(id)).toEqual([expect.closeTo(REPLY_COST_USD, 12), expect.closeTo(REPLY_COST_USD, 12)])
+    // A's end writes its audit row only after its spend's UPDATE has landed (TurnHost#write), so
+    // `landed` reaching 2 does not yet mean the row is there (#4817): wait for it.
+    await pollUntil(() => turnCosts(id), [expect.closeTo(REPLY_COST_USD, 12), expect.closeTo(REPLY_COST_USD, 12)])
     // `turns` as classic reckons each placement's end (turnCore.ts tallyTurn): the restart's
     // result, its one request; then A's, a stopped turn with a result, whose `num_turns` it adds.
     // (Its end's parameters: the cost, the turns and the unpriced increments.)

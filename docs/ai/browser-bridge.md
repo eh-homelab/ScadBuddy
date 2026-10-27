@@ -56,7 +56,7 @@ spec §8.1.
 | | `open_print_dialog` | **outward** |
 | source (`/m/<slug>/source`, `/new`) | `get_editor_text`, `get_problems` | read |
 | | `replace_range` (not saved) | write |
-| settings (`/settings`) | `get_form`, `test_connection` | read |
+| settings (`/settings/…`) | `get_form`, `test_connection` | read |
 | | `set_field` (not saved; `SETTINGS_FIELDS` only, and never the API key) | write |
 
 Notes, each from the tool's own entry:

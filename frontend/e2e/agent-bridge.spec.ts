@@ -112,6 +112,7 @@ test.describe('agent bridge', () => {
     expect(form.unsaved).toBe(false)
 
     await result(page, 'set_field', { field: 'display_unit', value: 'in' })
+    await expect(page).toHaveURL(/\/settings\/library$/)
     await expect(page.getByLabel('Show dimensions in')).toHaveText('Inches (in)')
     expect((await result<{ unsaved: boolean }>(page, 'get_form')).unsaved).toBe(true)
 

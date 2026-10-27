@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 
 import pytest
@@ -196,7 +197,8 @@ def test_the_page_carries_the_csp() -> None:
 
     from scadbuddy.api.static import PAGE_CSP
 
-    assert "script-src 'self';" in PAGE_CSP
+    # 'self' and one hash, index.html's inline entry-reload handler (#4873); nothing else.
+    assert re.search(r"script-src 'self' 'sha256-[A-Za-z0-9+/]{43}=';", PAGE_CSP)
     assert "connect-src 'self';" in PAGE_CSP
     assert "https://fonts.googleapis.com" in PAGE_CSP  # the font picker's previews
     assert "https://fonts.gstatic.com" in PAGE_CSP

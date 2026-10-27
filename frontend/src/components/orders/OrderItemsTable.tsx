@@ -169,8 +169,8 @@ function UnitPrice({ item, currency, exponent }: { item: OrderItemDetail; curren
 /**
  * The unit price, typed: Enter (or Accept) accepts the item's pending quote when the
  * price is that quote's and it is for the item's quantity (a slice quote keeps its sliced
- * file and cost), else records a `manual` quote at it and accepts that, as `recordQuote`
- * does. Escape puts back the price the item has. A refusal shows under it.
+ * file and cost), else records a `manual` quote at it and accepts that. Escape puts back
+ * the price the item has. A refusal shows under it.
  */
 function UnitPriceEditor({
   orderId,
@@ -195,6 +195,9 @@ function UnitPriceEditor({
   const text = typed ?? current
   // The same amount however it is typed (12.5 is 12.50), so an accepted price stays put.
   const unchanged = price !== null && parseUnitPrice(text, exponent) === price.minor
+  // Nothing to accept: the accepted quote prices the item at its quantity now.
+  const priced = pricingQuote(item)
+  const settled = priced !== null && priced.accepted && priced.quote.quantity === item.quantity
 
   async function submit() {
     const minor = parseUnitPrice(text, exponent)
@@ -259,7 +262,7 @@ function UnitPriceEditor({
         {/* Named without the item's title: the input beside it names the item, and a
             button named after it would match every `{ name: <title> }` lookup of the row's
             title link (Playwright matches names by substring). */}
-        <Button type="submit" size="xs" aria-label="Accept unit price" disabled={busy || (unchanged && price?.accepted === true)}>
+        <Button type="submit" size="xs" aria-label="Accept unit price" disabled={busy || (unchanged && settled)}>
           Accept
         </Button>
       </span>

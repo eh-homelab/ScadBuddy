@@ -52,6 +52,7 @@ import { rememberSession, rememberedSession, sessionToRestore } from './panelMem
 import { SessionBackgroundTasks } from './SessionBackgroundTasks'
 import { SessionFiles } from './SessionFiles'
 import { RunsWaiting } from './RunsWaiting'
+import { ApprovalsWaiting } from './ApprovalsWaiting'
 import { SessionFlowRuns } from './SessionFlowRuns'
 import { SessionTouched } from './SessionTouched'
 import { useDictation, useSpokenReplies } from './useVoice'
@@ -908,6 +909,7 @@ export function AssistantChat({
       )}
 
       <RunsWaiting />
+      <ApprovalsWaiting className="shrink-0 border-b border-line px-3 py-2" />
       {/* #4149 — siblings: each key names its strip as well as the session. Two children
           with one key are reconciled unpredictably; here the first was mounted afresh on
           every render of the chat, and read its flow runs each time. */}

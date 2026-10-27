@@ -102,7 +102,7 @@ describe('the Settings toggle', () => {
   const label = 'Let this browser’s built-in agent use ScadBuddy tools (WebMCP)'
 
   it('is off by default, stores the choice per browser, and an agent cannot flip it', async () => {
-    const { user } = renderPage(<Shell />)
+    const { user } = renderPage(<Shell />, { route: '/settings/tools' })
     const toggle = await screen.findByRole('switch', { name: label })
     expect(toggle).not.toBeChecked()
 

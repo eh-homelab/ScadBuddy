@@ -30,25 +30,31 @@ async function smallTargets(page: Page): Promise<string[]> {
   })()`)) as string[]
 }
 
+const AREAS = ['general', 'printing', 'library', 'assistant', 'tools', 'mcp', 'audits', 'system']
+
 for (const [width, height] of [
   [390, 844],
   [768, 1024],
 ] as const) {
-  test(`Settings controls are at least 24 px at ${width} px`, async ({ page }) => {
-    await page.setViewportSize({ width, height })
-    await page.goto('/settings')
-    await expect(page.getByRole('table', { name: 'Deployment values' })).toBeAttached()
-    await expect(page.getByRole('listitem', { name: 'Built-in plugin scadbuddy' })).toBeAttached()
-    // Open every fold, a plugin package's files (#1029) included, so what is inside one is
-    // measured too: each in document order, once, so a fold that opens more (nested ones
-    // follow it) is counted again, and one that closes another (a credential's Replace
-    // key, one at a time) does not loop.
-    const folds = page.locator('main [data-slot="collapsible-trigger"]')
-    for (let i = 0; i < (await folds.count()); i++) {
-      const fold = folds.nth(i)
-      if ((await fold.getAttribute('aria-expanded')) === 'false') await fold.click()
-    }
-    await expect(page.getByRole('list', { name: 'Files to read in scadbuddy' })).toBeVisible()
-    expect(await smallTargets(page)).toEqual([])
-  })
+  for (const area of AREAS) {
+    test(`Settings ${area} controls are at least 24 px at ${width} px`, async ({ page }) => {
+      await page.setViewportSize({ width, height })
+      await page.goto(`/settings/${area}`)
+      if (area === 'system') await expect(page.getByRole('table', { name: 'Deployment values' })).toBeAttached()
+      if (area === 'tools') await expect(page.getByRole('listitem', { name: 'Built-in plugin scadbuddy' })).toBeAttached({ timeout: 20_000 })
+      if (area !== 'system' && area !== 'tools') await expect(page.getByRole('region').locator('visible=true').first()).toBeVisible()
+      // The shell keeps the other areas mounted but hidden, so only the visible folds open.
+      // Open every fold, a plugin package's files (#1029) included, so what is inside one is
+      // measured too: each in document order, once, so a fold that opens more (nested ones
+      // follow it) is counted again, and one that closes another (a credential's Replace
+      // key, one at a time) does not loop.
+      const folds = page.locator('main [data-slot="collapsible-trigger"]:visible')
+      for (let i = 0; i < (await folds.count()); i++) {
+        const fold = folds.nth(i)
+        if ((await fold.getAttribute('aria-expanded')) === 'false') await fold.click()
+      }
+      if (area === 'tools') await expect(page.getByRole('list', { name: 'Files to read in scadbuddy' })).toBeVisible()
+      expect(await smallTargets(page)).toEqual([])
+    })
+  }
 }

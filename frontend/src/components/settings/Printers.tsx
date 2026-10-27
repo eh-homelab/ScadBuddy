@@ -340,7 +340,12 @@ function ImportFromBambuddy({ configured, onDone }: { configured: boolean; onDon
   }
 
   const notable = (result?.entries ?? []).filter(
-    (entry) => entry.reason || entry.lan_reason || entry.action === 'conflict' || entry.action === 'skipped',
+    (entry) =>
+      entry.reason ||
+      entry.lan_reason ||
+      entry.target_missing ||
+      entry.action === 'conflict' ||
+      entry.action === 'skipped',
   )
   return (
     <div className="space-y-2">

@@ -28,8 +28,8 @@ fixture (a throwaway schema), and it and the `requires_postgres` tests (the rend
 queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_URL`
 points at a Postgres they can create schemas in, e.g.
 `docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
-postgres:17` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
-Without it most of `tests/api` skips. CI runs them against a `postgres:17` service
+postgres:18` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
+Without it most of `tests/api` skips. CI runs them against a `postgres:18` service
 container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
 Tests marked `requires_fixtures` (#2146) use the real MakerWorld 3MFs in
 `test-fixtures/makerworld/` (Git LFS, ~290 MB; `git lfs pull --include "test-fixtures/**"`;
@@ -47,6 +47,9 @@ Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` n
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
 `/usr/local/bin/temporal`), from which the tests start their own dev server.
+That CLI is pinned by version and amd64 sha256 in the Dockerfile's `test` stage
+(`TEMPORAL_CLI_VERSION`, `TEMPORAL_CLI_SHA256_AMD64`), in `ci.yml`'s three "Install the
+Temporal CLI" steps and in `hot-path-e2e.yml`'s `native` job; move all five together.
 Under pytest-xdist each worker makes its schemas in a database of its own
 (`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
 because advisory locks and NOTIFY channels are per database: workers sharing one would
@@ -107,8 +110,8 @@ in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
 that each shard ran what it selected, as `backend-pytest-split` does.
 `e2e-stack/run.sh [--mode recorder|unset|both] [--keep] [--no-build]` is the real-stack
 e2e of the native hot path (docker with compose v2; it builds the runtime, slicer and test
-images; weekly and on dispatch in `hot-path-e2e.yml`, never on PRs); `e2e/real-hot-path.spec.ts`
-skips without what it sets.
+images; weekly and on dispatch in `hot-path-e2e.yml`'s `stack` job, never on PRs);
+`e2e/real-hot-path.spec.ts` skips without what it sets.
 `e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
 `e2e/real-agent.spec.ts` also needs `E2E_AGENT=1`: a stack whose one origin routes
 `/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
@@ -128,7 +131,7 @@ docker build --target agent -t scadbuddy-agent:dev .   # checks the bundled Clau
 Tests never call Anthropic. `test/run.test.ts` runs the bundled Claude Code binary
 against a local fake Anthropic endpoint; `test/pg.test.ts` needs
 `SCADBUDDY_TEST_DATABASE_URL` (e.g. `docker run -d -e POSTGRES_PASSWORD=postgres
--e POSTGRES_DB=scadbuddy_test -p 5432:5432 postgres:17`, then
+-e POSTGRES_DB=scadbuddy_test -p 5432:5432 postgres:18`, then
 `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test pnpm test`).
 With it set, `pnpm test`'s globalSetup migrates a template database once and each
 Postgres test copies it (`test/support/postgres.ts`, #2018), so the test role needs
@@ -453,7 +456,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `seed.sh`, runs `frontend/e2e/real-hot-path.spec.ts`, tears down by compose project),
   `fake-printer/` (MQTT and FTPS) and `bambuddy-recorder/`; their tests are
   `backend/tests/printers/test_fake_printer.py` and `backend/tests/test_bambuddy_recorder.py`.
-  Run by `.github/workflows/hot-path-e2e.yml` weekly and on dispatch, not on PRs.
+  `.github/workflows/hot-path-e2e.yml` runs the stack (its `stack` job) weekly and on
+  dispatch, never on a PR. Its `fakes` job (those two tests, ruff and mypy over the fakes)
+  and `native` job (`tests/test_print_native_workflow.py` and `tests/api/test_hot_path_native.py`,
+  which every backend-pytest shard skips for want of mosquitto, #4541; it fails on a skip)
+  run on a PR that touches `e2e-stack/**`, `backend/**` or the workflow. Neither is in
+  `CI Summary`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
@@ -614,9 +622,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `QuoteFilaments` ("Quote from a slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
   Attachments (#4251, spec §6.2 "As built"): any file on an order or a line item,
-  `attachments` (subject `order:<id>` / `order_item:<id>`, typed by its bytes in
-  `orders/attachments.py` `sniff`; only `INLINE` types are served as themselves, the rest
-  as downloads), uploaded through the claim store and the `order_attachment_add` kind (the
+  `order_attachments` (subject `order:<id>` / `order_item:<id>`, typed by its bytes in
+  `orders/attachments.py` `sniff`; only `orders/models.py` `INLINE` types are served as
+  themselves, the rest as downloads; the spec carries the type sets, which
+  `attachmentMedia.test.ts` checks the browser's copy against), uploaded through the claim store and the `order_attachment_add` kind (the
   blob `attachment-<sha256>`, its `blob_refs` row written in the attachment's own
   transaction), routes `api/order_attachments.py`; an item's `delivered_attachment_id`
   (`PUT …/items/{item}/delivered`) is its picture. Frontend `components/orders/OrderAttachments.tsx`,
@@ -652,6 +661,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   with a banner), `elements.ts` (`sb-param`/`sb-preview`/`sb-generate`, rendered by portal). Inputs are `{params, v, …ui state}` (`backend/scadbuddy/render/inputs.py`);
   `backend/scadbuddy/api/template_ui.py` serves `ui/**` live and at `/versions/{commit}/`;
   `api/static.py` `PAGE_CSP` (mirrored in `frontend/page-csp.txt`) is the page's policy.
+  Its one `script-src` hash is `frontend/index.html`'s inline entry-reload handler (#4873):
+  a page whose entry `index-*.js` or CSS 404s mid-rollout reloads, up to 3 times per failed
+  URL, for parse-time tags only (a lazy chunk's CSS is `staleChunks.ts`'s, #4874). Editing
+  that script changes the hash; `src/entryReload.test.ts` names the new one.
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
   as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
@@ -1020,13 +1033,13 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   references for Dependabot and `openscad-bump.yml` (BuildKit falls back to Docker Hub
   for an image the mirror lacks; the pinned digests matched on both on 2026-10-19,
   `docker buildx imagetools inspect`). `lint-buildx-mirror.sh` checks both. The
-  workflows' `postgres:17` service containers are `mirror.gcr.io/library/postgres:17`;
+  workflows' `postgres:18` service containers (the major prod's `scadbuddy-db` runs, #4760) are `mirror.gcr.io/library/postgres:18`;
   a service container has no such fallback, so a tag the mirror lacks fails the job.
-  So they are pinned by digest, `mirror.gcr.io/library/postgres:17@sha256:…`, all one
+  So they are pinned by digest, `mirror.gcr.io/library/postgres:18@sha256:…`, all one
   digest, as is `e2e-stack/compose.yaml`'s (#4729: the moving tag once reached a layer the mirror answered `unknown blob`
   for, and every backend job failed). `postgres-pin.sh` checks the pins in the `lint`
   job; with `--check`, the weekly `postgres-pin.yml` checks that the mirror holds every
-  blob of the pin's amd64 image and fails when `17` has moved, saying whether the mirror
+  blob of the pin's amd64 image and fails when `18` has moved, saying whether the mirror
   holds the new digest's blobs yet. Move every pin together, only once it does.
 - The repo's Actions cache has a ~10 GB ceiling, and it is full (9.9 GB on 2026-09-30,
   almost all `buildkit-blob`): GitHub evicts the least recently used entries. A new

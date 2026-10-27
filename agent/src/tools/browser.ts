@@ -28,7 +28,7 @@ import { errorName } from '../telemetry/scrub.js'
 //
 // Not here: the `screenshot()` fallback of #254, which PR #339 left out of the
 // tab on purpose. And not a browser plugin's tools (Playwright MCP, added in
-// Settings → Plugins): a separate browser that never sees the user's tab.
+// Settings → Tools & plugins): a separate browser that never sees the user's tab.
 
 /** Where a tab's answer comes from, for the untrusted-data envelope (#258). */
 const SOURCE =
@@ -270,7 +270,7 @@ export const browserTools: Tool[] = [
     tool: 'navigate',
     description:
       PREFIX +
-      'go to a route in the app, e.g. "/", "/settings", "/m/name-keychain", "/m/name-keychain/source". The ' +
+      'go to a route in the app, e.g. "/", "/settings/general", "/m/name-keychain", "/m/name-keychain/source". The ' +
       'catalogue ("/") takes its search, filters, sort and view from the query: ' +
       '"/?q=keychain&tag=a&tag=b&origin=builtin|mine&sort=name&view=list" (tags are ANDed). Returns the route ' +
       'that ended up on screen (an unknown path lands on "/").',
@@ -457,7 +457,7 @@ export const browserTools: Tool[] = [
     risk: 'read',
   }),
 
-  // ── Settings ("/settings") ────────────────────────────────────────────────────
+  // ── Settings ("/settings/…") ────────────────────────────────────────────────────
   forwarded({
     tool: 'get_form',
     description:

@@ -39,7 +39,7 @@ export const TOOLS = {
   // ── Global ────────────────────────────────────────────────────────────────────────
   navigate: tool({
     description:
-      'Go to a route in the app, e.g. "/", "/settings", "/m/name-keychain", "/m/name-keychain/source". ' +
+      'Go to a route in the app, e.g. "/", "/settings/general", "/m/name-keychain", "/m/name-keychain/source". ' +
       'The catalogue ("/") takes its search, filters, sort and view from the query: ' +
       '"/?q=keychain&tag=a&tag=b&origin=builtin|mine&sort=name&view=list" (tags are ANDed). ' +
       'Returns the route that ended up on screen (an unknown path lands on "/").',
@@ -262,5 +262,5 @@ export const SCOPE_ROUTES: Record<Scope, string> = {
   catalogue: 'the model catalogue ("/")',
   customize: 'the customizer ("/m/<slug>")',
   source: 'the source editor ("/m/<slug>/source" or "/new")',
-  settings: 'settings ("/settings")',
+  settings: 'settings ("/settings/…")',
 }

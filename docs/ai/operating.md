@@ -426,7 +426,7 @@ match `SCADBUDDY_PUBLIC_URL`.
 ### 4.1 MCP access tokens
 
 An outside MCP client authenticates to `/mcp` with a bearer token (`bearer` auth mode,
-spec §8.3). Tokens are managed in Settings → **MCP access tokens**, which calls the
+spec §8.3). Tokens are managed in Settings → MCP access → **MCP access tokens**, which calls the
 routes in `registerMcpTokenRoutes()` in
 [`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts). Tokens are
 stored in `ai_mcp_tokens` (§7). The Settings section renders only where
@@ -603,7 +603,7 @@ keep working. The design and the specifications followed are in spec §8.3 (`oid
   MCP client with its redirect URI (Claude Code uses a loopback redirect), and give the
   client ID to the MCP client's configuration.
 
-**In ScadBuddy.** Settings → "MCP sign-in (OIDC)" (the section appears where the agent
+**In ScadBuddy.** Settings → MCP access → "MCP sign-in (OIDC)" (the section appears where the agent
 service is available), or the API it uses:
 
 ```bash
@@ -662,23 +662,18 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   ([§8](#8-per-query-limits));
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
-  `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `http_request_enabled`
-  ([§12](#12-the-http-request-tool-827)); `browser_origins`, the headless browser's allow and deny
-  lists (`{ allow, deny }`, the defaults when unset), which Settings → AI headless browser writes
+  `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `browser_origins`, the headless browser's allow and deny
+  lists (`{ allow, deny }`, the defaults when unset), which Settings → Tools & plugins → AI headless browser writes
   through `PUT /api/v1/ai/settings/browser-origins`
   ([headless-browser.md](headless-browser.md#where-it-may-go-the-allow-and-deny-lists-982), #982);
-  `printer_camera_enabled`, on unless stored
-  `false`: while it is off a `get_printer_camera` call (from a turn, `/mcp` or a durable
-  session) is refused before the backend is asked, which Settings → Printer camera writes
-  through `PUT /api/v1/ai/settings/printer-camera`
-  ([`agent/src/tools/switches.ts`](../../agent/src/tools/switches.ts), #1911); `image_long_edge`, the long edge in pixels the
+  `image_long_edge`, the long edge in pixels the
   assistant panel scales an attached image to (default 1568, the Messages API's
   standard-tier edge; 200 to 2576, the high-resolution tier's edge for Claude 4.7 and
   later), which Settings → Assistant images writes through
   `PUT /api/v1/ai/settings/images` ([`agent/src/routes/imageSettings.ts`](../../agent/src/routes/imageSettings.ts));
   `memory_recall_max_query_chars`, the longest automatic Hindsight recall query in
-  characters (default 800, 0 for no cut, at most 100000), which Settings → Hindsight
-  memory writes through `PUT /api/v1/ai/settings/memory`
+  characters (default 800, 0 for no cut, at most 100000), which Settings → Assistant →
+  Hindsight memory writes through `PUT /api/v1/ai/settings/memory`
   ([§11](#11-automatic-hindsight-memory));
   `session_mode`, the mode a new session gets when whoever starts it names none
   (`durable` unless it says `classic`), which Settings → Assistant session mode writes
@@ -832,10 +827,10 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 - **Built-in plugins.** The plugin in the image is listed first by
   `GET /api/v1/ai/plugin-packages`, with `built_in: true`
   ([`agent/src/plugins/packages/builtins.ts`](../../agent/src/plugins/packages/builtins.ts)):
-  `scadbuddy`, ScadBuddy's own plugin (on unless the `ai_settings` key
-  `scadbuddy_plugin_enabled` is `false`). A browser (Playwright MCP) is not built in
+  `scadbuddy`, ScadBuddy's own plugin (on unless its source switch, `ai_access` row
+  (`builtin:own-plugin`, `*`), is `off`; [`agent/src/access/model.ts`](../../agent/src/access/model.ts)). A browser (Playwright MCP) is not built in
   any more; it is added as a remote plugin ([headless-browser.md](headless-browser.md)).
-  `PATCH` with `{ enabled }` sets that key; approve, re-pin and `DELETE` answer 409. An
+  `PATCH` with `{ enabled }` sets that row; approve, re-pin and `DELETE` answer 409. An
   install whose package names one answers 409 with `built_in: true` instead of
   refusing it, and Settings shows that as a notice.
 
@@ -1016,12 +1011,17 @@ and "Plugins", the list of `/api/v1/ai/plugins`
 ([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)): ScadBuddy's
 own tool set first (#1953, `built_in: true`; `scadbuddy` is every registry tool, from
 [`agent/src/plugins/builtInTools.ts`](../../agent/src/plugins/builtInTools.ts)), then the
-remote MCP plugins. A built-in tool's tier can be raised or the tool disabled, never lowered
-below the tier its code declares (a lower one answers 400); the overrides are the
-`ai_settings` key `builtin_tools.scadbuddy`, applied at the
-harness seam, on `/mcp` and in the durable `agent-tools` activities. The durable session
-workflow parks a call by the manifest's tier, so a tool raised to outward is not parked
-there: its activity finds no recorded approval and refuses it (NotApproved). Adding, removing,
+remote MCP plugins. A built-in tool's tier can be raised, lowered or the tool disabled (a patch is checked for
+known tools and valid tiers only, in either direction; anything else answers 400:
+`validateOverrides` in `agent/src/plugins/builtInTools.ts`); the overrides are
+`ai_access` rows (`builtin:scadbuddy`, or `builtin:browser` for the browser tools; see
+"Tool access" below), applied at the
+harness seam, on `/mcp` and in the durable `agent-tools` activities. Under the patch
+`tool-access-2171`, every registry call in a durable session stops at the gate, which asks
+`tool_tier` for the tool's access as it is then and lets the call through unless it is
+`outward` (`agent-durable/src/scadbuddy_durable/session/workflow.py`, module docstring).
+So a tool raised to `outward` parks, and one lowered stops parking, from its next call.
+Adding, removing,
 testing or re-pointing a built-in answers 409 with `built_in: true`.
 You install, review, approve and re-pin packages there. The approval dialog shows the
 full commit SHA and content hash, and you must tick a confirmation before it sends
@@ -1050,7 +1050,7 @@ A value outside those lists fails closed: `bearer`, or a `read` cap. While the m
 `disabled`, the agent logs `mcp auth: MCP auth is DISABLED ...` with the cap. It logs
 this once, and again after any change to either key.
 
-Change them in Settings → **MCP authentication** (shown where AI is available, beside
+Change them in Settings → MCP access → **MCP authentication** (shown where AI is available, beside
 the access tokens), which calls `GET`/`PUT /api/v1/ai/mcp/auth`
 ([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)). The
 choice is "Require an access token" (`bearer`) or "Allow calls without a token"
@@ -1100,7 +1100,7 @@ with the forwarder).
   `recallMaxQueryChars` characters (code points, so a non-BMP character is never split),
   800 by default and `0` for all of it. This is the Claude Code Hindsight plugin's
   setting of the same name (env `HINDSIGHT_RECALL_MAX_QUERY_CHARS`, `query[:max]`).
-  Settings → Assistant plugins → Hindsight memory writes it to `ai_settings`
+  Settings → Assistant → Hindsight memory writes it to `ai_settings`
   `memory_recall_max_query_chars` through `PUT /api/v1/ai/settings/memory`
   ([`agent/src/routes/memorySettings.ts`](../../agent/src/routes/memorySettings.ts)), and
   both session modes read it at each turn. The bank's own limit is in tokens,
@@ -1145,13 +1145,58 @@ turn. Neither is retried (beyond the one shorter recall above), and neither ever
 the turn goes on with no memories. Only the recalled block enters the workflow's history,
 sealed by the session's payload codec.
 
+## Tool access (`ai_access`, #2171)
+
+One table holds what the user set for every tool, hook, skill and subagent the assistant
+can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-design.md), §4.1 to §4.3). The user sets it in Settings → Tools & plugins.
+
+- One row per (`source`, `item`). The sources are `builtin:scadbuddy`, `builtin:browser`,
+  `builtin:http`, `builtin:own-plugin`, `remote:<name>`, `package:<name>` and
+  `package:<name>/mcp:<server>` (`agent/src/access/model.ts`).
+- Item `*` is the source switch: `on` or `off`. Built-in sources are on until turned off.
+  Remote plugins and packages are off until turned on (`enabledByDefault` in
+  `agent/src/access/resolve.ts`).
+- Any other item is a tool, with `off`, `read`, `write` or `outward`. A tool with no row has
+  its declared tier. The user may set it above or below that tier, with one exception.
+  On the registry sources (`builtin:scadbuddy`, `builtin:browser`), a row that the copy
+  migration wrote (`updated_by` is `migration:2171`) counts only when it is `off` or above
+  the declared tier. A copied lower tier is ignored, because the old registry overrides
+  could only raise (`toolAccess` in `agent/src/access/resolve.ts`;
+  `tool_access` in `agent-durable/src/scadbuddy_durable/session/access.py`). A row the
+  user writes later counts in either direction.
+- `on` is also allowed on a single item, but only in `package:*` sources and in
+  `builtin:own-plugin` (its skills, subagents and hooks). The table's CHECK enforces this
+  (`agent/src/db/migrations/20261026T2200Z_access.sql`).
+- Only overrides are stored. The resolver reads the rows at each call, so a change applies
+  from the next call, in either direction, also in a turn or flow run under way
+  (spec §4.4; `agent/src/access/resolver.ts`).
+- The same access holds from every caller: main agent, subagent, classic or durable turn,
+  flow run and `/mcp` (spec §4.1, §4.5). agent-durable reads the same rows
+  (`agent-durable/src/scadbuddy_durable/session/access.py`).
+- The old keys no longer decide. These are `ai_settings` `builtin_tools.scadbuddy`,
+  `scadbuddy_plugin_enabled`, `http_request_enabled` and `printer_camera_enabled`, and
+  `ai_plugins` `enabled`, `tool_tiers` and `disabled_tools`. Migration
+  `agent/src/db/migrations/20261026T2200Z_access.sql` made the table.
+  `20261026T2201Z_access_copy.sql` copied the old values into it (`updated_by` is
+  `migration:2171`). Its two triggers, created before the copy, mirror an older replica's
+  write of `ai_plugins` or of the four `ai_settings` keys into `ai_access` during a rolling
+  deploy. The new code also writes those keys, old key first and then `ai_access`, in one
+  transaction (`agent/src/access/legacy.ts`). Both go next release (#4828). A later migration drops the old
+  columns (spec §4.3).
+- The printer camera is the access of `get_printer_camera` (`builtin:scadbuddy`): `off`
+  replaces the old switch (spec §4.2; `agent/src/routes/printerCamera.ts`, #1911). The
+  route `PUT /api/v1/ai/settings/printer-camera` writes that row.
+
 ## 12. The HTTP request tool (#827)
 
 Session turns get an `http_request` tool ("curl"; `agent/src/harness/httpRequest.ts`)
-unless Settings → AI → **AI HTTP requests** is switched off. It is on by default; the
-switch is the `ai_settings` key `http_request_enabled` (`false` turns it off),
-written by `PUT /api/v1/ai/settings/http-request` and read at the start of every turn,
-so a change applies from the next turn.
+unless Settings → Tools & plugins turns it off. It is on by default; the
+switch is the `ai_access` row (`builtin:http`, `*`) (`off` turns it off),
+written by `PUT /api/v1/ai/settings/http-request`
+([`agent/src/routes/httpRequest.ts`](../../agent/src/routes/httpRequest.ts)). The turn's tool
+list is fixed when the turn starts (`agent/src/sessions/turnRunner.ts`), so turning the
+tool on or off changes what the next turn offers. The access of each call is read per
+call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
 
 - **Reach is open until the sandbox** (decided 2026-09-30): the internet, the LAN and
   cluster services, plain `http:` included. Only link-local and cloud metadata
