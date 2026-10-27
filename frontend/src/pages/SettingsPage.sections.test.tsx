@@ -854,6 +854,44 @@ describe('SettingsPage sections (#322)', () => {
     put.mockRestore()
   })
 
+  it('says a lost save could not be confirmed when a newer read overtakes its reread and both fail (#4837)', async () => {
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const timeout = screen.getByLabelText('Render timeout')
+    const save = api.putSettings.bind(api)
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      await save(body)
+      throw new ApiError(502, 'Bad gateway.')
+    })
+    // The save's reread is held; the read "Load the latest" starts after it fails at once.
+    let failReread: () => void = () => undefined
+    const reread = new Promise<never>((_, reject) => (failReread = () => reject(new TypeError('Failed to fetch'))))
+    const get = vi
+      .spyOn(api, 'getSettings')
+      .mockImplementationOnce(() => reread)
+      .mockRejectedValue(new TypeError('Failed to fetch'))
+    const note = /Could not confirm what the server stored\./
+
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+    expect(await within(region('Rendering')).findByText('Bad gateway.')).toBeInTheDocument()
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(1))
+
+    // A realtime signal while the form is edited offers the latest; taking it reads again.
+    emitRealtime('settings.changed', ['settings'], { section: 'rendering' })
+    await user.click(await screen.findByRole('button', { name: 'Load the latest' }))
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
+    await act(async () => failReread())
+    await act(flushMicrotasks)
+
+    const shown = await within(region('Rendering')).findByText(/^Bad gateway\. Could not confirm what the server stored\./)
+    expect(shown.textContent?.match(new RegExp(note, 'g'))).toHaveLength(1)
+    expect(screen.getAllByText(note)).toHaveLength(1)
+    get.mockRestore()
+    put.mockRestore()
+  })
+
   it('says on the section, once, that a lost save could not be confirmed, until a read is taken (#4821 review)', async () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
