@@ -133,6 +133,42 @@ describe('/api/v1/ai/settings/printer-camera', () => {
     expect(await (await get(a)).json()).toEqual({ enabled: true })
   })
 
+  it('PUT true keeps a tier set while it ran: it deletes only an off row, in one statement (review of #4838)', async () => {
+    const r = memoryAccess([{ source: CAMERA, item: 'get_printer_camera', access: 'off', updated_by: 'ui:x' }])
+    // Another write sets a tier while the PUT runs: after any read, before any delete.
+    let landed = false
+    const land = () => {
+      if (landed) return
+      landed = true
+      r.rows.splice(0, r.rows.length, { source: CAMERA, item: 'get_printer_camera', access: 'outward', updated_by: 'ui:y' })
+    }
+    const raced = {
+      ...r.access,
+      rows: async (sources: readonly string[]) => {
+        const before = await r.access.rows(sources)
+        land()
+        return before
+      },
+      resetItem: async (...args: Parameters<typeof r.access.resetItem>) => {
+        land()
+        return r.access.resetItem(...args)
+      },
+      resetItemIf: async (...args: Parameters<typeof r.access.resetItemIf>) => {
+        land()
+        return r.access.resetItemIf(...args)
+      },
+    }
+    const a = new Hono()
+    registerPrinterCameraRoutes(a, {
+      access: raced,
+      ready: () => Promise.resolve(true),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+    })
+    expect((await put(a, { enabled: true })).status).toBe(200)
+    expect(r.rows).toEqual([expect.objectContaining({ item: 'get_printer_camera', access: 'outward' })])
+  })
+
   it.each([
     ['another origin', { ...UI, origin: 'https://evil.example' }],
     ['no origin', { host: UI.host, 'x-forwarded-proto': 'https' }],

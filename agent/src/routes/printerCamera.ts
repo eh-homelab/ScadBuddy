@@ -76,11 +76,9 @@ export function registerPrinterCameraRoutes(app: Hono, deps: PrinterCameraRouteD
       return c.json({ detail }, 400)
     }
     const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
-    if (body.enabled) {
-      // Turning the camera on undoes the switch (`off`) only; a raised tier stays.
-      const row = (await access.rows([SOURCE])).find((r) => r.item === ITEM)
-      if (row?.access === 'off') await access.resetItem(SOURCE, ITEM, context)
-    }
+    // Turning the camera on undoes the switch (`off`) only, in one statement: a tier, raised
+    // before or while this ran, stays.
+    if (body.enabled) await access.resetItemIf(SOURCE, ITEM, 'off', context)
     else await access.setItem(SOURCE, ITEM, 'off', context)
     const view: PrinterCameraSettingView = { enabled: body.enabled }
     return c.json(view)

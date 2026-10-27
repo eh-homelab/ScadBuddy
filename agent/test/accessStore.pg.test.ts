@@ -41,6 +41,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
     expect(await store.rows([SCAD])).toEqual([])
   })
 
+  it('resetItemIf deletes the row only while it holds that access', async () => {
+    await store.setItem(SCAD, 'get_printer_camera', 'outward', ctx)
+    await store.resetItemIf(SCAD, 'get_printer_camera', 'off', ctx)
+    expect(await store.rows([SCAD])).toMatchObject([{ item: 'get_printer_camera', access: 'outward' }])
+    await store.setItem(SCAD, 'get_printer_camera', 'off', ctx)
+    await store.resetItemIf(SCAD, 'get_printer_camera', 'off', ctx)
+    expect(await store.rows([SCAD])).toEqual([])
+  })
+
   it("setEnabled writes '*' as on or off", async () => {
     await store.setEnabled('remote:mem', false, ctx)
     expect(await store.rows(['remote:mem'])).toMatchObject([{ item: '*', access: 'off' }])
