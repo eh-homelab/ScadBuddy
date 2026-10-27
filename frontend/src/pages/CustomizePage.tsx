@@ -86,6 +86,9 @@ const NOTHING: ParamValues = Object.freeze({})
 /** #4885 — the budget a parameter tool gives `schemaLoaded`; `render` gives it its own `timeout_ms`. */
 const SCHEMA_WAIT_MS = 10_000
 
+/** The model an agent tool call was made on, to check the page against after every wait. */
+type CallOn = { slug: string; version: string | undefined }
+
 /** Runs `wait` with `budget` ms and answers the ms left of it. */
 async function spend(budget: number, wait: (timeout: number) => Promise<unknown>): Promise<number> {
   const started = performance.now()
@@ -655,9 +658,6 @@ export function CustomizePage() {
     if (!schema) throw notLoaded(schemaState.error)
     return schema
   }
-
-  /** The model a call was made on, to check the page against after every wait. */
-  type CallOn = { slug: string; version: string | undefined }
 
   /**
    * #4894, #4900 — throws `unavailable` when the page has moved off the model the call was

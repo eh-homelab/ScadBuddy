@@ -393,9 +393,11 @@ describe('customizer tools', () => {
     const gate = new Promise<void>((resolve) => {
       release = resolve
     })
+    let held = 0
     server.use(
       http.post('/api/v1/models/:slug/render', async ({ params }) => {
         if (params['slug'] !== 'name-keychain') return undefined
+        held += 1
         await gate
         return undefined
       }),
@@ -408,6 +410,9 @@ describe('customizer tools', () => {
         { route: '/m/name-keychain', path: '/m/:slug' },
       )
       await waitFor(() => expect(bridge.snapshot().page.customize).toMatchObject({ slug: 'name-keychain', loaded: true }))
+
+      // The render is held in flight, so `render` below waits for the preview, not the schema.
+      await waitFor(() => expect(held).toBe(1))
 
       const rendered = call('render', { timeout_ms: 10_000 })
       await new Promise((resolve) => setTimeout(resolve, 100))
