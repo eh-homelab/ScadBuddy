@@ -81,7 +81,8 @@ export function connectWebMcp(bridge: AgentBridge, preference: WebMcpPreference 
       }
       return
     }
-    // Recovered: a later failure, even the same one, is news again.
+    // Recovered: a later failure, even the same one, is news again. "Recovered" means
+    // listTools() succeeded, not that any tool was registered (the list may be empty).
     warned.clear()
     for (const tool of listed.tools) {
       await context!

@@ -37,11 +37,6 @@ afterEach(() => {
   window.localStorage.clear()
 })
 
-/** Lets a sync whose load has already been called run to its end. */
-async function flushMicrotasks() {
-  for (let i = 0; i < 20; i++) await Promise.resolve()
-}
-
 /** What the browser would list now: registered and not yet aborted. */
 function active(): string[] {
   return registered.filter((entry) => !entry.signal?.aborted).map((entry) => entry.name)
@@ -90,11 +85,13 @@ describe('WebMCP', () => {
       await waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringMatching(/not registered \(stale_tab\)/)))
       expect(registered).toEqual([])
 
-      // Route changes retry; the same failure is not warned about again.
-      const loadsBefore = load.mock.calls.length
+      // Route changes retry; the same failure is not warned about again. Awaiting the very
+      // promises sync() awaits: sync() subscribed to each first, so its continuation (the
+      // warning, or not) has run by the time this await resumes.
+      const listings = vi.spyOn(bridge, 'listTools')
       bridge.register({ get_params: () => null }, { label: 'customize' })()
-      await waitFor(() => expect(load.mock.calls.length).toBe(loadsBefore + 2))
-      await flushMicrotasks()
+      expect(listings).toHaveBeenCalledTimes(2)
+      await Promise.all(listings.mock.results.map((result) => result.value))
       expect(warn).toHaveBeenCalledTimes(1)
 
       // A different failure is warned about.
