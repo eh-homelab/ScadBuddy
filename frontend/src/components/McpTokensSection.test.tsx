@@ -1,7 +1,8 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
+import { mcpAuthChanged } from '../lib/mcpAuthChanges'
 import { setMcpAuthMode } from '../mocks/features/mcpTokens'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -252,6 +253,17 @@ describe('McpTokensSection', () => {
     setMcpAuthMode('oidc')
     renderPage(<McpTokensSection />)
     expect(await screen.findByTestId('mcp-auth-note')).toHaveTextContent('keep working alongside')
+  })
+
+  it('reads the auth mode itself, and again when it is saved elsewhere on the page', async () => {
+    const auth = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'outward' } as const
+    vi.spyOn(api, 'getMcpAuth').mockResolvedValue(auth)
+    renderPage(<McpTokensSection />)
+    expect(await screen.findByTestId('mcp-auth-note')).toHaveTextContent('MCP authentication is turned off')
+
+    vi.spyOn(api, 'getMcpAuth').mockResolvedValue({ ...auth, mode: 'bearer', configured_mode: 'bearer' })
+    act(() => mcpAuthChanged())
+    await waitFor(() => expect(screen.queryByTestId('mcp-auth-note')).toBeNull())
   })
 
   it('says why when the AI service cannot list tokens', async () => {

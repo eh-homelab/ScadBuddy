@@ -8,7 +8,6 @@ import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
-import type { McpAuthMode } from '../api/mcpTokens'
 import { AiCredentialSection } from '../components/assistant/AiCredentialSection'
 import { AiStatusSection } from '../components/assistant/AiStatusSection'
 import { McpAuthSection } from '../components/McpAuthSection'
@@ -139,7 +138,6 @@ function SettingsSections() {
   const [error, setError] = useState<string | null>(null)
 
   const webMcp = useWebMcpEnabled()
-  const [mcpAuthMode, setMcpAuthMode] = useState<McpAuthMode | undefined>(undefined)
   const ai = useAiAvailability()
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
@@ -1416,13 +1414,8 @@ function SettingsSections() {
                   (useAiAvailability). */}
               {ai.available && (
                 <>
-                  <McpAuthSection
-                    onSaved={(setting) => {
-                      setMcpAuthMode(setting.mode)
-                      mcpAuthChanged()
-                    }}
-                  />
-                  <McpTokensSection authMode={mcpAuthMode} publicUrl={settings?.public_url} />
+                  <McpAuthSection onSaved={() => mcpAuthChanged()} />
+                  <McpTokensSection publicUrl={settings?.public_url} />
                 </>
               )}
               {ai.available && (
