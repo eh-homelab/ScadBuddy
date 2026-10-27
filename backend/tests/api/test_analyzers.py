@@ -125,6 +125,12 @@ def test_a_configuration_is_judged_on_its_newest_render(client: TestClient, mode
     output_id = make_output(client, model)
     body: dict[str, Any] = {"target": {"slug": model, "params": {"width": 12}}}
     assert _ok(client.post("/api/v1/analyzers/run", json=body))["output_id"] == output_id
+    # #4774: the output records `label` at its default, and both the sparse target above
+    # and the whole one name it; another `label` does not.
+    body = {"target": {"slug": model, "params": {"width": 12, "label": "hi"}}}
+    assert _ok(client.post("/api/v1/analyzers/run", json=body))["output_id"] == output_id
+    body = {"target": {"slug": model, "params": {"width": 12, "label": "bye"}}}
+    assert _ok(client.post("/api/v1/analyzers/run", json=body))["output_id"] is None
 
     body = {"target": {"slug": model, "params": {"width": 13}}, "detail": "advanced"}
     report = _ok(client.post("/api/v1/analyzers/run", json=body))

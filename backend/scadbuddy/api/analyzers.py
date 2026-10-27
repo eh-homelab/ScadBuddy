@@ -84,7 +84,8 @@ from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.hot_path import native_backends
 from scadbuddy.render.read_budget import ReadBudget, budget_of
-from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.runner import with_defaults
+from scadbuddy.render.schema import CustomizerSchema, ParamValue
 from scadbuddy.spools.component import Spools, SpoolsDep
 from scadbuddy.store.download_cache import DownloadCache
 
@@ -254,9 +255,11 @@ class ParamsCheck:
     config: ConfigDep
     fetcher: FetcherDep
 
-    async def __call__(self, target: AnalysisTarget) -> None:
+    async def __call__(self, target: AnalysisTarget) -> CustomizerSchema | None:
+        """The live schema the params were checked against, for `_subject`'s match;
+        None when there were none to check."""
         if target.slug is None or not target.params:
-            return
+            return None
         require_model_exists(self.catalogue, target.slug)
         _, schema = await schema_of(
             target.slug,
@@ -267,13 +270,17 @@ class ParamsCheck:
             fetcher=self.fetcher,
         )
         require_valid_params(schema, target.params)
+        return schema
 
 
 ParamsCheckDep = Annotated[ParamsCheck, Depends()]
 
 
 def _subject(
-    target: AnalysisTarget, outputs: OutputStore, catalogue: Catalogue
+    target: AnalysisTarget,
+    outputs: OutputStore,
+    catalogue: Catalogue,
+    schema: CustomizerSchema | None = None,
 ) -> tuple[str | None, dict[str, ParamValue], OutputMeta | None]:
     if target.library_file_id is not None:
         return None, {}, None
@@ -283,8 +290,16 @@ def _subject(
     assert target.slug is not None
     require_model_exists(catalogue, target.slug)
     params = target.params or {}
+
+    def filled(values: dict[str, ParamValue]) -> dict[str, ParamValue]:
+        # #4774: a render fills the params a request omits at their defaults, so an
+        # output records them whole, and one saved before that records them as sent:
+        # both sides filled, the same configuration matches either way.
+        return with_defaults(schema, values) if schema is not None else values
+
+    wanted = filled(params)
     meta = next(
-        (row for row in outputs.list_for(target.slug) if outputs.params(row.id) == params),
+        (row for row in outputs.list_for(target.slug) if filled(outputs.params(row.id)) == wanted),
         None,
     )
     return target.slug, params, meta
@@ -316,8 +331,9 @@ async def _context(
     native: NativeLibrary | None = None,
     printers: Printers | None = None,
     spools: Spools | None = None,
+    schema: CustomizerSchema | None = None,
 ) -> AnalysisContext:
-    slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
+    slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue, schema)
     settings = store.load()
     remembered = _remembered(target, slug, settings)
     route: RunRoute | None = None
@@ -528,7 +544,7 @@ async def post_run(
     With a database that cannot be reached, the analyzers still run;
     ``decisions_available`` is false and ``decisions_reason`` says why.
     """
-    await check(body.target)
+    schema = await check(body.target)
     budget = budget_of(state.settings, body.request.read_budget)
     context = await _context(
         body.target,
@@ -543,6 +559,7 @@ async def post_run(
         await library.serving_native(),
         printers,
         spools,
+        schema=schema,
     )
     try:
         stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
@@ -577,7 +594,7 @@ async def post_preview(
     """The fix's whole diff, where each line would land, whether it can be applied yet,
     and the fingerprint an apply confirms against (diff, scope, subject and base).
     Changes nothing."""
-    await check(body.target)
+    schema = await check(body.target)
     budget = budget_of(state.settings, body.request.read_budget)
     context = await _context(
         body.target,
@@ -592,6 +609,7 @@ async def post_preview(
         await library.serving_native(),
         printers,
         spools,
+        schema=schema,
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
@@ -639,7 +657,7 @@ async def post_apply(
     whose target is still unverified (409, ``analyzer-fix-unverified``, naming the §3.2
     items in ``to_verify``); no ``confirm: true`` (428, ``confirmation-required``).
     """
-    await check(body.target)
+    schema = await check(body.target)
     budget = budget_of(state.settings, body.request.read_budget)
     context = await _context(
         body.target,
@@ -654,6 +672,7 @@ async def post_apply(
         await library.serving_native(),
         printers,
         spools,
+        schema=schema,
     )
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)

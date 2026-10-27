@@ -596,6 +596,9 @@ def test_an_output_records_the_inputs_it_was_saved_with(client: TestClient, mode
         # Type as well as value, as the store checks them: 12.0 is not 12, True is not 1.
         ({"width": 12}, {"width": 12.0}),
         ({"width": 1}, {"width": True}),
+        # #4774: the job filled `label` at "hi"; filling the save's own omissions does
+        # not make another `label` agree.
+        ({"width": 12}, {"width": 12, "label": "bye"}),
         # A job that rendered the defaults did not render a width.
         ({}, {"width": 12}),
     ],
