@@ -364,6 +364,18 @@ describe('extractors', () => {
     expect(touches('sync_printers_from_bambuddy', { dry_run: true }, { dry_run: true, entries }, 'outward')).toEqual([])
   })
 
+  it("records a Bambuddy virtual printer's writes by its Bambuddy id (#4747)", () => {
+    expect(touches('create_virtual_printer', { name: 'Q' }, { id: 3 }, 'outward')).toEqual([
+      { type: 'setting', id: 'bambuddy_virtual_printer:3', action: 'created' },
+    ])
+    expect(touches('update_virtual_printer', { vp_id: 3 }, { id: 3 }, 'outward')).toEqual([
+      { type: 'setting', id: 'bambuddy_virtual_printer:3', action: 'modified' },
+    ])
+    expect(touches('delete_virtual_printer', { vp_id: 3 }, { deleted: 3 }, 'outward')).toEqual([
+      { type: 'setting', id: 'bambuddy_virtual_printer:3', action: 'deleted' },
+    ])
+  })
+
   it("records Bambuddy projects, files and a print's timelapse", () => {
     expect(touches('create_print_project', { name: 'Bins' }, { id: 9, name: 'Bins' }, 'outward')).toEqual([
       { type: 'project', id: '9', action: 'created' },

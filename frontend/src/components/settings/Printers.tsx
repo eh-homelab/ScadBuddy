@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { ChoiceSelect, LabeledInput, LoadingLines } from './form'
 import { Spinner } from '../ui/spinner'
+import { VirtualPrintersPanel } from './VirtualPrinters'
 
 /**
  * Settings → Printers (#3823, plan 2026-10-16, Task 10): the printer registry, one row per
@@ -86,6 +87,8 @@ export function PrintersPanel({ bambuddyConfigured = false }: { bambuddyConfigur
         ))}
       </ul>
       <AddPrinter onAdded={(row) => show([...rows, row])} />
+      {/* #4747: only with a Bambuddy, whose virtual printers these are. */}
+      {bambuddyConfigured && <VirtualPrintersPanel rows={rows} onChanged={() => printers.refresh()} />}
     </div>
   )
 }

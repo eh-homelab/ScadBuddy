@@ -781,6 +781,18 @@ async def test_the_access_code_reaches_no_log_and_no_result(
     assert CODE not in result.model_dump_json() and CODE not in result2.model_dump_json()
 
 
+async def test_the_virtual_pass_alone_runs_over_a_bare_store(store: PrinterStore) -> None:
+    """Review #4784: the print worker has no `Printers`; a VP write there still brings
+    the registry along, and no probe runs (a VP gets no LAN link)."""
+    from scadbuddy.printers.bambuddy_sync import StoreRegistry, sync_virtual_printers
+
+    client = FakeClient([bambuddy(1, SERIAL)], [vp(5, VP_SERIAL, None)], codes={1: CODE})
+    await sync_virtual_printers(StoreRegistry(store), cast(Any, client))
+    (row,) = store.list()
+    assert row.kind == "bambuddy_virtual" and row.bambuddy_vp_id == 5
+    assert row.lan_host is None
+
+
 async def test_the_housekeeping_sweep_logs_a_missing_target_quietly_unless_there_is_news(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:

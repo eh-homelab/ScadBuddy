@@ -60,6 +60,12 @@ const TOOLS = {
   unlink_printer_lan: ['outward', 'DELETE /api/v1/printers/{printer_id}/lan'],
   delete_printer: ['outward', 'DELETE /api/v1/printers/{printer_id}'],
   sync_printers_from_bambuddy: ['outward', 'POST /api/v1/printers/sync-bambuddy'],
+  list_virtual_printers: ['read', 'GET /api/v1/printers/virtual'],
+  get_virtual_printer: ['read', 'GET /api/v1/printers/virtual/{vp_id}'],
+  diagnose_virtual_printer: ['read', 'GET /api/v1/printers/virtual/{vp_id}/diagnostic'],
+  create_virtual_printer: ['outward', 'POST /api/v1/printers/virtual'],
+  update_virtual_printer: ['outward', 'PUT /api/v1/printers/virtual/{vp_id}'],
+  delete_virtual_printer: ['outward', 'DELETE /api/v1/printers/virtual/{vp_id}'],
 } as const
 
 describe('printer registry tools (#3823)', () => {
@@ -231,5 +237,42 @@ describe('printer registry tools (#3823)', () => {
     expect(firstText(planned)).toMatchObject({ created: 1, dry_run: true })
     await t.execute({ dry_run: false }, ctx())
     expect(queries).toEqual(['true', 'false'])
+  })
+
+  it("manages Bambuddy's virtual printers: the target as a registry printer, never a code (#4747)", async () => {
+    const VP = {
+      id: 3,
+      name: 'Any H2C',
+      enabled: true,
+      mode: 'queue',
+      model: 'O1C',
+      model_name: 'H2C',
+      access_code_set: true,
+      serial: '09400A391800003',
+      target_printer_id: 1,
+      target: ID,
+      printer_id: null,
+      status: { running: true, pending_files: 0 },
+    }
+    const sent: unknown[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/printers/virtual`, () =>
+        HttpResponse.json({ printers: [VP], models: { O1C: 'H2C' }, auth_enabled: false }),
+      ),
+      http.post(`${BACKEND}/api/v1/printers/virtual`, async ({ request }) => {
+        expect(request.headers.get('Idempotency-Key')).toBeTruthy()
+        sent.push(await request.json())
+        return HttpResponse.json(VP)
+      }),
+    )
+    const listed = firstText(await tool('list_virtual_printers').execute({}, ctx())) as { items: Record<string, unknown>[] }
+    expect(listed.items[0]).not.toHaveProperty('serial')
+    expect(listed).toMatchObject({ auth_enabled: false, items: [{ target: ID }] })
+
+    const t = tool('create_virtual_printer')
+    expect(t.summarize({ name: 'Any H2C', mode: 'queue' })).toMatch(/Any H2C \(queue\)/)
+    await t.execute(t.parse({ name: 'Any H2C', mode: 'queue', target: ID }), ctx({ principal: { id: 'test', kind: 'browser', tiers: tiersUpTo('outward') } }))
+    expect(sent[0]).toMatchObject({ name: 'Any H2C', mode: 'queue', target: ID, enabled: false, auto_dispatch: true })
+    expect(sent[0]).not.toHaveProperty('access_code')
   })
 })

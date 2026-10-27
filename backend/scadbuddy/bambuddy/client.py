@@ -34,7 +34,15 @@ from fastapi import status
 from opentelemetry.trace import Span, SpanKind
 from pydantic import ValidationError
 
-from scadbuddy.bambuddy.errors import Scope, map_response, map_transport, not_configured
+from scadbuddy.bambuddy.errors import (
+    REJECTED_PROBLEM,
+    Scope,
+    UpstreamAnswer,
+    map_response,
+    map_transport,
+    not_configured,
+    scrubbed_detail,
+)
 from scadbuddy.bambuddy.models import (
     Archive,
     ArchiveDetail,
@@ -75,6 +83,8 @@ from scadbuddy.bambuddy.models import (
     TimelapseInfo,
     TimelapseThumbnails,
     TrashedLibraryFile,
+    VirtualPrinter,
+    VirtualPrinterDiagnostic,
     VirtualPrinterList,
 )
 from scadbuddy.core.problems import ApiError
@@ -199,7 +209,12 @@ Operation = Literal[
     "spools.filament_presets",
     "spools.list",
     "version",
+    "virtual_printers.create",
+    "virtual_printers.delete",
+    "virtual_printers.diagnostic",
     "virtual_printers.list",
+    "virtual_printers.read",
+    "virtual_printers.update",
 ]
 
 
@@ -384,6 +399,116 @@ class BambuddyClient:
             what="list the virtual printers",
         )
         return VirtualPrinterList.model_validate(response.json())
+
+    async def _vp_call(
+        self,
+        method: str,
+        path: str,
+        *,
+        operation: Operation,
+        what: str,
+        json: Any | None = None,
+    ) -> httpx.Response:
+        """A virtual-printer call (#4747): a read under Read Status, a write under
+        `Scope.ADMIN_SETTINGS`. Bambuddy's 400 (an invalid mode, a bind IP in use, no
+        target in proxy mode; ``routes/virtual_printers.py``) is a 422 with its reason, and
+        so is its own 422: both with `scrubbed_detail`, since a validation error echoes the
+        request's values and a write may carry an access code (never its body)."""
+        write = method != "GET"
+        response = await self._send(
+            method,
+            path,
+            scope=Scope.ADMIN_SETTINGS if write else Scope.READ_STATUS,
+            operation=operation,
+            what=what,
+            json=json,
+            passthrough=frozenset(
+                {status.HTTP_400_BAD_REQUEST, status.HTTP_422_UNPROCESSABLE_CONTENT}
+            ),
+        )
+        if response.status_code in (
+            status.HTTP_400_BAD_REQUEST,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+        ):
+            detail = scrubbed_detail(response)
+            error = ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"Bambuddy refused to {what}" + (f": {detail}" if detail else ""),
+                type_=REJECTED_PROBLEM,
+                bambuddy_status=response.status_code,
+            )
+            error.upstream = UpstreamAnswer(status=response.status_code, detail=detail)
+            raise error
+        return response
+
+    async def virtual_printer(self, vp_id: int) -> VirtualPrinter:
+        response = await self._vp_call(
+            "GET",
+            f"/virtual-printers/{vp_id}",
+            operation="virtual_printers.read",
+            what=f"read virtual printer {vp_id}",
+        )
+        return VirtualPrinter.model_validate(response.json())
+
+    async def virtual_printer_diagnostic(self, vp_id: int) -> VirtualPrinterDiagnostic:
+        response = await self._vp_call(
+            "GET",
+            f"/virtual-printers/{vp_id}/diagnostic",
+            operation="virtual_printers.diagnostic",
+            what=f"diagnose virtual printer {vp_id}",
+        )
+        return VirtualPrinterDiagnostic.model_validate(response.json())
+
+    async def create_virtual_printer(self, body: dict[str, Any]) -> VirtualPrinter:
+        """``body`` may carry an ``access_code``: never logged, never in a span."""
+        response = await self._vp_call(
+            "POST",
+            "/virtual-printers",
+            operation="virtual_printers.create",
+            what="create the virtual printer",
+            json=body,
+        )
+        return VirtualPrinter.model_validate(response.json())
+
+    async def update_virtual_printer(self, vp_id: int, body: dict[str, Any]) -> VirtualPrinter:
+        response = await self._vp_call(
+            "PUT",
+            f"/virtual-printers/{vp_id}",
+            operation="virtual_printers.update",
+            what=f"change virtual printer {vp_id}",
+            json=body,
+        )
+        return VirtualPrinter.model_validate(response.json())
+
+    async def delete_virtual_printer(self, vp_id: int) -> None:
+        await self._vp_call(
+            "DELETE",
+            f"/virtual-printers/{vp_id}",
+            operation="virtual_printers.delete",
+            what=f"delete virtual printer {vp_id}",
+        )
+
+    async def auth_enabled(self) -> bool | None:
+        """``GET /api/v1/auth/status`` (public, ``routes/auth.py`` line 395): whether
+        Bambuddy's auth is on; ``None`` when it does not say."""
+        try:
+            response = await self._send(
+                "GET",
+                "/auth/status",
+                scope=Scope.READ_STATUS,
+                operation="auth.status",
+                what="read whether Bambuddy's auth is on",
+            )
+        except ApiError as error:
+            logger.debug("could not read Bambuddy's auth status", extra={"type": error.type})
+            return None
+        try:
+            body = response.json()
+        except ValueError:
+            logger.debug("Bambuddy's auth status is not JSON")
+            return None
+        enabled = body.get("auth_enabled") if isinstance(body, dict) else None
+        return enabled if isinstance(enabled, bool) else None
 
     async def printer_status(self, printer_id: int) -> PrinterStatus:
         """Live MQTT state: nozzles, AMS trays and the inlet each AMS is switched to."""

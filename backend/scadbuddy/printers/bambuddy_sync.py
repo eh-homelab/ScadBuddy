@@ -27,7 +27,7 @@ import asyncio
 import contextlib
 import logging
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ValidationError, computed_field
 
@@ -50,6 +50,7 @@ from scadbuddy.printers.store import (
     LanLinkChangedError,
     NoAccessCodeError,
     PrinterNotFoundError,
+    PrinterStore,
     SerialTakenError,
     SerialUnknownError,
     VirtualPrinterRowError,
@@ -534,8 +535,49 @@ async def _link(
     return "linked", None
 
 
+class VirtualRegistry(Protocol):
+    """What the virtual-printer part of the pass needs: the store, and a way to
+    announce a row's change. `Printers` is one; the print worker's is `StoreRegistry`."""
+
+    @property
+    def store(self) -> PrinterStore: ...
+
+    def changed(self, printer_id: str) -> None: ...
+
+
+class StoreRegistry:
+    """A `VirtualRegistry` over a bare store, for a process with no `Printers`
+    component (the print worker, #1060): a change is announced by nothing there, and the
+    page that made the write reads the registry again."""
+
+    def __init__(self, store: PrinterStore) -> None:
+        self._store = store
+
+    @property
+    def store(self) -> PrinterStore:
+        return self._store
+
+    def changed(self, printer_id: str) -> None:
+        return None
+
+
+async def sync_virtual_printers(registry: VirtualRegistry, client: BambuddyClient) -> None:
+    """The pass's virtual-printer part alone (#4747 item 4): the registry follows a VP
+    write on whichever worker ran it, so a write that outlives the route's deadline is
+    followed too. No LAN link is made here (a VP gets none), so no probe runs. Bambuddy's
+    printer list is read only for its serials (`may_adopt`); if that list grows slow, it is
+    the first thing to cache. Not a dry run, so a target is there only when its row is."""
+    now = datetime.now(UTC)
+    active = [printer for printer in await client.printers() if printer.is_active]
+    vps = (await client.virtual_printers()).printers
+    rows = await asyncio.to_thread(registry.store.list)
+    physical_serials = {p.serial_number for p in active if p.serial_number is not None}
+    for vp in vps:
+        await _sync_virtual(registry, vp, rows, physical_serials, set(), now, dry_run=False)
+
+
 async def _sync_virtual(
-    printers: Printers,
+    printers: VirtualRegistry,
     vp: VirtualPrinter,
     rows: list[PrinterRow],
     physical_serials: set[str],
