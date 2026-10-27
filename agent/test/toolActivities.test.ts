@@ -129,8 +129,8 @@ async function failure(promise: Promise<unknown>): Promise<ApplicationFailure> {
 }
 
 describe('tool activities', () => {
-  it("registers one activity per tool, under its name, and a flow's tier activity (#2704)", () => {
-    expect(Object.keys(harness().activities).sort()).toEqual(['boom', 'flow_tool_tier', 'send', 'slow', 'whoami'])
+  it("registers one activity per tool, under its name, a flow's tier activity (#2704) and a durable call's (#2171)", () => {
+    expect(Object.keys(harness().activities).sort()).toEqual(['boom', 'flow_tool_tier', 'send', 'slow', 'tool_tier', 'whoami'])
   })
 
   it("runs the tool as the session's owner, in the session, and returns its content", async () => {

@@ -28,7 +28,7 @@ import { errorName } from '../telemetry/scrub.js'
 //
 // Not here: the `screenshot()` fallback of #254, which PR #339 left out of the
 // tab on purpose. And not a browser plugin's tools (Playwright MCP, added in
-// Settings → Plugins): a separate browser that never sees the user's tab.
+// Settings → Tools & plugins): a separate browser that never sees the user's tab.
 
 /** Where a tab's answer comes from, for the untrusted-data envelope (#258). */
 const SOURCE =

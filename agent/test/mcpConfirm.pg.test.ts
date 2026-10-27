@@ -262,6 +262,43 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect((await confirm({ from: 1, to: 2 })).isError).toBeFalsy()
       expect(ran).toEqual([{ from: 1, to: 2 }])
     })
+
+    it('confirm of an action whose tool was lowered since says it needs no approval and can be called directly', async () => {
+      const ran: unknown[] = []
+      const send = defineTool({
+        name: 'lowered_send',
+        description: 'test: an outward tool the user lowers after the prepare',
+        input: z.object({ n: z.number() }),
+        risk: 'outward',
+        routes: [],
+        handler: async (args) => {
+          ran.push(args)
+          return json({ ok: true })
+        },
+      })
+      const confirmTool = ALL_TOOLS.find((t) => t.name === 'confirm_action')!
+      const byName = new Map([send, confirmTool].map((t) => [t.name, t]))
+      let lowered = false
+      const toolOverrides = {
+        of: async (name: string) => (lowered && name === 'lowered_send' ? { tier: 'write' as const, disabled: false } : { disabled: false }),
+        disabled: async () => new Set<string>(),
+      }
+      const ctx = {
+        ...services({ pending: actions, toolOverrides }),
+        principal: principalA,
+        progress: async () => {},
+        signal: new AbortController().signal,
+        lookup: (name: string) => byName.get(name),
+      }
+      const prepared = firstText(await runTool(send, { n: 1 }, ctx)) as { pending_action_id: string }
+      await approvals.decide(browser, prepared.pending_action_id, true)
+      lowered = true
+      const res = await runTool(confirmTool, { pending_action_id: prepared.pending_action_id, arguments: { n: 1 } }, ctx)
+      expect(res.isError).toBe(true)
+      expect(firstText(res)).toContain('lowered_send no longer needs approval')
+      expect(firstText(res)).toContain('call lowered_send directly')
+      expect(ran).toEqual([])
+    })
   },
 )
 

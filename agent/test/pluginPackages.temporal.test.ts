@@ -1,5 +1,5 @@
-import type { TestWorkflowEnvironment } from '@temporalio/testing'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { MockActivityEnvironment, type TestWorkflowEnvironment } from '@temporalio/testing'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,6 +18,16 @@ import { gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } f
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, throwawayDatabase } from './support/postgres.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { packageServerSource } from '../src/access/model.js'
+import { AccessResolver } from '../src/access/resolver.js'
+import { PluginForwarder } from '../src/plugins/forwarder.js'
+import { hashTree } from '../src/plugins/packages/hash.js'
+import type { PackagesForRun } from '../src/plugins/packages/install.js'
+import { forwardPackageServers } from '../src/plugins/packages/mcp.js'
+import { turnServers } from '../src/temporal/turnServers.js'
+import { TURN_TOOL_TIER_ACTIVITY, turnToolActivities } from '../src/temporal/turnTools.js'
+import { startFakeMcp } from './support/fakeMcp.js'
+import { memoryAccess } from './support/memoryAccess.js'
 
 // Installing a plugin package as a command, end to end (spec 2026-10-01 §4.2, §10 phase
 // 4; #1055): the route, AgentCommands, AgentOperation on a Temporal dev server, the
@@ -110,4 +120,51 @@ describe.skipIf(skip)(`plugin package install on Temporal${TEMPORAL_SKIP}`, () =
     expect(missing.status).toBe(502)
     expect(await db.sql`SELECT kind, status FROM ai_operations`).toEqual([{ kind: 'plugin_package_install', status: 'failed' }])
   }, 90_000)
+})
+
+// A durable turn's package server tools (#2171): turn_tool_tier answers what ai_access
+// stores for `package:<pkg>/mcp:<server>`, run in a mock activity context.
+describe("a package's MCP server tools in a durable turn (#2171)", () => {
+  it("turn_tool_tier answers a package server tool's stored tier, and outward when none is stored", async () => {
+    const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
+    const mcp = await startFakeMcp({ extraTools: ['a'] })
+    const forwarder = await PluginForwarder.start()
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'pkg-turn-'))
+    const root = mkdtempSync(path.join(os.tmpdir(), 'pkg-turn-root-'))
+    try {
+      mkdirSync(path.join(dir, '.claude-plugin'))
+      writeFileSync(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'notes' }))
+      writeFileSync(path.join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { api: { type: 'http', url: mcp.url } } }))
+      const pkg = { name: 'notes', contentHash: (await hashTree(dir)).hash, dir, allowed: false, builtinTools: [] }
+      const load = async (): Promise<PackagesForRun> => ({ paths: [dir], allowedPaths: [], builtinTools: [], loaded: [pkg], problems: [], release: () => {} })
+      const { access } = memoryAccess([{ source: packageServerSource('notes', 'api'), item: 'a', access: 'read', updated_by: 'test' }])
+      const resolver = new AccessResolver(access)
+      const activities = turnToolActivities({
+        sessions: { ownerOf: async (id) => (id === SESSION ? ({ kind: 'browser', id: 'browser', label: 'You' } as never) : undefined) },
+        servers: turnServers({
+          packages: {
+            load,
+            root,
+            localRoot: root,
+            forward: (loaded) => forwardPackageServers(loaded, forwarder, async () => ['127.0.0.1'], { access: resolver }),
+          },
+        }),
+        approvals: { approved: async () => false },
+      })
+      const tier = (tool: string) =>
+        new MockActivityEnvironment({
+          activityId: 'tool-toolu_01',
+          activityType: TURN_TOOL_TIER_ACTIVITY,
+          workflowExecution: { workflowId: `session-${SESSION}`, runId: 'run-1' },
+          taskQueue: 'agent-tools',
+        }).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool, input: { text: 'x' } })
+      expect(await tier('plugin_notes_api__a')).toEqual({ tier: 'read', declared: 'read' })
+      expect(await tier('plugin_notes_api__recall')).toEqual({ tier: 'outward', declared: 'outward' })
+    } finally {
+      await forwarder.close()
+      await mcp.close()
+      rmSync(dir, { recursive: true, force: true })
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })

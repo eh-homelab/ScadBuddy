@@ -243,6 +243,8 @@ def _pinned_call_patched(call_id: str) -> bool:
 #: (agent/src/temporal/flowTools.ts, #2704): runs recorded before take the run's start's.
 FLOW_TOOL_TIER = "flow_tool_tier"
 FLOW_LIVE_TIERS_PATCH = "flow-live-tiers-2704"
+#: #2171: the agent's tier is taken as given, lowered or raised; runs before it only raised.
+FLOW_ACCESS_PATCH = "flow-access-2171"
 #: Lowest first (agent/src/harness/permissions.ts RISK_TIERS).
 RISK_TIERS = ("read", "write", "outward")
 _TIER_TIMEOUT = timedelta(seconds=30)
@@ -875,23 +877,33 @@ async def _turn_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunne
             queue=queue,
         )
         return result
+    # Only a read is retried. Under `flow-access-2171` its tier in code (`declared`, e.g.
+    # http_request's method) must be read too: a POST set to read is still a POST (#2171).
+    # An agent that does not say `declared` counts as outward.
+    retry_safe = tier == "read"
+    if workflow.patched(FLOW_ACCESS_PATCH):
+        retry_safe = retry_safe and tiered.get("declared") == "read"
     async with step(f"tool:{name}", call_id, outward=False):
         return await _call_tool(
             call_id,
             name,
             args,
-            attempts=3 if tier == "read" else 1,
+            attempts=3 if retry_safe else 1,
             activity=f"{TURN_TOOL_PREFIX}{name}",
             queue=queue,
         )
 
 
-async def _live_tier(name: str, own: str | None) -> str:
+async def _live_tier(name: str, own: str | None) -> tuple[str, bool]:
     """The tool's tier as the agent resolves it now (`effectiveTool`: its definition,
-    Settings' raised tiers, disabled tools), as its own turns do, and as its activity will
-    check the call again when it runs. The answer only raises: a tool the run started
-    with at a higher tier keeps it. One the agent does not have, or will not say, is
-    refused; nothing falls back to the tiers the run started with."""
+    Settings' tiers, disabled tools), as its own turns do, and as its activity will check
+    the call again when it runs, and whether a lost answer may be asked again. Under
+    `flow-access-2171` the tier is taken as given, lowered or raised (#2171), and a retry
+    is safe only when the code's tier (`declared`) is read too: a tool lowered to read is
+    still the code it was. An agent that does not say `declared` counts as outward. Before
+    the patch the answer only raised (a tool the run started with at a higher tier kept
+    it), so the tier alone said. One the agent does not have, or will not say, is refused;
+    nothing falls back to the tiers the run started with."""
     owner: StepOwner = workflow.instance()
     try:
         tiered: dict[str, Any] = await workflow.execute_activity(
@@ -915,10 +927,12 @@ async def _live_tier(name: str, own: str | None) -> str:
     if tier not in RISK_TIERS:
         raise ToolFailedError(f"the agent gave no tier for {name}")
     if tiered.get("disabled") is True:
-        raise ValueError(f"{name} is disabled in Settings → Plugins")
+        raise ValueError(f"{name} is disabled in Settings → Tools & plugins")
+    if workflow.patched(FLOW_ACCESS_PATCH):
+        return str(tier), tier == "read" and tiered.get("declared") == "read"
     if own in RISK_TIERS and RISK_TIERS.index(own) > RISK_TIERS.index(tier):
-        return own
-    return str(tier)
+        return own, own == "read"
+    return str(tier), tier == "read"
 
 
 async def _run_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner) -> ToolResult:
@@ -928,8 +942,9 @@ async def _run_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner
     # replays without the patch marker and is refused again.
     if tier is None and TURN_TOOL_SEPARATOR in name and workflow.patched(FLOW_TURN_TOOLS_PATCH):
         return await _turn_tool(name, args, runner)
+    retry_safe = tier == "read"
     if workflow.patched(FLOW_LIVE_TIERS_PATCH):
-        tier = await _live_tier(name, tier)
+        tier, retry_safe = await _live_tier(name, tier)
     elif tier is None:
         raise ValueError(f"there is no tool {name!r}")
     call_id = str(workflow.uuid4())
@@ -947,8 +962,8 @@ async def _run_tool(name: str, args: dict[str, Any], runner: AgentWorkflowRunner
         return result
     async with step(f"tool:{name}", call_id, outward=False):
         # Only a read is retried: a write that landed and then lost its answer would
-        # land again.
-        return await _call_tool(call_id, name, args, attempts=3 if tier == "read" else 1)
+        # land again, and so would an outward or write tool lowered to read (#2171).
+        return await _call_tool(call_id, name, args, attempts=3 if retry_safe else 1)
 
 
 @agent.tool_defn(inherently_safe=True)

@@ -1,6 +1,10 @@
 """DurableSession on a dev server: turns, the gate, interrupt, continue-as-new (§6, §8).
 
 The model is the plugin's ScriptedClaude; agent-tools is a stand-in (session_support).
+
+``fixtures/durable_session_histories/raised.json`` is the history of
+``test_a_tool_raised_to_outward_parks_and_runs_once_approved`` as recorded on the code
+before ``tool-access-2171`` (#2171), payloads unsealed; it is never re-recorded.
 """
 
 from __future__ import annotations
@@ -9,9 +13,10 @@ import asyncio
 import contextlib
 import dataclasses
 import json
+import logging
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -21,6 +26,7 @@ import pytest
 from session_support import (
     MANIFEST,
     ME,
+    SCHEMA,
     Conn,
     Connect,
     StandInTools,
@@ -46,6 +52,7 @@ from temporalio.client import (
     Client,
     WorkflowExecutionStatus,
     WorkflowHandle,
+    WorkflowHistory,
     WorkflowUpdateFailedError,
 )
 from temporalio.exceptions import ApplicationError
@@ -66,6 +73,7 @@ from scadbuddy_durable.gate.store import OpenInput, ResolveInput
 from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import kek_from_base64
 from scadbuddy_durable.session import subagents, tools
+from scadbuddy_durable.session.access import REGISTRY_SOURCES, registry_source
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
@@ -115,6 +123,7 @@ def policy(prompt: str, history: list[HistoryItem]) -> ToolCall | Final:
         ("ask badly", ("ask_user", {"questions": "red?"})),
         ("wait for me", ("wait_for_user", WAIT)),
         ("render it", ("render_preview", {"model": "m"})),
+        ("watch it", ("get_printer_camera", {"printer_id": 1})),
         ("get it", ("notes__post", {"method": "GET", "body": "y"})),
         ("post it", ("notes__post", {"method": "POST", "body": "x"})),
         ("run it", ("Bash", {"command": "make notes"})),
@@ -972,23 +981,28 @@ async def test_an_expiry_in_flight_as_the_turn_ends_is_still_written(
     await _replays(harness, handle)
 
 
-# ---- Settings → Plugins overrides (#2088) ----
+# ---- Settings → Tools & plugins overrides (#2088) ----
 
 
 async def _overrides(conn: Conn, tool_tiers: dict[str, str], disabled: list[str]) -> None:
-    await conn.execute(
-        "INSERT INTO ai_settings (key, value) VALUES (%s, %s)"
-        " ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-        (
-            tools.OVERRIDES_SETTING,
-            json.dumps({"tool_tiers": tool_tiers, "disabled_tools": disabled}),
-        ),
-    )
+    """The registry tools' ai_access rows as rowsFromOverrides (agent test/support/
+    memoryAccess.ts) writes them: a disabled tool is off, whatever its tier."""
+    rows = [(t, "off") for t in disabled]
+    rows += [(t, a) for t, a in tool_tiers.items() if t not in disabled]
+    await conn.execute("DELETE FROM ai_access WHERE source = ANY(%s)", (list(REGISTRY_SOURCES),))
+    for item, value in rows:
+        await conn.execute(
+            "INSERT INTO ai_access (source, item, access, updated_by) VALUES (%s, %s, %s, %s)",
+            (registry_source(item), item, value, "browser:browser"),
+        )
 
 
 async def _replays(harness: Harness, handle: WorkflowHandle[Any, Any]) -> None:
     """The history replays on this code: the gates came from recorded results only."""
-    history = await handle.fetch_history()
+    await _replay(harness, await handle.fetch_history())
+
+
+async def _replay(harness: Harness, history: WorkflowHistory) -> None:
     await Replayer(
         workflows=[DurableSession],
         plugins=[ClaudeAgentPlugin(ScriptedClaude(policy))],
@@ -1024,20 +1038,247 @@ async def test_a_tool_raised_to_outward_parks_and_runs_once_approved(
     await _replays(harness, handle)
 
 
-async def test_an_override_never_lowers_a_tool_below_its_own_tier(
-    harness: Harness, agent_db: Conn, connect: Connect
-) -> None:
-    """TIGHTEN ONLY (builtInTools.ts): an outward tool set to read still parks."""
-    await _overrides(agent_db, {"print_output": "read"}, [])
-    sid, handle = await harness.session(agent_db)
-    await send(handle, "print it")
+def _twice(
+    tool: str, args: dict[str, Any], between: Callable[[], None]
+) -> Callable[[str, list[HistoryItem]], ToolCall | Final]:
+    """Calls ``tool`` twice, running ``between`` before the second call (Settings changed
+    while the turn runs), then reports the last call's result."""
+
+    def scripted(prompt: str, history: list[HistoryItem]) -> ToolCall | Final:
+        if not history:
+            return ToolCall(tool, args)
+        if len(history) == 1:
+            between()
+            return ToolCall(tool, args)
+        last = history[-1]
+        return Final(f"{last.name}: {'error' if last.is_error else 'ok'}: {last.content}")
+
+    return scripted
+
+
+async def _approve_next(handle: WorkflowHandle[Any, Any]) -> None:
     [entry] = await _parked(handle)
     assert entry["kind"] == "approval"
     await handle.execute_update(
-        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "deny"})
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+    )
+
+
+async def test_a_tier_lowered_mid_turn_stops_parking_on_the_next_call(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2171 §4.4: each call is decided by its access as it is now, not as the turn began."""
+    stand_in = harness.stand_in
+    await harness.agent.shutdown()
+    harness.claude = ScriptedClaude(
+        _twice(
+            "print_output", {"output_id": "o1"}, lambda: stand_in.tiers.update(print_output="write")
+        )
+    )
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        await _approve_next(handle)
+        assert await settled(connect, sid) == "idle"
+        log = await events(agent_db, sid)
+        assert _types(log).count("approval.required") == 1
+        assert [r[0] for r in stand_in.ran] == ["print_output", "print_output"]
+        texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+        assert texts == ["print_output: ok: printed"]
+        await _replays(harness, handle)
+
+
+async def test_a_tier_raised_mid_turn_parks_the_next_call(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    stand_in = harness.stand_in
+    await harness.agent.shutdown()
+    harness.claude = ScriptedClaude(
+        _twice(
+            "render_preview",
+            {"model": "m"},
+            lambda: stand_in.tiers.update(render_preview="outward"),
+        )
+    )
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "render it")
+        await _approve_next(handle)
+        assert await settled(connect, sid) == "idle"
+        log = await events(agent_db, sid)
+        assert _types(log).count("approval.required") == 1
+        assert [r[0] for r in stand_in.ran] == ["render_preview", "render_preview"]
+        texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+        assert texts == ["render_preview: ok: rendered"]
+        # The first ran as a read (retried on a lost worker), the raised one at most once.
+        assert _scheduled_attempts(await handle.fetch_history(), "render_preview") == [3, 1]
+        await _replays(harness, handle)
+
+
+def _scheduled_attempts(history: WorkflowHistory, tool: str) -> list[int]:
+    return [
+        e.activity_task_scheduled_event_attributes.retry_policy.maximum_attempts
+        for e in history.events
+        if e.HasField("activity_task_scheduled_event_attributes")
+        and e.activity_task_scheduled_event_attributes.activity_type.name == tool
+    ]
+
+
+def _both(prompt: str, history: list[HistoryItem]) -> ToolCall | list[ToolCall] | Final:
+    """Two render_preview calls at once, then the last result."""
+    if not history:
+        return [
+            ToolCall("render_preview", {"model": "a"}),
+            ToolCall("render_preview", {"model": "b"}),
+        ]
+    return Final(f"{len(history)} results")
+
+
+async def test_a_parked_call_runs_once_though_a_parallel_call_was_read_lower(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """The tool object is shared by parallel calls: the one lowered after the first parked
+    must not leave the parked one to be scheduled with retries (a second send)."""
+    stand_in = harness.stand_in
+    await _overrides(agent_db, {"render_preview": "outward"}, [])
+    stand_in.tier_answers = ["outward", "read"]
+    await harness.agent.shutdown()
+    harness.claude = ScriptedClaude(_both)
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "render both")
+        await _approve_next(handle)
+        assert await settled(connect, sid) == "idle"
+        assert stand_in.tiers_asked == ["render_preview", "render_preview"]
+        assert _types(await events(agent_db, sid)).count("approval.required") == 1
+        assert len(stand_in.ran) == 2
+        assert _scheduled_attempts(await handle.fetch_history(), "render_preview") == [1, 1]
+        await _replays(harness, handle)
+
+
+async def test_a_call_lowered_while_parked_runs_once_approved(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    await _overrides(agent_db, {"render_preview": "outward"}, [])
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "render it")
+    [entry] = await _parked(handle)
+    harness.stand_in.tiers["render_preview"] = "read"
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
     )
     assert await settled(connect, sid) == "idle"
+    assert [r[0] for r in harness.stand_in.ran] == ["render_preview"]
+    assert _scheduled_attempts(await handle.fetch_history(), "render_preview") == [1]
+    await _replays(harness, handle)
+
+
+async def test_a_tool_disabled_mid_turn_is_refused_naming_settings(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    stand_in = harness.stand_in
+    await harness.agent.shutdown()
+    harness.claude = ScriptedClaude(
+        _twice("print_output", {"output_id": "o1"}, lambda: stand_in.disabled.add("print_output"))
+    )
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "print it")
+        await _approve_next(handle)
+        assert await settled(connect, sid) == "idle"
+        log = await events(agent_db, sid)
+        # Never parked: its activity refuses it by name.
+        assert _types(log).count("approval.required") == 1
+        assert [r[0] for r in stand_in.ran] == ["print_output"]
+        [text] = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+        assert text.startswith("print_output: error")
+        assert "disabled in Settings → Tools & plugins" in text
+        await _replays(harness, handle)
+
+
+async def test_a_call_whose_access_cannot_be_read_parks(
+    harness: Harness, agent_db: Conn, connect: Connect, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Fail toward asking: a read tool whose tool_tier fails is asked about, and the
+    workflow says once why (review of #4838: an agent not yet rolled out)."""
+    caplog.set_level(logging.WARNING)
+    harness.stand_in.tool_tier_refuses = True
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "render it")
+    await _approve_next(handle)
+    assert await settled(connect, sid) == "idle"
+    assert [r[0] for r in harness.stand_in.ran] == ["render_preview"]
+    assert harness.stand_in.tiers_asked == ["render_preview"]
+    said = [
+        r.getMessage() for r in caplog.records if "no tool_tier on agent-tools" in r.getMessage()
+    ]
+    assert len(said) == 1, said
+    assert "is the agent rolled out?" in said[0]
+    assert "ApplicationError" in said[0]
+    await _replays(harness, handle)
+
+
+async def test_a_turn_from_before_tool_access_replays(harness: Harness) -> None:
+    """A history recorded before tool-access-2171 keeps its turn-start gates on this code."""
+    path = Path(__file__).parent / "fixtures" / "durable_session_histories" / "raised.json"
+    await _replay(harness, WorkflowHistory.from_json("raised", path.read_text(encoding="utf-8")))
+
+
+async def test_an_outward_tool_lowered_to_read_runs_without_parking(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#2171: Settings may lower a tool. print_output at read runs with no approval."""
+    await _overrides(agent_db, {"print_output": "read"}, [])
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "print it")
+    assert await settled(connect, sid) == "idle"
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    assert [r[0] for r in harness.stand_in.ran] == ["print_output"]
+    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert texts == ["print_output: ok: printed"]
+    await _replays(harness, handle)
+
+
+async def test_gate_settings_reads_lowered_raised_and_off_from_ai_access(
+    agent_db: Conn, connect: Connect
+) -> None:
+    tools.use_manifest(MANIFEST)
+    acts = SessionActivities(connect)
+    await _overrides(agent_db, {"render_preview": "outward", "print_output": "write"}, [])
+    await agent_db.execute(
+        "INSERT INTO ai_access (source, item, access, updated_by) VALUES"
+        " ('builtin:scadbuddy', 'wait_for_user', 'off', 'browser:browser'),"
+        " ('remote:hs', 'print_output', 'off', 'browser:browser')"
+    )
+    read = await acts.gate_settings()
+    assert read.tool_tiers == {"render_preview": "outward", "print_output": "write"}
+    assert read.disabled_tools == []  # an answer tool is in no source; remote:hs is not ours
+    await _overrides(agent_db, {}, ["print_output"])
+    off = await acts.gate_settings()
+    assert (off.tool_tiers, off.disabled_tools) == ({}, ["print_output"])
+
+
+async def test_the_camera_off_is_refused_by_the_durable_gate_and_never_parks(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """The camera switch is the camera's row (#2171): off, a durable call of it is refused
+    naming Settings, never parked, and the segment runner leaves it undeclared."""
+    camera = tools.ManifestEntry("get_printer_camera", "A frame.", SCHEMA, "read", None)
+    tools.use_manifest([*MANIFEST, camera])
+    await _overrides(agent_db, {}, ["get_printer_camera"])
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "watch it")
+    assert await settled(connect, sid) == "idle"
     assert harness.stand_in.ran == []
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    [text] = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+    assert text.startswith("get_printer_camera: error")
+    assert "disabled in Settings → Tools & plugins" in text
+    context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+    assert context.disabled_tools == ["get_printer_camera"]
+    await _replays(harness, handle)
 
 
 async def test_a_disabled_tool_is_refused_naming_settings_and_never_parks(
@@ -1056,7 +1297,7 @@ async def test_a_disabled_tool_is_refused_naming_settings_and_never_parks(
     texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
     assert len(texts) == 1
     assert texts[0].startswith("render_preview: error")
-    assert "disabled in Settings → Plugins" in texts[0]
+    assert "disabled in Settings → Tools & plugins" in texts[0]
     # What the segment runner reads, to leave the tool undeclared.
     context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
     assert context.disabled_tools == ["render_preview"]
@@ -1071,22 +1312,22 @@ class OlderSettings(SessionActivities):
         return {"approval_expiry_s": 600, "question_expiry_s": 3600}
 
 
-async def test_a_turn_an_older_worker_started_parks_by_the_manifest_and_replays(
+async def test_a_gate_settings_result_without_overrides_still_parks_a_raised_call(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:
-    """A history whose gate_settings result has no overrides keeps its old commands: the
-    raised call runs unparked (and is refused, as before #2088), and replays here."""
+    """A gate_settings result as before #2088 (no overrides) no longer decides a registry
+    call under tool-access-2171: the raised call parks by its access as it is now (#2171).
+    A history recorded before the patch keeps its old commands:
+    test_a_turn_from_before_tool_access_replays."""
     await harness.agent.shutdown()
     harness.session_activities = OlderSettings(connect)
     await _overrides(agent_db, {"render_preview": "outward"}, [])
     async with harness.restart_agent():
         sid, handle = await harness.session(agent_db)
         await send(handle, "render it")
+        await _approve_next(handle)
         assert await settled(connect, sid) == "idle"
-    log = await events(agent_db, sid)
-    assert "approval.required" not in _types(log)
-    texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
-    assert texts and texts[0].startswith("render_preview: error")
+    assert [r[0] for r in harness.stand_in.ran] == ["render_preview"]
     await _replays(harness, handle)
 
 

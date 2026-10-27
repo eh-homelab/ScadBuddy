@@ -7,9 +7,11 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { BUILTIN_SOURCES, SOURCE_ITEM } from '../src/access/model.js'
 import { createBackendClient } from '../src/api/backend.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
+import { HTTP_SERVER, HTTP_TOOL, HTTP_TOOL_NAME } from '../src/harness/httpRequest.js'
 import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
 import type { ApprovalGate, ToolDecision } from '../src/harness/permissions.js'
 import { ASK_USER_QUESTION, ASK_USER_TOOL, type QuestionGate, type QuestionRequest } from '../src/harness/questions.js'
@@ -22,6 +24,7 @@ import type { ToolServices } from '../src/tools/registry.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { browser } from './support/sessions.js'
+import { turnRunnerForTest } from './support/turnRunner.js'
 
 // The harness as main.ts wires it (#255): the registry's in-process server and
 // tiers (tools/harness.ts), run through the real SDK and its bundled Claude
@@ -89,6 +92,30 @@ describe('harnessTools', () => {
     expect(await offered({ kind: 'bearer', id: 'token:a', label: 'A' })).toEqual(reads)
     expect(await offered({ kind: 'flow', id: 'flow:x', label: 'X' })).toEqual(reads)
     expect(await offered({ kind: 'bearer', id: 'token:a', label: 'A' })).not.toContain('delete_model')
+  })
+})
+
+// http_request is the `builtin:http` source in ai_access (#2171): its `*` row switches it,
+// and its item's access, where it is one, replaces the method's tier.
+describe('http_request in ai_access', () => {
+  async function assembled(options: Parameters<typeof turnRunnerForTest>[0]) {
+    const { runner, session, principal } = await turnRunnerForTest(options)
+    const turn = await runner.assemble(session, principal)
+    turn.release()
+    return turn
+  }
+
+  it('a turn offers no http_request when builtin:http is off', async () => {
+    expect(Object.keys((await assembled({})).run.mcpServers ?? {})).toContain(HTTP_SERVER)
+    const turn = await assembled({ access: [{ source: BUILTIN_SOURCES.http, item: SOURCE_ITEM, access: 'off', updated_by: 'test' }] })
+    expect(Object.keys(turn.run.mcpServers ?? {})).not.toContain(HTTP_SERVER)
+    expect(turn.fingerprintParts.httpRequest).toBe(false)
+  })
+
+  it('a turn offers no http_request when its item is off', async () => {
+    const turn = await assembled({ access: [{ source: BUILTIN_SOURCES.http, item: HTTP_TOOL, access: 'off', updated_by: 'test' }] })
+    expect(Object.keys(turn.run.mcpServers ?? {})).not.toContain(HTTP_SERVER)
+    expect(turn.fingerprintParts.httpRequest).toBe(false)
   })
 })
 
@@ -185,6 +212,32 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     expect(deletes).toBe(1)
     expect(followUp).toContain('deleted')
     expect(followUp).not.toContain('pending_approval')
+  }, 60_000)
+
+  it('an http_request item set to outward parks a GET', async () => {
+    const { runner, session, principal } = await turnRunnerForTest({
+      access: [{ source: BUILTIN_SOURCES.http, item: HTTP_TOOL, access: 'outward', updated_by: 'test' }],
+    })
+    const turn = await runner.assemble(session, principal)
+    turn.release()
+    const http = turn.run.mcpServers?.[HTTP_SERVER]
+    expect(http).toBeDefined()
+    script = (r) =>
+      lastContent(r).includes('tool_result')
+        ? { text: 'waited' }
+        : { toolUse: { name: HTTP_TOOL_NAME, input: { method: 'GET', url: 'http://printer.lan/' } } }
+    const asked: [string, string][] = []
+    const deny: ApprovalGate = async (request) => {
+      asked.push([request.toolName, request.tier])
+      return { approved: false, message: 'denied by the test' }
+    }
+    const { result } = await collect({
+      tierOf: turn.run.tierOf!,
+      mcpServers: { ...harnessTools(services()).mcpServers({ owner: browser }), [HTTP_SERVER]: http! },
+      approvalGate: deny,
+    })
+    expect(result.subtype).toBe('success')
+    expect(asked).toEqual([[HTTP_TOOL_NAME, 'outward']])
   }, 60_000)
 
   it('never runs an outward tool without a gate', async () => {
