@@ -44,6 +44,8 @@ export function useApprovalToasts(approvals: readonly PendingApproval[], refresh
   const seen = useRef(new Set<string>())
   const shown = useRef(new Map<string, number>())
   const more = useRef<number | undefined>(undefined)
+  // Runs on each read: `useAttention` sets a new list every poll, so a place freed by a dismissed
+  // toast (its X or its timer) is filled by the next read, at most ATTENTION_POLL_MS later.
   useEffect(() => {
     const waiting = new Set(approvals.map((a) => a.id))
     for (const [id, toastId] of shown.current) {
@@ -64,6 +66,8 @@ export function useApprovalToasts(approvals: readonly PendingApproval[], refresh
       const deny = () => {
         shown.current.delete(approval.id)
         decidePendingApproval(approval, false).then(refresh, (err: unknown) => {
+          // Not reached (not settled): it still waits, so a later read toasts it again.
+          if (!(err instanceof RespondError && err.settled)) seen.current.delete(approval.id)
           refresh()
           toast({ title: notTakenText(err) })
         })

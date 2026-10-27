@@ -39,14 +39,14 @@ export function Toasts() {
             {one.detail && <span className="line-clamp-3 text-xs break-words text-muted-foreground">{one.detail}</span>}
             {one.actions && one.actions.length > 0 && (
               <div className="flex gap-2">
-                {one.actions.map((action) => {
+                {one.actions.map((action, i) => {
                   const act = () => {
                     dismissToast(one.id)
                     action.onClick?.()
                   }
                   return (
                     <Button
-                      key={action.label}
+                      key={i}
                       size="xs"
                       variant={action.destructive ? 'destructive' : action.href ? 'outline' : 'default'}
                       // An action a person must take (an approval), never the browser bridge (#254).

@@ -80,7 +80,7 @@ describe('ApprovalsWaiting', () => {
     server.use(http.post('/api/v1/ai/pending-input/:id', () => HttpResponse.error()))
     const { user } = shown([approval])
     await user.click(screen.getByRole('button', { name: 'Approve' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('The assistant could not be reached; try again.')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Your decision was not taken: The assistant could not be reached; try again.')
     expect(screen.getByRole('button', { name: 'Approve' })).toBeEnabled()
   })
 

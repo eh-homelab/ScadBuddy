@@ -1,5 +1,8 @@
 import { act, render, renderHook, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { HttpResponse, http } from 'msw'
 import { MemoryRouter } from 'react-router'
+import { server } from '../mocks/server'
 import { describe, expect, it, vi } from 'vitest'
 import { Toasts } from '../components/ui/Toasts'
 import type { PendingApproval } from './attention'
@@ -47,6 +50,24 @@ describe('useApprovalToasts, as approvals come and go (#4813)', () => {
     rerender({ list: all.slice(1) })
     expect(details()).toEqual(all.slice(1).map((a) => `print_output: ${a.summary}`))
     expect(toasts.queryByText('More approvals wait for you')).not.toBeInTheDocument()
+  })
+
+  it('toasts one again after a Deny that never reached the agent: it still waits', async () => {
+    server.use(http.post('/api/v1/ai/pending-input/:id', () => HttpResponse.error()))
+    const user = userEvent.setup()
+    render(
+      <MemoryRouter>
+        <Toasts />
+      </MemoryRouter>,
+    )
+    const list = [approval(0)]
+    const { rerender } = renderHook(({ list }) => useApprovalToasts(list, vi.fn()), { initialProps: { list } })
+    const toasts = within(screen.getByTestId('toasts'))
+    await user.click(toasts.getByRole('button', { name: 'Deny' }))
+    expect(await toasts.findByText('Your decision was not taken: The assistant could not be reached; try again.')).toBeInTheDocument()
+    // The next read lists it still: its toast is back.
+    rerender({ list: [...list] })
+    expect(toasts.getByRole('button', { name: 'Deny' })).toBeInTheDocument()
   })
 
   it('never stays past the default window, however far off the approval expires', () => {

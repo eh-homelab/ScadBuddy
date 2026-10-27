@@ -31,7 +31,7 @@ function PendingApprovalCard({ approval, onDecided }: { approval: PendingApprova
         if (err instanceof RespondError && err.settled) {
           setState({ kind: 'closed', text: notTakenText(err) })
           onDecided()
-        } else setState({ kind: 'pending', error: err instanceof Error ? err.message : String(err) })
+        } else setState({ kind: 'pending', error: notTakenText(err) })
       },
     )
   }
