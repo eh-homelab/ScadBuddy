@@ -258,7 +258,7 @@ const toolServices: ToolServices = {
   publicBaseUrl: config.publicUrl,
   // The render limits in Settings, read live (tools/renderLimits.ts).
   ...(settings ? { renderLimiter: new RenderLimiter(settingsRenderLimits(settings)) } : {}),
-  // Settings → Plugins' changed tiers and disabled tools (#1953, #2171), read at each call.
+  // Settings → Tools & plugins' changed tiers and disabled tools (#1953, #2171), read at each call.
   toolOverrides: builtInTools.registryOverrides(),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
@@ -384,7 +384,7 @@ const sessions =
         access: accessResolver,
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
-        // Settings → Plugins' overrides of the built-in tools (#1953), per turn.
+        // Settings → Tools & plugins' overrides of the built-in tools (#1953), per turn.
         builtInTools: () => builtInTools.policy(),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
         // subagents, with the Skill and Agent tools they need.

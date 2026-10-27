@@ -503,7 +503,7 @@ async function runGated(
     throw ApplicationFailure.nonRetryable(message, type)
   }
   if (effective.disabled) {
-    const message = `${tool.name} is disabled in Settings → Plugins; the user can turn it back on there`
+    const message = `${tool.name} is disabled in Settings → Tools & plugins; the user can turn it back on there`
     await refuse(message, message, TOOL_ERROR)
   }
   const principal = turnPrincipal(owner, caller.tiers ? { tiers: [...caller.tiers] } : undefined)

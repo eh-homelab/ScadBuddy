@@ -980,7 +980,7 @@ async def test_an_expiry_in_flight_as_the_turn_ends_is_still_written(
     await _replays(harness, handle)
 
 
-# ---- Settings → Plugins overrides (#2088) ----
+# ---- Settings → Tools & plugins overrides (#2088) ----
 
 
 async def _overrides(conn: Conn, tool_tiers: dict[str, str], disabled: list[str]) -> None:
@@ -1191,7 +1191,7 @@ async def test_a_tool_disabled_mid_turn_is_refused_naming_settings(
         assert [r[0] for r in stand_in.ran] == ["print_output"]
         [text] = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
         assert text.startswith("print_output: error")
-        assert "disabled in Settings → Plugins" in text
+        assert "disabled in Settings → Tools & plugins" in text
         await _replays(harness, handle)
 
 
@@ -1266,7 +1266,7 @@ async def test_the_camera_off_is_refused_by_the_durable_gate_and_never_parks(
     assert "approval.required" not in _types(log)
     [text] = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
     assert text.startswith("get_printer_camera: error")
-    assert "disabled in Settings → Plugins" in text
+    assert "disabled in Settings → Tools & plugins" in text
     context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
     assert context.disabled_tools == ["get_printer_camera"]
     await _replays(harness, handle)
@@ -1288,7 +1288,7 @@ async def test_a_disabled_tool_is_refused_naming_settings_and_never_parks(
     texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
     assert len(texts) == 1
     assert texts[0].startswith("render_preview: error")
-    assert "disabled in Settings → Plugins" in texts[0]
+    assert "disabled in Settings → Tools & plugins" in texts[0]
     # What the segment runner reads, to leave the tool undeclared.
     context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
     assert context.disabled_tools == ["render_preview"]

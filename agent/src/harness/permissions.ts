@@ -243,11 +243,11 @@ async function decideLive(
     access = live ? await within(live.access(toolName, input), GUARD_DEADLINE_MS) : undefined
   } catch {
     const tier = tierOf(toolName, input) ?? 'outward'
-    return { decision: 'deny', tier, reason: `${toolName} is refused: its Settings → Plugins entry cannot be read` }
+    return { decision: 'deny', tier, reason: `${toolName} is refused: its Settings → Tools & plugins entry cannot be read` }
   }
   if (access === 'off') {
     const tier = tierOf(toolName, input) ?? 'outward'
-    return { decision: 'deny', tier, reason: `${toolName} is disabled in Settings → Plugins; the user can turn it back on there` }
+    return { decision: 'deny', tier, reason: `${toolName} is disabled in Settings → Tools & plugins; the user can turn it back on there` }
   }
   const resolve: TierResolver = access === undefined ? tierOf : () => access
   const decision = decide(toolName, resolve, input, await judgeInput(guard, toolName, input))

@@ -106,7 +106,7 @@ loopback MCP server under the name `scadbuddy`, and their tool names stay
 The server answers only a loopback peer, with a token the segment runner mints from the
 KEK for the session's running turn and owner. Every call is decided from the session as
 it is when the call runs: the turn still running, the owner unchanged, the turn sender's
-tiers cut to what its credential holds now, and Settings → Plugins applied. An outward
+tiers cut to what its credential holds now, and Settings → Tools & plugins applied. An outward
 call is refused with a note telling the subagent to leave it to the main agent, where it
 parks for approval. The server is the subagents' own (#2562): the runner passes each
 definition in `agents/` to Claude Code with the server inline

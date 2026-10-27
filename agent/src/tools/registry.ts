@@ -108,7 +108,7 @@ export type ToolServices = {
   /** Where a session's calls that ran (succeeded or failed) are reported, for what it touched (sessions/touched.ts, #931). */
   touched?: TouchedSink | undefined
   /**
-   * Settings → Plugins' overrides of these tools (#1953, plugins/builtInTools.ts):
+   * Settings → Tools & plugins' overrides of these tools (#1953, plugins/builtInTools.ts):
    * a raised or lowered tier or a disabled tool, from `ai_access` (#2171), read at each call. Every tool runs at its
    * own tier without it.
    */
@@ -614,10 +614,10 @@ async function runJudgedByResult(
     effective = ctx.effective ?? (await effectiveTool(tool, ctx))
   } catch {
     // Fails closed: a database blip never runs a tool Settings disabled.
-    return refused(`${tool.name} is refused: its Settings → Plugins entry cannot be read`)
+    return refused(`${tool.name} is refused: its Settings → Tools & plugins entry cannot be read`)
   }
   if (effective.disabled) {
-    return refused(`${tool.name} is disabled in Settings → Plugins; the user can turn it back on there`)
+    return refused(`${tool.name} is disabled in Settings → Tools & plugins; the user can turn it back on there`)
   }
   if (!hasTier(ctx.principal, effective.risk)) {
     return refused(

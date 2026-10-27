@@ -68,7 +68,7 @@ export const approvalTools: Tool[] = [
       // As it runs now (#1953): raised to outward since the prepare still runs here; disabled since, never.
       const effective = tool ? await effectiveTool(tool, ctx) : undefined
       if (!tool || !effective?.gated) return errorResult(`pending action ${pending_action_id} is for ${action.tool}, which this server cannot run`)
-      if (effective.disabled) return refused(`${tool.name} is disabled in Settings → Plugins; nothing was sent`)
+      if (effective.disabled) return refused(`${tool.name} is disabled in Settings → Tools & plugins; nothing was sent`)
       if (!hasTier(principal, effective.risk)) return refused(`${tool.name} needs the "${effective.risk}" tier`)
       // Parsed as the prepare parsed them, so the hash compares like with like.
       // The tool's own schema, as the prepare parsed it (runTool: `tool.parse`),

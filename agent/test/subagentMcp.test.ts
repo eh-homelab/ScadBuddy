@@ -129,7 +129,7 @@ describe("a durable segment's subagents' tools", () => {
     expect(verifySubagentToken(token, [randomBytes(32)])).toBeUndefined()
   })
 
-  it('applies Settings → Plugins on every call: disabled mid-turn, or raised to outward', async () => {
+  it('applies Settings → Tools & plugins on every call: disabled mid-turn, or raised to outward', async () => {
     const { deps, token, set } = rig()
     const cl = await client(deps, token)
     expect((await call(cl, 'look')).error).toBe(false)

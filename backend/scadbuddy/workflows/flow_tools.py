@@ -918,7 +918,7 @@ async def _live_tier(name: str, own: str | None) -> str:
     if tier not in RISK_TIERS:
         raise ToolFailedError(f"the agent gave no tier for {name}")
     if tiered.get("disabled") is True:
-        raise ValueError(f"{name} is disabled in Settings → Plugins")
+        raise ValueError(f"{name} is disabled in Settings → Tools & plugins")
     if workflow.patched(FLOW_ACCESS_PATCH):
         return str(tier)
     if own in RISK_TIERS and RISK_TIERS.index(own) > RISK_TIERS.index(tier):

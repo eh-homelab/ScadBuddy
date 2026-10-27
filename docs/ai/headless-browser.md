@@ -15,7 +15,7 @@ in the user's own tab (`mcp__scadbuddy__browser_*`).
 The server is deployed beside ScadBuddy, not by it, **in its own pod**:
 eh-homelab/clusters#2174 runs `mcr.microsoft.com/playwright/mcp` as its own Deployment
 and Service, with its Streamable HTTP endpoint at
-`http://playwright-mcp.bambuddy:8931/mcp`. Then, as an admin, in **Settings → Plugins →
+`http://playwright-mcp.bambuddy:8931/mcp`. Then, as an admin, in **Settings → Tools & plugins →
 Add endpoint**:
 
 - **Name** `playwright`. Its tools reach a classic turn as `mcp__playwright__browser_*`

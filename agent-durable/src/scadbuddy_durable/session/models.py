@@ -179,7 +179,7 @@ class TurnPackage:
 class SegmentContext:
     images: list[ImageRef] = field(default_factory=list)
     system_append: str | None = None
-    # The tools Settings → Plugins disabled: the segment runner leaves them undeclared.
+    # The tools Settings → Tools & plugins disabled: the segment runner leaves them undeclared.
     disabled_tools: list[str] = field(default_factory=list)
     # The turn's plugin packages (#2320), which the segment runner loads once each hashes
     # to its pin.

@@ -95,7 +95,7 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
     },
     mcpServers: (session, turn, extras) => {
       const principal = turnPrincipal(session.owner, turn)
-      // Settings → Plugins (#1953): a disabled tool is not offered, and one raised
+      // Settings → Tools & plugins (#1953): a disabled tool is not offered, and one raised
       // past the principal's tiers is not either.
       const builtIn = extras?.builtIn
       const turnTierOf = (t: Tool) => (builtIn ? builtIn.tierOf(`mcp__${SERVER_NAME}__${t.name}`, t.risk) : t.risk)

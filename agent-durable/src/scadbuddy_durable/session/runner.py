@@ -40,11 +40,11 @@ Claude, failed, and was sent again on every retry. One over a bound ends the tur
 readable error and no retry.
 
 Settings → Model is the segment's model, and the own plugin's skills load only while
-Settings → Plugins has it on, read per segment as a classic turn reads them per turn.
+Settings → Tools & plugins has it on, read per segment as a classic turn reads them per turn.
 The turn's plugin packages (#2320) load from the payload volume, each only once it
 hashes to its pin (``package_hash.py``).
 
-The tools Settings → Plugins disabled (the workflow's ``segment_context``) are left out
+The tools Settings → Tools & plugins disabled (the workflow's ``segment_context``) are left out
 of the segment's declared tools (#2088), so Claude is never offered them.
 """
 
@@ -1059,7 +1059,7 @@ class ScadBuddyRunner:
                 inp, injected=with_refusals(inp.injected, context.refusals, context.replaced)
             )
         if context.disabled_tools:
-            # Settings → Plugins turned them off (#2088): Claude is not offered them.
+            # Settings → Tools & plugins turned them off (#2088): Claude is not offered them.
             off = set(context.disabled_tools)
             inp = replace(inp, tools=[t for t in inp.tools if t.name not in off])
         settings = await self._settings(session)

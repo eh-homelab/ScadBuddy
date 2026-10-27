@@ -172,7 +172,8 @@ class StandInTools:
         tier, off = await self._access(name)
         if off:
             raise ApplicationError(
-                f"{name} is disabled in Settings → Plugins; the user can turn it back on there",
+                f"{name} is disabled in Settings → Tools & plugins; "
+                "the user can turn it back on there",
                 type="ToolError",
                 non_retryable=True,
             )

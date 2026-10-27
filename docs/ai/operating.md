@@ -662,16 +662,11 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   ([§8](#8-per-query-limits));
   `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
-  `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `http_request_enabled`
-  ([§12](#12-the-http-request-tool-827)); `browser_origins`, the headless browser's allow and deny
+  `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); `browser_origins`, the headless browser's allow and deny
   lists (`{ allow, deny }`, the defaults when unset), which Settings → AI headless browser writes
   through `PUT /api/v1/ai/settings/browser-origins`
   ([headless-browser.md](headless-browser.md#where-it-may-go-the-allow-and-deny-lists-982), #982);
-  `printer_camera_enabled`, on unless stored
-  `false`: while it is off a `get_printer_camera` call (from a turn, `/mcp` or a durable
-  session) is refused before the backend is asked, which Settings → Printer camera writes
-  through `PUT /api/v1/ai/settings/printer-camera`
-  ([`agent/src/tools/switches.ts`](../../agent/src/tools/switches.ts), #1911); `image_long_edge`, the long edge in pixels the
+  `image_long_edge`, the long edge in pixels the
   assistant panel scales an attached image to (default 1568, the Messages API's
   standard-tier edge; 200 to 2576, the high-resolution tier's edge for Claude 4.7 and
   later), which Settings → Assistant images writes through
@@ -832,10 +827,10 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
 - **Built-in plugins.** The plugin in the image is listed first by
   `GET /api/v1/ai/plugin-packages`, with `built_in: true`
   ([`agent/src/plugins/packages/builtins.ts`](../../agent/src/plugins/packages/builtins.ts)):
-  `scadbuddy`, ScadBuddy's own plugin (on unless the `ai_settings` key
-  `scadbuddy_plugin_enabled` is `false`). A browser (Playwright MCP) is not built in
+  `scadbuddy`, ScadBuddy's own plugin (on unless its source switch, `ai_access` row
+  (`builtin:own-plugin`, `*`), is `off`; [`agent/src/access/model.ts`](../../agent/src/access/model.ts)). A browser (Playwright MCP) is not built in
   any more; it is added as a remote plugin ([headless-browser.md](headless-browser.md)).
-  `PATCH` with `{ enabled }` sets that key; approve, re-pin and `DELETE` answer 409. An
+  `PATCH` with `{ enabled }` sets that row; approve, re-pin and `DELETE` answer 409. An
   install whose package names one answers 409 with `built_in: true` instead of
   refusing it, and Settings shows that as a notice.
 
@@ -1017,8 +1012,9 @@ and "Plugins", the list of `/api/v1/ai/plugins`
 own tool set first (#1953, `built_in: true`; `scadbuddy` is every registry tool, from
 [`agent/src/plugins/builtInTools.ts`](../../agent/src/plugins/builtInTools.ts)), then the
 remote MCP plugins. A built-in tool's tier can be raised or the tool disabled, never lowered
-below the tier its code declares (a lower one answers 400); the overrides are the
-`ai_settings` key `builtin_tools.scadbuddy`, applied at the
+below the tier its code declares (a lower one answers 400); the overrides are
+`ai_access` rows (`builtin:scadbuddy`, or `builtin:browser` for the browser tools; see
+"Tool access" below), applied at the
 harness seam, on `/mcp` and in the durable `agent-tools` activities. The durable session
 workflow parks a call by the manifest's tier, so a tool raised to outward is not parked
 there: its activity finds no recorded approval and refuses it (NotApproved). Adding, removing,
@@ -1145,13 +1141,45 @@ turn. Neither is retried (beyond the one shorter recall above), and neither ever
 the turn goes on with no memories. Only the recalled block enters the workflow's history,
 sealed by the session's payload codec.
 
+## Tool access (`ai_access`, #2171)
+
+One table holds what the user set for every tool, hook, skill and subagent the assistant
+can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-design.md), §4.1 to §4.3). The user sets it in Settings → Tools & plugins.
+
+- One row per (`source`, `item`). The sources are `builtin:scadbuddy`, `builtin:browser`,
+  `builtin:http`, `builtin:own-plugin`, `remote:<name>`, `package:<name>` and
+  `package:<name>/mcp:<server>` (`agent/src/access/model.ts`).
+- Item `*` is the source switch: `on` or `off`. Built-in sources are on until turned off.
+  Remote plugins and packages are off until turned on (`enabledByDefault` in
+  `agent/src/access/resolve.ts`).
+- Any other item is a tool, with `off`, `read`, `write` or `outward`. A tool with no row has
+  its declared tier. The user may set it above or below that tier.
+- Only overrides are stored. The resolver reads the rows at each call, so a change applies
+  from the next call, in either direction, also in a turn or flow run under way
+  (spec §4.4; `agent/src/access/resolver.ts`).
+- The same access holds from every caller: main agent, subagent, classic or durable turn,
+  flow run and `/mcp` (spec §4.1, §4.5). agent-durable reads the same rows
+  (`agent-durable/src/scadbuddy_durable/session/access.py`).
+- The old keys no longer decide. These are `ai_settings` `builtin_tools.scadbuddy`,
+  `scadbuddy_plugin_enabled`, `http_request_enabled` and `printer_camera_enabled`, and
+  `ai_plugins` `enabled`, `tool_tiers` and `disabled_tools`. Migration
+  `agent/src/db/migrations/20261026T2200Z_access.sql` made the table.
+  `20261026T2201Z_access_copy.sql` copied the old values into it (`updated_by` is
+  `migration:2171`). `20261026T2358Z_access_plugins_mirror.sql` mirrors a write of an older
+  replica into `ai_access` during a rolling deploy. A later migration drops the old
+  columns (spec §4.3).
+- The printer camera is the access of `get_printer_camera` (`builtin:scadbuddy`): `off`
+  replaces the old switch (spec §4.2; `agent/src/routes/printerCamera.ts`, #1911). The
+  route `PUT /api/v1/ai/settings/printer-camera` writes that row.
+
 ## 12. The HTTP request tool (#827)
 
 Session turns get an `http_request` tool ("curl"; `agent/src/harness/httpRequest.ts`)
-unless Settings → AI → **AI HTTP requests** is switched off. It is on by default; the
-switch is the `ai_settings` key `http_request_enabled` (`false` turns it off),
-written by `PUT /api/v1/ai/settings/http-request` and read at the start of every turn,
-so a change applies from the next turn.
+unless Settings → Tools & plugins turns it off. It is on by default; the
+switch is the `ai_access` row (`builtin:http`, `*`) (`off` turns it off),
+written by `PUT /api/v1/ai/settings/http-request`
+([`agent/src/routes/httpRequest.ts`](../../agent/src/routes/httpRequest.ts)) and read at the
+start of every turn, so a change applies from the next turn.
 
 - **Reach is open until the sandbox** (decided 2026-09-30): the internet, the LAN and
   cluster services, plain `http:` included. Only link-local and cloud metadata

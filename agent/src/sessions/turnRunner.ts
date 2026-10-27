@@ -99,7 +99,7 @@ export type FingerprintParts = {
   owner: string
   systemAppend: string
   disabledTools: string[]
-  /** Settings → Plugins' raised tiers (#1953), `<harness name>=<tier>`, sorted. */
+  /** Settings → Tools & plugins' raised tiers (#1953), `<harness name>=<tier>`, sorted. */
   raisedTiers: string[]
   /** Whether the run has the http_request tool (#827). */
   httpRequest: boolean
@@ -136,7 +136,7 @@ export type AssembledTurn = {
    * plugins' header values (and their bare tokens).
    */
   secrets: string[]
-  /** Each tool's tier as the permission seam applies it, plugins' and Settings → Plugins' raised tiers included. */
+  /** Each tool's tier as the permission seam applies it, plugins' and Settings → Tools & plugins' raised tiers included. */
   eventTierOf: TierResolver
   /** As `eventTierOf`, but AskUserQuestion and ask_user are `read` where the user is asked (#940): what the panel shows and audits. */
   shownTierOf: TierResolver
@@ -218,7 +218,7 @@ export class TurnRunner {
     maxBudgetUsd: 'spawn', // what is left of the budget at spawn: its own reuse check (budget rule)
     maxRetries: 'transientRetries', // the fallback's bound on Claude Code's retries, set per attempt (warmTurn.ts)
     tierOf: 'plugins', // the registry's tiers, widened by each plugin's `toolTiers` (http_request's: `httpTier`)
-    builtInPolicy: 'raisedTiers', // Settings -> Plugins' raised tiers and disabled built-ins (`disabledTools`)
+    builtInPolicy: 'raisedTiers', // Settings → Tools & plugins' raised tiers and disabled built-ins (`disabledTools`)
     live: 'plugins', // reads each call's access as it runs; the sources it reads are the plugins' (its ledger is the slot's turn's)
     approvalGate: 'slot',
     prepareApproval: 'tiers', // bound to the principal, as `mcpServers` is (#4442)
@@ -268,7 +268,7 @@ export class TurnRunner {
     const tierOf: TierResolver = (name, input) => httpTier(name, input) ?? registryTierOf(name, input)
     // Widened with the plugins' tiers once they are loaded below, so the
     // panel shows a plugin tool at the tier the permission seam applies.
-    // Settings → Plugins' raised tiers (#1953), once read below, over every tier shown.
+    // Settings → Tools & plugins' raised tiers (#1953), once read below, over every tier shown.
     let builtIn: BuiltInPolicy | undefined
     const raised = (name: string, tier: RiskTier | undefined) => (tier === undefined || !builtIn ? tier : builtIn.tierOf(name, tier))
     let eventTierOf: TierResolver = (name, input) => raised(name, tierOf(name, input))
@@ -610,7 +610,7 @@ export class TurnRunner {
         tiers: principal.tiers ? [...principal.tiers] : null,
         owner: `${session.owner.kind}:${session.owner.id}`,
         systemAppend: run.systemPromptAppend ?? '',
-        // Settings → Plugins' disabled built-ins; each plugin's own are in its `plugins` entry.
+        // Settings → Tools & plugins' disabled built-ins; each plugin's own are in its `plugins` entry.
         disabledTools: [...(builtIn?.disallowed ?? [])],
         raisedTiers: [...(builtIn?.raised ?? [])],
         httpRequest: http !== undefined,

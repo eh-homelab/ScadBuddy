@@ -31,7 +31,7 @@ export type TurnRunnerTestOptions = {
   /** The Hindsight plugin's tool tiers and disabled tools. */
   pluginToolTiers?: Record<string, RiskTier>
   pluginDisabledTools?: string[]
-  /** Settings → Plugins' raised tiers for ScadBuddy's own tools (#1953), by bare name. */
+  /** Settings → Tools & plugins' raised tiers for ScadBuddy's own tools (#1953), by bare name. */
   raisedTiers?: Record<string, RiskTier>
   /** The http_request switch (#827), `builtin:http`'s `*` row in ai_access (#2171); on when undefined. */
   httpRequest?: boolean

@@ -5,7 +5,7 @@
 ``send_message``, and continues as new between turns when the server suggests it
 (and, the plugin's ``auto_continue_as_new``, between the steps of a long turn).
 
-A tool parks by its effective tier (#2088): ``gate_settings`` reads Settings → Plugins
+A tool parks by its effective tier (#2088): ``gate_settings`` reads Settings → Tools & plugins
 as each turn starts, a tool raised to ``outward`` parks like any outward tool, and a
 disabled one is left out of what the segment runner declares (``segment_context``).
 Under ``tool-access-2171`` every registry call stops at the gate, which asks the tool's
@@ -291,7 +291,7 @@ class DurableSession:
         # Set by each turn (tool-access-2171): every registry call asks its access then.
         self._per_call = False
         # The plugin keeps these objects and reads needs_approval as each call comes:
-        # a turn sets it from Settings → Plugins (manifest.apply_overrides, #2088).
+        # a turn sets it from Settings → Tools & plugins (manifest.apply_overrides, #2088).
         self._tools = {t.name: t for t in manifest.durable_tools(entries)}
         # This turn's other tools (plugins, http_request; #2320):
         # offered from what turn_tools listed, replaced every turn.

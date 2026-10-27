@@ -189,7 +189,7 @@ export type HarnessRun = {
    */
   browser?: BrowserGuard
   /**
-   * Settings → Plugins' overrides of the built-in tools (#1953,
+   * Settings → Tools & plugins' overrides of the built-in tools (#1953,
    * plugins/builtInTools.ts): raised tiers, applied over every other tier
    * here, and disabled tools, put in `disallowedTools`.
    */

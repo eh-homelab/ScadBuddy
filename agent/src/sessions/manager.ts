@@ -731,7 +731,7 @@ export type SessionManagerDeps = {
    */
   prepareApproval?: (session: SessionRecord, turn: TurnPrincipal) => ApprovalPreparer
   /**
-   * Settings → Plugins' overrides of the built-in tools (#1953,
+   * Settings → Tools & plugins' overrides of the built-in tools (#1953,
    * plugins/builtInTools.ts `BuiltInTools.policy`): read once per turn, as the
    * remote plugins are.
    */

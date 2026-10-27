@@ -147,11 +147,11 @@ export function principalFrom(extra: unknown): Principal | undefined {
   return principal as Principal | undefined
 }
 
-/** Each /mcp server's way to bring its tool list in line with Settings → Plugins (#1953). */
+/** Each /mcp server's way to bring its tool list in line with Settings → Tools & plugins (#1953). */
 const refreshers = new WeakMap<McpServer, () => Promise<void>>()
 
 /**
- * Offers on `server` exactly the tools Settings → Plugins has not disabled
+ * Offers on `server` exactly the tools Settings → Tools & plugins has not disabled
  * (#1953), read now; /mcp calls it before each request, so a `tools/list`
  * never shows a disabled tool. A change sends `notifications/tools/list_changed`.
  * A read that fails leaves the list as it was: every call to a tool re-reads
