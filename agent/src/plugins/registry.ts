@@ -341,7 +341,7 @@ export function validateDisabledTools(tools: readonly string[]): string[] {
     throw new PluginError(`disabled_tools has more than ${MAX_TOOL_ENTRIES} entries`, 400)
   }
   for (const tool of tools) {
-    if (!DISABLED_TOOL_NAME_RE.test(tool)) {
+    if (tool === '*' || !DISABLED_TOOL_NAME_RE.test(tool)) {
       throw new PluginError(`disabled_tools: "${tool}" is not a tool name (1–128 characters, no control characters)`, 400)
     }
   }

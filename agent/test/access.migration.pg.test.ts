@@ -103,6 +103,20 @@ describe.skipIf(skip !== '')(`the tool-access migrations${skip}`, () => {
     expect(await rows()).toEqual(expected)
   })
 
+  it('the camera switch off wins over a stored get_printer_camera tier', async () => {
+    await setting('builtin_tools.scadbuddy', { tool_tiers: { get_printer_camera: 'outward' } })
+    await setting('printer_camera_enabled', false)
+    await migrate(db.sql, MIGRATIONS)
+    expect(await rows()).toEqual([{ source: 'builtin:scadbuddy', item: 'get_printer_camera', access: 'off', updated_by: BY }])
+  })
+
+  it("skips '*' and empty tool names", async () => {
+    await setting('builtin_tools.scadbuddy', { tool_tiers: { '*': 'outward', '': 'read' }, disabled_tools: ['*', ''] })
+    await plugin('hs', true, { '*': 'read', '': 'read' }, ['*', ''])
+    await migrate(db.sql, MIGRATIONS)
+    expect(await rows()).toEqual([{ source: 'remote:hs', item: '*', access: 'on', updated_by: BY }])
+  })
+
   it('leaves the old keys and columns in place', async () => {
     await setting('builtin_tools.scadbuddy', { tool_tiers: { get_model: 'read' } })
     await setting('http_request_enabled', false)

@@ -125,6 +125,14 @@ describe('/api/v1/ai/settings/printer-camera', () => {
     expect(await (await get(a)).json()).toEqual({ enabled: true })
   })
 
+  it('PUT true leaves a raised get_printer_camera tier in place', async () => {
+    const { app: a, rows } = app()
+    rows.push({ source: CAMERA, item: 'get_printer_camera', access: 'outward', updated_by: 'ui:x' })
+    expect((await put(a, { enabled: true })).status).toBe(200)
+    expect(rows).toEqual([expect.objectContaining({ item: 'get_printer_camera', access: 'outward' })])
+    expect(await (await get(a)).json()).toEqual({ enabled: true })
+  })
+
   it.each([
     ['another origin', { ...UI, origin: 'https://evil.example' }],
     ['no origin', { host: UI.host, 'x-forwarded-proto': 'https' }],
