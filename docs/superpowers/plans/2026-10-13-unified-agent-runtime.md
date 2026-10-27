@@ -1,5 +1,10 @@
 # Unified agent runtime Implementation Plan
 
+> **On hold from Phase 6 (2026-10-26).** Spec §14 moves the agent's Temporal workers into a
+> worker Deployment of their own and keeps `agent-durable/` as the Python worker. Phases 1–5
+> are merged and stand. Phases 6–8 below are kept as written for the record and must be
+> rewritten against spec §14.3–§14.6 before any task in them starts.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Every agent session runs the classic TypeScript turn, as an activity of a TypeScript `AgentSession` workflow. The activity lands on the replica that keeps the session's Claude Code process warm, so there is one tool and permission layer and no second mode. `agent-durable/` is retired.
@@ -702,6 +707,8 @@ async function runTurn(input: SessionTurnInput): Promise<SessionTurnResult> {
 
 ## Phase 6: One runtime (PR 6, `feat(agent)!: every session is an AgentSession`)
 
+> **On hold (spec §14).** Rewrite before starting: the worker Deployment comes first.
+
 ### Task 6.1: Route every new session to `AgentSession`; retire the mode switch
 
 **Files:**
@@ -816,6 +823,8 @@ exit "$fail"
 ---
 
 ## Phase 8: Retire `agent-durable` (PR 8, `chore!: retire agent-durable`)
+
+> **On hold (spec §14.4).** `agent-durable/` stays; only its `session/` package and the plugin pins retire.
 
 Merge this only after the PR 7 backfill reported 0 open `DurableSession`s in production. Link the run output in the PR.
 

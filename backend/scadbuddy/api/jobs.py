@@ -751,7 +751,7 @@ async def get_model_diagnostics(
     )
 
 
-def _draw_view(glb: Path, view: ViewName, size: int, camera: Camera | None) -> bytes | None:
+def draw_view(glb: Path, view: ViewName, size: int, camera: Camera | None) -> bytes | None:
     parts = read_glb(glb)
     return render_view(parts, view, size, camera) if parts else None
 
@@ -774,7 +774,7 @@ async def preview_view(
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for {owner} is gone")
     try:
         png = await asyncio.wait_for(
-            asyncio.to_thread(_draw_view, glb, view, size, camera),
+            asyncio.to_thread(draw_view, glb, view, size, camera),
             timeout=config.render_timeout,
         )
     except TimeoutError:

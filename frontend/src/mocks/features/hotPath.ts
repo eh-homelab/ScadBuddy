@@ -60,6 +60,7 @@ export const NO_BAMBUDDY = 'no Bambuddy URL is configured'
 export const HOT_PRINTER: PrinterRow = {
   id: '00000000-0000-4000-8000-0000000000c2',
   serial: '31B8BP000000C2',
+  kind: 'physical',
   name: 'H2C',
   model: 'H2C',
   bambuddy_printer_id: 1,

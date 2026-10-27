@@ -1,0 +1,42 @@
+{
+  "printers": [
+    {
+      "id": 1,
+      "name": "H2C Virtual",
+      "enabled": true,
+      "mode": "queue",
+      "model": "O1C",
+      "model_name": "H2C",
+      "access_code_set": true,
+      "serial": "09400A391800001",
+      "target_printer_id": 1,
+      "auto_dispatch": true,
+      "queue_force_color_match": false,
+      "save_ams_mapping": false,
+      "gcode_injection": false,
+      "bind_ip": "0.0.0.0",
+      "remote_interface_ip": "",
+      "tailscale_disabled": false,
+      "position": 1,
+      "status": {"running": true, "pending_files": 0}
+    }
+  ],
+  "models": {
+    "BL-P001": "X1C",
+    "BL-P002": "X1",
+    "C13": "X1E",
+    "N6": "X2D",
+    "N9": "A2L",
+    "C11": "P1P",
+    "C12": "P1S",
+    "N7": "P2S",
+    "N2S": "A1",
+    "N1": "A1 Mini",
+    "O1D": "H2D",
+    "O1E": "H2D Pro",
+    "O2D": "H2D Pro",
+    "O1C": "H2C",
+    "O1C2": "H2C",
+    "O1S": "H2S"
+  }
+}
