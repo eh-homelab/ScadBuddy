@@ -2149,10 +2149,12 @@ export class SessionManager {
    */
   private async dropFailedFork(childId: string): Promise<void> {
     await this.deps.sql`DELETE FROM ai_session_entries WHERE session_id = ${childId}`
-    await this.deps.sql`DELETE FROM ai_sessions WHERE id = ${childId}`
     await this.deps.sql.begin(async (tx) => {
-      // The lock a key's creation takes (payloadCodec.ts), so this never races one.
+      // The lock a key's creation takes (payloadCodec.ts), held over the row's delete too: a
+      // creation that saw the row standing commits its key before this deletes it, and one
+      // after this commit sees no row and makes none.
       await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(`session-${childId}`)}))`
+      await tx`DELETE FROM ai_sessions WHERE id = ${childId}`
       await tx`DELETE FROM ai_payload_keys WHERE subject = ${`session-${childId}`}`
     })
   }

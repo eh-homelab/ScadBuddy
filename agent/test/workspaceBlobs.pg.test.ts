@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
-import { SubjectForgotten } from '../src/temporal/payloadCodec.js'
+import { payloadKeyLock, SubjectForgotten } from '../src/temporal/payloadCodec.js'
 import { BackendWorkspaceBlobs, WORKSPACE_BLOBS } from '../src/workspace/blobs.js'
 import { rewrapWorkspaceKeys, WorkspaceSealing } from '../src/workspace/sealing.js'
 import { SessionFiles, sha256, type WorkspaceRef } from '../src/workspace/store.js'
@@ -421,6 +421,34 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
       } finally {
         await db.sql`ALTER TABLE ai_session_files_away RENAME TO ai_session_files`
       }
+    })
+  })
+  describe('review of 10b6be073', () => {
+    it("deletes a failed fork's row under its key's lock, so no key creation reads it as standing", async () => {
+      const { session: child } = await m.start(browser, { origin: 'chat' })
+      const subject = `session-${child.id}`
+      let release!: () => void
+      const held = new Promise<void>((resolve) => (release = resolve))
+      let locked!: () => void
+      const isLocked = new Promise<void>((resolve) => (locked = resolve))
+      // A key creation for the child, mid-insert: it holds the lock and has seen the row.
+      const creation = db.sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
+        locked()
+        await held
+      })
+      await isLocked
+      const dropping = (m as unknown as { dropFailedFork(id: string): Promise<void> }).dropFailedFork(child.id)
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        expect(await db.sql`SELECT 1 FROM ai_sessions WHERE id = ${child.id}`).toHaveLength(1)
+      } finally {
+        release()
+        await creation
+        await dropping
+      }
+      expect(await db.sql`SELECT 1 FROM ai_sessions WHERE id = ${child.id}`).toHaveLength(0)
+      expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(0)
     })
   })
 })
