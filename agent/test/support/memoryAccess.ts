@@ -22,6 +22,11 @@ export function memoryAccess(initial: AccessRow[] = []): { access: AccessReader 
       reads.n += 1
       return rows.filter((r) => sources.includes(r.source)).map((r) => ({ ...r }))
     },
+    async row(source, item) {
+      reads.n += 1
+      const row = rows.find((r) => r.source === source && r.item === item)
+      return row && { ...row }
+    },
     async setItem(source, item, tier: ToolAccess, context) {
       if (item === SOURCE_ITEM || !isToolAccess(tier)) throw new AccessError('bad item')
       put(source, item, tier, by(context))

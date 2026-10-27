@@ -1,7 +1,7 @@
 import type { RiskTier } from '../harness/permissions.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import type { Tool, ToolOverrides } from '../tools/registry.js'
-import { BUILTIN_SOURCES, isToolAccess, type StoredOverrides, type ToolAccess } from './model.js'
+import { type AccessRow, BUILTIN_SOURCES, isToolAccess, registrySource, type StoredOverrides, type ToolAccess } from './model.js'
 import { isRegistrySource, pluginOverrides, registryOverrides, sourceEnabled, toolAccess } from './resolve.js'
 import type { AccessReader } from './store.js'
 
@@ -12,9 +12,11 @@ import type { AccessReader } from './store.js'
 export class AccessResolver {
   private readonly reader: AccessReader | undefined
   private readonly tools: readonly Pick<Tool, 'name' | 'risk'>[]
+  private readonly risk: ReadonlyMap<string, RiskTier>
   constructor(reader: AccessReader | undefined, tools: readonly Pick<Tool, 'name' | 'risk'>[] = ALL_TOOLS) {
     this.reader = reader
     this.tools = tools
+    this.risk = new Map(tools.map((t) => [t.name, t.risk]))
   }
 
   /** The registry tools' overrides, in one read of `builtin:scadbuddy` and `builtin:browser`. */
@@ -23,13 +25,18 @@ export class AccessResolver {
     return registryOverrides(this.tools, rows)
   }
 
-  /** The registry's overrides as a tool sees them: each call reads once. */
+  /**
+   * The registry's overrides as a tool sees them: each call reads its tool's one row (`item`,
+   * the same rules as `registry`), and `disabled` the whole registry.
+   */
   registryOverrides(): ToolOverrides {
     return {
       of: async (tool) => {
-        const stored = await this.registry()
-        const tier = stored.tool_tiers[tool]
-        return { ...(tier === undefined ? {} : { tier }), disabled: stored.disabled_tools.includes(tool) }
+        const own = this.risk.get(tool)
+        if (own === undefined) return { disabled: false }
+        const access = await this.item(registrySource(tool), tool, own)
+        if (access === 'off') return { disabled: true }
+        return { ...(access === own ? {} : { tier: access }), disabled: false }
       },
       disabled: async () => new Set((await this.registry()).disabled_tools),
     }
@@ -68,7 +75,12 @@ export class AccessResolver {
   /** One item's access: its row, else `declared`. */
   async item(source: string, item: string, declared: RiskTier): Promise<ToolAccess> {
     if (!this.reader) return declared
-    const row = (await this.reader.rows([source])).find((r) => r.source === source && r.item === item)
-    return toolAccess(declared, row, isRegistrySource(source))
+    return toolAccess(declared, await this.rowOf(this.reader, source, item), isRegistrySource(source))
+  }
+
+  /** One indexed read where the reader has one, else its source's rows. */
+  private async rowOf(reader: AccessReader, source: string, item: string): Promise<AccessRow | undefined> {
+    if (reader.row) return reader.row(source, item)
+    return (await reader.rows([source])).find((r) => r.source === source && r.item === item)
   }
 }

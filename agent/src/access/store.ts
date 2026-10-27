@@ -4,7 +4,11 @@ import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { LEGACY_SOURCES, legacySettings, type RegistryTool } from './legacy.js'
 import { type AccessRow, isToolAccess, SOURCE_ITEM, type ToolAccess } from './model.js'
 
-export type AccessReader = { rows(sources: readonly string[]): Promise<AccessRow[]> }
+export type AccessReader = {
+  rows(sources: readonly string[]): Promise<AccessRow[]>
+  /** One item's row, in one indexed read; absent: `rows` of its source. */
+  row?(source: string, item: string): Promise<AccessRow | undefined>
+}
 
 export type AccessWriter = {
   setItem(source: string, item: string, access: ToolAccess, context?: AuditContext): Promise<void>
@@ -124,6 +128,12 @@ export class AccessStore implements AccessReader, AccessWriter {
     if (sources.length === 0) return []
     return this.sql<AccessRow[]>`
       SELECT source, item, access, updated_by FROM ai_access WHERE source IN ${this.sql(sources)} ORDER BY source, item`
+  }
+
+  async row(source: string, item: string): Promise<AccessRow | undefined> {
+    const [row] = await this.sql<AccessRow[]>`
+      SELECT source, item, access, updated_by FROM ai_access WHERE source = ${source} AND item = ${item}`
+    return row
   }
 
   async setItem(source: string, item: string, access: ToolAccess, context?: AuditContext): Promise<void> {

@@ -2,6 +2,8 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { type AccessRow, MIGRATED_BY, registrySource, type StoredOverrides, TOOL_ACCESS } from '../src/access/model.js'
 import { registryOverrides, sourceEnabled } from '../src/access/resolve.js'
+import { AccessResolver } from '../src/access/resolver.js'
+import type { AccessReader } from '../src/access/store.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 
 // The tool-access rules (#2171, spec 2026-10-18 §4.1–§4.3). The vectors are the one source of
@@ -108,6 +110,28 @@ describe('access vectors', () => {
   it.each(built.registry.filter((v) => !v.durable_only))('registry: $name', (v) => {
     const tools = v.tools.filter((t) => t.hitl !== 'answer') as { name: string; risk: RiskTier }[]
     expect(registryOverrides(tools, v.rows)).toEqual(v.expect)
+  })
+
+  // Review of #4838: a call's tool is resolved from its one row, not the whole registry.
+  it.each(built.registry.filter((v) => !v.durable_only))('one tool per call, as the whole registry: $name', async (v) => {
+    const tools = v.tools.filter((t) => t.hitl !== 'answer') as { name: string; risk: RiskTier }[]
+    const reads = { rows: 0, row: 0 }
+    const reader: AccessReader = {
+      rows: async (sources) => {
+        reads.rows += 1
+        return v.rows.filter((r) => sources.includes(r.source))
+      },
+      row: async (source, item) => {
+        reads.row += 1
+        return v.rows.find((r) => r.source === source && r.item === item)
+      },
+    }
+    const overrides = new AccessResolver(reader, tools).registryOverrides()
+    for (const tool of tools) {
+      const tier = v.expect.tool_tiers[tool.name]
+      expect(await overrides.of(tool.name), tool.name).toEqual({ ...(tier === undefined ? {} : { tier }), disabled: v.expect.disabled_tools.includes(tool.name) })
+    }
+    expect(reads).toEqual({ rows: 0, row: tools.length })
   })
 
   it.each(built.sources)('source: $name', (v) => expect(sourceEnabled(v.source, v.rows)).toBe(v.expect))
