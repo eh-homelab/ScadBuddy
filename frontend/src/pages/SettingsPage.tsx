@@ -311,15 +311,18 @@ const groupTitle = (id: (typeof ASSISTANT_GROUPS)[number]['id']): string =>
 
 /** #4818 review — a write whose answer was lost, and the settings could not be read again. */
 const UNCONFIRMED = 'Could not confirm what the server stored. Reload the page to see the saved settings.'
+/** Whether `message` carries the note, in either form `withUnconfirmed` builds (#4831 review). */
+const hasUnconfirmed = (message: string | null | undefined): boolean =>
+  message === UNCONFIRMED || !!message?.endsWith(` ${UNCONFIRMED}`)
 /** `message` with the note added once: merged rereads call every caller's `failed`. */
 const withUnconfirmed = (message: string | null | undefined): string =>
-  !message ? UNCONFIRMED : message.endsWith(UNCONFIRMED) ? message : `${message} ${UNCONFIRMED}`
+  !message ? UNCONFIRMED : hasUnconfirmed(message) ? message : `${message} ${UNCONFIRMED}`
 /** `message` without the note, once a read has confirmed what is stored. */
 const confirmed = (message: string | null | undefined): string | undefined =>
   message === UNCONFIRMED
     ? undefined
-    : message?.endsWith(` ${UNCONFIRMED}`)
-      ? message.slice(0, -(UNCONFIRMED.length + 1))
+    : hasUnconfirmed(message)
+      ? message!.slice(0, -(UNCONFIRMED.length + 1))
       : (message ?? undefined)
 
 function SettingsSections() {
@@ -569,7 +572,7 @@ function SettingsSections() {
       setError((current) => confirmed(current) ?? null)
       // Keep `current` when no section carries the note: nothing changed, so React bails out.
       setSectionError((current) =>
-        Object.values(current).some((message) => message?.endsWith(UNCONFIRMED))
+        Object.values(current).some(hasUnconfirmed)
           ? Object.fromEntries(Object.entries(current).map(([id, message]) => [id, confirmed(message)]))
           : current,
       )
