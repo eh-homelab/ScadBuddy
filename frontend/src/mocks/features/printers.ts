@@ -150,6 +150,11 @@ export function setVirtualAuth(on: boolean): void {
   state.virtualAuth = on
 }
 
+/** The virtual printers as they are now, for a test that sets one up. */
+export function virtualState(): VirtualPrinter[] {
+  return state.virtual
+}
+
 export function virtualWrites(): unknown[] {
   return state.virtualWrites
 }

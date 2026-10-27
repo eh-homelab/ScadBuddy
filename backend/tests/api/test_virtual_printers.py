@@ -280,3 +280,45 @@ def test_a_resend_with_the_same_key_and_code_creates_once(client: TestClient) ->
             "SELECT id FROM operations WHERE kind = 'bambuddy_vp_create'"
         ).fetchall()
     assert len(rows) == 1
+
+
+@respx.mock
+def test_a_401_is_the_plain_scope_problem(client: TestClient) -> None:
+    configure(client)
+    bambuddy([])
+    respx.put(f"{API}/virtual-printers/1").mock(
+        return_value=httpx.Response(401, json={"detail": "Invalid API key"})
+    )
+    response = client.put("/api/v1/printers/virtual/1", json={"enabled": False}, headers=press())
+    assert response.status_code == 409, response.text
+    assert "auth is on" not in response.json()["detail"]
+
+
+@respx.mock
+def test_a_code_for_a_vp_that_keeps_its_target_is_refused(client: TestClient) -> None:
+    configure(client)
+    registry(client).store.kek = KEK
+    bambuddy([])
+    respx.get(f"{API}/virtual-printers/1").mock(return_value=httpx.Response(200, json=vp(1, 1)))
+    changed = respx.put(f"{API}/virtual-printers/1")
+    response = client.put("/api/v1/printers/virtual/1", json={"access_code": CODE}, headers=press())
+    assert response.status_code == 422, response.text
+    assert "target's access code" in response.json()["detail"]
+    assert not changed.called
+
+
+@respx.mock
+def test_a_repeat_answered_from_the_record_does_not_sync_again(client: TestClient) -> None:
+    configure(client)
+    bambuddy([vp(1, None)])
+    listed = respx.routes[-1]  # GET /printers/, which every sync reads
+    respx.put(f"{API}/virtual-printers/1").mock(
+        return_value=httpx.Response(200, json=vp(1, None, enabled=False))
+    )
+    key = press()
+    client.put("/api/v1/printers/virtual/1", json={"enabled": False}, headers=key)
+    synced = listed.call_count
+    assert synced >= 1
+    again = client.put("/api/v1/printers/virtual/1", json={"enabled": False}, headers=key)
+    assert again.status_code == 200, again.text
+    assert listed.call_count == synced

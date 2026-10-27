@@ -6,6 +6,7 @@ import type {
   VirtualPrinter,
   VirtualPrinterCreate,
   VirtualPrinterDiagnostic,
+  VirtualPrinterUpdate,
   VirtualPrinters,
 } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
@@ -34,6 +35,16 @@ const MODES: { value: Mode; label: string }[] = [
 export const VP_ACCESS_CODE_LENGTH = 8
 
 const ANY = ''
+/**
+ * The form's target for a VP whose Bambuddy target no registry row links (not imported
+ * yet, or a sync that failed): kept as it is, never sent as "any printer" (review #4784).
+ */
+const UNREGISTERED = '\u0000bambuddy-target'
+
+/** Bambuddy's target that no registry row links, or null. */
+function unregisteredTarget(vp: VirtualPrinter | null): number | null {
+  return vp && vp.target == null && vp.target_printer_id != null ? vp.target_printer_id : null
+}
 
 function problem(cause: unknown, fallback: string): string {
   return cause instanceof ApiError ? cause.message : fallback
@@ -59,7 +70,7 @@ function formOf(vp: VirtualPrinter | null, defaultModel: string): Form {
     name: vp?.name ?? '',
     mode: (vp?.mode as Mode | undefined) ?? 'queue',
     model: vp?.model ?? defaultModel,
-    target: vp?.target ?? ANY,
+    target: vp?.target ?? (unregisteredTarget(vp) != null ? UNREGISTERED : ANY),
     enabled: vp?.enabled ?? false,
     auto_dispatch: vp?.auto_dispatch ?? true,
     queue_force_color_match: vp?.queue_force_color_match ?? false,
@@ -76,7 +87,7 @@ function bodyOf(form: Form): VirtualPrinterCreate {
     name: form.name.trim(),
     mode: form.mode,
     model: form.model || null,
-    target: form.target || null,
+    target: form.target === UNREGISTERED ? undefined : form.target || null,
     enabled: form.enabled,
     auto_dispatch: form.auto_dispatch,
     queue_force_color_match: form.queue_force_color_match,
@@ -87,7 +98,22 @@ function bodyOf(form: Form): VirtualPrinterCreate {
   }
   // A targeted one uses its target's code; Bambuddy would overwrite any other.
   if (!form.target && form.access_code) body.access_code = form.access_code
+  if (body.target === undefined) delete body.target
   return body
+}
+
+/**
+ * An edit's PUT: only what the user changed, so a save never sends a field it did not
+ * touch (the PUT changes only what is sent). An unregistered target is never sent.
+ */
+function changesOf(form: Form, vp: VirtualPrinter): VirtualPrinterUpdate {
+  const next = bodyOf(form) as Record<string, unknown>
+  const before = bodyOf(formOf(vp, vp.model ?? '')) as Record<string, unknown>
+  const changes: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(next)) {
+    if (key === 'access_code' || value !== before[key]) changes[key] = value
+  }
+  return changes as VirtualPrinterUpdate
 }
 
 export function VirtualPrintersPanel({ rows, onChanged }: { rows: PrinterRow[]; onChanged: () => void }) {
@@ -186,7 +212,12 @@ function VirtualPrinterItem({
     }
   }
 
-  const target = vp.target ? targets.find((row) => row.id === vp.target)?.name ?? 'a printer' : null
+  const unregistered = unregisteredTarget(vp)
+  const target = vp.target
+    ? (targets.find((row) => row.id === vp.target)?.name ?? 'a printer')
+    : unregistered != null
+      ? `Bambuddy printer ${unregistered} (not in the registry)`
+      : null
   const model = vp.model_name ?? (vp.model ? data.models[vp.model] : null) ?? vp.model ?? 'its model'
   return (
     <li aria-label={`Virtual printer ${vp.name}`}>
@@ -201,7 +232,7 @@ function VirtualPrinterItem({
               <div className="flex flex-wrap gap-1">
                 <Badge variant="outline">{vp.enabled ? 'Enabled' : 'Disabled'}</Badge>
                 {vp.status?.running && <Badge variant="outline">Running</Badge>}
-                {!vp.target && !vp.access_code_set && <Badge variant="outline">No access code</Badge>}
+                {vp.target_printer_id == null && !vp.access_code_set && <Badge variant="outline">No access code</Badge>}
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-1" {...USER_ONLY}>
@@ -310,7 +341,7 @@ function VirtualPrinterForm({
     setError(null)
     try {
       const body = bodyOf(form)
-      if (vp) await api.updateVirtualPrinter(vp.id, body)
+      if (vp) await api.updateVirtualPrinter(vp.id, changesOf(form, vp))
       else await api.createVirtualPrinter(body)
       set('access_code', '')
       onDone()
@@ -359,6 +390,9 @@ function VirtualPrinterForm({
             onValueChange={(value) => set('target', value)}
             choices={[
               { value: ANY, label: 'Any printer of its model' },
+              ...(unregisteredTarget(vp) != null
+                ? [{ value: UNREGISTERED, label: `Bambuddy printer ${unregisteredTarget(vp)} (not in the registry)` }]
+                : []),
               ...targets.map((row) => ({ value: row.id, label: row.name })),
             ]}
           />

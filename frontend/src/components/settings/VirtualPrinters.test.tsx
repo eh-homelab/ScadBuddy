@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
-import { setVirtualAuth, virtualWrites } from '../../mocks/features/printers'
+import { setVirtualAuth, virtualState, virtualWrites } from '../../mocks/features/printers'
 import { renderPage } from '../../test/utils'
 import { choose } from '../../test/select'
 import { PrintersPanel } from './Printers'
@@ -67,7 +67,24 @@ describe('VirtualPrintersPanel (#4747)', () => {
     await choose(user, within(form).getByRole('combobox', { name: 'Mode' }), 'Proxy')
     await user.click(within(form).getByRole('button', { name: 'Save in Bambuddy' }))
     await waitFor(() => expect(vp).toHaveTextContent('(proxy)'))
-    expect(virtualWrites()[0]).not.toHaveProperty('access_code')
+    expect(virtualWrites()[0]).toEqual({ mode: 'proxy' })
+  })
+
+  it('keeps a target the registry has not imported when an edit leaves it alone (review #4784)', async () => {
+    virtualState()[0] = { ...virtualState()[0]!, target: null, target_printer_id: 7 }
+    const { user } = renderPage(<PrintersPanel bambuddyConfigured />)
+    const vp = await screen.findByRole('listitem', { name: H2C_VP })
+    expect(vp).toHaveTextContent('→ Bambuddy printer 7 (not in the registry) (queue)')
+    await user.click(within(vp).getByRole('button', { name: 'Edit' }))
+    const form = within(vp).getByRole('form', { name: 'Edit H2C Virtual' })
+    expect(within(form).getByRole('combobox', { name: 'Sends to' })).toHaveTextContent('Bambuddy printer 7')
+    expect(within(form).queryByLabelText(/access code/i)).toBeNull()
+    const name = within(form).getByLabelText('Name')
+    await user.clear(name)
+    await user.type(name, 'Renamed')
+    await user.click(within(form).getByRole('button', { name: 'Save in Bambuddy' }))
+    await waitFor(() => expect(virtualWrites()).toHaveLength(1))
+    expect(virtualWrites()[0]).toEqual({ name: 'Renamed' })
   })
 
   it("says why a write is refused while Bambuddy's auth is on", async () => {

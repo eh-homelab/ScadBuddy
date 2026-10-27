@@ -217,9 +217,17 @@ def virtual_printer_kinds(
         checked: dict[str, Any] = {}
         if "target" in fields:
             checked["target_printer_id"] = await target_id(fields)
-            if checked["target_printer_id"] is not None and request.get("access_code"):
+            if checked["target_printer_id"] is not None and request.get(SEALED_FIELD):
                 raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, CODE_WITH_TARGET)
-        if request.get("access_code") and (printers is None or printers.kek is None):
+        if request.get(SEALED_FIELD) and "vp_id" in request and "target" not in fields:
+            # An update that keeps the target: Bambuddy would replace a code sent to a
+            # targeted VP with its target's (lines 236-240), so it is refused as a create's.
+            settings = await asyncio.to_thread(settings_store.load)
+            async with waiting_on_bambuddy(), client_for(settings) as client:
+                current = await client.virtual_printer(int(request["vp_id"]))
+            if current.target_printer_id is not None:
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, CODE_WITH_TARGET)
+        if request.get(SEALED_FIELD) and (printers is None or printers.kek is None):
             raise ApiError(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
                 "a virtual printer's access code needs SCADBUDDY_SECRET_KEY_FILE on the"

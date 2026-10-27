@@ -150,7 +150,7 @@ def _mapped(
     suffix = f": {detail}" if detail else ""
 
     if code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
-        if scope == Scope.ADMIN_SETTINGS:
+        if scope == Scope.ADMIN_SETTINGS and code == status.HTTP_403_FORBIDDEN:
             return ApiError(
                 status.HTTP_409_CONFLICT,
                 f"Bambuddy refused the API key when asked to {what}. No Bambuddy API key can"

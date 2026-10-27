@@ -311,6 +311,8 @@ export type PrinterSyncEntry = Schemas['SyncEntry']
 export type BambuddyView = Schemas['BambuddyView']
 /** #4747 — Bambuddy's virtual printers, managed from Settings > Printers. */
 export type VirtualPrinter = Schemas['VirtualPrinterView']
+/** A write's answer: Bambuddy's model, without the registry's `target` and `printer_id`. */
+export type BambuddyVirtualPrinter = Schemas['VirtualPrinter']
 export type VirtualPrinters = Schemas['VirtualPrintersView']
 export type VirtualPrinterCreate = Schemas['VirtualPrinterCreate']
 export type VirtualPrinterUpdate = Schemas['VirtualPrinterUpdate']

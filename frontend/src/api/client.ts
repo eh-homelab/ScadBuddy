@@ -206,7 +206,7 @@ import type {
   Shipment,
   ShipmentEdit,
   ShipmentInput,
-  VirtualPrinter,
+  BambuddyVirtualPrinter,
   VirtualPrinters,
   VirtualPrinterCreate,
   VirtualPrinterUpdate,
@@ -1973,18 +1973,18 @@ export const api = {
   deletePrinter: (id: string) => request<void>(`/printers/${seg(id)}`, { method: 'DELETE' }),
   /** Bambuddy's active printers, each with the row linking it, if any. */
   discoverPrinters: () => request<DiscoveredPrinter[]>('/printers/discover'),
-  /** #4439, #4747: import and link Bambuddy's printers and virtual printers; idempotent. */
   /** #4747: Bambuddy's virtual printers; 409 without a Bambuddy. Never an access code. */
   listVirtualPrinters: () => request<VirtualPrinters>('/printers/virtual'),
   diagnoseVirtualPrinter: (vpId: number) =>
     request<VirtualPrinterDiagnostic>(`/printers/virtual/${vpId}/diagnostic`),
-  /** The writes are commands: Bambuddy dedupes none of them. */
+  /** The writes are commands: Bambuddy dedupes none of them. Each answers Bambuddy's own model. */
   createVirtualPrinter: (body: VirtualPrinterCreate) =>
-    command<VirtualPrinter>('/printers/virtual', { method: 'POST', body: JSON.stringify(body) }),
+    command<BambuddyVirtualPrinter>('/printers/virtual', { method: 'POST', body: JSON.stringify(body) }),
   updateVirtualPrinter: (vpId: number, body: VirtualPrinterUpdate) =>
-    command<VirtualPrinter>(`/printers/virtual/${vpId}`, { method: 'PUT', body: JSON.stringify(body) }),
+    command<BambuddyVirtualPrinter>(`/printers/virtual/${vpId}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteVirtualPrinter: (vpId: number) =>
     command<{ deleted: number }>(`/printers/virtual/${vpId}`, { method: 'DELETE' }),
+  /** #4439, #4747: import and link Bambuddy's printers and virtual printers; idempotent. */
   syncPrintersFromBambuddy: (dryRun = false) =>
     request<PrinterSyncResult>(`/printers/sync-bambuddy?dry_run=${dryRun}`, { method: 'POST' }),
   linkPrinterBambuddy: (id: string, bambuddyPrinterId: number) =>

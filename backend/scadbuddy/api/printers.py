@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from fastapi import APIRouter, Response, status
 from fastapi.responses import JSONResponse
@@ -19,6 +20,7 @@ from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     IdempotencyKey,
     operation_answer,
+    recorded,
     run_operation,
 )
 from scadbuddy.bambuddy.client import client_for
@@ -32,7 +34,7 @@ from scadbuddy.bambuddy.virtual_printers import (
     access_code_request,
 )
 from scadbuddy.core.problems import ApiError
-from scadbuddy.operations.component import OperationsDep
+from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.store import OperationAccepted
 from scadbuddy.printers.address import UnsafeAddressError
 from scadbuddy.printers.bambuddy_sync import (
@@ -281,6 +283,36 @@ def _sealed(
     return access_code_request(printers.kek, code, vp_id=vp_id, idempotency_key=idempotency_key)
 
 
+async def _vp_write(
+    ops: OperationCommands,
+    response: Response,
+    printers: Printers,
+    store: SettingsStoreDep,
+    *,
+    kind: str,
+    subject: str,
+    request: dict[str, Any],
+    idempotency_key: str | None,
+) -> dict[str, Any] | OperationAccepted:
+    """Run a virtual printer's write; the registry follows a write this request made
+    (`_resync`), not a repeat answered from its record."""
+    operation = ops.kinds[kind]
+    repeat = await recorded(
+        ops, kind=operation, subject=subject, request=request, idempotency_key=idempotency_key
+    )
+    result = await run_operation(
+        ops,
+        response,
+        kind=operation,
+        subject=subject,
+        request=request,
+        idempotency_key=idempotency_key,
+    )
+    if repeat is None and not isinstance(result, OperationAccepted):
+        await _resync(printers, store)
+    return result
+
+
 VP_WRITES = (
     "A write needs Bambuddy's `settings:update`, which no API key holds while Bambuddy's "
     "auth is on: then it is the scope problem naming `Settings (admin only)`. Bambuddy's "
@@ -310,10 +342,12 @@ async def create_virtual_printer(
     idempotency_key: IdempotencyKey = None,
 ) -> VirtualPrinter | JSONResponse:
     fields = body.model_dump(mode="json", exclude={"access_code"})
-    result = await run_operation(
+    result = await _vp_write(
         ops,
         response,
-        kind=ops.kinds["bambuddy_vp_create"],
+        printers,
+        store,
+        kind="bambuddy_vp_create",
         subject="bambuddy_vp:new",
         request={
             "fields": fields,
@@ -321,8 +355,6 @@ async def create_virtual_printer(
         },
         idempotency_key=idempotency_key,
     )
-    if not isinstance(result, OperationAccepted):
-        await _resync(printers, store)
     return operation_answer(result, VirtualPrinter)
 
 
@@ -343,10 +375,12 @@ async def update_virtual_printer(
     idempotency_key: IdempotencyKey = None,
 ) -> VirtualPrinter | JSONResponse:
     fields = body.model_dump(mode="json", exclude={"access_code"}, exclude_unset=True)
-    result = await run_operation(
+    result = await _vp_write(
         ops,
         response,
-        kind=ops.kinds["bambuddy_vp_update"],
+        printers,
+        store,
+        kind="bambuddy_vp_update",
         subject=f"bambuddy_vp:{vp_id}",
         request={
             "vp_id": vp_id,
@@ -355,8 +389,6 @@ async def update_virtual_printer(
         },
         idempotency_key=idempotency_key,
     )
-    if not isinstance(result, OperationAccepted):
-        await _resync(printers, store)
     return operation_answer(result, VirtualPrinter)
 
 
@@ -378,16 +410,16 @@ async def delete_virtual_printer(
     vp_id: int,
     idempotency_key: IdempotencyKey = None,
 ) -> VirtualPrinterDeleted | JSONResponse:
-    result = await run_operation(
+    result = await _vp_write(
         ops,
         response,
-        kind=ops.kinds["bambuddy_vp_delete"],
+        printers,
+        store,
+        kind="bambuddy_vp_delete",
         subject=f"bambuddy_vp:{vp_id}",
         request={"vp_id": vp_id},
         idempotency_key=idempotency_key,
     )
-    if not isinstance(result, OperationAccepted):
-        await _resync(printers, store)
     return operation_answer(result, VirtualPrinterDeleted)
 
 
