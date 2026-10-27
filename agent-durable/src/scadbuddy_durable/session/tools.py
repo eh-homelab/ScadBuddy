@@ -129,8 +129,9 @@ def durable_tools(entries: Sequence[ManifestEntry]) -> list[DurableTool]:
 def _policy(entry: ManifestEntry, tier: str) -> RetryPolicy:
     """At most once when the stricter of the code's tier (``entry.tier``) and ``tier`` is
     outward, or the manifest asks for approval: whether a retry is safe is the code's to
-    say, so an outward tool Settings lowered is still never run twice (#2171)."""
-    outward = "outward" in (entry.tier, tier)
+    say, so an outward tool Settings lowered is still never run twice (#2171). A code tier
+    that is no known tier counts as outward, as a flow counts an agent's missing ``declared``."""
+    outward = "outward" in (entry.tier, tier) or entry.tier not in RISK_TIERS
     return _ONCE if entry.hitl == "approval" or outward else _RETRY
 
 

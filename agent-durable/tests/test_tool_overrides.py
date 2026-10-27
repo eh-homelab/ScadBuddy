@@ -181,3 +181,23 @@ def test_an_outward_tool_lowered_below_outward_still_runs_at_most_once() -> None
         assert by_name["confirm_thing"].retry_policy.maximum_attempts == 1, lowered
         tools.gate_call(by_name["confirm_thing"], entry, lowered)
         assert by_name["confirm_thing"].retry_policy.maximum_attempts == 1, lowered
+
+
+def test_a_manifest_tier_that_is_no_tier_runs_at_most_once() -> None:
+    """Review m2: a code tier the worker does not know counts as outward for retries, as a
+    flow counts an agent's missing ``declared``: whether a retry is safe is unknown."""
+    [odd] = tools.parse_manifest(
+        [
+            {
+                "name": "odd_tool",
+                "description": "odd",
+                "input_schema": {"type": "object"},
+                "tier": "admin",
+            }
+        ]
+    )
+    by_name = {t.name: t for t in tools.durable_tools([odd])}
+    assert by_name["odd_tool"].retry_policy is not None
+    assert by_name["odd_tool"].retry_policy.maximum_attempts == 1
+    tools.apply_overrides(by_name, [odd], {"odd_tool": "read"}, set())
+    assert by_name["odd_tool"].retry_policy.maximum_attempts == 1
