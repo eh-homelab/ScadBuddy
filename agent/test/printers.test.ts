@@ -82,6 +82,15 @@ describe('printer registry tools (#3823)', () => {
     }
   })
 
+  it("does not tell the model that no tool makes a LAN link: the sync fills one from Bambuddy's code (#4798)", () => {
+    for (const name of ['list_printers', 'get_printer']) {
+      const description = tool(name).description
+      expect(description).not.toMatch(/linked over the LAN only in Settings/)
+      expect(description).toMatch(/sync_printers_from_bambuddy/)
+      expect(description).toMatch(/never ask for the code in chat/)
+    }
+  })
+
   it('unlink_printer_lan is outward: it deletes the stored code (#4340 review I2)', async () => {
     const t = tool('unlink_printer_lan')
     expect(t.gated).toBe(true)

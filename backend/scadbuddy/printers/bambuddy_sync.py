@@ -13,7 +13,8 @@ one idempotent pass that brings the registry up to what Bambuddy knows.
   withheld. The code goes from that read to the probe and the sealed column, and nowhere
   else: no log, span, response, activity row or Temporal payload.
 - Each Bambuddy virtual printer gets a ``bambuddy_virtual`` row (Ruling 4), naming the
-  printer it forwards to, or none ("any <model>").
+  printer it forwards to, or none ("any <model>"). One whose Bambuddy target has no row
+  here, and gets none from this pass, is a ``conflict`` (#4797), never "any".
 
 The pass runs in the API, from ``POST /printers/sync-bambuddy`` and from the housekeeping
 sweep ``housekeeping_sync_bambuddy_printers`` on the ``library`` worker (the API's own
@@ -80,6 +81,10 @@ SERIAL_KEPT = (
     " printer has a row of its own, bambuddy-vp-{vp_id}"
 )
 NOT_LISTED = "Bambuddy no longer lists this virtual printer; the row is kept"
+VP_TARGET_MISSING = (
+    "Bambuddy forwards this virtual printer to Bambuddy printer {target}, which no printer"
+    " here is linked to: it does not forward to any printer of its model"
+)
 
 LAN_WITHHELD = (
     "Bambuddy withholds the access code from API keys while its auth is on: link the"
@@ -112,6 +117,9 @@ class SyncEntry(BaseModel):
     #: A virtual printer's target row; ``None`` with a ``target_model`` is "any <model>".
     forwards_to: str | None = None
     target_model: str | None = None
+    #: Whether this sync wrote the row (its link, name, Bambuddy view, target or LAN
+    #: link); never in a dry run (#4798).
+    changed: bool = False
 
 
 class PrinterSyncResult(BaseModel):
@@ -259,9 +267,16 @@ async def sync_printers(
         entries.append(await _sync_printer(printers, client, printer, rows, now, dry_run=dry_run))
     rows = await asyncio.to_thread(store.list)
     physical_serials = {p.serial_number for p in active if p.serial_number is not None}
+    # The Bambuddy printers this pass gives a row: a dry run wrote none, so a VP's target
+    # is there when the plan says so, not only when a row is (#4797).
+    in_pass = {
+        e.bambuddy_printer_id
+        for e in entries
+        if e.action in ("created", "linked", "already_linked") and e.bambuddy_printer_id is not None
+    }
     for vp in vps:
         entries.append(
-            await _sync_virtual(printers, vp, rows, physical_serials, now, dry_run=dry_run)
+            await _sync_virtual(printers, vp, rows, physical_serials, in_pass, now, dry_run=dry_run)
         )
     if vp_error is None:
         listed = {vp.id for vp in vps}
@@ -292,6 +307,7 @@ async def _sync_printer(
 ) -> SyncEntry:
     store = printers.store
     action, row, reason = plan_printer(printer, rows)
+    planned = row
     entry = SyncEntry(
         kind="physical",
         name=printer.name,
@@ -354,6 +370,7 @@ async def _sync_printer(
     entry.lan, entry.lan_reason = await _sync_lan(printers, client, row, printer, previous_ip)
     if action != "already_linked" or row != before:
         printers.changed(row.id)
+    entry.changed = planned is None or await asyncio.to_thread(store.get, row.id) != planned
     return entry
 
 
@@ -384,9 +401,7 @@ async def _sync_lan(
     clears a reason an earlier sync left when this one has none."""
     action, reason = await _lan_outcome(printers, client, row, printer, previous_ip)
     if reason is None and action in ("kept", "none") and row.lan_sync_error is not None:
-        with contextlib.suppress(PrinterNotFoundError):
-            await asyncio.to_thread(printers.store.set_lan_sync_error, row.id, None)
-        printers.changed(row.id)
+        await _set_lan_state(printers, row, None, move_pending=None)
     return action, reason
 
 
@@ -403,10 +418,14 @@ async def _lan_outcome(
     if row.lan_host is not None:
         # A move is due when the link followed Bambuddy's last address, or when an
         # earlier move failed: that sync already recorded the new address in the view,
-        # so only the recorded failure still says the link was following it.
+        # so only `lan_move_pending` still says the link was following it (#4796). A sync
+        # with no address (above) leaves it, so the move is tried when the address is back.
+        if ip == row.lan_host:
+            if row.lan_move_pending:  # Bambuddy is back at the link's address
+                await _set_lan_state(printers, row, None, move_pending=False)
+            return "kept", None
         followed = previous_ip is not None and row.lan_host == previous_ip
-        retry = row.lan_sync_error == LAN_MOVE_FAILED
-        if not (followed or retry) or ip == row.lan_host:
+        if not (followed or row.lan_move_pending):
             return "kept", None
         return await _move_lan(printers, client, row, printer, ip)
     try:
@@ -436,6 +455,8 @@ async def _move_lan(
         outcome = await _link(printers, row, ip, stored, expect_host=old_host, failed=None)
         if outcome[0] == "linked":
             return "relinked", None
+        if outcome[0] == "kept":  # the user linked it meanwhile: that link wins
+            return "kept", None
     try:
         code = await client.printer_access_code(printer.id)
     except ApiError:
@@ -444,7 +465,9 @@ async def _move_lan(
         outcome = await _link(printers, row, ip, code, expect_host=old_host, failed=None)
         if outcome[0] == "linked":
             return "relinked", None
-    return await _lan_failed(printers, row, "failed", LAN_MOVE_FAILED)
+        if outcome[0] == "kept":
+            return "kept", None
+    return await _lan_failed(printers, row, "failed", LAN_MOVE_FAILED, move_pending=True)
 
 
 async def _link(
@@ -477,13 +500,29 @@ async def _link(
 
 
 async def _lan_failed(
-    printers: Printers, row: PrinterRow, action: LanAction, reason: str | None
+    printers: Printers,
+    row: PrinterRow,
+    action: LanAction,
+    reason: str | None,
+    *,
+    move_pending: bool | None = None,
 ) -> tuple[LanAction, str | None]:
-    if reason is not None and reason != row.lan_sync_error:
-        with contextlib.suppress(PrinterNotFoundError):
-            await asyncio.to_thread(printers.store.set_lan_sync_error, row.id, reason)
-        printers.changed(row.id)
+    if reason is not None and (
+        reason != row.lan_sync_error
+        or (move_pending is not None and move_pending != row.lan_move_pending)
+    ):
+        await _set_lan_state(printers, row, reason, move_pending=move_pending)
     return action, reason
+
+
+async def _set_lan_state(
+    printers: Printers, row: PrinterRow, reason: str | None, *, move_pending: bool | None
+) -> None:
+    with contextlib.suppress(PrinterNotFoundError):
+        await asyncio.to_thread(
+            printers.store.set_lan_sync_error, row.id, reason, move_pending=move_pending
+        )
+    printers.changed(row.id)
 
 
 async def _sync_virtual(
@@ -491,6 +530,7 @@ async def _sync_virtual(
     vp: VirtualPrinter,
     rows: list[PrinterRow],
     physical_serials: set[str],
+    in_pass: set[int],
     now: datetime,
     *,
     dry_run: bool,
@@ -511,8 +551,16 @@ async def _sync_virtual(
         forwards_to=None if target is None else target.id,
         target_model=(vp.model_name or vp.model) if vp.target_printer_id is None else None,
     )
+    # #4797: a target with no row here leaves `forwards_to` NULL, which on its own reads
+    # as "any <model>"; the row still keeps Bambuddy's target id in its view. A target this
+    # pass creates or links is not missing, in a dry run too.
+    target_missing = (
+        None
+        if vp.target_printer_id is None or target is not None or vp.target_printer_id in in_pass
+        else VP_TARGET_MISSING.format(target=vp.target_printer_id)
+    )
     if dry_run:
-        return entry
+        return _target_conflict(entry, target_missing)
     try:
         synced, done, changed = await asyncio.to_thread(
             printers.store.upsert_virtual,
@@ -528,9 +576,20 @@ async def _sync_virtual(
     except SerialTakenError:
         entry.action, entry.reason = "conflict", RACE
         return entry
-    entry.printer_id, entry.action = synced.id, done
+    entry.printer_id, entry.action, entry.changed = synced.id, done, changed
     if done == "conflict":
         entry.reason = SERIAL_KEPT.format(vp_id=vp.id)
     if changed:
         printers.changed(synced.id)
+    return _target_conflict(entry, target_missing)
+
+
+def _target_conflict(entry: SyncEntry, target_missing: str | None) -> SyncEntry:
+    """The entry as a ``conflict`` naming the missing target, beside any other reason.
+    The row is still written: only what it forwards to is unknown."""
+    if target_missing is not None:
+        entry.action = "conflict"
+        entry.reason = (
+            target_missing if entry.reason is None else f"{entry.reason}; {target_missing}"
+        )
     return entry

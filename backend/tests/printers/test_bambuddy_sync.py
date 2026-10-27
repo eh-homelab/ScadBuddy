@@ -4,6 +4,7 @@ Rulings 2-4): the registry follows Bambuddy, idempotently, and never overwrites.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, cast
 
@@ -14,6 +15,7 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.bambuddy_sync import (
     LAN_PROBE_FAILED,
     LAN_WITHHELD,
+    VP_TARGET_MISSING,
     PrinterSyncResult,
     may_adopt,
     plan_printer,
@@ -81,9 +83,13 @@ class FakePrinters:
         self.changed_ids: list[str] = []
         self.probes: list[tuple[str, str, str]] = []
         self.answer = True
+        #: Run inside a probe: a change that lands while the sync dials the printer.
+        self.during_probe: Callable[[], None] | None = None
 
         async def probe(host: str, serial: str, code: str) -> tuple[LanReport, str]:
             self.probes.append((host, serial, code))
+            if self.during_probe is not None:
+                self.during_probe()
             if not self.answer:
                 raise ConnectionRefusedError("nope")
             return LanReport(serial=serial, received_at=datetime.now(UTC), print={}), CERT
@@ -174,6 +180,27 @@ async def test_a_second_sync_changes_nothing(printers: FakePrinters, store: Prin
     assert {entry.action for entry in again.entries} == {"already_linked"}
     assert {row.id: row for row in store.list()} == before  # not even updated_at
     assert printers.probes == [] and printers.changed_ids == []
+
+
+async def test_each_entry_says_whether_the_sync_changed_its_row(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4798: the agent records the rows a sync wrote, `already_linked` ones included."""
+    client = FakeClient([bambuddy(1, SERIAL)], [vp(5, VP_SERIAL, 1)], codes={1: CODE})
+    first = await run(printers, client)
+    assert [e.changed for e in first.entries] == [True, True]
+    again = await run(printers, client)
+    assert [e.changed for e in again.entries] == [False, False]
+    renamed = FakeClient(
+        [bambuddy(1, SERIAL, name="Renamed in Bambuddy")], [vp(5, VP_SERIAL, None)], codes={1: CODE}
+    )
+    third = await run(printers, renamed)
+    assert [(e.action, e.changed) for e in third.entries] == [
+        ("already_linked", True),
+        ("already_linked", True),
+    ]
+    dry = await run(printers, renamed, dry_run=True)
+    assert not any(e.changed for e in dry.entries)
 
 
 async def test_dry_run_plans_and_writes_nothing(
@@ -299,6 +326,85 @@ async def test_a_failed_move_is_tried_again_on_the_next_sync(
     assert printers.probes[0] == ("192.168.1.77", SERIAL, CODE)
 
 
+async def test_a_link_the_user_makes_during_a_move_is_kept(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4796 finding 1: the move's probe passes, but the user linked the printer
+    meanwhile. That link wins now, and is not marked as a failed move that the next
+    sync then moves to Bambuddy's address."""
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    (row,) = store.list()
+    moved = FakeClient([bambuddy(1, SERIAL, ip="192.168.1.77")], codes={1: CODE})
+
+    def users_link() -> None:
+        printers.during_probe = None
+        store.link_lan(
+            row.id, LanLink(host="192.168.1.50", access_code="mine1234"), cert_sha256=CERT
+        )
+
+    printers.during_probe = users_link
+    result = await run(printers, moved)
+    assert result.entries[0].lan == "kept"
+    after = store.require(row.id)
+    assert after.lan_host == "192.168.1.50"
+    assert after.lan_sync_error is None and not after.lan_move_pending
+
+    await run(printers, moved)
+    assert store.require(row.id).lan_host == "192.168.1.50"
+    assert store.open_access_code(row.id) == "mine1234"
+
+
+async def test_a_failed_move_is_retried_whatever_its_message_says(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4796 finding 2: the retry is its own state, not the wording of the message a
+    row was stored with."""
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    moved = FakeClient([bambuddy(1, SERIAL, ip="192.168.1.77")], codes={1: CODE})
+    printers.answer = False
+    await run(printers, moved)
+    (row,) = store.list()
+    assert row.lan_move_pending
+    store.set_lan_sync_error(row.id, "an older wording of the failed-move message")
+
+    printers.answer = True
+    again = await run(printers, moved)
+    assert again.entries[0].lan == "relinked"
+    assert store.require(row.id).lan_host == "192.168.1.77"
+
+
+async def test_a_failed_move_survives_a_sync_with_no_address(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4796 finding 3: Bambuddy reporting no address for one sync does not forget the
+    move that is due."""
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    moved = FakeClient([bambuddy(1, SERIAL, ip="192.168.1.77")], codes={1: CODE})
+    printers.answer = False
+    await run(printers, moved)
+    printers.answer = True
+    blank = await run(printers, FakeClient([bambuddy(1, SERIAL, ip=None)], codes={1: CODE}))
+    assert blank.entries[0].lan == "kept"
+
+    again = await run(printers, moved)
+    assert again.entries[0].lan == "relinked"
+    row = store.list()[0]
+    assert row.lan_host == "192.168.1.77" and not row.lan_move_pending
+
+
+async def test_a_pending_move_ends_when_bambuddy_returns_to_the_links_address(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    printers.answer = False
+    await run(printers, FakeClient([bambuddy(1, SERIAL, ip="192.168.1.77")], codes={1: CODE}))
+    back = await run(printers, FakeClient([bambuddy(1, SERIAL)], codes={1: CODE}))
+    assert back.entries[0].lan == "kept"
+    (row,) = store.list()
+    assert row.lan_host == "192.168.1.10"
+    assert row.lan_sync_error is None and not row.lan_move_pending
+
+
 async def test_a_reason_a_later_sync_no_longer_has_is_cleared(
     printers: FakePrinters, store: PrinterStore
 ) -> None:
@@ -344,6 +450,50 @@ async def test_virtual_printers_import_with_their_target(
     assert rows[5].vp_mode == "queue" and rows[5].lan_host is None
     assert [e.target_model for e in result.entries if e.bambuddy_vp_id == 7] == ["H2C"]
     assert printers.probes == [("192.168.1.10", SERIAL, CODE)]  # never a VP
+
+
+async def test_a_vp_whose_target_has_no_row_is_a_conflict_never_any(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4797: Bambuddy forwards the VP to printer 1, which has no row here (no serial,
+    so it was skipped). Its NULL `forwards_to` is not "any H2C": the entry says so,
+    and the row keeps Bambuddy's target id in its view."""
+    result = await run(printers, FakeClient([bambuddy(1, None)], [vp(5, VP_SERIAL, 1)]))
+    entry = next(e for e in result.entries if e.bambuddy_vp_id == 5)
+    assert entry.action == "conflict" and entry.reason == VP_TARGET_MISSING.format(target=1)
+    assert entry.forwards_to is None and entry.target_model is None
+    row = next(r for r in store.list() if r.bambuddy_vp_id == 5)
+    assert row.forwards_to is None
+    assert row.bambuddy_view is not None and row.bambuddy_view.target_printer_id == 1
+    dry = await run(printers, FakeClient([bambuddy(1, None)], [vp(5, VP_SERIAL, 1)]), dry_run=True)
+    assert [e.action for e in dry.entries if e.bambuddy_vp_id == 5] == ["conflict"]
+
+
+async def test_a_vp_whose_target_this_sync_makes_is_not_missing(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4797 review: the target is created in the same pass. A dry run writes no row
+    for it, so only the plan says it is there; neither run calls it missing."""
+    client = FakeClient([bambuddy(1, SERIAL)], [vp(5, VP_SERIAL, 1)], codes={1: CODE})
+    dry = await run(printers, client, dry_run=True)
+    assert [(e.action, e.reason) for e in dry.entries] == [("created", None), ("created", None)]
+    real = await run(printers, client)
+    assert [(e.action, e.reason) for e in real.entries] == [("created", None), ("created", None)]
+
+
+async def test_a_vp_whose_target_row_was_deleted_is_a_conflict(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4797: deleting the target row sets `forwards_to` NULL (ON DELETE SET NULL);
+    the next sync reports it rather than reading it as "any <model>"."""
+    await run(printers, FakeClient([bambuddy(1, SERIAL)], [vp(5, VP_SERIAL, 1)], codes={1: CODE}))
+    target = store.by_serial(SERIAL)
+    assert target is not None
+    store.delete(target.id)
+    gone = FakeClient([bambuddy(1, SERIAL, is_active=False)], [vp(5, VP_SERIAL, 1)])
+    result = await run(printers, gone)
+    (entry,) = result.entries
+    assert entry.action == "conflict" and entry.reason == VP_TARGET_MISSING.format(target=1)
 
 
 async def test_a_hand_made_row_with_the_vps_serial_is_adopted_with_its_lan_link(
