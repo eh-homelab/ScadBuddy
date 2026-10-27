@@ -28,6 +28,7 @@ import { turnPrincipal } from '../tools/harness.js'
 import { FLOW_IMAGES_MAX, type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity } from './flowTools.js'
+import { TOOL_TIER_ACTIVITY, toolTierActivity } from './toolTier.js'
 import { type SessionFiles, withWorkspaceSize } from '../workspace/store.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
@@ -325,6 +326,8 @@ export function toolActivities(tools: readonly Tool[], deps: ToolActivityDeps): 
     ...Object.fromEntries(tools.map((tool) => [tool.name, (input: unknown) => runAsActivity(tool, input, deps, lookup)])),
     // A flow's tool(...) asks each tool's tier from here before it may run or park (#2704).
     [FLOW_TOOL_TIER_ACTIVITY]: flowToolTierActivity(tools, deps.services),
+    // A durable session asks each of ScadBuddy's own tools' tier from here per call (#2171).
+    [TOOL_TIER_ACTIVITY]: toolTierActivity(tools, deps.services),
   }
 }
 
