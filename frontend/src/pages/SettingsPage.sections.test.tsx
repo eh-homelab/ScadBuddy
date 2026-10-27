@@ -528,6 +528,43 @@ describe('SettingsPage sections (#322)', () => {
     put.mockRestore()
   })
 
+  it('keeps a later save’s settings when an earlier save answers last (#4776)', async () => {
+    // Rendering's answer is held until Connection's has landed. It holds the settings from
+    // before Connection's save, so caching it would take the Bambuddy URL back a step.
+    const save = api.putSettings.bind(api)
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const put = vi.spyOn(api, 'putSettings').mockImplementation(async (body) => {
+      const saved = await save(body)
+      if ('render_timeout' in body) await held
+      return saved
+    })
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    const timeout = screen.getByLabelText('Render timeout')
+    await user.clear(timeout)
+    await user.type(timeout, '45')
+    await user.click(within(region('Rendering')).getByRole('button', { name: 'Save Rendering' }))
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+
+    const url = screen.getByLabelText('Bambuddy URL')
+    await user.clear(url)
+    await enter(user, url, 'https://later.test')
+    await user.click(within(region('Connection')).getByRole('button', { name: 'Save Connection' }))
+    await waitFor(() => expect(within(region('Connection')).queryByText('Unsaved')).toBeNull())
+
+    await act(async () => release())
+    await waitFor(() => expect(within(region('Rendering')).queryByText('Unsaved')).toBeNull())
+    expect(screen.getByTestId('source-render_timeout')).toHaveTextContent('Set here')
+    expect(timeout).toHaveValue(45)
+    // Connection stays clean: the cached Bambuddy URL is the one its save stored.
+    expect(url).toHaveValue('https://later.test')
+    expect(within(region('Connection')).queryByText('Unsaved')).toBeNull()
+    expect(screen.getByTestId('source-bambuddy_url')).toHaveTextContent('Set here')
+    put.mockRestore()
+  })
+
   it('discards one section’s edits', async () => {
     const put = vi.spyOn(api, 'putSettings')
     const { user } = renderPage(<SettingsPage />)

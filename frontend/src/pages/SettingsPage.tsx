@@ -475,6 +475,11 @@ function SettingsSections() {
     return body as SettingsUpdate
   }
 
+  // #4776: saves are numbered as sent. Only the newest answer to land is cached; an older
+  // one landing after it would take the settings back a step.
+  const saveSent = useRef(0)
+  const saveLanded = useRef(0)
+
   /** Save one section; true when it saved, or had nothing to save. */
   async function saveSection(id: SectionId): Promise<boolean> {
     const body = patchFor(id)
@@ -484,9 +489,21 @@ function SettingsSections() {
     setSectionError((current) => ({ ...current, [id]: undefined }))
     try {
       const since = beginSeed()
+      const sent = ++saveSent.current
       const next = await api.putSettings(body)
-      requestSeed([...fieldsOf(id, next), ...('store_backend' in body ? (['store_backend'] as const) : [])], since)
-      settingsState.setData(next)
+      const names = [...fieldsOf(id, next), ...('store_backend' in body ? (['store_backend'] as const) : [])]
+      if (sent > saveLanded.current) {
+        saveLanded.current = sent
+        requestSeed(names, since)
+        settingsState.setData(next)
+      } else {
+        // #4776: a newer save's answer landed first and holds the newer settings, so this
+        // one is not cached; it still seeds its own section's fields, so its draft is clean.
+        const kept = new Map(names.map((name) => [name, since.get(name) ?? 0]))
+        const values = Object.fromEntries(names.map((name) => [name, baseline(next, name)]))
+        setDraft((current) => seedDraft(current, values, editedSince(kept, edits.current)))
+        setClearing((current) => current.filter((name) => !names.includes(name)))
+      }
       if (id === 'preview') setDisplayUnit(next.display_unit)
       if (id === 'connection') setBambuddyLinks(next)
       setSavedAt((current) => ({ ...current, [id]: new Date().toLocaleTimeString() }))
