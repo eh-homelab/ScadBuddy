@@ -73,8 +73,6 @@ export function foldIdsOf(sections: readonly SettingsSection[]): string[] {
   return sections.map((section) => section.id)
 }
 
-export const FOLD_IDS = foldIdsOf(SECTION_REGISTRY)
-
 /** Where the anchors of the one long page (and the assistant's old sections) now live. */
 export const LEGACY_ANCHORS: Readonly<Record<string, { area: AreaId; section?: string }>> = {
   assistant: { area: 'assistant', section: 'assistant-credentials' },

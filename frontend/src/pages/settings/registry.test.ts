@@ -3,8 +3,10 @@ import {
   AREAS,
   foldIdsOf,
   isAreaId,
+  LEGACY_ANCHORS,
   loadSections,
   resolveLocation,
+  SECTION_REGISTRY,
   settingsTarget,
 } from './registry'
 
@@ -99,5 +101,40 @@ describe('registry', () => {
 
   it('folds every section it holds', () => {
     expect(foldIdsOf(sections)).toEqual(['connection', 'fonts', 'model', 'packages'])
+  })
+
+  it('holds the spec §3.2 table, with Printers and Orders in Printing', () => {
+    expect(AREAS.map((a) => [a.id, SECTION_REGISTRY.filter((s) => s.area === a.id).map((s) => s.id)])).toEqual([
+      ['general', ['connection']],
+      ['printing', ['printing', 'printers', 'inventory', 'orders', 'remembered', 'hotend-usage']],
+      ['library', ['projects', 'uploads', 'fonts', 'libraries', 'rendering', 'preview']],
+      [
+        'assistant',
+        [
+          'assistant-credentials',
+          'model',
+          'session-limits',
+          'session-runtime',
+          'render-limits',
+          'images',
+          'workspace',
+          'default-session-mode',
+          'durable-subagents',
+          'memory',
+        ],
+      ],
+      ['tools', ['builtin', 'packages', 'remote']],
+      ['mcp', ['mcp-auth-mode', 'mcp-access-tokens', 'mcp-oidc']],
+      ['audits', ['audit-log']],
+      ['system', ['diagnostics', 'administration', 'about']],
+    ])
+  })
+
+  it('sends every old anchor to a section that exists in its area', () => {
+    for (const [anchor, { area, section }] of Object.entries(LEGACY_ANCHORS)) {
+      expect(section, anchor).toBeDefined()
+      expect(SECTION_REGISTRY.find((s) => s.id === section)?.area, anchor).toBe(area)
+      expect(settingsTarget(`#${anchor}`)).toEqual({ area, hash: `#${section}` })
+    }
   })
 })
