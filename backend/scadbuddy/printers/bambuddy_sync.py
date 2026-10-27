@@ -117,6 +117,9 @@ class SyncEntry(BaseModel):
     #: A virtual printer's target row; ``None`` with a ``target_model`` is "any <model>".
     forwards_to: str | None = None
     target_model: str | None = None
+    #: Whether this sync wrote the row (its link, name, Bambuddy view, target or LAN
+    #: link); never in a dry run (#4798).
+    changed: bool = False
 
 
 class PrinterSyncResult(BaseModel):
@@ -297,6 +300,7 @@ async def _sync_printer(
 ) -> SyncEntry:
     store = printers.store
     action, row, reason = plan_printer(printer, rows)
+    planned = row
     entry = SyncEntry(
         kind="physical",
         name=printer.name,
@@ -359,6 +363,7 @@ async def _sync_printer(
     entry.lan, entry.lan_reason = await _sync_lan(printers, client, row, printer, previous_ip)
     if action != "already_linked" or row != before:
         printers.changed(row.id)
+    entry.changed = planned is None or await asyncio.to_thread(store.get, row.id) != planned
     return entry
 
 
@@ -562,7 +567,7 @@ async def _sync_virtual(
     except SerialTakenError:
         entry.action, entry.reason = "conflict", RACE
         return entry
-    entry.printer_id, entry.action = synced.id, done
+    entry.printer_id, entry.action, entry.changed = synced.id, done, changed
     if done == "conflict":
         entry.reason = SERIAL_KEPT.format(vp_id=vp.id)
     if changed:

@@ -182,6 +182,27 @@ async def test_a_second_sync_changes_nothing(printers: FakePrinters, store: Prin
     assert printers.probes == [] and printers.changed_ids == []
 
 
+async def test_each_entry_says_whether_the_sync_changed_its_row(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4798: the agent records the rows a sync wrote, `already_linked` ones included."""
+    client = FakeClient([bambuddy(1, SERIAL)], [vp(5, VP_SERIAL, 1)], codes={1: CODE})
+    first = await run(printers, client)
+    assert [e.changed for e in first.entries] == [True, True]
+    again = await run(printers, client)
+    assert [e.changed for e in again.entries] == [False, False]
+    renamed = FakeClient(
+        [bambuddy(1, SERIAL, name="Renamed in Bambuddy")], [vp(5, VP_SERIAL, None)], codes={1: CODE}
+    )
+    third = await run(printers, renamed)
+    assert [(e.action, e.changed) for e in third.entries] == [
+        ("already_linked", True),
+        ("already_linked", True),
+    ]
+    dry = await run(printers, renamed, dry_run=True)
+    assert not any(e.changed for e in dry.entries)
+
+
 async def test_dry_run_plans_and_writes_nothing(
     printers: FakePrinters, store: PrinterStore
 ) -> None:
