@@ -9,9 +9,10 @@ back (S3's presigned URL on `store_backend` s3). The agent writes each file's ho
 writes its row (a trigger on `ai_session_files`), so the blob sweep keeps a blob while a
 row names it.
 
-Without a content store (`store_backend` local), or without what a `TransferUrl` needs
-(`SCADBUDDY_API_INTERNAL_URL`, the KEK), every route is a 404 saying why, and the agent
-keeps the file's bytes in Postgres as before. Not a client API: hidden from the schema,
+Without a content store (`store_backend` local) every route is a 404, and the agent keeps
+the file's bytes in Postgres as before. With one but without what a `TransferUrl` needs
+(`SCADBUDDY_API_INTERNAL_URL`, the KEK) a route is a 503 saying which: the agent then
+refuses the write, never keeping the bytes in plaintext. Not a client API: hidden from the schema,
 and internal by path only, like `api/internal.py`."""
 
 from __future__ import annotations
@@ -69,6 +70,16 @@ def _transfers(slicing: SlicingDep) -> Transfers:
     return transfers
 
 
+def _unavailable(err: TransferUnavailableError) -> ApiError:
+    # `err` names what the slicer's URLs need; workspace files' URLs need the same.
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        f"workspace files cannot reach the blob store: {err}".replace(
+            "the native slicer needs", "the transfer URLs need"
+        ),
+    )
+
+
 def _missing(key: str) -> ApiError:
     return ApiError(status.HTTP_404_NOT_FOUND, f"blob {key} not found", key=key)
 
@@ -78,7 +89,7 @@ async def mint_upload(slicing: SlicingDep) -> WorkspaceUpload:
     try:
         put = _transfers(slicing).mint_put(WORKSPACE_PENDING_PREFIX)
     except TransferUnavailableError as err:
-        raise ApiError(status.HTTP_404_NOT_FOUND, str(err)) from None
+        raise _unavailable(err) from None
     return WorkspaceUpload(url=put.url, pending_key=put.pending_key)
 
 
@@ -107,7 +118,7 @@ async def mint_download(key: str, slicing: SlicingDep) -> TransferUrl:
     except BlobMissingError:
         raise _missing(key) from None
     except TransferUnavailableError as err:
-        raise ApiError(status.HTTP_404_NOT_FOUND, str(err)) from None
+        raise _unavailable(err) from None
 
 
 __all__ = ["INTERNAL_WORKSPACE", "WORKSPACE_KEY_PREFIX", "router"]

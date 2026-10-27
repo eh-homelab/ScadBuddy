@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
 import type { SettingsReader } from '../approvals/service.js'
-import type { WorkspaceBlobStore } from './blobs.js'
+import { WorkspaceBlobError, type WorkspaceBlobStore } from './blobs.js'
 import { newFileKey, openFile, sealFile, type WorkspaceSealing } from './sealing.js'
 
 // The assistant's workspace (#2329): files of its own, in `ai_session_files`,
@@ -20,13 +20,15 @@ import { newFileKey, openFile, sealFile, type WorkspaceSealing } from './sealing
 // WORKSPACE_MAX_SETTING, checked under a per-workspace lock so two writes at
 // once cannot both pass.
 //
-// The bytes (#4789): with `blobs` (main.ts, whenever the KEK is mounted) a file's
-// bytes are a blob of the backend's content store, sealed under a file key of
-// their own (sealing.ts) and held in `blob_refs` while the row stands (a trigger,
-// migration 20261027T0114Z); the row keeps the metadata and the wrapped key. Where
-// the backend keeps no blobs (store_backend local), or without `blobs`, the bytes
-// stay in `data`, as before; reads take either. `moveToBlobs` moves the rows kept
-// in `data` to blobs (main.ts, at start).
+// The bytes (#4789): with `blobs` (main.ts) a file's bytes are a blob of the
+// backend's content store, sealed under a file key of their own (sealing.ts) and
+// held in `blob_refs` while the row stands (a trigger, migration 20261027T0114Z);
+// the row keeps the metadata and the wrapped key. Only on a backend whose
+// `store_backend` is `local` (it has no content store), or without `blobs` (tests),
+// do the bytes stay in `data`, as before. On any other backend a write that cannot
+// be sealed and stored (no KEK here, a backend that cannot mint the URLs or is too
+// old or unreachable) is refused `unavailable`: never kept in plaintext. Reads take
+// either. `moveToBlobs` moves the rows kept in `data` to blobs (main.ts, at start).
 
 /** `ai_settings` key: the largest file (bytes). */
 export const WORKSPACE_FILE_MAX_SETTING = 'workspace_file_max_bytes'
@@ -157,7 +159,7 @@ export type WorkspaceFile = WorkspaceFileInfo & { bytes: Buffer }
 
 export type WorkspaceLimits = { fileMaxBytes: number; workspaceMaxBytes: number }
 
-export type WorkspaceErrorCode = 'invalid_path' | 'not_found' | 'conflict' | 'too_large' | 'quota'
+export type WorkspaceErrorCode = 'invalid_path' | 'not_found' | 'conflict' | 'too_large' | 'quota' | 'unavailable'
 
 /** A refusal the caller may show as it is: it never quotes a file's bytes. */
 export class WorkspaceError extends Error {
@@ -167,6 +169,11 @@ export class WorkspaceError extends Error {
     super(message)
     this.code = code
   }
+}
+
+/** A write refused because the blob store cannot take it: nothing is kept in plaintext instead. */
+function refused(why: string): WorkspaceError {
+  return new WorkspaceError('unavailable', `${why}; nothing was written`)
 }
 
 /** `path` as stored (a leading `./` dropped), or a WorkspaceError `invalid_path` saying why not. */
@@ -308,8 +315,18 @@ async function lockSession(tx: TransactionSql, sessionId: string | null): Promis
 /** Where a row's bytes are: `data`, or a sealed blob and its wrapped file key. */
 type Stored = { data: Buffer | null; blob_key: string | null; key_sealed: Buffer | null; key_kek_id: string | null }
 
-/** How the bytes leave Postgres: the backend's blob store, and who seals for it. */
-export type WorkspaceBlobs = { store: WorkspaceBlobStore; sealing: WorkspaceSealing }
+/** How the bytes leave Postgres: the backend's blob store, and who seals for it (none without the KEK). */
+export type WorkspaceBlobs = { store: WorkspaceBlobStore; sealing?: WorkspaceSealing | undefined }
+
+/**
+ * Where a write's bytes go now (main.ts logs it at start; GET /api/v1/ai/status shows it):
+ * the blob store, Postgres (`store_backend` local, or no blob store configured), or
+ * nowhere, `reason` saying why every write is refused.
+ */
+export type WorkspaceBytesStatus =
+  | { store: 'blobs'; backend: string }
+  | { store: 'postgres'; reason: string }
+  | { store: 'refused'; reason: string }
 
 /** A row's bytes as `ai_session_files` takes them: inline, or a blob with its wrapped key. */
 type Placed = { data: Buffer | null; blobKey: string | null; keySealed: Buffer | null; kekId: string | null }
@@ -336,14 +353,51 @@ export class SessionFiles {
     this.blobs = options.blobs
   }
 
-  #blobs(): WorkspaceBlobs {
-    if (!this.blobs) throw new Error('this workspace file is in the blob store, and this process has no blob store (SCADBUDDY_SECRET_KEY_FILE)')
-    return this.blobs
+  #sealing(): { store: WorkspaceBlobStore; sealing: WorkspaceSealing } {
+    if (!this.blobs?.sealing) {
+      throw new WorkspaceError('unavailable', 'this workspace file is sealed in the blob store, and this agent has no SCADBUDDY_SECRET_KEY_FILE to open it')
+    }
+    return { store: this.blobs.store, sealing: this.blobs.sealing }
+  }
+
+  /**
+   * Where a write's bytes go: undefined for Postgres (no blob store configured, or
+   * `store_backend` local), else the store and sealing; `unavailable` when the backend has
+   * a blob store this agent cannot use.
+   */
+  async #target(): Promise<{ store: WorkspaceBlobStore; sealing: WorkspaceSealing } | undefined> {
+    if (!this.blobs) return undefined
+    let backend: string
+    try {
+      backend = await this.blobs.store.backend()
+    } catch (err) {
+      if (err instanceof WorkspaceBlobError) throw refused(err.message)
+      throw err
+    }
+    if (backend === 'local') return undefined
+    if (!this.blobs.sealing) {
+      throw refused(`the backend keeps files in its blob store (store_backend ${backend}), and this agent has no SCADBUDDY_SECRET_KEY_FILE to seal them with`)
+    }
+    return { store: this.blobs.store, sealing: this.blobs.sealing }
+  }
+
+  /** Where a write's bytes go now, and why not when nowhere; never throws. */
+  async bytesStatus(): Promise<WorkspaceBytesStatus> {
+    if (!this.blobs) return { store: 'postgres', reason: 'no blob store is configured' }
+    try {
+      const target = await this.#target()
+      if (!target) return { store: 'postgres', reason: 'the backend has no blob store (store_backend local)' }
+      await target.store.probe()
+      return { store: 'blobs', backend: await target.store.backend() }
+    } catch (err) {
+      const reason = err instanceof WorkspaceError || err instanceof WorkspaceBlobError ? err.message : 'the blob store could not be checked'
+      return { store: 'refused', reason: reason.replace(/; nothing was written$/, '') }
+    }
   }
 
   /** The plaintext of a blob row, a segment at a time. */
   #open(ws: WorkspaceRef, path: string, digest: string, stored: Stored): AsyncGenerator<Buffer> {
-    const blobs = this.#blobs()
+    const blobs = this.#sealing()
     return (async function* () {
       const fileKey = await blobs.sealing.unwrap(ws, path, stored.blob_key!, stored.key_sealed!, stored.key_kek_id)
       try {
@@ -355,16 +409,22 @@ export class SessionFiles {
   }
 
   /**
-   * Where `data` goes: sealed and uploaded as a blob when there is a blob store, else
-   * inline (no `blobs`, or a backend that keeps none).
+   * Where `data` goes: sealed and uploaded as a blob, or inline only where #target says
+   * Postgres. A store that refuses is `unavailable`.
    */
   async #place(ws: WorkspaceRef, path: string, data: Buffer, digest: string): Promise<Placed> {
-    if (!this.blobs) return { data, blobKey: null, keySealed: null, kekId: null }
+    const target = await this.#target()
+    if (!target) return { data, blobKey: null, keySealed: null, kekId: null }
     const fileKey = newFileKey()
     try {
-      const blobKey = await this.blobs.store.put(sealFile(fileKey, data, digest))
-      if (blobKey === undefined) return { data, blobKey: null, keySealed: null, kekId: null }
-      const { sealed, kekId } = await this.blobs.sealing.wrap(ws, path, blobKey, fileKey)
+      let blobKey: string
+      try {
+        blobKey = await target.store.put(sealFile(fileKey, data, digest))
+      } catch (err) {
+        if (err instanceof WorkspaceBlobError) throw refused(err.message)
+        throw err
+      }
+      const { sealed, kekId } = await target.sealing.wrap(ws, path, blobKey, fileKey)
       return { data: null, blobKey, keySealed: sealed, kekId }
     } finally {
       fileKey.fill(0)
@@ -603,7 +663,7 @@ export class SessionFiles {
       SELECT path, media_type, size, sha256, source, created_at, updated_at, NULL::bytea AS data, blob_key, key_sealed, key_kek_id
       FROM ai_session_files WHERE workspace = ${`session:${fromSession}`} AND blob_key IS NOT NULL`
     if (rows.length === 0) return
-    const { sealing } = this.#blobs()
+    const { sealing } = this.#sealing()
     const parent: WorkspaceRef = { kind: 'session', sessionId: fromSession }
     const child: WorkspaceRef = { kind: 'session', sessionId: toSession }
     for (const row of rows) {
@@ -624,22 +684,23 @@ export class SessionFiles {
   /**
    * Moves every file still kept in `data` to a sealed blob (#4789; main.ts, at start), one
    * row at a time; a row written meanwhile is left as its writer left it. Idempotent: a
-   * row once moved is not read again. `unavailable` when the backend keeps no blobs
-   * (store_backend local), which moves nothing more.
+   * row once moved is not read again. `local` when the backend keeps no blobs
+   * (store_backend local), which moves nothing; `unavailable` (thrown) when it has a blob
+   * store this agent cannot use, which moves nothing either.
    */
-  async moveToBlobs(batch = 50): Promise<{ moved: number; unavailable: boolean }> {
-    if (!this.blobs) return { moved: 0, unavailable: true }
+  async moveToBlobs(batch = 50): Promise<{ moved: number; local: boolean }> {
+    if (!(await this.#target())) return { moved: 0, local: true }
     let moved = 0
     for (;;) {
       const rows = await this.sql<{ workspace: string; path: string; sha256: string }[]>`
         SELECT workspace, path, sha256 FROM ai_session_files WHERE data IS NOT NULL ORDER BY workspace, path LIMIT ${batch}`
-      if (rows.length === 0) return { moved, unavailable: false }
+      if (rows.length === 0) return { moved, local: false }
       for (const { workspace, path, sha256: digest } of rows) {
         const [held] = await this.sql<{ data: Buffer }[]>`
           SELECT data FROM ai_session_files WHERE workspace = ${workspace} AND path = ${path} AND sha256 = ${digest} AND data IS NOT NULL`
         if (!held) continue
         const placed = await this.#place(refOf(workspace), path, held.data, digest)
-        if (placed.blobKey === null) return { moved, unavailable: true }
+        if (placed.blobKey === null) return { moved, local: true }
         const updated = await this.sql`
           UPDATE ai_session_files SET data = NULL, blob_key = ${placed.blobKey}, key_sealed = ${placed.keySealed}, key_kek_id = ${placed.kekId}
           WHERE workspace = ${workspace} AND path = ${path} AND sha256 = ${digest} AND data IS NOT NULL`

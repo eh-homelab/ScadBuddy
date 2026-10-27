@@ -38,23 +38,24 @@ def kek_file(tmp_path: Path) -> Path:
     return path
 
 
+def _on_s3(settings: Settings, s3: S3Settings, **update: object) -> Settings:
+    return settings.model_copy(
+        update={
+            "store_backend": "s3",
+            "store_s3_endpoint": s3.endpoint,
+            "store_s3_bucket": s3.bucket,
+            "store_s3_prefix": s3.prefix,
+            "store_s3_access_key_id": s3.access_key_id,
+            "store_s3_secret_access_key": s3.secret_access_key,
+            **update,
+        }
+    )
+
+
 @pytest.fixture
 def s3_client(settings: Settings, s3: S3Settings, kek_file: Path) -> Iterator[TestClient]:
     with TestClient(
-        create_app(
-            settings.model_copy(
-                update={
-                    "store_backend": "s3",
-                    "store_s3_endpoint": s3.endpoint,
-                    "store_s3_bucket": s3.bucket,
-                    "store_s3_prefix": s3.prefix,
-                    "store_s3_access_key_id": s3.access_key_id,
-                    "store_s3_secret_access_key": s3.secret_access_key,
-                    "secret_key_file": kek_file,
-                    "api_internal_url": INTERNAL,
-                }
-            )
-        )
+        create_app(_on_s3(settings, s3, secret_key_file=kek_file, api_internal_url=INTERNAL))
     ) as client:
         yield client
 
@@ -157,3 +158,21 @@ def test_without_a_content_store_the_routes_are_404(local_client: TestClient) ->
 def test_the_routes_are_hidden(s3_client: TestClient) -> None:
     paths = s3_client.get("/openapi.json").json()["paths"]
     assert not [p for p in paths if "internal" in p]
+
+
+@pytest.mark.parametrize(
+    ("update", "names"),
+    [({"api_internal_url": None}, "SCADBUDDY_API_INTERNAL_URL"), ({}, "SCADBUDDY_SECRET_KEY_FILE")],
+)
+def test_on_s3_without_what_a_url_needs_the_upload_is_503(
+    settings: Settings, s3: S3Settings, kek_file: Path, update: dict[str, object], names: str
+) -> None:
+    """Not the 404 of `local`: the store exists, so the agent refuses the write rather
+    than keep its bytes in Postgres, and says why (#4789)."""
+    base: dict[str, object] = (
+        {"secret_key_file": kek_file, **update} if update else {"api_internal_url": INTERNAL}
+    )
+    with TestClient(create_app(_on_s3(settings, s3, **base))) as client:
+        response = client.post(f"{INTERNAL_WORKSPACE}/uploads")
+    assert response.status_code == 503
+    assert names in response.json()["detail"]

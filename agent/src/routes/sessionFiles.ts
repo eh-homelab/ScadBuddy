@@ -109,12 +109,14 @@ export function downloadType(stored: string): string {
   return bare === undefined || ACTIVE_TYPE.test(bare) ? 'application/octet-stream' : bare
 }
 
-const STATUS_OF: Record<WorkspaceError['code'], 400 | 404 | 409 | 413> = {
+const STATUS_OF: Record<WorkspaceError['code'], 400 | 404 | 409 | 413 | 503> = {
   invalid_path: 400,
   not_found: 404,
   conflict: 409,
   too_large: 413,
   quota: 413,
+  // The blob store cannot take or give the bytes (#4789): nothing was kept in plaintext.
+  unavailable: 503,
 }
 
 const BASE = '/api/v1/ai/sessions'

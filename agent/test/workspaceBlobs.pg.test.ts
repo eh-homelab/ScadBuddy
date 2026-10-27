@@ -22,12 +22,18 @@ import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.
 const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not set`
 const MIB = 1024 * 1024
 
-/** The backend's routes over a Map; `local` answers every route 404, as store_backend local does. */
+/**
+ * The backend's routes over a Map. `storeBackend` is what its /healthz says; on `local` every
+ * workspace route answers 404, as the backend's does. `routes` is how they answer on s3:
+ * `unavailable` as without SCADBUDDY_API_INTERNAL_URL or the KEK (503), `missing` as a backend
+ * older than #4789 (FastAPI's own 404).
+ */
 class FakeBackend {
   readonly blobs = new Map<string, Buffer>()
   readonly pending = new Map<string, Buffer>()
   puts = 0
-  local = false
+  storeBackend: 'local' | 's3' = 's3'
+  routes: 'ok' | 'unavailable' | 'missing' = 'ok'
   server!: Server
   base = ''
 
@@ -60,8 +66,15 @@ class FakeBackend {
     const json = (value: unknown) => ({ status: 200, body: JSON.stringify(value), type: 'application/json' })
     const notFound = { status: 404, body: JSON.stringify({ detail: 'store_backend local has no blob store' }), type: 'application/problem+json' }
     const expires_at = new Date(Date.now() + 3600_000).toISOString()
+    if (req.method === 'GET' && url.pathname === '/healthz') return json({ status: 'ok', store: { backend: this.storeBackend } })
+    if (url.pathname.startsWith(WORKSPACE_BLOBS)) {
+      if (this.storeBackend === 'local') return notFound
+      if (this.routes === 'missing') return { status: 404, body: JSON.stringify({ detail: 'Not Found' }), type: 'application/json' }
+      if (this.routes === 'unavailable') {
+        return { status: 503, body: JSON.stringify({ detail: 'the native slicer needs SCADBUDDY_API_INTERNAL_URL' }), type: 'application/problem+json' }
+      }
+    }
     if (req.method === 'POST' && url.pathname === `${WORKSPACE_BLOBS}/uploads`) {
-      if (this.local) return notFound
       const pending = `pending-workspace-${randomBytes(16).toString('hex')}`
       return json({ pending_key: pending, url: { url: `${this.base}/blob/${pending}`, headers: { 'X-ScadBuddy-Transfer': 'tok' }, expires_at } })
     }
@@ -76,7 +89,7 @@ class FakeBackend {
     }
     const get = new RegExp(`^${WORKSPACE_BLOBS}/(workspace-[0-9a-f]{64})/url$`).exec(url.pathname)
     if (req.method === 'GET' && get) {
-      if (this.local || !this.blobs.has(get[1]!)) return notFound
+      if (!this.blobs.has(get[1]!)) return notFound
       return json({ url: `${this.base}/blob/${get[1]}`, headers: {}, expires_at })
     }
     const blob = /^\/blob\/(.+)$/.exec(url.pathname)
@@ -108,10 +121,14 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
   let ws: WorkspaceRef
   let m: ReturnType<typeof manager>
 
-  const filesWith = (limits: { fileMaxBytes: number; workspaceMaxBytes: number }, k = kek) =>
+  const filesWith = (limits: { fileMaxBytes: number; workspaceMaxBytes: number }, k: typeof kek | null = kek) =>
     new SessionFiles(db.sql, {
       limits,
-      blobs: { store: new BackendWorkspaceBlobs(backend.base), sealing: new WorkspaceSealing(testPayloadKeys(db.sql), k) },
+      blobs: {
+        // No cache: a test changes what the backend says between calls.
+        store: new BackendWorkspaceBlobs(backend.base, { backendCacheMs: 0 }),
+        ...(k ? { sealing: new WorkspaceSealing(testPayloadKeys(db.sql), k) } : {}),
+      },
     })
   const row = async (path: string, workspace = `session:${sessionId}`) => {
     const [r] = await db.sql<{ data: Buffer | null; blob_key: string | null; key_sealed: Buffer | null; key_kek_id: string | null }[]>`
@@ -245,7 +262,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
   })
 
   it("keeps the bytes in Postgres when the backend has no blob store (store_backend local)", async () => {
-    backend.local = true
+    backend.storeBackend = 'local'
     await files.write(ws, 'a.txt', Buffer.from('inline'))
     const stored = await row('a.txt')
     expect(stored?.data?.toString()).toBe('inline')
@@ -272,8 +289,8 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
     await inline.write(ws, 'a.txt', Buffer.from('one'))
     await inline.write(ws, 'dir/big.bin', big)
     await inline.write(principal, 'p.txt', Buffer.from('mine'))
-    expect(await files.moveToBlobs()).toEqual({ moved: 3, unavailable: false })
-    expect(await files.moveToBlobs()).toEqual({ moved: 0, unavailable: false })
+    expect(await files.moveToBlobs()).toEqual({ moved: 3, local: false })
+    expect(await files.moveToBlobs()).toEqual({ moved: 0, local: false })
     const rows = await db.sql<{ data: Buffer | null; blob_key: string | null }[]>`SELECT data, blob_key FROM ai_session_files`
     expect(rows.every((r) => r.data === null && r.blob_key !== null)).toBe(true)
     expect((await files.read(ws, 'a.txt'))?.bytes.toString()).toBe('one')
@@ -282,7 +299,54 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
     expect(await holders()).toHaveLength(3)
     // Without a blob store it moves nothing and says why.
     await inline.write(ws, 'later.txt', Buffer.from('x'))
-    backend.local = true
-    expect(await files.moveToBlobs()).toEqual({ moved: 0, unavailable: true })
+    backend.storeBackend = 'local'
+    expect(await files.moveToBlobs()).toEqual({ moved: 0, local: true })
+    expect(await files.bytesStatus()).toMatchObject({ store: 'postgres' })
+  })
+  describe('on a backend with a blob store (store_backend s3), never in Postgres', () => {
+    const refusedWith = async (target: SessionFiles, cause: RegExp) => {
+      const error = await target.write(ws, 'a.txt', Buffer.from('plain secret')).catch((err: unknown) => err)
+      expect(error).toMatchObject({ code: 'unavailable' })
+      expect((error as Error).message).toMatch(cause)
+      expect((error as Error).message).toMatch(/nothing was written/)
+      expect(await row('a.txt')).toBeUndefined()
+      const status = await target.bytesStatus()
+      expect(status.store).toBe('refused')
+      expect(status.reason).toMatch(cause)
+    }
+
+    it('refuses a write when this agent has no KEK to seal it with', async () => {
+      await refusedWith(filesWith({ fileMaxBytes: 4 * MIB, workspaceMaxBytes: 8 * MIB }, null), /SCADBUDDY_SECRET_KEY_FILE/)
+      expect(backend.puts).toBe(0)
+    })
+
+    it('refuses a write when the backend cannot mint transfer URLs (no internal URL or KEK)', async () => {
+      backend.routes = 'unavailable'
+      await refusedWith(files, /SCADBUDDY_API_INTERNAL_URL/)
+    })
+
+    it('refuses a write when the backend is older than its workspace blob routes', async () => {
+      backend.routes = 'missing'
+      await refusedWith(files, /older than #4789/)
+    })
+
+    it('refuses a write when the backend cannot be reached to say where files go', async () => {
+      await backend.stop()
+      await refusedWith(files, /could not be reached/)
+      await backend.start()
+    })
+
+    it('refuses to move files out of Postgres, and leaves them as they are', async () => {
+      await inline.write(ws, 'a.txt', Buffer.from('one'))
+      backend.routes = 'unavailable'
+      await expect(files.moveToBlobs()).rejects.toMatchObject({ code: 'unavailable' })
+      expect((await row('a.txt'))?.data?.toString()).toBe('one')
+      const keyless = filesWith({ fileMaxBytes: 4 * MIB, workspaceMaxBytes: 8 * MIB }, null)
+      await expect(keyless.moveToBlobs()).rejects.toMatchObject({ code: 'unavailable' })
+    })
+
+    it('says the bytes go to the blob store when every part is there', async () => {
+      expect(await files.bytesStatus()).toEqual({ store: 'blobs', backend: 's3' })
+    })
   })
 })

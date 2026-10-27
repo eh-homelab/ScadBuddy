@@ -1,6 +1,7 @@
 import type { Hono } from 'hono'
 import type { AppDeps } from '../app.js'
 import { aiStatus, type AiStatus } from '../aiStatus.js'
+import type { WorkspaceBytesStatus } from '../workspace/store.js'
 import { uiReadProblem } from './guard.js'
 import type { RouteModule } from './module.js'
 
@@ -27,6 +28,15 @@ export type AiStatusView = {
   chat?: 'refused'
   /** When no credential is usable now but one is rate limited: the soonest one is usable again (#1093). */
   recovers_at?: string
+  /** Where workspace files' bytes go (#4789): the blob store, Postgres, or nowhere and why. */
+  workspace_files?: WorkspaceBytesStatus
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /** Where workspace writes go now (main.ts, cached); the status omits it without one. */
+    workspaceBytes?: () => Promise<WorkspaceBytesStatus>
+  }
 }
 
 /** The words the UI shows for an AiStatus other than `enabled`. */
@@ -64,6 +74,7 @@ export function registerStatusRoute(app: Hono, deps: AppDeps): void {
       statusReason(ai, recoversAt) ??
       (chat ? undefined : 'The agent service was started without its chat socket.') ??
       (refused ? `${refused}. Open ScadBuddy at its public HTTPS address to use it.` : undefined)
+    const workspaceFiles = await deps.workspaceBytes?.()
     const body: AiStatusView = {
       available: ai === 'enabled' && chat && !refused,
       state,
@@ -71,6 +82,7 @@ export function registerStatusRoute(app: Hono, deps: AppDeps): void {
       ...(reason ? { reason } : {}),
       ...(refused ? { chat: 'refused' as const } : {}),
       ...(recoversAt ? { recovers_at: recoversAt } : {}),
+      ...(workspaceFiles ? { workspace_files: workspaceFiles } : {}),
     }
     c.header('Cache-Control', 'no-store')
     return c.json(body)

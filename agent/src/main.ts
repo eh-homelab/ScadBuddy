@@ -103,7 +103,7 @@ import type { ToolServices } from './tools/registry.js'
 import { RenderLimiter, settingsRenderLimits } from './tools/renderLimits.js'
 import { BackendWorkspaceBlobs } from './workspace/blobs.js'
 import { rewrapWorkspaceKeys, WorkspaceSealing } from './workspace/sealing.js'
-import { SessionFiles, WORKSPACE_SWEEP_MS } from './workspace/store.js'
+import { SessionFiles, WORKSPACE_SWEEP_MS, type WorkspaceBytesStatus } from './workspace/store.js'
 import { toolSwitches } from './tools/switches.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
@@ -292,32 +292,48 @@ if (database) {
 // The data keys that seal a session's transcript (D7), its workspace files' keys and, below,
 // its durable payloads: one instance, so forgetting a subject drops its key from the one cache.
 const dataKeys = database && kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) : undefined
-// The files' bytes are sealed blobs of the backend's store (#4789, workspace/blobs.ts) whenever
-// the KEK is mounted; where the backend keeps no blobs (store_backend local) they stay in Postgres.
+// The files' bytes are sealed blobs of the backend's store (#4789, workspace/blobs.ts). Only on a
+// backend with store_backend local do they stay in Postgres; on any other, a write this agent
+// cannot seal (no KEK) or store (the backend cannot mint the URLs, is too old, or is down) is
+// refused rather than kept in plaintext.
 const workspace = database
   ? new SessionFiles(database.sql, {
       settings,
-      ...(dataKeys && kek.ok
-        ? {
-            blobs: {
-              store: new BackendWorkspaceBlobs(config.backendUrl, { warn: (message) => console.warn(message) }),
-              sealing: new WorkspaceSealing(dataKeys, kek.kek, previousKek?.ok ? previousKek.kek : undefined),
-            },
-          }
-        : {}),
+      blobs: {
+        store: new BackendWorkspaceBlobs(config.backendUrl),
+        ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, previousKek?.ok ? previousKek.kek : undefined) } : {}),
+      },
     })
   : undefined
 if (workspace) toolServices.workspace = workspace
-// The files written before #4789 (or while the backend kept no blobs) move to blobs, in the
-// background once migrations have applied; what is left is retried at the next start.
-if (database && workspace && dataKeys) {
+// Where writes go, for GET /api/v1/ai/status: checked at most once a minute (the backend may start after this).
+let workspaceBytes: { at: number; status: Promise<WorkspaceBytesStatus> } | undefined
+const workspaceBytesStatus = workspace
+  ? (): Promise<WorkspaceBytesStatus> => {
+      if (!workspaceBytes || Date.now() - workspaceBytes.at > 60_000) workspaceBytes = { at: Date.now(), status: workspace.bytesStatus() }
+      return workspaceBytes.status
+    }
+  : undefined
+// Once migrations have applied: say where the files go (once, the cause when refused), and move
+// the files written before #4789 (or while the backend kept no blobs) to blobs; what is left is
+// retried at the next start.
+if (database && workspace && workspaceBytesStatus) {
   void database
     .ready()
     .then(async (ready) => {
       if (!ready) return
-      const { moved, unavailable } = await workspace.moveToBlobs()
+      const status = await workspaceBytesStatus()
+      if (status.store === 'refused') {
+        console.error(`workspace files: every write is refused, and nothing is kept in plaintext: ${status.reason}`)
+        return
+      }
+      if (status.store === 'postgres') {
+        console.log(`workspace files: kept in Postgres: ${status.reason}`)
+        return
+      }
+      console.log(`workspace files: sealed blobs in the backend's store (store_backend ${status.backend})`)
+      const { moved } = await workspace.moveToBlobs()
       if (moved) console.log(`workspace files: moved ${moved} file(s) from Postgres to the blob store`)
-      if (unavailable) console.log('workspace files: the backend keeps no blobs (store_backend local); files stay in Postgres')
     })
     .catch((err: unknown) => console.error('workspace files: moving them to the blob store failed; retried at the next start:', (err as Error).message))
 }
@@ -925,6 +941,7 @@ const commands =
 const app = createApp({
   database,
   backend: () => backendReachable(backend),
+  ...(workspaceBytesStatus ? { workspaceBytes: workspaceBytesStatus } : {}),
   kek,
   credentials,
   plugins,
