@@ -201,6 +201,7 @@ function sync(dryRun: boolean): PrinterSyncResult {
     conflicts: count('conflict'),
     lan_linked: entries.filter((entry) => entry.lan === 'linked' || entry.lan === 'relinked').length,
     lan_failed: entries.filter((entry) => entry.lan === 'failed' || entry.lan === 'withheld').length,
+    target_missing: entries.filter((entry) => entry.target_missing).length,
   }
 }
 

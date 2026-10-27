@@ -657,11 +657,12 @@ class PrinterStore:
 
     def record_bambuddy_view(
         self, printer_id: str, view: BambuddyView, *, model: str | None = None
-    ) -> PrinterRow:
-        """Store what Bambuddy reports for the row. Its name follows Bambuddy's only
-        while it is still the name Bambuddy last gave (the user has not renamed it); its
-        model is filled only when it has none (#4439 "Refresh model/name only if the
-        user hasn't renamed it")."""
+    ) -> tuple[PrinterRow, bool]:
+        """Store what Bambuddy reports for the row, and say whether that wrote anything
+        (judged under the row's lock, so a change by someone else is not this one). Its
+        name follows Bambuddy's only while it is still the name Bambuddy last gave (the
+        user has not renamed it); its model is filled only when it has none (#4439
+        "Refresh model/name only if the user hasn't renamed it")."""
         with self.pool.connection() as conn, conn.transaction():
             # Under the row's lock, as `link_lan`: a rename landing between the read and
             # the write would otherwise be reverted.
@@ -679,12 +680,15 @@ class PrinterStore:
                 and name == row.name
                 and (row.model is not None or model is None)
             ):
-                return row  # a sync that changes nothing writes nothing
-            return self._update(
-                conn,
-                printer_id,
-                "bambuddy_view = %s, name = %s, model = COALESCE(model, %s)",
-                (Jsonb(view.model_dump(mode="json")), name, model),
+                return row, False  # a sync that changes nothing writes nothing
+            return (
+                self._update(
+                    conn,
+                    printer_id,
+                    "bambuddy_view = %s, name = %s, model = COALESCE(model, %s)",
+                    (Jsonb(view.model_dump(mode="json")), name, model),
+                ),
+                True,
             )
 
     def set_lan_sync_error(
