@@ -12,28 +12,39 @@
     <!--
       #4873: during a rollout this HTML can name one build's entry while the request for it
       reaches a pod of the other build, which has no such file (a real 404, #395). The
-      entry never runs, so lib/staleChunks.ts cannot help; this reloads instead. Once per
-      URL: a URL that already failed in this tab is not reloaded for again, so a rollout
-      costs at most a reload per build and a later deploy still recovers. Without
-      sessionStorage there is no guard, so no reload. Its sha256 is in PAGE_CSP
-      (backend/scadbuddy/api/static.py, frontend/page-csp.txt); src/entryReload.test.ts
-      fails when they drift.
+      entry never runs, so lib/staleChunks.ts cannot help; this reloads instead.
+      Only the tags parsed from this HTML: the listener goes at DOMContentLoaded, which
+      waits for the entry script and, before it runs, the stylesheets parsed ahead of it.
+      A lazy chunk's CSS fails later and stays with staleChunks.ts's per-build guard and
+      loadOptionalChunk's exemption (#4874).
+      Up to 3 reloads per URL, each a little later than the last, as the next one can
+      reach an old pod again; then the URL is left failed for this tab, so it cannot loop
+      and a later deploy (new names) still recovers. Without sessionStorage there is no
+      guard, so no reload. Its sha256 is in PAGE_CSP (backend/scadbuddy/api/static.py,
+      frontend/page-csp.txt); src/entryReload.test.ts fails when they drift.
     -->
     <script>
-      addEventListener('error', function (event) {
-        var el = event.target
-        var url = el instanceof HTMLScriptElement ? el.src : el instanceof HTMLLinkElement && el.rel === 'stylesheet' ? el.href : ''
-        if (!url || url.indexOf(location.origin + '/assets/') !== 0) return
-        try {
-          var key = 'scadbuddy:entry-reload'
-          var failed = JSON.parse(sessionStorage.getItem(key) || '[]')
-          if (failed.indexOf(url) >= 0) return
-          sessionStorage.setItem(key, JSON.stringify(failed.concat(url).slice(-10)))
-        } catch (error) {
-          return
+      ;(function () {
+        function onError(event) {
+          var el = event.target
+          var url = el instanceof HTMLScriptElement ? el.src : el instanceof HTMLLinkElement && el.rel === 'stylesheet' ? el.href : ''
+          if (!url || url.indexOf(location.origin + '/assets/') !== 0) return
+          var tries
+          try {
+            var key = 'scadbuddy:entry-reload'
+            var failed = JSON.parse(sessionStorage.getItem(key) || '[]')
+            tries = failed.filter(function (seen) { return seen === url }).length
+            if (tries >= 3) return
+            sessionStorage.setItem(key, JSON.stringify(failed.concat(url).slice(-30)))
+          } catch (error) {
+            return
+          }
+          removeEventListener('error', onError, true)
+          setTimeout(function () { location.reload() }, 500 * tries)
         }
-        location.reload()
-      }, true)
+        addEventListener('error', onError, true)
+        addEventListener('DOMContentLoaded', function () { removeEventListener('error', onError, true) })
+      })()
     </script>
   </head>
   <body>

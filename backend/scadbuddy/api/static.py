@@ -49,7 +49,7 @@ def _is_api(path: str) -> bool:
 #: src/entryReload.test.ts fails when it no longer matches.
 PAGE_CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'sha256-BcCNGzlHEDKhjqrB3sHPMmAl0jxOKO/vOgBqN5UM2+g='; "
+    "script-src 'self' 'sha256-gEejrgaaF8OZrzshiT39PvIe/0Ry0RjhdyQXiQjuO5A='; "
     "connect-src 'self'; "
     "img-src 'self' data: blob:; media-src 'self' blob:; "
     "font-src 'self' data: https://fonts.gstatic.com; "
