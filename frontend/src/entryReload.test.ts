@@ -12,7 +12,8 @@ const html = readFileSync(`${import.meta.dirname}/../index.html`, 'utf8')
 const csp = readFileSync(`${import.meta.dirname}/../page-csp.txt`, 'utf8')
 
 it("PAGE_CSP's script-src hash is index.html's inline script", () => {
-  const inline = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]!)
+  // Every inline script, attributes or not (`type`, `nonce`): only one with `src=` is not.
+  const inline = [...html.matchAll(/<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]!)
   expect(inline).toHaveLength(1)
   const hash = createHash('sha256').update(inline[0]!, 'utf8').digest('base64')
   const scriptSrc = /script-src ([^;]*);/.exec(csp)?.[1]
