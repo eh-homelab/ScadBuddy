@@ -19,6 +19,7 @@ applied at all; the problem names the item it waits on.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -351,6 +352,22 @@ async def _context(
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue, schema)
     settings = store.load()
     remembered = _remembered(target, slug, settings)
+    # What both paths below judge, built once so they cannot drift apart (#4685).
+    gather = functools.partial(
+        gather_context,
+        outputs=outputs,
+        settings=settings,
+        slug=slug,
+        params=params,
+        request=request,
+        meta=meta,
+        remembered=remembered,
+        library_subject=target.library_file_id,
+        cache=paths.cache,
+        budget=budget,
+        downloads=downloads,
+        native=native,
+    )
     route: RunRoute | None = None
     #: Why the named registry printer cannot be judged (gone, a disagreeing pair): the
     #: analysis goes on without it, as `dialog_route` would, and says so.
@@ -405,44 +422,14 @@ async def _context(
                 plate_ids=request.plate_ids,
             )
 
-        return await gather_context(
-            outputs=outputs,
-            settings=settings,
-            slug=slug,
-            params=params,
-            request=request,
-            meta=meta,
-            remembered=remembered,
-            library_subject=target.library_file_id,
-            cache=paths.cache,
-            budget=budget,
-            downloads=downloads,
-            native=native,
-            route=route,
-            trays=trays,
-        )
+        return await gather(route=route, trays=trays)
     library_file_id: int | None = None
     if meta is not None:
         # Any copy will do: every one is this output's 3MF, and the filament read only
         # needs the plate's slots.
         copies = await uploads.for_output(meta.id)
         library_file_id = copies[-1].id if copies else None
-    return await gather_context(
-        outputs=outputs,
-        settings=settings,
-        slug=slug,
-        params=params,
-        request=request,
-        meta=meta,
-        library_file_id=library_file_id,
-        remembered=remembered,
-        library_subject=target.library_file_id,
-        cache=paths.cache,
-        budget=budget,
-        downloads=downloads,
-        native=native,
-        refused=refused,
-    )
+    return await gather(library_file_id=library_file_id, refused=refused)
 
 
 def _find_fix(context: AnalysisContext, body: FixRequest) -> tuple[AnalyzerDiagnostic, Fix]:

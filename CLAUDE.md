@@ -47,6 +47,9 @@ Tests marked `requires_temporal` skip unless `SCADBUDDY_TEST_TEMPORAL_ADDRESS` n
 running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `PATH`
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
 `/usr/local/bin/temporal`), from which the tests start their own dev server.
+That CLI is pinned by version and amd64 sha256 in the Dockerfile's `test` stage
+(`TEMPORAL_CLI_VERSION`, `TEMPORAL_CLI_SHA256_AMD64`), in `ci.yml`'s three "Install the
+Temporal CLI" steps and in `hot-path-e2e.yml`'s `native` job; move all five together.
 Under pytest-xdist each worker makes its schemas in a database of its own
 (`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
 because advisory locks and NOTIFY channels are per database: workers sharing one would
@@ -107,8 +110,8 @@ in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
 that each shard ran what it selected, as `backend-pytest-split` does.
 `e2e-stack/run.sh [--mode recorder|unset|both] [--keep] [--no-build]` is the real-stack
 e2e of the native hot path (docker with compose v2; it builds the runtime, slicer and test
-images; weekly and on dispatch in `hot-path-e2e.yml`, never on PRs); `e2e/real-hot-path.spec.ts`
-skips without what it sets.
+images; weekly and on dispatch in `hot-path-e2e.yml`'s `stack` job, never on PRs);
+`e2e/real-hot-path.spec.ts` skips without what it sets.
 `e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
 `e2e/real-agent.spec.ts` also needs `E2E_AGENT=1`: a stack whose one origin routes
 `/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
@@ -453,7 +456,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `seed.sh`, runs `frontend/e2e/real-hot-path.spec.ts`, tears down by compose project),
   `fake-printer/` (MQTT and FTPS) and `bambuddy-recorder/`; their tests are
   `backend/tests/printers/test_fake_printer.py` and `backend/tests/test_bambuddy_recorder.py`.
-  Run by `.github/workflows/hot-path-e2e.yml` weekly and on dispatch, not on PRs.
+  `.github/workflows/hot-path-e2e.yml` runs the stack (its `stack` job) weekly and on
+  dispatch, never on a PR. Its `fakes` job (those two tests, ruff and mypy over the fakes)
+  and `native` job (`tests/test_print_native_workflow.py` and `tests/api/test_hot_path_native.py`,
+  which every backend-pytest shard skips for want of mosquitto, #4541; it fails on a skip)
+  run on a PR that touches `e2e-stack/**`, `backend/**` or the workflow. Neither is in
+  `CI Summary`.
 - `backend/scadbuddy/store/` — the blob store. Phase 1: the directory-shaped `BlobStore`
   Protocol and `LocalBlobStore` (`local.py`, a piece in `data/blobs/<piece_key>/`),
   `BlobRefs` (`refs.py`, the `blob_refs` table that keeps a blob alive) and `sweep_blobs`
