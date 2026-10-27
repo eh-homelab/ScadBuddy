@@ -1454,6 +1454,144 @@ async def test_a_request_resent_after_its_render_closed_is_answered_with_its_job
     assert acts.accepts == 1
 
 
+def _drop_refs(projection: JobProjection, job_id: str) -> None:
+    """What the prune takes with a row: its job's `blob_refs`, so a sweep may take them."""
+    with psycopg.connect(projection.conninfo) as conn:
+        conn.execute(
+            "DELETE FROM blob_refs WHERE holder_kind = 'job' AND holder_id = %s", (job_id,)
+        )
+
+
+def _finished_ago(projection: JobProjection, job_id: str, ago: timedelta) -> None:
+    with psycopg.connect(projection.conninfo) as conn:
+        conn.execute("UPDATE render_jobs SET finished_at = now() - %s WHERE id = %s", (ago, job_id))
+
+
+async def test_a_submit_after_its_render_finished_is_answered_with_that_job(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    """#4870: update-with-start joins only an open run, so a render that has finished
+    would run its pipeline again. A done job of the same key whose result is still held
+    answers at once: no new row, no new run."""
+    width = _w()
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = ProjectingActivities(deps)
+        async with _worker(client, queue, acts):
+            first = await service.submit(SLUG, {"width": width})
+            await _settled(projection, first.id)
+            assert first.workflow_id is not None
+            handle = client.get_workflow_handle(first.workflow_id)
+            await asyncio.wait_for(handle.result(), timeout=30)
+            again = await service.submit(SLUG, {"width": width}, request_id=uuid.uuid4().hex)
+            described = await handle.describe()
+        await service.aclose()
+
+    assert again.id == first.id and again.state == "done" and again.result is not None
+    assert described.run_id == first.workflow_run_id
+    assert acts.accepts == 1
+    assert _sample(service.metrics, "scadbuddy_render_jobs_coalesced_total", RENDER) == 1
+
+
+async def test_a_finished_job_whose_result_is_no_longer_held_renders_again(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    """A done row whose blobs a sweep may take (its refs gone) is never answered."""
+    width = _w()
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        acts = ProjectingActivities(deps)
+        async with _worker(client, queue, acts):
+            first = await service.submit(SLUG, {"width": width})
+            await _settled(projection, first.id)
+            await asyncio.to_thread(_drop_refs, projection, first.id)
+            again = await service.submit(SLUG, {"width": width})
+            done = await _settled(projection, again.id)
+        await service.aclose()
+
+    assert again.id != first.id and done.state == "done", done.error
+    assert acts.accepts == 2
+
+
+async def test_a_failed_job_is_never_reused(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    width = _w()
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        async with _worker(client, queue, ProjectingActivities(deps, fail_main=True)):
+            first = await service.submit(SLUG, {"width": width})
+            assert (await _settled(projection, first.id)).state == "failed"
+            again = await service.submit(SLUG, {"width": width})
+            await _settled(projection, again.id)
+        await service.aclose()
+
+    assert again.id != first.id
+
+
+async def test_a_reused_job_is_kept_by_the_prune_for_another_ttl(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    """A reuse resets the row's age in the transaction that checks its refs: the prune,
+    which deletes the row and its refs together, either took it first (and the submit
+    renders) or keeps it (and its blobs) for another `job_ttl`."""
+    width = _w()
+    config = replace(deps.config, job_ttl=86400.0)
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue, config=config)
+        async with _worker(client, queue, ProjectingActivities(deps)):
+            first = await service.submit(SLUG, {"width": width})
+            await _settled(projection, first.id)
+            await asyncio.to_thread(_finished_ago, projection, first.id, timedelta(days=2))
+            again = await service.submit(SLUG, {"width": width})
+            await service.prune()
+        await service.aclose()
+
+    assert again.id == first.id
+    kept = await asyncio.to_thread(projection.read, first.id)
+    # Its own times are the render's: the reuse moves none of them.
+    assert kept.state == "done" and kept.finished_at == again.finished_at
+    with psycopg.connect(projection.conninfo) as conn:
+        held = conn.execute(
+            "SELECT count(*) FROM blob_refs WHERE holder_kind = 'job' AND holder_id = %s",
+            (first.id,),
+        ).fetchone()
+    assert held is not None and held[0] > 0
+
+
+async def test_a_reuse_still_releases_the_render_it_supersedes(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    patient_release: None,
+) -> None:
+    """A slider moved back to a value already rendered: the job it replaces is released,
+    and the answer is the finished job."""
+    a = {"width": _w()}
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        gate = asyncio.Event()
+        gate.set()
+        acts = ProjectingActivities(deps, block_main=gate)
+        async with _worker(client, queue, acts):
+            first = await service.submit(SLUG, a)
+            await _settled(projection, first.id)
+            gate.clear()
+            moved = await service.submit(SLUG, {"width": _w()})
+            back = await service.submit(SLUG, a, supersedes=moved.id, request_id=uuid.uuid4().hex)
+            dropped = await _settled(projection, moved.id)
+            gate.set()
+        await service.aclose()
+
+    assert back.id == first.id and back.state == "done"
+    assert (dropped.state, dropped.error) == ("cancelled", SUPERSEDED_ERROR)
+
+
 class _SlowAccept(ProjectingActivities):
     """`render_accept` waits for ``accepting``: an Update that outlives its deadline."""
 

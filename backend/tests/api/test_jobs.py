@@ -104,6 +104,27 @@ def test_omitted_defaults_render_as_the_same_job_as_sent_defaults(
     assert first["params"] == second["params"] == {"width": 12, "label": "hi"}
     assert first["inputs"] == {"params": {"width": 12, "label": "hi"}, "v": 0}
     assert first["workflow_id"] == second["workflow_id"]
+    # #4870: the first had finished, so the second is answered with it.
+    assert first["id"] == second["id"]
+
+
+def test_a_render_already_finished_is_answered_with_its_job_at_once(
+    client: TestClient, model: str
+) -> None:
+    """#4870: no second row and no second run; the job reads as done straight away,
+    so the browser's first read (its subscription's confirmation) settles it."""
+    url = f"/api/v1/models/{model}/render"
+    first = client.post(url, json={"params": {"width": 13}})
+    assert first.status_code == 202, first.text
+    done = wait_for_job(client, first.json()["job_id"])
+    again = client.post(url, json={"params": {"width": 13}}, headers={"Idempotency-Key": "c" * 32})
+    assert again.status_code == 202, again.text
+    assert again.json()["job_id"] == done["id"]
+    assert again.json()["inputs"] == {"params": {"width": 13, "label": "hi"}, "v": 0}
+    read = client.get(again.json()["status_url"])
+    assert read.json()["status"] == "done"
+    assert read.json()["finished_at"] == done["finished_at"]
+    assert client.get(read.json()["preview_url"]).status_code == 200
 
 
 def test_an_unknown_parameter_is_rejected_by_name(client: TestClient, model: str) -> None:
