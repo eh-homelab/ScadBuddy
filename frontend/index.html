@@ -27,10 +27,9 @@
       not 3 failures in a row: a reload that recovers still spends one. That is fine, as a
       hashed name is one version of the file: a build that changes it gets a new name and
       a fresh budget, and one that leaves it byte-identical keeps the name, which every pod
-      then serves. Without
-      sessionStorage there is no guard, so no reload. Its sha256 is in PAGE_CSP
-      (backend/scadbuddy/api/static.py, frontend/page-csp.txt); src/entryReload.test.ts
-      fails when they drift.
+      then serves. Without sessionStorage there is no guard, so no reload. Its sha256 is
+      in PAGE_CSP (backend/scadbuddy/api/static.py, frontend/page-csp.txt);
+      src/entryReload.test.ts fails when they drift.
     -->
     <script>
       ;(function () {
