@@ -4,6 +4,8 @@ attached later puts the item on the normal flow."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import psycopg
 import pytest
 
@@ -104,10 +106,11 @@ def test_a_hold_refuses_a_custom_items_accepted_price(shop: Shop) -> None:
     order = shop.order()
     item = custom(shop, order)
     shop.lifecycle.hold(order.id, BY)
-    for call in (
+    calls: tuple[Callable[[], object], ...] = (
         lambda: custom(shop, order),
         lambda: shop.lifecycle.update_item(order.id, item.id, BY, unit_price_minor=1),
-    ):
+    )
+    for call in calls:
         with pytest.raises(LifecycleError) as refused:
             call()
         assert refused.value.slug == "order_on_hold"
