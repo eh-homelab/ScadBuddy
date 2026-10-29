@@ -82,22 +82,38 @@ def _input() -> LanPrintInput:
     )
 
 
-async def _start(pg_pool: PgPool, lan: Scripted) -> LanStarted:
+async def _attempts(pg_pool: PgPool, *lans: Scripted) -> list[LanStarted | ApplicationError]:
+    """``lan_print`` once per scripted printer, in turn, on one printer row: the attempts
+    the workflow makes of one start (`_lan_start`, the same ``subtask_name`` each time)."""
     printers = PrinterStore(pg_pool, KEK)
     row = printers.create(PrinterCreate(serial=SERIAL, name="H2C"))
     printers.link_lan(
         row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="ab" * 32
     )
-    deps = LanDeps(
-        printers=printers,
-        settings_store=cast(SettingsStore, None),
-        connect=lambda *_: cast(LanPrinter, lan),
-        start_wait=0.5 + len(lan.after),
-    )
-    started: LanStarted = await ActivityEnvironment().run(
-        LanActivities(deps).lan_print, _input().model_copy(update={"printer": row.id})
-    )
-    return started
+    outcomes: list[LanStarted | ApplicationError] = []
+    for lan in lans:
+        deps = LanDeps(
+            printers=printers,
+            settings_store=cast(SettingsStore, None),
+            connect=lambda *_, lan=lan: cast(LanPrinter, lan),
+            start_wait=0.5 + len(lan.after),
+        )
+        try:
+            outcomes.append(
+                await ActivityEnvironment().run(
+                    LanActivities(deps).lan_print, _input().model_copy(update={"printer": row.id})
+                )
+            )
+        except ApplicationError as error:
+            outcomes.append(error)
+    return outcomes
+
+
+async def _start(pg_pool: PgPool, lan: Scripted) -> LanStarted:
+    [outcome] = await _attempts(pg_pool, lan)
+    if isinstance(outcome, ApplicationError):
+        raise outcome
+    return outcome
 
 
 async def test_from_finish_the_start_is_the_move_out_of_it(pg_pool: PgPool) -> None:
@@ -151,22 +167,31 @@ async def test_from_failed_a_new_error_is_this_starts(pg_pool: PgPool) -> None:
         await _start(pg_pool, lan)
 
 
-async def test_a_retry_that_finds_its_name_over_finish_waits_for_the_move(
+async def test_a_retry_that_finds_its_name_over_finish_sends_it_again(
     pg_pool: PgPool,
 ) -> None:
-    """An earlier attempt's command named the job: no second command, and the move out of
-    ``FINISH`` is the start."""
+    """Review of #4980: the earlier attempt saw only the name move, and no print finishes
+    in the seconds between attempts, so the name over ``FINISH`` is not a start. The
+    printer is idle: the command is sent again, and the move is the start."""
     lan = Scripted(
         state(gcode_state="FINISH", **{**LAST, "subtask_name": NAME}),
         [state(gcode_state="RUNNING", subtask_name=NAME, layer_num=0)],
     )
     started = await _start(pg_pool, lan)
-    assert lan.commands == [None]
+    [command] = lan.commands
+    assert command is not None and command["print"]["command"] == "project_file"
     assert started.started_at == T0 + timedelta(seconds=1)
 
 
-async def test_a_retry_whose_print_had_ended_is_that_start(pg_pool: PgPool) -> None:
-    """Still ``FINISH`` under its name once the wait is over: it printed, and ended."""
-    lan = Scripted(state(gcode_state="FINISH", **{**LAST, "subtask_name": NAME}), [])
-    started = await _start(pg_pool, lan)
-    assert lan.commands == [None] and started.started_at == T0
+async def test_attempts_over_a_stale_finish_never_read_as_printed(pg_pool: PgPool) -> None:
+    """Review of #4980: attempt 1 is unsure over the name on the last job's ``FINISH``;
+    attempt 2's baseline is that same report. Neither is a start, so the run never reads
+    the stale ``FINISH`` as this print's end."""
+    stale = state(gcode_state="FINISH", **{**LAST, "subtask_name": NAME})
+    first = Scripted(state(gcode_state="FINISH", **LAST), [stale])
+    second = Scripted(stale, [stale])
+    outcomes = await _attempts(pg_pool, first, second)
+    assert all(
+        isinstance(outcome, ApplicationError) and outcome.type == LAN_UNSURE for outcome in outcomes
+    )
+    assert all(command is not None for command in [*first.commands, *second.commands])

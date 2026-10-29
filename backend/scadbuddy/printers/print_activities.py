@@ -41,7 +41,6 @@ import zipfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import IO, Any
 
 import aiomqtt
@@ -299,14 +298,13 @@ class LanActivities:
                     raise self._print_error(row, code)
                 raise _failed(f"{row.name} reports this print stopped.")
             if state in TAKEN_STATES:
-                return LanStarted(subtask_name=input.subtask_name, started_at=datetime.now(UTC))
-            if state == "FINISH":
-                # Its print ended, or the printer names it over the last job's FINISH and
-                # has not moved on yet (#4935): the reports that follow tell which.
-                finished = LanStarted(subtask_name=input.subtask_name, started_at=first.received_at)
-                return await self._taken(row, lan, input, None, error_before, finished)
+                return LanStarted(subtask_name=input.subtask_name, started_at=first.received_at)
+            # FINISH under its name is the printer naming it over the last job's FINISH,
+            # never a print that ran (#4935): the earlier attempt saw no move, and this
+            # one follows it by seconds, which no print finishes in. The printer is idle,
+            # so the command is sent again.
         command, warnings = await self._command(row, printer, input)
-        started = await self._taken(row, lan, input, command, error_before, None)
+        started = await self._taken(row, lan, input, command, error_before)
         return started.model_copy(update={"warnings": warnings})
 
     async def _taken(
@@ -314,13 +312,11 @@ class LanActivities:
         row: PrinterRow,
         lan: LanPrinter,
         input: LanPrintInput,
-        command: dict[str, Any] | None,
+        command: dict[str, Any],
         error_before: int,
-        finished: LanStarted | None,
     ) -> LanStarted:
-        """The start, from the reports after ``command`` (``None`` sends none), within
-        `LanDeps.start_wait`. With no start seen by then, ``finished`` (a print that had
-        ended) or ``LAN_UNSURE``."""
+        """The start, from the reports after ``command``, within `LanDeps.start_wait`;
+        with none seen by then, ``LAN_UNSURE``."""
         try:
             async with asyncio.timeout(self.d.start_wait):
                 async for report in lan.reports(command=command):
@@ -328,8 +324,6 @@ class LanActivities:
                     if started is not None:
                         return started
         except TimeoutError:
-            if finished is not None:
-                return finished
             raise _unsure(
                 f"{row.name} did not report the print within {self.d.start_wait:.0f} s."
             ) from None
