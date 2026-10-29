@@ -1,7 +1,6 @@
 import type { Context, Hono } from 'hono'
 import { z } from 'zod'
-import type { ToolListings } from '../access/listings.js'
-import { remoteSource } from '../access/model.js'
+import type { PluginListingPut, ToolListings } from '../access/listings.js'
 import type { AppDeps } from '../app.js'
 import { RISK_TIERS } from '../harness/permissions.js'
 import { EgressError, type Resolver, systemResolver } from '../http/egress.js'
@@ -20,7 +19,7 @@ import {
   reservedNameProblem,
   toolPrefix,
 } from '../plugins/registry.js'
-import { type PluginTest, testPlugin } from '../plugins/testConnection.js'
+import { DEFAULT_PLUGIN_TEST_TIMEOUT_MS, type PluginTest, testPlugin } from '../plugins/testConnection.js'
 import { type KekStatus, SealError } from '../secrets.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
@@ -271,7 +270,8 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
   app.post(`${base}/:name/test`, async (c) => {
     const name = c.req.param('name')
     if (builtIn(name)) return isBuiltIn(c, name, 'tested: it has no endpoint; its tools are listed with it')
-    const { status, body } = await testAndList(deps, name)
+    const { status, body, retryAfter } = await testAndList(deps, name)
+    if (retryAfter !== undefined) c.header('Retry-After', String(retryAfter))
     if (!('ok' in body)) return c.json(body, status)
     const { stored: _stored, ...sent } = body
     return c.json(sent, status)
@@ -279,8 +279,18 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
 }
 
 // One test (or listing refresh) per plugin at a time, whichever route started it: each
-// one opens a connection to the endpoint.
+// one opens a connection to the endpoint. This set answers a second caller in this process
+// without a database round trip; ToolListings.exclusive holds it across replicas (#4994).
 const testing = new Set<string>()
+
+// Seconds: a running test ends within its timeout (testConnection.ts), and its lock and slot are
+// held until its listing write (ToolListings #putIfCurrent) commits; 2 s more covers that write.
+// It assumes the default timeout: a test given a longer one of its own would outlast the hint.
+const RETRY_AFTER_S = Math.ceil(DEFAULT_PLUGIN_TEST_TIMEOUT_MS / 1000) + 2
+const BUSY = { status: 429, body: { detail: 'a connection test for this plugin is already running' }, retryAfter: RETRY_AFTER_S } as const
+
+/** `retryAfter`: seconds, sent as `Retry-After` with a 429. */
+export type TestAnswer = { status: 200 | 400 | 404 | 409 | 429 | 503; body: PluginTest | { detail: string }; retryAfter?: number }
 
 type TestDeps = ReturnType<typeof pluginTestDeps> & { ready: () => Promise<boolean> }
 
@@ -291,8 +301,8 @@ type TestDeps = ReturnType<typeof pluginTestDeps> & { ready: () => Promise<boole
 export async function testAndList(
   deps: TestDeps,
   name: string,
-): Promise<{ status: 200 | 400 | 404 | 409 | 429 | 503; body: PluginTest | { detail: string } }> {
-  if (testing.has(name)) return { status: 429, body: { detail: 'a connection test for this plugin is already running' } }
+): Promise<TestAnswer> {
+  if (testing.has(name)) return BUSY
   testing.add(name)
   try {
     if (!deps.plugins) return { status: 503, body: { detail: NO_DATABASE } }
@@ -318,9 +328,22 @@ export async function testAndList(
       throw err
     }
     if (address === undefined) return { status: 400, body: { detail: 'url host resolves to no address' } }
-    const test = await deps.testPlugin(plugin, address)
-    if (test.ok) await deps.listings?.put(remoteSource(name), test.stored, { truncated: test.truncated })
-    return { status: 200, body: test }
+    const tested = plugin
+    const run = async (put?: PluginListingPut): Promise<PluginTest> => {
+      const test = await deps.testPlugin(tested, address)
+      // Only while the plugin still stands at the URL tested: a delete or a URL change since wins.
+      if (test.ok) await put?.(tested.url, test.stored, { truncated: test.truncated })
+      return test
+    }
+    if (!deps.listings) return { status: 200, body: await run() }
+    const held = await deps.listings.exclusive(name, run)
+    if (held === 'busy') return BUSY
+    if (held === 'full') {
+      return { status: 429, body: { detail: 'too many connection tests are running; try again shortly' }, retryAfter: RETRY_AFTER_S }
+    }
+    // The lock client's database is down: the same answer as the ready check above, not a 500.
+    if (held === 'unreachable') return { status: 503, body: { detail: NOT_READY } }
+    return { status: 200, body: held.value }
   } finally {
     testing.delete(name)
   }

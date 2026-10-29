@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import type { ItemDetails, SourceView } from '../src/access/capabilities.js'
-import { listedTool, toStoredTools, type ListedTool, type StoredTool } from '../src/access/listings.js'
+import { listedTool, toStoredTools, type ListedTool, type PluginListingPut, type StoredTool } from '../src/access/listings.js'
 import { type AccessRow, BUILTIN_SOURCES, registrySource, remoteSource, SOURCE_ITEM, type ToolAccess } from '../src/access/model.js'
 import { pluginOverrides, sourceEnabled } from '../src/access/resolve.js'
 import { createApp } from '../src/app.js'
@@ -78,12 +78,20 @@ function memoryPlugins(names: readonly string[]) {
 
 function memoryListings(initial: Record<string, Listing>) {
   const store = new Map(Object.entries(initial))
+  const put = async (source: string, tools: readonly StoredTool[], options: { truncated?: boolean } = {}) => {
+    store.set(source, { tools: tools.map(listedTool), listed_at: '2026-10-29T12:00:00.000Z', truncated: options.truncated ?? false })
+  }
   return {
     get: async (source: string) => store.get(source),
     getMany: async (sources: readonly string[]) => new Map([...store].filter(([s]) => sources.includes(s))),
-    put: async (source: string, tools: readonly StoredTool[], options: { truncated?: boolean } = {}) => {
-      store.set(source, { tools: tools.map(listedTool), listed_at: '2026-10-29T12:00:00.000Z', truncated: options.truncated ?? false })
-    },
+    put,
+    // No other replica here: the lock is always free.
+    exclusive: async <T>(name: string, fn: (put: PluginListingPut) => Promise<T>) => ({
+      value: await fn(async (_url, tools, options) => {
+        await put(remoteSource(name), tools, options)
+        return true
+      }),
+    }),
   }
 }
 
@@ -292,6 +300,8 @@ describe('/api/v1/ai/capabilities', () => {
     await vi.waitFor(() => expect(testPlugin).toHaveBeenCalledTimes(1))
     const busy = await refresh(app, 'remote:hs')
     expect(busy.status).toBe(429)
+    // A running test ends within its 10 s timeout, and its listing write within 2 s more (#4994).
+    expect(busy.headers.get('Retry-After')).toBe('12')
     expect(await busy.json()).toEqual({ detail: expect.stringMatching(/already running/) as unknown })
     release()
     expect((await running).status).toBe(200)

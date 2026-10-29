@@ -197,8 +197,9 @@ describe('the connection test stores its listing (#2171)', () => {
   })
   function setup(testPlugin: AppDeps['testPlugin'], overrides: Partial<AppDeps> = {}) {
     const repo = { ...untouchable(), reveal: vi.fn(() => Promise.resolve(plugin)) }
-    const put = vi.fn((_source: string, _tools: readonly StoredTool[], _options?: { truncated: boolean }) => Promise.resolve())
-    const listings = { put } as unknown as ToolListings
+    const put = vi.fn((_url: string, _tools: readonly StoredTool[], _options: { truncated?: boolean }) => Promise.resolve(true))
+    const exclusive = vi.fn(async <T>(_name: string, fn: (p: typeof put) => Promise<T>) => ({ value: await fn(put) }))
+    const listings = { exclusive } as unknown as ToolListings
     return { put, repo, listings, a: app(repo, { testPlugin, listings, ...overrides }) }
   }
   const test = (a: ReturnType<typeof app>) => a.request('/api/v1/ai/plugins/mem/test', { method: 'POST', headers: UI })
@@ -207,14 +208,14 @@ describe('the connection test stores its listing (#2171)', () => {
     const { put, a } = setup(() => Promise.resolve(result(true)))
     const res = await test(a)
     expect(res.status).toBe(200)
-    expect(put).toHaveBeenCalledWith('remote:mem', stored, { truncated: false })
+    expect(put).toHaveBeenCalledWith(plugin.url, stored, { truncated: false })
     expect(await res.json()).not.toHaveProperty('stored')
   })
 
   it('a truncated test stores its listing as incomplete (#2171 re-review N1)', async () => {
     const { put, a } = setup(() => Promise.resolve({ ...result(true), truncated: true }))
     expect((await test(a)).status).toBe(200)
-    expect(put).toHaveBeenCalledWith('remote:mem', stored, { truncated: true })
+    expect(put).toHaveBeenCalledWith(plugin.url, stored, { truncated: true })
   })
 
   it('a failed connection test stores nothing', async () => {
@@ -235,9 +236,43 @@ describe('the connection test stores its listing (#2171)', () => {
     await vi.waitFor(() => expect(finish).toBeDefined())
     const second = await test(a)
     expect(second.status).toBe(429)
+    expect(second.headers.get('Retry-After')).toBe('12')
     finish!(result(true))
     expect((await first).status).toBe(200)
     expect((await test(a)).status).toBe(200)
+  })
+
+  it("a test while another replica holds the plugin's test lock answers 429 and connects nowhere (#4994)", async () => {
+    const testPlugin = vi.fn(() => Promise.resolve(result(true)))
+    const { a, listings } = setup(testPlugin)
+    vi.mocked(listings.exclusive).mockResolvedValueOnce('busy')
+    const res = await test(a)
+    expect(res.status).toBe(429)
+    expect(res.headers.get('Retry-After')).toBe('12')
+    expect(testPlugin).not.toHaveBeenCalled()
+    expect((await test(a)).status).toBe(200)
+  })
+
+  it('a test while this replica runs its cap of tests answers 429 (#4994)', async () => {
+    const testPlugin = vi.fn(() => Promise.resolve(result(true)))
+    const { a, listings } = setup(testPlugin)
+    vi.mocked(listings.exclusive).mockResolvedValueOnce('full')
+    const res = await test(a)
+    expect(res.status).toBe(429)
+    expect(res.headers.get('Retry-After')).toBe('12')
+    expect(((await res.json()) as { detail: string }).detail).toMatch(/too many connection tests/)
+    expect(testPlugin).not.toHaveBeenCalled()
+  })
+
+  it("a test whose lock client cannot reach Postgres answers 503, the ready check's answer, and connects nowhere (#4994)", async () => {
+    const testPlugin = vi.fn(() => Promise.resolve(result(true)))
+    const { a, listings } = setup(testPlugin)
+    vi.mocked(listings.exclusive).mockResolvedValueOnce('unreachable')
+    const res = await test(a)
+    expect(res.status).toBe(503)
+    expect(res.headers.get('Retry-After')).toBeNull()
+    expect(((await res.json()) as { detail: string }).detail).toMatch(/AI database is unreachable/)
+    expect(testPlugin).not.toHaveBeenCalled()
   })
 
   it('one test at a time per plugin, whichever caller started it (#2171 review M3)', async () => {

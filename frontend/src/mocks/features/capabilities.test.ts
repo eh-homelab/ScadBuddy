@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { aiPlugins } from '../../api/aiPlugins'
 import { setListedToolNames, setRemotePluginAccess } from '../aiPlugins'
 import { aiCapabilities } from '../../api/capabilities'
+import { summarize } from '../../components/capabilities/access'
+import { seedBuiltInRow } from './capabilities'
 import type { ApiError } from '../../api/client'
 
 describe('capabilities mock (#2171)', () => {
@@ -16,6 +18,16 @@ describe('capabilities mock (#2171)', () => {
     ])
     expect(sources[0]!.items).toHaveLength(10)
     expect(sources[1]).toMatchObject({ options_route: '/api/v1/ai/settings/browser-origins', items: [{ id: 'browser_click', default: 'write' }] })
+  })
+
+  it('a migrated row at the tool\'s own tier is overridden, counted as a change, and Reset removes it (#4994)', async () => {
+    seedBuiltInRow('builtin:scadbuddy', 'list_models', 'read')
+    const source = await aiCapabilities.source('builtin:scadbuddy')
+    expect(source.items.find((i) => i.id === 'list_models')).toMatchObject({ default: 'read', access: 'read', overridden: true })
+    expect(summarize(source)).toBe('10 tools, 1 changed')
+    const after = await aiCapabilities.resetItem('builtin:scadbuddy', 'list_models')
+    expect(after.items.find((i) => i.id === 'list_models')).toMatchObject({ access: 'read', overridden: false })
+    expect(summarize(after)).toBe('10 tools')
   })
 
   it('lists a remote plugin after a refresh, recall at its stored read', async () => {

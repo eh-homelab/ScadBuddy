@@ -63,6 +63,15 @@ describe('SourceCard', () => {
     expect(screen.getAllByRole('combobox', { name: /^Access of / })).toHaveLength(10)
   })
 
+  it('counts a row at the default tier (a migrated one, #4994) as changed, and offers its Reset', async () => {
+    const start = source({ items: [tool(1, { access: 'read', overridden: true }), tool(2)] })
+    const { user } = renderPage(<Harness start={start} />)
+    expect(within(card('ScadBuddy tools')).getByText('2 tools, 1 changed')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'ScadBuddy tools' }))
+    expect(screen.getByRole('button', { name: 'Reset tool_1' })).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Reset tool_2' })).toBeNull()
+  })
+
   it('the switch enables a switchable source, is not user-only, and is absent otherwise', async () => {
     const http_ = source({ id: 'builtin:http', title: 'HTTP requests', switchable: true }, 1)
     const { user } = renderPage(<Harness start={http_} />)

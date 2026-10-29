@@ -1,5 +1,7 @@
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
+import type { LockClient, LockLease } from '../db.js'
 import { z } from 'zod'
+import { remoteSource } from './model.js'
 
 // The tools a remote source listed (#2171, #778), kept in `ai_tool_listings`: each
 // `tools/list` entry once, as the server sent it, with only what a cap removed taken
@@ -191,9 +193,12 @@ function parseRow(row: Row): Listing | undefined {
 
 export class ToolListings {
   readonly #sql: Sql
+  readonly #locks: LockClient
 
-  constructor(sql: Sql) {
+  /** `locks`: the lock client (db.ts `Database.locks`). */
+  constructor(sql: Sql, locks: LockClient) {
     this.#sql = sql
+    this.#locks = locks
   }
 
   async get(source: string): Promise<Listing | undefined> {
@@ -214,11 +219,78 @@ export class ToolListings {
     return out
   }
 
-  /** `truncated`: the listing is not every tool the source has (a `nextCursor`, or entries dropped). */
-  async put(source: string, tools: readonly StoredTool[], options: { truncated?: boolean } = {}): Promise<void> {
-    await this.#sql`
-      INSERT INTO ai_tool_listings (source, tools, truncated)
-      VALUES (${source}, ${this.#sql.json(tools as never)}, ${options.truncated ?? false})
-      ON CONFLICT (source) DO UPDATE SET tools = EXCLUDED.tools, truncated = EXCLUDED.truncated, listed_at = now()`
+  /**
+   * Runs `fn` holding remote plugin `name`'s test lock, a session advisory lock, so one test
+   * runs at a time across replicas (#4994). `busy`: another session holds it; `full`: this
+   * replica already runs TEST_LOCK_CONNECTIONS tests; `unreachable`: the lock client could not
+   * reach Postgres, and `fn` did not run. An error of `fn`'s own is thrown as it is. The lock is held on the lock client
+   * (db.ts `createLockClient`), never on the shared pool, which a test therefore never waits on.
+   */
+  async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
+    let lease: LockLease | undefined
+    try {
+      lease = await this.#locks.take()
+    } catch (err) {
+      console.error(`plugin test lock: no lock connection: ${message(err)}`)
+      return 'unreachable'
+    }
+    if (!lease) return 'full'
+    // A 64-bit hash of the name: two names may share a key, which only costs a spurious `busy` and a retry.
+    const key = `scadbuddy:ai_tool_listings:test:${name}`
+    // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
+    let healthy = false
+    try {
+      let row: { held: boolean } | undefined
+      try {
+        ;[row] = await lease.sql<{ held: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS held`
+      } catch (err) {
+        console.error(`plugin test lock: the lock query failed, retiring its connection: ${message(err)}`)
+        return 'unreachable'
+      }
+      if (!row?.held) {
+        healthy = true
+        return 'busy'
+      }
+      try {
+        return { value: await fn((url, tools, options) => this.#putIfCurrent(name, url, tools, options.truncated ?? false)) }
+      } finally {
+        // A failed unlock retires the connection (lease.done) and leaves the test's own answer.
+        healthy = await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`.then(
+          () => true,
+          (err: unknown) => {
+            console.error(`plugin test lock: unlock failed, retiring its connection: ${message(err)}`)
+            return false
+          },
+        )
+      }
+    } finally {
+      lease.done(healthy)
+    }
   }
+
+  // One short transaction on the shared pool, after the test and still under its lock.
+  async #putIfCurrent(name: string, url: string, tools: readonly StoredTool[], truncated: boolean): Promise<boolean> {
+    return this.#sql.begin(async (tx) => {
+      const [plugin] = await tx`SELECT 1 FROM ai_plugins WHERE name = ${name} AND url = ${url} FOR UPDATE`
+      if (!plugin) return false
+      await upsert(tx, remoteSource(name), tools, truncated)
+      return true
+    })
+  }
+}
+
+/**
+ * Stores remote plugin `name`'s listing only while it still exists at `url`, the one tested
+ * (#4994): under its ai_plugins row lock, so a delete or a URL change after the test wins.
+ * False: nothing stored. `truncated`: not every tool the source has (a `nextCursor`, or entries dropped).
+ */
+export type PluginListingPut = (url: string, tools: readonly StoredTool[], options: { truncated?: boolean }) => Promise<boolean>
+
+const message = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+async function upsert(sql: TransactionSql, source: string, tools: readonly StoredTool[], truncated: boolean): Promise<void> {
+  await sql`
+    INSERT INTO ai_tool_listings (source, tools, truncated)
+    VALUES (${source}, ${sql.json(tools as never)}, ${truncated})
+    ON CONFLICT (source) DO UPDATE SET tools = EXCLUDED.tools, truncated = EXCLUDED.truncated, listed_at = now()`
 }

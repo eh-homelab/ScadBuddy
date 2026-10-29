@@ -69,14 +69,15 @@ function memoryPlugins(names: readonly string[], initial: AccessRow[] = []) {
 
 function memoryListings(initial: Record<string, Listing> = {}) {
   const store = new Map(Object.entries(initial))
-  const listings: Pick<ToolListings, 'get' | 'getMany' | 'put'> = {
+  const listings: Pick<ToolListings, 'get' | 'getMany'> = {
     get: async (source) => store.get(source),
     getMany: async (sources) => new Map([...store].filter(([s]) => sources.includes(s))),
-    put: async (source, tools, options = {}) => {
-      store.set(source, { tools: tools.map(listedTool), listed_at: '2026-10-29T12:00:00.000Z', truncated: options.truncated ?? false })
-    },
   }
-  return { listings, store }
+  /** What testAndList's guarded put stores. */
+  const put = async (source: string, tools: readonly StoredTool[], options: { truncated?: boolean } = {}) => {
+    store.set(source, { tools: tools.map(listedTool), listed_at: '2026-10-29T12:00:00.000Z', truncated: options.truncated ?? false })
+  }
+  return { listings, put, store }
 }
 
 const listing = (entries: Record<string, unknown>[], listed_at = '2026-10-20T00:00:00.000Z'): Listing => ({
@@ -287,14 +288,14 @@ describe('remote MCP plugins as capability sources', () => {
   it('refresh stores the new listing and answers the source', async () => {
     const stored = toStoredTools([{ name: 'reflect', description: 'Thinks' }])
     // The real refresh is testAndList, which stores a good listing before it answers.
-    let put: Pick<ToolListings, 'put'>['put'] = () => Promise.reject(new Error('unset'))
-    const { caps, refresh, listings } = setup({
+    let put: (source: string, tools: readonly StoredTool[]) => Promise<void> = () => Promise.reject(new Error('unset'))
+    const { caps, refresh, put: storeListing } = setup({
       refresh: async (name) => {
         await put(remoteSource(name), stored)
         return { status: 200, body: okTest(stored) }
       },
     })
-    put = listings.put
+    put = storeListing
     const { test, source } = await caps.refresh('remote:hs')
     expect(refresh).toHaveBeenCalledWith('hs')
     expect(test.ok).toBe(true)

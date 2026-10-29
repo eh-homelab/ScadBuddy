@@ -35,7 +35,8 @@ const rowOf = (rows: readonly AccessRow[], source: string, item: string): Access
 
 function registryItem(tool: Tool, rows: readonly AccessRow[]): ItemView {
   // The item's own access: a source `*` switch (builtin:browser's, #4757) is not folded in.
-  const access = toolAccess(tool.risk, rowOf(rows, registrySource(tool.name), tool.name), true)
+  const row = rowOf(rows, registrySource(tool.name), tool.name)
+  const access = toolAccess(tool.risk, row, true)
   return {
     id: tool.name,
     kind: 'tool',
@@ -47,7 +48,9 @@ function registryItem(tool: Tool, rows: readonly AccessRow[]): ItemView {
     default_note: null,
     suggested: null,
     access,
-    overridden: access !== tool.risk,
+    // Any stored row, so Reset can remove it (#4994): a migrated row at or below the tier is
+    // inert now (resolve.ts `toolAccess`), but takes effect if the tool's tier drops below it.
+    overridden: row !== undefined,
     missing: false,
     allowed: null,
     fixed: null,
@@ -282,18 +285,13 @@ const REFRESH_STATUSES: readonly number[] = [400, 404, 409, 429, 503]
 export function remoteProvider(deps: {
   plugins: PluginRepo
   listings: Pick<ToolListings, 'get' | 'getMany'>
-  refresh: (name: string) => Promise<{ status: number; body: PluginTest | { detail: string } }>
+  refresh: (name: string) => Promise<{ status: number; body: PluginTest | { detail: string }; retryAfter?: number }>
 }): CapabilityProvider {
   const nameOf = (source: string): string => source.slice(REMOTE_PREFIX.length)
 
   const get = async (source: string): Promise<SourceView | undefined> => {
     const [plugin, listing] = await Promise.all([deps.plugins.get(nameOf(source)), deps.listings.get(source)])
     return plugin && remoteView(plugin, listing)
-  }
-
-  const toolWrite = (access: Access): Exclude<Access, 'on'> => {
-    if (access === 'on') throw new CapabilityError('a tool takes off, read, write or outward, not "on"', 400)
-    return access
   }
 
   return {
@@ -329,10 +327,10 @@ export function remoteProvider(deps: {
       }
     },
     async refresh(source) {
-      const { status, body } = await deps.refresh(nameOf(source))
+      const { status, body, retryAfter } = await deps.refresh(nameOf(source))
       if (status !== 200 || !('ok' in body)) {
         const code = REFRESH_STATUSES.includes(status) ? (status as 400 | 404 | 409 | 429 | 503) : 502
-        throw new CapabilityError(body.detail, code)
+        throw new CapabilityError(body.detail, code, retryAfter)
       }
       const view = await get(source)
       if (view === undefined) throw new CapabilityError(`no source "${source}"`, 404)

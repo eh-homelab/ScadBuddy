@@ -237,6 +237,16 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(await db.sql`SELECT 1 FROM ai_tool_listings WHERE source = 'remote:mem'`).toHaveLength(0)
       })
 
+      it("a URL change drops the old server's listing; any other change keeps it (#4994)", async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await db.sql`INSERT INTO ai_tool_listings (source, tools) VALUES ('remote:mem', '[]')`
+        await store.update('mem', { enabled: true, tool_tiers: { a: 'read' } }, kek)
+        await store.update('mem', { url: 'https://hs.example/mcp' }, kek)
+        expect(await db.sql`SELECT 1 FROM ai_tool_listings WHERE source = 'remote:mem'`).toHaveLength(1)
+        await store.update('mem', { url: 'https://new.example/mcp' }, kek)
+        expect(await db.sql`SELECT 1 FROM ai_tool_listings WHERE source = 'remote:mem'`).toHaveLength(0)
+      })
+
       const UI_CONTEXT = { actor: { kind: 'browser', id: 'browser', label: 'Browser' }, surface: 'http' } as const
       const rowsBy = (name: string) =>
         db.sql<{ item: string; access: string; updated_by: string }[]>`
@@ -319,7 +329,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       it("a source switch through the tree records the UI's actor", async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
         const caps = new Capabilities([
-          remoteProvider({ plugins: store, listings: new ToolListings(db.sql), refresh: () => Promise.reject(new Error('not called')) }),
+          remoteProvider({ plugins: store, listings: new ToolListings(db.sql, db.locks), refresh: () => Promise.reject(new Error('not called')) }),
         ])
         expect((await caps.setEnabled('remote:mem', true, UI_CONTEXT)).enabled).toBe(true)
         expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'on', updated_by: 'browser:browser' }])
