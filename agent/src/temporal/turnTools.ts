@@ -401,14 +401,21 @@ async function withServers<T>(deps: TurnToolsDeps, context: TurnContext, use: (s
   }
 }
 
-/** The server a turn tool's name names now, or a non-retryable refusal saying why not. */
-function serverOf(set: TurnServers, name: string) {
+/** Why a turn tool's server is not in the turn's build (switched off, removed, or its name now taken). */
+const goneReason = (name: string) => `${name} is not offered any more: its plugin or setting was turned off`
+
+/** The server a turn tool's name names now, or undefined. */
+function findServer(set: TurnServers, name: string) {
   const parts = split(name)
   const server = parts && set.servers.find((s) => s.name === parts.server)
-  if (!parts || !server) {
-    throw ApplicationFailure.nonRetryable(`${name} is not offered any more: its plugin or setting was turned off`, TOOL_ERROR)
-  }
-  return { parts, server }
+  return parts && server ? { parts, server } : undefined
+}
+
+/** The server a turn tool's name names now, or a non-retryable refusal saying why not. */
+function serverOf(set: TurnServers, name: string) {
+  const found = findServer(set, name)
+  if (!found) throw ApplicationFailure.nonRetryable(goneReason(name), TOOL_ERROR)
+  return found
 }
 
 /**
@@ -577,8 +584,13 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
       return withServers(deps, { ...caller.context, signal }, async (set) => {
         // As a guard's deny below: not parked, since its call refuses it with the reason. A
         // switch that cannot be read is refused too: an approval could not run the call.
-        // Read before the listing: a server switched off is not listed (turnServers.ts).
-        const named = serverOf(set, tool).server
+        // Read before the listing. In a durable session a server not in the build (switched
+        // off, removed, or its name now another's) is refused the same way (#4757): never
+        // parked for an approval its call could not use; its call still rebuilds, re-tiers
+        // and needs an approval. A flow, which never parks, is told there is no such tool.
+        const present = caller.context.flow === undefined ? findServer(set, tool) : serverOf(set, tool)
+        if (!present) return { tier: 'write', declared: 'outward', refused: goneReason(tool) }
+        const named = present.server
         const off = await refusalOf(named)
         if (off !== undefined) return { tier: 'write', declared: 'outward', refused: off, ...(pinned(deps, named) ? { task_queue: deps.hostQueue! } : {}) }
         const { server, harnessName, tool: found } = await resolve(deps, caller.context, set, tool, signal, 'tier')

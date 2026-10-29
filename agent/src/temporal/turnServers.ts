@@ -24,7 +24,7 @@ import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
-import { declaredPackageServers, type PackageServers, serverAccess } from '../plugins/packages/mcp.js'
+import { type PackageServers, serverAccess } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
 import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
 import type { SessionFiles } from '../workspace/store.js'
@@ -408,20 +408,6 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           },
           ...browserParts,
         })
-      }
-      // A call (never a listing) to a server switched off since its turn's listing is refused
-      // by its switch, not parked for an approval no one could use (#4757).
-      if (!context.listing) {
-        const present = new Set(servers.map((s) => s.name))
-        for (const { name, pkg, server } of declaredPackageServers(offered)) {
-          if (present.has(name) || switches.get(packageServerSource(pkg, server))?.enabled !== false) continue
-          servers.push({
-            name,
-            connect: () => Promise.reject(new Error(`${name} is switched off`)),
-            tierOf: () => 'outward',
-            refusal: async () => switchedOff(server, pkg),
-          })
-        }
       }
     }
     return {

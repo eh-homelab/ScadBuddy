@@ -877,9 +877,10 @@ class DurableSession:
 
     async def _outward(self, name: str, call: dict[str, Any]) -> bool:
         """Whether a turn tool's call is outward, by its input (turn_tool_tier). Only a
-        tool listed as may_park is asked about, so one the agent cannot tier (its plugin
-        did not answer, or is gone) parks: fail toward asking. Its activity still refuses
-        a call whose tool is gone, saying why."""
+        tool listed as may_park is asked about. A tool whose server is gone from the turn
+        (switched off, removed, its name now another's) is answered refused, not outward,
+        so it does not park; one the agent cannot tier (its plugin did not answer) parks:
+        fail toward asking. Its activity still refuses a call whose tool is gone, saying why."""
         try:
             tiered = await workflow.execute_activity(
                 TURN_TOOL_TIER,

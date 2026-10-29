@@ -102,11 +102,6 @@ function offeredServers(loaded: readonly LoadedPackage[]): { pkg: LoadedPackage;
   return out
 }
 
-/** Every server a package offers a turn (`offeredServers`), by the name its tools carry. */
-export function declaredPackageServers(loaded: readonly LoadedPackage[]): { name: string; pkg: string; server: string; local: boolean }[] {
-  return offeredServers(loaded).map(({ pkg, server, local }) => ({ name: packageServerName(pkg.name, server), pkg: pkg.name, server, local }))
-}
-
 /**
  * The server names (`packageServerName`) more than one package server would carry, http
  * and local alike (`a.b`'s `s` and `a_b`'s `s` are both `plugin_a_b_s`), with their owners.
@@ -128,11 +123,8 @@ export function collisionProblem(colliding: ReadonlyMap<string, { pkg: string; s
   const name = packageServerName(pkg, server)
   const owners = colliding.get(name)
   if (!owners) return undefined
-  const others = owners
-    .filter((o) => !(o.pkg === pkg && o.server === server))
-    .map((o) => `"${o.server}" of plugin package ${o.pkg}`)
-    .join(', ')
-  return `plugin package ${pkg}: MCP server "${server}" is named ${name}, as ${others} are, so none of them is offered`
+  const others = owners.filter((o) => !(o.pkg === pkg && o.server === server)).map((o) => `"${o.server}" of plugin package ${o.pkg}`)
+  return `plugin package ${pkg}: MCP server "${server}" is named ${name}, as ${others.join(', ')} ${others.length === 1 ? 'is' : 'are'}, so none of them is offered`
 }
 
 /** A package server's switch and stored tool access (`package:<pkg>/mcp:<server>` in ai_access). */

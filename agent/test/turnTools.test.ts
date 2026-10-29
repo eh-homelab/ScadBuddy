@@ -832,23 +832,24 @@ describe('saved http bodies on this pod (#2496)', () => {
 // transcript only, and a package server keeps its MCP session as a remote plugin does.
 describe('package servers and remote plugins in a durable turn (#4757)', () => {
   const loopback = async () => ['127.0.0.1']
+  const GONE = (tool: string) => `${tool} is not offered any more: its plugin or setting was turned off`
 
-  async function notesPackage(url: string): Promise<LoadedPackage> {
+  async function notesPackage(url: string, name = 'notes', server = 'api'): Promise<LoadedPackage> {
     const dir = await mkdtemp(path.join(os.tmpdir(), 'turn-pkg-'))
     await mkdir(path.join(dir, '.claude-plugin'))
     await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'notes' }))
-    await writeFile(path.join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { api: { type: 'http', url } } }))
-    return { name: 'notes', contentHash: (await hashTree(dir)).hash, dir, allowed: false, builtinTools: [] }
+    await writeFile(path.join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { [server]: { type: 'http', url } } }))
+    return { name, contentHash: (await hashTree(dir)).hash, dir, allowed: false, builtinTools: [] }
   }
 
-  async function packageTurn(options: { sessions?: boolean; rows?: AccessRow[] } = {}) {
+  async function packageTurn(options: { sessions?: boolean; rows?: AccessRow[]; name?: string } = {}) {
     const mcp = await startFakeMcp({ ...(options.sessions ? { sessions: true } : {}) })
     const forwarder = await PluginForwarder.start()
-    const pkg = await notesPackage(mcp.url)
+    const loaded = [await notesPackage(mcp.url, options.name)]
     const store = memoryAccess(options.rows ?? [])
     const resolver = new AccessResolver(store.access)
     const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
-    const load = async (): Promise<PackagesForRun> => ({ paths: [pkg.dir], allowedPaths: [], builtinTools: [], loaded: [pkg], problems: [], release: () => {} })
+    const load = async (): Promise<PackagesForRun> => ({ paths: loaded.map((p) => p.dir), allowedPaths: [], builtinTools: [], loaded: [...loaded], problems: [], release: () => {} })
     const clients = new SessionClients<ListedTools>()
     const deps: TurnToolsDeps = {
       sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
@@ -863,6 +864,7 @@ describe('package servers and remote plugins in a durable turn (#4757)', () => {
     const activities = turnToolActivities(deps)
     return {
       mcp,
+      loaded,
       rows: store.rows,
       list: async () => ((await env(TURN_TOOLS_ACTIVITY).run(activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult).tools,
       tier: (tool: string) => env(TURN_TOOL_TIER_ACTIVITY, 'tier-1').run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool, input: { query: 'q' } }),
@@ -932,12 +934,66 @@ describe('package servers and remote plugins in a durable turn (#4757)', () => {
       expect((await t.list()).map((x) => x.name)).toContain('plugin_notes_api__recall')
       t.rows.push({ source: packageServerSource('notes', 'api'), item: '*', access: 'off', updated_by: 'test' })
       expect(await t.list()).toEqual([])
-      const why = 'api of plugin package notes is switched off in Settings → Tools & plugins; the user can turn it back on there'
-      expect(await t.tier('plugin_notes_api__recall')).toEqual({ tier: 'write', declared: 'outward', refused: why })
-      expect((await failure(t.call('plugin_notes_api__recall'))).message).toBe(why)
+      expect(await t.tier('plugin_notes_api__recall')).toEqual({ tier: 'write', declared: 'outward', refused: GONE('plugin_notes_api__recall') })
+      expect((await failure(t.call('plugin_notes_api__recall'))).message).toBe(GONE('plugin_notes_api__recall'))
       expect(t.mcp.calls).toEqual([])
     } finally {
       await t.close()
+    }
+  })
+
+  it('a server whose name another package takes mid-turn is refused at its tier check, not parked', async () => {
+    const t = await packageTurn({ name: 'n.x' })
+    try {
+      expect((await t.list()).map((x) => x.name)).toContain('plugin_n_x_api__recall')
+      t.loaded.push(await notesPackage(t.mcp.url, 'n_x'))
+      expect(await t.tier('plugin_n_x_api__recall')).toEqual({ tier: 'write', declared: 'outward', refused: GONE('plugin_n_x_api__recall') })
+      expect((await failure(t.call('plugin_n_x_api__recall'))).message).toBe(GONE('plugin_n_x_api__recall'))
+      expect(t.mcp.calls).toEqual([])
+    } finally {
+      await t.close()
+    }
+  })
+
+  it("a server re-pinned to a name with '__' is refused at its tier check, not parked", async () => {
+    const t = await packageTurn()
+    try {
+      expect((await t.list()).map((x) => x.name)).toContain('plugin_notes_api__recall')
+      t.loaded.splice(0, 1, await notesPackage(t.mcp.url, 'notes', 'api__v2'))
+      expect(await t.list()).toEqual([])
+      expect(await t.tier('plugin_notes_api__recall')).toEqual({ tier: 'write', declared: 'outward', refused: GONE('plugin_notes_api__recall') })
+    } finally {
+      await t.close()
+    }
+  })
+
+  it('a remote plugin removed mid-turn is refused at its tier check; back again, its outward call still needs an approval', async () => {
+    const mcp = await startFakeMcp({})
+    const forwarder = await PluginForwarder.start()
+    const state = { on: true }
+    try {
+      const deps: TurnToolsDeps = {
+        sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+        servers: turnServers({
+          remotePlugins: async () =>
+            forwardForRun(
+              { plugins: state.on ? [{ plugin: { name: 'mem', url: mcp.url, toolTiers: {}, disabledTools: [] }, address: '127.0.0.1' }] : [], problems: [] },
+              forwarder,
+            ),
+        }),
+        approvals: { approved: async () => false },
+      }
+      const activities = turnToolActivities(deps)
+      const tier = () => env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'mem__recall', input: { query: 'q' } })
+      expect(await tier()).toMatchObject({ tier: 'outward' })
+      state.on = false
+      expect(await tier()).toEqual({ tier: 'write', declared: 'outward', refused: GONE('mem__recall') })
+      state.on = true
+      expect((await failure(env('turn:mem__recall', 'tool-toolu_x').run(turnToolActivity(deps), { query: 'q' }))).type).toBe('NotApproved')
+      expect(mcp.calls).toEqual([])
+    } finally {
+      await forwarder.close()
+      await mcp.close()
     }
   })
 

@@ -504,9 +504,14 @@ describe("a package's MCP servers: their switch and their names (#4757)", () => 
     const servers = await forwardPackageServers([dotted, plain], forwarder, toLoopback)
     expect(servers.plugins).toEqual([])
     expect(servers.problems).toEqual([
-      'plugin package a.b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a_b are, so none of them is offered',
-      'plugin package a_b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a.b are, so none of them is offered',
+      'plugin package a.b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a_b is, so none of them is offered',
+      'plugin package a_b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a.b is, so none of them is offered',
     ])
+    // With several others, they are named together.
+    const third = { ...(await fakePackage(http)), name: 'a+b' }
+    expect((await forwardPackageServers([dotted, plain, third], forwarder, toLoopback)).problems[0]).toBe(
+      'plugin package a.b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a_b, "s" of plugin package a+b are, so none of them is offered',
+    )
     // One package alone is offered.
     const alone = await forwardPackageServers([plain], forwarder, toLoopback)
     expect(alone.plugins.map((p) => p.name)).toEqual(['plugin_a_b_s'])
@@ -518,10 +523,10 @@ describe("a package's MCP servers: their switch and their names (#4757)", () => 
     const http = { ...(await fakePackage({ mcpServers: { s: { type: 'http', url: 'https://notes.example/mcp' } } })), name: 'a_b' }
     const problems: string[] = []
     expect(localPackageServers([local, http], problems, await serverAccess([local, http]))).toEqual([])
-    expect(problems).toEqual(['plugin package a.b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a_b are, so none of them is offered'])
+    expect(problems).toEqual(['plugin package a.b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a_b is, so none of them is offered'])
     const forwarded = await forwardPackageServers([local, http], forwarder, toLoopback)
     expect(forwarded.plugins).toEqual([])
-    expect(forwarded.problems).toEqual(['plugin package a_b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a.b are, so none of them is offered'])
+    expect(forwarded.problems).toEqual(['plugin package a_b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a.b is, so none of them is offered'])
   })
 
   it('a local server switched off is not started', async () => {
