@@ -79,6 +79,23 @@ test.describe('orders', () => {
     await expect(items.getByRole('cell', { name: '$12.50', exact: true })).toBeVisible()
   })
 
+  // #4954 — a custom item, typed in the row under the items: priced and accepted on Enter.
+  test('adds a custom item from the row under the items', async ({ page }) => {
+    await page.goto('/orders')
+    await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
+    const items = page.getByRole('table', { name: 'Line items' })
+    await page.getByRole('button', { name: 'Add custom item' }).click()
+    const title = items.getByRole('textbox', { name: 'Custom item title' })
+    await expect(title).toBeFocused()
+    await title.fill('Rush fee')
+    await items.getByRole('textbox', { name: 'Custom item unit price' }).fill('5')
+    await items.getByRole('textbox', { name: 'Custom item unit price' }).press('Enter')
+    await expect(items.getByRole('button', { name: 'Rush fee' })).toBeVisible()
+    await expect(items.getByRole('img', { name: 'Rush fee is a custom item' })).toBeVisible()
+    await expect(title).toHaveValue('')
+    await expect(page.getByTestId('order-totals')).toContainText('5.00')
+  })
+
   // #4251: the customer made inside the New order dialog, with the order's due date.
   test('a new order for a customer made in the dialog', async ({ page }) => {
     await page.goto('/orders')
@@ -109,7 +126,7 @@ test.describe('orders', () => {
     await expect(dialog.getByRole('combobox', { name: 'Order' })).toContainText(orderNumberMatcher('ORD-2026-3'))
     await dialog.getByRole('button', { name: 'Add to order' }).click()
     await expect(page).toHaveURL(/\/orders\/0e5a3c1e-1111-4222-8333-944455556661$/)
-    await expect(page.getByRole('table', { name: 'Line items' }).getByRole('row')).toHaveCount(3)
+    await expect(page.getByRole('table', { name: 'Line items' }).getByRole('row')).toHaveCount(4)
   })
 
   // #4250 — a quote from a slice: the print dialog in its quote mode, a price-book
@@ -169,7 +186,7 @@ test.describe('orders', () => {
     await page.getByRole('link', { name: 'ORD-2026-3', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'ORD-2026-3', exact: true })).toBeVisible()
     const rows = page.getByRole('table', { name: 'Line items' }).getByRole('row')
-    await expect(rows).toHaveCount(2)
+    await expect(rows).toHaveCount(3)
 
     await page.getByRole('button', { name: 'Add item' }).click()
     let dialog = page.getByRole('dialog', { name: 'Add item' })
@@ -180,7 +197,7 @@ test.describe('orders', () => {
     expect(await page.evaluate('document.documentElement.scrollWidth')).toBeLessThanOrEqual(390)
     await dialog.getByRole('button', { name: 'Add item' }).click()
     await expect(dialog).toBeHidden()
-    await expect(rows).toHaveCount(3)
+    await expect(rows).toHaveCount(4)
 
     await page.getByRole('button', { name: 'Add item' }).click()
     dialog = page.getByRole('dialog', { name: 'Add item' })
@@ -189,7 +206,7 @@ test.describe('orders', () => {
     await expect(dialog.getByRole('radio', { name: 'Current version, default settings' })).toBeChecked()
     await dialog.getByRole('button', { name: 'Add item' }).click()
     await expect(dialog).toBeHidden()
-    await expect(rows).toHaveCount(4)
+    await expect(rows).toHaveCount(5)
     await expect(page.getByRole('table', { name: 'Line items' }).getByRole('button', { name: 'Ball Maze' })).toBeVisible()
   })
 
