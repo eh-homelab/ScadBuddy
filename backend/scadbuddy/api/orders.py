@@ -975,13 +975,21 @@ async def accept_fulfilment(
         "returns the item to the status its latest attempt gives it (`approved` or "
         "`failed`); the order's status follows. 409 `item_not_fulfilled`, "
         "`order_item_shipped` (a shipment carries it: its `shipments` name them), "
-        "`order_on_hold`, `order_not_accepted` and `order_closed`/`order_cancelled`."
+        "`order_on_hold`, `order_not_accepted`, `order_closed`/`order_cancelled`, and "
+        "`unfulfil_disabled` while the stored setting `orders_allow_unfulfil` is off."
     ),
 )
-async def unfulfil_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderItem:
+async def unfulfil_item(
+    order_id: str, item_id: str, orders: OrdersDep, settings: SettingsStoreDep
+) -> OrderItem:
     _path(order_id, item_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.unfulfil_item(order_id, item_id, by))
+
+    def unfulfil() -> OrderItem:
+        allowed = settings.snapshot().runtime.orders_allow_unfulfil
+        return orders.lifecycle.unfulfil_item(order_id, item_id, by, allowed=allowed)
+
+    return await _run(unfulfil)
 
 
 # -- shipments (§6.3) --------------------------------------------------------------------------

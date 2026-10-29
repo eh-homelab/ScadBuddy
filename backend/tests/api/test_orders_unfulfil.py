@@ -180,3 +180,23 @@ def test_an_ended_order_is_refused(client: TestClient) -> None:
     fulfil(client, order_id, item_id, 1)
     client.post(f"/api/v1/orders/{order_id}/cancel")
     problem(unfulfil(client, order_id, item_id), "order_cancelled")
+
+
+def test_the_setting_turns_unfulfil_off_and_on(client: TestClient) -> None:
+    order_id, [item_id] = accepted_order(client)
+    fulfil(client, order_id, item_id, 1)
+    before = client.get(f"/api/v1/orders/{order_id}/events").json()
+
+    off = client.put("/api/v1/settings", json={"orders_allow_unfulfil": False})
+    assert off.status_code == 200, off.text
+    assert off.json()["orders_allow_unfulfil"] is False
+    # The change writes nothing to the order.
+    assert client.get(f"/api/v1/orders/{order_id}/events").json() == before
+
+    problem(unfulfil(client, order_id, item_id), "unfulfil_disabled")
+    assert detail(client, order_id)["items"][0]["status"] == "fulfilled"
+    assert client.get(f"/api/v1/orders/{order_id}/events").json() == before
+
+    on = client.put("/api/v1/settings", json={"orders_allow_unfulfil": True})
+    assert on.json()["orders_allow_unfulfil"] is True
+    assert unfulfil(client, order_id, item_id).json()["status"] == "approved"

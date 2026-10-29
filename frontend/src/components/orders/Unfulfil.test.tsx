@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
-import { resetMockState } from '../../mocks/handlers'
+import { mockSettings, resetMockState } from '../../mocks/handlers'
 import { ITEM_APPROVED, ORDER_ACCEPTED, state } from '../../mocks/features/orders/state'
 import { OrderPage } from '../../pages/OrderPage'
 import { renderPage } from '../../test/utils'
@@ -104,5 +104,34 @@ describe('Unfulfil', () => {
     state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Unfulfil' }))
     expect(await within(screen.getByRole('alertdialog')).findByRole('alert')).toHaveTextContent('on hold')
+  })
+
+  // #4953: `orders_allow_unfulfil` off disables the action, with a link to the setting.
+  it('is disabled with a link to Settings when the setting is off', async () => {
+    fulfil()
+    mockSettings().orders_allow_unfulfil = false
+    render(`/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Unfulfil…' })).toBeDisabled())
+    const reason = screen.getByTestId('unfulfil-blocked')
+    expect(reason).toHaveTextContent('Turned off in Settings → Orders.')
+    expect(within(reason).getByRole('link', { name: 'Open Settings' })).toHaveAttribute('href', '/settings/printing#orders')
+  })
+
+  it('disables the row menu entry when the setting is off', async () => {
+    fulfil()
+    mockSettings().orders_allow_unfulfil = false
+    const { user } = render()
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(within(row()).getByRole('button', { name: 'Row actions' }))
+    const entry = await screen.findByRole('menuitem', { name: 'Unfulfil…' })
+    await waitFor(() => expect(entry).toHaveAttribute('data-disabled'))
+    expect(screen.getByRole('menuitem', { name: 'Open Settings → Orders' })).toHaveAttribute('href', '/settings/printing#orders')
+  })
+
+  it('the mock refuses with unfulfil_disabled when the setting is off', async () => {
+    fulfil()
+    mockSettings().orders_allow_unfulfil = false
+    await expect(api.unfulfilOrderItem(ORDER_ACCEPTED, ITEM_APPROVED)).rejects.toMatchObject({ status: 409 })
+    expect(state.items.find((i) => i.id === ITEM_APPROVED)!.status).toBe('fulfilled')
   })
 })

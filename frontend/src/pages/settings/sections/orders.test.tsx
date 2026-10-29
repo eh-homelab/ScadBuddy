@@ -72,3 +72,16 @@ describe('Orders, the price book (#4250)', () => {
     expect((await api.priceBook()).policy.markup_percent).toBe('15')
   })
 })
+
+describe('Orders, Unfulfil (#4953)', () => {
+  it('turns Unfulfil off and saves it', async () => {
+    const { user } = renderSettingsSection(<Orders />, { route: '/settings/printing' })
+    await seeded()
+    const toggle = within(region('Orders')).getByRole('switch', { name: 'Allow Unfulfil on a line item' })
+    expect(toggle).toBeChecked()
+    await user.click(toggle)
+    await user.click(within(region('Orders')).getByRole('button', { name: 'Save Orders' }))
+    await waitFor(() => expect(mockSettings().orders_allow_unfulfil).toBe(false))
+    expect(mockSettings().sources?.['orders_allow_unfulfil']).toBe('stored')
+  })
+})

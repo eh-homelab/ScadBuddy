@@ -645,6 +645,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   accepted attempt's `accepted_at` (the row stays) and sets the item to what its latest
   attempt gives; refused for an item on a shipment (`order_item_shipped`) and on hold.
   The browser's row menu and drawer (`components/orders/Unfulfil.tsx`) confirm first.
+  The stored setting `orders_allow_unfulfil` (#4953, live, default on) turns it off:
+  the route passes it as `allowed` and the lifecycle answers `unfulfil_disabled`.
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
   times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.

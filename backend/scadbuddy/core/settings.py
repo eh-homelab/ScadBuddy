@@ -171,6 +171,10 @@ class Settings(BaseSettings):
     # SCADBUDDY_ROUGH_ESTIMATE_FACTOR: the rough estimate's allowance for walls, infill
     # and purge over a part's enclosed volume (orders spec §5.3), more than 0.
     rough_estimate_factor: str = "1.15"
+    # #4953: whether a fulfilled line item may be unfulfilled (#4952). Off, the shop
+    # treats a fulfilment as final: `POST …/unfulfil` answers 409 `unfulfil_disabled`,
+    # for a person and the agent alike. A change writes nothing to existing orders.
+    orders_allow_unfulfil: bool = True
     # SCADBUDDY_SLICER_BACKEND: who slices a print: Bambuddy, or the `scadbuddy-slicer`
     # worker on `temporal_task_queue_slicer` (`native`, which needs a content store).
     slicer_backend: Slicer = "bambuddy"
@@ -754,6 +758,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "pricing_markup_percent": "live",
         "pricing_rounding": "live",
         "rough_estimate_factor": "live",
+        # Read from the store by each unfulfil.
+        "orders_allow_unfulfil": "live",
         # Read from the store by every slice's start.
         "slicer_backend": "live",
         "bambuddy_render_api_key": "restart",
