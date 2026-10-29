@@ -230,7 +230,8 @@ export class ToolListings {
     let lease: LockLease | undefined
     try {
       lease = await this.#locks.take()
-    } catch {
+    } catch (err) {
+      console.error(`plugin test lock: no lock connection: ${message(err)}`)
       return 'unreachable'
     }
     if (!lease) return 'full'
@@ -241,7 +242,8 @@ export class ToolListings {
       let row: { held: boolean } | undefined
       try {
         ;[row] = await lease.sql<{ held: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS held`
-      } catch {
+      } catch (err) {
+        console.error(`plugin test lock: the lock query failed, retiring its connection: ${message(err)}`)
         return 'unreachable'
       }
       if (!row?.held) {
@@ -255,7 +257,7 @@ export class ToolListings {
         healthy = await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`.then(
           () => true,
           (err: unknown) => {
-            console.error(`plugin test lock: unlock failed, retiring its connection: ${err instanceof Error ? err.message : String(err)}`)
+            console.error(`plugin test lock: unlock failed, retiring its connection: ${message(err)}`)
             return false
           },
         )
@@ -282,6 +284,8 @@ export class ToolListings {
  * False: nothing stored. `truncated`: not every tool the source has (a `nextCursor`, or entries dropped).
  */
 export type PluginListingPut = (url: string, tools: readonly StoredTool[], options: { truncated?: boolean }) => Promise<boolean>
+
+const message = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 
 async function upsert(sql: TransactionSql, source: string, tools: readonly StoredTool[], truncated: boolean): Promise<void> {
   await sql`

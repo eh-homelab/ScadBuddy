@@ -90,15 +90,21 @@ describe('toStoredTools', () => {
 
 describe('ToolListings.exclusive when Postgres is down (#4994)', () => {
   const sql = {} as never
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
 
   it('answers unreachable, without running the test, when the lock client cannot connect', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     const fn = vi.fn(async () => 'tested')
     const down: LockClient = { take: () => Promise.reject(new Error('connect ECONNREFUSED')), end: async () => {} }
     expect(await new ToolListings(sql, down).exclusive('memory', fn)).toBe('unreachable')
     expect(fn).not.toHaveBeenCalled()
+    expect(logged.mock.calls).toEqual([['plugin test lock: no lock connection: connect ECONNREFUSED']])
   })
 
   it('answers unreachable, and retires the connection, when the lock query fails', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     const fn = vi.fn(async () => 'tested')
     const done = vi.fn()
     const broken: LockClient = {
@@ -108,6 +114,7 @@ describe('ToolListings.exclusive when Postgres is down (#4994)', () => {
     expect(await new ToolListings(sql, broken).exclusive('memory', fn)).toBe('unreachable')
     expect(fn).not.toHaveBeenCalled()
     expect(done).toHaveBeenCalledWith(false)
+    expect(logged.mock.calls).toEqual([['plugin test lock: the lock query failed, retiring its connection: connection ended']])
   })
 })
 
