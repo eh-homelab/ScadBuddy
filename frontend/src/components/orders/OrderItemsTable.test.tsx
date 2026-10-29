@@ -296,3 +296,61 @@ describe('OrderItemsTable · unit price', () => {
     expect(within(row(ITEM_DRAFT)).queryByText('not accepted')).not.toBeInTheDocument()
   })
 })
+
+// #4952 review: a fulfilled row's menu offers Unfulfil, disabled with the backend's reason.
+describe('OrderItemsTable · row menu', () => {
+  beforeEach(() => {
+    resetMockState()
+    state.fulfilments.push({
+      id: 'f-made',
+      order_item_id: ITEM_APPROVED,
+      attempt: 1,
+      quantity: 2,
+      outcome: 'succeeded',
+      failure_reason: null,
+      started_at: null,
+      finished_at: null,
+      notes: '',
+      accepted_at: '2026-10-20T10:00:00Z',
+      created_by: { kind: 'browser', principal: null, session: null },
+      created_at: '2026-10-20T09:00:00Z',
+    })
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'fulfilled'
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'ready'
+  })
+
+  async function openMenu() {
+    const { user } = render(ORDER_ACCEPTED)
+    await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    await user.click(within(row(ITEM_APPROVED)).getByRole('button', { name: 'Row actions' }))
+    return screen.findByRole('menuitem', { name: 'Unfulfil…' })
+  }
+
+  it('disables Unfulfil on an order on hold, and says why', async () => {
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.on_hold = true
+    expect(await openMenu()).toHaveAttribute('data-disabled')
+    expect(screen.getByText('The order is on hold. Release it first.')).toBeInTheDocument()
+  })
+
+  it('disables Unfulfil for an item a shipment carries, and says why', async () => {
+    state.shipments.push({
+      id: 's-made',
+      order_id: ORDER_ACCEPTED,
+      carrier: 'Post',
+      service: null,
+      tracking: null,
+      shipped_at: null,
+      address: null,
+      cost_minor: null,
+      notes: '',
+      created_at: '2026-10-21T09:00:00Z',
+      items: [{ order_item_id: ITEM_APPROVED, quantity: 2 }],
+    })
+    expect(await openMenu()).toHaveAttribute('data-disabled')
+    expect(screen.getByText('A shipment carries this item. Take it off the shipment first.')).toBeInTheDocument()
+  })
+
+  it('offers Unfulfil, not disabled, when nothing is in the way', async () => {
+    expect(await openMenu()).not.toHaveAttribute('data-disabled')
+  })
+})
