@@ -69,6 +69,14 @@ describe('toStoredTools', () => {
     expect(last.omitted).toEqual(['annotations', 'description', 'title'])
   })
 
+  it('keeps the first of two keys that collide once storable, and names the loss (#2171 re-review N2)', () => {
+    const [tool] = toStoredTools([{ name: 'k', 'a\u0000': 1, 'a\uFFFD': 2, inputSchema: { type: 'object', properties: { 'p\u0000': {}, 'p\uD800': { type: 'string' } } } }])
+    expect(tool!.raw['a\uFFFD']).toBe(1)
+    expect(tool!.raw.inputSchema).toEqual({ type: 'object', properties: { 'p\uFFFD': {} } })
+    expect(tool!.omitted).toEqual(['keys'])
+    expect(toStoredTools([{ name: 'clean', x: { y: 1 } }])[0]!.omitted).toEqual([])
+  })
+
   it('drops an entry without a name', () => {
     expect(toStoredTools([{ title: 'no name' }, { name: 7 }, { name: 'ok' }]).map((t) => t.raw.name)).toEqual(['ok'])
   })
@@ -99,6 +107,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`ToolListings${TEST_DATABASE_URL ? '' : ` (s
     const got = await listings.get(SRC)
     expect(got!.tools.map((t) => [t.name, t.description])).toEqual([['recall', 'Search']])
     expect(Number.isNaN(Date.parse(got!.listed_at))).toBe(false)
+    expect(got!.truncated).toBe(false)
+  })
+
+  it('stores whether the listing is incomplete (#2171 re-review N1)', async () => {
+    await listings.put(SRC, toStoredTools([{ name: 'a' }]), { truncated: true })
+    expect((await listings.get(SRC))!.truncated).toBe(true)
+    expect((await listings.getMany([SRC])).get(SRC)!.truncated).toBe(true)
+    await listings.put(SRC, toStoredTools([{ name: 'a' }]))
+    expect((await listings.get(SRC))!.truncated).toBe(false)
   })
 
   it('put replaces the last listing', async () => {

@@ -196,7 +196,7 @@ describe('the connection test stores its listing (#2171)', () => {
   })
   function setup(testPlugin: AppDeps['testPlugin'], overrides: Partial<AppDeps> = {}) {
     const repo = { ...untouchable(), reveal: vi.fn(() => Promise.resolve(plugin)) }
-    const put = vi.fn((_source: string, _tools: readonly StoredTool[]) => Promise.resolve())
+    const put = vi.fn((_source: string, _tools: readonly StoredTool[], _options?: { truncated: boolean }) => Promise.resolve())
     const listings = { put } as unknown as ToolListings
     return { put, repo, listings, a: app(repo, { testPlugin, listings, ...overrides }) }
   }
@@ -206,8 +206,14 @@ describe('the connection test stores its listing (#2171)', () => {
     const { put, a } = setup(() => Promise.resolve(result(true)))
     const res = await test(a)
     expect(res.status).toBe(200)
-    expect(put).toHaveBeenCalledWith('remote:mem', stored)
+    expect(put).toHaveBeenCalledWith('remote:mem', stored, { truncated: false })
     expect(await res.json()).not.toHaveProperty('stored')
+  })
+
+  it('a truncated test stores its listing as incomplete (#2171 re-review N1)', async () => {
+    const { put, a } = setup(() => Promise.resolve({ ...result(true), truncated: true }))
+    expect((await test(a)).status).toBe(200)
+    expect(put).toHaveBeenCalledWith('remote:mem', stored, { truncated: true })
   })
 
   it('a failed connection test stores nothing', async () => {

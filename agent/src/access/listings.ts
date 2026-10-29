@@ -20,7 +20,8 @@ export const LISTING_CAPS = {
   total: 2_097_152,
 } as const
 
-export const OMITTED = ['description', 'inputSchema', 'outputSchema', 'other', 'title', 'annotations'] as const
+/** `keys`: two keys of the entry became one once made storable; the first was kept. */
+export const OMITTED = ['description', 'inputSchema', 'outputSchema', 'other', 'title', 'annotations', 'keys'] as const
 export type Omitted = (typeof OMITTED)[number]
 
 export type StoredTool = { raw: Record<string, unknown>; omitted: Omitted[] }
@@ -51,12 +52,18 @@ function storable(text: string): string {
   return text.toWellFormed().replaceAll('\u0000', '\uFFFD')
 }
 
-/** `value` with every string and key `storable`. */
-function clean(value: unknown): unknown {
+/** `value` with every string and key `storable`; of keys that become equal, the first is kept and `lost.keys` set. */
+function clean(value: unknown, lost: { keys: boolean }): unknown {
   if (typeof value === 'string') return storable(value)
-  if (Array.isArray(value)) return value.map(clean)
-  if (isRecord(value)) return Object.fromEntries(Object.entries(value).map(([k, v]) => [storable(k), clean(v)]))
-  return value
+  if (Array.isArray(value)) return value.map((v) => clean(v, lost))
+  if (!isRecord(value)) return value
+  const out = new Map<string, unknown>()
+  for (const [k, v] of Object.entries(value)) {
+    const key = storable(k)
+    if (out.has(key)) lost.keys = true
+    else out.set(key, clean(v, lost))
+  }
+  return Object.fromEntries(out)
 }
 
 /** The first `max` code units, not ending in half a surrogate pair. */
@@ -87,7 +94,8 @@ function capText(tool: StoredTool, key: 'description' | 'title', max: number): v
 }
 
 function capEntry(entry: Record<string, unknown>): StoredTool {
-  const tool: StoredTool = { raw: clean(entry) as Record<string, unknown>, omitted: [] }
+  const lost = { keys: false }
+  const tool: StoredTool = { raw: clean(entry, lost) as Record<string, unknown>, omitted: lost.keys ? ['keys'] : [] }
   capText(tool, 'description', LISTING_CAPS.description)
   capText(tool, 'title', LISTING_CAPS.title)
   for (const key of ['inputSchema', 'outputSchema'] as const) {
@@ -171,12 +179,14 @@ const StoredTools = z.array(
   }),
 )
 
-type Listing = { tools: ListedTool[]; listed_at: string }
+/** `truncated`: not every tool the source has (ToolListings.put's option). */
+type Listing = { tools: ListedTool[]; listed_at: string; truncated: boolean }
+type Row = { tools: unknown; listed_at: Date; truncated: boolean }
 
-function parseRow(row: { tools: unknown; listed_at: Date }): Listing | undefined {
+function parseRow(row: Row): Listing | undefined {
   const parsed = StoredTools.safeParse(row.tools)
   if (!parsed.success) return undefined
-  return { tools: parsed.data.map(listedTool), listed_at: row.listed_at.toISOString() }
+  return { tools: parsed.data.map(listedTool), listed_at: row.listed_at.toISOString(), truncated: row.truncated }
 }
 
 export class ToolListings {
@@ -187,16 +197,16 @@ export class ToolListings {
   }
 
   async get(source: string): Promise<Listing | undefined> {
-    const [row] = await this.#sql<{ tools: unknown; listed_at: Date }[]>`
-      SELECT tools, listed_at FROM ai_tool_listings WHERE source = ${source}`
+    const [row] = await this.#sql<Row[]>`
+      SELECT tools, listed_at, truncated FROM ai_tool_listings WHERE source = ${source}`
     return row ? parseRow(row) : undefined
   }
 
   async getMany(sources: readonly string[]): Promise<Map<string, Listing>> {
     const out = new Map<string, Listing>()
     if (sources.length === 0) return out
-    const rows = await this.#sql<{ source: string; tools: unknown; listed_at: Date }[]>`
-      SELECT source, tools, listed_at FROM ai_tool_listings WHERE source = ANY(${[...sources]}::text[])`
+    const rows = await this.#sql<(Row & { source: string })[]>`
+      SELECT source, tools, listed_at, truncated FROM ai_tool_listings WHERE source = ANY(${[...sources]}::text[])`
     for (const row of rows) {
       const listing = parseRow(row)
       if (listing) out.set(row.source, listing)
@@ -204,9 +214,11 @@ export class ToolListings {
     return out
   }
 
-  async put(source: string, tools: readonly StoredTool[]): Promise<void> {
+  /** `truncated`: the listing is not every tool the source has (a `nextCursor`, or entries dropped). */
+  async put(source: string, tools: readonly StoredTool[], options: { truncated?: boolean } = {}): Promise<void> {
     await this.#sql`
-      INSERT INTO ai_tool_listings (source, tools) VALUES (${source}, ${this.#sql.json(tools as never)})
-      ON CONFLICT (source) DO UPDATE SET tools = EXCLUDED.tools, listed_at = now()`
+      INSERT INTO ai_tool_listings (source, tools, truncated)
+      VALUES (${source}, ${this.#sql.json(tools as never)}, ${options.truncated ?? false})
+      ON CONFLICT (source) DO UPDATE SET tools = EXCLUDED.tools, truncated = EXCLUDED.truncated, listed_at = now()`
   }
 }

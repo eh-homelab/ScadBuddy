@@ -319,7 +319,7 @@ export async function testAndList(
     }
     if (address === undefined) return { status: 400, body: { detail: 'url host resolves to no address' } }
     const test = await deps.testPlugin(plugin, address)
-    if (test.ok) await deps.listings?.put(remoteSource(name), test.stored)
+    if (test.ok) await deps.listings?.put(remoteSource(name), test.stored, { truncated: test.truncated })
     return { status: 200, body: test }
   } finally {
     testing.delete(name)

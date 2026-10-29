@@ -18,7 +18,7 @@ afterEach(async () => {
 })
 
 /** An upstream that issues session `s-1` to a POST and records every request; `hang` never answers a DELETE. */
-async function upstream(options: { hang?: boolean; body?: string } = {}) {
+async function upstream(options: { hang?: boolean; body?: string; type?: string } = {}) {
   const seen: Seen[] = []
   const server = createServer((req, res) => {
     seen.push({ method: req.method ?? '', headers: req.headers })
@@ -28,7 +28,7 @@ async function upstream(options: { hang?: boolean; body?: string } = {}) {
     }
     req.resume()
     req.on('end', () => {
-      res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 's-1' })
+      res.writeHead(200, { 'content-type': options.type ?? 'application/json', 'mcp-session-id': 's-1' })
       res.end(options.body ?? JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }))
     })
   })
@@ -159,5 +159,17 @@ describe('the response cap (#2171 review M6)', () => {
     expect(((await res.json()) as { error: string }).error).toMatch(/too large/)
     const open = forwarder.register(plugin, '127.0.0.1')
     expect(await (await post(open.url)).text()).toBe(big)
+  })
+  it('a capped event stream ends with an error for each request id, never the event past the cap (#2171 re-review N3)', async () => {
+    const big = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'x', description: 'd'.repeat(5000) }] } })
+    const { plugin } = await upstream({ body: `data: ${big}\n\n`, type: 'text/event-stream' })
+    const forwarder = await PluginForwarder.start()
+    forwarders.push(forwarder)
+    const res = await post(forwarder.register(plugin, '127.0.0.1', { maxResponseBytes: 1000 }).url)
+    expect(res.status).toBe(200)
+    const text = await res.text()
+    expect(text).not.toContain('d'.repeat(100))
+    const events = text.split('\n\n').filter(Boolean).map((e) => JSON.parse(e.replace(/^data: /, '')) as { id: number; error: { message: string } })
+    expect(events).toEqual([{ jsonrpc: '2.0', id: 1, error: { code: -32603, message: expect.stringMatching(/too large/) as unknown } }])
   })
 })
