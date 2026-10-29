@@ -721,6 +721,35 @@ async def test_a_poll_that_trusts_a_peer_reads_the_marks_once(
         marks={"me@pod-a": 0},  # its own mark, as written when the drain began
         updates=[],
     )
+    reads = _counting_reads(client)
+    _patch_drain(monkeypatch, "b1")
+    with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+        await _serve_fake_and_stop(client, "me@pod-a")
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("stopping without draining") for m in messages), messages
+    # One poll trusted the peer; the other version read is the mark's prune. The count
+    # holds because `_patch_drain` sets the grace to 0, and because a poll before the
+    # mark is written (`marked` unset) returns at once and reads nothing: with a grace,
+    # or a mark written later, more polls would run before the trusted one.
+    assert reads == {"version": 2, "queue": 1}
+
+
+async def test_a_poll_with_no_peer_reads_no_version_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4998: with no other poller of the build, the usual rollout, each poll after the
+    grace read the version's metadata for nothing. Only the mark's prune reads it."""
+    client = _described(_poller("me@pod-a", "b1", age=0), marks={"me@pod-a": 0}, updates=[])
+    reads = _counting_reads(client)
+    _patch_drain(monkeypatch, "b1")
+    await _serve_fake_and_stop(client, "me@pod-a", timeout=0.5)
+    assert reads["queue"] >= 2, reads  # it polled past the grace, more than once
+    assert reads["version"] == 1, reads
+
+
+def _counting_reads(client: Client) -> dict[str, int]:
+    """Counts of ``client``'s version (`DescribeWorkerDeploymentVersion`) and queue
+    (`DescribeTaskQueue`) reads, as they are made."""
     service = client.workflow_service
     reads = {"version": 0, "queue": 0}
 
@@ -737,13 +766,7 @@ async def test_a_poll_that_trusts_a_peer_reads_the_marks_once(
     service.describe_task_queue = counted(  # type: ignore[method-assign]
         "queue", service.describe_task_queue
     )
-    _patch_drain(monkeypatch, "b1")
-    with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
-        await _serve_fake_and_stop(client, "me@pod-a")
-    messages = [r.getMessage() for r in caplog.records]
-    assert any(m.startswith("stopping without draining") for m in messages), messages
-    # One poll trusted the peer; the other version read is the mark's prune.
-    assert reads == {"version": 2, "queue": 1}
+    return reads
 
 
 async def test_an_unparsable_mark_counts_as_draining_and_is_logged_once(
@@ -1061,7 +1084,11 @@ async def test_a_clear_that_lands_after_the_mark_is_written_over_before_a_peer_i
     monkeypatch.setattr(worker_module, "clear_draining", clear)
     monkeypatch.setattr(worker_module, "mark_draining", mark)
     monkeypatch.setattr(worker_module, "draining_marks", read)
-    monkeypatch.setattr(worker_module, "polled_elsewhere", _always_current)
+
+    async def a_peer(*_: object, **__: object) -> set[str]:
+        return {"pod-b"}
+
+    monkeypatch.setattr(worker_module, "pollers_elsewhere", a_peer)
     client = cast(Client, SimpleNamespace(namespace="default", identity="client"))
     with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
         await _serve_fake_and_stop(client, identity, build_id=build_id)
