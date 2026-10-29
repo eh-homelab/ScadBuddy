@@ -109,6 +109,15 @@ function load(): void {
   for (const [name, access] of Object.entries(stored.remote)) setRemotePluginAccess(name, access)
 }
 
+/**
+ * A built-in row as the #2171 migration copied it (#4994): stored, so it is `overridden` and
+ * Reset removes it, though at the tool's own tier it changes nothing. For tests.
+ */
+export function seedBuiltInRow(source: string, item: string, access: Access): void {
+  state.rows.set(key(source, item), access)
+  save()
+}
+
 export function reset(): void {
   state.rows.clear()
   state.enabled.clear()

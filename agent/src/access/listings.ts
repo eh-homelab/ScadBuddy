@@ -1,5 +1,5 @@
 import type { Sql, TransactionSql } from 'postgres'
-import { TEST_LOCK_CONNECTIONS } from '../db.js'
+import type { LockClient } from '../db.js'
 import { z } from 'zod'
 import { remoteSource } from './model.js'
 
@@ -193,11 +193,10 @@ function parseRow(row: Row): Listing | undefined {
 
 export class ToolListings {
   readonly #sql: Sql
-  readonly #locks: () => Sql
-  #held = 0
+  readonly #locks: LockClient
 
-  /** `locks`: the lock client (db.ts `Database.lockClient`), asked for on the first test. */
-  constructor(sql: Sql, locks: () => Sql) {
+  /** `locks`: the lock client (db.ts `Database.locks`). */
+  constructor(sql: Sql, locks: LockClient) {
     this.#sql = sql
     this.#locks = locks
   }
@@ -224,28 +223,34 @@ export class ToolListings {
    * Runs `fn` holding remote plugin `name`'s test lock, a session advisory lock, so one test
    * runs at a time across replicas (#4994). `busy`: another session holds it; `full`: this
    * replica already runs TEST_LOCK_CONNECTIONS tests. The lock is held on the lock client
-   * (db.ts `lockClient`), never on the shared pool, which a test therefore never waits on.
+   * (db.ts `createLockClient`), never on the shared pool, which a test therefore never waits on.
    */
   async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | 'busy' | 'full'> {
-    // Every reserve below is counted here, so none waits for another test's connection.
-    if (this.#held >= TEST_LOCK_CONNECTIONS) return 'full'
-    this.#held++
+    const lease = await this.#locks.take()
+    if (!lease) return 'full'
+    const key = `scadbuddy:ai_tool_listings:test:${name}`
+    // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
+    let healthy = false
     try {
-      const conn = await this.#locks().reserve()
+      const [row] = await lease.sql<{ held: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS held`
+      if (!row?.held) {
+        healthy = true
+        return 'busy'
+      }
       try {
-        const key = `scadbuddy:ai_tool_listings:test:${name}`
-        const [row] = await conn<{ held: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS held`
-        if (!row?.held) return 'busy'
-        try {
-          return { value: await fn((url, tools, options) => this.#putIfCurrent(name, url, tools, options.truncated ?? false)) }
-        } finally {
-          await conn`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`
-        }
+        return { value: await fn((url, tools, options) => this.#putIfCurrent(name, url, tools, options.truncated ?? false)) }
       } finally {
-        conn.release()
+        // A failed unlock retires the connection (lease.done) and leaves the test's own answer.
+        healthy = await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`.then(
+          () => true,
+          (err: unknown) => {
+            console.error(`plugin test lock: unlock failed, retiring its connection: ${err instanceof Error ? err.message : String(err)}`)
+            return false
+          },
+        )
       }
     } finally {
-      this.#held--
+      lease.done(healthy)
     }
   }
 

@@ -43,7 +43,7 @@ describe.skipIf(skip !== '')(`remote access set through the capabilities routes$
 
   async function rig() {
     const store = new PluginStore(db.sql)
-    const listings = new ToolListings(db.sql, db.lockClient)
+    const listings = new ToolListings(db.sql, db.locks)
     const { url } = await store.create({ name: 'hs', url: mcp.url }, kek)
     await listings.exclusive('hs', (put) => put(url, toStoredTools([{ name: 'a' }, { name: 'b' }]), {}))
     const app = createApp({

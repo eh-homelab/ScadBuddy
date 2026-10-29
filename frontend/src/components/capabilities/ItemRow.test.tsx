@@ -205,6 +205,16 @@ describe('ItemRow', () => {
     expect(sent).toEqual([{ method: 'DELETE' }])
   })
 
+  it('a row at the default tier (a migrated one, #4994) shows the default, with Reset', async () => {
+    const start = item({ access: 'outward', overridden: true })
+    const sent = serve(start)
+    const { user } = renderPage(<Harness start={start} />)
+    expect(select('send_to_printer')).toHaveTextContent('outward (asks first) (default)')
+    await user.click(screen.getByRole('button', { name: 'Reset send_to_printer' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Reset send_to_printer' })).toBeNull())
+    expect(sent).toEqual([{ method: 'DELETE' }])
+  })
+
   it('a failed Reset keeps focus in the row', async () => {
     server.use(http.delete(`${BASE}/:source/items/:item`, () => HttpResponse.json({ detail: 'reset refused' }, { status: 409 })))
     const { user } = renderPage(<Harness start={item({ access: 'off', overridden: true })} />)
