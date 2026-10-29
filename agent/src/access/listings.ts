@@ -1,5 +1,5 @@
 import type { Sql, TransactionSql } from 'postgres'
-import type { LockClient } from '../db.js'
+import type { LockClient, LockLease } from '../db.js'
 import { z } from 'zod'
 import { remoteSource } from './model.js'
 
@@ -222,17 +222,28 @@ export class ToolListings {
   /**
    * Runs `fn` holding remote plugin `name`'s test lock, a session advisory lock, so one test
    * runs at a time across replicas (#4994). `busy`: another session holds it; `full`: this
-   * replica already runs TEST_LOCK_CONNECTIONS tests. The lock is held on the lock client
+   * replica already runs TEST_LOCK_CONNECTIONS tests; `unreachable`: the lock client could not
+   * reach Postgres, and `fn` did not run. An error of `fn`'s own is thrown as it is. The lock is held on the lock client
    * (db.ts `createLockClient`), never on the shared pool, which a test therefore never waits on.
    */
-  async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | 'busy' | 'full'> {
-    const lease = await this.#locks.take()
+  async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
+    let lease: LockLease | undefined
+    try {
+      lease = await this.#locks.take()
+    } catch {
+      return 'unreachable'
+    }
     if (!lease) return 'full'
     const key = `scadbuddy:ai_tool_listings:test:${name}`
     // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
     let healthy = false
     try {
-      const [row] = await lease.sql<{ held: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS held`
+      let row: { held: boolean } | undefined
+      try {
+        ;[row] = await lease.sql<{ held: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS held`
+      } catch {
+        return 'unreachable'
+      }
       if (!row?.held) {
         healthy = true
         return 'busy'

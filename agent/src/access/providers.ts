@@ -285,7 +285,7 @@ const REFRESH_STATUSES: readonly number[] = [400, 404, 409, 429, 503]
 export function remoteProvider(deps: {
   plugins: PluginRepo
   listings: Pick<ToolListings, 'get' | 'getMany'>
-  refresh: (name: string) => Promise<{ status: number; body: PluginTest | { detail: string } }>
+  refresh: (name: string) => Promise<{ status: number; body: PluginTest | { detail: string }; retryAfter?: number }>
 }): CapabilityProvider {
   const nameOf = (source: string): string => source.slice(REMOTE_PREFIX.length)
 
@@ -327,10 +327,10 @@ export function remoteProvider(deps: {
       }
     },
     async refresh(source) {
-      const { status, body } = await deps.refresh(nameOf(source))
+      const { status, body, retryAfter } = await deps.refresh(nameOf(source))
       if (status !== 200 || !('ok' in body)) {
         const code = REFRESH_STATUSES.includes(status) ? (status as 400 | 404 | 409 | 429 | 503) : 502
-        throw new CapabilityError(body.detail, code)
+        throw new CapabilityError(body.detail, code, retryAfter)
       }
       const view = await get(source)
       if (view === undefined) throw new CapabilityError(`no source "${source}"`, 404)

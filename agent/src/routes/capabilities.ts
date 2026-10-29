@@ -92,7 +92,10 @@ export const route: RouteModule = {
       try {
         return c.json(await run(caps, parsed))
       } catch (err) {
-        if (err instanceof CapabilityError) return c.json({ detail: err.message }, err.status)
+        if (err instanceof CapabilityError) {
+          if (err.retryAfter !== undefined) c.header('Retry-After', String(err.retryAfter))
+          return c.json({ detail: err.message }, err.status)
+        }
         // A backstop: the providers already turn these into CapabilityError (access/providers.ts).
         if (err instanceof AccessError) return c.json({ detail: err.message }, 400)
         if (err instanceof PluginError) return c.json({ detail: err.message }, err.status === 422 ? 400 : err.status)

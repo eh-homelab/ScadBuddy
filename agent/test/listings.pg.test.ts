@@ -88,6 +88,29 @@ describe('toStoredTools', () => {
   })
 })
 
+describe('ToolListings.exclusive when Postgres is down (#4994)', () => {
+  const sql = {} as never
+
+  it('answers unreachable, without running the test, when the lock client cannot connect', async () => {
+    const fn = vi.fn(async () => 'tested')
+    const down: LockClient = { take: () => Promise.reject(new Error('connect ECONNREFUSED')), end: async () => {} }
+    expect(await new ToolListings(sql, down).exclusive('memory', fn)).toBe('unreachable')
+    expect(fn).not.toHaveBeenCalled()
+  })
+
+  it('answers unreachable, and retires the connection, when the lock query fails', async () => {
+    const fn = vi.fn(async () => 'tested')
+    const done = vi.fn()
+    const broken: LockClient = {
+      take: async () => ({ sql: (() => Promise.reject(new Error('connection ended'))) as never, done }),
+      end: async () => {},
+    }
+    expect(await new ToolListings(sql, broken).exclusive('memory', fn)).toBe('unreachable')
+    expect(fn).not.toHaveBeenCalled()
+    expect(done).toHaveBeenCalledWith(false)
+  })
+})
+
 describe.skipIf(!TEST_DATABASE_URL)(`ToolListings${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   let db: Database
   let drop: () => Promise<void>

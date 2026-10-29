@@ -70,9 +70,12 @@ export type ItemDetails = {
 
 export class CapabilityError extends Error {
   readonly status: 400 | 404 | 409 | 429 | 502 | 503
-  constructor(message: string, status: 400 | 404 | 409 | 429 | 502 | 503) {
+  /** Seconds, sent as `Retry-After`. */
+  readonly retryAfter: number | undefined
+  constructor(message: string, status: 400 | 404 | 409 | 429 | 502 | 503, retryAfter?: number) {
     super(message)
     this.status = status
+    this.retryAfter = retryAfter
   }
 }
 

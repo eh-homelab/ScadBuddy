@@ -300,6 +300,8 @@ describe('/api/v1/ai/capabilities', () => {
     await vi.waitFor(() => expect(testPlugin).toHaveBeenCalledTimes(1))
     const busy = await refresh(app, 'remote:hs')
     expect(busy.status).toBe(429)
+    // A running test ends within its 10 s timeout (#4994).
+    expect(busy.headers.get('Retry-After')).toBe('10')
     expect(await busy.json()).toEqual({ detail: expect.stringMatching(/already running/) as unknown })
     release()
     expect((await running).status).toBe(200)
