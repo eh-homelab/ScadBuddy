@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { isUserOnly } from '../../../agent/dom'
 import { aiCapabilities } from '../../../api/capabilities'
 import { server } from '../../../mocks/server'
-import { choose } from '../../../test/select'
+import { accessName, choose } from '../../../test/select'
 import { enter, renderSettingsSection } from '../testing'
 import { Component as BuiltIn } from './builtin'
 
@@ -21,7 +21,7 @@ const WEBMCP = 'This browser’s agent (WebMCP)'
 const WEBMCP_SWITCH = 'Let this browser’s built-in agent use ScadBuddy tools (WebMCP)'
 
 const card = (title: string) => screen.findByRole('region', { name: `Source ${title}` })
-const select = (name: string) => screen.getByRole('combobox', { name: `Access of ${name}` })
+const select = (name: string) => screen.getByRole('combobox', { name: accessName(name) })
 
 async function itemAccess(source: string, item: string) {
   const sources = await aiCapabilities.list()
@@ -55,7 +55,7 @@ describe('Built-in (#2171)', () => {
     await user.click(screen.getByRole('button', { name: 'Your browser tab' }))
     const browser = await card('Your browser tab')
     expect(await within(browser).findByTestId('browser-origins')).toBeInTheDocument()
-    expect(within(browser).getByRole('combobox', { name: 'Access of browser_click' })).toBeInTheDocument()
+    expect(within(browser).getByRole('combobox', { name: accessName('browser_click') })).toBeInTheDocument()
   })
 
   it("keeps the browser tab's unsaved origin lists through a fold", async () => {
@@ -127,11 +127,11 @@ describe('Built-in (#2171)', () => {
 
   it('turns HTTP requests off with the source switch', async () => {
     const { user } = renderSettingsSection(<BuiltIn />, { route })
-    const toggle = within(await card('HTTP requests')).getByRole('switch', { name: 'Enabled' })
+    const toggle = within(await card('HTTP requests')).getByRole('switch', { name: 'Enable HTTP requests' })
     expect(toggle).toBeChecked()
     expect(isUserOnly(toggle)).toBe(false)
     await user.click(toggle)
-    await waitFor(async () => expect(within(await card('HTTP requests')).getByRole('switch', { name: 'Enabled' })).not.toBeChecked())
+    await waitFor(async () => expect(within(await card('HTTP requests')).getByRole('switch', { name: 'Enable HTTP requests' })).not.toBeChecked())
     expect((await aiCapabilities.list()).find((s) => s.id === 'builtin:http')?.enabled).toBe(false)
   })
 

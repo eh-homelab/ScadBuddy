@@ -116,7 +116,16 @@ export const BUILT_IN_ANSWER = `ScadBuddy's own plugin is built in: the assistan
 
 const now = () => new Date('2026-09-28T09:00:00Z').toISOString()
 
+const LISTED_TOOLS = ['recall', 'retain', 'files.list', 'notes.get', 'notes_get']
+let listedTools: readonly string[] = LISTED_TOOLS
+
+/** For a test: the tool names the next refresh lists (a name may appear twice, as a server may list it). */
+export function setListedToolNames(names: readonly string[]): void {
+  listedTools = names
+}
+
 export function resetAiPluginMocks(): void {
+  listedTools = LISTED_TOOLS
   state.remote.clear()
   state.packages.clear()
   state.builtIns = new Map(builtIns().map((b) => [b.name, b]))
@@ -192,12 +201,15 @@ export function seedStoredPackage(name: string): void {
  * Claude Code renames, and `notes.get` and `notes_get`, which share one harness name (a collision).
  */
 export function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
-  const names = ['recall', 'retain', 'files.list', 'notes.get', 'notes_get']
+  const names = listedTools
   const harnessOf = (tool: string) => tool.replace(/[^A-Za-z0-9_-]/g, '_')
+  const disabled = new Set(plugin.disabled_tools.map(harnessOf))
   return names.map((tool) => {
     const renamed = tool.includes('.')
     const harness = harnessOf(tool)
-    const collides_with = names.filter((other) => other !== tool && harnessOf(other) === harness)
+    // Every other entry of the harness name, a second entry of the same name included, as the agent counts.
+    const entries = names.filter((other) => harnessOf(other) === harness)
+    const collides_with = entries.filter((_, j) => j !== entries.indexOf(tool))
     const explicit = !renamed && Object.hasOwn(plugin.tool_tiers, tool)
     const description = `The ${tool} tool.`
     const annotations = tool === 'recall' ? { readOnlyHint: true } : null
@@ -216,7 +228,7 @@ export function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
       tier_source: collides_with.length > 0 ? 'collision' : renamed ? 'renamed' : explicit ? 'explicit' : 'default',
       collides_with,
       suggested_tier: tool === 'recall' ? 'read' : null,
-      disabled: plugin.disabled_tools.includes(tool),
+      disabled: disabled.has(harness) || collides_with.length > 0,
     }
   })
 }
@@ -293,8 +305,6 @@ export const aiPluginHandlers = [
     const next: RemotePlugin = {
       ...plugin,
       ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
-      ...(body.tool_tiers ? { tool_tiers: body.tool_tiers } : {}),
-      ...(body.disabled_tools ? { disabled_tools: [...body.disabled_tools].sort() } : {}),
       updated_at: now(),
     }
     state.remote.set(plugin.name, next)
@@ -304,21 +314,6 @@ export const aiPluginHandlers = [
   http.delete(`${base}/plugins/:name`, ({ params }) => {
     if (!state.remote.delete(String(params.name))) return undefined
     return new HttpResponse(null, { status: 204 })
-  }),
-
-  http.post(`${base}/plugins/:name/test`, async ({ params }) => {
-    const plugin = state.remote.get(String(params.name))
-    if (!plugin) return undefined
-    await delay(100)
-    const result: PluginTest = {
-      ok: true,
-      detail: `connected; ${toolsFor(plugin).length} tools`,
-      duration_ms: 42,
-      server: { name: 'hindsight', version: '0.4.1' },
-      tools: toolsFor(plugin),
-      truncated: false,
-    }
-    return HttpResponse.json(result)
   }),
 
   // ---- plugin packages

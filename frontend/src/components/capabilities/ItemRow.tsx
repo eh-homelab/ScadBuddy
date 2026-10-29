@@ -75,15 +75,18 @@ export function ItemRow({
     else apply(next)
   }
 
-  const note = item.fixed?.reason ?? (item.allowed !== null ? item.reason : null)
+  // Every reason the agent gives: a fixed item's, a renamed tool's, one off through another entry's row.
+  const note = item.fixed?.reason ?? item.reason
+  // The name holds the visible label (WCAG 2.5.3), and the raw name when it differs.
+  const accessName = item.label === item.name ? `Access of ${item.name}` : `Access of ${item.name} (${item.label})`
 
   return (
     <div className="flex flex-col gap-1.5 py-2">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium">{item.label}</div>
+          <div className="text-sm font-medium break-words">{item.label}</div>
           {item.description !== null && <p className="line-clamp-2 text-xs text-muted-foreground">{item.description}</p>}
-          <div className="sb-num text-xs text-muted-foreground">{item.harness_name}</div>
+          <div className="sb-num text-xs break-all text-muted-foreground">{item.harness_name}</div>
         </div>
         <div className="flex items-center gap-2">
           <span id={statusId} role="status" className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -98,7 +101,7 @@ export function ItemRow({
             size="sm"
             className="w-48"
             id={selectId}
-            aria-label={`Access of ${item.name}`}
+            aria-label={accessName}
             aria-describedby={statusId}
             value={shown}
             onValueChange={choose}

@@ -49,7 +49,7 @@ export function LowerConfirm({
         }}
       >
         <AlertDialogHeader>
-          <AlertDialogTitle>{`Lower ${label}?`}</AlertDialogTitle>
+          <AlertDialogTitle className="break-words">{`Lower ${label}?`}</AlertDialogTitle>
           {line !== null && <AlertDialogDescription>{line}</AlertDialogDescription>}
         </AlertDialogHeader>
         <AlertDialogFooter>

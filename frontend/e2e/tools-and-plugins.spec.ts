@@ -89,7 +89,7 @@ test.describe('Tools & plugins (#2171)', () => {
 
     for (const [role, name] of [
       ['button', 'ScadBuddy tools'],
-      ['combobox', 'Access of send_to_printer'],
+      ['combobox', 'Access of send_to_printer (Send to printer)'],
       ['option', 'write'],
       ['button', 'Lower to write'],
     ] as const) {

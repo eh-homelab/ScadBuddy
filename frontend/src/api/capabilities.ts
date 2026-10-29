@@ -81,7 +81,8 @@ export interface ItemDetails {
 
 /** A remote source listed again: the connection test and the source after it. */
 export interface RefreshResult {
-  test: PluginTest
+  /** The connection test; its tools are `source`'s items, so the agent does not send them twice. */
+  test: Omit<PluginTest, 'tools'>
   source: SourceView
 }
 

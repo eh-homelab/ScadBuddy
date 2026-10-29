@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { aiPlugins } from '../../api/aiPlugins'
+import { setListedToolNames, setRemotePluginAccess } from '../aiPlugins'
 import { aiCapabilities } from '../../api/capabilities'
 import type { ApiError } from '../../api/client'
 
@@ -44,6 +45,31 @@ describe('capabilities mock (#2171)', () => {
     expect(await aiCapabilities.source('remote:notes')).toMatchObject({ items: [], listed_at: null })
     await aiPlugins.deleteRemote('notes')
     await expect(aiCapabilities.source('remote:notes')).rejects.toMatchObject({ status: 404 })
+  })
+
+  it('a refresh answers no tools beside the source, as the agent does (final review M3)', async () => {
+    const { test, source } = await aiCapabilities.refresh('remote:hindsight')
+    expect(test).not.toHaveProperty('tools')
+    expect(source.items.length).toBeGreaterThan(0)
+  })
+
+  it('a name listed twice is one row, fixed off, as the agent marks it (final review I1)', async () => {
+    setListedToolNames(['recall', 'recall', 'retain'])
+    const { source } = await aiCapabilities.refresh('remote:hindsight')
+    expect(source.items.map((i) => i.id)).toEqual(['recall', 'retain'])
+    expect(source.items[0]).toMatchObject({ access: 'off', fixed: { access: 'off', reason: 'Shares its name with recall, so both are hidden' } })
+  })
+
+  it("a tool off through a stored entry of another name says which to reset, as the agent does (final review I2)", async () => {
+    setListedToolNames(['a_b'])
+    await aiPlugins.createRemote({ name: 'notes', url: 'https://notes.example/mcp/' })
+    setRemotePluginAccess('notes', { disabled_tools: ['a.b'] })
+    const { source } = await aiCapabilities.refresh('remote:notes')
+    expect(source.items.find((i) => i.id === 'a_b')).toMatchObject({
+      access: 'off',
+      overridden: true,
+      reason: 'Off because "a.b" is off, which Claude Code names the same: reset "a.b" to change it',
+    })
   })
 
   it('refuses as the agent does', async () => {

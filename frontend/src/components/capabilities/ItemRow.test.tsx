@@ -5,7 +5,7 @@ import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import type { Access, ItemView, SourceView } from '../../api/capabilities'
 import { server } from '../../mocks/server'
-import { choose, optionsOf } from '../../test/select'
+import { accessName, choose, optionsOf } from '../../test/select'
 import { renderPage } from '../../test/utils'
 import { ItemRow } from './ItemRow'
 
@@ -74,7 +74,7 @@ function Harness({ start, source = 'builtin:scadbuddy' }: { start: ItemView; sou
   return <ItemRow source={source} item={shown} onSaved={(s) => setShown(s.items.find((i) => i.id === shown.id)!)} />
 }
 
-const select = (name: string) => screen.getByRole('combobox', { name: `Access of ${name}` })
+const select = (name: string) => screen.getByRole('combobox', { name: accessName(name) })
 
 describe('ItemRow', () => {
   it('shows label, description and the raw name, with the default marked', async () => {
@@ -264,6 +264,22 @@ describe('ItemRow', () => {
     expect(select('files.list')).toBeEnabled()
     expect(screen.getByText(reason)).toBeInTheDocument()
     expect(await optionsOf(user, select('files.list'))).toEqual(['off', 'outward (asks first) (default)'])
+  })
+
+  it("shows a remote tool's reason when it is off through another entry's row (final review I2)", () => {
+    const reason = 'Off because "a.b" is off, which Claude Code names the same: reset "a.b" to change it'
+    renderPage(<Harness start={item({ id: 'a_b', name: 'a_b', label: 'a_b', access: 'off', overridden: true, reason })} source="remote:hs" />)
+    expect(screen.getByText(reason)).toBeInTheDocument()
+  })
+
+  it('names the select with its visible label, and wraps long untrusted text (final review M1, M5)', async () => {
+    const label = 'L'.repeat(300)
+    const { user } = renderPage(<Harness start={item({ label })} />)
+    expect(screen.getByRole('combobox', { name: `Access of send_to_printer (${label})` })).toBeInTheDocument()
+    expect(screen.getByText(label)).toHaveClass('break-words')
+    expect(screen.getByText('mcp__scadbuddy__send_to_printer')).toHaveClass('break-all')
+    await choose(user, select('send_to_printer'), 'write')
+    expect(await screen.findByRole('heading', { name: `Lower ${label}?` })).toHaveClass('break-words')
   })
 
   it('By call (default) for http_request, and read asks to lower', async () => {

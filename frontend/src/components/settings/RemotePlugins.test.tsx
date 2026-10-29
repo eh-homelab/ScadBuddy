@@ -1,14 +1,14 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { aiPlugins, type RemotePlugin } from '../../api/aiPlugins'
 import { aiCapabilities, type RefreshResult } from '../../api/capabilities'
-import { setRemotePluginProblem } from '../../mocks/aiPlugins'
+import { setListedToolNames, setRemotePluginProblem } from '../../mocks/aiPlugins'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { RemotePluginsPanel } from './RemotePlugins'
-import { choose, optionsOf } from '../../test/select'
+import { accessName, choose, optionsOf } from '../../test/select'
 
 // Radix Select scrolls its selected option into view; jsdom has no layout.
 Element.prototype.scrollIntoView ??= () => {}
@@ -87,9 +87,9 @@ describe('RemotePluginsPanel', () => {
     const { user } = renderPage(<RemotePluginsPanel />)
     const card = await endpoint()
     await tested(user, card)
-    expect(within(card).getByRole('combobox', { name: 'Access of recall' })).toHaveTextContent('read')
-    expect(within(card).getByRole('combobox', { name: 'Access of retain' })).toHaveTextContent('outward (asks first) (default)')
-    const renamed = within(card).getByRole('combobox', { name: 'Access of files.list' })
+    expect(within(card).getByRole('combobox', { name: accessName('recall') })).toHaveTextContent('read')
+    expect(within(card).getByRole('combobox', { name: accessName('retain') })).toHaveTextContent('outward (asks first) (default)')
+    const renamed = within(card).getByRole('combobox', { name: accessName('files.list') })
     expect(renamed).toBeEnabled()
     expect(await optionsOf(user, renamed)).toEqual(['off', 'outward (asks first) (default)'])
     expect(within(card).getByText(/Claude Code renames this tool/)).toBeInTheDocument()
@@ -100,24 +100,43 @@ describe('RemotePluginsPanel', () => {
     const card = await endpoint()
     await user.click(await within(card).findByRole('button', { name: 'hindsight' }))
     expect(within(card).getByText('Not in the last listing')).toBeInTheDocument()
-    expect(within(card).getByRole('combobox', { name: 'Access of recall' })).toHaveTextContent('read')
+    expect(within(card).getByRole('combobox', { name: accessName('recall') })).toHaveTextContent('read')
     await user.click(within(card).getByRole('button', { name: 'Reset recall' }))
-    await waitFor(() => expect(within(card).queryByRole('combobox', { name: 'Access of recall' })).toBeNull())
+    await waitFor(() => expect(within(card).queryByRole('combobox', { name: accessName('recall') })).toBeNull())
     expect((await hindsight()).tool_tiers).toEqual({})
+  })
+
+  it('a tool the server lists twice under one name is one fixed-off row, with no duplicate key (final review I1)', async () => {
+    setListedToolNames(['recall', 'recall', 'retain'])
+    const errors = vi.spyOn(console, 'error')
+    try {
+      const { user } = renderPage(<RemotePluginsPanel />)
+      const card = await endpoint()
+      await user.click(within(card).getByRole('button', { name: 'Test connection' }))
+      await within(card).findByText(/connected; 3 tools/)
+      await user.click(within(card).getByRole('button', { name: 'hindsight' }))
+      const recall = within(card).getAllByRole('combobox', { name: accessName('recall') })
+      expect(recall).toHaveLength(1)
+      expect(recall[0]).toBeDisabled()
+      expect(within(card).getByText('Shares its name with recall, so both are hidden')).toBeInTheDocument()
+      expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/)
+    } finally {
+      errors.mockRestore()
+    }
   })
 
   it('says a truncated listing may be incomplete', async () => {
     server.use(
       http.post('/api/v1/ai/capabilities/:source/refresh', async () => {
         const source = await aiCapabilities.source('remote:hindsight')
-        const test = { ok: true, detail: 'connected; 50 tools', duration_ms: 3, server: null, tools: [], truncated: true }
+        const test = { ok: true, detail: 'connected; 50 tools', duration_ms: 3, server: null, truncated: true }
         return HttpResponse.json({ test, source: { ...source, truncated: true } } satisfies RefreshResult)
       }),
     )
     const { user } = renderPage(<RemotePluginsPanel />)
     const card = await endpoint()
     await user.click(within(card).getByRole('button', { name: 'Test connection' }))
-    expect(await within(card).findByText(/the list may be incomplete/)).toBeInTheDocument()
+    expect(await within(card).findByText('The stored list may not be every tool the server has.')).toBeInTheDocument()
   })
 
   it('sets a tool off, which replaces the Hidden column', async () => {
@@ -126,9 +145,9 @@ describe('RemotePluginsPanel', () => {
     await tested(user, card)
     expect(within(card).queryByRole('switch', { name: /^Show / })).toBeNull()
     expect(within(card).queryByRole('button', { name: 'Save tool settings' })).toBeNull()
-    await choose(user, within(card).getByRole('combobox', { name: 'Access of retain' }), 'off')
+    await choose(user, within(card).getByRole('combobox', { name: accessName('retain') }), 'off')
     await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Lower to off' }))
-    await waitFor(() => expect(within(card).getByRole('combobox', { name: 'Access of retain' })).toHaveTextContent('off'))
+    await waitFor(() => expect(within(card).getByRole('combobox', { name: accessName('retain') })).toHaveTextContent('off'))
     expect((await hindsight()).disabled_tools).toEqual(['retain'])
   })
 
@@ -136,16 +155,16 @@ describe('RemotePluginsPanel', () => {
     const { user } = renderPage(<RemotePluginsPanel />)
     const card = await endpoint()
     await tested(user, card)
-    await choose(user, within(card).getByRole('combobox', { name: 'Access of retain' }), 'write')
+    await choose(user, within(card).getByRole('combobox', { name: accessName('retain') }), 'write')
     const dialog = await screen.findByRole('alertdialog')
     expect(within(dialog).getByRole('heading')).toHaveTextContent('Lower retain?')
     await user.click(within(dialog).getByRole('button', { name: 'Lower to write' }))
-    await waitFor(() => expect(within(card).getByRole('combobox', { name: 'Access of retain' })).toHaveTextContent('write'))
+    await waitFor(() => expect(within(card).getByRole('combobox', { name: accessName('retain') })).toHaveTextContent('write'))
     expect(screen.queryByRole('alertdialog')).toBeNull()
     expect((await hindsight()).tool_tiers).toMatchObject({ retain: 'write' })
 
     // Raising recall back to its default asks nothing.
-    await choose(user, within(card).getByRole('combobox', { name: 'Access of recall' }), 'outward (asks first) (default)')
+    await choose(user, within(card).getByRole('combobox', { name: accessName('recall') }), 'outward (asks first) (default)')
     await waitFor(() => expect(within(card).queryByRole('button', { name: 'Reset recall' })).toBeNull())
     expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(within(card).getByText('server suggests read')).toBeInTheDocument()
@@ -158,7 +177,7 @@ describe('RemotePluginsPanel', () => {
     const source = await within(card).findByRole('region', { name: 'Source hindsight' })
     expect(within(card).queryByRole('button', { name: /^(Enable|Disable)$/ })).toBeNull()
     expect(within(card).getAllByRole('switch')).toHaveLength(1)
-    await user.click(within(source).getByRole('switch', { name: 'Enabled' }))
+    await user.click(within(source).getByRole('switch', { name: 'Enable hindsight' }))
     await waitFor(() => expect(badge(card, 'Enabled')).toBeInTheDocument())
     expect(badge(card, 'Disabled')).toBeNull()
     expect((await hindsight()).enabled).toBe(true)
@@ -174,9 +193,9 @@ describe('RemotePluginsPanel', () => {
     const fold = within(card).getByRole('button', { name: 'hindsight' })
     expect(fold).toHaveAttribute('aria-expanded', 'false')
     expect(within(card).getByText('5 tools, 1 changed')).toBeInTheDocument()
-    expect(within(card).getByRole('combobox', { name: 'Access of retain', hidden: true })).not.toBeVisible()
+    expect(within(card).getByRole('combobox', { name: accessName('retain'), hidden: true })).not.toBeVisible()
     await user.click(fold)
-    expect(within(card).getByRole('combobox', { name: 'Access of retain' })).toBeVisible()
+    expect(within(card).getByRole('combobox', { name: accessName('retain') })).toBeVisible()
     await user.click(fold)
     expect(status).toBeVisible()
   })
@@ -188,13 +207,13 @@ describe('RemotePluginsPanel', () => {
     server.use(
       http.post('/api/v1/ai/capabilities/:source/refresh', async () => {
         const source = await aiCapabilities.source('remote:hindsight')
-        const test = { ok: false, detail: 'connection refused', duration_ms: 3, server: null, tools: [], truncated: false }
+        const test = { ok: false, detail: 'connection refused', duration_ms: 3, server: null, truncated: false }
         return HttpResponse.json({ test, source } satisfies RefreshResult)
       }),
     )
     await user.click(within(card).getByRole('button', { name: 'Test connection' }))
     expect(await within(card).findByText('connection refused')).toHaveAttribute('role', 'status')
-    expect(within(card).getByRole('combobox', { name: 'Access of retain' })).toBeVisible()
+    expect(within(card).getByRole('combobox', { name: accessName('retain') })).toBeVisible()
   })
 
   it('says a refused test as an alert, and keeps the last listing', async () => {
@@ -206,7 +225,7 @@ describe('RemotePluginsPanel', () => {
     )
     await user.click(within(card).getByRole('button', { name: 'Test connection' }))
     expect(await within(card).findByRole('alert')).toHaveTextContent('bad gateway')
-    expect(within(card).getByRole('combobox', { name: 'Access of retain' })).toBeVisible()
+    expect(within(card).getByRole('combobox', { name: accessName('retain') })).toBeVisible()
   })
 
   it('fixes both tools of a colliding pair off, with the reason', async () => {
@@ -214,7 +233,7 @@ describe('RemotePluginsPanel', () => {
     const card = await endpoint()
     await tested(user, card)
     for (const [name, other] of [['notes.get', 'notes_get'], ['notes_get', 'notes.get']] as const) {
-      const select = within(card).getByRole('combobox', { name: `Access of ${name}` })
+      const select = within(card).getByRole('combobox', { name: accessName(name) })
       expect(select).toHaveTextContent('off')
       expect(select).toBeDisabled()
       expect(within(card).getByText(`Shares its name with ${other}, so both are hidden`)).toBeInTheDocument()
@@ -297,7 +316,7 @@ describe('RemotePluginsPanel', () => {
     expect(isUserOnly(screen.getByLabelText('Header value'))).toBe(true)
 
     await tested(user, card)
-    expect(isUserOnly(within(card).getByRole('switch', { name: 'Enabled' }))).toBe(false)
+    expect(isUserOnly(within(card).getByRole('switch', { name: 'Enable hindsight' }))).toBe(false)
     const selects = within(card).getAllByRole('combobox', { name: /^Access of / })
     expect(selects).toHaveLength(5)
     for (const select of selects) expect(isUserOnly(select)).toBe(false)

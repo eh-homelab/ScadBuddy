@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../../agent/dom'
-import { aiPlugins, type PluginTest, type RemotePlugin } from '../../api/aiPlugins'
-import { aiCapabilities, type SourceView } from '../../api/capabilities'
+import { aiPlugins, type RemotePlugin } from '../../api/aiPlugins'
+import { aiCapabilities, type RefreshResult, type SourceView } from '../../api/capabilities'
 import { ApiError } from '../../api/client'
 import { useAsync } from '../../lib/useAsync'
 import { SourceCard } from '../capabilities/SourceCard'
@@ -142,7 +142,7 @@ function RegisterForm({ onCreated }: { onCreated: (plugin: RemotePlugin) => void
 }
 
 /** A test's line: its result (with how many tools it listed) and the server it reached. */
-function testSummary(test: PluginTest): string {
+function testSummary(test: RefreshResult['test']): string {
   return `${test.detail}${test.server ? ` (${test.server.name} ${test.server.version})` : ''}`
 }
 
@@ -163,7 +163,7 @@ function RemoteCard({
 }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [test, setTest] = useState<PluginTest | null>(null)
+  const [test, setTest] = useState<RefreshResult['test'] | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const enabled = source?.enabled ?? plugin.enabled
 
@@ -245,7 +245,7 @@ function RemoteCard({
             </p>
           )}
           {source?.truncated && (
-            <p className="mt-1 text-xs text-warn">The server has more tools than one page listed: the list may be incomplete.</p>
+            <p className="mt-1 text-xs text-warn">The stored list may not be every tool the server has.</p>
           )}
           {!source && readError && (
             <p role="alert" className="mt-2 text-xs text-warn">

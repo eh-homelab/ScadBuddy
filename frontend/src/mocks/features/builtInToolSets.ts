@@ -58,9 +58,4 @@ export const handlers = [
     const name = String(params.name)
     return state.sets.has(name) ? builtIn(name, 'removed: disable its tools instead') : missing(name)
   }),
-
-  http.post(`${base}/:name/test`, ({ params }) => {
-    const name = String(params.name)
-    return state.sets.has(name) ? builtIn(name, 'tested: it has no endpoint') : missing(name)
-  }),
 ]

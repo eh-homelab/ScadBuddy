@@ -1,4 +1,5 @@
 import { renderHook, screen, waitFor, within } from '@testing-library/react'
+import { accessName } from '../../test/select'
 import { http, HttpResponse } from 'msw'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
@@ -57,7 +58,7 @@ describe('SourceCard', () => {
   it('folds to its summary, and opens to its rows', async () => {
     const { user } = renderPage(<Harness start={source()} />)
     expect(within(card('ScadBuddy tools')).getByText('10 tools, 1 changed')).toBeInTheDocument()
-    expect(screen.queryByRole('combobox', { name: 'Access of tool_1' })).toBeNull()
+    expect(screen.queryByRole('combobox', { name: accessName('tool_1') })).toBeNull()
     await user.click(screen.getByRole('button', { name: 'ScadBuddy tools' }))
     expect(screen.getAllByRole('combobox', { name: /^Access of / })).toHaveLength(10)
   })
@@ -65,12 +66,13 @@ describe('SourceCard', () => {
   it('the switch enables a switchable source, is not user-only, and is absent otherwise', async () => {
     const http_ = source({ id: 'builtin:http', title: 'HTTP requests', switchable: true }, 1)
     const { user } = renderPage(<Harness start={http_} />)
-    const toggle = screen.getByRole('switch', { name: 'Enabled' })
+    // Named for its source, so several switches on one page sound apart; the visible label stays.
+    const toggle = screen.getByRole('switch', { name: 'Enable HTTP requests' })
+    expect(within(card('HTTP requests')).getByText('Enabled')).toBeVisible()
     expect(toggle).toBeChecked()
     expect(isUserOnly(toggle)).toBe(false)
-    expect(toggle).toHaveAccessibleDescription('Enable HTTP requests')
     await user.click(toggle)
-    await waitFor(() => expect(screen.getByRole('switch', { name: 'Enabled' })).not.toBeChecked())
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Enable HTTP requests' })).not.toBeChecked())
 
     renderPage(<Harness start={source()} />)
     expect(within(card('ScadBuddy tools')).queryByRole('switch')).toBeNull()
@@ -88,16 +90,16 @@ describe('SourceCard', () => {
     const filter = screen.getByRole('textbox', { name: 'Filter ScadBuddy tools' })
     await user.type(filter, 'CAMERA')
     expect(screen.getAllByRole('combobox', { name: /^Access of / }).map((c) => c.getAttribute('aria-label'))).toEqual([
-      'Access of tool_8',
+      'Access of tool_8 (Printer camera)',
     ])
     await user.clear(filter)
     await user.type(filter, 'zebra')
-    expect(screen.getByRole('combobox', { name: 'Access of zebra_tool' })).toBeInTheDocument()
+    expect(screen.getByRole('combobox', { name: accessName('zebra_tool') })).toBeInTheDocument()
     expect(screen.getAllByRole('combobox', { name: /^Access of / })).toHaveLength(1)
     await user.clear(filter)
     await user.type(filter, 'readme')
     expect(screen.getAllByRole('combobox', { name: /^Access of / }).map((c) => c.getAttribute('aria-label'))).toEqual([
-      'Access of tool_10',
+      'Access of tool_10 (Tool 10)',
     ])
   })
 

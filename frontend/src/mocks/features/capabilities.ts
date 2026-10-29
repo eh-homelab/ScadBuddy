@@ -1,5 +1,5 @@
 import { HttpResponse, http } from 'msw'
-import type { PluginTest, PluginToolView, RemotePlugin, RiskTier } from '../../api/aiPlugins'
+import type { PluginToolView, RemotePlugin, RiskTier } from '../../api/aiPlugins'
 import {
   ITEM_ACCESS,
   type Access,
@@ -194,10 +194,18 @@ function builtInView(spec: Spec): SourceView {
 
 // ------------------------------------------------------------------ remote sources
 
-function listedItem(view: PluginToolView): ItemView {
+/** The stored `disabled_tools` entry of another name that Claude Code names as `tool` (the agent's `disabledAs`). */
+function disabledAs(plugin: RemotePlugin, tool: string): string | undefined {
+  if (plugin.disabled_tools.includes(tool)) return undefined
+  const harnessOf = (name: string) => name.replace(/[^A-Za-z0-9_-]/g, '_')
+  return plugin.disabled_tools.find((d) => harnessOf(d) === harnessOf(tool))
+}
+
+function listedItem(plugin: RemotePlugin, view: PluginToolView): ItemView {
   const renamed = view.tier_source === 'renamed'
   // The agent's `remoteProvider`: tools colliding on one harness name are fixed off, both.
   const collision = view.tier_source === 'collision'
+  const other = collision || !view.disabled ? undefined : disabledAs(plugin, view.name)
   const row = collision ? undefined : view.disabled ? 'off' : view.tier_source === 'explicit' ? view.tier : undefined
   return {
     id: view.name,
@@ -214,7 +222,12 @@ function listedItem(view: PluginToolView): ItemView {
     missing: false,
     allowed: renamed ? ['off', 'outward'] : null,
     fixed: collision ? { access: 'off', reason: `Shares its name with ${view.collides_with.join(', ')}, so both are hidden` } : null,
-    reason: renamed ? RENAMED_REASON : null,
+    reason:
+      other !== undefined
+        ? `Off because "${other}" is off, which Claude Code names the same: reset "${other}" to change it`
+        : renamed
+          ? RENAMED_REASON
+          : null,
   }
 }
 
@@ -243,7 +256,14 @@ function missingItem(plugin: RemotePlugin, tool: string): ItemView {
 function remoteView(plugin: RemotePlugin): SourceView {
   const listed = state.listed.has(plugin.name)
   const tools = listed ? toolsFor(plugin) : []
-  const names = new Set(tools.map((t) => t.name))
+  // One row per name, as the agent's `remoteView`: a name listed twice is one item.
+  const names = new Set<string>()
+  const items: ItemView[] = []
+  for (const tool of tools) {
+    if (names.has(tool.name)) continue
+    names.add(tool.name)
+    items.push(listedItem(plugin, tool))
+  }
   const stored = [...new Set([...Object.keys(plugin.tool_tiers), ...plugin.disabled_tools])].filter((t) => !names.has(t)).sort()
   return {
     id: `remote:${plugin.name}`,
@@ -254,7 +274,7 @@ function remoteView(plugin: RemotePlugin): SourceView {
     options_route: null,
     listed_at: listed ? LISTED_AT : null,
     truncated: false,
-    items: [...tools.map(listedItem), ...stored.map((t) => missingItem(plugin, t))],
+    items: [...items, ...stored.map((t) => missingItem(plugin, t))],
     children: [],
   }
 }
@@ -369,12 +389,12 @@ function refresh(id: string): RefreshResult {
   if (source.kind !== 'remote') throw new Refusal(409, `"${id}" lists no tools to refresh`)
   const plugin = pluginOf(source)
   state.listed.add(plugin.name)
-  const test: PluginTest = {
+  // The agent's refresh sends no `tools`: they are the source's items.
+  const test: RefreshResult['test'] = {
     ok: true,
     detail: `connected; ${toolsFor(plugin).length} tools`,
     duration_ms: 42,
     server: { name: plugin.name, version: '0.4.1' },
-    tools: toolsFor(plugin),
     truncated: false,
   }
   return { test, source: found(id) }

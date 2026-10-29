@@ -1,5 +1,5 @@
 import { ChevronRight } from 'lucide-react'
-import { useId, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { aiCapabilities, type SourceView } from '../../api/capabilities'
 import { SwitchField } from '../settings/form'
 import { Button } from '@/components/ui/button'
@@ -30,7 +30,6 @@ export function SourceCard({
   headerExtra?: ReactNode
   children?: ReactNode
 }) {
-  const switchNote = useId()
   const [open, setOpen] = useState(false)
   const [filter, setFilter] = useState('')
   const [busy, setBusy] = useState(false)
@@ -64,16 +63,13 @@ export function SourceCard({
             {source.switchable && (
               <SwitchField
                 label="Enabled"
+                ariaLabel={`Enable ${source.title}`}
                 checked={source.enabled}
                 onCheckedChange={(on) => void setEnabled(on)}
                 disabled={busy}
                 busy={busy}
-                describedBy={switchNote}
                 userOnly={false}
               />
-            )}
-            {source.switchable && (
-              <span id={switchNote} className="sr-only">{`Enable ${source.title}`}</span>
             )}
           </div>
         </div>

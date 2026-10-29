@@ -69,8 +69,6 @@ export interface RemotePluginPatch {
   enabled?: boolean
   auth_header?: string | null
   secret?: string | null
-  tool_tiers?: Record<string, RiskTier>
-  disabled_tools?: string[]
 }
 
 export interface PluginToolView {
@@ -267,10 +265,7 @@ const json = (method: string, body: unknown): RequestInit => ({ method, body: JS
 export const aiPlugins = {
   listPlugins: () => request<ListedPlugin[]>('/plugins'),
   createRemote: (body: RemotePluginCreate) => request<RemotePlugin>('/plugins', json('POST', body)),
-  updateRemote: (name: string, body: RemotePluginPatch) =>
-    request<RemotePlugin>(`/plugins/${seg(name)}`, json('PATCH', body)),
   deleteRemote: (name: string) => request<void>(`/plugins/${seg(name)}`, { method: 'DELETE' }),
-  testRemote: (name: string) => request<PluginTest>(`/plugins/${seg(name)}/test`, { method: 'POST' }),
 
   listPackages: () => request<ListedPackage[]>('/plugin-packages'),
   // The two fetches are the agent's commands (#1055): an Idempotency-Key per press, a
