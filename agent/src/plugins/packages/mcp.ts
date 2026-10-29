@@ -1,6 +1,5 @@
 import { packageServerSource } from '../../access/model.js'
 import type { AccessResolver } from '../../access/resolver.js'
-import { utimes } from 'node:fs/promises'
 import { declaredConfigs, noCommand } from '../../harness/plugins.js'
 import { EgressError, type Resolver, systemResolver } from '../../http/egress.js'
 import {
@@ -23,7 +22,7 @@ import {
   validateHeaderName,
   validateSecret,
 } from '../registry.js'
-import { derivedPackage } from './derived.js'
+import { derivedPackage, NOTHING_OMITTED } from './derived.js'
 import type { LoadedPackage } from './install.js'
 import { packageLedgerId } from '../pluginSessions.js'
 
@@ -262,27 +261,14 @@ export async function forwardPackageServers(
   }
 }
 
-/** Whether a server entry is reached by URL (http, sse): the forwarder's, never Claude Code's. */
-export function isRemoteEntry(config: Record<string, unknown>): boolean {
-  return noCommand(config) && (typeof config.url === 'string' || config.type === 'http' || config.type === 'sse')
-}
-
-/** Whether a plugin directory declares any server reached by URL. */
-export function declaresRemoteServers(dir: string): boolean {
-  return declaredConfigs(dir).mcp.some(({ map }) => entries(map).some(([, config]) => isRemoteEntry(config)))
-}
-
-/** Marks a package copy as just used: its folder's mtime is what turnPackages.ts `sweepPackageCopies` reads. */
-export async function touch(dir: string): Promise<void> {
-  const now = new Date()
-  await utimes(dir, now, now).catch(() => {})
-}
+// Moved to derived.ts, which mcp.ts imports and which imports nothing of mcp.ts.
+export { declaresRemoteServers, isRemoteEntry, touch } from './derived.js'
 
 /**
  * The package without its own http MCP servers: derived.ts `derivedPackage` leaving
- * nothing else out, named by the copy's own hash. Goes once its callers take
+ * nothing else out, at `root/<hex>/<package name>`. Goes once its callers take
  * `derivedPackage` (#4757).
  */
-export async function withoutRemoteServers(dir: string, contentHash: string, root: string): Promise<string> {
-  return (await derivedPackage(dir, contentHash, root)).dir
+export async function withoutRemoteServers(dir: string, contentHash: string, root: string, name: string): Promise<string> {
+  return (await derivedPackage(dir, contentHash, root, NOTHING_OMITTED, name)).dir
 }

@@ -385,8 +385,33 @@ function mcpEntries(map: unknown): [string, unknown][] {
   return isRecord(servers) ? Object.entries(servers) : []
 }
 
-/** Each skill's name to its directory, relative to `root` (`.` for a package that is one skill). */
-function skillDirs(root: string, manifest: Record<string, unknown>): Map<string, string> {
+/**
+ * The name of the skill a package root is (#4757): its package name with every character
+ * outside `[A-Za-z0-9_-]` as `-`. Claude Code 2.1.310 (SDK 0.3.310's bundled `claude`,
+ * function `_7t`, read with `strings -n 20`) names a skills path that is itself a skill by
+ * its frontmatter `name`, else by `basename(dir)`, with that replacement. A loaded copy's
+ * folder is named after the package (derived.ts), so this is the name Claude Code gives a
+ * root skill with no frontmatter `name`, and one key, whatever folder the review was built
+ * in; a frontmatter `name` is an alias of it.
+ */
+export function rootSkillName(packageName: string): string {
+  return packageName.replace(/[^a-zA-Z0-9_-]/g, '-')
+}
+
+/** The package's name for its root skill: the manifest's, else `fallbackName`, else the folder's. */
+function packageNameOf(root: string, manifest: Record<string, unknown>, fallbackName: string | undefined): string {
+  return typeof manifest.name === 'string' ? manifest.name : (fallbackName ?? path.basename(root))
+}
+
+/**
+ * Each skill's name to its directory, relative to `root` (`.` for a package that is one
+ * skill, named `rootSkillName`). The root is a skill without being listed only when the
+ * manifest's `skills` is falsy and there is no `skills` path at all, as Claude Code 2.1.310
+ * loads it (the plugin loader's `if(Se.skills){…}else if(!St&&…)`, `St` being whether
+ * `<root>/skills` exists; read as `_7t` above).
+ */
+function skillDirs(root: string, manifest: Record<string, unknown>, fallbackName?: string): Map<string, string> {
+  const rootName = rootSkillName(packageNameOf(root, manifest, fallbackName))
   const dirs = ['skills', ...(Array.isArray(manifest.skills) ? manifest.skills : [manifest.skills])]
     .filter((d): d is string => typeof d === 'string')
     .map((d) => d.replace(/^\.\/+/, '').replace(/\/+$/, '') || '.')
@@ -398,21 +423,21 @@ function skillDirs(root: string, manifest: Record<string, unknown>): Map<string,
     const abs = path.resolve(root, dir)
     if (!isInside(root, abs) || !existsSync(abs) || !statSync(abs).isDirectory()) continue
     if (existsSync(path.join(abs, 'SKILL.md')) && dir !== 'skills') {
-      add(path.basename(dir === '.' ? root : abs), abs)
+      add(dir === '.' ? rootName : path.basename(abs), abs)
       continue
     }
     for (const entry of readdirSync(abs, { withFileTypes: true })) {
       if (entry.isDirectory() && existsSync(path.join(abs, entry.name, 'SKILL.md'))) add(entry.name, path.join(abs, entry.name))
     }
   }
-  if (out.size === 0 && manifest.skills === undefined && existsSync(path.join(root, 'SKILL.md'))) {
-    add(path.basename(root), root)
+  if (!manifest.skills && !existsSync(path.join(root, 'skills')) && existsSync(path.join(root, 'SKILL.md'))) {
+    add(rootName, root)
   }
   return out
 }
 
-export function skillNames(root: string, manifest: Record<string, unknown>): string[] {
-  return [...skillDirs(path.resolve(root), manifest).keys()].sort()
+export function skillNames(root: string, manifest: Record<string, unknown>, fallbackName?: string): string[] {
+  return [...skillDirs(path.resolve(root), manifest, fallbackName).keys()].sort()
 }
 
 /** Each Markdown item's name (a nested one `<dir>:<name>` when `recursive`) to its file, relative to `root`. */
@@ -505,7 +530,8 @@ function configAt(where: string): string {
 export type PackageItems = {
   /**
    * Each skill item's name to where it lives, relative to the root, the skill first:
-   *   - a skill's directory, or `.` when the package root is the skill (never delete `.`);
+   *   - a skill's directory, or `.` when the package root is the skill (never delete `.`),
+   *     keyed `rootSkillName(<package name>)` whatever the folder is called;
    *   - a command's file (`commands/wave.md`), or `inlineCommandAt(<name>)` for a
    *     manifest's inline command; its name is an untrusted key that may hold `.`, `#` or
    *     `/`, so compare with `inlineCommandAt`, never parse it.
@@ -536,8 +562,8 @@ export type PackageItems = {
 }
 
 /** Where each of the package's items lives (#4757), so a derived copy can leave one out. */
-export function packageItems(root: string, manifest: Record<string, unknown>): PackageItems {
-  return itemsOf(path.resolve(root), manifest).items
+export function packageItems(root: string, manifest: Record<string, unknown>, fallbackName?: string): PackageItems {
+  return itemsOf(path.resolve(root), manifest, fallbackName).items
 }
 
 type ItemsRead = {
@@ -548,7 +574,7 @@ type ItemsRead = {
   problems: string[]
 }
 
-function itemsOf(root: string, manifest: Record<string, unknown>): ItemsRead {
+function itemsOf(root: string, manifest: Record<string, unknown>, fallbackName?: string): ItemsRead {
   const cut: string[] = []
   const problems: string[] = []
   const described = new Map<string, string | null>()
@@ -566,7 +592,7 @@ function itemsOf(root: string, manifest: Record<string, unknown>): ItemsRead {
   }
 
   const skills = new Map<string, string[]>()
-  for (const [name, dir] of skillDirs(root, manifest)) {
+  for (const [name, dir] of skillDirs(root, manifest, fallbackName)) {
     const file = path.join(dir, 'SKILL.md')
     const text = readText(root, file)
     skills.set(name, [dir])
@@ -645,7 +671,7 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
     }
   }
 
-  const items = itemsOf(abs, m)
+  const items = itemsOf(abs, m, fallbackName)
   problems.push(...items.problems)
   const cut = [...items.cut]
   const hooks: ReviewHook[] = []
@@ -713,7 +739,7 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
         name,
         description: typeof m.description === 'string' ? m.description : null,
         version: typeof m.version === 'string' ? m.version : null,
-        skills: skillNames(abs, m).map((s) => `${name}:${s}`),
+        skills: skillNames(abs, m, fallbackName).map((s) => `${name}:${s}`),
         commands: [
           ...markdownIn(abs, isRecord(m.commands) ? [] : m.commands, 'commands', false),
           ...(isRecord(m.commands) ? Object.keys(m.commands) : []),

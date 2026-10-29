@@ -62,6 +62,25 @@ def test_the_runner_loads_only_a_copy_that_hashes_to_its_pin(tmp_path: Path) -> 
     assert _runner(root)._packages("session-x", context) == [str(root / good)]
 
 
+def test_the_runner_loads_a_copy_in_a_folder_named_after_its_package(tmp_path: Path) -> None:
+    # agent/src/temporal/turnPackages.ts sharePackage (#4757): `<hash>/<package name>`, so
+    # Claude Code names a root skill and a manifest-less package by the package's name.
+    root = tmp_path / "plugins"
+    hex_ = "1" * 64
+    _tree(root / hex_ / "notes")
+    _tree(root / hex_ / "other")
+    context = SegmentContext(
+        packages=[
+            TurnPackage("notes", f"{hex_}/notes", TS_VECTOR),
+            # A folder named for another package, or a path out of the tree, is refused.
+            TurnPackage("mine", f"{hex_}/other", TS_VECTOR),
+            TurnPackage("up", f"{hex_}/..", TS_VECTOR),
+            TurnPackage("deep", f"{hex_}/notes/sub", TS_VECTOR),
+        ]
+    )
+    assert _runner(root)._packages("session-x", context) == [str(root / hex_ / "notes")]
+
+
 @pytest.mark.parametrize(
     ("files", "remote"),
     [

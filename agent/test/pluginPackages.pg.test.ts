@@ -474,13 +474,15 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
 
   describe('the session manager', () => {
     // sessions/manager.ts: a package that declares an http MCP server is loaded as its copy without it.
-    // The copy without its http servers, named by its own hash, not the pin's (#4757).
+    // The copy without its http servers, at `<hex>/<package name>` by its own hash, not the pin's (#4757).
     const expectStrippedCopy = async (paths: readonly string[] | undefined, stateDir: string, pin: string) => {
       expect(paths).toHaveLength(1)
       const copy = paths![0]!
-      expect(path.dirname(copy)).toBe(path.join(stateDir, 'plugins-local'))
-      expect(`sha256:${path.basename(copy)}`).not.toBe(pin)
-      expect((await hashTree(copy)).hash).toBe(`sha256:${path.basename(copy)}`)
+      const hex = path.basename(path.dirname(copy))
+      expect(path.dirname(path.dirname(copy))).toBe(path.join(stateDir, 'plugins-local'))
+      expect(path.basename(copy)).toBe('greeter')
+      expect(`sha256:${hex}`).not.toBe(pin)
+      expect((await hashTree(copy)).hash).toBe(`sha256:${hex}`)
     }
 
     it('loads the enabled packages into each turn by path, and reports the ones it cannot load', async () => {

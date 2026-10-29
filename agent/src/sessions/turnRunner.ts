@@ -327,7 +327,7 @@ export class TurnRunner {
           const pkg = loaded.loaded.find((p) => p.dir === dir)
           if (!pkg) return dir
           try {
-            const loadedDir = await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local'))
+            const loadedDir = await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local'), pkg.name)
             packageNames.set(loadedDir, pkg.name)
             return loadedDir
           } catch (err) {

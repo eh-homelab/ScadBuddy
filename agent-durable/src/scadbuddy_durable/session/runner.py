@@ -214,7 +214,10 @@ MODEL_KEY = "model"
 SUBAGENTS_KEY = "durable_subagents"
 IMAGE_TOO_LARGE = "input too large: "
 # agent/src/temporal/turnPackages.ts sharedName: a package's folder on the shared volume.
-_SHARED_NAME = re.compile(r"[0-9a-f]{64}")
+# A shared copy's folder (agent/src/temporal/turnPackages.ts sharePackage): `<hash>`, as an
+# agent before #4757 shares it, or `<hash>/<package name>` (vet.ts SAFE_NAME_RE), so Claude
+# Code names a root skill and a manifest-less package by the package's name.
+_SHARED_NAME = re.compile(r"[0-9a-f]{64}(?:/(?P<name>[A-Za-z0-9][A-Za-z0-9._-]{0,63}))?")
 
 
 def image_size(data: bytes) -> tuple[int, int] | None:
@@ -811,7 +814,9 @@ class ScadBuddyRunner:
         One that does not is left out, as the agent leaves out one it cannot load."""
         dirs: list[str] = []
         for package in context.packages:
-            if self._package_root is None or not _SHARED_NAME.fullmatch(package.dir):
+            shared = _SHARED_NAME.fullmatch(package.dir)
+            named = shared is not None and shared.group("name") in (None, package.name)
+            if self._package_root is None or not named:
                 logger.warning("segment of %s: package %s not loaded", workflow_id, package.name)
                 continue
             path = os.path.join(self._package_root, package.dir)

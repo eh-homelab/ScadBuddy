@@ -72,7 +72,7 @@ describe('plugin packages in a durable turn', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
     const local = await mkdtemp(path.join(os.tmpdir(), 'turn-local-'))
     const shared = await sharePackage(pkg, root, local)
-    expect(shared).toEqual({ name: 'notes', dir: sharedName(pkg.contentHash), content_hash: pkg.contentHash, allowed: false, builtin_tools: [] })
+    expect(shared).toEqual({ name: 'notes', dir: `${sharedName(pkg.contentHash)}/notes`, content_hash: pkg.contentHash, allowed: false, builtin_tools: [] })
     const skill = path.join(root, shared.dir, 'skills', 'jot', 'SKILL.md')
     expect(await readFile(skill, 'utf8')).toContain('Jot it down.')
     // Something else on the shared volume changed it: copied again from the verified cache.
@@ -87,17 +87,18 @@ describe('plugin packages in a durable turn', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
     const local = await mkdtemp(path.join(os.tmpdir(), 'turn-local-'))
     const shared = await sharePackage(pkg, root, local)
+    const hex = path.dirname(shared.dir)
     const week = Date.now() + PACKAGE_COPY_KEPT_MS + 60_000
     const old = new Date(Date.now() - PACKAGE_COPY_KEPT_MS - 60_000)
     const stale = 'f'.repeat(64)
     await mkdir(path.join(root, stale))
     await mkdir(path.join(root, '.tmp-half'))
     await mkdir(path.join(root, 'lost+found'))
-    for (const name of [shared.dir, stale, '.tmp-half']) await utimes(path.join(root, name), old, old)
+    for (const name of [hex, stale, '.tmp-half']) await utimes(path.join(root, name), old, old)
     // A turn shares it again, as each listing does: it is the one kept.
     await sharePackage(pkg, root, local)
     expect((await sweepPackageCopies(root)).sort()).toEqual(['.tmp-half', stale].sort())
-    expect((await readdir(root)).sort()).toEqual([shared.dir, 'lost+found'].sort())
+    expect((await readdir(root)).sort()).toEqual([hex, 'lost+found'].sort())
     // The stripped copy under the pod's own folder is kept the same way, and goes once unused.
     const [localCopy] = await readdir(local)
     expect(await sweepPackageCopies(local)).toEqual([])
@@ -107,7 +108,7 @@ describe('plugin packages in a durable turn', () => {
     const outside = await mkdtemp(path.join(os.tmpdir(), 'turn-outside-'))
     await writeFile(path.join(outside, 'keep'), 'x')
     await symlink(outside, path.join(root, 'e'.repeat(64)))
-    expect(await sweepPackageCopies(root, week)).toEqual([shared.dir])
+    expect(await sweepPackageCopies(root, week)).toEqual([hex])
     expect(await readdir(outside)).toEqual(['keep'])
   })
 
@@ -119,7 +120,7 @@ describe('plugin packages in a durable turn', () => {
     expect(declaresRemoteServers(dir)).toBe(false)
     expect(shared.content_hash).not.toBe(pkg.contentHash)
     expect(shared.content_hash).toBe((await hashTree(dir)).hash)
-    expect(shared.dir).toBe(sharedName(shared.content_hash))
+    expect(shared.dir).toBe(`${sharedName(shared.content_hash)}/notes`)
     expect(await readFile(path.join(dir, 'skills', 'jot', 'SKILL.md'), 'utf8')).toContain('Jot it down.')
     // The original, the pin's cache, is never written to.
     expect(declaresRemoteServers(pkg.dir)).toBe(true)
@@ -206,7 +207,7 @@ describe('plugin packages in a durable turn', () => {
     expect(call.packages).toBeUndefined()
     const listing = await servers({ session: 's', owner: OWNER, signal, listing: true })
     expect(listing.packages).toEqual([
-      { name: 'notes', dir: sharedName(pkg.contentHash), content_hash: pkg.contentHash, allowed: true, builtin_tools: ['Bash', 'Skill'] },
+      { name: 'notes', dir: `${sharedName(pkg.contentHash)}/notes`, content_hash: pkg.contentHash, allowed: true, builtin_tools: ['Bash', 'Skill'] },
     ])
     expect(listing.problems).toEqual([
       'plugin package broken was not loaded: refused',
@@ -376,7 +377,7 @@ describe('plugin packages in a durable turn', () => {
     const base = { paths, credential: { kind: 'anthropic_api_key' as const, secret: 'sk-ant-test-0000' }, prompt: 'hi' }
     // strictMcpConfig is off with an allowed package: the original would be started by Claude Code.
     expect(() => buildHarnessOptions({ ...base, allowedPluginPaths: [pkg.dir] })).toThrow(PluginRefusedError)
-    const copy = await withoutRemoteServers(pkg.dir, pkg.contentHash, path.join(paths.stateDir, 'plugins-local'))
+    const copy = await withoutRemoteServers(pkg.dir, pkg.contentHash, path.join(paths.stateDir, 'plugins-local'), pkg.name)
     const servers = await forwardPackageServers([pkg], forwarder, async () => ['203.0.113.7'])
     expect(servers.problems.join('\n')).toMatch(/metadata|link-local/)
     const ok = await forwardPackageServers(

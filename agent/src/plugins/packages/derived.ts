@@ -1,22 +1,31 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { declaredConfigs, hookEvents } from '../../harness/plugins.js'
+import { declaredConfigs, hookEvents, noCommand } from '../../harness/plugins.js'
 import { hashTree, PackageContentError } from './hash.js'
-import { declaresRemoteServers, isRemoteEntry, touch } from './mcp.js'
-import { hookId, inlineCommandAt, packageItems, type PackageItems } from './vet.js'
+import { hookId, inlineCommandAt, packageItems, type PackageItems, SAFE_NAME_RE } from './vet.js'
 
 // The copy of a package (or of the own plugin) that a turn loads (#4757): without its http
 // MCP servers, which reach the turn through the forwarder (mcp.ts `forwardPackageServers`;
 // a query with `strictMcpConfig` off would start them itself, harness/run.ts), and without
-// what the turn's access switches off. It is named by its own hash, so two turns with
-// different access to one pin each have their own, and neither overwrites the other's.
+// what the turn's access switches off. It is `<root>/<hex>/<package name>`: named by its own
+// hash, so two turns with different access to one pin each have their own and neither
+// overwrites the other's, in a folder named after the package, because Claude Code 2.1.310
+// names a root skill with no frontmatter `name` by its folder (`_7t`) and a plugin with no
+// manifest name by its folder too ("this plugin is named after its directory"; both read
+// with `strings -n 20` in SDK 0.3.310's bundled `claude`). The durable share keeps the same
+// layout (temporal/turnPackages.ts `sharePackage`), so both runtimes, and every access
+// variant, give such a skill one name: vet.ts `rootSkillName`.
 
 /**
  * What a derived copy leaves out, by name: skills (commands too) and subagents as
  * `packageItems` keys them, hook ids (`hookId`), and the local servers that are switched
  * off or whose names another package server carries (mcp.ts `collidingServerNames`).
+ * Frontmatter names are not read here: an item left in whose frontmatter `name` is an off
+ * item's is still loaded, and Claude Code may offer it under that name (a skills path that
+ * is itself a skill, or a subagent); Task 5's call check refuses such a call through
+ * `PackageReview.aliases`.
  */
 export type Omitted = {
   skills: ReadonlySet<string>
@@ -39,6 +48,22 @@ function serverEntries(map: unknown): [string, unknown][] {
   return isRecord(servers) ? Object.entries(servers) : []
 }
 
+/** Whether a server entry is reached by URL (http, sse): the forwarder's, never Claude Code's. */
+export function isRemoteEntry(config: Record<string, unknown>): boolean {
+  return noCommand(config) && (typeof config.url === 'string' || config.type === 'http' || config.type === 'sse')
+}
+
+/** Whether a plugin directory declares any server reached by URL. */
+export function declaresRemoteServers(dir: string): boolean {
+  return declaredConfigs(dir).mcp.some(({ map }) => serverEntries(map).some(([, c]) => isRecord(c) && isRemoteEntry(c)))
+}
+
+/** Marks a package copy as just used: its folder's mtime is what turnPackages.ts `sweepPackageCopies` reads. */
+export async function touch(dir: string): Promise<void> {
+  const now = new Date()
+  await utimes(dir, now, now).catch(() => {})
+}
+
 function localServerNames(dir: string): string[] {
   return declaredConfigs(dir).mcp.flatMap(({ map }) =>
     serverEntries(map)
@@ -47,23 +72,14 @@ function localServerNames(dir: string): string[] {
   )
 }
 
-/**
- * `packageItems` of `dir`, with a skill at `.` named `rootName`: a package that is one skill
- * is named by its folder, which a copy's is not.
- */
-function itemsOf(dir: string, rootName: string): PackageItems {
-  const items = packageItems(dir, declaredConfigs(dir).manifest)
-  const skills = new Map<string, string[]>()
-  for (const [name, at] of items.skills) {
-    const key = at.includes('.') ? rootName : name
-    skills.set(key, [...(skills.get(key) ?? []), ...at])
-  }
-  return { ...items, skills }
+/** `packageItems` of `dir`, its root skill named after the package `name`. */
+function itemsOf(dir: string, name: string): PackageItems {
+  return packageItems(dir, declaredConfigs(dir).manifest, name)
 }
 
 /** What `dir` holds that `omitted` names, as `kind name` lines. */
-function heldOmitted(dir: string, rootName: string, omitted: Omitted): string[] {
-  const items = itemsOf(dir, rootName)
+function heldOmitted(dir: string, name: string, omitted: Omitted): string[] {
+  const items = itemsOf(dir, name)
   return [
     ...[...items.skills.keys()].filter((n) => omitted.skills.has(n)).map((n) => `skill ${n}`),
     ...[...items.subagents.keys()].filter((n) => omitted.subagents.has(n)).map((n) => `subagent ${n}`),
@@ -124,8 +140,8 @@ function within(root: string, rel: string): string {
 }
 
 /** One round of leaving out, in the copy at `tmp`. */
-async function leaveOut(tmp: string, rootName: string, omitted: Omitted): Promise<void> {
-  const items = itemsOf(tmp, rootName)
+async function leaveOut(tmp: string, name: string, omitted: Omitted): Promise<void> {
+  const items = itemsOf(tmp, name)
   const manifestFile = path.join(tmp, '.claude-plugin', 'plugin.json')
   const manifest = existsSync(manifestFile) ? (JSON.parse(await readFile(manifestFile, 'utf8')) as Record<string, unknown>) : undefined
   let manifestChanged = false
@@ -198,7 +214,7 @@ async function leaveOut(tmp: string, rootName: string, omitted: Omitted): Promis
   if (manifest && manifestChanged) await writeFile(manifestFile, JSON.stringify(manifest))
 }
 
-async function hashesTo(dir: string, hash: string): Promise<boolean> {
+export async function hashesTo(dir: string, hash: string): Promise<boolean> {
   if (!existsSync(dir)) return false
   try {
     return (await hashTree(dir)).hash === hash
@@ -208,15 +224,61 @@ async function hashesTo(dir: string, hash: string): Promise<boolean> {
   }
 }
 
+/** `<root>/<hex of hash>/<name>`, where a copy that hashes to `hash` is loaded from. */
+export function copyPath(root: string, hash: string, name: string): string {
+  const hex = hash.replace(/^sha256:/, '')
+  if (!/^[0-9a-f]{64}$/.test(hex)) throw new Error(`not a package content hash: ${hash}`)
+  if (!SAFE_NAME_RE.test(name)) throw new Error(`not a package name: ${name}`)
+  return path.join(root, hex, name)
+}
+
+/**
+ * Puts the copy at `tmp` (which hashes to `want`) at `target`, so that every read of
+ * `target` sees a whole copy: one there that hashes to `want` (another turn's, perhaps in
+ * use) is kept as it is and `tmp` is left for the caller to remove; one that does not is
+ * moved aside whole before `tmp` is renamed in. Nothing is removed in place. Its folder
+ * (`<hex>`) is touched first: its mtime is what turnPackages.ts `sweepPackageCopies` keeps
+ * it by (#2395), so a sweep that takes it after the touch sees the use and puts it back.
+ */
+export async function placeCopy(tmp: string, target: string, want: string): Promise<void> {
+  const folder = path.dirname(target)
+  await mkdir(folder, { recursive: true })
+  await touch(folder)
+  if (await hashesTo(target, want)) return
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await rename(tmp, target)
+      return
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code !== 'ENOTEMPTY' && code !== 'EEXIST') throw err
+    }
+    // Another turn placed it first: fine when it is the same copy.
+    if (await hashesTo(target, want)) return
+    const aside = path.join(path.dirname(folder), `.sweep-${randomUUID()}`)
+    await rename(target, aside).then(
+      () => rm(aside, { recursive: true, force: true }),
+      (err: NodeJS.ErrnoException) => {
+        if (err.code !== 'ENOENT') throw err
+      },
+    )
+  }
+  throw new Error(`could not place the copy at ${target}`)
+}
+
 /**
  * The package as a turn's Claude Code loads it. `dir` and `contentHash` themselves when it
- * declares no server reached by URL and holds nothing `omitted` names; else a copy under
- * `root`, with links followed (the own plugin's checkout links `skills` and `agents`, which
- * `hashTree` refuses), its http servers and every omitted item left out, named
- * `root/<hex>` by the copy's own hash, which it answers. The own plugin has no pin hash
- * (`contentHash` undefined): only a copy is hashed. A copy is made again from `dir` (re-hashed
- * by its loader) on every call: one already there is kept only while it hashes to the fresh
- * copy, so it is never trusted as it is. The original is never written to. It fails when the
+ * declares no server reached by URL, holds nothing `omitted` names and names nothing by its
+ * folder (it has a manifest name and no root skill); else a copy at
+ * `root/<hex>/<package name>` (`copyPath`), named by the copy's own hash, which it answers,
+ * with links followed (the own plugin's checkout links `skills` and `agents`, which
+ * `hashTree` refuses), and its http servers and every omitted item left out. The package
+ * name is the manifest's, else `name` (the pin's). With a pin hash, the copy must hash to
+ * it before anything is left out: the source is read again after its loader hashed it, and
+ * a link it holds would be followed. The own plugin has no pin hash (`contentHash`
+ * undefined, a trusted image path): only its copy is hashed. A copy is made again from
+ * `dir` on every call: one already there is kept only while it hashes to the fresh copy,
+ * so it is never trusted as it is. The original is never written to. It fails when the
  * copy still declares an http server or an omitted item.
  */
 export async function derivedPackage(
@@ -224,32 +286,31 @@ export async function derivedPackage(
   contentHash: string | undefined,
   root: string,
   omitted: Omitted = NOTHING_OMITTED,
+  name?: string,
 ): Promise<{ dir: string; contentHash: string | undefined }> {
   const source = path.resolve(dir)
-  const rootName = path.basename(source)
-  if (!declaresRemoteServers(source) && heldOmitted(source, rootName, omitted).length === 0) return { dir, contentHash }
+  const manifest = declaredConfigs(source).manifest
+  const pkgName = typeof manifest.name === 'string' ? manifest.name : name
+  if (pkgName === undefined) throw new Error(`${dir} has no name: no manifest name and none given`)
+  if (!SAFE_NAME_RE.test(pkgName)) throw new Error(`${dir} has a name that is not a safe path segment`)
+  const namedByFolder = typeof manifest.name !== 'string' || [...itemsOf(source, pkgName).skills.values()].some((at) => at.includes('.'))
+  if (!namedByFolder && !declaresRemoteServers(source) && heldOmitted(source, pkgName, omitted).length === 0) return { dir, contentHash }
   await mkdir(root, { recursive: true })
   const tmp = path.join(root, `.tmp-${randomUUID()}`)
   try {
     await cp(source, tmp, { recursive: true, dereference: true })
-    for (let pass = 0; pass < PASSES && (declaresRemoteServers(tmp) || heldOmitted(tmp, rootName, omitted).length); pass++) {
-      await leaveOut(tmp, rootName, omitted)
+    if (contentHash !== undefined && (await hashTree(tmp)).hash !== contentHash) {
+      throw new Error(`the copy of ${dir} does not hash to its pin`)
+    }
+    for (let pass = 0; pass < PASSES && (declaresRemoteServers(tmp) || heldOmitted(tmp, pkgName, omitted).length); pass++) {
+      await leaveOut(tmp, pkgName, omitted)
     }
     if (declaresRemoteServers(tmp)) throw new Error(`could not strip the http MCP servers of ${dir}`)
-    const left = heldOmitted(tmp, rootName, omitted)
+    const left = heldOmitted(tmp, pkgName, omitted)
     if (left.length) throw new Error(`could not leave out ${left.join(', ')} of ${dir}`)
     const want = (await hashTree(tmp)).hash
-    const target = path.join(root, want.replace(/^sha256:/, ''))
-    // Its last use, which turnPackages.ts `sweepPackageCopies` keeps it by (#2395),
-    // touched before it is checked, as sharePackage does.
-    await touch(target)
-    if (!(await hashesTo(target, want))) {
-      await rm(target, { recursive: true, force: true })
-      await rename(tmp, target).catch(async (err: NodeJS.ErrnoException) => {
-        // Another turn placed it first: fine when it is the same copy.
-        if ((err.code !== 'ENOTEMPTY' && err.code !== 'EEXIST') || !(await hashesTo(target, want))) throw err
-      })
-    }
+    const target = copyPath(root, want, pkgName)
+    await placeCopy(tmp, target, want)
     return { dir: target, contentHash: want }
   } finally {
     await rm(tmp, { recursive: true, force: true })

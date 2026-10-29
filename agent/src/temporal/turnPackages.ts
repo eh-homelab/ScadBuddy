@@ -13,9 +13,8 @@ import {
   collisionProblem,
   packageServerName,
   type ServerAccess,
-  touch,
-  withoutRemoteServers,
 } from '../plugins/packages/mcp.js'
+import { copyPath, derivedPackage, NOTHING_OMITTED, placeCopy, touch } from '../plugins/packages/derived.js'
 import { pluginTierResolver } from '../plugins/registry.js'
 import { type TurnPackage, type TurnServer } from './turnTools.js'
 
@@ -24,7 +23,7 @@ import { type TurnPackage, type TurnServer } from './turnTools.js'
 // its pin and re-hashed for the turn (plugins/packages/install.ts `loadPackagesForRun`).
 // A durable turn's Claude Code runs in the agent-durable container, so:
 //
-//   - each loaded package is copied to `<payload dir>/plugins/<content hash>/`, on the
+//   - each loaded package is copied to `<payload dir>/plugins/<content hash>/<name>/`, on the
 //     volume both sidecars mount, once per content hash (it never changes under that
 //     name), and the turn's listing names it (`TurnPackage`); the segment runner hashes
 //     the copy again before it loads it, as the agent re-hashes its own cache;
@@ -55,40 +54,37 @@ export function sharedName(contentHash: string): string {
 }
 
 /**
- * Copies a loaded package to `root/<hash>` unless a copy that hashes to `<hash>` is
- * already there, and returns its name under `root`. A copy that does not match is
- * replaced: the volume is shared, so it is checked, never trusted. A package that
- * declares an http MCP server is shared without it (`withoutRemoteServers`, made under
- * `localRoot`), named by that copy's own hash: Claude Code in agent-durable would reach
- * it itself, past the forwarder, and the segment runner refuses a copy that declares one.
+ * Copies a loaded package to `root/<hash>/<package name>` unless a copy that hashes to
+ * `<hash>` is already there, and returns it as the turn lists it (`dir` is
+ * `<hash>/<package name>`, under `root`). The folder is named after the package, as the
+ * classic copy is (plugins/packages/derived.ts), so Claude Code names a root skill and a
+ * package with no manifest name alike in both runtimes. A copy that does not match is moved
+ * aside whole and replaced (`placeCopy`): the volume is shared, so it is checked, never
+ * trusted. The source is `derivedPackage`'s, made under `localRoot`: without the package's
+ * http MCP servers, which Claude Code in agent-durable would reach itself, past the
+ * forwarder (the segment runner refuses a copy that declares one), named by that copy's
+ * own hash.
  */
 export async function sharePackage(pkg: LoadedPackage, root: string, localRoot: string): Promise<TurnPackage> {
-  const source = await withoutRemoteServers(pkg.dir, pkg.contentHash, localRoot)
-  const contentHash = source === pkg.dir ? pkg.contentHash : (await hashTree(source)).hash
+  const source = await derivedPackage(pkg.dir, pkg.contentHash, localRoot, NOTHING_OMITTED, pkg.name)
+  const contentHash = source.contentHash ?? pkg.contentHash
   const name = sharedName(contentHash)
-  const target = path.join(root, name)
+  const target = copyPath(root, contentHash, pkg.name)
   // Its last share, which the sweep keeps it by (sweepPackageCopies): touched before
   // it is checked, so a sweep that takes it after the touch sees the share and puts it back.
-  await touch(target)
+  await touch(path.dirname(target))
   if (!(await matches(target, contentHash))) {
     await mkdir(root, { recursive: true })
     const tmp = path.join(root, `.tmp-${randomUUID()}`)
     try {
-      await cp(source, tmp, { recursive: true, preserveTimestamps: true })
+      await cp(source.dir, tmp, { recursive: true, preserveTimestamps: true })
       if (!(await matches(tmp, contentHash))) throw new Error(`the copy of ${pkg.name} does not hash to its pin`)
-      await rm(target, { recursive: true, force: true })
-      try {
-        await rename(tmp, target)
-      } catch (err) {
-        // Another replica placed it first: fine when it matches.
-        const code = (err as NodeJS.ErrnoException).code
-        if ((code !== 'ENOTEMPTY' && code !== 'EEXIST') || !(await matches(target, contentHash))) throw err
-      }
+      await placeCopy(tmp, target, contentHash)
     } finally {
       await rm(tmp, { recursive: true, force: true })
     }
   }
-  return { name: pkg.name, dir: name, content_hash: contentHash, allowed: pkg.allowed, builtin_tools: [...pkg.builtinTools] }
+  return { name: pkg.name, dir: `${name}/${pkg.name}`, content_hash: contentHash, allowed: pkg.allowed, builtin_tools: [...pkg.builtinTools] }
 }
 
 /** A copy is kept this long after the last turn that shared it (#2395). */
