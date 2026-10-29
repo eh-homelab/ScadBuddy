@@ -42,8 +42,6 @@ from tests.support.fake_lan import (
     needs_fake_lan,
     start_fake_printer,
 )
-from tests.support.fake_lan import free_port as _free_port
-from tests.support.fake_lan import load_fake_printer as _load
 
 pytestmark = needs_fake_lan
 
@@ -156,7 +154,7 @@ class _Lan:
 
 @pytest.fixture
 async def lan(tmp_path: Path) -> AsyncIterator[_Lan]:
-    module = _load()
+    module = fake_lan.load_fake_printer()
     cert = tmp_path / "state" / "cert.pem"
     _, task, ports = await start_fake_printer(
         module,
@@ -376,7 +374,7 @@ async def test_a_project_file_naming_no_uploaded_file_fails(
     ],
 )
 def test_resolve_url(url: str, file: str, path: str | None) -> None:
-    assert _load().resolve_url(url, file) == path
+    assert fake_lan.load_fake_printer().resolve_url(url, file) == path
 
 
 async def test_bblp_may_use_only_its_printers_topics(lan: _Lan) -> None:
@@ -395,7 +393,7 @@ async def test_bblp_may_use_only_its_printers_topics(lan: _Lan) -> None:
 
 
 async def test_the_certificate_survives_a_restart(tmp_path: Path) -> None:
-    module = _load()
+    module = fake_lan.load_fake_printer()
     state = tmp_path / "state"
     state.mkdir()
     printer = module.FakePrinter(
@@ -410,9 +408,9 @@ async def test_the_certificate_survives_a_restart(tmp_path: Path) -> None:
 async def test_a_taken_control_port_fails_the_start_with_its_bind_error(tmp_path: Path) -> None:
     """The bind's own error, which the fixtures retry on new ports: the cleanup must not
     replace it by joining the threads that never started (#4541's CI job hit it)."""
-    module = _load()
+    module = fake_lan.load_fake_printer()
     assert MOSQUITTO is not None
-    ftps_port = _free_port()
+    ftps_port = fake_lan.free_port()
     with socket.socket() as taken:
         taken.bind(("127.0.0.1", 0))
         taken.listen()
@@ -421,7 +419,7 @@ async def test_a_taken_control_port_fails_the_start_with_its_bind_error(tmp_path
                 serial=SERIAL,
                 access_code=ACCESS_CODE,
                 host="127.0.0.1",
-                mqtt_port=_free_port(),
+                mqtt_port=fake_lan.free_port(),
                 ftps_port=ftps_port,
                 control_port=taken.getsockname()[1],
                 sdcard=tmp_path / "sdcard",
@@ -440,7 +438,7 @@ async def test_a_taken_control_port_fails_the_start_with_its_bind_error(tmp_path
 async def test_a_taken_ftps_port_fails_the_start_with_its_bind_error(tmp_path: Path) -> None:
     """pyftpdlib wraps a failed bind in an OSError with no errno; the fake raises the
     bind's own, so the fixtures see EADDRINUSE and retry (#4944)."""
-    module = _load()
+    module = fake_lan.load_fake_printer()
     assert MOSQUITTO is not None
     with socket.socket() as taken:
         taken.bind(("127.0.0.1", 0))
@@ -450,9 +448,9 @@ async def test_a_taken_ftps_port_fails_the_start_with_its_bind_error(tmp_path: P
                 serial=SERIAL,
                 access_code=ACCESS_CODE,
                 host="127.0.0.1",
-                mqtt_port=_free_port(),
+                mqtt_port=fake_lan.free_port(),
                 ftps_port=taken.getsockname()[1],
-                control_port=_free_port(),
+                control_port=fake_lan.free_port(),
                 sdcard=tmp_path / "sdcard",
                 state=tmp_path / "state",
                 mosquitto=MOSQUITTO,
@@ -461,6 +459,9 @@ async def test_a_taken_ftps_port_fails_the_start_with_its_bind_error(tmp_path: P
         with pytest.raises(OSError) as raised:
             await asyncio.wait_for(printer.run(), 60)
     assert raised.value.errno == errno.EADDRINUSE
+    # Raised from pyftpdlib's wrapper, which carries the same error and no errno.
+    assert isinstance(raised.value.__cause__, OSError)
+    assert raised.value.__cause__.args == (raised.value,)
 
 
 async def test_the_start_moves_past_a_taken_ftps_port(
@@ -468,13 +469,14 @@ async def test_the_start_moves_past_a_taken_ftps_port(
 ) -> None:
     """The first FTPS port picked is taken by the time the fake binds it (#4944's CI
     job): the start picks new ports and comes up."""
-    module = _load()
+    module = fake_lan.load_fake_printer()
     with socket.socket() as taken:
         taken.bind(("127.0.0.1", 0))
         taken.listen()
         # mqtt, ftps, control: the first start's FTPS port is the taken one.
-        picks = iter([_free_port(), taken.getsockname()[1], _free_port()])
-        monkeypatch.setattr(fake_lan, "free_port", lambda: next(picks, None) or _free_port())
+        free_port = fake_lan.free_port  # the real picker, before it is replaced below
+        picks = iter([free_port(), taken.getsockname()[1], free_port()])
+        monkeypatch.setattr(fake_lan, "free_port", lambda: next(picks, None) or free_port())
         starts: list[fake_lan.Ports] = []
 
         def config_for(ports: fake_lan.Ports) -> Any:
