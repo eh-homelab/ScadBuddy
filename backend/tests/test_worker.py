@@ -24,10 +24,19 @@ import psycopg
 import pytest
 from google.protobuf.timestamp_pb2 import Timestamp
 from temporalio import workflow
-from temporalio.api.deployment.v1 import WorkerDeploymentOptions
+from temporalio.api.deployment.v1 import (
+    VersionMetadata,
+    WorkerDeploymentOptions,
+    WorkerDeploymentVersionInfo,
+)
 from temporalio.api.enums.v1 import TaskQueueType
 from temporalio.api.taskqueue.v1 import PollerInfo, TaskQueue
-from temporalio.api.workflowservice.v1 import DescribeTaskQueueRequest, DescribeTaskQueueResponse
+from temporalio.api.workflowservice.v1 import (
+    DescribeTaskQueueRequest,
+    DescribeTaskQueueResponse,
+    DescribeWorkerDeploymentVersionRequest,
+    DescribeWorkerDeploymentVersionResponse,
+)
 from temporalio.client import Client
 from temporalio.common import VersioningBehavior
 from temporalio.runtime import Runtime, TelemetryConfig
@@ -74,12 +83,16 @@ from scadbuddy.worker import (
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
+    DRAINING_MARK,
     POLLER_SEEN_WITHIN,
     connect_lazily,
     current_routing,
+    drain_mark,
     drained,
+    draining_marks,
     is_current,
     make_current,
+    mark_draining,
     polled_elsewhere,
 )
 from scadbuddy.workflows.models import piece_key
@@ -489,16 +502,42 @@ def _poller(
     )
 
 
-def _described(*pollers: PollerInfo) -> Client:
+def _described(
+    *pollers: PollerInfo, marks: dict[str, float] | None = None, metadata_fails: bool = False
+) -> Client:
+    """A client whose queue has ``pollers`` and whose version of ``b1`` holds a drain mark
+    ``marks[identity]`` seconds old for each identity in ``marks``."""
+
     async def describe(request: DescribeTaskQueueRequest, **_: object) -> DescribeTaskQueueResponse:
         assert request.task_queue.name == "render"
         assert request.task_queue_type == TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW
         return DescribeTaskQueueResponse(pollers=list(pollers))
 
+    async def describe_version(
+        request: DescribeWorkerDeploymentVersionRequest, **_: object
+    ) -> DescribeWorkerDeploymentVersionResponse:
+        assert request.deployment_version.deployment_name == DEPLOYMENT_NAME
+        assert request.deployment_version.build_id == "b1"
+        if metadata_fails:
+            raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+        now = datetime.now(UTC)
+        entries = {
+            f"{DRAINING_MARK}{identity}": drain_mark(now - timedelta(seconds=age))
+            for identity, age in (marks or {}).items()
+        }
+        return DescribeWorkerDeploymentVersionResponse(
+            worker_deployment_version_info=WorkerDeploymentVersionInfo(
+                metadata=VersionMetadata(entries=entries)
+            )
+        )
+
     return cast(
         Client,
         SimpleNamespace(
-            namespace="default", workflow_service=SimpleNamespace(describe_task_queue=describe)
+            namespace="default",
+            workflow_service=SimpleNamespace(
+                describe_task_queue=describe, describe_worker_deployment_version=describe_version
+            ),
         ),
     )
 
@@ -529,8 +568,60 @@ async def test_polled_elsewhere_counts_only_a_recent_poller_of_this_build_not_th
             deployment_name=DEPLOYMENT_NAME,
             build_id="b1",
             identities={"me@pod-a"},
+            marked_within=MARKED_WITHIN,
         )
         is elsewhere
+    )
+
+
+MARKED_WITHIN = 600.0
+
+
+@pytest.mark.parametrize(
+    ("marks", "elsewhere"),
+    [
+        ({"other@pod-b": 5}, False),  # both pods stopping: the other one drains too
+        ({"other@pod-b": MARKED_WITHIN + 5}, True),  # a stale mark is ignored
+        ({"me@pod-a": 5}, True),  # this worker's own mark says nothing of the other
+        ({"other@pod-b": 5, "fresh@pod-c": MARKED_WITHIN + 5}, True),
+    ],
+)
+async def test_polled_elsewhere_skips_a_poller_that_marked_itself_draining(
+    marks: dict[str, float], elsewhere: bool
+) -> None:
+    """#4948: a draining worker keeps polling, so two pods of one build that stop together
+    each saw the other polling and both left their pinned runs."""
+    client = _described(
+        _poller("me@pod-a", "b1", age=0),
+        _poller("other@pod-b", "b1", age=1),
+        *([_poller("fresh@pod-c", "b1", age=1)] if "fresh@pod-c" in marks else []),
+        marks=marks,
+    )
+    assert (
+        await polled_elsewhere(
+            client,
+            "render",
+            deployment_name=DEPLOYMENT_NAME,
+            build_id="b1",
+            identities={"me@pod-a"},
+            marked_within=MARKED_WITHIN,
+        )
+        is elsewhere
+    )
+
+
+async def test_polled_elsewhere_is_false_when_the_marks_cannot_be_read() -> None:
+    """#4948: an unread mark may be the other pod's drain, so the safe answer is no."""
+    client = _described(
+        _poller("me@pod-a", "b1", age=0), _poller("other@pod-b", "b1", age=1), metadata_fails=True
+    )
+    assert not await polled_elsewhere(
+        client,
+        "render",
+        deployment_name=DEPLOYMENT_NAME,
+        build_id="b1",
+        identities={"me@pod-a"},
+        marked_within=MARKED_WITHIN,
     )
 
 
@@ -559,11 +650,9 @@ def _pinned_worker(
     )
 
 
-async def _stop_and_drain(
-    monkeypatch: pytest.MonkeyPatch, client: Client, queue: str, build_id: str, timeout: float
-) -> None:
-    """`_serve_versioned` of one worker, stopped at once, its build current and its runs
-    never drained."""
+def _patch_drain(monkeypatch: pytest.MonkeyPatch, build_id: str) -> None:
+    """Every `_serve_versioned` of the test sees its build current and its runs never
+    drained, and is never made current for real."""
 
     async def routing(*_: object, **__: object) -> tuple[str | None, bytes]:
         return build_id, b""
@@ -577,12 +666,18 @@ async def _stop_and_drain(
     monkeypatch.setattr(worker_module, "drained", _never_drained)
     monkeypatch.setattr(worker_module, "DRAIN_POLL", 0.05)
     monkeypatch.setattr(worker_module, "DRAIN_CURRENT_GRACE", 0.0)
+
+
+async def _serve_and_stop(
+    client: Client, queue: str, build_id: str, timeout: float, identity: str | None = None
+) -> None:
+    """`_serve_versioned` of one worker, stopped at once (`_patch_drain` first)."""
     stop = asyncio.Event()
     stop.set()
     await asyncio.wait_for(
         _serve_versioned(
             client,
-            [_pinned_worker(client, queue, build_id)],
+            [_pinned_worker(client, queue, build_id, identity=identity)],
             stop,
             build_id=build_id,
             deployment_name=DEPLOYMENT_NAME,
@@ -591,6 +686,31 @@ async def _stop_and_drain(
         ),
         timeout + 30,
     )
+
+
+async def _stop_and_drain(
+    monkeypatch: pytest.MonkeyPatch, client: Client, queue: str, build_id: str, timeout: float
+) -> None:
+    """`_serve_versioned` of one worker, stopped at once, its build current and its runs
+    never drained."""
+    _patch_drain(monkeypatch, build_id)
+    await _serve_and_stop(client, queue, build_id, timeout)
+
+
+async def _another_pod(client: Client) -> Client:
+    """A client in a runtime of its own, as another pod's: the SDK refuses two workers of
+    one build and queue in one runtime."""
+    return await Client.connect(
+        client.service_client.config.target_host,
+        namespace=client.namespace,
+        runtime=Runtime(telemetry=TelemetryConfig()),
+    )
+
+
+async def _until_polled(client: Client, queue: str) -> None:
+    async with asyncio.timeout(10):
+        while not await _pollers(client, queue):
+            await asyncio.sleep(0.1)
 
 
 @pytest.mark.requires_temporal
@@ -618,21 +738,124 @@ async def test_a_current_build_another_worker_of_polls_stops_without_draining(
     build_id = f"test-{uuid.uuid4().hex[:8]}"
     queue = f"t-{uuid.uuid4().hex[:8]}"
     async with temporal_client() as client:
-        # The next pod: a process of its own, as the SDK refuses two workers of one build
-        # and queue in one runtime.
-        next_pod = await Client.connect(
-            client.service_client.config.target_host,
-            namespace=client.namespace,
-            runtime=Runtime(telemetry=TelemetryConfig()),
-        )
+        next_pod = await _another_pod(client)
         async with _pinned_worker(next_pod, queue, build_id, identity=f"next-pod-{build_id}"):
-            async with asyncio.timeout(10):
-                while not await _pollers(client, queue):
-                    await asyncio.sleep(0.1)
+            await _until_polled(client, queue)
             with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
                 await _stop_and_drain(monkeypatch, client, queue, build_id, timeout=30.0)
     messages = [r.getMessage() for r in caplog.records]
     assert any(m.startswith("stopping without draining") for m in messages), messages
+
+
+@pytest.mark.requires_temporal
+async def test_two_draining_workers_of_a_current_build_both_keep_draining(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#4948: both pods of one build stopped together (a node drain that evicts both). A
+    draining worker keeps polling, so each counted the other and both left their runs."""
+    build_id = f"test-{uuid.uuid4().hex[:8]}"
+    queue = f"t-{uuid.uuid4().hex[:8]}"
+    _patch_drain(monkeypatch, build_id)
+    # As in production, the grace lets both marks land before either trusts "current";
+    # without it the first to mark may leave, and the other then drains in full. The
+    # version exists only once a worker polls, so a mark's first write may be refused.
+    monkeypatch.setattr(worker_module, "DRAIN_CURRENT_GRACE", 5.0)
+    async with temporal_client() as client:
+        other = await _another_pod(client)
+        with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+            await asyncio.gather(
+                _serve_and_stop(client, queue, build_id, 10.0, identity=f"pod-a-{build_id}"),
+                _serve_and_stop(other, queue, build_id, 10.0, identity=f"pod-b-{build_id}"),
+            )
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum(m.startswith("drain timed out") for m in messages) == 2, messages
+    assert not any(m.startswith("stopping without draining") for m in messages)
+
+
+@pytest.mark.requires_temporal
+async def test_a_restarted_worker_clears_its_mark_and_a_draining_peer_leaves_runs_to_it(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#4948: a container restarted in its pod keeps its identity. Its last life's mark
+    would make a draining peer drain in full, though the restarted worker serves."""
+    build_id = f"test-{uuid.uuid4().hex[:8]}"
+    queue = f"t-{uuid.uuid4().hex[:8]}"
+    identity = f"next-pod-{build_id}"
+    _patch_drain(monkeypatch, build_id)
+    async with temporal_client() as client:
+        next_pod = await _another_pod(client)
+        # Its last life: it began a drain and was killed before it cleared anything.
+        async with _pinned_worker(next_pod, queue, build_id, identity=identity):
+            await _until_polled(client, queue)
+            async with asyncio.timeout(30):
+                while True:
+                    with contextlib.suppress(RPCError):
+                        await mark_draining(
+                            next_pod,
+                            deployment_name=DEPLOYMENT_NAME,
+                            build_id=build_id,
+                            identities={identity},
+                            since=datetime.now(UTC),
+                        )
+                        break
+                    await asyncio.sleep(0.2)
+        assert identity in await _marks(client, build_id)
+
+        stop, stop_now = asyncio.Event(), asyncio.Event()
+        restarted = asyncio.create_task(
+            _serve_versioned(
+                next_pod,
+                [_pinned_worker(next_pod, queue, build_id, identity=identity)],
+                stop,
+                build_id=build_id,
+                deployment_name=DEPLOYMENT_NAME,
+                task_queue=queue,
+                drain_timeout=30.0,
+                stop_now=stop_now,
+            )
+        )
+        try:
+            async with asyncio.timeout(30):
+                while identity in await _marks(client, build_id):
+                    await asyncio.sleep(0.2)
+            await _until_polled(client, queue)
+            with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+                await _serve_and_stop(client, queue, build_id, 30.0, identity=f"pod-a-{build_id}")
+        finally:
+            stop.set()
+            stop_now.set()
+            await asyncio.wait_for(restarted, 30)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("stopping without draining") for m in messages), messages
+
+
+@pytest.mark.requires_temporal
+async def test_a_worker_that_cannot_mark_itself_draining_keeps_draining(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#4948: unmarked, it looks to a stopping peer like a worker that serves, so it never
+    trusts the peer either."""
+    build_id = f"test-{uuid.uuid4().hex[:8]}"
+    queue = f"t-{uuid.uuid4().hex[:8]}"
+
+    async def refused(*_: object, **__: object) -> None:
+        raise RPCError("unavailable", RPCStatusCode.UNAVAILABLE, b"")
+
+    _patch_drain(monkeypatch, build_id)
+    monkeypatch.setattr(worker_module, "mark_draining", refused)
+    async with temporal_client() as client:
+        next_pod = await _another_pod(client)
+        async with _pinned_worker(next_pod, queue, build_id, identity=f"next-pod-{build_id}"):
+            await _until_polled(client, queue)
+            with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+                await _serve_and_stop(client, queue, build_id, 3.0)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("drain timed out") for m in messages), messages
+    assert not any(m.startswith("stopping without draining") for m in messages)
+
+
+async def _marks(client: Client, build_id: str) -> dict[str, datetime]:
+    return await draining_marks(client, deployment_name=DEPLOYMENT_NAME, build_id=build_id)
 
 
 async def _write_refusal(

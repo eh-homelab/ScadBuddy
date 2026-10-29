@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from temporalio.api.common.v1 import Payload
+from temporalio.api.deployment.v1 import WorkerDeploymentVersion as DeploymentVersion
 from temporalio.api.enums.v1 import TaskQueueKind, TaskQueueType
 from temporalio.api.taskqueue.v1 import TaskQueue
 from temporalio.api.workflowservice.v1 import (
     CountWorkflowExecutionsRequest,
     DescribeTaskQueueRequest,
     DescribeWorkerDeploymentRequest,
+    DescribeWorkerDeploymentVersionRequest,
     SetWorkerDeploymentCurrentVersionRequest,
+    UpdateWorkerDeploymentVersionMetadataRequest,
 )
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.common import VersioningBehavior
@@ -65,6 +70,10 @@ RPC_TIMEOUT = timedelta(seconds=10)
 #: `last_access_time` moves only when a poll arrives, so a live idle worker can look 60
 #: to 70 s old.
 POLLER_SEEN_WITHIN = 90.0
+#: A draining worker's mark in its build version's metadata (#4948): this prefix and the
+#: worker's identity, the value when its drain began (`drain_mark`). A draining worker
+#: keeps polling, so its polls alone cannot tell it from one that serves.
+DRAINING_MARK = "draining:"
 
 logger = logging.getLogger(__name__)
 
@@ -333,6 +342,81 @@ async def routes_to(
     return True
 
 
+def drain_mark(since: datetime) -> Payload:
+    """A `DRAINING_MARK` entry's value: ``since`` in seconds since the epoch, as JSON."""
+    return Payload(
+        metadata={"encoding": b"json/plain"}, data=json.dumps(since.timestamp()).encode()
+    )
+
+
+async def mark_draining(
+    client: Client,
+    *,
+    deployment_name: str,
+    build_id: str,
+    identities: Collection[str],
+    since: datetime,
+) -> None:
+    """Mark ``identities`` (one worker's) draining since ``since`` in the version's
+    metadata (#4948). The version exists only once a worker of it has polled: until then
+    Temporal refuses the write."""
+    await client.workflow_service.update_worker_deployment_version_metadata(
+        UpdateWorkerDeploymentVersionMetadataRequest(
+            namespace=client.namespace,
+            deployment_version=DeploymentVersion(
+                deployment_name=deployment_name, build_id=build_id
+            ),
+            upsert_entries={
+                f"{DRAINING_MARK}{identity}": drain_mark(since) for identity in identities
+            },
+        ),
+        timeout=RPC_TIMEOUT,
+    )
+
+
+async def clear_draining(
+    client: Client, *, deployment_name: str, build_id: str, identities: Collection[str]
+) -> None:
+    """Remove the marks of ``identities``: a container restarted in its pod keeps its
+    identity, and its last life's mark must not make a peer skip it (#4948)."""
+    await client.workflow_service.update_worker_deployment_version_metadata(
+        UpdateWorkerDeploymentVersionMetadataRequest(
+            namespace=client.namespace,
+            deployment_version=DeploymentVersion(
+                deployment_name=deployment_name, build_id=build_id
+            ),
+            remove_entries=[f"{DRAINING_MARK}{identity}" for identity in identities],
+        ),
+        timeout=RPC_TIMEOUT,
+    )
+
+
+async def draining_marks(
+    client: Client, *, deployment_name: str, build_id: str
+) -> dict[str, datetime]:
+    """Each marked identity and when its drain began. A mark that does not parse counts
+    as new: it is then skipped, and the reader drains in full."""
+    described = await client.workflow_service.describe_worker_deployment_version(
+        DescribeWorkerDeploymentVersionRequest(
+            namespace=client.namespace,
+            deployment_version=DeploymentVersion(
+                deployment_name=deployment_name, build_id=build_id
+            ),
+        ),
+        timeout=RPC_TIMEOUT,
+    )
+    marks: dict[str, datetime] = {}
+    for key, value in described.worker_deployment_version_info.metadata.entries.items():
+        if not key.startswith(DRAINING_MARK):
+            continue
+        try:
+            since = datetime.fromtimestamp(float(json.loads(value.data)), UTC)
+        except (ValueError, TypeError, OverflowError):
+            since = datetime.now(UTC)
+        marks[key.removeprefix(DRAINING_MARK)] = since
+    return marks
+
+
 async def polled_elsewhere(
     client: Client,
     task_queue: str,
@@ -340,6 +424,7 @@ async def polled_elsewhere(
     deployment_name: str,
     build_id: str,
     identities: Collection[str],
+    marked_within: float,
     within: float = POLLER_SEEN_WITHIN,
 ) -> bool:
     """Whether a worker of ``build_id`` other than ``identities`` (the asking
@@ -347,7 +432,11 @@ async def polled_elsewhere(
     `DescribeTaskQueue`'s pollers, which name each one's identity and build (measured on
     prod, 2026-10-27). A stopping worker leaves its pinned runs to such a worker only
     (#4869): in a rollout the build is still current while the new pods, of the next
-    build, start, and none of them serves a run pinned to this one."""
+    build, start, and none of them serves a run pinned to this one.
+
+    A poller marked draining in the last ``marked_within`` seconds (`mark_draining`) does
+    not count (#4948): two pods of one build that stop together would each count the
+    other. When the marks cannot be read, the answer is False."""
     described = await client.workflow_service.describe_task_queue(
         DescribeTaskQueueRequest(
             namespace=client.namespace,
@@ -356,14 +445,25 @@ async def polled_elsewhere(
         ),
         timeout=RPC_TIMEOUT,
     )
-    since = datetime.now(UTC) - timedelta(seconds=within)
-    return any(
-        poller.deployment_options.deployment_name == deployment_name
+    now = datetime.now(UTC)
+    since = now - timedelta(seconds=within)
+    others = {
+        poller.identity
+        for poller in described.pollers
+        if poller.deployment_options.deployment_name == deployment_name
         and poller.deployment_options.build_id == build_id
         and poller.identity not in identities
         and poller.last_access_time.ToDatetime(tzinfo=UTC) >= since
-        for poller in described.pollers
-    )
+    }
+    if not others:
+        return False
+    try:
+        marks = await draining_marks(client, deployment_name=deployment_name, build_id=build_id)
+    except RPCError:
+        logger.warning("could not read this build's drain marks", exc_info=True)
+        return False
+    marked_since = now - timedelta(seconds=marked_within)
+    return any(identity not in marks or marks[identity] < marked_since for identity in others)
 
 
 async def is_current(

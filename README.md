@@ -567,7 +567,15 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   that build polls the render queue (seen in the last 90 s), as on a restart of the
   same build (a manifest change, a node drain), it stops after 30 s instead, because
   that worker serves its pinned runs; it logs "stopping without draining" then. A
-  current build with no other poller of it drains in full (#4869). The drain lasts at
+  current build with no other poller of it drains in full (#4869). A draining worker
+  keeps polling, so at the drain's start it marks itself draining in its build
+  version's metadata (an entry `draining:<identity>` holding the time, through
+  `UpdateWorkerDeploymentVersionMetadata`), and a stopping worker does not count a
+  poller with such a mark (#4948). So two pods of one build that stop together (a
+  node drain that evicts both) both drain in full. A worker that cannot write its
+  mark trusts no other poller; one that cannot read the marks drains in full. A
+  mark older than the drain's bound plus 150 s is ignored, and a worker removes its
+  own at start, since a container restarted in its pod keeps its identity. The drain lasts at
   most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
   SDK gives in-flight activities up to `SCADBUDDY_RENDER_TIMEOUT + 60` s. If the
   drain's bound passes first, the worker exits anyway (it logs "drain timed out"):
