@@ -20,6 +20,7 @@ import { isInside } from '../src/harness/plugins.js'
 import {
   capProblems,
   frontmatter,
+  cutName,
   hookId,
   HOOK_URL_CAP,
   isAllowlistedTool,
@@ -362,6 +363,17 @@ describe("a package's items (#4757)", () => {
     expect(v.endpoints).toContainEqual({ what: 'hooks/hooks.json Stop hook', url })
     const atCap = `https://hooks.example/${'u'.repeat(HOOK_URL_CAP - 'https://hooks.example/'.length)}`
     expect(vetPackage(tree({ ...GREETER, ...hooksFile([{ hooks: [{ type: 'http', url: atCap }] }]) })).review!.hooks[0]!.url).toBe(atCap)
+  })
+
+  it('names each cut once, however many hooks it hits', () => {
+    const event = 'E'.repeat(300)
+    const url = `https://hooks.example/${'u'.repeat(HOOK_URL_CAP)}`
+    const hook = { matcher: 'm'.repeat(2_000), hooks: [{ type: 'http', url }] }
+    const review = vetPackage(tree({ ...GREETER, 'hooks/hooks.json': JSON.stringify({ hooks: { [event]: [hook, hook] } }) })).review!
+    expect(review.hooks).toHaveLength(2)
+    const shown = cutName(event)
+    expect(shown).toBe('E'.repeat(LISTING_CAPS.name))
+    expect(review.cut).toEqual([`hooks/hooks.json ${shown} event`, `hooks/hooks.json ${shown} matcher`, `hooks/hooks.json ${shown} url`])
   })
 
   it("a hook's id changes with its url", () => {

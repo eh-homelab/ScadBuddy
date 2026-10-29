@@ -482,7 +482,16 @@ const MATCHER_CAP = LISTING_CAPS.title
 /** A hook url longer than this is refused (allowable), never stored cut: a cut url is another endpoint. */
 export const HOOK_URL_CAP = 2_048
 
-/** `text` cut to `max` and made storable; `what` joins `cut` when it was longer. */
+/**
+ * A name as a review stores it: a frontmatter `name` (an alias key) or a hook event, cut to
+ * `LISTING_CAPS.name` and made storable. Task 5 cuts a Skill/Agent call's name with this
+ * before it looks the name up in `aliases`, so the two agree.
+ */
+export function cutName(text: string): string {
+  return storableCut(text, NAME_CAP)
+}
+
+/** `text` cut to `max` and made storable; `what` joins `cut` (once) when it was longer. */
 function capped(text: string, max: number, what: string, cut: string[]): string {
   if (text.length > max && !cut.includes(what)) cut.push(what)
   return storableCut(text, max)
@@ -582,7 +591,7 @@ function itemsOf(root: string, manifest: Record<string, unknown>): ItemsRead {
   const hooks = declaredConfigs(root).hooks.flatMap(({ where, config }) =>
     hookHandlers(config).map(({ event, matcher, handler }) => ({
       id: hookId(event, matcher, handler),
-      event: storableCut(event, NAME_CAP),
+      event: cutName(event),
       where: configAt(where),
     })),
   )
@@ -644,7 +653,7 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
     for (const { event, matcher, handler } of hookHandlers(config)) {
       const type = isRecord(handler) && typeof handler.type === 'string' ? handler.type : 'command'
       // The id is the hook's own, uncut; what the review shows (and says of it) is capped.
-      const shown = storableCut(event, NAME_CAP)
+      const shown = cutName(event)
       if (event.length > NAME_CAP) cut.push(`${where} ${shown} event`)
       const hook: ReviewHook = { event: shown, type: capped(type, NAME_CAP, `${where} ${shown} type`, cut), id: hookId(event, matcher, handler) }
       if (typeof matcher === 'string') hook.matcher = capped(matcher, MATCHER_CAP, `${where} ${shown} matcher`, cut)
@@ -718,7 +727,7 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
         builtin_tools: [...builtins].sort(),
         described: Object.fromEntries(items.described),
         aliases: Object.fromEntries(items.items.aliases),
-        cut,
+        cut: [...new Set(cut)],
       }
     : undefined
 
