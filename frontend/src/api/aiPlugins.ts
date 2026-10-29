@@ -251,6 +251,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
+/** The same request for the agent's other route groups (`api/capabilities.ts`). */
+export { request as aiRequest }
+
 /** The problems a refused install lists (422), or none. */
 export function refusalProblems(error: unknown): string[] {
   if (!(error instanceof ApiError)) return []

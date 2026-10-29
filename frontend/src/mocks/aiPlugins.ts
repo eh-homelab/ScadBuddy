@@ -25,6 +25,7 @@ import type {
   RemotePlugin,
   RemotePluginCreate,
   RemotePluginPatch,
+  RiskTier,
 } from '../api/aiPlugins'
 
 const base = '/api/v1/ai'
@@ -186,7 +187,8 @@ export function seedStoredPackage(name: string): void {
   state.packages.set(name, { ...greeter, name, approved: true, approved_at: now(), enabled: true })
 }
 
-function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
+/** The tools a test lists for `plugin`: `recall` (suggested read), `retain`, and `files.list`, which Claude Code renames. */
+export function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
   return ['recall', 'retain', 'files.list'].map((tool) => {
     const renamed = tool.includes('.')
     const harness = tool.replace(/[^A-Za-z0-9_-]/g, '_')
@@ -214,6 +216,25 @@ export function setRemotePluginProblem(name: string, problem: string | null): vo
 
 export function remotePluginList(): RemotePlugin[] {
   return [...state.remote.values()]
+}
+
+/**
+ * Writes a remote plugin's access, as the agent's `PluginRepo` does for the capabilities routes
+ * (`features/capabilities.ts`), so `GET /plugins` and the capabilities read one state.
+ */
+export function setRemotePluginAccess(
+  name: string,
+  access: { tool_tiers?: Record<string, RiskTier>; disabled_tools?: string[]; enabled?: boolean },
+): void {
+  const plugin = state.remote.get(name)
+  if (!plugin) return
+  state.remote.set(name, {
+    ...plugin,
+    ...(access.enabled === undefined ? {} : { enabled: access.enabled }),
+    ...(access.tool_tiers ? { tool_tiers: access.tool_tiers } : {}),
+    ...(access.disabled_tools ? { disabled_tools: [...access.disabled_tools].sort() } : {}),
+    updated_at: now(),
+  })
 }
 
 /** ScadBuddy's own tool sets (#1953); their routes are `features/builtInToolSets.ts`. */
