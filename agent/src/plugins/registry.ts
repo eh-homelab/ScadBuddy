@@ -1,6 +1,6 @@
 import type { Sql, TransactionSql } from 'postgres'
 import type { AuditContext } from '../audit/log.js'
-import { type AccessRow, remoteSource, type ToolAccess } from '../access/model.js'
+import { type AccessRow, remoteSource, SOURCE_ITEM, type ToolAccess } from '../access/model.js'
 import { pluginOverrides, sourceEnabled } from '../access/resolve.js'
 import { forgetSource, updatedBy, writeEnabled, writeTools } from '../access/store.js'
 import { isLoopbackPeer } from '../http/origins.js'
@@ -218,7 +218,8 @@ export type PluginRepo = {
   list(): Promise<PluginSummary[]>
   get(name: string): Promise<PluginSummary | undefined>
   create(input: PluginCreate, kek: Kek | undefined): Promise<PluginSummary>
-  update(name: string, patch: PluginPatch, kek: Kek | undefined): Promise<PluginSummary>
+  /** `context`: who to record on the ai_access rows the patch writes; `system` without one. */
+  update(name: string, patch: PluginPatch, kek: Kek | undefined, context?: AuditContext): Promise<PluginSummary>
   /**
    * One tool's access (#2171): `off` disables it, a tier sets it, `null` drops both.
    * Recorded as `context`'s actor.
@@ -324,7 +325,8 @@ export function validateSecret(raw: string): string {
 export function validateToolTiers(tiers: Record<string, string>): Record<string, RiskTier> {
   const entries = Object.entries(tiers)
   if (entries.length > MAX_TOOL_ENTRIES) throw new PluginError(`tool_tiers has more than ${MAX_TOOL_ENTRIES} entries`, 400)
-  const out: Record<string, RiskTier> = {}
+  // No prototype: a tool named `__proto__` is an own key.
+  const out = Object.create(null) as Record<string, RiskTier>
   for (const [tool, tier] of entries) {
     if (!TIERED_TOOL_NAME_RE.test(tool)) {
       throw new PluginError(
@@ -577,7 +579,7 @@ export class PluginStore implements PluginRepo {
     })
   }
 
-  async update(name: string, patch: PluginPatch, kek: Kek | undefined): Promise<PluginSummary> {
+  async update(name: string, patch: PluginPatch, kek: Kek | undefined, context?: AuditContext): Promise<PluginSummary> {
     return this.sql.begin(async (tx) => {
       const [locked] = await tx`SELECT name FROM ai_plugins WHERE name = ${name} FOR UPDATE`
       if (!locked) throw new PluginError(`no plugin named "${name}"`, 404)
@@ -637,7 +639,7 @@ export class PluginStore implements PluginRepo {
           dek_sealed = ${secretColumns.dek_sealed}, kek_id = ${secretColumns.kek_id},
           last4 = ${secretColumns.last4}, updated_at = now()
         WHERE name = ${name}`
-      await this.writeAccess(tx, name, { tiers, disabled, enabled }, updatedBy(), {
+      await this.writeAccess(tx, name, { tiers, disabled, enabled }, updatedBy(context), {
         enabled: patch.enabled !== undefined,
         tools: patch.tool_tiers !== undefined || patch.disabled_tools !== undefined,
       })
@@ -650,7 +652,13 @@ export class PluginStore implements PluginRepo {
       const [locked] = await tx`SELECT name FROM ai_plugins WHERE name = ${name} FOR UPDATE`
       if (!locked) throw new PluginError(`no plugin named "${name}"`, 404)
       const stored = access(await selectRow(tx, name))
-      const tiers: Record<string, string> = { ...stored.toolTiers }
+      const source = remoteSource(name)
+      // Each tool row as it stands, so only `tool`'s is attributed to this write (below).
+      // `updated_at` as text: a Date would drop its microseconds.
+      const before = await tx<{ item: string; access: string; updated_by: string; updated_at: string }[]>`
+        SELECT item, access, updated_by, updated_at::text AS updated_at FROM ai_access WHERE source = ${source} AND item <> ${SOURCE_ITEM}`
+      // No prototype: a tool named `__proto__` is an own key.
+      const tiers = Object.assign(Object.create(null) as Record<string, string>, stored.toolTiers)
       delete tiers[tool]
       const disabled = stored.disabledTools.filter((t) => t !== tool)
       if (value === 'off') disabled.push(tool)
@@ -662,6 +670,15 @@ export class PluginStore implements PluginRepo {
         updatedBy(context),
         { enabled: false, tools: true },
       )
+      // writeTools (and the mirror trigger before it) wrote every tool row as new: the rows
+      // this write left as they were get their own author and time back.
+      const kept = before.filter((r) => r.item !== tool)
+      if (kept.length > 0) {
+        await tx`
+          UPDATE ai_access a SET updated_by = k.updated_by, updated_at = k.updated_at
+          FROM jsonb_to_recordset(${tx.json(kept as never)}) AS k(item text, access text, updated_by text, updated_at timestamptz)
+          WHERE a.source = ${source} AND a.item = k.item AND a.access = k.access`
+      }
       return summary(await selectRow(tx, name))
     })
   }

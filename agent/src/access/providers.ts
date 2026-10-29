@@ -182,9 +182,16 @@ function storedAccess(plugin: PluginSummary, tool: string): Exclude<Access, 'on'
   return Object.hasOwn(plugin.tool_tiers, tool) ? plugin.tool_tiers[tool] : undefined
 }
 
-function remoteItem(view: PluginToolView, listed: ListedTool): ItemView {
+/** A stored disabled entry under another name that disables `tool` by its harness name (`a.b` for `a_b`). */
+function disabledAs(plugin: PluginSummary, tool: string): string | undefined {
+  if (plugin.disabled_tools.includes(tool)) return undefined
+  return plugin.disabled_tools.find((d) => harnessToolName(d) === harnessToolName(tool))
+}
+
+function remoteItem(plugin: PluginSummary, view: PluginToolView, listed: ListedTool): ItemView {
   const collision = view.tier_source === 'collision'
   const renamed = view.tier_source === 'renamed'
+  const other = collision || !view.disabled ? undefined : disabledAs(plugin, view.name)
   // The row takes effect unless the pair is hidden anyway; a renamed tool's tier never does.
   const row = collision ? undefined : view.disabled ? 'off' : view.tier_source === 'explicit' ? view.tier : undefined
   return {
@@ -202,7 +209,12 @@ function remoteItem(view: PluginToolView, listed: ListedTool): ItemView {
     missing: false,
     allowed: renamed ? ['off', 'outward'] : null,
     fixed: collision ? { access: 'off', reason: `Shares its name with ${view.collides_with.join(', ')}, so both are hidden` } : null,
-    reason: renamed ? RENAMED_REASON : null,
+    reason:
+      other !== undefined
+        ? `Off because "${other}" is off, which Claude Code names the same: reset "${other}" to change it`
+        : renamed
+          ? RENAMED_REASON
+          : null,
   }
 }
 
@@ -232,7 +244,7 @@ function missingItem(plugin: PluginSummary, tool: string): ItemView {
 function remoteView(plugin: PluginSummary, listing: Listing): SourceView {
   const tools = listing?.tools ?? []
   const views = describeTools({ name: plugin.name, toolTiers: plugin.tool_tiers, disabledTools: plugin.disabled_tools }, tools)
-  const items = views.map((view, i) => remoteItem(view, tools[i]!))
+  const items = views.map((view, i) => remoteItem(plugin, view, tools[i]!))
   const listed = new Set(tools.map((t) => t.name))
   const stored = [...new Set([...Object.keys(plugin.tool_tiers), ...plugin.disabled_tools])].filter((t) => !listed.has(t)).sort()
   return {
@@ -276,9 +288,9 @@ export function remoteProvider(deps: {
       return plugins.map((p) => remoteView(p, listings.get(remoteSource(p.name))))
     },
     get,
-    async setEnabled(source, enabled) {
+    async setEnabled(source, enabled, context) {
       // The secret is not touched, so no key is needed.
-      await registry(deps.plugins.update(nameOf(source), { enabled }, undefined))
+      await registry(deps.plugins.update(nameOf(source), { enabled }, undefined, context))
     },
     async setItem(source, item, access, context) {
       await registry(deps.plugins.setToolAccess(nameOf(source), item, toolWrite(access), context))

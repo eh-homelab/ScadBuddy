@@ -8,6 +8,9 @@ import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
 import { loadEnabledPlugins, PluginError, PluginStore } from '../src/plugins/registry.js'
+import { Capabilities } from '../src/access/capabilities.js'
+import { ToolListings } from '../src/access/listings.js'
+import { remoteProvider } from '../src/access/providers.js'
 import type { PluginTest } from '../src/plugins/testConnection.js'
 import type { PluginView } from '../src/routes/plugins.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
@@ -263,6 +266,39 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await expect(store.setToolAccess('mem', 'files.list', 'read', UI_CONTEXT)).rejects.toMatchObject({ status: 400 })
         await store.setToolAccess('mem', 'files.list', 'off', UI_CONTEXT)
         expect((await oldColumns('mem'))?.disabled_tools).toEqual(['files.list'])
+      })
+
+      it("setToolAccess attributes only the changed row: the others keep their author and time", async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
+        await db.sql`UPDATE ai_access SET updated_by = 'migration:2171', updated_at = now() - interval '1 day'
+          WHERE source = 'remote:mem' AND item = 'a'`
+        const times = () =>
+          db.sql<{ item: string; updated_by: string; t: string }[]>`
+            SELECT item, updated_by, updated_at::text AS t FROM ai_access WHERE source = 'remote:mem' ORDER BY item`
+        const [, a0, b0] = await times()
+        await store.setToolAccess('mem', 'c', 'write', UI_CONTEXT)
+        const [, a1, b1, c1] = await times()
+        expect(a1).toEqual(a0)
+        expect(a1?.updated_by).toBe('migration:2171')
+        expect(b1).toEqual(b0)
+        expect(c1).toMatchObject({ item: 'c', updated_by: 'browser:browser' })
+      })
+
+      it('setToolAccess keeps a tool named __proto__ as its own key', async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await store.setToolAccess('mem', '__proto__', 'read', UI_CONTEXT)
+        const [row] = await db.sql<{ j: string }[]>`SELECT tool_tiers::text AS j FROM ai_plugins WHERE name = 'mem'`
+        expect(row?.j).toBe('{"__proto__": "read"}')
+        expect(await rowsBy('mem')).toContainEqual({ item: '__proto__', access: 'read', updated_by: 'browser:browser' })
+      })
+
+      it("a source switch through the tree records the UI's actor", async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        const caps = new Capabilities([
+          remoteProvider({ plugins: store, listings: new ToolListings(db.sql), refresh: () => Promise.reject(new Error('not called')) }),
+        ])
+        expect((await caps.setEnabled('remote:mem', true, UI_CONTEXT)).enabled).toBe(true)
+        expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'on', updated_by: 'browser:browser' }])
       })
 
       it('setToolAccess null removes the tool from both', async () => {

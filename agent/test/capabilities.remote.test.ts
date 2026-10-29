@@ -45,9 +45,9 @@ function memoryPlugins(names: readonly string[], initial: AccessRow[] = []) {
     if (!names.includes(name)) throw new PluginError(`no plugin named "${name}"`, 404)
   }
   const reject = () => Promise.reject(new Error('not called'))
-  const update = vi.fn(async (name: string, patch: PluginPatch): Promise<PluginSummary> => {
+  const update = vi.fn(async (name: string, patch: PluginPatch, _kek?: unknown, context?: AuditContext): Promise<PluginSummary> => {
     known(name)
-    if (patch.enabled !== undefined) put(remoteSource(name), SOURCE_ITEM, patch.enabled ? 'on' : 'off', 'system')
+    if (patch.enabled !== undefined) put(remoteSource(name), SOURCE_ITEM, patch.enabled ? 'on' : 'off', by(context))
     return summary(name)
   })
   const setToolAccess = vi.fn(async (name: string, tool: string, access: ToolAccess | null, context?: AuditContext): Promise<PluginSummary> => {
@@ -235,10 +235,27 @@ describe('remote MCP plugins as capability sources', () => {
   })
 
   it('switching the source on calls update({ enabled: true })', async () => {
-    const { caps, update } = setup()
+    const { caps, update, rows } = setup()
     const source = await caps.setEnabled('remote:hs', true, ctx)
-    expect(update).toHaveBeenCalledWith('hs', { enabled: true }, undefined)
+    expect(update).toHaveBeenCalledWith('hs', { enabled: true }, undefined, ctx)
     expect(source.enabled).toBe(true)
+    expect(rows).toEqual([{ source: 'remote:hs', item: '*', access: 'on', updated_by: 'browser:browser' }])
+  })
+
+  it('a tool off only through a stored entry of another name says which entry to reset', async () => {
+    const { caps } = setup({
+      listings: { 'remote:hs': listing([{ name: 'a_b' }]) },
+      rows: [{ source: 'remote:hs', item: 'a.b', access: 'off', updated_by: 'browser:browser' }],
+    })
+    const source = await caps.source('remote:hs')
+    expect(item(source, 'a_b')).toMatchObject({
+      access: 'off',
+      overridden: true,
+      reason: 'Off because "a.b" is off, which Claude Code names the same: reset "a.b" to change it',
+    })
+    expect(item(source, 'a.b')).toMatchObject({ missing: true, access: 'off' })
+    await caps.resetItem('remote:hs', 'a.b', ctx)
+    expect(item(await caps.source('remote:hs'), 'a_b')).toMatchObject({ access: 'outward', overridden: false, reason: null })
   })
 
   it('an unknown plugin is 404', async () => {
@@ -269,6 +286,15 @@ describe('remote MCP plugins as capability sources', () => {
     expect(await refusal(caps.refresh('remote:hs'))).toEqual({ status: 400, message: 'down' })
     expect(refresh).toHaveBeenCalledWith('hs')
     const source = await caps.source('remote:hs')
+    expect(source.listed_at).toBe('2026-10-20T00:00:00.000Z')
+    expect(source.items.map((i) => i.id)).toEqual(['recall', 'retain'])
+  })
+
+  it('a refresh whose connection test failed answers it and keeps the last listing', async () => {
+    const failed: PluginTest = { ...okTest([]), ok: false, detail: 'connection refused', server: null }
+    const { caps } = setup({ refresh: async () => ({ status: 200, body: failed }) })
+    const { test, source } = await caps.refresh('remote:hs')
+    expect(test).toMatchObject({ ok: false, detail: 'connection refused' })
     expect(source.listed_at).toBe('2026-10-20T00:00:00.000Z')
     expect(source.items.map((i) => i.id)).toEqual(['recall', 'retain'])
   })
