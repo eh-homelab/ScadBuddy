@@ -885,6 +885,12 @@ Spec §14.3: same image, two entrypoints. #4773's audit (§14.5) is answered in 
     process. It polls neither `agent-sessions`, nor the shared `agent-tools`, nor a session
     host queue, so it runs no `AgentSession` turn.
   - Classic sessions still run in-process wherever `SessionManager.send` runs, until Step 6.3.
+  - Until Step 8.1, `api`'s host worker also registers the pinned `turn:` activities
+    (`turnToolActivities`, `default`). A `DurableSession` turn pins each call to the
+    `agent-tools.<hostname>` of the replica that listed its servers (`turnTools.ts`
+    `pinned`). One that listed them on an API pod before the role switch would otherwise
+    schedule an activity that nobody there serves. New listings run on worker pods, so the
+    API pods' share falls to nothing as those turns end.
   - `worker` builds the worker half and serves only `runtime/health.ts`.
 - Modify: `agent/src/sessions/durable.ts` (`unready`: an `api` process has no session host
   queue of its own; a unified session is ready when `agent-sessions` and `agent-tools` have
@@ -1046,7 +1052,10 @@ The old Tasks 6.2 and 6.3, unchanged in substance.
   roles, not the Python worker), `agent/test/evals.durable.e2e.test.ts` (the only replay),
   `agent/test/evals.test.ts` (removed), `docs/ai/evals.md` (`SCADBUDDY_EVAL_MODE` removed).
 - Create: `.github/scripts/lint-one-runtime.sh` and `lint-one-runtime.test.sh`, with the
-  script and fixtures of the old Task 6.3 (in git history at `4c130e08b`). Modify:
+  script and fixtures of the old Task 6.3 (at `4c130e08b`). Until Step 7.2,
+  `agent/src/sessions/durable.ts` still routes open `DurableSession`s. Run the guard on that
+  tree first; if it trips there, allowlist that one file, with a comment naming Step 7.2,
+  and remove the allowlist in Step 7.2. Modify:
   `.github/workflows/ci.yml` (the `lint` job runs both).
 
 **Tests:** every scenario passes through `AgentSession`; the guard's fixture trees fail and
@@ -1179,10 +1188,16 @@ Each step keeps one turn path. A workflow change goes behind `patched()`, and
 The old Task 9.1, needed by Steps 9.2 and 9.7.
 
 **Files:** `agent/src/temporal/payloadCodec.ts` `SUBJECT` and `subjectOf`. The pattern
-becomes `^(session|flow)-<uuid>(-[a-z0-9-]+)?$` with subject `session-<uuid>`, beside
-#4806's `bridge-<uuid>`. `bgtask-<session>-<id>` maps to `session-<session>` too.
+becomes `^(session|flow)-<uuid>(-[A-Za-z0-9_-]+)?$` with subject `session-<uuid>`, beside
+#4806's `bridge-<uuid>`. The suffix takes capitals and `_`, because an Anthropic
+`tool_use_id` has both (`toolu_01Ab…`), and Step 9.2's `ToolCall` id carries one. Keep the
+existing `BACKGROUND_TASK` mapping (`bgtask-<session uuid>-<8 hex>` already seals under
+`session-<session>`).
 **Tests:** `agent/test/payloadCodec.test.ts`:
-- `session-<u>-call-toolu_1` and `bgtask-<u>-3` seal under `session-<u>`'s key;
+- `session-<u>-call-toolu_01AbC_d` seals under `session-<u>`'s key. This test must stay as
+  written: a narrower pattern would send every tool call's input and result to history
+  unsealed;
+- `bgtask-<u>-0a1b2c3d` still seals under `session-<u>`'s key;
 - `session-<u>x` passes through unsealed;
 - `payload-vectors.json` is regenerated (`UPDATE_PAYLOAD_VECTORS=1`), and
   `agent-durable/tests/test_codec.py` still opens every vector.
@@ -1207,7 +1222,9 @@ Decision Q1. The recommended shape is described here; the alternative (an Update
   Settings see no change. Its handler starts or attaches to the call's `ToolCall` and returns
   its result.
 - Modify: `agent/src/sessions/turnRunner.ts` (the turn's ScadBuddy server is the activity
-  projection), `agent/src/sessions/turnHost.ts` (a `restarted` continuation fetches the
+  projection), `agent/src/sessions/warm.ts` (`fingerprint` includes `tools_as_activities`,
+  because a warm process keeps the MCP servers it was spawned with; without it a flip would
+  reach only new processes), `agent/src/sessions/turnHost.ts` (a `restarted` continuation fetches the
   results of calls whose `ToolCall` completed and states them in the restart message, in
   place of "unknown"), `agent/src/sessions/forget.ts` (terminate the session's open
   `ToolCall`s, listed from `ai_session_events`' `tool.call` rows that have no result).
