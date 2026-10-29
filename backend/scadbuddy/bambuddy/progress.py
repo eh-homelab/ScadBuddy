@@ -59,6 +59,18 @@ class CopyProgress(BaseModel):
     waiting_reason: str | None = None
 
 
+class LanRunControl(BaseModel):
+    """A native run's prints still to start (#4541), and what a person can do about
+    them: stop the rest (``POST /print/runs/{run_id}/stop``, #4942), and, while the run
+    waits for it (#4939), say the plate is clear (``POST …/plate-cleared``)."""
+
+    run_id: str
+    #: How many prints the run has still to start.
+    waiting: int
+    #: The printer has ended the last print, and the next waits for a cleared plate.
+    awaiting_clear: bool = False
+
+
 class PrintProgress(BaseModel):
     """What the send bar shows until every copy is queued, failed or cancelled."""
 
@@ -83,6 +95,9 @@ class PrintProgress(BaseModel):
     fix: str | None = None
     copies_detail: list[CopyProgress] = Field(default_factory=list)
     bambuddy_url: str
+    #: A native run's prints still to start, and its controls (``route`` ``lan``); ``None``
+    #: once none is left to start, or the run stopped them.
+    lan_run: LanRunControl | None = None
 
 
 #: The fix per failing stage. Each is an action the user can actually take from the

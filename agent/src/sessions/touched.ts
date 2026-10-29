@@ -130,6 +130,12 @@ function printed(input: Record<string, unknown>): string | null {
   return file ? `library:${file}` : str(input.output_id)
 }
 
+/** A print run a call changed, by the `run_id` it named. */
+function runTouched(input: Record<string, unknown>): Touch[] {
+  const run = str(input.run_id)
+  return run ? [{ type: 'print_run', id: run, action: 'modified' }] : []
+}
+
 function field(value: unknown, key: string): unknown {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined
 }
@@ -411,6 +417,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
         .map((item) => ({ type: 'print' as const, id: String(item), action: 'created' as const, before: output })),
     ]
   },
+  // #4942, #4939: the run a stop or a cleared plate acts on; what it starts or stops
+  // later is the run's own.
+  stop_print_run: runTouched,
+  confirm_plate_clear: runTouched,
   // Libraries and fonts.
   pin_library: pinned,
   pin_library_from_url: pinned,

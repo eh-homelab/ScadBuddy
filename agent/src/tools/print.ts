@@ -576,7 +576,9 @@ export const printTools: Tool[] = [
     name: 'get_print_progress',
     description:
       'How the last print of an output, or of a Bambuddy library file (`library_file_id`), is going, per copy; ' +
-      'null when it was never printed. Poll until `settled` is true.',
+      'null when it was never printed. Poll until `settled` is true. A run over the LAN with prints still to ' +
+      'start names them in `lan_run` (`run_id`, `waiting`, and `awaiting_clear` while it waits for the plate ' +
+      'to be cleared): stop_print_run stops them, confirm_plate_clear starts the next.',
     input: withSource({}),
     risk: 'read',
     source:
@@ -634,6 +636,53 @@ export const printTools: Tool[] = [
     risk: 'read',
     routes: ['GET /api/v1/print/runs/{run_id}'],
     handler: async ({ run_id }, ctx) => json(followed(await getRun(ctx, run_id))),
+  }),
+
+  // #4942, #4939: a native run's prints still to start. get_print_progress names them
+  // (`lan_run`), as the dialog's panel and the Prints page card do.
+  defineTool({
+    name: 'stop_print_run',
+    description:
+      'Stops the prints a run over the LAN (`path: "native"`) has not started yet: a run of several plates or ' +
+      "copies starts each once the printer has ended the one before (`lan_waiting`). The print on the printer " +
+      'carries on; one being started as the stop arrives still starts. The run then records why the rest never ' +
+      'start (`lan_stopped`). get_print_progress names a run that has prints still to start (`lan_run`). 409 when ' +
+      'it has none left to stop.',
+    input: z.object({ run_id: runId }),
+    risk: 'outward',
+    routes: ['POST /api/v1/print/runs/{run_id}/stop'],
+    summarize: ({ run_id }) => `Stop the prints print run ${run_id} has not started yet`,
+    handler: async ({ run_id }, { backend }) =>
+      json(
+        followed(
+          await ok(
+            backend.POST('/api/v1/print/runs/{run_id}/stop', { params: { path: { run_id } } }),
+            `stop the rest of print run ${run_id}`,
+          ),
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'confirm_plate_clear',
+    description:
+      'Tells a run over the LAN that the printer\'s plate is clear, so it starts its next print. With "Wait for ' +
+      'a cleared plate" on in Settings, such a run of several prints waits after each until someone says so ' +
+      '(`lan_awaiting_clear`, and get_print_progress `lan_run.awaiting_clear`). Only call it once the user has ' +
+      'said the plate is clear: the next print starts on whatever is on the bed. 409 when the run is not waiting.',
+    input: z.object({ run_id: runId }),
+    risk: 'outward',
+    routes: ['POST /api/v1/print/runs/{run_id}/plate-cleared'],
+    summarize: ({ run_id }) => `Say the plate is clear, so print run ${run_id} starts its next print`,
+    handler: async ({ run_id }, { backend }) =>
+      json(
+        followed(
+          await ok(
+            backend.POST('/api/v1/print/runs/{run_id}/plate-cleared', { params: { path: { run_id } } }),
+            `confirm the plate is clear for print run ${run_id}`,
+          ),
+        ),
+      ),
   }),
 
   defineTool({

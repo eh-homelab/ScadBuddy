@@ -175,6 +175,11 @@ class Settings(BaseSettings):
     # treats a fulfilment as final: `POST …/unfulfil` answers 409 `unfulfil_disabled`,
     # for a person and the agent alike. A change writes nothing to existing orders.
     orders_allow_unfulfil: bool = True
+    # #4939: whether a native (LAN) run of several prints waits, after each, for someone
+    # to say the plate is clear before it starts the next, as Bambuddy's queue does with
+    # its `require_plate_clear` on (off by default there too: maziggy/bambuddy 98ecaf50,
+    # `backend/app/services/print_scheduler.py`). Read by each run's plan, which keeps it.
+    lan_require_plate_clear: bool = False
     # SCADBUDDY_SLICER_BACKEND: who slices a print: Bambuddy, or the `scadbuddy-slicer`
     # worker on `temporal_task_queue_slicer` (`native`, which needs a content store).
     slicer_backend: Slicer = "bambuddy"
@@ -760,6 +765,8 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         "rough_estimate_factor": "live",
         # Read from the store by each unfulfil.
         "orders_allow_unfulfil": "live",
+        # Read from the store by each print run's plan; a run keeps what it read.
+        "lan_require_plate_clear": "live",
         # Read from the store by every slice's start.
         "slicer_backend": "live",
         "bambuddy_render_api_key": "restart",

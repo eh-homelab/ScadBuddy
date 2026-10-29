@@ -574,6 +574,8 @@ class SettingsPatch(BaseModel):
     rough_estimate_factor: str | None = None
     #: Whether a fulfilled line item may be unfulfilled (#4953).
     orders_allow_unfulfil: bool | None = None
+    #: Whether a native run waits for a cleared plate between its prints (#4939).
+    lan_require_plate_clear: bool | None = None
     #: The S3 store (spec 2026-10-16 §4.2); the secret is write-only, ``""`` clears it.
     store_s3_endpoint: str | None = None
     store_s3_region: str | None = None

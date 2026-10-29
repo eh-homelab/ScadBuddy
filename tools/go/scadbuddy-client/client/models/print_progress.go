@@ -29,6 +29,8 @@ type PrintProgress struct {
 	error_message PrintProgress_PrintProgress_error_messageable
 	// The fix property
 	fix PrintProgress_PrintProgress_fixable
+	// The lan_run property
+	lan_run LanRunControlable
 	// The queue_item_id property
 	queue_item_id PrintProgress_PrintProgress_queue_item_idable
 	// The route property
@@ -665,6 +667,16 @@ func (m *PrintProgress) GetFieldDeserializers() map[string]func(i878a80d2330e89d
 		}
 		return nil
 	}
+	res["lan_run"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateLanRunControlFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetLanRun(val.(LanRunControlable))
+		}
+		return nil
+	}
 	res["queue_item_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreatePrintProgress_PrintProgress_queue_item_idFromDiscriminatorValue)
 		if err != nil {
@@ -722,6 +734,12 @@ func (m *PrintProgress) GetFieldDeserializers() map[string]func(i878a80d2330e89d
 // returns a PrintProgress_PrintProgress_fixable when successful
 func (m *PrintProgress) GetFix() PrintProgress_PrintProgress_fixable {
 	return m.fix
+}
+
+// GetLanRun gets the lan_run property value. The lan_run property
+// returns a LanRunControlable when successful
+func (m *PrintProgress) GetLanRun() LanRunControlable {
+	return m.lan_run
 }
 
 // GetQueueItemId gets the queue_item_id property value. The queue_item_id property
@@ -817,6 +835,12 @@ func (m *PrintProgress) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0
 		}
 	}
 	{
+		err := writer.WriteObjectValue("lan_run", m.GetLanRun())
+		if err != nil {
+			return err
+		}
+	}
+	{
 		err := writer.WriteObjectValue("queue_item_id", m.GetQueueItemId())
 		if err != nil {
 			return err
@@ -906,6 +930,11 @@ func (m *PrintProgress) SetFix(value PrintProgress_PrintProgress_fixable) {
 	m.fix = value
 }
 
+// SetLanRun sets the lan_run property value. The lan_run property
+func (m *PrintProgress) SetLanRun(value LanRunControlable) {
+	m.lan_run = value
+}
+
 // SetQueueItemId sets the queue_item_id property value. The queue_item_id property
 func (m *PrintProgress) SetQueueItemId(value PrintProgress_PrintProgress_queue_item_idable) {
 	m.queue_item_id = value
@@ -943,6 +972,7 @@ type PrintProgressable interface {
 	GetCopiesInProgress() *int32
 	GetErrorMessage() PrintProgress_PrintProgress_error_messageable
 	GetFix() PrintProgress_PrintProgress_fixable
+	GetLanRun() LanRunControlable
 	GetQueueItemId() PrintProgress_PrintProgress_queue_item_idable
 	GetRoute() PrintProgress_PrintProgress_routeable
 	GetSettled() *bool
@@ -957,6 +987,7 @@ type PrintProgressable interface {
 	SetCopiesInProgress(value *int32)
 	SetErrorMessage(value PrintProgress_PrintProgress_error_messageable)
 	SetFix(value PrintProgress_PrintProgress_fixable)
+	SetLanRun(value LanRunControlable)
 	SetQueueItemId(value PrintProgress_PrintProgress_queue_item_idable)
 	SetRoute(value PrintProgress_PrintProgress_routeable)
 	SetSettled(value *bool)

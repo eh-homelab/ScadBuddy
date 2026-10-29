@@ -110,6 +110,14 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     help: 'Multiplies a part\'s enclosed volume for walls, infill and purge in the estimate before a slice, such as 1.15. More than 0.',
     advanced: true,
   },
+  // #4939 — a native run's plate-clear wait, as Bambuddy's queue's `require_plate_clear`.
+  {
+    name: 'lan_require_plate_clear',
+    section: 'printing',
+    label: 'Wait for a cleared plate between prints over the LAN',
+    kind: 'bool',
+    help: 'On, a run of several plates or copies sent over the LAN waits after each print until someone says the plate is clear, on the Prints page, in the print dialog or through the assistant. Off, the next print starts once the printer has finished, as Bambuddy\'s queue does by default. A run keeps the setting it started with.',
+  },
   // #4953 — whether a fulfilled line item may be unfulfilled (#4952), by a person or the agent.
   {
     name: 'orders_allow_unfulfil',

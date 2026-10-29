@@ -2392,6 +2392,13 @@ export const api = {
   /** #2672 — one run as it stands, for a batch's per-file result. */
   getPrintRun: (runId: string) => request<PrintRun>(`/print/runs/${seg(runId)}`),
 
+  /** #4942 — stops the prints a native run has not started yet; the one printing carries on. */
+  stopPrintRun: (runId: string) => request<PrintRun>(`/print/runs/${seg(runId)}/stop`, { method: 'POST' }),
+
+  /** #4939 — the plate is clear, so a native run waiting for it starts its next print. */
+  confirmPlateClear: (runId: string) =>
+    request<PrintRun>(`/print/runs/${seg(runId)}/plate-cleared`, { method: 'POST' }),
+
   putLibraryChoices: (fileId: number, body: ModelPrintChoices) =>
     request<ModelPrintChoices>(`/print/library/${fileId}/choices`, {
       method: 'PUT',

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any, Literal
 
@@ -26,6 +27,7 @@ from pydantic import BaseModel, Field, ValidationError
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import HmsError, Printer, PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLinkStore
+from scadbuddy.bambuddy.progress import LanRunControl
 from scadbuddy.core.problems import ApiError
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
@@ -94,10 +96,31 @@ class PrinterNow(BaseModel):
     bambuddy_url: str | None = None
     #: The status read failed; the rest is unknown.
     error: str | None = None
+    #: A native run on this printer with prints still to start (#4942), and its
+    #: controls: stop the rest, and, while it waits for one (#4939), say the plate is
+    #: clear. ``None`` when no run waits on it.
+    lan_run: LanRunControl | None = None
 
 
 class PrintersNow(BaseModel):
     printers: list[PrinterNow] = Field(default_factory=list)
+
+
+def with_lan_runs(now: PrintersNow, runs: Mapping[str, LanRunControl]) -> PrintersNow:
+    """``now`` with each printer's waiting native run (by registry id). A run waiting
+    for a cleared plate (#4939) is the card's ``awaiting_plate_clear``, as Bambuddy's own
+    flag is on its path, so the card says to clear it."""
+
+    def card(printer: PrinterNow) -> PrinterNow:
+        control = runs.get(printer.id)
+        if control is None:
+            return printer
+        update: dict[str, Any] = {"lan_run": control}
+        if control.awaiting_clear:
+            update["awaiting_plate_clear"] = True
+        return printer.model_copy(update=update)
+
+    return PrintersNow(printers=[card(printer) for printer in now.printers])
 
 
 def _activity(status: PrinterStatus) -> Activity:

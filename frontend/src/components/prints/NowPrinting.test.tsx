@@ -363,6 +363,24 @@ describe('NowPrinting (#977)', () => {
     expect(screen.queryByRole('dialog', { name: '3DP-77A-114 camera' })).toBeNull()
   })
 
+  // #4942, #4939 — the card of a printer a native run waits on carries the run's controls.
+  it("shows a native run's controls on its printer's card, with the plate warning while it waits for a clear", async () => {
+    const control = { run_id: 'f'.repeat(32), waiting: 2, awaiting_clear: true }
+    setPrintersNow(
+      PRINTERS_NOW.map((printer) =>
+        printer.printer_id === 3
+          ? { ...printer, activity: 'finished' as const, state: 'FINISH', awaiting_plate_clear: true, lan_run: control }
+          : printer,
+      ),
+    )
+    renderPage(<NowPrinting />)
+    const card = await screen.findByTestId('printer-now-3')
+    expect(within(card).getByTestId('lan-run-controls')).toHaveTextContent('Clear the plate of Spare')
+    expect(within(card).getByRole('button', { name: 'Plate is clear — start the next print' })).toBeInTheDocument()
+    expect(within(card).getByTestId('printer-now-plate-3')).toBeInTheDocument()
+    expect(within(screen.getByTestId('printer-now-1')).queryByTestId('lan-run-controls')).toBeNull()
+  })
+
   describe('the plate warning (#3632)', () => {
     const finished = PRINTERS_NOW.map((printer) =>
       printer.printer_id === 3

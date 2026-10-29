@@ -20,6 +20,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { mergeCards, type NowCard } from './nowCards'
+import { LanRunControls } from '../print/LanRunControls'
 import { PlateWarning } from './PlateWarning'
 
 /** How often the printers are read while the page is visible: the fallback when no
@@ -201,6 +202,8 @@ function PrinterCard({ card, onCamera }: { card: NowCard; onCamera: () => void }
           </p>
         )}
         <JobStatus printer={printer} />
+        {/* #4942, #4939 — a native run's prints still to start on this printer. */}
+        {printer.lan_run && !stale && <LanRunControls control={printer.lan_run} printerName={printer.name} className="mt-2" />}
         {printer.printer_id !== null && printer.activity !== 'offline' && !printer.error && !stale && (
           <Button
             variant="outline"

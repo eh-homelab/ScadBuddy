@@ -3,6 +3,7 @@ import { plateLabel } from '../../lib/plate'
 import { Badge } from '@/components/ui/badge'
 import { WarningList } from '../FilamentPicker'
 import { PrintProgressPanel } from '../PrintProgressPanel'
+import { LanRunControls } from './LanRunControls'
 
 type Props = {
   result: PrintRunResult
@@ -23,13 +24,16 @@ export function QueuedPanel({ result, printerName, progress, polling, plates = [
   const manyPlates = new Set(picks.map((pick) => pick.plate_id)).size > 1
   /** #4541 — the plate copies a LAN run starts later, one at a time. */
   const stopped = native ? (result.lan_stopped ?? null) : null
-  const waiting = native && stopped === null ? (result.lan_waiting ?? []).length : 0
+  // The result is the run as it succeeded; a LAN progress read says whether any still wait.
+  const settledWaits = progress?.route === 'lan' && !progress.lan_run
+  const waiting = native && stopped === null && !settledWaits ? (result.lan_waiting ?? []).length : 0
   /** Every print the run makes: each plate's copies, where `copies` is per plate. */
   const prints = (result.lan ?? []).length + waiting
   return (
     <div className="space-y-2 text-[13px] text-foreground">
       <div data-testid="queued-items">
         {native ? (
+          <>
           <p>
             Sliced and sent to {printerName ?? 'the printer you chose'} over the LAN —{' '}
             <span className="sb-num">{result.copies}</span> {result.copies === 1 ? 'copy' : 'copies'}.
@@ -46,6 +50,9 @@ export function QueuedPanel({ result, printerName, progress, polling, plates = [
               </span>
             )}
           </p>
+          {/* #4942, #4939 — read from the progress, which follows the run as it is now. */}
+          {progress?.lan_run && <LanRunControls control={progress.lan_run} printerName={printerName} className="mt-1.5" />}
+          </>
         ) : (
         <p>
           Sliced and queued for {printerName ?? 'the printer you chose'} —{' '}

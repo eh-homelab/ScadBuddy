@@ -458,6 +458,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   over the watch's `printer_reports`) waits out each print before the next starts, and
   `print_lan_update` rewrites the result (`PrintRunResult.lan_waiting`, `lan_stopped`).
   A change to what a native run reads must keep `e2e-stack/`'s recorder pass at zero.
+  A native run of several prints starts the later ones in `PrintLanSequence`
+  (`print-lan-<run id>`, `workflows/printing.py` `LanSequenceWorkflow`); its controls
+  (#4942, #4939) are `POST /print/runs/{id}/stop` (cancels the sequence, which records
+  `lan_stopped`) and `…/plate-cleared` (the `plate_cleared` signal, for a run planned with
+  the stored setting `lan_require_plate_clear`, behind `PLATE_CLEAR_PATCH`), shown from
+  `PrintProgress.lan_run` and `PrinterNow.lan_run` by `components/print/LanRunControls.tsx`,
+  and the agent's `stop_print_run` and `confirm_plate_clear`.
 - `e2e-stack/` — the real-stack e2e of the hot path (#4602): `compose.yaml` (ScadBuddy on
   moto's S3, the Temporal dev server, the slicer worker, a fake LAN printer and a
   Bambuddy recorder that fails every call), `run.sh` (builds, brings up, seeds with

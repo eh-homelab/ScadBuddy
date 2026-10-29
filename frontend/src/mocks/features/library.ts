@@ -530,6 +530,7 @@ function startLibraryRun(fileId: number, body: PrintRunRequest): PrintRun {
     project_id: body.project_id ?? null,
     folder_id: body.folder_id ?? null,
     bambuddy_url: `${mockSettings().bambuddy_url}/queue`,
+    lan_awaiting_clear: false,
   } satisfies PrintRunResult
   // #742: a 202 with a run, like an output's; this one has already finished.
   const now = new Date().toISOString()

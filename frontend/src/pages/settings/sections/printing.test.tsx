@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../../api/client'
+import { mockSettings } from '../../../mocks/handlers'
 import { server } from '../../../mocks/server'
 import { region, renderSettingsSection } from '../testing'
 import { Component as Printing } from './printing'
@@ -107,5 +108,18 @@ describe('Printing defaults', () => {
     await user.click(save())
     expect(await screen.findByText(/Enter 1 to 3650 days/)).toBeInTheDocument()
     expect(put).not.toHaveBeenCalled()
+  })
+
+  it('turns the plate-clear wait between LAN prints on and saves it (#4939)', async () => {
+    const { user } = renderSettingsSection(<Printing />)
+    await seeded()
+    const toggle = within(region('Printing defaults')).getByRole('switch', {
+      name: 'Wait for a cleared plate between prints over the LAN',
+    })
+    expect(toggle).not.toBeChecked()
+    await user.click(toggle)
+    await user.click(save())
+    await waitFor(() => expect(mockSettings().lan_require_plate_clear).toBe(true))
+    expect(mockSettings().sources?.['lan_require_plate_clear']).toBe('stored')
   })
 })

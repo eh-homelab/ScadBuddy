@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-import type { PrintRunResult } from '../../api/types'
+import type { PrintProgress, PrintRunResult } from '../../api/types'
 import { queuedResult } from '../../mocks/choices'
 import { QueuedPanel } from './QueuedPanel'
 
@@ -104,5 +104,38 @@ describe('QueuedPanel · a LAN run of several plate copies', () => {
   it('says nothing more once every one has started', () => {
     renderPanel({ ...queuedResult, path: 'native', copies: 2, lan_waiting: [] })
     expect(screen.queryByTestId('lan-waiting')).toBeNull()
+  })
+
+  // #4942, #4939 — the run's controls follow its progress, which reads the run as it is now.
+  const lanProgress: PrintProgress = {
+    route: 'lan',
+    stage: 'running',
+    settled: false,
+    copies: 2,
+    copies_completed: 1,
+    copies_failed: 0,
+    copies_cancelled: 0,
+    copies_in_progress: 0,
+    bambuddy_url: '',
+  }
+
+  it("offers the run's controls while its progress says prints are still to start", () => {
+    const progress: PrintProgress = {
+      ...lanProgress,
+      lan_run: { run_id: 'r'.repeat(32), waiting: 1, awaiting_clear: true },
+    }
+    render(
+      <QueuedPanel result={{ ...queuedResult, path: 'native', copies: 2, lan_waiting: [1] }} printerName="H2C" progress={progress} polling />,
+    )
+    expect(screen.getByTestId('lan-run-controls')).toHaveTextContent('Clear the plate of H2C')
+    expect(screen.getByRole('button', { name: 'Stop the rest' })).toBeInTheDocument()
+  })
+
+  it('offers no controls once the progress names none', () => {
+    const progress: PrintProgress = { ...lanProgress, lan_run: null }
+    render(
+      <QueuedPanel result={{ ...queuedResult, path: 'native', copies: 2, lan_waiting: [1] }} printerName="H2C" progress={progress} polling />,
+    )
+    expect(screen.queryByTestId('lan-run-controls')).toBeNull()
   })
 })

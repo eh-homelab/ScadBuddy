@@ -42,6 +42,7 @@ from scadbuddy.workflows.follow import FollowPrint, follow_queue
 from scadbuddy.workflows.print_models import (
     LAN_PRINT_ACTIVITY,
     LAN_UNSURE,
+    PLATE_CLEARED_SIGNAL,
     PRINT_LAN_UPDATE_ACTIVITY,
     SLICE_RUN_ACTIVITY,
     SLICED_UPLOAD_ACTIVITY,
@@ -212,6 +213,8 @@ class NativeFake(Fake):
         self.unrecorded: set[int] = set()
         #: The blob each `slice_run` answers, in turn; `BLOB` once they run out.
         self.slice_keys: list[str] = []
+        #: The plan's `lan_require_plate_clear` (#4939).
+        self.plate_clear = False
 
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
@@ -238,6 +241,7 @@ class NativeFake(Fake):
             rack_algorithm=self.rack_algorithm,
             rack_position=self.rack_position,
             has_rack=True,
+            plate_clear=self.plate_clear,
         )
 
     @activity.defn(name=SLICE_RUN_ACTIVITY)
@@ -349,6 +353,7 @@ async def _run(
     during: Callable[[Client, PrintRunInput, NativeFake], Awaitable[None]] | None = None,
     gates: dict[str, asyncio.Event] | None = None,
     slice_keys: list[str] | None = None,
+    plate_clear: bool = False,
 ) -> tuple[NativeFake, PrintRun]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
     fake = NativeFake(printer, queue)
@@ -361,6 +366,7 @@ async def _run(
     fake.lan_start = lan_start
     fake.rack_position = rack_position
     fake.rack_algorithm = rack_algorithm
+    fake.plate_clear = plate_clear
     deps = LanDeps(
         printers=PrinterStore(pg_pool, KEK),
         # Never read: a native file and a blob need no Bambuddy client.
@@ -844,3 +850,87 @@ async def test_a_started_copy_whose_record_fails_is_still_followed(
         "Plate 2 is printing, but it could not be recorded, so plate 3 and the plates after"
     )
     assert len(fake_lan.project_files()) == 2
+
+
+async def _awaiting_clear(fake: NativeFake, count: int = 1) -> None:
+    """Until the run has recorded its ``count``-th wait for a cleared plate."""
+    async with asyncio.timeout(60):
+        while sum(update.lan_awaiting_clear for update in fake.updates) < count:
+            await asyncio.sleep(0.1)
+
+
+async def test_a_plate_clear_waits_for_the_confirmation(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#4939: with ``lan_require_plate_clear`` on, the run waits after each print until
+    someone says the plate is clear. A confirmation sent for an earlier wait (fewer
+    starts than the run has made) starts nothing."""
+    sent_early: list[int] = []
+
+    async def confirm(client: Client, arg: PrintRunInput, fake: NativeFake) -> None:
+        sequence = client.get_workflow_handle(lan_sequence_id("run-1"))
+        await _awaiting_clear(fake)
+        # A stale confirmation, for no print started yet.
+        await sequence.signal(PLATE_CLEARED_SIGNAL, 0)
+        await asyncio.sleep(1.5)
+        sent_early.append(len(fake_lan.project_files()))
+        await sequence.signal(PLATE_CLEARED_SIGNAL, 1)
+        await _awaiting_clear(fake, 2)
+        await sequence.signal(PLATE_CLEARED_SIGNAL, 2)
+
+    fake, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(),
+        copies=3,
+        reports=FakeReports(fake_lan),
+        plate_clear=True,
+        during=confirm,
+    )
+    assert sent_early == [1]
+    assert len(fake_lan.project_files()) == 3
+    result = run.result
+    assert result is not None and result.lan_waiting == [] and result.lan_stopped is None
+    assert not result.lan_awaiting_clear
+    waits = [update for update in fake.updates if update.lan_awaiting_clear]
+    # Each wait names the print that ended, and the next still to start.
+    assert [len(update.lan) for update in waits] == [1, 2]
+    assert waits[0].lan[0].ended == "done" and waits[0].lan_waiting == [1, 1]
+
+
+async def test_a_run_without_the_setting_never_waits_for_a_clear(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    fake, run = await _run(
+        client, pg_pool, registry_native, blobs=Blobs(), copies=2, reports=FakeReports(fake_lan)
+    )
+    assert run.status == "succeeded" and len(fake_lan.project_files()) == 2
+    assert not any(update.lan_awaiting_clear for update in fake.updates)
+
+
+async def test_a_stop_while_it_waits_for_a_clear_stops_the_rest(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#4942: a stop (the sequence's cancel) while the run waits for a cleared plate
+    starts none of the rest, and the run no longer reads as waiting for one."""
+
+    async def stop(client: Client, arg: PrintRunInput, fake: NativeFake) -> None:
+        await _awaiting_clear(fake)
+        await client.get_workflow_handle(lan_sequence_id("run-1")).cancel()
+
+    _, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(),
+        copies=2,
+        reports=FakeReports(fake_lan),
+        plate_clear=True,
+        during=stop,
+    )
+    assert len(fake_lan.project_files()) == 1
+    result = run.result
+    assert result is not None and result.lan_waiting == [1]
+    assert result.lan_stopped is not None and result.lan_stopped.stage == "cancelled"
+    assert not result.lan_awaiting_clear

@@ -18,6 +18,9 @@ finished the one before (`lan_ended`, which the run's ``lan_wait`` polls): a sta
 run waited out carries how it ended (`LanStarted.ended`), since the printer reports the
 next one by then, and each start still to come (`PrintRunResult.lan_waiting`) is a copy
 ``queued``, as one waiting in Bambuddy's queue is, until the run stops (``lan_stopped``).
+While the run waits for a cleared plate (#4939, ``lan_awaiting_clear``) the next one says
+so (`AWAITING_CLEAR`). The progress names the run's controls (`lan_control`, #4942): stop
+the rest, and say the plate is clear.
 """
 
 from __future__ import annotations
@@ -29,8 +32,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from scadbuddy.bambuddy.follow import MAX_AGE
-from scadbuddy.bambuddy.progress import CopyProgress, PrintProgress, from_plates
-from scadbuddy.bambuddy.runs import LatestRun, read_latest
+from scadbuddy.bambuddy.progress import CopyProgress, LanRunControl, PrintProgress, from_plates
+from scadbuddy.bambuddy.runs import LatestRun, PrintRun, read_latest
 from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.core.problems import DATABASE_ERRORS
 from scadbuddy.printers.lan_models import LanStarted, LanStopped
@@ -170,13 +173,18 @@ def _ended(started: LanStarted, printer_name: str | None) -> PrintProgress:
 
 #: A copy still to start, while the printer prints the one before (#4541).
 WAITING = "Waiting for the printer to finish the print before it."
+#: The next copy, once the printer has ended the one before, while the run waits for
+#: someone to say the plate is clear (#4939, ``lan_require_plate_clear``).
+AWAITING_CLEAR = "Waiting for someone to say the plate of {printer} is clear."
 
 
-def _waiting(printer_name: str | None, stopped: LanStopped | None) -> PrintProgress:
+def _waiting(
+    printer_name: str | None, stopped: LanStopped | None, reason: str = WAITING
+) -> PrintProgress:
     """A start still to come: ``queued`` as one in Bambuddy's queue, or, once the run has
     stopped, never to start."""
     if stopped is None:
-        copy = CopyProgress(printer_name=printer_name, stage="queued", waiting_reason=WAITING)
+        copy = CopyProgress(printer_name=printer_name, stage="queued", waiting_reason=reason)
         return PrintProgress(route="lan", stage="queued", copies_detail=[copy], bambuddy_url="")
     copy = CopyProgress(printer_name=printer_name, stage=stopped.stage, message=stopped.message)
     failed = stopped.stage == "failed"
@@ -189,6 +197,19 @@ def _waiting(printer_name: str | None, stopped: LanStopped | None) -> PrintProgr
         error_message=stopped.message if failed else None,
         copies_detail=[copy],
         bambuddy_url="",
+    )
+
+
+def lan_control(run: PrintRun) -> LanRunControl | None:
+    """A succeeded native run's prints still to start and its controls (#4942, #4939);
+    ``None`` once it started every one or they were stopped."""
+    result = run.result
+    if run.status != "succeeded" or result is None or result.path != "native":
+        return None
+    if not result.lan_waiting or result.lan_stopped is not None:
+        return None
+    return LanRunControl(
+        run_id=run.id, waiting=len(result.lan_waiting), awaiting_clear=result.lan_awaiting_clear
     )
 
 
@@ -238,7 +259,10 @@ class LanProgress:
             else from_lan_report(report, plate, printer_name=name, now=now, max_age=self.max_age)
             for plate in started
         ]
-        plates += [_waiting(name, result.lan_stopped) for _ in result.lan_waiting]
+        reasons = [WAITING] * len(result.lan_waiting)
+        if reasons and result.lan_awaiting_clear:
+            reasons[0] = AWAITING_CLEAR.format(printer=name or "the printer")
+        plates += [_waiting(name, result.lan_stopped, reason) for reason in reasons]
         if len(plates) == 1:
             return plates[0]
         merged = from_plates(
@@ -251,4 +275,4 @@ class LanProgress:
             queue_item_id=None,
             bambuddy_url="",
         )
-        return merged.model_copy(update={"route": "lan"})
+        return merged.model_copy(update={"route": "lan", "lan_run": lan_control(run)})

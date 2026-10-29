@@ -441,6 +441,10 @@ class PrintRunResult(BaseModel):
     lan_waiting: list[int] = Field(default_factory=list)
     #: Why the run started none of ``lan_waiting``: set, they never will be.
     lan_stopped: LanStopped | None = None
+    #: The printer has ended the print before the next of ``lan_waiting``, and the run
+    #: waits for someone to say its plate is clear before it starts it (#4939,
+    #: ``lan_require_plate_clear``): ``POST /print/runs/{id}/plate-cleared``.
+    lan_awaiting_clear: bool = False
 
 
 async def known_slots(
@@ -2426,6 +2430,10 @@ class PlannedRun(BaseModel):
     path: RunPath = "bambuddy"
     #: As :attr:`PreparedPlates.lan_start`: the plates are started over the LAN.
     lan_start: bool = False
+    #: Whether a LAN run of several prints waits, after each, for someone to say the
+    #: plate is clear before it starts the next (#4939): ``lan_require_plate_clear`` as
+    #: the plan read it. The default keeps every recorded ``print_plan`` result as before.
+    plate_clear: bool = False
 
 
 class QueuedPlate(BaseModel):

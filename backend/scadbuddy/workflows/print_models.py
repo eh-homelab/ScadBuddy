@@ -40,6 +40,12 @@ def lan_sequence_id(run_id: str) -> str:
     return f"print-lan-{run_id}"
 
 
+#: The signal that says a LAN run's plate is clear (#4939). Its argument is how many
+#: prints the run had started (``len(result.lan)``) when the person said so, so a
+#: confirmation sent for an earlier wait never starts a later print.
+PLATE_CLEARED_SIGNAL = "plate_cleared"
+
+
 #: The Update the route waits on: the record, or the refusal (§5.1).
 ACCEPTED_UPDATE = "accepted"
 #: An activity's `ApplicationError.type` for a refusal before the record exists: the

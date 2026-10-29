@@ -25,10 +25,14 @@ from scadbuddy.bambuddy.runs import (
 )
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, PrintRunEvent
+from scadbuddy.printers.lan_models import LanStopped
+from scadbuddy.printers.models import PrinterCreate
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.render.pg_store import MIGRATIONS_DIR
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows import client as client_module
 from scadbuddy.workflows.client import reconcile_lost_runs
+from tests.printers.conftest import KEK
 from tests.support.temporal import DownClient, namespace_not_found_error, temporal_client
 
 pytestmark = pytest.mark.requires_postgres
@@ -132,6 +136,42 @@ async def test_update_result_rewrites_only_a_succeeded_run(
     assert (await store.update_result(failed.id, "demo", later)).result is None
     with pytest.raises(LookupError):
         await store.update_result("nope", "demo", later)
+
+
+async def test_lan_waiting_reads_each_printers_newest_run_with_prints_to_start(
+    store: PrintRunStore, jobs: JobProjection
+) -> None:
+    """#4942: the Prints page's controls. A printer's newest succeeded run whose prints
+    still to start were neither all started nor stopped; nothing for any other run."""
+    printers = PrinterStore(jobs.pool, KEK)
+    one = printers.create(PrinterCreate(serial="01P00A000000001", name="One")).id
+    two = printers.create(PrinterCreate(serial="01P00A000000002", name="Two")).id
+    waiting = RESULT.model_copy(update={"path": "native", "lan_waiting": [1]})
+    stopped = waiting.model_copy(
+        update={"lan_stopped": LanStopped(stage="cancelled", message="Stopped.")}
+    )
+    for run_id, printer, result in [
+        ("old", one, waiting),
+        ("new", one, waiting),
+        ("stopped", two, stopped),
+        ("done", two, RESULT),
+    ]:
+        await store.insert_accepted(
+            run_id,
+            subject=PrintSubject.output(OUTPUT),
+            key=run_id,
+            slug="demo",
+            workflow_id=f"print-{run_id}",
+            workflow_run_id="w",
+            retention=None,
+            printer=printer,
+        )
+        await store.succeed(run_id, "demo", result)
+    running = await accept(store, "k3", run_id="running", wf_run="w3")
+    assert running.status == "running"
+    found = await store.lan_waiting([one, two])
+    assert {printer: run.id for printer, run in found.items()} == {one: "new"}
+    assert await store.lan_waiting([]) == {}
 
 
 async def test_start_enqueue_marks_may_have_queued_on_a_later_failure(store: PrintRunStore) -> None:
