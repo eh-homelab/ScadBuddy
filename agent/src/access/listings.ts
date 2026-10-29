@@ -137,7 +137,7 @@ export function toStoredTools(entries: readonly unknown[]): StoredTool[] {
   const bare = tools.map((t) => jsonLength({ raw: { name: t.raw.name }, omitted: [...OMITTED] }))
   let rest = bare.reduce((sum, n) => sum + n, 2 + Math.max(tools.length - 1, 0))
   let kept = 0
-  for (const [i, t] of tools.entries()) {
+  for (const i of tools.keys()) {
     rest -= bare[i]!
     kept += full[i]!
     if (kept + rest > LISTING_CAPS.total) {
