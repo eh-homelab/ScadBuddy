@@ -6,6 +6,7 @@ test/fixtures/access-vectors.json pins them to the TypeScript (tests/test_access
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -20,8 +21,11 @@ _TIERS = ("read", "write", "outward")
 SOURCE_ITEM = "*"
 # `updated_by` of the rows migration 20261026T2201Z_access_copy.sql wrote.
 MIGRATED_BY = "migration:2171"
-REGISTRY_SOURCES = ("builtin:scadbuddy", "builtin:browser")
+BROWSER_SOURCE = "builtin:browser"
+REGISTRY_SOURCES = ("builtin:scadbuddy", BROWSER_SOURCE)
 OWN_PLUGIN_SOURCE = "builtin:own-plugin"
+# A package's MCP server, ``package:<pkg>/mcp:<server>`` (agent/src/access/model.ts).
+_PACKAGE_SERVER_RE = re.compile(r"package:.+/mcp:.+", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -34,7 +38,7 @@ class AccessRow:
 
 def registry_source(name: str) -> str:
     """The source of a registry tool: the browser's tools are their own."""
-    return "builtin:browser" if name.startswith("browser_") else "builtin:scadbuddy"
+    return BROWSER_SOURCE if name.startswith("browser_") else "builtin:scadbuddy"
 
 
 def _rank(tier: str) -> int:
@@ -53,9 +57,15 @@ def tool_access(declared: str, row: AccessRow | None, *, migrated_raises_only: b
     return row.access
 
 
+def enabled_by_default(source: str) -> bool:
+    """Built-in sources and package servers are on until turned off (a server is offered while
+    its package is approved and enabled); remote plugins and packages off until turned on."""
+    return source.startswith("builtin:") or _PACKAGE_SERVER_RE.fullmatch(source) is not None
+
+
 def source_enabled(source: str, rows: Sequence[AccessRow]) -> bool:
-    """The source's ``*`` row when it is ``on`` or ``off``, else its default: built-in sources
-    are on until turned off, remote plugins and packages off until turned on."""
+    """The source's ``*`` row when it is ``on`` or ``off``, else its default
+    (``enabled_by_default``)."""
     for row in rows:
         if row.source == source and row.item == SOURCE_ITEM:
             if row.access == "on":
@@ -63,7 +73,7 @@ def source_enabled(source: str, rows: Sequence[AccessRow]) -> bool:
             if row.access == "off":
                 return False
             break
-    return source.startswith("builtin:")
+    return enabled_by_default(source)
 
 
 async def read_rows(conn: psycopg.AsyncConnection[Any], sources: Sequence[str]) -> list[AccessRow]:

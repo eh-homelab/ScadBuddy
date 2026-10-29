@@ -1,5 +1,5 @@
 import { BUILTIN_SOURCES, registrySource, type StoredOverrides, type ToolAccess } from '../access/model.js'
-import { registryOverrides } from '../access/resolve.js'
+import { itemOverrides, registryOverrides } from '../access/resolve.js'
 import { AccessResolver } from '../access/resolver.js'
 import type { AccessReader, AccessWriter } from '../access/store.js'
 import type { AuditContext } from '../audit/log.js'
@@ -164,15 +164,20 @@ export class BuiltInTools {
     return this.sets.find((s) => s.name === name)
   }
 
-  /** The set's overrides as stored now; none without a database. */
+  /** The set's overrides as the gates apply them now (`builtin:browser`'s switch folded in); none without a database. */
   async overrides(set: BuiltInToolSet): Promise<StoredOverrides> {
     return registryOverrides(set.tools, this.#access ? await this.#access.rows(REGISTRY_SOURCES) : [])
+  }
+
+  /** Each tool's own stored access, no switch folded in: what `update` patches and the view shows. */
+  async stored(set: BuiltInToolSet): Promise<StoredOverrides> {
+    return itemOverrides(set.tools, this.#access ? await this.#access.rows(REGISTRY_SOURCES) : [])
   }
 
   async view(set: BuiltInToolSet): Promise<BuiltInPluginView> {
     const builtIn = builtInNamed(set.name)
     const [overrides, enabled] = await Promise.all([
-      this.overrides(set),
+      this.stored(set),
       set.switchable && builtIn ? builtInEnabled(this.#access, builtIn) : Promise.resolve(true),
     ])
     return {
@@ -200,7 +205,7 @@ export class BuiltInTools {
   ): Promise<BuiltInPluginView> {
     const replaceToolsOf = this.#access?.replaceToolsOf?.bind(this.#access)
     if (!replaceToolsOf) throw new PluginError('built-in tool settings need the database', 503)
-    const next = validateOverrides(set, patch, await this.overrides(set))
+    const next = validateOverrides(set, patch, await this.stored(set))
     // A tool's own tier is not stored; a disabled tool is `off`, whatever its tier.
     const rows = new Map<string, Record<string, ToolAccess>>(REGISTRY_SOURCES.map((source) => [source, {}]))
     for (const [tool, tier] of Object.entries(next.tool_tiers)) rows.get(registrySource(tool))![tool] = tier

@@ -25,16 +25,15 @@ export type LiveTurn = {
  * The seam's per-call read (harness/permissions.ts `LiveSeam`): a registry tool's access
  * (`off` too when `builtin:browser` is switched off, for a browser tool), a remote
  * plugin's tool's (`off` when the plugin is switched off), a package server's tool's
- * (outward unless stored), and http_request's (`off` when `builtin:http` is, its item
- * when one is stored, else its method's tier). Anything else (Skill, Agent, Claude
- * Code's built-ins) is undefined.
+ * (`off` when the server is switched off, else outward unless stored), and
+ * http_request's (`off` when `builtin:http` is, its item when one is stored, else its
+ * method's tier). Anything else (Skill, Agent, Claude Code's built-ins) is undefined.
  */
 export function liveAccess(resolver: Pick<AccessResolver, 'item' | 'entry' | 'switchedItem'>, turn: LiveTurn): LiveAccess {
   const own = new Map(turn.tools.map((t) => [`${toolPrefix(SERVER_NAME)}${t.name}`, t]))
-  const sources: { prefix: string; source: string; switched: boolean }[] = [
-    ...turn.remote.map((name) => ({ prefix: toolPrefix(name), source: remoteSource(name), switched: true })),
-    // Not switched yet: a package server's '*' default is defined by #4757 (enabledByDefault is false for it today).
-    ...turn.packageServers.map((s) => ({ prefix: toolPrefix(s.name), source: packageServerSource(s.pkg, s.server), switched: false })),
+  const sources: { prefix: string; source: string }[] = [
+    ...turn.remote.map((name) => ({ prefix: toolPrefix(name), source: remoteSource(name) })),
+    ...turn.packageServers.map((s) => ({ prefix: toolPrefix(s.name), source: packageServerSource(s.pkg, s.server) })),
   ]
   return async (harnessName, input) => {
     const tool = own.get(harnessName)
@@ -51,7 +50,6 @@ export function liveAccess(resolver: Pick<AccessResolver, 'item' | 'entry' | 'sw
     }
     const from = sources.find((s) => harnessName.startsWith(s.prefix))
     if (!from) return undefined
-    const item = harnessName.slice(from.prefix.length)
-    return from.switched ? resolver.switchedItem(from.source, item, 'outward') : resolver.item(from.source, item, 'outward')
+    return resolver.switchedItem(from.source, harnessName.slice(from.prefix.length), 'outward')
   }
 }

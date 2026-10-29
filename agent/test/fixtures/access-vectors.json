@@ -539,6 +539,100 @@
         },
         "disabled_tools": []
       }
+    },
+    {
+      "name": "browser switched off disables the browser tools",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        },
+        {
+          "name": "browser_navigate",
+          "risk": "read",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:browser",
+          "item": "*",
+          "access": "off",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "builtin:browser",
+          "item": "browser_click",
+          "access": "outward",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "builtin:scadbuddy",
+          "item": "get_model",
+          "access": "write",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {
+          "get_model": "write"
+        },
+        "disabled_tools": [
+          "browser_click",
+          "browser_navigate"
+        ]
+      }
+    },
+    {
+      "name": "browser switched on keeps their rows",
+      "tools": [
+        {
+          "name": "get_model",
+          "risk": "read",
+          "hitl": null
+        },
+        {
+          "name": "send_to_bambuddy",
+          "risk": "outward",
+          "hitl": "approval"
+        },
+        {
+          "name": "browser_click",
+          "risk": "write",
+          "hitl": null
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:browser",
+          "item": "*",
+          "access": "on",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "builtin:browser",
+          "item": "browser_click",
+          "access": "outward",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "tool_tiers": {
+          "browser_click": "outward"
+        },
+        "disabled_tools": []
+      }
     }
   ],
   "sources": [
@@ -604,6 +698,31 @@
           "updated_by": "browser:browser"
         }
       ],
+      "expect": false
+    },
+    {
+      "name": "a package server is on by default",
+      "source": "package:pk/mcp:srv",
+      "rows": [],
+      "expect": true
+    },
+    {
+      "name": "a package server off",
+      "source": "package:pk/mcp:srv",
+      "rows": [
+        {
+          "source": "package:pk/mcp:srv",
+          "item": "*",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": false
+    },
+    {
+      "name": "a package is off by default",
+      "source": "package:pk",
+      "rows": [],
       "expect": false
     }
   ]

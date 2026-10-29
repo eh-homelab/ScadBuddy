@@ -1,5 +1,6 @@
 import type { AuditContext } from '../audit/log.js'
 import type { PluginTest } from '../plugins/testConnection.js'
+import type { ItemKind } from './items.js'
 import type { ToolAccess } from './model.js'
 
 // The capabilities tree (#2171, spec §4): every source the agent's tools, hooks, skills and
@@ -7,7 +8,7 @@ import type { ToolAccess } from './model.js'
 // the sources; Capabilities dispatches to them and checks every write against the model.
 
 export type Access = ToolAccess | 'on'
-export type ItemKind = 'tool' | 'hook' | 'skill' | 'subagent' | 'builtin'
+export type { ItemKind } from './items.js'
 
 const TIERS: readonly Access[] = ['off', 'read', 'write', 'outward']
 const SWITCH: readonly Access[] = ['off', 'on']

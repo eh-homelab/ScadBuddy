@@ -95,13 +95,45 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
 
   it("refuses on for a tool, a tier for '*', and an unknown source with AccessError", async () => {
     const refusals = [
-      () => store.setItem(SCAD, 'get_model', 'on' as never, ctx),
+      () => store.setItem(SCAD, 'get_model', 'on', ctx),
       () => store.setItem(SCAD, '*', 'read', ctx),
       () => store.setItem('bogus:x', 'a', 'read', ctx),
       () => store.setEnabled('remote:Bad Name', true, ctx),
       () => store.replaceTools('bogus:x', { a: 'read' }, ctx),
       () => store.replaceTools(SCAD, { a: 'on' as never }, ctx),
       () => store.resetItem('bogus:x', 'a', ctx),
+    ]
+    for (const refuse of refusals) {
+      const err = await refuse().catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(AccessError)
+      expect((err as AccessError).status).toBe(400)
+    }
+    expect(await db.sql`SELECT 1 FROM ai_access`).toHaveLength(0)
+  })
+
+  it('stores on for a package skill and the own plugin\'s subagent', async () => {
+    await store.setItem('package:pk', 'skill:review', 'on', ctx)
+    await store.setItem('builtin:own-plugin', 'subagent:printer', 'on', ctx)
+    await store.setItem('package:pk', 'hook:PreToolUse:0123456789abcdef', 'off', ctx)
+    await store.setItem('package:pk', 'builtin:Bash', 'write', ctx)
+    expect(await store.rows(['package:pk', 'builtin:own-plugin'])).toEqual([
+      { source: 'builtin:own-plugin', item: 'subagent:printer', access: 'on', updated_by: 'browser:browser' },
+      { source: 'package:pk', item: 'builtin:Bash', access: 'write', updated_by: 'browser:browser' },
+      { source: 'package:pk', item: 'hook:PreToolUse:0123456789abcdef', access: 'off', updated_by: 'browser:browser' },
+      { source: 'package:pk', item: 'skill:review', access: 'on', updated_by: 'browser:browser' },
+    ])
+  })
+
+  it('refuses on for a tool, a tier for a hook, and on outside a package (400)', async () => {
+    const refusals = [
+      () => store.setItem(SCAD, 'get_model', 'on', ctx),
+      () => store.setItem('package:pk/mcp:srv', 'search', 'on', ctx),
+      () => store.setItem('package:pk', 'hook:PreToolUse:0123456789abcdef', 'read', ctx),
+      () => store.setItem('package:pk', 'skill:review', 'outward', ctx),
+      () => store.setItem('builtin:own-plugin', 'subagent:printer', 'write', ctx),
+      () => store.setItem('package:pk', 'builtin:Bash', 'on', ctx),
+      () => store.setItem(SCAD, 'skill:review', 'on', ctx),
+      () => store.setItem('remote:hs', 'subagent:x', 'off', ctx),
     ]
     for (const refuse of refusals) {
       const err = await refuse().catch((e: unknown) => e)

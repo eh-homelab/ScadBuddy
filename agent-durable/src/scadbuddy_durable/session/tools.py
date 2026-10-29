@@ -27,7 +27,13 @@ from temporalio import activity, workflow
 from temporalio.claude_agent_sdk import DurableTool, activity_as_tool
 from temporalio.common import RetryPolicy
 
-from scadbuddy_durable.session.access import AccessRow, registry_source, tool_access
+from scadbuddy_durable.session.access import (
+    BROWSER_SOURCE,
+    AccessRow,
+    registry_source,
+    source_enabled,
+    tool_access,
+)
 from scadbuddy_durable.session.models import TOOLS_QUEUE, TurnTool
 
 Hitl = Literal["approval", "answer"]
@@ -153,13 +159,18 @@ def sanitise_overrides(
     raised or lowered, and every ``off``, by name. A row of another source, naming no tool,
     or holding no access counts for nothing; a migrated row only where it raises or is
     ``off``. A manifest tier that is no tier still takes a stored tier (#3882). The answer
-    tools are durable-only, in no source."""
+    tools are durable-only, in no source. While ``builtin:browser``'s ``*`` is ``off``,
+    every browser tool is disabled (#4757)."""
     by_key = {(r.source, r.item): r for r in rows}
+    browser_on = source_enabled(BROWSER_SOURCE, rows)
     tiers: dict[str, str] = {}
     disabled: list[str] = []
     for e in sorted((e for e in entries if e.hitl != "answer"), key=lambda e: e.name):
-        row = by_key.get((registry_source(e.name), e.name))
+        source = registry_source(e.name)
+        row = by_key.get((source, e.name))
         effective = tool_access(e.tier, row, migrated_raises_only=True)
+        if source == BROWSER_SOURCE and not browser_on:
+            effective = "off"
         if effective == "off":
             disabled.append(e.name)
         elif effective != e.tier:

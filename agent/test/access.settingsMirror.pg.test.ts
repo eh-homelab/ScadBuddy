@@ -107,6 +107,19 @@ describe.skipIf(skip !== '')(`the old ai_settings keys during a rolling deploy${
     expect(await setting('http_request_enabled')).toBe(true)
   })
 
+  it('switching builtin:browser off writes no browser tool into builtin_tools.scadbuddy', async () => {
+    await store.setItem('builtin:browser', 'browser_click', 'outward', ctx)
+    const before = await setting('builtin_tools.scadbuddy')
+    expect(before).toEqual({ tool_tiers: { browser_click: 'outward' }, disabled_tools: [] })
+    await store.setEnabled('builtin:browser', false, ctx)
+    expect(await setting('builtin_tools.scadbuddy')).toEqual(before)
+    expect(await access()).toEqual([
+      { source: 'builtin:browser', item: '*', access: 'off', updated_by: 'browser:browser' },
+      { source: 'builtin:browser', item: 'browser_click', access: 'outward', updated_by: 'browser:browser' },
+    ])
+    expect(await db.sql`SELECT 1 FROM ai_access WHERE updated_by = ${BY}`).toHaveLength(0)
+  })
+
   it('a lowered tier the new code wrote is kept by the mirror of an old write', async () => {
     const tools = new BuiltInTools(store)
     const set = tools.named(OWN_PLUGIN_NAME)!

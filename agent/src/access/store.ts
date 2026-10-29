@@ -2,7 +2,9 @@ import type { Sql, TransactionSql } from 'postgres'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from '../audit/log.js'
 import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { LEGACY_SOURCES, legacySettings, type RegistryTool } from './legacy.js'
-import { type AccessRow, isToolAccess, SOURCE_ITEM, type ToolAccess } from './model.js'
+import type { Access } from './capabilities.js'
+import { itemKindOf } from './items.js'
+import { type AccessRow, BUILTIN_SOURCES, isToolAccess, SOURCE_ITEM, type ToolAccess } from './model.js'
 
 export type AccessReader = {
   rows(sources: readonly string[]): Promise<AccessRow[]>
@@ -11,7 +13,8 @@ export type AccessReader = {
 }
 
 export type AccessWriter = {
-  setItem(source: string, item: string, access: ToolAccess, context?: AuditContext): Promise<void>
+  /** A tool or built-in takes a tier or `off`; a hook, skill or subagent `on` or `off` (checkItem). */
+  setItem(source: string, item: string, access: Access, context?: AuditContext): Promise<void>
   resetItem(source: string, item: string, context?: AuditContext): Promise<void>
   /** `resetItem` in one statement, only while the row holds `only`: a concurrent write of another access is kept. */
   resetItemIf(source: string, item: string, only: ToolAccess, context?: AuditContext): Promise<void>
@@ -36,6 +39,23 @@ function checkSource(source: string): void {
 function checkTool(item: string, access: unknown): asserts access is ToolAccess {
   if (item === '' || item === SOURCE_ITEM) throw new AccessError(`${JSON.stringify(item)} is not a tool name`)
   if (!isToolAccess(access)) throw new AccessError(`a tool takes off, read, write or outward, not ${JSON.stringify(access)}`)
+}
+
+/**
+ * One item's write as the model allows it (#4757, spec §4.1): a tool or an allowed built-in
+ * takes off, read, write or outward; a hook, skill or subagent takes on or off, and only in
+ * a package or the own plugin.
+ */
+export function checkItem(source: string, item: string, access: unknown): asserts access is Access {
+  const kind = itemKindOf(item)
+  if (kind === 'tool' || kind === 'builtin') {
+    checkTool(item, access)
+    return
+  }
+  if (access !== 'on' && access !== 'off') throw new AccessError(`a ${kind} takes on or off, not ${JSON.stringify(access)}`)
+  if (!source.startsWith('package:') && source !== BUILTIN_SOURCES.ownPlugin) {
+    throw new AccessError(`${JSON.stringify(source)} has no ${kind}s: only a package or the own plugin does`)
+  }
 }
 
 /** `<actor.kind>:<actor.id>`; `system` without a context. */
@@ -144,9 +164,9 @@ export class AccessStore implements AccessReader, AccessWriter {
     return row
   }
 
-  async setItem(source: string, item: string, access: ToolAccess, context?: AuditContext): Promise<void> {
+  async setItem(source: string, item: string, access: Access, context?: AuditContext): Promise<void> {
     checkSource(source)
-    checkTool(item, access)
+    checkItem(source, item, access)
     await this.write(context, [{ source, kind: 'items', items: { [item]: access } }], () => `${source}/${item} = ${JSON.stringify(access)}`)
   }
 

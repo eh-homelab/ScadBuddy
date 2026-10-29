@@ -94,6 +94,19 @@ function build(): Vectors {
         rows: [row(S, 't', 'outward', MIGRATED_BY)],
         expect: { tool_tiers: { t: 'outward' }, disabled_tools: [] },
       },
+      {
+        // #4757: the browser's `*` switch, folded into every gate's overrides.
+        name: 'browser switched off disables the browser tools',
+        tools: [...TOOLS, { name: 'browser_navigate', risk: 'read', hitl: null }],
+        rows: [row(B, '*', 'off'), row(B, 'browser_click', 'outward'), row(S, 'get_model', 'write')],
+        expect: { tool_tiers: { get_model: 'write' }, disabled_tools: ['browser_click', 'browser_navigate'] },
+      },
+      {
+        name: 'browser switched on keeps their rows',
+        tools: TOOLS,
+        rows: [row(B, '*', 'on'), row(B, 'browser_click', 'outward')],
+        expect: { tool_tiers: { browser_click: 'outward' }, disabled_tools: [] },
+      },
     ],
     sources: [
       { name: 'http is on by default', source: 'builtin:http', rows: [], expect: true },
@@ -102,6 +115,9 @@ function build(): Vectors {
       { name: 'a remote plugin is off by default', source: 'remote:hs', rows: [], expect: false },
       { name: 'a remote plugin on', source: 'remote:hs', rows: [row('remote:hs', '*', 'on')], expect: true },
       { name: "a '*' row holding a tier is ignored", source: 'remote:hs', rows: [row('remote:hs', '*', 'outward')], expect: false },
+      { name: 'a package server is on by default', source: 'package:pk/mcp:srv', rows: [], expect: true },
+      { name: 'a package server off', source: 'package:pk/mcp:srv', rows: [row('package:pk/mcp:srv', '*', 'off')], expect: false },
+      { name: 'a package is off by default', source: 'package:pk', rows: [], expect: false },
     ],
   }
 }
@@ -138,7 +154,9 @@ describe('access vectors', () => {
       const tier = v.expect.tool_tiers[tool.name]
       expect(await overrides.of(tool.name), tool.name).toEqual({ ...(tier === undefined ? {} : { tier }), disabled: v.expect.disabled_tools.includes(tool.name) })
     }
-    expect(reads).toEqual({ rows: 0, row: tools.length })
+    // A browser tool's call reads its source's rows once, for the `*` switch too (#4757).
+    const browser = tools.filter((t) => registrySource(t.name) === B).length
+    expect(reads).toEqual({ rows: browser, row: tools.length - browser })
   })
 
   it.each(built.sources)('source: $name', (v) => expect(sourceEnabled(v.source, v.rows)).toBe(v.expect))

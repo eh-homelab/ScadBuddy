@@ -1,5 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import type { HookInput } from '@anthropic-ai/claude-agent-sdk'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
@@ -11,12 +13,15 @@ import { originPolicy } from '../src/http/origins.js'
 import { BuiltInTools } from '../src/plugins/builtInTools.js'
 import { CAPABILITIES_PATH } from '../src/routes/capabilities.js'
 import { FLOW_TOOLS_PATH } from '../src/routes/flowTools.js'
+import { subagentServer } from '../src/routes/subagentMcp.js'
 import { kekFromBase64 } from '../src/secrets.js'
+import { mintSubagentToken, subagentKey, verifySubagentToken } from '../src/temporal/subagentToken.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { TOOL_TIER_ACTIVITY } from '../src/temporal/toolTier.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { defineTool, json, runToolWithOutcome } from '../src/tools/registry.js'
+import { createExternalServer, refreshOfferedTools } from '../src/tools/projections.js'
+import { defineTool, json, runToolWithOutcome, type Tool } from '../src/tools/registry.js'
 import { services } from './helpers/mcp.js'
 import { memoryAccess } from './support/memoryAccess.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
@@ -136,5 +141,112 @@ describe('access set in Settings → Tools & plugins, at every gate (#2171)', ()
     expect(await ask()).toEqual({ tier: 'outward', disabled: false })
     await lower()
     expect(await ask()).toEqual({ tier: 'write', disabled: false })
+  })
+})
+
+// #4757: the browser's `*` switch, at the same gates.
+describe('builtin:browser switched off, at every gate (#4757)', () => {
+  const browser = ALL_TOOLS.find((t) => t.name.startsWith('browser_'))!
+  const other = ALL_TOOLS.find((t) => !t.name.startsWith('browser_'))!
+  const standIn = (t: Tool) =>
+    defineTool({ name: t.name, label: t.label, description: 'stands in', input: z.object({}), risk: t.risk, routes: [], handler: async () => json({ ran: t.name }) })
+
+  function browserRig() {
+    const { access } = memoryAccess()
+    const tools = [standIn(browser), standIn(other)]
+    const svc = services({ toolOverrides: new BuiltInTools(access).registryOverrides() })
+    const off = () => access.setEnabled(BUILTIN_SOURCES.browser, false)
+    return { access, tools, svc, off }
+  }
+
+  it('builtin:browser switched off hides browser tools from /mcp', async () => {
+    const { tools, svc, off } = browserRig()
+    const server = createExternalServer(tools, svc)
+    const [c, s] = InMemoryTransport.createLinkedPair()
+    await server.connect(s)
+    const client = new Client({ name: 't', version: '1' })
+    await client.connect(c)
+    const listed = async () => {
+      await refreshOfferedTools(server)
+      return (await client.listTools()).tools.map((t) => t.name).sort()
+    }
+    expect(await listed()).toEqual([browser.name, other.name].sort())
+    await off()
+    expect(await listed()).toEqual([other.name])
+  })
+
+  // A flow has no tab, so the route never lists a browser tool (temporal/flowTools.ts forFlows):
+  // switched off, it stays unlisted, and nothing else changes.
+  it('builtin:browser switched off answers disabled from /internal/flows/tools', async () => {
+    const { tools, svc, off, access } = browserRig()
+    const app = createApp({
+      access: access as never,
+      database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
+      backend: () => Promise.resolve(true),
+      kek: { ok: true, kek },
+      credentials: new MemoryCredentials(),
+      testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
+      remoteAddress: () => '127.0.0.1',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+      flowTools: { tools, services: svc },
+    })
+    const disabled = async () => {
+      const res = await app.request(FLOW_TOOLS_PATH)
+      expect(res.status).toBe(200)
+      return Object.fromEntries(((await res.json()) as { tools: { name: string; disabled: boolean }[] }).tools.map((t) => [t.name, t.disabled]))
+    }
+    expect(await disabled()).toEqual({ [other.name]: false })
+    await off()
+    expect(await disabled()).toEqual({ [other.name]: false })
+  })
+
+  it('builtin:browser switched off answers disabled from the durable TOOL_TIER_ACTIVITY', async () => {
+    const { tools, svc, off } = browserRig()
+    const activities = toolActivities(tools, {
+      services: svc,
+      sessions: { ownerOf: async () => ({ kind: 'browser', id: 'browser', label: 'You' }) },
+      approvals: { approved: async () => false },
+    })
+    const env = new MockActivityEnvironment({
+      activityId: 'tier-1',
+      workflowExecution: { workflowId: `session-${SESSION}`, runId: 'run-1' },
+      activityType: TOOL_TIER_ACTIVITY,
+      taskQueue: 'agent-tools',
+    })
+    const ask = (tool: string) => env.run(activities[TOOL_TIER_ACTIVITY]!, { tool })
+    expect(await ask(browser.name)).toEqual({ tier: browser.risk, disabled: false })
+    await off()
+    expect(await ask(browser.name)).toEqual({ tier: browser.risk, disabled: true })
+    expect(await ask(other.name)).toEqual({ tier: other.risk, disabled: false })
+  })
+
+  it('builtin:browser switched off answers disabled from the subagent loopback', async () => {
+    const { tools, svc, off } = browserRig()
+    const key = subagentKey(kek)
+    const owner = { kind: 'browser' as const, id: 'browser', label: 'You' }
+    const turn = '6a1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
+    const server = subagentServer(
+      {
+        sessions: { ownerOf: async (id) => (id === SESSION ? { ...owner, turnTiers: null } : undefined) },
+        running: async () => true,
+        currentTiers: async () => undefined,
+        keys: () => [key],
+        tools,
+        services: svc,
+        audit: { record: vi.fn(async () => {}), hash: () => 'h', summarise: () => 's' } as never,
+      },
+      verifySubagentToken(mintSubagentToken(key, { session: SESSION, turn, owner }, Date.now() / 1000 + 600), [key])!,
+    )
+    const [c, s] = InMemoryTransport.createLinkedPair()
+    await server.connect(s)
+    const client = new Client({ name: 't', version: '1' })
+    await client.connect(c)
+    const call = async () => {
+      const r = (await client.callTool({ name: browser.name, arguments: {} })) as { isError?: boolean; content: { text: string }[] }
+      return { error: r.isError === true, text: r.content.map((x) => x.text).join('') }
+    }
+    expect(await call()).toMatchObject({ error: false })
+    await off()
+    expect(await call()).toEqual({ error: true, text: expect.stringMatching(/disabled in Settings/) as unknown })
   })
 })

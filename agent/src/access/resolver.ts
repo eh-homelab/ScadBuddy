@@ -1,9 +1,18 @@
 import type { RiskTier } from '../harness/permissions.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import type { Tool, ToolOverrides } from '../tools/registry.js'
-import { type AccessRow, BUILTIN_SOURCES, isToolAccess, registrySource, type StoredOverrides, type ToolAccess } from './model.js'
+import { builtinItem, itemKindOf, strictest } from './items.js'
+import { type AccessRow, BUILTIN_SOURCES, isToolAccess, packageSource, registrySource, type StoredOverrides, type ToolAccess } from './model.js'
 import { isRegistrySource, pluginOverrides, registryOverrides, sourceEnabled, toolAccess } from './resolve.js'
 import type { AccessReader } from './store.js'
+
+/** One package's (or the own plugin's) items as stored: what is switched off, and each built-in's tier. */
+export type PackageAccess = {
+  off: { skills: Set<string>; subagents: Set<string>; hooks: Set<string>; builtins: Set<string> }
+  builtinTiers: Map<string, ToolAccess>
+}
+
+const OFF_SET = { skill: 'skills', subagent: 'subagents', hook: 'hooks' } as const
 
 /**
  * Every item's effective access (#2171, spec §4.4), read from `ai_access` at each call.
@@ -27,15 +36,16 @@ export class AccessResolver {
 
   /**
    * The registry's overrides as a tool sees them: each call reads its tool's one row (`item`,
-   * the same rules as `registry`), and `disabled` the whole registry.
+   * the same rules as `registry`; a browser tool's with `builtin:browser`'s switch,
+   * `switchedItem`), and `disabled` the whole registry.
    */
   registryOverrides(): ToolOverrides {
     return {
       of: async (tool) => {
         const own = this.risk.get(tool)
         if (own === undefined) return { disabled: false }
-        // `item`, not `switchedItem`: a `builtin:browser` `*` off is enforced only on the classic seam until #4757.
-        const access = await this.item(registrySource(tool), tool, own)
+        const source = registrySource(tool)
+        const access = source === BUILTIN_SOURCES.browser ? await this.switchedItem(source, tool, own) : await this.item(source, tool, own)
         if (access === 'off') return { disabled: true }
         return { ...(access === own ? {} : { tier: access }), disabled: false }
       },
@@ -77,6 +87,51 @@ export class AccessResolver {
   async item(source: string, item: string, declared: RiskTier): Promise<ToolAccess> {
     if (!this.reader) return declared
     return toolAccess(declared, await this.rowOf(this.reader, source, item), isRegistrySource(source))
+  }
+
+  /** An on/off item (a skill, subagent or hook): `false` only for an `off` row. */
+  async switchOn(source: string, item: string): Promise<boolean> {
+    if (!this.reader) return true
+    return (await this.rowOf(this.reader, source, item))?.access !== 'off'
+  }
+
+  /**
+   * A built-in's access across `packages`, the packages that name it: each one's
+   * `builtin:<name>` row, `outward` where it has none, and the strictest of those wins
+   * (`outward` for none).
+   */
+  async builtin(name: string, packages: readonly string[]): Promise<ToolAccess> {
+    if (packages.length === 0 || !this.reader) return 'outward'
+    const sources = packages.map(packageSource)
+    const item = builtinItem(name)
+    const rows = await this.reader.rows(sources)
+    const each = sources.map((source) => {
+      const access = rows.find((r) => r.source === source && r.item === item)?.access
+      return isToolAccess(access) ? access : 'outward'
+    })
+    return strictest(each) ?? 'outward'
+  }
+
+  /** Every given source's switched-off items and built-in tiers, in one read. */
+  async packageAccess(sources: readonly string[]): Promise<Map<string, PackageAccess>> {
+    const rows = this.reader && sources.length > 0 ? await this.reader.rows(sources) : []
+    const out = new Map<string, PackageAccess>(
+      sources.map((s) => [s, { off: { skills: new Set(), subagents: new Set(), hooks: new Set(), builtins: new Set() }, builtinTiers: new Map() }]),
+    )
+    for (const row of rows) {
+      const into = out.get(row.source)
+      if (!into) continue
+      const kind = itemKindOf(row.item)
+      if (kind === 'tool') continue
+      const name = row.item.slice(row.item.indexOf(':') + 1)
+      if (kind === 'builtin') {
+        if (row.access === 'off') into.off.builtins.add(name)
+        else if (isToolAccess(row.access)) into.builtinTiers.set(name, row.access)
+      } else if (row.access === 'off') {
+        into.off[OFF_SET[kind]].add(name)
+      }
+    }
+    return out
   }
 
   /** One indexed read where the reader has one, else its source's rows. */
