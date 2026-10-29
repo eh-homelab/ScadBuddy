@@ -281,6 +281,12 @@ _refreshing: dict[Path, asyncio.Task[None]] = {}
 #: The first reads running in this process, one per file with nothing kept yet, which
 #: every open of that file waits on (#2906).
 _reading: dict[Path, asyncio.Task[Catalogue]] = {}
+#: When this process last found each file's refresh claimed by another replica
+#: (``time.monotonic``), so its opens do not each ask again until that one is done.
+_refused: dict[Path, float] = {}
+#: How long a refused claim is not asked again, in seconds: about as long as a
+#: refresh takes on prod (1.4 to 12 s, #4528).
+REFUSED_CLAIM_BACKOFF = 15.0
 
 
 def catalogue_name_key(kek: Kek | None) -> bytes | None:
@@ -310,6 +316,7 @@ def catalogue_refresh_claim(conninfo: str) -> RefreshClaim:
 
     @asynccontextmanager
     async def claim(path: Path) -> AsyncIterator[bool]:
+        conn: AsyncConnection[tuple[object, ...]] | None = None
         try:
             conn = await AsyncConnection.connect(
                 conninfo, autocommit=True, connect_timeout=REFRESH_CLAIM_CONNECT_TIMEOUT
@@ -320,6 +327,9 @@ def catalogue_refresh_claim(conninfo: str) -> RefreshClaim:
                 "could not claim the preset catalogue's refresh",
                 extra={"error": type(error).__name__},
             )
+        if conn is None:
+            # Outside the handler, so a refresh's own error never carries the connect
+            # error, and its conninfo, as its context.
             yield True
             return
         try:
@@ -387,7 +397,9 @@ async def cached_catalogue(
             reading.add_done_callback(lambda done: _settle_first_read(path, done))
         return await asyncio.shield(reading)
     age, catalogue = kept
-    if age >= CATALOGUE_TTL and path not in _refreshing:
+    refused = _refused.get(path)
+    backing_off = refused is not None and time.monotonic() - refused < REFUSED_CLAIM_BACKOFF
+    if age >= CATALOGUE_TTL and path not in _refreshing and not backing_off:
         task = asyncio.create_task(_refresh(client.config, path, refresh_claim))
         _refreshing[path] = task
         task.add_done_callback(lambda _: _refreshing.pop(path, None))
@@ -539,7 +551,11 @@ async def _refresh(config: BambuddyConfig, path: Path, claim: RefreshClaim | Non
     copy in finds the file no longer expired and reads nothing either."""
     try:
         async with _claimed(claim, path) as claimed:
-            if not claimed or not await asyncio.to_thread(_expired, path):
+            if not claimed:
+                _refused[path] = time.monotonic()
+                return
+            _refused.pop(path, None)
+            if not await asyncio.to_thread(_expired, path):
                 return
             async with BambuddyClient(config) as client:
                 catalogue = await _catalogue(client)
@@ -595,3 +611,4 @@ def forget_catalogues() -> None:
     _reading.clear()
     _parsed.clear()
     _misses.clear()
+    _refused.clear()

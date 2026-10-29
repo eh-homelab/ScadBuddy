@@ -308,6 +308,28 @@ async def test_an_expired_catalogue_another_replica_refreshes_is_not_read_again(
 
 
 @respx.mock
+async def test_a_refused_claim_is_not_asked_again_by_every_open(
+    bambuddy: BambuddyClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#4938 review: while the other replica refreshes, each open here would otherwise
+    open one more Postgres connection to be refused again."""
+    _preset_routes()
+    await cached_catalogue(bambuddy, tmp_path)
+    _expire(tmp_path)
+    claim = _Claim(granted=False)
+
+    for _ in range(3):
+        await cached_catalogue(bambuddy, tmp_path, refresh_claim=claim)
+        await _refreshes_done()
+    assert len(claim.claimed) == 1
+
+    monkeypatch.setattr(catalogue, "REFUSED_CLAIM_BACKOFF", 0.0)
+    await cached_catalogue(bambuddy, tmp_path, refresh_claim=claim)
+    await _refreshes_done()
+    assert len(claim.claimed) == 2
+
+
+@respx.mock
 async def test_a_refresh_that_finds_the_copy_refreshed_once_claimed_reads_nothing(
     bambuddy: BambuddyClient, tmp_path: Path
 ) -> None:
@@ -355,10 +377,18 @@ async def test_a_refresh_claim_that_cannot_reach_postgres_lets_the_replica_refre
 
     async with asyncio.timeout(10), claim(tmp_path / "v1-x.json") as granted:
         assert granted
-    (record,) = [r for r in caplog.records if "claim" in r.getMessage()]
-    # psycopg's own subclass of OperationalError, by its connect timeout's path.
-    assert record.__dict__["error"] in ("OperationalError", "ConnectionTimeout")
-    assert not any("nobody" in str(value) for value in record.__dict__.values())
+    # A refresh that fails under it does not carry the connect error as its context
+    # (#4938 review), which a later `exc_info` would print with the conninfo.
+    with pytest.raises(RuntimeError) as failed:
+        async with claim(tmp_path / "v1-x.json"):
+            raise RuntimeError("refresh")
+    assert failed.value.__context__ is None
+    records = [r for r in caplog.records if "claim" in r.getMessage()]
+    assert len(records) == 2
+    for record in records:
+        # psycopg's own subclass of OperationalError, by its connect timeout's path.
+        assert record.__dict__["error"] in ("OperationalError", "ConnectionTimeout")
+        assert not any("nobody" in str(value) for value in record.__dict__.values())
 
 
 @pytest.mark.requires_postgres
