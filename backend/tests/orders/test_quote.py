@@ -38,6 +38,7 @@ from scadbuddy.orders.quote import (
     quote_check,
     quote_run,
     read_plate,
+    reference_of,
     unsliced_slots,
 )
 from scadbuddy.orders.reference import ResolvedReference
@@ -445,7 +446,7 @@ async def test_an_output_saved_before_defaults_were_filled_still_matches(shop: S
     meta = OutputMeta.model_construct(id="out-9", slug="demo", model_version="a" * 40)
     sparse: dict[str, Any] = {"params": {"width": 10}, "v": 0}
     full: dict[str, Any] = {"params": {"width": 10, "label": "hi"}, "v": 0}
-    reference = shop.item.reference
+    reference = reference_of(shop.item)
 
     async def never(body: dict[str, Any]) -> dict[str, Any]:
         raise AssertionError("a matching output is reused, never saved again")
@@ -488,7 +489,7 @@ async def test_an_output_with_malformed_params_is_compared_exactly(shop: Shop) -
     meta = OutputMeta.model_construct(id="out-9", slug="demo", model_version="a" * 40)
     full = {"params": {"width": 10, "label": "hi"}, "v": 0}
     resolved = ResolvedReference(
-        shop.item.reference.model_copy(update={"inputs": full}), shop.item.colours
+        reference_of(shop.item).model_copy(update={"inputs": full}), shop.item.colours
     )
     item = shop.lifecycle.update_item(
         shop.order.id, shop.item.id, BY, reference=resolved, output_id="out-9"

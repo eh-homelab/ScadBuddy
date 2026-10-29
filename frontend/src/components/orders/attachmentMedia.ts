@@ -47,11 +47,14 @@ export function itemPictureSources(orderId: string, item: OrderItem, attachments
   const deliveredUrl = delivered ? attachmentImageUrl(orderId, delivered) : null
   if (deliveredUrl) sources.push({ url: deliveredUrl, label: `What was delivered: ${item.title}`, delivered: true })
   if (item.output_id) sources.push({ url: api.outputThumbnailUrl(item.output_id), label: `The render of ${item.title}`, delivered: false })
-  sources.push({
-    url: `${API_BASE}/models/${encodeURIComponent(item.reference.slug)}/thumbnail`,
-    label: `${item.reference.template_name}'s picture`,
-    delivered: false,
-  })
+  // A custom item (#4954) names no template, so it has no template thumbnail.
+  if (item.reference) {
+    sources.push({
+      url: `${API_BASE}/models/${encodeURIComponent(item.reference.slug)}/thumbnail`,
+      label: `${item.reference.template_name}'s picture`,
+      delivered: false,
+    })
+  }
   return sources
 }
 

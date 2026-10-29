@@ -770,6 +770,7 @@ class Lifecycle:
         quantity: int,
         title: str | None = None,
         notes: str = "",
+        sku: str | None = None,
     ) -> OrderItem:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
@@ -784,11 +785,73 @@ class Lifecycle:
                 quantity=quantity,
                 title=title,
                 notes=notes,
+                sku=sku,
             )
             self._event(conn, order, by, "item.added", item_id=item.id)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return item
+
+    def add_custom_item(
+        self,
+        order_id: str,
+        by: Actor,
+        *,
+        title: str,
+        quantity: int,
+        unit_price_minor: int,
+        notes: str = "",
+        sku: str | None = None,
+        requires_printing: bool = False,
+    ) -> OrderItem:
+        """A custom item (#4954): a title, a quantity and a typed price, with no template
+        behind it. Its price is a `manual` quote, accepted as it is saved, so the item is
+        `approved` at once. Accepting a quote advances the order, so a hold refuses it."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            self._open_for_items(order, "the list of items")
+            self._not_on_hold(order)
+            item = self.store.insert_custom_item(
+                conn,
+                order.id,
+                title=title,
+                quantity=quantity,
+                notes=notes,
+                sku=sku,
+                requires_printing=requires_printing,
+            )
+            item, quote = self._custom_price(conn, item, unit_price_minor, by)
+            self._event(conn, order, by, "item.added", item_id=item.id, item_kind="custom")
+            self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, None)]))
+        return item
+
+    def _custom_price(
+        self, conn: Conn, item: OrderItem, unit_price_minor: int, by: Actor
+    ) -> tuple[OrderItem, Quote]:
+        """A custom item's typed price as its accepted `manual` quote, at its quantity
+        now; the item `approved`."""
+        line = QuoteLine(
+            kind="manual",
+            label="Custom item",
+            quantity=1,
+            unit_minor=unit_price_minor,
+            amount_minor=unit_price_minor,
+        )
+        quote = self.store.insert_quote(
+            conn,
+            item.id,
+            source="manual",
+            lines=[line],
+            unit_cost_minor=unit_price_minor,
+            unit_price_minor=unit_price_minor,
+            quantity=item.quantity,
+            created_by=by,
+        )
+        self.store.accept_quote(conn, item.id, quote.id)
+        return self.store.update_item(conn, item.id, status="approved"), quote
 
     def update_item(
         self,
@@ -803,6 +866,9 @@ class Lifecycle:
         notes: str | None = None,
         filaments: Mapping[int, str | None] | None = None,
         colours: Sequence[ColourSlot] | None = None,
+        unit_price_minor: int | None = None,
+        sku: str | UnsetType | None = UNSET,
+        requires_printing: bool | None = None,
     ) -> OrderItem:
         """The reference (replaced whole), the quantity and the slots' filaments while
         `draft` or `quoted`, each dropping the accepted quote (Ruling 1; #4250 Ruling 6:
@@ -815,13 +881,37 @@ class Lifecycle:
         item lacks, or a filament not in the book or archived, is refused (422).
         ``colours`` gives an item made by hand, which has none, the slots its first
         render made (the quote's run, #4250); it repins nothing, as it changes no slot
-        the item had."""
+        the item had.
+
+        A custom item (#4954) takes ``unit_price_minor`` and ``requires_printing``, which
+        a model item refuses (422). A new quantity or price on it is priced at once: a
+        new `manual` quote, accepted, so it stays `approved` (refused on hold, as an
+        accepted quote is). A ``reference`` given to it makes it a model item, on the
+        normal flow: its quote is dropped as any reference change drops one."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            custom = item.kind == "custom" and reference is None
+            for name, value in (
+                ("unit_price_minor", unit_price_minor),
+                ("requires_printing", requires_printing),
+            ):
+                if value is not None and not custom:
+                    raise LifecycleError(
+                        name, f"{name}: only a custom item takes one", unprocessable=True
+                    )
+            price = None
+            if custom:
+                quotes = self.store.quotes(item.id, conn=conn)
+                current = next((q.unit_price_minor for q in quotes if q.accepted), None)
+                wanted = current if unit_price_minor is None else unit_price_minor
+                if quantity == item.quantity:
+                    quantity = None
+                if wanted is not None and (quantity is not None or wanted != current):
+                    price = wanted
             base = list(reference.colours if reference is not None else item.colours)
             slots = base if base or colours is None else list(colours)
             if filaments is not None:
@@ -831,9 +921,11 @@ class Lifecycle:
             refiled = any(
                 slot.slot in before and before[slot.slot] != slot.filament_id for slot in slots
             )
-            repins = reference is not None or quantity is not None or refiled
+            repins = reference is not None or quantity is not None or refiled or price is not None
             if repins:
                 self._open_for_items(order, "an item's reference, quantity and filaments")
+            if price is not None:
+                self._not_on_hold(order)
             fields: dict[str, Any] = {}
             if reference is not None:
                 fields.update(reference=reference.reference, colours=slots)
@@ -849,13 +941,20 @@ class Lifecycle:
                 fields["title"] = title
             if notes is not None:
                 fields["notes"] = notes
-            if not fields:
+            if not isinstance(sku, UnsetType) and sku != item.sku:
+                fields["sku"] = sku
+            if requires_printing is not None and requires_printing != item.requires_printing:
+                fields["requires_printing"] = requires_printing
+            if not fields and price is None:
                 # Nothing changes (the item's own filaments sent again): nothing written.
                 return item
             if repins:
                 self.store.unaccept_quotes(conn, item.id)
                 fields["status"] = "draft"
             item = self.store.update_item(conn, item.id, **fields)
+            if price is not None:
+                item, quote = self._custom_price(conn, item, price, by)
+                self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
             self._event(conn, order, by, "item.updated", item_id=item.id, repinned=repins)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))

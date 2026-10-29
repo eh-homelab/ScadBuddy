@@ -75,7 +75,7 @@ describe('orders mock (#4249)', () => {
 
   it('deletes a draft item, refuses to delete a quoted one, and locks the reference after accept', async () => {
     const added = await api.addOrderItem(ORDER_DRAFT, { output_id: OUTPUT_REAGAN, quantity: 1 })
-    expect(added.reference.slug).toBe('name-keychain')
+    expect(added.reference?.slug).toBe('name-keychain')
     expect(added.colours.length).toBeGreaterThan(0)
     await api.deleteOrderItem(ORDER_DRAFT, added.id)
     await api.quoteOrderItem(ORDER_DRAFT, ITEM_DRAFT, { unit_price_minor: 5 })

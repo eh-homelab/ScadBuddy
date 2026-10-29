@@ -175,13 +175,26 @@ describe('order tools (#4249)', () => {
       { order_id: ORDER, slug: 'demo', commit: 'a'.repeat(40), inputs: { params: { width: 7 } } },
       ctx(),
     )
+    await tool('order_item_add').execute(
+      { order_id: ORDER, kind: 'custom', title: 'Rush fee', unit_price_minor: 750, sku: 'RUSH' },
+      ctx(),
+    )
     await tool('order_item_update').execute({ order_id: ORDER, item_id: ITEM, quantity: 3 }, ctx())
+    await tool('order_item_update').execute(
+      { order_id: ORDER, item_id: ITEM, unit_price_minor: 500, requires_printing: true, sku: null },
+      ctx(),
+    )
     const gone = await tool('order_item_update').execute({ order_id: ORDER, item_id: ITEM, delete: true }, ctx())
     expect(sent).toEqual([
       { output_id: 'out1', quantity: 2, notes: '' },
       { slug: 'demo', commit: 'a'.repeat(40), inputs: { params: { width: 7 } }, quantity: 1, notes: '' },
+      { kind: 'custom', title: 'Rush fee', unit_price_minor: 750, sku: 'RUSH', quantity: 1, notes: '' },
       { quantity: 3 },
+      { unit_price_minor: 500, requires_printing: true, sku: null },
     ])
+    expect(tool('order_item_add').summarize({ order_id: ORDER, kind: 'custom', title: 'Rush fee' })).toContain(
+      'Rush fee',
+    )
     expect(firstText(gone)).toEqual({ deleted: ITEM })
   })
 

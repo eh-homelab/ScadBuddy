@@ -174,7 +174,7 @@ export function QuoteEditor({
           )}
         </div>
       )}
-      {item?.output_id && slice && slicing && (
+      {item?.output_id && item.reference && slice && slicing && (
         <PrintPicker
           open
           source={{ kind: 'output', output: { id: item.output_id, slug: item.reference.slug } }}

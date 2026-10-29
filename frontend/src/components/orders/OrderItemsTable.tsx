@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { useId, useState, type KeyboardEvent } from 'react'
 import { MoreHorizontalIcon } from 'lucide-react'
 import { api } from '../../api/client'
 import type { OrderAttachment, OrderItemDetail, OrderStatus, Shipment } from '../../api/types'
@@ -6,12 +6,13 @@ import { formatMoney, toMajor } from '../../lib/money'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
-import { DataTable, type Column } from '../records/DataTable'
+import { CELL, DataTable, ROW, type Column } from '../records/DataTable'
 import { ItemPicture } from './ItemPicture'
 import { ItemStatusBadge } from './OrderStatusBadge'
 import { itemPrice, parseUnitPrice, PRICED_WHILE, pricingQuote, UNIT_PRICE_HINT, unitPrice } from './price'
+import { parseQuantity, QUANTITY_HINT } from './quantity'
 import { refusalText } from './refusal'
-import { itemAnchor } from './itemLink'
+import { CUSTOM_ITEM_TITLE, itemAnchor } from './itemLink'
 import type { SliceQuoteRuns } from './useSliceQuotes'
 import { UnfulfilDialog } from './Unfulfil'
 import { offersUnfulfil, UNFULFIL_OFF, UNFULFIL_SETTING, unfulfilBlock } from './unfulfilRules'
@@ -78,9 +79,12 @@ export function OrderItemsTable({
       header: 'Item',
       className: 'break-words',
       cell: (item, open) => (
-        <Button variant="link" className="h-auto p-0 text-left font-medium whitespace-normal text-foreground" onClick={open}>
-          {item.title}
-        </Button>
+        <span className="flex flex-col items-start gap-0.5">
+          <Button variant="link" className="h-auto p-0 text-left font-medium whitespace-normal text-foreground" onClick={open}>
+            {item.title}
+          </Button>
+          {item.sku && <span className="font-mono text-[11px] text-muted-foreground">SKU {item.sku}</span>}
+        </span>
       ),
     },
     {
@@ -174,7 +178,8 @@ export function OrderItemsTable({
       rowId={(item) => itemAnchor(item.id)}
       selected={selected}
       onOpen={onOpen}
-      empty={canAdd ? 'No items yet. Add one with Add item above.' : 'No items.'}
+      empty={canAdd ? 'No items yet. Add one with Add item above, or type a custom item below.' : 'No items.'}
+      footer={canAdd ? <CustomItemRow orderId={orderId} currency={currency} exponent={exponent} actions={columns.some((column) => column.key === 'actions')} onChanged={onChanged} /> : undefined}
     />
   )
 }
@@ -220,6 +225,109 @@ function ItemMenu({
       </DropdownMenu>
       <UnfulfilDialog orderId={orderId} item={item} open={confirming} onOpenChange={setConfirming} onChanged={onChanged} />
     </>
+  )
+}
+
+/**
+ * #4954 — the empty row under the items: a custom item's title, quantity and unit price,
+ * and optional SKU, notes and "Requires printing". Enter in any field saves it, priced
+ * and accepted as it is saved (`kind: "custom"`); the row then clears for the next one.
+ */
+function CustomItemRow({ orderId, currency, exponent, actions, onChanged }: { orderId: string; currency: string; exponent: number; actions: boolean; onChanged: () => void }) {
+  const errorId = useId()
+  const blank = { title: '', quantity: '1', price: '', sku: '', notes: '', printing: false }
+  const [draft, setDraft] = useState(blank)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const set = (fields: Partial<typeof blank>) => {
+    setDraft({ ...draft, ...fields })
+    setError(null)
+  }
+
+  async function submit() {
+    const title = draft.title.trim()
+    const quantity = parseQuantity(draft.quantity)
+    const price = parseUnitPrice(draft.price, exponent)
+    if (!title) return setError('Type a title for the custom item.')
+    if (quantity === null) return setError(QUANTITY_HINT)
+    if (price === null) return setError(UNIT_PRICE_HINT)
+    setBusy(true)
+    setError(null)
+    try {
+      await api.addOrderItem(orderId, {
+        kind: 'custom',
+        title,
+        quantity,
+        unit_price_minor: price,
+        notes: draft.notes.trim(),
+        ...(draft.sku.trim() ? { sku: draft.sku.trim() } : {}),
+        requires_printing: draft.printing,
+      })
+      setDraft(blank)
+      onChanged()
+      document.getElementById(CUSTOM_ITEM_TITLE)?.focus()
+    } catch (err) {
+      setError(refusalText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // A row of a table holds no form, so Enter in any field saves the row.
+  function enter(event: KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== 'Enter') return
+    event.preventDefault()
+    if (!busy) void submit()
+  }
+
+  const described = error ? errorId : undefined
+  return (
+    <tr className={ROW} data-testid="custom-item-row">
+      <td className={CELL}>
+        <span className="flex size-12 items-center justify-center rounded-md border border-dashed text-[10px] text-muted-foreground">Custom</span>
+      </td>
+      <td className={CELL}>
+        <span className="flex flex-col gap-1">
+          <Input
+            id={CUSTOM_ITEM_TITLE}
+            aria-label="Custom item title"
+            aria-describedby={described}
+            className="h-7"
+            placeholder="Custom item: design work, a fee…"
+            value={draft.title}
+            onKeyDown={enter}
+            onChange={(event) => set({ title: event.target.value })}
+          />
+          <span className="flex gap-1">
+            <Input aria-label="Custom item SKU" className="h-7 w-24" placeholder="SKU" value={draft.sku} onKeyDown={enter} onChange={(event) => set({ sku: event.target.value })} />
+            <Input aria-label="Custom item notes" className="h-7" placeholder="Notes" value={draft.notes} onKeyDown={enter} onChange={(event) => set({ notes: event.target.value })} />
+          </span>
+          {error && (
+            <p id={errorId} role="alert" className="text-[11px] whitespace-normal text-warn">
+              {error}
+            </p>
+          )}
+        </span>
+      </td>
+      <td className={CELL}>
+        <label className="flex items-center gap-1 text-[11px] whitespace-nowrap text-muted-foreground">
+          <input type="checkbox" checked={draft.printing} onKeyDown={enter} onChange={(event) => set({ printing: event.target.checked })} />
+          Requires printing
+        </label>
+      </td>
+      <td className={`${CELL} sb-num`}>
+        <Input aria-label="Custom item quantity" aria-describedby={described} inputMode="numeric" className="h-7 w-14 text-right" value={draft.quantity} onKeyDown={enter} onChange={(event) => set({ quantity: event.target.value })} />
+      </td>
+      <td className={`${CELL} sb-num`}>
+        <Input aria-label="Custom item unit price" aria-describedby={described} inputMode="decimal" className="h-7 w-24 text-right" placeholder={currency} value={draft.price} onKeyDown={enter} onChange={(event) => set({ price: event.target.value })} />
+      </td>
+      <td className={`${CELL} sb-num`}>
+        <Button type="button" size="xs" aria-label="Save custom item" disabled={busy} onClick={() => void submit()}>
+          Add
+        </Button>
+      </td>
+      {actions && <td className={CELL} />}
+    </tr>
   )
 }
 
@@ -289,6 +397,13 @@ function UnitPriceEditor({
     const reuse = pending && !pending.accepted && pending.quote.quantity === item.quantity && pending.quote.unit_price_minor === minor ? pending.quote : null
     let recorded = false
     try {
+      if (item.kind === 'custom') {
+        // #4954 — a custom item's price is its own field, accepted as it is saved.
+        await api.updateOrderItem(orderId, item.id, { unit_price_minor: minor })
+        setTyped(null)
+        onChanged()
+        return
+      }
       const quote = reuse ?? (await api.quoteOrderItem(orderId, item.id, { unit_price_minor: minor }))
       recorded = reuse === null
       await api.acceptOrderQuote(orderId, item.id, quote.id)

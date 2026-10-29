@@ -162,6 +162,28 @@ current slug, HEAD commit, inputs and the preview's colours), from an existing o
 ("Order this" in the output's menu: its `meta.json` and `inputs.json`), or from a
 template's gallery with defaults. The agent makes one with `order_item_add` (§7.3).
 
+**Custom items (#4954, as built).** `kind` is `model` (the reference above) or `custom`:
+a title, a quantity and a typed price, with no reference (design work, a rush fee,
+packaging, a part made elsewhere). For a `custom` item the reference columns and
+`output_id` are null; the table's `order_items_reference` check keeps each kind whole
+(migration `20261029T0733Z_order_custom_items.sql`). `sku` (any item) and
+`requires_printing` (a custom item's; always true for a model item) are columns too.
+`POST /orders/{id}/items` takes `{kind: "custom", title, quantity, unit_price_minor,
+notes?, sku?, requires_printing?}`; the price is a `manual` quote (§3.4), accepted in the
+same transaction, so the item is `approved` at once and `OrderTotals` counts it as any
+accepted quote. Accepting a quote advances the order, so a hold refuses the add
+(`order_on_hold`). While the order is `draft` or `quoted`, `PATCH` takes a new
+`quantity` or `unit_price_minor` and prices it again at once (a new accepted `manual`
+quote); a model item refuses `unit_price_minor` and `requires_printing` (422). A
+`reference` or `output_id` sent to a custom item makes it a `model` item on the normal
+flow (its quote is dropped as any reference change drops one). A custom item has
+nothing to slice: the slice quote refuses it, 409 `item_custom`. Its inputs are null, so
+the asset sweep reads nothing of it. It is made by hand: the drawer's **Mark done**
+(when it does not require printing) records one attempt for what is left and accepts
+it, and it then ships as any fulfilled item. The grid shows a "Custom" badge in place
+of its picture and an entry row under the items (title, SKU, notes, quantity, unit
+price, "Requires printing"; Enter saves).
+
 ### 3.4 Quotes
 
 `order_item_quotes`: `order_item_id`, `id`, `created_at`, `source` (`slice` or

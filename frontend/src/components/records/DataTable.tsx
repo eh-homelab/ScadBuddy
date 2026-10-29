@@ -33,12 +33,14 @@ export interface DataTableProps<Row> {
   rowId?: (row: Row) => string
   /** The key of the row the page has open: marked, and `aria-current`. */
   selected?: string | null
-  /** Shown in place of the table when there are no rows. */
+  /** Shown in place of the table when there are no rows (in its body, under a `footer`). */
   empty?: ReactNode
+  /** Rows under the body, such as an entry row (#4954): `<tr>`s, in a `<tfoot>`. */
+  footer?: ReactNode
 }
 
-export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen, rowId, selected, empty }: DataTableProps<Row>) {
-  if (rows.length === 0 && empty !== undefined) {
+export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen, rowId, selected, empty, footer }: DataTableProps<Row>) {
+  if (rows.length === 0 && empty !== undefined && !footer) {
     return (
       <p className="rounded-xl border border-dashed px-4 py-8 text-center text-sm text-muted-foreground">{empty}</p>
     )
@@ -80,7 +82,15 @@ export function DataTable<Row>({ columns, rows, rowKey, label, rowTestId, onOpen
                 </tr>
               )
             })}
+            {rows.length === 0 && empty !== undefined && (
+              <tr className={ROW}>
+                <td colSpan={columns.length} className={`${CELL} text-center text-muted-foreground`}>
+                  {empty}
+                </td>
+              </tr>
+            )}
           </tbody>
+          {footer && <tfoot>{footer}</tfoot>}
         </table>
       </div>
     </Card>

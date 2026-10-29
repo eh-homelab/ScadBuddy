@@ -115,6 +115,20 @@ class QuoteError(ValueError):
         self.slot = slot
 
 
+def reference_of(item: OrderItem) -> Reference:
+    """What the item names to make. A custom item (#4954) names nothing, so there is
+    nothing to render or slice: 409 ``item_custom``, and its price is typed instead."""
+    if item.reference is None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"item {item.id} is a custom item: it has no model to render or slice, so its"
+            " price is typed (PATCH the item's unit_price_minor)",
+            type_=PROBLEMS + "item_custom",
+            items=[item.id],
+        )
+    return item.reference
+
+
 def _unprocessable(field: str, message: str) -> ApiError:
     return ApiError(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -179,6 +193,7 @@ def quote_check(
             f"item {item_id} is {item.status}",
             type_=PROBLEMS + "item_not_open",
         )
+    reference_of(item)
     known = {slot.slot for slot in item.colours}
     unknown = sorted(set(request.filaments) - known) if item.colours else []
     if unknown:
@@ -294,6 +309,8 @@ def output_matches(
     except (OutputNotFoundError, OSError, ValueError):
         return False
     reference = item.reference
+    if reference is None:
+        return False
     return (
         meta.slug == reference.slug
         and (meta.model_version == reference.commit or arranged)
@@ -332,7 +349,7 @@ async def ensure_output(
     if await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
         assert item.output_id is not None
         return item.output_id
-    reference = item.reference
+    reference = reference_of(item)
     params = reference.inputs.get("params", {})
     pipeline = reference.render_key == inputs_key(
         reference.slug, reference.inputs, reference.commit
@@ -577,7 +594,8 @@ async def quote_run(
     item = await asyncio.to_thread(store.item, item_id)
     if order is None or item is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order_id!r}")
-    schema = await run.schema_of(item.reference) if run.schema_of is not None else None
+    reference = reference_of(item)
+    schema = await run.schema_of(reference) if run.schema_of is not None else None
     output_id = await ensure_output(
         lifecycle=lifecycle,
         outputs=run.outputs,
@@ -594,7 +612,7 @@ async def quote_run(
     sliced = await slice_item(
         run.slicer, output_id, request, subject, follow_every=run.follow_every
     )
-    scope = BlobScope(slug=item.reference.slug, title=item.reference.template_name)
+    scope = BlobScope(slug=reference.slug, title=reference.template_name)
     quote_id = uuid.uuid4().hex
     held = False
     try:

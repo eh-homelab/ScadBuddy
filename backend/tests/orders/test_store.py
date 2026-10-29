@@ -283,6 +283,7 @@ def test_items_are_positioned_and_a_draft_one_deletes(rows: OrderStore) -> None:
         )
     assert (first.position, second.position) == (0, 1)
     assert first.title == "Demo"  # the template's name by default
+    assert first.reference and second.reference
     assert first.reference.libraries[0].name == "BOSL2"
     assert first.colours == [ColourSlot(slot=0, colour="#ff0000", filament_id=None)]
     assert [i.id for i in rows.items(order.id)] == [first.id, second.id]
