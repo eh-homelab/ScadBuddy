@@ -23,6 +23,10 @@ describe('capabilities mock (#2171)', () => {
     expect(source.listed_at).not.toBeNull()
     expect(source.items.find((i) => i.id === 'recall')).toMatchObject({ access: 'read', overridden: true, suggested: 'read', missing: false })
     expect(source.items.find((i) => i.id === 'files.list')).toMatchObject({ allowed: ['off', 'outward'] })
+    expect(source.items.find((i) => i.id === 'recall')?.label).toBe('Recall memories')
+    expect(await aiCapabilities.details('remote:hindsight', 'recall')).toMatchObject({ annotations: { readOnlyHint: true }, omitted: [] })
+    // A literal % in an id is one segment's %25, refused as the agent does.
+    await expect(aiCapabilities.details('remote:hindsight', '100%')).rejects.toMatchObject({ status: 404 })
   })
 
   it('writes remote access into the plugins state, and reads plugins registered there', async () => {

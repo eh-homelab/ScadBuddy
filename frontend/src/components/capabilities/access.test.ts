@@ -104,6 +104,7 @@ describe('access rules', () => {
     expect(summarize(source([item()]))).toBe('1 tool')
     expect(summarize(source([item(), item({ id: 'b', overridden: true })]))).toBe('2 tools, 1 changed')
     expect(summarize(source([], { id: 'remote:hindsight', kind: 'remote' }))).toBe('No tools listed yet')
+    expect(summarize(source([], { id: 'builtin:own-plugin' }))).toBe('Nothing listed')
   })
 
   it('filters by label, name and description', () => {

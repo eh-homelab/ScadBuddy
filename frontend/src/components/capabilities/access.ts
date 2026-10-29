@@ -36,7 +36,7 @@ const isTool = (item: ItemView) => item.kind === 'tool' || item.kind === 'builti
 export function summarize(source: SourceView): string {
   const { items } = source
   const noun = items.every(isTool) ? 'tool' : 'item'
-  if (items.length === 0) return source.kind === 'remote' ? 'No tools listed yet' : `No ${noun}s`
+  if (items.length === 0) return source.kind === 'remote' ? 'No tools listed yet' : 'Nothing listed'
   const count = `${items.length} ${noun}${items.length === 1 ? '' : 's'}`
   const changed = items.filter((i) => i.overridden).length
   return changed === 0 ? count : `${count}, ${changed} changed`

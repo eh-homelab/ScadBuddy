@@ -153,7 +153,7 @@ function listedItem(view: PluginToolView): ItemView {
     kind: 'tool',
     name: view.name,
     harness_name: view.harness_name,
-    label: view.name,
+    label: view.title ?? view.name,
     description: view.description,
     default: 'outward',
     default_note: null,
@@ -303,11 +303,13 @@ function details(id: string, item: string): ItemDetails {
   if (view.missing || view.id === HTTP_TOOL) {
     return { item: view, input_schema: null, output_schema: null, annotations: null, raw: null, omitted: [] }
   }
-  const annotations =
-    source.kind === 'remote'
-      ? (toolsFor(pluginOf(source)).find((t) => t.name === item)?.annotations ?? null)
-      : { readOnlyHint: view.default === 'read' }
-  const raw = { name: view.name, description: view.description, inputSchema: INPUT_SCHEMA, ...(annotations ? { annotations } : {}) }
+  if (source.kind === 'remote') {
+    const listed = toolsFor(pluginOf(source)).find((t) => t.name === item)!
+    const { input_schema, output_schema, annotations, raw, omitted } = listed
+    return { item: view, input_schema, output_schema, annotations, raw, omitted }
+  }
+  const annotations = { readOnlyHint: view.default === 'read' }
+  const raw = { name: view.name, description: view.description, inputSchema: INPUT_SCHEMA, annotations }
   return { item: view, input_schema: INPUT_SCHEMA, output_schema: null, annotations, raw, omitted: [] }
 }
 
@@ -353,7 +355,8 @@ async function bodyOf<T>(request: Request, field: string, ok: (value: unknown) =
 
 const isBoolean = (v: unknown): v is boolean => typeof v === 'boolean'
 const isAccess = (v: unknown): v is Access => typeof v === 'string' && ['off', 'read', 'write', 'outward', 'on'].includes(v)
-const param = (value: unknown) => decodeURIComponent(String(value))
+// msw hands path params over decoded.
+const param = (value: unknown) => String(value)
 
 export const handlers = [
   http.get(base, () => HttpResponse.json({ sources: tree() })),

@@ -9,6 +9,7 @@
  * Errors come back as `{ detail }`, and a refused package install as
  * `{ detail, problems: string[] }` (422); `readProblem` keeps both on `ApiError.problem`.
  */
+import type { Omitted } from './capabilities'
 import { ApiError, command } from './client'
 
 export type RiskTier = 'read' | 'write' | 'outward'
@@ -83,8 +84,15 @@ export interface RemotePluginPatch {
 export interface PluginToolView {
   name: string
   harness_name: string
+  title: string | null
   description: string | null
   annotations: Record<string, unknown> | null
+  input_schema: Record<string, unknown> | null
+  output_schema: Record<string, unknown> | null
+  /** The server's entry as listed, minus what a cap removed (agent `access/listings.ts`). */
+  raw: Record<string, unknown>
+  /** What a cap removed from `raw`. */
+  omitted: Omitted[]
   tier: RiskTier
   tier_source: 'explicit' | 'default' | 'renamed' | 'collision'
   collides_with: string[]

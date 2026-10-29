@@ -193,11 +193,19 @@ export function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
     const renamed = tool.includes('.')
     const harness = tool.replace(/[^A-Za-z0-9_-]/g, '_')
     const explicit = !renamed && Object.hasOwn(plugin.tool_tiers, tool)
+    const description = `The ${tool} tool.`
+    const annotations = tool === 'recall' ? { readOnlyHint: true } : null
+    const input_schema = { type: 'object', properties: { query: { type: 'string', description: 'What to look for.' } }, required: ['query'] }
     return {
       name: tool,
       harness_name: `${plugin.tool_prefix}${harness}`,
-      description: `The ${tool} tool.`,
-      annotations: tool === 'recall' ? { readOnlyHint: true } : null,
+      title: tool === 'recall' ? 'Recall memories' : null,
+      description,
+      annotations,
+      input_schema,
+      output_schema: null,
+      raw: { name: tool, description, inputSchema: input_schema, ...(annotations ? { annotations } : {}) },
+      omitted: [],
       tier: explicit ? plugin.tool_tiers[tool]! : 'outward',
       tier_source: renamed ? 'renamed' : explicit ? 'explicit' : 'default',
       collides_with: [],
