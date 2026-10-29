@@ -28,10 +28,8 @@ import type {
   FontCatalogue,
   FontFamily,
   GlyphCoverage,
-  HttpRequestSetting,
   BrowserOriginsSetting,
   ModelSetting,
-  PrinterCameraSetting,
   ImageSettings,
   MemorySettings,
   WorkspaceFile,
@@ -2568,18 +2566,6 @@ export const api = {
     command<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
 
   /**
-   * The assistant's `http_request` tool (#827), served by the agent service. On by
-   * default. Fails (404 or 503) when there is no agent or no AI database.
-   */
-  getHttpRequestSetting: () => request<HttpRequestSetting>('/ai/settings/http-request'),
-
-  putHttpRequestSetting: (enabled: boolean) =>
-    request<HttpRequestSetting>('/ai/settings/http-request', {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
-    }),
-
-  /**
    * #982 — the headless browser's allow and deny lists, and the origins approved in each
    * chat, served by the agent service. Fails (404 or 503) without the agent or its database.
    */
@@ -2694,18 +2680,6 @@ export const api = {
     request<DurableSubagentsSetting>('/ai/settings/durable-subagents', {
       method: 'PUT',
       body: JSON.stringify(setting),
-    }),
-
-  /**
-   * #1911 — the switch for the assistant's `get_printer_camera` tool, served by the agent
-   * service. On by default. Fails (404 or 503) when there is no agent or no AI database.
-   */
-  getPrinterCameraSetting: () => request<PrinterCameraSetting>('/ai/settings/printer-camera'),
-
-  putPrinterCameraSetting: (enabled: boolean) =>
-    request<PrinterCameraSetting>('/ai/settings/printer-camera', {
-      method: 'PUT',
-      body: JSON.stringify({ enabled }),
     }),
 
   /** #1917 — the Claude model the assistant uses (`null`: Claude Code's default), served by the agent service. */
