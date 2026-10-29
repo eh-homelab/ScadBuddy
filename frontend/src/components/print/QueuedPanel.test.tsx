@@ -80,9 +80,11 @@ describe('QueuedPanel · the path the run took', () => {
 // #4541 — the printer has no queue, so a LAN run of several plate copies is one.
 describe('QueuedPanel · a LAN run of several plate copies', () => {
   it('says the rest start one at a time, as the printer finishes each', () => {
-    renderPanel({ ...queuedResult, path: 'native', copies: 3, lan_waiting: [1, 1] })
+    const started = { subtask_name: 'scadbuddy-run-p1', started_at: '2026-10-28T12:00:00Z', plate_id: 1 }
+    // Two plates of two copies: `copies` is per plate, so the prints are counted.
+    renderPanel({ ...queuedResult, path: 'native', copies: 2, lan: [started], lan_waiting: [1, 2, 2] })
     expect(screen.getByTestId('lan-waiting')).toHaveTextContent(
-      'The printer has no queue: ScadBuddy starts the other 2 one at a time, each once the printer has finished the one before.',
+      'The printer has no queue: ScadBuddy starts the other 3 of 4 prints one at a time, each once the printer has finished the one before.',
     )
   })
 

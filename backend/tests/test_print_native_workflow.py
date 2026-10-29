@@ -31,6 +31,7 @@ from scadbuddy.bambuddy.print_run import PlannedRun, PlatePlan, PrintRunRequest,
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.trays import tray_spool_id
+from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.printers.models import LanLink, PrinterCreate
@@ -50,6 +51,7 @@ from scadbuddy.workflows.print_models import (
     NativeSliced,
     PlanInput,
     PrintRunInput,
+    RecordInput,
     SlicedUploadInput,
     SliceRunInput,
     SourceSpec,
@@ -205,6 +207,15 @@ class NativeFake(Fake):
         self.copies = 1
         #: Each result `print_lan_update` recorded, in order (#4541).
         self.updates: list[PrintRunResult] = []
+        #: The plates whose `print_record` fails every attempt.
+        self.unrecorded: set[int] = set()
+
+    @activity.defn(name="print_record")
+    async def record(self, input: RecordInput) -> list[PlateSend]:
+        if input.plate_id in self.unrecorded:
+            self.calls.append("record:failed")
+            raise RuntimeError("the database is gone")
+        return await super().record(input)
 
     @activity.defn(name="print_plan")
     async def plan(self, input: PlanInput) -> PlannedRun:
@@ -328,6 +339,7 @@ async def _run(
     rack_algorithm: RackAlgorithm = "least_used",
     plates: list[int] | None = None,
     copies: int = 1,
+    unrecorded: set[int] | None = None,
     reports: FakeReports | None = None,
     during: Callable[[Client, PrintRunInput, NativeFake], Awaitable[None]] | None = None,
 ) -> tuple[NativeFake, PrintRun]:
@@ -335,6 +347,7 @@ async def _run(
     fake = NativeFake(printer, queue)
     fake.plates = plates or [1]
     fake.copies = copies
+    fake.unrecorded = unrecorded or set()
     fake.native_slicer = native_slicer
     fake.lan_start = lan_start
     fake.rack_position = rack_position
@@ -735,3 +748,29 @@ async def test_a_cancel_while_it_waits_stops_the_rest(
     result = run.result
     assert result is not None and result.lan_waiting == [1]
     assert result.lan_stopped is not None and result.lan_stopped.stage == "cancelled"
+
+
+async def test_a_started_copy_whose_record_fails_is_still_followed(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """Review of #4940: the start is on the run before its record, so a record that fails
+    stops only the plates after it, and the one printing is still read as printing."""
+    fake, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(),
+        plates=[1, 2, 3],
+        unrecorded={2},
+        reports=FakeReports(fake_lan),
+    )
+    assert run.status == "succeeded" and "record:failed" in fake.calls
+    result = run.result
+    assert result is not None
+    assert [start.plate_id for start in result.lan] == [1, 2] and result.lan_waiting == [3]
+    stopped = result.lan_stopped
+    assert stopped is not None and stopped.stage == "failed"
+    assert stopped.message.startswith(
+        "Plate 2 is printing, but it could not be recorded, so plate 3 and the plates after"
+    )
+    assert len(fake_lan.project_files()) == 2

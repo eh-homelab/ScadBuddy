@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from datetime import timedelta
-from typing import Any
+from typing import Any, Literal
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, SearchAttributeKey, SearchAttributeUpdate
@@ -185,19 +185,33 @@ _LAN_CANCELLED = LanStopped(
 )
 
 
-def _lan_failed(error: BaseException, plate_id: int) -> LanStopped:
-    """Why a LAN run started none of its later plate copies: the wait or the start that
-    failed, in its own words (#4541)."""
-    if isinstance(error, ActivityError) and isinstance(error.cause, TemporalTimeoutError):
+#: Where a LAN run's later copies stopped: waiting for a print, starting the next
+#: copy, or recording a plate it started.
+LanStep = Literal["wait", "start", "record"]
+
+
+def _lan_failed(error: BaseException, step: LanStep, plate_id: int, next_id: int) -> LanStopped:
+    """Why a LAN run started none of its later plate copies (#4541): the step that failed
+    on ``plate_id``, in its own words, and ``next_id`` the first plate it did not start."""
+    detail = problem_of(error).detail
+    if (
+        step == "wait"
+        and isinstance(error, ActivityError)
+        and isinstance(error.cause, TemporalTimeoutError)
+    ):
         detail = (
-            f"The printer did not finish the print before plate {plate_id} within"
+            f"The printer did not finish the print before plate {next_id} within"
             f" {LAN_WAIT_BOUND.days} days, so it and the plates after it were not started."
         )
-    else:
-        detail = (
-            f"Plate {plate_id} was not started, nor the plates after it: {problem_of(error).detail}"
+        return LanStopped(stage="failed", message=detail)
+    if step == "record":
+        message = (
+            f"Plate {plate_id} is printing, but it could not be recorded, so plate"
+            f" {next_id} and the plates after it were not started: {detail}"
         )
-    return LanStopped(stage="failed", message=detail)
+    else:
+        message = f"Plate {next_id} was not started, nor the plates after it: {detail}"
+    return LanStopped(stage="failed", message=message)
 
 
 KIND = SearchAttributeKey.for_keyword("ScadbuddyKind")
@@ -1049,11 +1063,16 @@ class LanSequenceWorkflow(_PlateStarts):
         recorded = set(sequence.recorded)
         sent = sequence.sent
         row = accepted.run
+        #: What the loop was doing when it stopped, for the reason it records.
+        step: LanStep = "wait"
+        plate_id = 0
         try:
             for start in sequence.starts:
-                # A cancel a start or a record absorbed stops the run before the next.
+                # A cancel a start, a record or an update absorbed stops the next start.
                 self._stop_if_cancelled()
                 plate, native = start.plate, start.native
+                plate_id = plate.plate_id
+                step = "wait"
                 ended = await workflow.execute_activity(
                     LAN_WAIT_ACTIVITY,
                     LanWaitInput(printer=planned.printer, started=result.lan[-1]),
@@ -1064,6 +1083,8 @@ class LanSequenceWorkflow(_PlateStarts):
                 )
                 result = result.model_copy(update={"lan": [*result.lan[:-1], ended]})
                 row = await self._lan_update(input, accepted, result)
+                self._stop_if_cancelled()
+                step = "start"
                 taken = await self._start_lan(
                     input,
                     accepted,
@@ -1074,22 +1095,9 @@ class LanSequenceWorkflow(_PlateStarts):
                     last=True,
                     copy=start.copy_number,
                 )
-                taken = taken.model_copy(update={"plate_id": plate.plate_id})
-                if plate.plate_id not in recorded:
-                    # A plate is recorded once, by its first copy, as Bambuddy's one
-                    # queue item stands for all of a plate's copies.
-                    recorded.add(plate.plate_id)
-                    outcome = QueueOutcome(
-                        slice_job_id=start.slice_job_id,
-                        sliced_library_file_id=start.sliced,
-                        preset_key=start.preset_key,
-                        native_slice_id=native.slice_id if native is not None else None,
-                        sliced_blob_key=native.sliced_blob_key if native is not None else None,
-                        queue_item_ids=[],
-                        printer_id=planned.printer_id,
-                        lan=taken,
-                    )
-                    sent = await self._record_plate(accepted, planned, plate, outcome, sent, 0, 0)
+                taken = taken.model_copy(update={"plate_id": plate_id})
+                # On the run before anything else, so whatever fails next never reads a
+                # copy the printer is printing as one it never started.
                 result = result.model_copy(
                     update={
                         "lan": [*result.lan, taken],
@@ -1101,12 +1109,38 @@ class LanSequenceWorkflow(_PlateStarts):
                     }
                 )
                 row = await self._lan_update(input, accepted, result)
+                if plate_id not in recorded:
+                    # A plate is recorded once, by its first copy, as Bambuddy's one
+                    # queue item stands for all of a plate's copies.
+                    recorded.add(plate_id)
+                    step = "record"
+                    outcome = QueueOutcome(
+                        slice_job_id=start.slice_job_id,
+                        sliced_library_file_id=start.sliced,
+                        preset_key=start.preset_key,
+                        native_slice_id=native.slice_id if native is not None else None,
+                        sliced_blob_key=native.sliced_blob_key if native is not None else None,
+                        queue_item_ids=[],
+                        printer_id=planned.printer_id,
+                        lan=taken,
+                    )
+                    sent = await self._record_plate(accepted, planned, plate, outcome, sent, 0, 0)
         except (ActivityError, ApplicationError, asyncio.CancelledError) as error:
-            if is_cancelled_exception(error):
+            cancelled = is_cancelled_exception(error)
+            if cancelled:
                 self.cancel_absorbed = True
-                stopped = _LAN_CANCELLED
-            else:
-                stopped = _lan_failed(error, result.lan_waiting[0] if result.lan_waiting else 0)
+            if not result.lan_waiting:
+                # Every copy started: nothing is left to stop.
+                workflow.logger.warning(
+                    "a LAN run's last step failed after its last start",
+                    extra={"step": step, "plate_id": plate_id},
+                )
+                return row
+            stopped = (
+                _LAN_CANCELLED
+                if cancelled
+                else _lan_failed(error, step, plate_id, result.lan_waiting[0])
+            )
             row = await self._lan_update(
                 input, accepted, result.model_copy(update={"lan_stopped": stopped})
             )
