@@ -143,6 +143,13 @@ async def test_the_print_worker_mounts_no_volume(pg_conninfo: str, tmp_path: Pat
         ]
         print_deps = check.__self__.d  # type: ignore[attr-defined]
         assert print_deps.printers is not None and print_deps.reports is not None
+        # #4541: a worker without the reports would stop every waiting LAN sequence.
+        [wait] = [
+            fn
+            for fn in deps.activities
+            if getattr(fn, "__temporal_activity_definition").name == "lan_wait"
+        ]
+        assert wait.__self__.d.reports is not None  # type: ignore[attr-defined]
     finally:
         await deps.aclose()
     assert not settings.data_dir.exists()

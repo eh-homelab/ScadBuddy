@@ -25,6 +25,7 @@ from scadbuddy.printers.progress import (
     LanProgress,
     from_lan_report,
     lan_ended,
+    shows,
 )
 from scadbuddy.printers.status import print_error_text
 
@@ -345,7 +346,7 @@ def test_a_start_ends_when_the_printer_stops_printing(
     data: dict[str, Any], stage: str, message: str | None
 ) -> None:
     """#4541: the next copy of a run waits for this."""
-    ended = lan_ended(report(**data), OURS)
+    ended = lan_ended(report(**data), OURS, seen=True)
     assert ended is not None and ended.ended == stage
     assert (ended.ended_message is None) == (message is None)
     assert message is None or message in (ended.ended_message or "")
@@ -369,7 +370,32 @@ def test_a_start_ends_when_the_printer_stops_printing(
 def test_a_start_has_not_ended_while_the_printer_prints(
     value: tuple[dict[str, Any], datetime] | None,
 ) -> None:
-    assert lan_ended(value, OURS) is None
+    assert lan_ended(value, OURS, seen=True) is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"gcode_state": "FINISH", "subtask_name": "theirs"},
+        {"gcode_state": "IDLE", "subtask_name": "theirs"},
+    ],
+    ids=["another's end", "idle under another name"],
+)
+def test_another_name_is_no_end_until_a_report_named_this_print(data: dict[str, Any]) -> None:
+    """Review of #4940: the report's time is the watch's clock, not the print worker's,
+    and the watch may not have merged the start yet, so a report from before the start
+    can look newer. Read as an end, it would start the next copy over this one."""
+    assert lan_ended(report(**data), OURS, seen=False) is None
+    ended = lan_ended(report(**data), OURS, seen=True)
+    assert ended is not None and ended.ended == "unknown"
+
+
+def test_its_own_end_needs_no_earlier_report() -> None:
+    """A report that names this print is itself the proof."""
+    ended = lan_ended(report(gcode_state="FINISH"), OURS, seen=False)
+    assert ended is not None and ended.ended == "done"
+    assert shows(report(), OURS) and not shows(report(subtask_name="theirs"), OURS)
+    assert not shows(None, OURS)
 
 
 async def test_a_sequenced_run_reads_each_start_and_the_ones_to_come() -> None:

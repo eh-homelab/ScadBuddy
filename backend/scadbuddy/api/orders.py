@@ -852,7 +852,7 @@ async def cancel_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderIt
     return await _run(lambda: orders.lifecycle.cancel_item(order_id, item_id, by))
 
 
-# -- quotes (§3.4, manual only in phase 1) --------------------------------------------------
+# -- quotes (§3.4: manual, or from a slice since phase 2) ----------------------------------
 
 
 @router.post(

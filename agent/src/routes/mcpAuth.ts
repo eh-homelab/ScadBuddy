@@ -30,7 +30,7 @@ import { ready, type RouteModule } from './module.js'
 //   POST /test   runs that check for `{ issuer }` without saving
 //
 // Writes are settings writes, outward tier (spec §8.1, §8.3): they pass the same
-// interim UI gate as the credential routes (guard.ts), until approvals (#258).
+// UI gate as the credential routes (guard.ts); they do not park for an approval (#258).
 // Nothing here is secret. Error bodies are `{ detail }`, as in credentials.ts.
 
 export type McpAuthRouteDeps = {
