@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from scadbuddy.bambuddy.catalogue import (
     Catalogue,
     PresetChoice,
+    RefreshClaim,
     cached_catalogue,
 )
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -169,6 +170,7 @@ async def choices_for(
     catalogue_key: bytes | None,
     rack: RackUsage | None = None,
     native: Profiles | None = None,
+    refresh_claim: RefreshClaim | None = None,
 ) -> ChoicesView:
     """The dialog's choices, read in two waves (#2504): ``source`` and the printers
     together, then everything that needs the chosen printer together, its status read
@@ -186,7 +188,7 @@ async def choices_for(
         # nothing kept under `cache` (#3818 tier A).
         catalogue_for(None, native=native)
         if native is not None
-        else cached_catalogue(client, cache, name_key=catalogue_key)
+        else cached_catalogue(client, cache, name_key=catalogue_key, refresh_claim=refresh_claim)
     )
     try:
         return await _choices(
@@ -389,6 +391,7 @@ async def choices_for_output(
     # bare hash without saying so (#3816 review): None only when there is no KEK.
     catalogue_key: bytes | None,
     rack: RackUsage | None = None,
+    refresh_claim: RefreshClaim | None = None,
 ) -> ChoicesView:
     return await choices_for(
         client,
@@ -399,6 +402,7 @@ async def choices_for_output(
         cache=cache,
         catalogue_key=catalogue_key,
         rack=rack,
+        refresh_claim=refresh_claim,
     )
 
 
