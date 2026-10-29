@@ -83,6 +83,7 @@ from scadbuddy.worker import (
     run_inprocess_worker,
     run_worker,
 )
+from scadbuddy.workflows import client as client_module
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
@@ -691,6 +692,60 @@ async def test_a_drain_mark_prunes_the_unparsable_marks_of_other_workers() -> No
     assert list(update.remove_entries) == [f"{DRAINING_MARK}odd@pod-q"]
 
 
+async def test_a_pruned_unparsable_mark_is_no_longer_held_as_logged() -> None:
+    """#4996: the set of logged unparsable marks lived for the whole process and only
+    grew; a mark `mark_draining` prunes leaves it."""
+    key = f"{DRAINING_MARK}odd@pod-q-{uuid.uuid4().hex[:6]}"
+    client = _described(raw={key: b"nope"}, updates=[])
+    await draining_marks(client, deployment_name=DEPLOYMENT_NAME, build_id="b1")
+    assert key in client_module._unparsable_marks
+    await mark_draining(
+        client,
+        deployment_name=DEPLOYMENT_NAME,
+        build_id="b1",
+        identities={"me@pod-a"},
+        since=datetime.now(UTC),
+        prune_within=MARKED_WITHIN,
+    )
+    assert key not in client_module._unparsable_marks
+
+
+async def test_a_poll_that_trusts_a_peer_reads_the_marks_once(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#4996: `still_current` read the version's metadata for its own mark and again in
+    `polled_elsewhere`; the two reads could disagree, and every poll paid for both."""
+    client = _described(
+        _poller("me@pod-a", "b1", age=0),
+        _poller("other@pod-b", "b1", age=1),
+        marks={"me@pod-a": 0},  # its own mark, as written when the drain began
+        updates=[],
+    )
+    service = client.workflow_service
+    reads = {"version": 0, "queue": 0}
+
+    def counted(name: str, call: Any) -> Any:
+        async def call_counted(*args: Any, **kwargs: Any) -> Any:
+            reads[name] += 1
+            return await call(*args, **kwargs)
+
+        return call_counted
+
+    service.describe_worker_deployment_version = counted(  # type: ignore[method-assign]
+        "version", service.describe_worker_deployment_version
+    )
+    service.describe_task_queue = counted(  # type: ignore[method-assign]
+        "queue", service.describe_task_queue
+    )
+    _patch_drain(monkeypatch, "b1")
+    with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+        await _serve_fake_and_stop(client, "me@pod-a")
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("stopping without draining") for m in messages), messages
+    # One poll trusted the peer; the other version read is the mark's prune.
+    assert reads == {"version": 2, "queue": 1}
+
+
 async def test_an_unparsable_mark_counts_as_draining_and_is_logged_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -764,6 +819,43 @@ async def _serve_and_stop(
             build_id=build_id,
             deployment_name=DEPLOYMENT_NAME,
             task_queue=queue,
+            drain_timeout=timeout,
+        ),
+        timeout + 30,
+    )
+
+
+class _FakeWorker:
+    """What `_serve_versioned` asks of a worker, with no Temporal behind it (#4996)."""
+
+    def __init__(self, identity: str) -> None:
+        self.identity = identity
+
+    def config(self) -> dict[str, Any]:
+        return {"identity": self.identity}
+
+    async def __aenter__(self) -> _FakeWorker:
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        return None
+
+
+async def _serve_fake_and_stop(
+    client: Client, identity: str, *, build_id: str = "b1", timeout: float = 10.0
+) -> None:
+    """`_serve_versioned` of a `_FakeWorker` on the queue ``render``, stopped at once
+    (`_patch_drain` first, and every other Temporal call it makes faked)."""
+    stop = asyncio.Event()
+    stop.set()
+    await asyncio.wait_for(
+        _serve_versioned(
+            client,
+            [cast(Worker, _FakeWorker(identity))],
+            stop,
+            build_id=build_id,
+            deployment_name=DEPLOYMENT_NAME,
+            task_queue="render",
             drain_timeout=timeout,
         ),
         timeout + 30,
@@ -937,15 +1029,14 @@ async def test_a_worker_that_cannot_mark_itself_draining_keeps_draining(
     assert not any(m.startswith("stopping without draining") for m in messages)
 
 
-@pytest.mark.requires_temporal
 async def test_a_clear_that_lands_after_the_mark_is_written_over_before_a_peer_is_trusted(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """#4948 review: the start's clear, cancelled at stop, may reach Temporal after the
-    drain's mark and remove it. The worker then leaves only once its mark is back."""
-    build_id = f"test-{uuid.uuid4().hex[:8]}"
-    queue = f"t-{uuid.uuid4().hex[:8]}"
-    identity = f"pod-a-{build_id}"
+    drain's mark and remove it. The worker then leaves only once its mark is back. Every
+    Temporal call is faked, so it needs no server (#4996)."""
+    build_id = "b1"
+    identity = "pod-a"
     stored: dict[str, datetime] = {}
     late: list[asyncio.Task[None]] = []
 
@@ -971,9 +1062,9 @@ async def test_a_clear_that_lands_after_the_mark_is_written_over_before_a_peer_i
     monkeypatch.setattr(worker_module, "mark_draining", mark)
     monkeypatch.setattr(worker_module, "draining_marks", read)
     monkeypatch.setattr(worker_module, "polled_elsewhere", _always_current)
-    async with temporal_client() as client:
-        with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
-            await _serve_and_stop(client, queue, build_id, 10.0, identity=identity)
+    client = cast(Client, SimpleNamespace(namespace="default", identity="client"))
+    with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+        await _serve_fake_and_stop(client, identity, build_id=build_id)
     assert late, "the start's clear never ran"
     await asyncio.gather(*late)
     messages = [r.getMessage() for r in caplog.records]
