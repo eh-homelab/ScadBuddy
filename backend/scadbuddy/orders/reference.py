@@ -9,7 +9,7 @@ slug's own directory: a model's directory is its slug and never moves), and the 
 must normalise against the schema of the template at that commit, as a render's do.
 An item made from an output takes the output's commit, libraries and colours; one made
 by hand takes the libraries a render at that commit would resolve and no colours, which
-the quote fills (phase 2). Nothing here imports from ``api/``.
+a slice quote fills (phase 2). Nothing here imports from ``api/``.
 """
 
 from __future__ import annotations
@@ -85,9 +85,9 @@ class OutputFacts:
 
 
 def colours_of(colors: Sequence[str]) -> list[ColourSlot]:
-    """The render's colour slots, in order (Ruling 7); ``filament_id`` waits for the
-    price book. A default-render preview record (`library/previews.py`) keeps no
-    colours, so only an output can give them in phase 1."""
+    """The render's colour slots, in order (Ruling 7), with no ``filament_id``: a
+    slice quote writes those from the price book (phase 2). A default-render preview
+    record (`library/previews.py`) keeps no colours, so only an output can give them."""
     return [ColourSlot(slot=index, colour=colour) for index, colour in enumerate(colors)]
 
 

@@ -91,7 +91,7 @@ function scrubValue(value: unknown, secrets: readonly string[], byKey: boolean):
  * What of an event may go into the durable, multi-watcher event log
  * (ai_session_events; attach replays it to every watcher, and live watchers
  * read it too). Tool inputs and results come from the model and from tools,
- * so once #251/#258 wire in real tools they may carry credentials:
+ * so the registry's tools (#251) may carry credentials:
  *
  *   - every string, in every event, has the turn's own secrets (the Claude
  *     credential) replaced by the shared `redact()` (secrets.ts);
@@ -101,8 +101,9 @@ function scrubValue(value: unknown, secrets: readonly string[], byKey: boolean):
  *   - tool.result summaries are already capped at SUMMARY_MAX by the mapper.
  *
  * The full payloads stay only in the SDK transcript (ai_session_entries),
- * which is never sent to watchers. Tools that take secrets by another name
- * must declare them when #251's registry lands (the seam in manager.ts).
+ * which is never sent to watchers. No registry tool takes a secret argument;
+ * one that takes a secret under another name must declare it to the registry,
+ * and this must read that declaration (the seam in manager.ts).
  */
 export function scrubForLog(e: ServerEvent, secrets: readonly string[]): ServerEvent {
   const scrubbed = scrubValue(e, secrets, false) as ServerEvent
