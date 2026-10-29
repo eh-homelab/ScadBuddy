@@ -13,7 +13,8 @@ import hmac
 import logging
 import os
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import ClassVar, cast
@@ -268,6 +269,108 @@ async def test_an_expired_catalogue_answers_at_once_and_is_read_again_behind_it(
     assert local.call_count == 2
     assert not catalogue._refreshing
     assert catalogue._load(next((tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()))
+
+
+class _Claim:
+    """A refresh claim that is ``granted``, or held by another replica, recording the
+    files it was asked for; ``before`` runs as it is taken."""
+
+    def __init__(self, granted: bool, before: Callable[[], None] = lambda: None) -> None:
+        self.granted = granted
+        self.before = before
+        self.claimed: list[Path] = []
+
+    @asynccontextmanager
+    async def __call__(self, path: Path) -> AsyncIterator[bool]:
+        self.before()
+        self.claimed.append(path)
+        yield self.granted
+
+
+@respx.mock
+async def test_an_expired_catalogue_another_replica_refreshes_is_not_read_again(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#4528: two replicas refreshed the same expired copy at the same moment, since
+    `_refreshing` is per process. A replica that cannot take the refresh's claim answers
+    the kept copy and reads nothing behind it."""
+    presets, local = _preset_routes()
+    first = await cached_catalogue(bambuddy, tmp_path)
+    _expire(tmp_path)
+    claim = _Claim(granted=False)
+
+    assert await cached_catalogue(bambuddy, tmp_path, refresh_claim=claim) == first
+    await _refreshes_done()
+
+    assert claim.claimed == [catalogue._path(tmp_path, bambuddy.config)]
+    assert presets.call_count == 1
+    assert local.call_count == 1
+
+
+@respx.mock
+async def test_a_refresh_that_finds_the_copy_refreshed_once_claimed_reads_nothing(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    """#4528: the replica holding the claim renamed a fresh copy in and let go just as
+    this one took it: the copy this open found expired is fresh now, so it is not read
+    again."""
+    presets, _ = _preset_routes()
+    await cached_catalogue(bambuddy, tmp_path)
+    _expire(tmp_path)
+    (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
+
+    await cached_catalogue(bambuddy, tmp_path, refresh_claim=_Claim(True, before=kept.touch))
+    await _refreshes_done()
+
+    assert presets.call_count == 1
+
+
+@respx.mock
+async def test_a_claimed_refresh_reads_and_keeps_the_catalogue(
+    bambuddy: BambuddyClient, tmp_path: Path
+) -> None:
+    presets, _ = _preset_routes()
+    await cached_catalogue(bambuddy, tmp_path)
+    _expire(tmp_path)
+    (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
+
+    await cached_catalogue(bambuddy, tmp_path, refresh_claim=_Claim(True))
+    await _refreshes_done()
+
+    assert presets.call_count == 2
+    assert kept.stat().st_mtime > 0  # rewritten
+
+
+async def test_a_refresh_claim_that_cannot_reach_postgres_lets_the_replica_refresh(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A database that does not answer costs a double refresh, never a copy that is
+    not refreshed at all; it is said by its type alone."""
+    claim = catalogue.catalogue_refresh_claim(
+        "postgresql://nobody@127.0.0.1:1/none?connect_timeout=1"
+    )
+
+    async with asyncio.timeout(10), claim(tmp_path / "v1-x.json") as granted:
+        assert granted
+    (record,) = [r for r in caplog.records if "claim" in r.getMessage()]
+    # psycopg's own subclass of OperationalError, by its connect timeout's path.
+    assert record.__dict__["error"] in ("OperationalError", "ConnectionTimeout")
+    assert not any("nobody" in str(value) for value in record.__dict__.values())
+
+
+@pytest.mark.requires_postgres
+async def test_one_replica_at_a_time_holds_a_files_refresh_claim(
+    pg_conninfo: str, tmp_path: Path
+) -> None:
+    """#4528: the claim is a Postgres advisory lock, so it holds across replicas, each
+    of which takes it on a connection of its own."""
+    claim = catalogue.catalogue_refresh_claim(pg_conninfo)
+    kept, other = tmp_path / "v1-a.json", tmp_path / "v1-b.json"
+
+    async with claim(kept) as first, claim(kept) as second, claim(other) as beside:
+        assert (first, second, beside) == (True, False, True)
+    async with claim(kept) as again:
+        assert again
 
 
 @respx.mock
