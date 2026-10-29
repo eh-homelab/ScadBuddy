@@ -219,7 +219,7 @@ describe('the capabilities tree', () => {
     }
     const pinned: ItemView = { ...base, id: 'dup', name: 'dup', harness_name: 'mcp__p__dup', allowed: null, fixed: { access: 'off', reason: 'two tools share "dup"' }, reason: null }
     const renamed: ItemView = { ...base, id: 'a.b', name: 'a.b', harness_name: 'mcp__p__a_b', allowed: ['off', 'outward'], fixed: null, reason: 'Claude Code renames "a.b"' }
-    const source: SourceView = { id: 'remote:p', kind: 'remote', title: 'p', enabled: true, switchable: true, options_route: null, listed_at: null, items: [pinned, renamed], children: [] }
+    const source: SourceView = { id: 'remote:p', kind: 'remote', title: 'p', enabled: true, switchable: true, options_route: null, listed_at: null, truncated: false, items: [pinned, renamed], children: [] }
     const setItem = vi.fn(async () => {})
     const resetItem = vi.fn(async () => {})
     const provider: CapabilityProvider = {

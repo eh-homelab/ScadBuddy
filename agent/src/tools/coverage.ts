@@ -391,6 +391,11 @@ export const PENDING_ROUTES: readonly { operation: string; pr: number; tool: str
   // Empty: #320's and #324's routes have merged and have their tools.
 ]
 
+const CAPABILITIES_READ =
+  "Settings → Tools & plugins' view for the user; an agent learns its own tools from the tool list it is offered"
+const CAPABILITIES_WRITE =
+  "A settings write the user makes from the UI in Settings → Tools & plugins; the page's own assistant reaches it only through the browser bridge (#4208)"
+
 /**
  * The agent service's own routes that an agent needs a tool for (spec 2026-10-01 §6.6,
  * plan 5b Task 10): each names its tool, or gives the reason it has none.
@@ -429,5 +434,18 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
   {
     route: 'PUT /api/v1/ai/settings/durable-subagents',
     reason: 'Widens which network peers may call the agent: an operator decision made in Settings, never by an agent.',
+  },
+  // Settings → Tools & plugins (#2171).
+  ...['GET /api/v1/ai/capabilities', 'GET /api/v1/ai/capabilities/{source}', 'GET /api/v1/ai/capabilities/{source}/items/{item}'].map(
+    (route) => ({ route, reason: CAPABILITIES_READ }),
+  ),
+  ...[
+    'PUT /api/v1/ai/capabilities/{source}',
+    'PUT /api/v1/ai/capabilities/{source}/items/{item}',
+    'DELETE /api/v1/ai/capabilities/{source}/items/{item}',
+  ].map((route) => ({ route, reason: CAPABILITIES_WRITE })),
+  {
+    route: 'POST /api/v1/ai/capabilities/{source}/refresh',
+    reason: "Connects to the plugin with its stored secret to list its tools for the Settings page, at the user's click in the UI",
   },
 ]

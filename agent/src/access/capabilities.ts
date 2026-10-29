@@ -53,6 +53,8 @@ export type SourceView = {
   switchable: boolean
   options_route: string | null
   listed_at: string | null
+  /** The stored listing is not every tool the source has (a `nextCursor`, or entries dropped); false without one. */
+  truncated: boolean
   items: ItemView[]
   children: SourceView[]
 }

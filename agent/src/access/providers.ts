@@ -110,6 +110,7 @@ export function builtInProviders(deps: { access: AccessReader & AccessWriter; to
       switchable: spec.switchable,
       options_route: spec.options_route,
       listed_at: null,
+      truncated: false,
       items,
       children: [],
     }
@@ -255,6 +256,7 @@ function remoteView(plugin: PluginSummary, listing: Listing): SourceView {
     switchable: true,
     options_route: null,
     listed_at: listing?.listed_at ?? null,
+    truncated: listing?.truncated ?? false,
     items: [...items, ...stored.map((tool) => missingItem(plugin, tool))],
     children: [],
   }
