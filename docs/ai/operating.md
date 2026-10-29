@@ -1225,10 +1225,13 @@ Settings → Tools & plugins reads and writes `ai_access` through seven agent ro
 | `GET /api/v1/ai/capabilities/{source}/items/{item}` | the item with its input and output schemas, annotations, the raw listed entry and what the caps `omitted` |
 | `PUT /api/v1/ai/capabilities/{source}/items/{item}` | `{ "access": … }`: `off`, `read`, `write` or `outward` for a tool. Choosing the default deletes the row. 400 on an access the kind does not take, 409 on a `fixed` item or one outside `allowed` |
 | `DELETE /api/v1/ai/capabilities/{source}/items/{item}` | back to the default |
-| `POST /api/v1/ai/capabilities/{source}/refresh` | a remote plugin's connection test, which stores a good listing (`testAndList` in `agent/src/routes/plugins.ts`, shared with `POST /plugins/{name}/test`, one at a time per plugin; a second is 429) |
+| `POST /api/v1/ai/capabilities/{source}/refresh` | `{ test, source }`: a remote plugin's connection test and its source after it. A good test stores the listing (`testAndList` in `agent/src/routes/plugins.ts`, shared with `POST /plugins/{name}/test`, one at a time per plugin; a second is 429). 409 on a source that lists no tools |
 
 - A source or item id is one percent-encoded path segment (`remote%3Ahindsight`). An
-  unknown one is 404. Every write answers the source as it is after the write.
+  unknown one is 404. Every other write answers the source as it is after the write.
+- The refusals: 400 (a bad body or access), 403 (a guard), 404, 409, 413 (a body over
+  4 KiB), 429 (a test already running), 502 (a refresh whose test failed with any other status,
+  `refresh` in `agent/src/access/providers.ts`) and 503 (no database, or its migrations have not applied), each as `{ detail }`.
 - The guards are the plugin routes' guards (`agent/src/routes/guard.ts`): reads behind
   `uiReadProblem`, writes and the refresh behind `uiRequestProblem`, JSON bodies of at
   most 4 KiB (`jsonBodyLimit`). These are the user's settings writes. No agent tool
@@ -1252,7 +1255,9 @@ Settings → Tools & plugins reads and writes `ai_access` through seven agent ro
   dropped), a title of 1,024, a description of 8,192, 64 KiB of JSON per schema, 16 KiB
   for the annotations and for the other fields together, and 2 MiB per listing. Over the
   listing cap the other fields go first, then the output schemas, the input schemas,
-  the annotations and the descriptions. Each removal is named in the tool's `omitted`.
+  the annotations and the descriptions. If the listing is still over the cap with only
+  names and titles left, then from the first tool whose title no longer fits, every tool
+  keeps only its name. Each removal is named in the tool's `omitted`.
 - The page asks one confirmation line when a choice ranks below the item's default
   (`off` < `read` < `write` < `outward`; a by-call default such as `http_request`'s ranks
   as `outward`), and nothing more. The routes ask nothing: a write takes effect from the

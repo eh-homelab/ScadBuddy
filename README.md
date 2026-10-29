@@ -765,9 +765,8 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
   started with (#2171, behind `workflow.patched("flow-access-2171")` in
   `backend/scadbuddy/workflows/flow_tools.py`; a run recorded before it only raised). A
   call is tried up to three times only when both that tier and the tool's tier in code
-  (`declared`) are `read`: a tool lowered to `read` is still the code it was.
-  The API asks
-  the `agent` container in its own pod, `GET /internal/flows/tools` on
+  (`declared`) are `read`: a tool lowered to `read` is still the code it was. The API
+  asks the `agent` container in its own pod, `GET /internal/flows/tools` on
   `SCADBUDDY_AGENT_INTERNAL_URL` (default `http://127.0.0.1:8081`; the agent answers
   only a loopback peer, and the ingress never routes that path), when a run starts, a
   grant is approved, and for the editor's tool list. If the agent does not answer, a
