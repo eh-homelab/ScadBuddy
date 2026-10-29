@@ -2015,22 +2015,58 @@ def test_own_call_plugin_keeps_a_frontmatter_name_over_the_cap_whole(tmp_path: P
 
 
 async def test_a_packages_builtin_skill_is_read_per_call(agent_db: Conn, connect: Connect) -> None:
-    """I2 (Task 5 review M4): an allowed package that names Skill gives every Skill call that
-    built-in's access, read as each call is made: off refuses it in a classic turn's words."""
-    judge = CallAccess(connect, [], {"Skill": ["notes"]}).check
-    call = {"tool_name": "Skill", "tool_input": {"skill": "anything"}}
-    assert await judge(call) == {}  # no row: outward, which a durable call cannot ask (listed)
-    await agent_db.execute(
-        "INSERT INTO ai_access (source, item, access, updated_by)"
-        " VALUES ('package:notes', 'builtin:Skill', 'off', 'browser:browser')"
-    )
+    """I2 (Task 5 review M4), and review round 2: an allowed package that names Skill gives
+    every Skill call that built-in's access, read as each call is made, as a classic turn's
+    seam does: off refuses it, read or write runs it, outward (or no row, outward as in
+    classic) parks it at the gate, running it only once approved."""
+    parked: list[tuple[str, str, Any]] = []
+    answers: list[dict[str, Any]] = []
+
+    async def park(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        parked.append((call, tool, tool_input))
+        return answers.pop(0)
+
+    judge = CallAccess(connect, [], {"Skill": ["notes"]}, park).check
+    call = {"tool_name": "Skill", "tool_input": {"skill": "anything"}, "tool_use_id": "t1"}
+
+    async def set_tier(tier: str) -> None:
+        await agent_db.execute(
+            "INSERT INTO ai_access (source, item, access, updated_by)"
+            " VALUES ('package:notes', 'builtin:Skill', %s, 'browser:browser')"
+            " ON CONFLICT (source, item) DO UPDATE SET access = EXCLUDED.access",
+            (tier,),
+        )
+
+    # No row: outward, parked; approved, it runs.
+    answers.append({"go": True, "reason": None})
+    assert await judge(call) == {}
+    assert parked == [("t1", "Skill", {"skill": "anything"})]
+    # Denied: refused with the gate's reason.
+    answers.append({"go": False, "reason": "the user denied it"})
     denied = await judge(call)
-    assert denied["hookSpecificOutput"]["permissionDecisionReason"] == (
+    assert denied["hookSpecificOutput"]["permissionDecisionReason"] == "the user denied it"
+    await set_tier("read")
+    assert await judge(call) == {}
+    await set_tier("write")
+    assert await judge(call) == {}
+    await set_tier("off")
+    off = await judge(call)
+    assert off["hookSpecificOutput"]["permissionDecisionReason"] == (
         "Skill is disabled in Settings → Tools & plugins; the user can turn it back on there"
     )
+    assert len(parked) == 2  # neither read, write nor off was parked
+    # A tool no package names is never parked.
     assert await judge({"tool_name": "Agent", "tool_input": {"subagent_type": "x"}}) == {}
-    await agent_db.execute("UPDATE ai_access SET access = 'write' WHERE source = 'package:notes'")
-    assert await judge(call) == {}
+    # Outward with no gate to ask, or a gate that fails: refused (fail closed).
+    await set_tier("outward")
+    alone = await CallAccess(connect, [], {"Skill": ["notes"]}).check(call)
+    assert "could not be asked for" in alone["hookSpecificOutput"]["permissionDecisionReason"]
+
+    async def broken(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        raise RuntimeError("away")
+
+    failed = await CallAccess(connect, [], {"Skill": ["notes"]}, broken).check(call)
+    assert failed["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_builtin_access_is_the_strictest_of_the_packages_naming_it() -> None:
@@ -2159,3 +2195,110 @@ def test_own_plugin_copies_are_swept(tmp_path: Path) -> None:
     assert sorted(p.name for p in root.iterdir()) == sorted([used.name, ".tmp-live"])
     later = sweep_own_plugin_copies(str(root), now + week + 120)
     assert sorted(later) == sorted([used.name, ".tmp-live"])
+
+
+async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_approved(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 2, end to end: the bundled Claude Code calls Skill twice in a turn whose
+    allowed package names Skill (no row: outward). Each call waits at the gate in the
+    segment's hook; the first, approved, runs; the second, denied, is refused with why."""
+    root = tmp_path / "plugins"
+    staging = root / "staging" / "notes"
+    (staging / "skills" / "jot").mkdir(parents=True)
+    (staging / "skills" / "jot" / "SKILL.md").write_text("---\nname: jot\n---\nJot.\n")
+    digest = hash_tree(staging)
+    hex_ = digest.removeprefix("sha256:")
+    (root / "staging").rename(root / hex_)
+    stand_in = StandInTools(connect)
+    stand_in.turn_packages = [
+        {
+            "name": "notes",
+            "dir": f"{hex_}/notes",
+            "content_hash": digest,
+            "allowed": True,
+            "builtin_tools": ["Skill"],
+            "named_builtins": ["Skill"],
+            "items": ["skill:jot"],
+        }
+    ]
+    main: list[list[dict[str, Any]]] = []
+    call = {"name": "Skill", "input": {"skill": "scadbuddy:print"}}
+
+    def reply(body: dict[str, Any]) -> dict[str, Any]:
+        if "Skill" not in [t.get("name") for t in body.get("tools") or []]:
+            return {"text": "ok"}
+        results = _results(body)
+        main.append(results)
+        return {"tool_use": call} if len(results) < 2 else {"text": "All done."}
+
+    fake = FakeAnthropic(reply).start()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    try:
+        await insert_gateway(agent_db, KEK, fake.url)
+        runner = ScadBuddyRunner(
+            connect,
+            KEK,
+            cwd=os.path.realpath(cwd),
+            plugin_dir=str(_own_plugin(tmp_path)),
+            package_root=str(root),
+            make_runner=ClaudeAgentSdkRunner,
+            own_plugin_root=str(tmp_path / "own"),
+        )
+        async with running(temporal_env, connect, runner, stand_in) as (client, queue):
+            sid = await insert_session(agent_db)
+            handle = await start_session(client, sid, queue)
+            try:
+                await send(handle, "go")
+                for decision in ("approve", "deny"):
+                    entries: list[dict[str, Any]] = []
+
+                    async def parked() -> bool:
+                        nonlocal entries
+                        entries = [
+                            e
+                            for e in await handle.query(PENDING_INPUT_QUERY)
+                            if e["tool"] == "Skill"
+                        ]
+                        return bool(entries)
+
+                    await until(parked, timeout=120)
+                    [entry] = entries
+                    await handle.execute_update(
+                        RESPOND_UPDATE,
+                        {
+                            "request_id": entry["id"],
+                            "response": {"kind": "approval", "decision": decision},
+                            "responder": {"kind": "browser", "id": "browser", "label": "You"},
+                            "role": "browser",
+                        },
+                    )
+                    if decision == "approve":
+                        await until(lambda: _seen_results(main, 1), timeout=120)
+                assert await settled(connect, sid, timeout=180) == "idle"
+            finally:
+                await handle.terminate()
+    finally:
+        fake.close()
+        await asyncio.sleep(0)
+    first, second = next(r for r in reversed(main) if len(r) >= 2)
+    assert not first.get("is_error"), first
+    assert second.get("is_error") is True
+    assert "denied" in _text_of(second), _text_of(second)
+
+
+async def _seen_results_async(main: list[list[dict[str, Any]]], n: int) -> bool:
+    return any(len(r) >= n for r in main)
+
+
+def _seen_results(main: list[list[dict[str, Any]]], n: int) -> Any:
+    return _seen_results_async(main, n)

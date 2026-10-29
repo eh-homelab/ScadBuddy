@@ -240,7 +240,7 @@ export type TurnPackage = {
    */
   items: string[]
   aliases: Record<string, string[]>
-  /** The built-ins it names, before `builtin_tools` leaves out the switched-off ones: a Skill, Agent or Task call reads their access per call. */
+  /** The built-ins it names, before `builtin_tools` leaves out the switched-off ones: a Skill, Agent or Task call takes their access per call, an outward one parked at the gate. */
   named_builtins: string[]
 }
 

@@ -29,7 +29,7 @@ import { builtinAccessOf, builtinsOffOf, packageOmitted } from '../plugins/packa
 import { pluginTierResolver } from '../plugins/registry.js'
 import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
 import type { SessionFiles } from '../workspace/store.js'
-import { localPackageServers, sharePackage, unaskedBuiltinsNote, unparkableBuiltins } from './turnPackages.js'
+import { localPackageServers, sharePackage, unparkableBuiltins } from './turnPackages.js'
 import { turnToolName } from './turnTools.js'
 import {
   connectHttp,
@@ -340,8 +340,6 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
                   'such a call runs, so they are not offered here; a classic session offers them',
               )
             }
-            const unasked = unaskedBuiltinsNote(turnPackage)
-            if (unasked) problems.push(unasked)
             // The ones provided as turn tools are not the engine's to run.
             shared.push({ ...turnPackage, builtin_tools: turnPackage.builtin_tools.filter((t) => !dark.includes(t) && !provided.has(t)) })
           } catch (err) {

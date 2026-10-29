@@ -109,7 +109,9 @@ from scadbuddy_durable.session import access, subagents
 from scadbuddy_durable.session.fallback import classify, credentials_fault
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
+    BUILTIN_CALL_UPDATE,
     SEGMENT_CONTEXT_QUERY,
+    SEGMENT_TIMEOUT,
     SegmentContext,
     TurnPackage,
 )
@@ -586,6 +588,9 @@ DEFAULT_SUBAGENT = "general-purpose"
 
 #: A PreToolUse hook's answer for one call's input: ``{}`` to let it run, or a deny.
 CallJudge = Callable[[Any], Awaitable[dict[str, Any]]]
+#: Asks the gate about a call (tool_use id, tool, input), waiting while it is parked:
+#: ``{"go": bool, "reason": str | None}`` (workflow.py ``builtin_call``).
+ParkCall = Callable[[str, str, Any], Awaitable[dict[str, Any]]]
 
 
 class SegmentCalls:
@@ -706,7 +711,11 @@ class SegmentCalls:
 
     def hooks(self) -> dict[str, list[HookMatcher]]:
         return {
-            "PreToolUse": [HookMatcher(hooks=[self._started])],
+            # Long enough for a call the gate parked (CallAccess, ``park``) to be decided:
+            # Claude Code's default is 60 s; the gate's own wait is shorter than the segment.
+            "PreToolUse": [
+                HookMatcher(hooks=[self._started], timeout=SEGMENT_TIMEOUT.total_seconds())
+            ],
             "PostToolUse": [HookMatcher(hooks=[self._ended])],
             "PostToolUseFailure": [HookMatcher(hooks=[self._ended])],
             "SubagentStart": [HookMatcher(hooks=[self._subagent_started])],
@@ -967,9 +976,12 @@ class CallAccess:
         connect: Connect,
         plugins: list[access.CallPlugin],
         builtins: Mapping[str, Sequence[str]] | None = None,
+        park: ParkCall | None = None,
     ) -> None:
         self._connect = connect
         self._plugins = plugins
+        # An outward one parks at the workflow's gate, as an engine-parked built-in does.
+        self._park = park
         # Skill, Agent or Task as an allowed package's built-in, with the packages naming it
         # (Task 5 review M4): each call also takes that built-in's access (access.py
         # ``builtin_access``), as a classic turn's seam reads it (agent access/live.ts).
@@ -992,10 +1004,26 @@ class CallAccess:
         off = access.off_call_item(tool, data.get("tool_input"), self._plugins, rows)
         if off is not None:
             return _deny(access.off_item_reason(off))
-        # Outward runs: a hook cannot park a call (the agent's listing says so to the session).
-        if packages and access.builtin_access(tool, packages, rows) == "off":
+        if not packages:
+            return {}
+        tier = access.builtin_access(tool, packages, rows)
+        if tier == "off":
             return _deny(access.TOOL_OFF.format(tool))
-        return {}
+        if tier in ("read", "write"):
+            return {}
+        # Outward, as a classic turn's seam parks it: asked of a person at the gate, and run
+        # only once approved. With no gate to ask, refused (fail closed).
+        call = str(data.get("tool_use_id") or "")
+        if self._park is None or not call:
+            return _deny(f"{tool} needs approval, and it could not be asked for")
+        try:
+            answer = await self._park(call, tool, data.get("tool_input") or {})
+        except Exception as err:
+            logger.warning("%s could not be parked: %s", tool, type(err).__name__)
+            return _deny(f"{tool} needs approval, and it could not be asked for")
+        if answer.get("go") is True:
+            return {}
+        return _deny(str(answer.get("reason") or f"{tool} was not approved"))
 
 
 class ScadBuddyRunner:
@@ -1443,7 +1471,17 @@ class ScadBuddyRunner:
             else None,
             packages,
         )
-        judge = CallAccess(self._connect, call_plugins, call_builtins_of(packages)).check
+        handle = activity.client().get_workflow_handle(workflow_id)
+
+        async def park(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+            answer: dict[str, Any] = await handle.execute_update(
+                BUILTIN_CALL_UPDATE,
+                {"call_id": call, "tool": tool, "input": tool_input},
+                result_type=dict,
+            )
+            return answer
+
+        judge = CallAccess(self._connect, call_plugins, call_builtins_of(packages), park).check
         calls = SegmentCalls(list(inp.tool_activities), judge)
         extra["hooks"] = merged_hooks(extra.get("hooks"), calls.hooks())
         out = await self._on_credentials(

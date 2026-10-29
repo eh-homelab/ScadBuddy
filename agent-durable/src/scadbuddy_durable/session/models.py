@@ -19,6 +19,10 @@ TOOLS_QUEUE = "agent-tools"
 # default, as TOOLS_QUEUE is the agent tools queue's.
 PROJECTS_QUEUE = "projects"
 SEND_MESSAGE_UPDATE = "send_message"
+#: The segment runner's call hook asks the gate about a Skill, Agent or Task call that an
+#: allowed package's built-in makes outward (#4757): parked as an engine-parked built-in is,
+#: its answer ``{"go": bool, "reason": str | None}`` once decided.
+BUILTIN_CALL_UPDATE = "builtin_call"
 # What the segment runner reads from its workflow: the turn's images (Ruling 5) and the
 # system prompt's append (SegmentContext).
 SEGMENT_CONTEXT_QUERY = "segment_context"

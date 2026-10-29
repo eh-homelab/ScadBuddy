@@ -222,8 +222,6 @@ describe('plugin packages in a durable turn', () => {
     expect(listing.problems).toEqual([
       'plugin package broken was not loaded: refused',
       expect.stringContaining('plugin package notes names WebFetch: a durable session cannot ask you'),
-      // Task 6 review I2: Skill takes its access per call, but a hook cannot park it.
-      'plugin package notes names Skill: a durable session cannot ask you before such a call runs, so there each runs unless it is switched off in Settings → Tools & plugins; a classic session asks you while it is outward',
     ])
     await listing.release()
     await call.release()
@@ -254,10 +252,7 @@ describe('plugin packages in a durable turn', () => {
     expect(listing.notes).toEqual([builtinNote(['Read', 'WebFetch'])])
     expect(listing.notes?.[0]).toContain('Read (mcp__durable__builtin__Read)')
     // Only what nothing provides is left out, and said.
-    expect(listing.problems).toEqual([
-      expect.stringContaining('plugin package notes names Monitor: a durable session cannot ask you'),
-      expect.stringContaining('plugin package notes names Skill, Task: a durable session cannot ask you before such a call runs'),
-    ])
+    expect(listing.problems).toEqual([expect.stringContaining('plugin package notes names Monitor: a durable session cannot ask you')])
     await listing.release()
     // A flow has no session workspace: no built-ins there.
     const flow = await servers({ session: 'flow-x', flow: 'x', owner: OWNER, signal })

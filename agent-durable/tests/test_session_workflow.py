@@ -7,7 +7,9 @@ The model is the plugin's ScriptedClaude; agent-tools is a stand-in (session_sup
 before ``tool-access-2171`` (#2171), payloads unsealed; it is never re-recorded.
 ``bash.json`` is the history of
 ``test_a_package_built_in_parks_runs_once_approved_and_the_runner_gets_the_package``,
-recorded the same way on the code before ``builtin-access-4757`` (#4757).
+recorded the same way on the code before ``builtin-access-4757`` (#4757). ``skill.json`` is
+``test_an_outward_package_skill_parks_and_runs_once_approved``'s, recorded the same way when
+the hooked built-in path was added (#4757), to keep it replaying.
 """
 
 from __future__ import annotations
@@ -80,6 +82,7 @@ from scadbuddy_durable.session.access import REGISTRY_SOURCES, registry_source
 from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
+    BUILTIN_CALL_UPDATE,
     FORK_POINT_QUERY,
     MESSAGE_MAX,
     SEGMENT_CONTEXT_QUERY,
@@ -93,7 +96,7 @@ from scadbuddy_durable.session.models import (
     SegmentContext,
     SessionStart,
 )
-from scadbuddy_durable.session.workflow import FOLLOW_DRAIN, DurableSession
+from scadbuddy_durable.session.workflow import FOLLOW_DRAIN, DurableSession, refusal
 from scadbuddy_durable.worker import build_worker
 
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_temporal]
@@ -536,13 +539,15 @@ async def test_the_handler_set_is_the_gates_and_the_plugins(
     updates = {u.name for u in definition.update_definitions}
     signals = {s.name for s in definition.signal_definitions}
     queries = {q.name for q in definition.query_definitions}
-    assert {"send_message", "respond", "cancel_input"} <= updates
+    # builtin_call: the segment runner's hook asks the gate about a hooked built-in (#4757).
+    assert {"send_message", "respond", "cancel_input", "builtin_call"} <= updates
     assert {"interrupt", "end"} <= signals
     assert {"pending_input", "segment_context", "turn", "fork_point"} <= queries
     ours = {
         "send_message",
         "respond",
         "cancel_input",
+        "builtin_call",
         "interrupt",
         "end",
         "pending_input",
@@ -1478,6 +1483,108 @@ async def test_a_turn_from_before_builtin_access_replays(harness: Harness) -> No
     parked, then ran once approved) replays on this code without asking builtin_tier."""
     path = Path(__file__).parent / "fixtures" / "durable_session_histories" / "bash.json"
     await _replay(harness, WorkflowHistory.from_json("bash", path.read_text(encoding="utf-8")))
+
+
+SKILL_PACKAGE = {**NOTES_PACKAGE, "builtin_tools": ["Skill"], "named_builtins": ["Skill"]}
+
+
+async def _hooked_skill(
+    harness: Harness, agent_db: Conn, answers: list[str]
+) -> tuple[str, WorkflowHandle[Any, Any], asyncio.Task[Any]]:
+    """A turn held open by a question, and the segment hook's ask about a Skill call."""
+    harness.stand_in.turn_packages = [SKILL_PACKAGE]
+    harness.stand_in.builtin_answers = answers
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "ask me")
+    await _parked(handle)  # the question: the turn runs
+    asked = asyncio.ensure_future(
+        handle.execute_update(
+            BUILTIN_CALL_UPDATE,
+            {"call_id": "toolu_skill", "tool": "Skill", "input": {"skill": "notes:jot"}},
+            result_type=dict,
+        )
+    )
+    return sid, handle, asked
+
+
+async def test_an_outward_package_skill_parks_and_runs_once_approved(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#4757 (Task 6 review round 2): a Skill call an allowed package's built-in makes
+    outward parks as its Bash would: one approval entry, same request id shape, run on approve."""
+    sid, handle, asked = await _hooked_skill(harness, agent_db, ["outward"])
+
+    async def two() -> bool:
+        return len(await handle.query(PENDING_INPUT_QUERY)) == 2
+
+    await until(two)
+    [entry] = [e for e in await handle.query(PENDING_INPUT_QUERY) if e["tool"] == "Skill"]
+    assert entry["kind"] == "approval"
+    assert entry["id"].endswith(":toolu_skill") and entry["id"].startswith(f"durable:{sid}:")
+    assert not asked.done()
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+    )
+    assert await asked == {"go": True, "reason": None}
+    assert harness.stand_in.builtin_asked == [{"tool": "Skill", "packages": ["notes"]}]
+    await _replays(harness, handle)
+
+
+async def test_an_outward_package_skill_denied_is_refused_with_why(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    _, handle, asked = await _hooked_skill(harness, agent_db, ["outward"])
+
+    async def two() -> bool:
+        return len(await handle.query(PENDING_INPUT_QUERY)) == 2
+
+    await until(two)
+    [entry] = [e for e in await handle.query(PENDING_INPUT_QUERY) if e["tool"] == "Skill"]
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "deny"})
+    )
+    answer = await asked
+    assert answer["go"] is False
+    assert answer["reason"] == refusal("Skill", entry["id"], "denied", None)
+    await _replays(harness, handle)
+
+
+@pytest.mark.parametrize(("tier", "go"), [("read", True), ("write", True), ("off", False)])
+async def test_a_package_skill_read_or_off_is_answered_without_parking(
+    harness: Harness, agent_db: Conn, connect: Connect, tier: str, go: bool
+) -> None:
+    sid, handle, asked = await _hooked_skill(harness, agent_db, [tier])
+    answer = await asked
+    assert answer["go"] is go
+    if not go:
+        assert answer["reason"] == (
+            "Skill is disabled in Settings → Tools & plugins; the user can turn it back on there"
+        )
+    assert [e["tool"] for e in await handle.query(PENDING_INPUT_QUERY)] == ["ask_user"]
+    assert await _open_rows(agent_db, sid) == 1
+    await _replays(harness, handle)
+
+
+async def test_a_hooked_call_outside_a_turn_is_refused(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    _, handle = await harness.session(agent_db)
+    answer = await handle.execute_update(
+        BUILTIN_CALL_UPDATE,
+        {"call_id": "t1", "tool": "Skill", "input": {"skill": "x"}},
+        result_type=dict,
+    )
+    assert answer["go"] is False
+    bad = await handle.execute_update(
+        BUILTIN_CALL_UPDATE, {"call_id": "t2", "tool": "Bash", "input": {}}, result_type=dict
+    )
+    assert bad["go"] is False
+
+
+async def test_a_hooked_skill_from_its_fixture_replays(harness: Harness) -> None:
+    """``skill.json``: test_an_outward_package_skill_parks_and_runs_once_approved's history."""
+    path = Path(__file__).parent / "fixtures" / "durable_session_histories" / "skill.json"
+    await _replay(harness, WorkflowHistory.from_json("skill", path.read_text(encoding="utf-8")))
 
 
 async def test_a_turn_recalls_memories_into_its_prompt_and_retains_before_it_ends(
