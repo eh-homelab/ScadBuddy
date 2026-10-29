@@ -66,7 +66,7 @@ describe.skipIf(skip !== undefined)(`an allowed package's built-ins in a durable
       turnServers: (deps) => {
         sql = deps.sql
         return turnServers({
-          packages: { load, root, localRoot: path.join(deps.stateDir, 'plugins-local'), forward: async () => ({ plugins: [], problems: [], secrets: [], terminate: async () => {}, release: () => {} }) },
+          packages: { load, root, localRoot: path.join(deps.stateDir, 'plugins-local'), forward: async () => ({ plugins: [], servers: [], problems: [], secrets: [], terminate: async () => {}, release: () => {} }) },
           builtins: { files: new SessionFiles(deps.sql), nested: () => ({ ask: async () => '', search: async () => ({ text: '' }) }) },
         })
       },

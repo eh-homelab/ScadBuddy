@@ -1499,6 +1499,24 @@ async def test_a_turn_tool_call_the_agent_cannot_tier_parks(
     await _replays(harness, handle)
 
 
+async def test_a_switched_off_package_servers_call_is_refused_without_parking(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#4757: turn_tool_tier answers a switched-off package server's call as refused, so it
+    never parks for an approval that could not run it; its call refuses it with the reason."""
+    off = "api of plugin package notes is switched off in Settings → Tools & plugins"
+    harness.stand_in.turn_offered = [NOTES_POST]
+    harness.stand_in.turn_refused = off
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "post it")
+    assert await settled(connect, sid) == "idle"
+    log = await events(agent_db, sid)
+    assert "approval.required" not in _types(log)
+    assert harness.stand_in.ran == []
+    assert off in json.dumps(log, ensure_ascii=False)
+    await _replays(harness, handle)
+
+
 async def test_a_turn_whose_other_tools_cannot_be_listed_goes_on_with_its_own(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:

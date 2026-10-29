@@ -1,7 +1,7 @@
 import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { Sql } from 'postgres'
-import { BUILTIN_SOURCES } from '../access/model.js'
+import { BUILTIN_SOURCES, packageServerSource } from '../access/model.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
 import type { AccessResolver } from '../access/resolver.js'
 import type { AuditSink } from '../audit/log.js'
@@ -98,8 +98,8 @@ export async function sweepTurnDirs(root: string, sql: Sql, now = Date.now()): P
 export type TurnServerDeps = {
   /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`). */
   remotePlugins?: (() => Promise<PluginsForRun>) | undefined
-  /** Tool access (#2171, ai_access): http_request's switch and tier. Defaults without it. */
-  access?: Pick<AccessResolver, 'entry'> | undefined
+  /** Tool access (#2171, ai_access): http_request's switch and tier, and each package server's switch. Defaults without it. */
+  access?: Pick<AccessResolver, 'entry' | 'enabled'> | undefined
   /**
    * The headless browser's lists and the sessions' approved origins (#982,
    * browser/store.ts): the remote plugins' browser_* calls are judged by them, as a
@@ -375,15 +375,24 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       forwardedPackages = await deps.packages!.forward(offered)
       problems.push(...forwardedPackages.problems)
       secrets.push(...forwardedPackages.secrets)
+      const access = deps.access ?? DEFAULT_ACCESS
       for (const plugin of forwardedPackages.plugins) {
         browserPlugins.push(plugin.name)
         // Its tiers from ai_access (#2171), an unlisted tool outward, as a remote plugin's above.
         const tiers = pluginTierResolver([plugin])
+        const at = forwardedPackages.servers.find((s) => s.name === plugin.name)
         servers.push({
           name: plugin.name,
           connect: () => connectHttp(plugin.url),
           listingKey: JSON.stringify(plugin.disabledTools),
           tierOf: (name) => tiers(name) ?? 'outward',
+          // Its `*` switch at each tier check and call (#4757); a server not found is refused.
+          refusal: async () => {
+            if (!at) return `${plugin.name} is not a known package server`
+            return (await access.enabled(packageServerSource(at.pkg, at.server)))
+              ? undefined
+              : `${at.server} of plugin package ${at.pkg} is switched off in Settings → Tools & plugins; the user can turn it back on there`
+          },
           ...browserParts,
         })
       }

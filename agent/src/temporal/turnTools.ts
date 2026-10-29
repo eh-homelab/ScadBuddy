@@ -97,6 +97,12 @@ export type TurnServer = {
    * `outward` or `allow` move its tier (`tierAfter`).
    */
   guard?(harnessName: string, input: unknown): Promise<GuardVerdict | undefined>
+  /**
+   * Why its calls are refused now, read at each tier check and each call (#4757: a package
+   * server switched off in Settings → Tools & plugins), or undefined. A read that fails
+   * rejects: the tier check then fails (the call parks) and the call is never made.
+   */
+  refusal?(): Promise<string | undefined>
   /** The text the model reads instead of a call's result (#982: a page the lists do not let it read), or undefined. */
   screen?(harnessName: string, input: unknown, text: string): Promise<string | undefined>
   /**
@@ -565,6 +571,9 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         const { server, harnessName } = await resolve(deps, caller.context, set, tool, signal, 'tier')
         // A flow takes its call's queue from here, since it lists nothing (turn_tools).
         const queue = pinned(deps, server) ? { task_queue: deps.hostQueue! } : {}
+        // As a guard's deny below: not parked, since its call refuses it with the reason.
+        const off = await server.refusal?.()
+        if (off !== undefined) return { tier: 'write', declared: 'outward', refused: off, ...queue }
         const verdict = server.guard ? await judgeInput(server.guard.bind(server), harnessName, input) : undefined
         // A refused call is not parked, since no approval could run it: its call refuses
         // it with the reason (turnToolActivity). It is answered as not outward; `refused`
@@ -625,6 +634,8 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         await record('refused', message)
         throw ApplicationFailure.nonRetryable(message, type)
       }
+      const off = await server.refusal?.()
+      if (off !== undefined) await refuse(off, TOOL_ERROR)
       if (verdict && 'deny' in verdict) await refuse(verdict.deny, TOOL_ERROR)
       if (!principal.tiers.includes(tier)) {
         const who = caller.context.flow ? "this flow run's starter" : "this session's turn"

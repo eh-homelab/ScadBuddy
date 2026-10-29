@@ -111,6 +111,7 @@ function harness(
     flowBlobs?: TurnToolsDeps['flowBlobs']
     lapsed?: (requestId: string, inputHash: string | undefined) => boolean
     callIds?: boolean
+    refusal?: () => Promise<string | undefined>
   } = {},
 ) {
   const contexts: TurnContext[] = []
@@ -131,6 +132,7 @@ function harness(
     ...(options.fixedTier ? { fixedTier: options.fixedTier } : {}),
     ...(options.pinned ? { pinned: true } : {}),
     ...(options.callIds ? { callIds: true } : {}),
+    ...(options.refusal ? { refusal: options.refusal } : {}),
   }
   const deps: TurnToolsDeps = {
     sessions: { ownerOf: async (id) => (id === SESSION ? (owner as never) : undefined) },
@@ -193,6 +195,56 @@ async function failure(promise: Promise<unknown>): Promise<ApplicationFailure> {
   expect(err).toBeInstanceOf(ApplicationFailure)
   return err as ApplicationFailure
 }
+
+// #4757 security review: a package server switched off is refused at each tier check and
+// each call, in a durable turn and a flow run alike, and a failed read of its switch never
+// lets a call through.
+describe('a turn tool whose server refuses its calls (#4757)', () => {
+  const OFF = 'api of plugin package notes is switched off in Settings → Tools & plugins'
+
+  it.each([
+    ['a durable turn', `session-${SESSION}`, 'tool-toolu_approved'],
+    ['a flow run', `flow-${FLOW}`, 'tool-flow_approved'],
+  ])('%s: turn_tool_tier answers refused (not parked) and the call is refused', async (_what, workflowId, activityId) => {
+    const state = { off: false }
+    const h = harness({ refusal: async () => (state.off ? OFF : undefined) })
+    const tier = () => env(TURN_TOOL_TIER_ACTIVITY, 'tier-1', workflowId).run(h.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__post', input: { method: 'POST', body: 'x' } })
+    const call = () => env('turn:notes__post', activityId, workflowId).run(h.call, { method: 'POST', body: 'x' })
+    expect(await tier()).toMatchObject({ tier: 'outward' })
+    state.off = true
+    expect(await tier()).toEqual({ tier: 'write', declared: 'outward', refused: OFF })
+    const refused = await failure(call())
+    expect(refused.message).toBe(OFF)
+    expect(h.calls).toEqual([])
+    expect(h.audits).toEqual([expect.objectContaining({ outcome: 'refused', detail: OFF })])
+  })
+
+  it('a switch that cannot be read refuses the call and fails the tier check', async () => {
+    const h = harness({ refusal: () => Promise.reject(new Error('db down')) })
+    await expect(env(TURN_TOOL_TIER_ACTIVITY, 'tier-1').run(h.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__read_note', input: { id: 'a' } })).rejects.toThrow('db down')
+    await expect(env('turn:notes__read_note').run(h.call, { id: 'a' })).rejects.toThrow('db down')
+    expect(h.calls).toEqual([])
+  })
+
+  it("turnServers reads a package server's switch at each refusal check", async () => {
+    const { access, rows } = memoryAccess()
+    const forward = async () => ({
+      plugins: [{ name: 'plugin_notes_api', url: 'http://127.0.0.1:9/p/x', toolTiers: {}, disabledTools: [] }],
+      servers: [{ name: 'plugin_notes_api', pkg: 'notes', server: 'api' }],
+      problems: [],
+      secrets: [],
+      terminate: async () => {},
+      release: () => {},
+    })
+    const load = async () => ({ paths: [], allowedPaths: [], builtinTools: [], loaded: [], problems: [], release: () => {} })
+    const build = turnServers({ access: new AccessResolver(access), packages: { load, root: undefined, localRoot: os.tmpdir(), forward } })
+    const set = await build({ session: SESSION, owner: BROWSER, signal: new AbortController().signal, listing: false })
+    const server = set.servers.find((x) => x.name === 'plugin_notes_api')!
+    expect(await server.refusal!()).toBeUndefined()
+    rows.push({ source: 'package:notes/mcp:api', item: '*', access: 'off', updated_by: 'browser:browser' })
+    expect(await server.refusal!()).toMatch(/api of plugin package notes is switched off/)
+  })
+})
 
 describe('turn tools in a durable session', () => {
   it('lists each server tool by the name Claude Code gives it, and says which may park', async () => {

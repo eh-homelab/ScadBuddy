@@ -127,6 +127,9 @@ class StandInTools:
         self.memory: list[tuple[str, str]] = []
         self.memory_fails = False
         self.tier_refuses = False
+        # #4757: the agent's answer for a switched-off package server: turn_tool_tier says
+        # refused (not outward), and the call refuses with the reason.
+        self.turn_refused: str | None = None
         # tool_tier (#2171): the access laid over ai_access, each tool it was asked, and
         # tool_tier_refuses makes it fail.
         self.tiers: dict[str, str] = {}
@@ -254,6 +257,8 @@ class StandInTools:
                 raise ApplicationError(
                     "the plugin did not answer", type="ToolError", non_retryable=True
                 )
+            if self.turn_refused is not None:
+                return {"tier": "write", "declared": "outward", "refused": self.turn_refused}
             return {"tier": tier(args["input"])}
 
         @activity.defn(name="tool_tier")
@@ -284,6 +289,8 @@ class StandInTools:
             name = activity.info().activity_type
             assert name.startswith("turn:"), name
             args = activity.payload_converter().from_payload(raw[0].payload, dict)
+            if self.turn_refused is not None:
+                raise ApplicationError(self.turn_refused, type="ToolError", non_retryable=True)
             if tier(args) == "outward":
                 recorded = await self._response(name)
                 if recorded is None or recorded[0] != "approved":

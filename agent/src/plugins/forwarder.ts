@@ -80,6 +80,11 @@ export type ForwardOptions = {
   ledgerId?: string
   /** Refuse a response body past this many bytes (the connection test's, #2171): 502, or the stream cut once it has begun. */
   maxResponseBytes?: number
+  /**
+   * Why every `tools/call` is refused now, read at each call (#4757: a package server
+   * switched off), or undefined. A read that fails refuses the call.
+   */
+  callCheck?: () => Promise<string | undefined>
 }
 
 export type Registration = {
@@ -113,6 +118,7 @@ type Route = {
   ledgerId: string
   filterTools: boolean
   maxResponseBytes: number | undefined
+  callCheck: (() => Promise<string | undefined>) | undefined
   /** Harness names hidden because two or more tools share them (learned from tools/list). */
   collided: Set<string>
   /** The requests this route has forwarded whose responses are rewritten, on whichever stream they arrive. */
@@ -394,6 +400,7 @@ export class PluginForwarder {
       ledgerId: options.ledgerId ?? plugin.name,
       filterTools: options.filterTools ?? true,
       maxResponseBytes: options.maxResponseBytes,
+      callCheck: options.callCheck,
       collided: new Set(),
       rewrites: { lists: new Set(), calls: new Map() },
     }
@@ -477,7 +484,14 @@ export class PluginForwarder {
           rewrites.lists.add(m.id)
         }
         if (m.method === 'tools/call' && isRecord(m.params) && typeof m.params.name === 'string') {
-          const refusal = callRefusal(route, m.params.name)
+          let refusal = callRefusal(route, m.params.name)
+          if (refusal === undefined && route.callCheck) {
+            try {
+              refusal = await route.callCheck()
+            } catch {
+              refusal = `the access of plugin ${route.plugin.name} could not be read; the call is refused`
+            }
+          }
           if (refusal !== undefined) {
             // A JSON-RPC error, so the client reports it as the tool's failure.
             res.writeHead(200, { 'content-type': 'application/json' })

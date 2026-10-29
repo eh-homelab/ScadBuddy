@@ -43,7 +43,7 @@ import { packageLedgerId } from '../pluginSessions.js'
 export type PackageServers = {
   plugins: HarnessPlugin[]
   /** Each of `plugins`, in order: its package and server, whose ai_access source the seam reads per call (access/live.ts). */
-  servers?: { name: string; pkg: string; server: string }[]
+  servers: { name: string; pkg: string; server: string }[]
   /** Each server's `pluginEndpoint` (its declared URL and header), in `plugins` order. */
   endpoints?: PluginEndpoint[]
   problems: string[]
@@ -75,7 +75,7 @@ export async function forwardPackageServers(
   loaded: readonly LoadedPackage[],
   forwarder: Pick<PluginForwarder, 'register'>,
   resolve: Resolver = systemResolver,
-  options: Pick<ForwardOptions, 'record'> & { access?: Pick<AccessResolver, 'plugin'> } = {},
+  options: Pick<ForwardOptions, 'record'> & { access?: Pick<AccessResolver, 'plugin' | 'enabled'> } = {},
 ): Promise<PackageServers> {
   const { access, ...forwardOptions } = options
   const plugins: HarnessPlugin[] = []
@@ -127,7 +127,18 @@ export async function forwardPackageServers(
         }
         const { toolTiers, disabledTools } = access ? await access.plugin(packageServerSource(pkg.name, server)) : { toolTiers: {}, disabledTools: [] }
         const plugin: RemotePlugin = { name, url, ...(header ? { header } : {}), toolTiers, disabledTools }
-        const registration = forwarder.register(plugin, address, { ...forwardOptions, ledgerId: packageLedgerId(name) })
+        // Its `*` switch at each call, on every path that reaches it (#4757): a classic or
+        // durable turn's, a flow's. A read that fails refuses the call (forwarder.ts).
+        const source = packageServerSource(pkg.name, server)
+        const callCheck = access
+          ? async () =>
+              (await access.enabled(source)) ? undefined : `${server} of plugin package ${pkg.name} is switched off in Settings → Tools & plugins`
+          : undefined
+        const registration = forwarder.register(plugin, address, {
+          ...forwardOptions,
+          ledgerId: packageLedgerId(name),
+          ...(callCheck ? { callCheck } : {}),
+        })
         releases.push(registration.release)
         registrations.push(registration)
         if (header) secrets.push(...headerSecretVariants(header.value))

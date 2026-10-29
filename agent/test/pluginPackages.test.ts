@@ -711,4 +711,42 @@ describe("a package's MCP servers on ai_access (#2171)", () => {
       await mcp.close()
     }
   })
+
+  // #4757 security review: the forwarder refuses every call of a switched-off server, on
+  // whichever path reaches it, and a failed read of the switch refuses the call too.
+  it("the forwarder refuses a call while the server's `*` is off, and when the switch cannot be read", async () => {
+    const mcp = await startFakeMcp({ extraTools: ['a'] })
+    const forwarder = await PluginForwarder.start()
+    try {
+      const dir = tree({
+        '.claude-plugin/plugin.json': JSON.stringify({ name: 'notes' }),
+        '.mcp.json': JSON.stringify({ mcpServers: { api: { type: 'http', url: mcp.url } } }),
+      })
+      const pkg = { name: 'notes', contentHash: (await hashTree(dir)).hash, dir, allowed: false, builtinTools: [] }
+      const { access, rows } = memoryAccess()
+      const state = { fail: false }
+      const resolver = new AccessResolver({
+        rows: (sources) => (state.fail ? Promise.reject(new Error('db down')) : access.rows(sources)),
+      })
+      const servers = await forwardPackageServers([pkg], forwarder, async () => ['127.0.0.1'], { access: resolver })
+      const client = await connectHttp(servers.plugins[0]!.url)
+      try {
+        await client.callTool({ name: 'a', arguments: { text: '1' } })
+        rows.push({ source: packageServerSource('notes', 'api'), item: '*', access: 'off', updated_by: 'test' })
+        await expect(client.callTool({ name: 'a', arguments: { text: '2' } })).rejects.toThrow(/ScadBuddy: api of plugin package notes is switched off/)
+        rows.length = 0
+        state.fail = true
+        await expect(client.callTool({ name: 'a', arguments: { text: '3' } })).rejects.toThrow(/could not be read; the call is refused/)
+        state.fail = false
+        await client.callTool({ name: 'a', arguments: { text: '4' } })
+        expect(mcp.calls).toEqual(['a:1', 'a:4'])
+      } finally {
+        await client.close()
+        servers.release()
+      }
+    } finally {
+      await forwarder.close()
+      await mcp.close()
+    }
+  })
 })
