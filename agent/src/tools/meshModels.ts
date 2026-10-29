@@ -54,6 +54,7 @@ const edit = z.discriminatedUnion('edit', [
 export const meshModelTools: Tool[] = [
   defineTool({
     name: 'create_model_from_mesh',
+    label: 'Open a mesh as an editable model',
     description:
       'Open a mesh as an editable model: a Bambuddy library file (library_file_id, from list_library), an output ' +
       '(output_id), or a 3MF/STL in your workspace (workspace_path with its workspace_sha256). Each object becomes a ' +
@@ -104,6 +105,7 @@ export const meshModelTools: Tool[] = [
 
   defineTool({
     name: 'get_scene',
+    label: "Read a mesh model's scene",
     description:
       "A mesh model's scene: its objects (ids o1, o2…), each object's colour parts, its ops in order (cut, joint, " +
       'add, subtract, custom) in the object\'s own frame, and its transform (translate, rotate in degrees X then Y ' +
@@ -119,6 +121,7 @@ export const meshModelTools: Tool[] = [
 
   defineTool({
     name: 'edit_scene',
+    label: "Edit a mesh model's scene",
     description:
       'Edit a mesh model as one revision (undo with restore_version). Painting done in Bambu Studio is carried into a model\'s one-plate renders (not multi-plate ones; a hand-edited model.scad or unreadable paint file skips it with a render warning). Edits apply in order, so a later edit may name an ' +
       'object an earlier one made (split_at_plane makes the top half the next id). Planes and `at` are world mm. ' +
@@ -141,6 +144,7 @@ export const meshModelTools: Tool[] = [
 
   defineTool({
     name: 'eject_scene',
+    label: 'Turn a mesh model back into OpenSCAD',
     description:
       "Stop editing a mesh model as a scene: scene.json is removed and model.scad (which imports the meshes) is the " +
       'source from then on, edited with update_source. One way; restore_version undoes it.',

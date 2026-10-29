@@ -474,14 +474,6 @@ export interface Problem {
   [extension: string]: unknown
 }
 
-/**
- * The agent service's switch for the assistant's `http_request` tool (#827,
- * `GET/PUT /api/v1/ai/settings/http-request`). On by default.
- */
-export interface HttpRequestSetting {
-  enabled: boolean
-}
-
 /** #982 — an origin the user let one chat's headless browser open (`once`: one navigation, `session`: the chat). */
 export interface ApprovedBrowserOrigin {
   session_id: string
@@ -501,15 +493,6 @@ export interface BrowserOriginsSetting {
   deny: string[]
   defaults: { allow: string[]; deny: string[] }
   approved: ApprovedBrowserOrigin[]
-}
-
-/**
- * #1911 — the agent service's switch for the assistant's `get_printer_camera` tool
- * (`GET/PUT /api/v1/ai/settings/printer-camera`, agent `src/routes/printerCamera.ts`).
- * On by default; while off, every call to the tool is refused.
- */
-export interface PrinterCameraSetting {
-  enabled: boolean
 }
 
 /**

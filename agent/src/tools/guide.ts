@@ -48,6 +48,7 @@ export function authoringGuide(): Promise<string> {
 export const guideTools: Tool[] = [
   defineTool({
     name: 'get_authoring_guide',
+    label: 'Read the authoring guide',
     description:
       "ScadBuddy's authoring conventions, as Markdown: what a template is on disk, customizer comment " +
       'syntax, colours (one `// color` parameter per extruder, every solid in a `color()`), fonts (installed ' +

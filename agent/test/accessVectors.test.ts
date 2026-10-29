@@ -81,6 +81,13 @@ function build(): Vectors {
         expect: none,
       },
       {
+        // An own key in both languages: a JS object literal would take it as its prototype.
+        name: 'a tool named __proto__ is an own key',
+        tools: [{ name: '__proto__', risk: 'read', hitl: null }],
+        rows: [row(S, '__proto__', 'write')],
+        expect: { tool_tiers: JSON.parse('{"__proto__":"write"}') as Record<string, RiskTier>, disabled_tools: [] },
+      },
+      {
         name: 'durable_only: a migrated raise of a tool whose tier is no tier counts',
         durable_only: true,
         tools: [{ name: 't', risk: '?', hitl: null }],

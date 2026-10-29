@@ -14,6 +14,7 @@ const backend = z.enum(['bambuddy', 's3'])
 export const storeTools: Tool[] = [
   defineTool({
     name: 'store_migrate',
+    label: 'Migrate the blob store to another backend',
     description:
       'Copy every recorded blob from the `source` store backend to `target`, `batch` at a time, as a ' +
       'background workflow. The target backend\'s settings must already be saved on the Settings page (no tool writes them). Each row switches to its copy when ' +
@@ -39,6 +40,7 @@ export const storeTools: Tool[] = [
 
   defineTool({
     name: 'store_migrate_status',
+    label: 'Check a blob store migration',
     description:
       "A store migration's progress: rows still to copy (`remaining`), `copied`, the ones whose copy " +
       'failed and why (`failed`, up to 200 of `failed_count`), and whether it `running`. Refused (404) when ' +

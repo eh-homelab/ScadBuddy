@@ -997,6 +997,7 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
       const aim = (fill: (args: { printer?: string | undefined; printer_id?: number | undefined }) => Record<string, unknown>) =>
         defineTool({
           name: 'aim',
+          label: 'aim',
           description: 'aims',
           risk: 'outward',
           routes: [],

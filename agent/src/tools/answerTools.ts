@@ -28,6 +28,7 @@ const notInWorkflow = (name: string) =>
 export const DURABLE_ONLY_TOOLS: Tool[] = [
   defineTool({
     name: ASK_USER,
+    label: 'Ask the user a question',
     description:
       'Ask the user one to four multiple-choice questions and wait for their answers. The user may also type ' +
       'their own answer. Use it when you need a decision only the user can make; the answers come back keyed by question.',
@@ -40,6 +41,7 @@ export const DURABLE_ONLY_TOOLS: Tool[] = [
   }),
   defineTool({
     name: WAIT_FOR_USER,
+    label: 'Wait for the user',
     description:
       "Get the user's attention and wait for their reply, shown in the ScadBuddy panel and counted on the " +
       'Assistant badge. Use it when you cannot go on without them (`blocked`, a `question` with no fixed choices, ' +

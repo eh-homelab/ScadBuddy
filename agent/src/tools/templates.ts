@@ -86,6 +86,7 @@ export const BLANK_TEMPLATE = [
 export const templateTools: Tool[] = [
   defineTool({
     name: 'create_from_template',
+    label: 'Start a model from a template',
     description:
       'Start a new model under `name`: from `blank` (a small two-colour template with the customizer ' +
       'annotations, fonts and color() conventions already in place; replace its geometry), or from a ' +

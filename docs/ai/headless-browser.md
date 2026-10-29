@@ -35,8 +35,11 @@ exactly as any plugin's (`agent/src/plugins/registry.ts`).
 ## Tiers
 
 A plugin tool with no tier of its own is **`outward`**: every call parks for a human's
-approval until it is tiered. So once the plugin is added, set its tiers in Settings →
-Tools & plugins. A starting point:
+approval until it is tiered. So once the plugin is added, press **Test connection** and
+set each tool's access (its select on the plugin's card) in Settings → Tools & plugins
+→ Remote MCP plugins ([user guide, "Tool access"](../user-guide.md#tool-access);
+[operating.md, "The capabilities API"](operating.md#the-capabilities-api)). A starting
+point:
 
 | Tier | Tools |
 |---|---|

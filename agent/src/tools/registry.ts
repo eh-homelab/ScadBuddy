@@ -239,6 +239,11 @@ export type RunReport = {
 
 export type ToolSpec<S extends z.ZodRawShape> = {
   name: string
+  /**
+   * What a person calls the tool, for Settings → Tools & plugins and as the MCP `title`:
+   * short, sentence case, the action in plain words, proper names as written. Unique.
+   */
+  label: string
   description: string
   input: z.ZodObject<S>
   risk: Risk
@@ -302,6 +307,8 @@ export type ApprovalNeeds = { summary: boolean }
 /** A registry entry with its argument types erased, so tools of any shape share one list. */
 export type Tool = {
   readonly name: string
+  /** ToolSpec.label; also `annotations.title`. */
+  readonly label: string
   readonly description: string
   readonly shape: z.ZodRawShape
   readonly risk: Risk
@@ -348,6 +355,7 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
   const bambuddyScope = spec.bambuddyScope ?? []
   return {
     name: spec.name,
+    label: spec.label,
     description: spec.description,
     shape: spec.input.shape,
     risk: spec.risk,
@@ -357,6 +365,7 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
     gated,
     source: spec.source ?? DEFAULT_SOURCE,
     annotations: {
+      title: spec.label,
       readOnlyHint: readOnly,
       destructiveHint: spec.risk === 'outward',
       // Bambuddy is a system outside ScadBuddy.

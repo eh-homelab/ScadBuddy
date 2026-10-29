@@ -183,7 +183,7 @@ export function createExternalServer(tools: readonly Tool[], services: ToolServi
   for (const t of tools) {
     const handle = server.registerTool(
       t.name,
-      { description: t.description, inputSchema: t.shape, annotations: t.annotations },
+      { title: t.label, description: t.description, inputSchema: t.shape, annotations: t.annotations },
       async (args, extra): Promise<CallToolResult> => {
         const principal = principalFrom(extra)
         if (!principal) return errorResult('unauthenticated')

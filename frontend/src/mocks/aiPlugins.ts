@@ -25,6 +25,7 @@ import type {
   RemotePlugin,
   RemotePluginCreate,
   RemotePluginPatch,
+  RiskTier,
 } from '../api/aiPlugins'
 
 const base = '/api/v1/ai'
@@ -115,7 +116,16 @@ export const BUILT_IN_ANSWER = `ScadBuddy's own plugin is built in: the assistan
 
 const now = () => new Date('2026-09-28T09:00:00Z').toISOString()
 
+const LISTED_TOOLS = ['recall', 'retain', 'files.list', 'notes.get', 'notes_get']
+let listedTools: readonly string[] = LISTED_TOOLS
+
+/** For a test: the tool names the next refresh lists (a name may appear twice, as a server may list it). */
+export function setListedToolNames(names: readonly string[]): void {
+  listedTools = names
+}
+
 export function resetAiPluginMocks(): void {
+  listedTools = LISTED_TOOLS
   state.remote.clear()
   state.packages.clear()
   state.builtIns = new Map(builtIns().map((b) => [b.name, b]))
@@ -186,21 +196,39 @@ export function seedStoredPackage(name: string): void {
   state.packages.set(name, { ...greeter, name, approved: true, approved_at: now(), enabled: true })
 }
 
-function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
-  return ['recall', 'retain', 'files.list'].map((tool) => {
+/**
+ * The tools a test lists for `plugin`: `recall` (suggested read), `retain`, `files.list`, which
+ * Claude Code renames, and `notes.get` and `notes_get`, which share one harness name (a collision).
+ */
+export function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
+  const names = listedTools
+  const harnessOf = (tool: string) => tool.replace(/[^A-Za-z0-9_-]/g, '_')
+  const disabled = new Set(plugin.disabled_tools.map(harnessOf))
+  return names.map((tool) => {
     const renamed = tool.includes('.')
-    const harness = tool.replace(/[^A-Za-z0-9_-]/g, '_')
+    const harness = harnessOf(tool)
+    // Every other entry of the harness name, a second entry of the same name included, as the agent counts.
+    const entries = names.filter((other) => harnessOf(other) === harness)
+    const collides_with = entries.filter((_, j) => j !== entries.indexOf(tool))
     const explicit = !renamed && Object.hasOwn(plugin.tool_tiers, tool)
+    const description = `The ${tool} tool.`
+    const annotations = tool === 'recall' ? { readOnlyHint: true } : null
+    const input_schema = { type: 'object', properties: { query: { type: 'string', description: 'What to look for.' } }, required: ['query'] }
     return {
       name: tool,
       harness_name: `${plugin.tool_prefix}${harness}`,
-      description: `The ${tool} tool.`,
-      annotations: tool === 'recall' ? { readOnlyHint: true } : null,
+      title: tool === 'recall' ? 'Recall memories' : null,
+      description,
+      annotations,
+      input_schema,
+      output_schema: null,
+      raw: { name: tool, description, inputSchema: input_schema, ...(annotations ? { annotations } : {}) },
+      omitted: [],
       tier: explicit ? plugin.tool_tiers[tool]! : 'outward',
-      tier_source: renamed ? 'renamed' : explicit ? 'explicit' : 'default',
-      collides_with: [],
+      tier_source: collides_with.length > 0 ? 'collision' : renamed ? 'renamed' : explicit ? 'explicit' : 'default',
+      collides_with,
       suggested_tier: tool === 'recall' ? 'read' : null,
-      disabled: plugin.disabled_tools.includes(tool),
+      disabled: disabled.has(harness) || collides_with.length > 0,
     }
   })
 }
@@ -216,12 +244,31 @@ export function remotePluginList(): RemotePlugin[] {
   return [...state.remote.values()]
 }
 
+/**
+ * Writes a remote plugin's access, as the agent's `PluginRepo` does for the capabilities routes
+ * (`features/capabilities.ts`), so `GET /plugins` and the capabilities read one state.
+ */
+export function setRemotePluginAccess(
+  name: string,
+  access: { tool_tiers?: Record<string, RiskTier>; disabled_tools?: string[]; enabled?: boolean },
+): void {
+  const plugin = state.remote.get(name)
+  if (!plugin) return
+  state.remote.set(name, {
+    ...plugin,
+    ...(access.enabled === undefined ? {} : { enabled: access.enabled }),
+    ...(access.tool_tiers ? { tool_tiers: access.tool_tiers } : {}),
+    ...(access.disabled_tools ? { disabled_tools: [...access.disabled_tools].sort() } : {}),
+    updated_at: now(),
+  })
+}
+
 /** ScadBuddy's own tool sets (#1953); their routes are `features/builtInToolSets.ts`. */
 const BUILT_IN_SETS = new Set(['scadbuddy'])
 
 export const aiPluginHandlers = [
-  // ---- remote MCP endpoints. A name that is no remote plugin falls through to
-  // features/builtInToolSets.ts, which answers for the built-ins and 404s the rest.
+  // ---- remote MCP endpoints. A delete or test of a name that is no remote plugin falls
+  // through to features/builtInToolSets.ts, which answers for the built-ins and 404s the rest.
 
   http.post(`${base}/plugins`, async ({ request }) => {
     const body = (await request.json()) as RemotePluginCreate
@@ -258,8 +305,6 @@ export const aiPluginHandlers = [
     const next: RemotePlugin = {
       ...plugin,
       ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
-      ...(body.tool_tiers ? { tool_tiers: body.tool_tiers } : {}),
-      ...(body.disabled_tools ? { disabled_tools: [...body.disabled_tools].sort() } : {}),
       updated_at: now(),
     }
     state.remote.set(plugin.name, next)
@@ -269,21 +314,6 @@ export const aiPluginHandlers = [
   http.delete(`${base}/plugins/:name`, ({ params }) => {
     if (!state.remote.delete(String(params.name))) return undefined
     return new HttpResponse(null, { status: 204 })
-  }),
-
-  http.post(`${base}/plugins/:name/test`, async ({ params }) => {
-    const plugin = state.remote.get(String(params.name))
-    if (!plugin) return undefined
-    await delay(100)
-    const result: PluginTest = {
-      ok: true,
-      detail: 'connected; 3 tools',
-      duration_ms: 42,
-      server: { name: 'hindsight', version: '0.4.1' },
-      tools: toolsFor(plugin),
-      truncated: false,
-    }
-    return HttpResponse.json(result)
   }),
 
   // ---- plugin packages

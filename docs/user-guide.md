@@ -469,9 +469,11 @@ move them), and one that is rate limited is skipped until its limit resets. The 
 encrypted on the server and never sent back to the browser.
 
 The same section sets **Assistant chat limits** (each new chat's budget in USD and its
-turns per reply), **Assistant images**, and **AI HTTP requests** (GET and HEAD run at
-once; anything else waits for your approval). **AI activity** is the
-log of what the assistant did.
+turns per reply) and **Assistant images**. The assistant's HTTP request tool is the
+**Make an HTTP request** row (`http_request`) of **Settings → Tools & plugins → Built-in**,
+on its **HTTP requests** card: **By call (default)** runs GET and HEAD at once and waits
+for your approval on anything else, and **Enabled** turns the tool off or on (see
+[Tool access](#tool-access)). **AI activity** is the log of what the assistant did.
 
 ### The assistant panel
 
@@ -653,6 +655,30 @@ own when an admin adds Microsoft's Playwright MCP server as a plugin named
 `playwright` (**Plugins** below). Its tools ask before every call until their tiers
 are set ([headless-browser.md](ai/headless-browser.md)).
 
+### Tool access
+
+**Settings → Tools & plugins** lists every tool the assistant can use, by where it
+comes from. **Built-in** has a card per source: **ScadBuddy tools**, **Your browser
+tab** (with the sites the assistant's own browser may visit) and **HTTP requests**, then
+**This browser's agent (WebMCP)**. **Remote MCP plugins** has a card per plugin endpoint.
+A card opens from its title; folded, it shows how many tools it has and how many you
+changed. A card with more than eight tools has a **Filter**.
+
+- Each tool's row shows its name, what it does, and its name as the assistant sees it,
+  with one **Access** select: **off**, **read**, **write** or **outward (asks first)**.
+  The one marked **(default)** is what ScadBuddy (or, for a plugin, outward) gives it.
+  A choice applies at once ("Saving…" while it is sent), from the assistant's next
+  call, in classic and durable chats, flows and MCP clients alike.
+- A choice below the default asks once, in one line (**Lower to …**, or **Cancel** or
+  Esc to keep it). **Reset** returns a changed tool to its default.
+- **Details** shows the tool's parameters and, for a plugin's tool, its annotations as
+  the server's claims, which ScadBuddy does not check. **View JSON** shows the entry as
+  it was listed, and **Copy** copies it.
+- The printer camera is the **See a printer's camera** row (`get_printer_camera`): **off** keeps
+  camera frames from the assistant and from MCP clients.
+- The assistant may change these settings too, by working this page while you have it
+  open. The WebMCP switch is yours only, as it lets an outside agent in.
+
 ### Plugins
 
 **Settings → Tools & plugins → Packages** adds to what the assistant can do
@@ -668,17 +694,13 @@ are set ([headless-browser.md](ai/headless-browser.md)).
   listed; the only way past is to approve loading the package as it is, which runs its
   code with the assistant service's own access. A newer commit is **Fetch re-pin**,
   approved the same way.
-- **Plugins**. ScadBuddy's own tools come first, marked **Built in**: `scadbuddy` (the
-  assistant's ScadBuddy tools). **Review tools**
-  lists each one with its tier and **Disable**. A tier can only be raised above the one
-  ScadBuddy gives the tool (raise it to outward and it asks first), never lowered, and a
-  built-in is never removed. Every setting here applies to classic and durable chats
-  alike: a tool raised to outward asks for approval before it runs in a durable chat
-  too, as in a classic one. Then the plugin endpoints (remote MCP servers): give a **Name**, the **MCP endpoint URL**
-  and, if it needs one, an auth header, and press **Add endpoint**. It starts disabled:
-  **Test connection** lists its tools, each with a tier (outward, which asks first, by
-  default) and **Hide**. Press **Save tool settings**, then **Enable**. Claude never
-  sees the endpoint's address or secret.
+- **Remote MCP plugins**. Give a **Name**, the **MCP endpoint URL** and, if it needs
+  one, an auth header, and press **Add endpoint**. It starts disabled: **Test
+  connection** lists its tools as rows (see [Tool access](#tool-access)), each
+  **outward (asks first)** by default. A tool whose name Claude Code changes (one with a
+  `.`, say) can only be off or outward, and two tools that end up with one name are
+  both off. Set each tool's access, then turn the card's **Enabled** switch on. Claude
+  never sees the endpoint's address or secret.
 - **Hindsight memory**. With a plugin named `hindsight` enabled, the assistant recalls
   memories against each message you send. **Recall query limit (characters)** is how
   much of the message it sends as the query: the first 800 characters by default, as

@@ -21,7 +21,8 @@ export function toolAccess(declared: RiskTier, row: AccessRow | undefined, migra
 
 /** The registry tools' overrides: every effective tier that differs from the tool's own, and every `off`. */
 export function registryOverrides(tools: readonly { name: string; risk: RiskTier }[], rows: readonly AccessRow[]): StoredOverrides {
-  const tool_tiers: Record<string, RiskTier> = {}
+  // No prototype: a tool named `__proto__` is an own key, as in agent-durable's dict.
+  const tool_tiers = Object.create(null) as Record<string, RiskTier>
   const disabled_tools: string[] = []
   for (const tool of [...tools].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     const source = registrySource(tool.name)
@@ -35,7 +36,8 @@ export function registryOverrides(tools: readonly { name: string; risk: RiskTier
 
 /** A plugin source's tool rows. No migrated rule: a remote plugin's tiers were set in any direction. */
 export function pluginOverrides(source: string, rows: readonly AccessRow[]): { toolTiers: Record<string, RiskTier>; disabledTools: string[] } {
-  const toolTiers: Record<string, RiskTier> = {}
+  // No prototype: a tool named `__proto__` is an own key (PluginStore writes it so).
+  const toolTiers = Object.create(null) as Record<string, RiskTier>
   const disabledTools: string[] = []
   for (const row of rows) {
     if (row.source !== source || row.item === SOURCE_ITEM || !isToolAccess(row.access)) continue

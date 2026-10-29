@@ -163,6 +163,7 @@ function jobSummary(job: JobStatus) {
 export const customizerTools: Tool[] = [
   defineTool({
     name: 'get_schema',
+    label: "Read a model's customizer schema",
     description:
       "A model's customizer schema: every parameter with its type (number, integer, slider, string, " +
       'boolean, select, color, font, file), default, range, step, options and group. Pass `version` for ' +
@@ -177,6 +178,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'validate_params',
+    label: 'Check parameters against a model',
     description:
       "Check a parameter set against a model's customizer schema without rendering: unknown names, wrong " +
       'types, out-of-range numbers, values not among a select\'s options. Returns the issues and every ' +
@@ -190,6 +192,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'render_model',
+    label: 'Render a model',
     description:
       'Render a model with the given parameters and wait for it to finish, reporting progress. Returns the ' +
       "job's outcome (bounding box, colours, parts, warnings, errors). Parameters are validated first; " +
@@ -305,6 +308,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'get_render_job',
+    label: 'Check a render job',
     description: "A render job's current state: status, error, warnings, bounding box, colours, parts and log tail.",
     input: z.object({ job_id: jobId }),
     risk: 'read',
@@ -316,6 +320,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'get_render_preview',
+    label: "Get a render's 3D preview",
     description:
       "A finished render's preview mesh as a binary glTF (model/gltf-binary), embedded as a base64 resource; " +
       'when it is too large to inline, a link to fetch it instead.',
@@ -335,6 +340,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'get_render_view',
+    label: 'See a render from a named view',
     description:
       "A render job's preview mesh drawn from a named view (iso, front, back, left, right, top, bottom) as a " +
       'shaded PNG, to check the geometry without a 3D viewer. Give `azimuth`/`elevation` (degrees; Z up, ' +
@@ -364,6 +370,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'get_render_diagnostics',
+    label: "Read a render's warnings and errors",
     description:
       "OpenSCAD's warnings and errors, with the file and line each names, from the model's most recently " +
       'settled render (done or failed). Use it to fix a failing or warning-laden model.',
@@ -380,6 +387,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'get_asset_usage',
+    label: 'See how much the upload store holds',
     description:
       'How much the upload store for `// file` parameters holds (count, bytes) and the caps past which an ' +
       'upload is refused (0 is no limit).',
@@ -391,6 +399,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'get_store_usage',
+    label: 'See how much the blob store holds',
     description:
       'What the blob store holds (pieces, snapshots, uploads, fonts) against its limits, and which backend it is',
     input: z.object({}),
@@ -401,6 +410,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'list_presets',
+    label: "List a model's presets",
     description: "A model's saved parameter presets, including read-only ones a template ships." + PAGED,
     input: z.object({ slug, ...pageInput }),
     risk: 'read',
@@ -420,6 +430,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'save_preset',
+    label: 'Save a preset',
     description: 'Save a parameter set as a named preset of a model, optionally with a description and tags.',
     input: z.object({
       slug,
@@ -445,6 +456,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'update_preset',
+    label: 'Edit a preset',
     description:
       'Rename a preset or replace its values, description or tags. Omitted fields are unchanged; an empty description or tag list clears it.',
     input: z.object({
@@ -472,6 +484,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'duplicate_preset',
+    label: 'Duplicate a preset',
     description: 'Copy a preset (including a read-only one a template ships) under a new name.',
     input: z.object({ slug, preset_id: presetId, name: z.string().min(1).max(80) }),
     risk: 'write',
@@ -490,6 +503,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'delete_preset',
+    label: 'Delete a preset',
     description: 'Delete a saved preset. Presets have no history, so this needs a human approval.',
     input: z.object({ slug, preset_id: presetId }),
     risk: 'outward',
@@ -506,6 +520,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'upload_asset',
+    label: 'Upload an image for a parameter',
     description:
       'Upload an SVG or PNG for a `// file` parameter. Returns its asset id, the value to pass ' +
       'for that parameter. SVGs are sanitised and PNGs downscaled by the backend.' +
@@ -546,6 +561,7 @@ export const customizerTools: Tool[] = [
   // or redirect, off the allowlist the user keeps in Settings (#844).
   defineTool({
     name: 'fetch_asset',
+    label: 'Fetch an image from a URL for a parameter',
     description:
       'Fetch an SVG or PNG from an https URL into a model, for a `// file` parameter. The backend fetches it, ' +
       "so this needs a human approval, and only from a domain on the user's allowlist (Settings); any other " +
@@ -568,6 +584,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'get_asset',
+    label: 'Read an uploaded file',
     description: "An uploaded file's metadata and, with `include_content`, the image itself.",
     input: z.object({
       slug,
@@ -595,6 +612,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'get_sample',
+    label: "Get a template's sample file",
     description: "A sample file a template ships for one of its `// file` parameters (listed in the schema's `samples`).",
     input: z.object({ slug, name: z.string().min(1), version: z.string().optional() }),
     risk: 'read',

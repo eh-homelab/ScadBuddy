@@ -11,7 +11,7 @@ import { buildHarnessOptions, type HarnessRun, runHarness } from '../src/harness
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { forwardForRun, PluginForwarder, type PluginsForRun } from '../src/plugins/forwarder.js'
 import type { RemotePlugin } from '../src/plugins/registry.js'
-import { testPlugin } from '../src/plugins/testConnection.js'
+import { MAX_LIST_RESPONSE_BYTES, testPlugin } from '../src/plugins/testConnection.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { type FakeMcp, startFakeMcp } from './support/fakeMcp.js'
 
@@ -90,6 +90,40 @@ describe('plugin connection test, through the forwarder', () => {
     for (const r of posts) expect(r.headers.authorization).toBe(`Bearer ${PLUGIN_TOKEN}`)
     expect(JSON.stringify(result)).not.toContain(PLUGIN_TOKEN)
     expect(forwarder.size).toBe(0) // released
+  })
+
+  it('a connection test keeps fields the MCP SDK does not know', async () => {
+    mcp = await startFakeMcp({ listExtras: { recall: { x_new: 1, annotations: { readOnlyHint: true, x_hint: true } } } })
+    const result = await testPlugin(plugin(mcp.url), '127.0.0.1', forwarder, { timeoutMs: 5000 })
+    expect(result.ok).toBe(true)
+    const recall = result.tools.find((t) => t.name === 'recall')!
+    expect(recall.raw.x_new).toBe(1)
+    expect((recall.raw.annotations as Record<string, unknown>).x_hint).toBe(true)
+    expect(recall.input_schema).toMatchObject({ type: 'object', properties: { query: { type: 'string' } } })
+    expect(result.stored.find((t) => t.raw.name === 'recall')!.raw.x_new).toBe(1)
+  })
+
+  it('a tools/list entry without a name is dropped, and the listing says it is incomplete (#2171 review M4)', async () => {
+    mcp = await startFakeMcp({ listAppend: [{ description: 'no name' }] })
+    const result = await testPlugin(plugin(mcp.url), '127.0.0.1', forwarder, { timeoutMs: 5000 })
+    expect(result.ok).toBe(true)
+    expect(result.tools.map((t) => t.name)).toEqual(['recall', 'retain', 'forget'])
+    expect(result.truncated).toBe(true)
+  })
+
+  it('more tools than a listing keeps answer truncated (#2171 review I2)', async () => {
+    mcp = await startFakeMcp({ extraTools: Array.from({ length: 600 }, (_, i) => `t${i}`) })
+    const result = await testPlugin(plugin(mcp.url), '127.0.0.1', forwarder, { timeoutMs: 20_000 })
+    expect(result.ok).toBe(true)
+    expect(result.stored).toHaveLength(512)
+    expect(result.truncated).toBe(true)
+  })
+
+  it('a listing past the response cap fails the test (#2171 review M6)', async () => {
+    mcp = await startFakeMcp({ listAppend: [{ name: 'huge', description: 'x'.repeat(MAX_LIST_RESPONSE_BYTES) }] })
+    const result = await testPlugin(plugin(mcp.url), '127.0.0.1', forwarder, { timeoutMs: 20_000 })
+    expect(result.ok).toBe(false)
+    expect(result.detail).toMatch(/too large/)
   })
 
   it('connects to the checked address, not to whatever the name resolves to', async () => {

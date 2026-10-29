@@ -3,6 +3,7 @@ import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Serv
 import type { AddressInfo } from 'node:net'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
+import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 
 // A local Streamable HTTP MCP server for the plugin tests (#297): the
@@ -42,6 +43,10 @@ export type FakeMcpOptions = {
   browser?: { redirects?: Record<string, string>; fails?: readonly string[] }
   /** Stateful: `initialize` issues an `mcp-session-id` (sessionIdGenerator: randomUUID) and a `DELETE` ends it. */
   sessions?: boolean
+  /** Fields merged into a tool's `tools/list` entry, by tool name: ones the MCP SDK's schema does not know. */
+  listExtras?: Record<string, Record<string, unknown>>
+  /** Entries added to the end of `tools/list` as they are (a nameless one, say). */
+  listAppend?: Record<string, unknown>[]
 }
 
 /** What the fake browser shows of a page. */
@@ -49,14 +54,44 @@ export function fakePage(url: string): string {
   return `### Page\n- Page URL: ${url}\n- Page Title: Page at ${url}\n\n### Snapshot\nThe text of ${url}`
 }
 
+type ToolDef = { name: string; description?: string; inputSchema?: z.ZodRawShape; annotations?: Record<string, unknown> }
+type ListShape = { extras: Record<string, Record<string, unknown>>; append: Record<string, unknown>[] }
+
+/**
+ * Replaces the McpServer's `tools/list` handler through the public Protocol API
+ * (`removeRequestHandler`, `setRequestHandler`): the entries are written out here, since
+ * McpServer's own list builder is private, with `extras` merged in and `append` added.
+ */
+function replaceList(server: McpServer, defs: readonly ToolDef[], { extras, append }: ListShape): void {
+  server.server.removeRequestHandler('tools/list')
+  server.server.setRequestHandler(ListToolsRequestSchema, () => ({
+    tools: [
+      ...defs.map((d) => ({
+        name: d.name,
+        ...(d.description === undefined ? {} : { description: d.description }),
+        inputSchema: z.toJSONSchema(z.object(d.inputSchema ?? {})),
+        ...(d.annotations === undefined ? {} : { annotations: d.annotations }),
+        ...extras[d.name],
+      })),
+      ...append,
+    ] as never,
+  }))
+}
+
 function buildServer(
   calls: string[],
   extraTools: readonly string[],
   browser?: { redirects?: Record<string, string>; fails?: readonly string[]; page: { url: string } },
+  list?: ListShape,
 ): McpServer {
   const server = new McpServer({ name: 'fake-memory', version: '0.0.1' })
+  const defs: ToolDef[] = []
+  const register = ((name: string, config: Omit<ToolDef, 'name'>, cb: unknown) => {
+    defs.push({ name, ...config })
+    return (server.registerTool as (n: string, c: unknown, f: unknown) => unknown).call(server, name, config, cb)
+  }) as typeof server.registerTool
   if (browser) {
-    server.registerTool('browser_navigate', { description: 'Navigate to a URL', inputSchema: { url: z.string() } }, ({ url }) => {
+    register('browser_navigate', { description: 'Navigate to a URL', inputSchema: { url: z.string() } }, ({ url }) => {
       calls.push(`browser_navigate:${url}`)
       browser.page.url = browser.redirects?.[url] ?? url
       if (browser.fails?.includes(url)) {
@@ -64,18 +99,18 @@ function buildServer(
       }
       return { content: [{ type: 'text', text: fakePage(browser.page.url) }] }
     })
-    server.registerTool('browser_snapshot', { description: 'Snapshot the page', inputSchema: {} }, () => {
+    register('browser_snapshot', { description: 'Snapshot the page', inputSchema: {} }, () => {
       calls.push('browser_snapshot')
       return { content: [{ type: 'text', text: fakePage(browser.page.url) }] }
     })
   }
   for (const name of extraTools) {
-    server.registerTool(name, { description: `Extra tool ${name}`, inputSchema: { text: z.string() } }, ({ text }) => {
+    register(name, { description: `Extra tool ${name}`, inputSchema: { text: z.string() } }, ({ text }) => {
       calls.push(`${name}:${text}`)
       return { content: [{ type: 'text', text: `${name} ran` }] }
     })
   }
-  server.registerTool(
+  register(
     'recall',
     {
       description: 'Search memories',
@@ -87,11 +122,11 @@ function buildServer(
       return { content: [{ type: 'text', text: `remembered: ${query}` }] }
     },
   )
-  server.registerTool('retain', { description: 'Store a memory', inputSchema: { text: z.string() } }, ({ text }) => {
+  register('retain', { description: 'Store a memory', inputSchema: { text: z.string() } }, ({ text }) => {
     calls.push(`retain:${text}`)
     return { content: [{ type: 'text', text: 'stored' }] }
   })
-  server.registerTool(
+  register(
     'forget',
     { description: 'Delete a memory', inputSchema: { id: z.string() }, annotations: { destructiveHint: true } },
     ({ id }) => {
@@ -99,6 +134,7 @@ function buildServer(
       return { content: [{ type: 'text', text: 'deleted' }] }
     },
   )
+  if (list) replaceList(server, defs, list)
   return server
 }
 
@@ -110,6 +146,8 @@ export async function startFakeMcp(options: FakeMcpOptions = {}): Promise<FakeMc
   const deletes: FakeMcp['deletes'] = []
   const issued: string[] = []
   const live = new Map<string, StreamableHTTPServerTransport>()
+  const listShape: ListShape | undefined =
+    options.listExtras || options.listAppend ? { extras: options.listExtras ?? {}, append: options.listAppend ?? [] } : undefined
   const http: Server = createServer((req, res) => {
     requests.push({ method: req.method ?? 'GET', path: req.url ?? '', headers: req.headers })
     if (options.intercept?.(req, res)) return
@@ -132,7 +170,7 @@ export async function startFakeMcp(options: FakeMcpOptions = {}): Promise<FakeMc
         res.writeHead(sessionId === undefined ? 400 : 404).end()
         return
       }
-      const server = buildServer(calls, options.extraTools ?? [], browser)
+      const server = buildServer(calls, options.extraTools ?? [], browser, listShape)
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: randomUUID,
         onsessioninitialized: (id) => {
@@ -156,7 +194,7 @@ export async function startFakeMcp(options: FakeMcpOptions = {}): Promise<FakeMc
       res.writeHead(405, { allow: 'POST' }).end()
       return
     }
-    const server = buildServer(calls, options.extraTools ?? [], browser)
+    const server = buildServer(calls, options.extraTools ?? [], browser, listShape)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
       void transport.close()

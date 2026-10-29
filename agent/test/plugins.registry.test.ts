@@ -19,6 +19,7 @@ import {
   validateToolTiers,
 } from '../src/plugins/registry.js'
 import { describeTools } from '../src/plugins/testConnection.js'
+import { listedTool, toStoredTools } from '../src/access/listings.js'
 import { pluginView } from '../src/routes/plugins.js'
 import type { KekStatus } from '../src/secrets.js'
 
@@ -207,13 +208,16 @@ describe('tool names as Claude Code sees them', () => {
   })
 
   it('describes renamed and colliding tools as outward, with their harness names', () => {
-    const tools = describeTools(memory, [
-      { name: 'recall', annotations: { readOnlyHint: true } },
-      { name: 'files.list' },
-      { name: 'files_list' },
-      { name: 'files.get', annotations: { readOnlyHint: true } },
-      { name: 'my tool' },
-    ])
+    const tools = describeTools(
+      memory,
+      listed([
+        { name: 'recall', annotations: { readOnlyHint: true } },
+        { name: 'files.list' },
+        { name: 'files_list' },
+        { name: 'files.get', annotations: { readOnlyHint: true } },
+        { name: 'my tool' },
+      ]),
+    )
     expect(tools.map((t) => [t.name, t.harness_name, t.tier, t.tier_source, t.suggested_tier, t.disabled])).toEqual([
       ['recall', 'mcp__memory__recall', 'read', 'explicit', 'read', false],
       ['files.list', 'mcp__memory__files_list', 'outward', 'collision', null, true],
@@ -221,6 +225,28 @@ describe('tool names as Claude Code sees them', () => {
       ['files.get', 'mcp__memory__files_get', 'outward', 'renamed', 'read', false],
       ['my tool', 'mcp__memory__my_tool', 'outward', 'renamed', null, true],
     ])
+  })
+
+  it('a tool listed twice under one name collides with itself, as the forwarder hides it', () => {
+    const tools = describeTools(memory, listed([{ name: 'recall' }, { name: 'recall' }, { name: 'retain' }]))
+    expect(tools.map((t) => [t.name, t.tier_source, t.collides_with, t.disabled])).toEqual([
+      ['recall', 'collision', ['recall'], true],
+      ['recall', 'collision', ['recall'], true],
+      ['retain', 'default', [], false],
+    ])
+  })
+
+  it('keeps title, input and output schema and the raw entry of each tool', () => {
+    const inputSchema = { type: 'object', properties: { query: { type: 'string' } } }
+    const outputSchema = { type: 'object', properties: { hits: { type: 'array' } } }
+    const [tool] = describeTools(memory, listed([{ name: 'recall', title: 'Recall', inputSchema, outputSchema, x_new: 1 }]))
+    expect(tool).toMatchObject({ title: 'Recall', input_schema: inputSchema, output_schema: outputSchema, omitted: [] })
+    expect(tool!.raw.x_new).toBe(1)
+  })
+
+  it('takes annotations.title when there is no title', () => {
+    const [tool] = describeTools(memory, listed([{ name: 'recall', annotations: { title: 'Recall memories' } }]))
+    expect(tool!.title).toBe('Recall memories')
   })
 })
 
@@ -357,3 +383,7 @@ describe('the SDK options a plugin becomes', () => {
     expect(Object.keys(options.env ?? {}).filter((k) => k.startsWith('SCADBUDDY_'))).toEqual([])
   })
 })
+
+function listed(entries: Record<string, unknown>[]) {
+  return toStoredTools(entries).map(listedTool)
+}

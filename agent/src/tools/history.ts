@@ -16,6 +16,7 @@ const HISTORY_WINDOW = 500
 export const historyTools: Tool[] = [
   defineTool({
     name: 'list_versions',
+    label: "List a model's revisions",
     description:
       "A model's revision history, newest first: commit id, message and time. Only the newest " +
       `${HISTORY_WINDOW} revisions can be paged to, and \`total\` is null while more may follow.` + PAGED,
@@ -48,6 +49,7 @@ export const historyTools: Tool[] = [
 
   defineTool({
     name: 'diff_version',
+    label: 'Compare a revision with its parent',
     description: 'The unified diff of a revision against its parent, or against `base` when given.',
     input: z.object({ slug, commit, base: commit.optional() }),
     risk: 'read',
@@ -67,6 +69,7 @@ export const historyTools: Tool[] = [
 
   defineTool({
     name: 'get_version_source',
+    label: "Read a model's source at a revision",
     description: "A model's OpenSCAD source at an earlier revision.",
     input: z.object({ slug, commit }),
     risk: 'read',
@@ -87,6 +90,7 @@ export const historyTools: Tool[] = [
 
   defineTool({
     name: 'restore_version',
+    label: 'Restore an earlier revision',
     description: 'Restore an earlier revision as a new revision on top of the history (nothing is lost).',
     input: z.object({ slug, commit }),
     risk: 'write',
@@ -102,6 +106,7 @@ export const historyTools: Tool[] = [
 
   defineTool({
     name: 'get_upstream',
+    label: "Check a duplicate's upstream template",
     description:
       "A duplicate's upstream template: whether it has moved on, and a preview of merging its current revision.",
     input: z.object({ slug }),
@@ -115,6 +120,7 @@ export const historyTools: Tool[] = [
 
   defineTool({
     name: 'update_from_upstream',
+    label: 'Merge, dismiss or detach from upstream',
     description:
       "Act on a duplicate's upstream: `merge` its current revision, `dismiss` that revision (stop offering " +
       'it), or `detach` from an upstream that no longer exists.',

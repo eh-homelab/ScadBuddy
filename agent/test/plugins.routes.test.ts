@@ -2,7 +2,10 @@ import { randomBytes } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { originPolicy } from '../src/http/origins.js'
-import type { PluginRepo } from '../src/plugins/registry.js'
+import { testAndList } from '../src/routes/plugins.js'
+import type { StoredTool, ToolListings } from '../src/access/listings.js'
+import type { PluginRepo, RemotePlugin } from '../src/plugins/registry.js'
+import type { PluginTest } from '../src/plugins/testConnection.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 
@@ -26,6 +29,7 @@ function untouchable(): PluginRepo & { calls: string[] } {
     get: fail('get'),
     create: fail('create'),
     update: fail('update'),
+    setToolAccess: fail('setToolAccess'),
     delete: fail('delete'),
     reveal: fail('reveal'),
   }
@@ -176,5 +180,75 @@ describe('plugin reads are guarded (uiReadProblem)', () => {
     })
     expect(res.status).toBe(403)
     expect(list).not.toHaveBeenCalled()
+  })
+})
+
+describe('the connection test stores its listing (#2171)', () => {
+  const plugin: RemotePlugin = { name: 'mem', url: 'https://hs.example/mcp', toolTiers: {}, disabledTools: [] }
+  const stored: StoredTool[] = [{ raw: { name: 'recall', x_new: 1 }, omitted: [] }]
+  const result = (ok: boolean): PluginTest => ({
+    ok,
+    detail: ok ? 'connected; 1 tool(s)' : 'the MCP endpoint answered HTTP 500',
+    duration_ms: 1,
+    server: null,
+    tools: [],
+    truncated: false,
+    stored: ok ? stored : [],
+  })
+  function setup(testPlugin: AppDeps['testPlugin'], overrides: Partial<AppDeps> = {}) {
+    const repo = { ...untouchable(), reveal: vi.fn(() => Promise.resolve(plugin)) }
+    const put = vi.fn((_source: string, _tools: readonly StoredTool[], _options?: { truncated: boolean }) => Promise.resolve())
+    const listings = { put } as unknown as ToolListings
+    return { put, repo, listings, a: app(repo, { testPlugin, listings, ...overrides }) }
+  }
+  const test = (a: ReturnType<typeof app>) => a.request('/api/v1/ai/plugins/mem/test', { method: 'POST', headers: UI })
+
+  it('a good connection test stores its listing', async () => {
+    const { put, a } = setup(() => Promise.resolve(result(true)))
+    const res = await test(a)
+    expect(res.status).toBe(200)
+    expect(put).toHaveBeenCalledWith('remote:mem', stored, { truncated: false })
+    expect(await res.json()).not.toHaveProperty('stored')
+  })
+
+  it('a truncated test stores its listing as incomplete (#2171 re-review N1)', async () => {
+    const { put, a } = setup(() => Promise.resolve({ ...result(true), truncated: true }))
+    expect((await test(a)).status).toBe(200)
+    expect(put).toHaveBeenCalledWith('remote:mem', stored, { truncated: true })
+  })
+
+  it('a failed connection test stores nothing', async () => {
+    const { put, a } = setup(() => Promise.resolve(result(false)))
+    const res = await test(a)
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as PluginTest).ok).toBe(false)
+    expect(put).not.toHaveBeenCalled()
+  })
+
+  it('a second test of one plugin while one runs answers 429', async () => {
+    let finish: ((t: PluginTest) => void) | undefined
+    let calls = 0
+    const { a } = setup(() =>
+      calls++ === 0 ? new Promise<PluginTest>((resolve) => (finish = resolve)) : Promise.resolve(result(true)),
+    )
+    const first = test(a)
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    const second = await test(a)
+    expect(second.status).toBe(429)
+    finish!(result(true))
+    expect((await first).status).toBe(200)
+    expect((await test(a)).status).toBe(200)
+  })
+
+  it('one test at a time per plugin, whichever caller started it (#2171 review M3)', async () => {
+    let finish: ((t: PluginTest) => void) | undefined
+    const testPlugin = vi.fn(() => new Promise<PluginTest>((resolve) => (finish = resolve)))
+    const { a, repo, listings } = setup(testPlugin)
+    const first = test(a)
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    const direct = await testAndList({ plugins: repo, kek: { ok: true, kek }, testPlugin, listings, ready: () => Promise.resolve(true) }, 'mem')
+    expect(direct.status).toBe(429)
+    finish!(result(true))
+    expect((await first).status).toBe(200)
   })
 })

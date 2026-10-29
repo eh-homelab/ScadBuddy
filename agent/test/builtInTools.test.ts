@@ -143,6 +143,7 @@ function remoteRepo(): PluginRepo {
     get: () => Promise.resolve(undefined),
     create: vi.fn(reject),
     update: vi.fn(reject),
+    setToolAccess: vi.fn(reject),
     delete: vi.fn(() => Promise.resolve(true)),
     reveal: reject,
   }
@@ -415,7 +416,7 @@ describe('/mcp', () => {
 
   it('a lowered outward tool runs over /mcp without a pending approval', async () => {
     const handler = vi.fn(async () => json({ sent: true }))
-    const send = defineTool({ name: 'send_it', description: 'sends', input: z.object({}), risk: 'outward', routes: [], handler })
+    const send = defineTool({ name: 'send_it', label: 'send_it', description: 'sends', input: z.object({}), risk: 'outward', routes: [], handler })
     const { access } = memoryAccess(rowsFromOverrides(OWN_SOURCE, { send_it: 'write' }, []))
     const ctx = {
       ...services({ toolOverrides: new BuiltInTools(access, ownSet([send])).registryOverrides() }),
@@ -434,6 +435,7 @@ describe('the durable activities', () => {
   const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
   const whoamiSpec = {
     name: 'whoami',
+    label: 'whoami',
     description: 'who runs this',
     input: z.object({}),
     risk: 'read' as const,
@@ -501,7 +503,7 @@ describe('the durable activities', () => {
     function rig(approve: (requestId: string, call?: { inputHash: string }) => boolean) {
       const { access, reads } = memoryAccess()
       const handler = vi.fn(async () => json({ ok: true }))
-      const counted = defineTool({ name: 'counted', description: 'counts', input: z.object({ n: z.number().optional() }), risk: 'read', routes: [], handler })
+      const counted = defineTool({ name: 'counted', label: 'counted', description: 'counts', input: z.object({ n: z.number().optional() }), risk: 'read', routes: [], handler })
       const a = toolActivities([counted], {
         services: services({ toolOverrides: new BuiltInTools(access, ownSet([counted])).registryOverrides() }),
         sessions: { ownerOf: async () => ({ kind: 'browser', id: 'browser', label: 'You' }) },

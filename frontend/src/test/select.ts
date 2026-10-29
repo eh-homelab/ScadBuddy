@@ -48,3 +48,8 @@ export async function optionNames(user: UserEvent, trigger: HTMLElement): Promis
   await waitFor(() => expect(screen.queryByRole('listbox')).not.toBeInTheDocument())
   return names
 }
+
+/** An access select's name (#2171): `Access of <name>`, with its visible label after it when the two differ. */
+export function accessName(name: string): RegExp {
+  return new RegExp(`^Access of ${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?: \\(.*\\))?$`)
+}

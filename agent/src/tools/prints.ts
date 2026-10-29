@@ -14,6 +14,7 @@ const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a day, YYYY-MM-DD')
 export const printHistoryTools: Tool[] = [
   defineTool({
     name: 'list_prints',
+    label: 'List prints',
     description:
       "ScadBuddy's print history, newest first: each print's status, printer, times, filament, cover image and the " +
       'parameters that differ from the template defaults; a Bambuddy library file\'s print names the file ' +
@@ -41,6 +42,7 @@ export const printHistoryTools: Tool[] = [
 
   defineTool({
     name: 'get_print',
+    label: "Read a print's details",
     description:
       'One print: the output it came from (template, revision, exact parameters), its files, photos, timelapse, ' +
       'outcome (status, failure reason, times, filament, cost), runs, the slicing (printer model, bed, layers, ' +
@@ -64,6 +66,7 @@ export const printHistoryTools: Tool[] = [
   // ── outward (#311): the print detail page's "Print again" and "Pull timelapse" ──
   defineTool({
     name: 'print_again',
+    label: 'Print an earlier print again',
     description:
       "Queue a print again on Bambuddy: the same sliced file, on the printer and plate it printed on, with Bambuddy's " +
       'default options. Refused when the archive was deleted in Bambuddy or has no known printer.',
@@ -82,6 +85,7 @@ export const printHistoryTools: Tool[] = [
 
   defineTool({
     name: 'pull_print_timelapse',
+    label: "Pull a print's timelapse",
     description:
       "Download a timelapse still on the printer and attach it to the print. `filename` is a `remote_files[].name` " +
       'of kind `timelapse` from get_print with `printer_media: true`. It is fetched over FTP from the printer. ' +
@@ -109,6 +113,7 @@ export const printHistoryTools: Tool[] = [
   // ── read (#1053): a Bambuddy write still running when its tool returned ──
   defineTool({
     name: 'get_operation',
+    label: 'Check a Bambuddy write',
     description:
       "Read a Bambuddy write (a send, a reprint, project filing, a timelapse pull) that was still running when its " +
       'tool returned: its status, and its result or error once it ended.',
@@ -137,6 +142,7 @@ const photoName = z
 export const printMediaTools: Tool[] = [
   defineTool({
     name: 'get_print_image',
+    label: "See a print's picture",
     description:
       "A print's image: with `photo` one of its archive photos (the finish photo is named finish_<ts>_<hex>.jpg), " +
       'with `plate` the slicer image of that plate (1-based), otherwise its thumbnail.',
@@ -189,6 +195,7 @@ export const printMediaTools: Tool[] = [
 
   defineTool({
     name: 'get_print_timelapse',
+    label: "Get a print's timelapse",
     description:
       "A print's timelapse video. Usually too large to inline, so it comes back as a link to fetch (it supports Range).",
     input: z.object({ archive_id: archiveId }),
@@ -206,6 +213,7 @@ export const printMediaTools: Tool[] = [
 
   defineTool({
     name: 'download_print_file',
+    label: "Download a print's file",
     description:
       "A print's `sliced` file (what the printer ran) or its `source` slicer project 3MF, embedded as a resource; " +
       'when it is too large to inline, a link to fetch it instead.',

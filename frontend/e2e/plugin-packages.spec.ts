@@ -1,4 +1,5 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test } from '@playwright/test'
+import { bridgeCall } from './bridge'
 
 /**
  * #297 — Settings → Plugin packages and Plugin endpoints, against the msw stand-ins for
@@ -10,18 +11,6 @@ import { expect, test, type Page } from '@playwright/test'
 const V1 = '3f1c9a2b7d4e5f60718293a4b5c6d7e8f9012345'
 const V1_HASH = 'sha256:9b2e6c1f0a3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b'
 const V2 = '7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f607'
-
-type Outcome = { ok: true; result: unknown } | { ok: false; error: { code: string; message: string } }
-
-async function bridgeCall(page: Page, name: string, args: unknown): Promise<Outcome> {
-  return page.evaluate(
-    ([tool, input]) =>
-      (
-        globalThis as unknown as { __scadbuddyBridge: { call: (n: string, a: unknown) => Promise<Outcome> } }
-      ).__scadbuddyBridge.call(tool as string, input),
-    [name, args] as const,
-  )
-}
 
 test.describe('assistant plugins in Settings (#297)', () => {
   test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the agent service is not in the real stack yet')
@@ -122,19 +111,51 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await expect(section.getByText('Awaiting approval')).toBeVisible()
   })
 
-  test('tests a plugin endpoint and reviews its tool tiers', async ({ page }) => {
+  test("tests a plugin endpoint and sets its tools' access", async ({ page }) => {
     await page.goto('/settings/tools')
     const section = page.getByRole('region', { name: 'Plugins', exact: true })
     const card = section.getByRole('listitem', { name: 'Plugin endpoint hindsight' })
     await expect(card).toContainText('Authorization: …9f3a')
     await card.getByRole('button', { name: 'Test connection' }).click()
-    await expect(card.getByRole('status')).toContainText('connected; 3 tools')
-    await expect(card.getByLabel('Tier of recall')).toHaveText('read')
-    await expect(card.getByLabel('Tier of files.list')).toBeDisabled()
-    await card.getByLabel('Tier of retain').click()
-    await page.getByRole('option', { name: 'write', exact: true }).click()
-    await card.getByRole('button', { name: 'Save tool settings' }).click()
-    await card.getByRole('button', { name: 'Enable' }).click()
-    await expect(card.getByText('Enabled', { exact: true })).toBeVisible()
+    // The mock lists five tools (`src/mocks/aiPlugins.ts` `toolsFor`).
+    await expect(card.getByText(/^connected; 5 tools/)).toBeVisible()
+
+    const source = card.getByRole('region', { name: 'Source hindsight' })
+    await source.getByRole('button', { name: 'hindsight', exact: true }).click()
+
+    // The seed's stored tier: shown, with Reset.
+    await expect(source.getByRole('combobox', { name: 'Access of recall' })).toHaveText('read')
+    await expect(source.getByRole('button', { name: 'Reset recall' })).toBeVisible()
+
+    // Claude Code renames files.list: it takes off or outward only, and is not disabled.
+    const files = source.getByRole('combobox', { name: 'Access of files.list' })
+    await expect(files).toBeEnabled()
+    await files.click()
+    await expect(page.getByRole('listbox').getByRole('option')).toHaveText(['off', 'outward (asks first) (default)'])
+    await page.keyboard.press('Escape')
+
+    // A colliding pair is fixed off.
+    await expect(source.getByRole('combobox', { name: 'Access of notes.get' })).toBeDisabled()
+    await expect(source.getByRole('combobox', { name: 'Access of notes_get' })).toBeDisabled()
+
+    // Lowering retain below its default asks one line, and applies at once.
+    await source.getByRole('combobox', { name: 'Access of retain' }).click()
+    await page.getByRole('listbox').getByRole('option', { name: 'write', exact: true }).click()
+    const lower = page.getByRole('alertdialog', { name: 'Lower retain?' })
+    await lower.getByRole('button', { name: 'Lower to write' }).click()
+    await expect(lower).toHaveCount(0)
+    await expect(source.getByRole('combobox', { name: 'Access of retain' })).toHaveText('write')
+    await expect(source.getByRole('button', { name: 'Reset retain' })).toBeVisible()
+
+    await source.getByRole('switch', { name: 'Enabled (hindsight)', exact: true }).click()
+    await expect(card.locator('[data-slot="badge"]', { hasText: 'Enabled' })).toBeVisible()
+
+    // Stored, not only shown: a reload reads the access and the switch back.
+    await page.reload()
+    await expect(card.locator('[data-slot="badge"]', { hasText: 'Enabled' })).toBeVisible()
+    await source.getByRole('button', { name: 'hindsight', exact: true }).click()
+    await expect(source.getByRole('combobox', { name: 'Access of retain' })).toHaveText('write')
+    await expect(source.getByRole('combobox', { name: 'Access of recall' })).toHaveText('read')
+    await expect(source.getByRole('switch', { name: 'Enabled (hindsight)', exact: true })).toBeChecked()
   })
 })

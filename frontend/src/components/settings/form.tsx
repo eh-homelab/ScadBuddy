@@ -125,11 +125,14 @@ export function SwitchField({
   disabled,
   busy,
   describedBy,
+  ariaLabel,
   userOnly = true,
   className,
 }: {
   id?: string
   label: ReactNode
+  /** The switch's accessible name, when the visible label alone does not say what it switches. */
+  ariaLabel?: string
   checked: boolean
   onCheckedChange: (checked: boolean) => void
   disabled?: boolean
@@ -148,6 +151,7 @@ export function SwitchField({
         onCheckedChange={onCheckedChange}
         disabled={disabled}
         aria-busy={busy}
+        aria-label={ariaLabel}
         aria-describedby={describedBy}
         className="mt-0.5"
       />

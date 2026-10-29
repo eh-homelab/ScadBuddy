@@ -19,6 +19,18 @@ describe('AccessResolver', () => {
     expect(await resolver.item('remote:hs', 'search', 'outward')).toBe('outward')
   })
 
+  it('plugin() keeps a tool named __proto__ as its own key', async () => {
+    const { access } = memoryAccess([
+      { source: 'remote:hs', item: '__proto__', access: 'read', updated_by: 'browser:browser' },
+      { source: 'remote:hs', item: 'search', access: 'off', updated_by: 'browser:browser' },
+    ])
+    const { toolTiers, disabledTools } = await new AccessResolver(access).plugin('remote:hs')
+    expect(Object.hasOwn(toolTiers, '__proto__')).toBe(true)
+    expect(toolTiers['__proto__']).toBe('read')
+    expect(Object.keys(toolTiers)).toEqual(['__proto__'])
+    expect(disabledTools).toEqual(['search'])
+  })
+
   it('registryOverrides reads once per call and answers a lowered tier', async () => {
     const { access, reads } = memoryAccess(rowsFromOverrides(S, { send_to_bambuddy: 'write' }, []))
     const overrides = new AccessResolver(access).registryOverrides()

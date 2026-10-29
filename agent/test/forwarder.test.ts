@@ -18,7 +18,7 @@ afterEach(async () => {
 })
 
 /** An upstream that issues session `s-1` to a POST and records every request; `hang` never answers a DELETE. */
-async function upstream(options: { hang?: boolean } = {}) {
+async function upstream(options: { hang?: boolean; body?: string; type?: string; status?: number } = {}) {
   const seen: Seen[] = []
   const server = createServer((req, res) => {
     seen.push({ method: req.method ?? '', headers: req.headers })
@@ -28,8 +28,8 @@ async function upstream(options: { hang?: boolean } = {}) {
     }
     req.resume()
     req.on('end', () => {
-      res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 's-1' })
-      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }))
+      res.writeHead(options.status ?? 200, { 'content-type': options.type ?? 'application/json', 'mcp-session-id': 's-1' })
+      res.end(options.body ?? JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }))
     })
   })
   servers.push(server)
@@ -145,4 +145,42 @@ describe('Registration.terminate', () => {
     expect(logs.join('\n')).not.toContain('plugin-secret-1')
     expect(forwarder.size).toBe(0)
   }, 15_000)
+})
+
+describe('the response cap (#2171 review M6)', () => {
+  it('a registration with maxResponseBytes refuses a larger answer with 502', async () => {
+    const big = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'x', description: 'd'.repeat(5000) }] } })
+    const { plugin } = await upstream({ body: big })
+    const forwarder = await PluginForwarder.start()
+    forwarders.push(forwarder)
+    const capped = forwarder.register(plugin, '127.0.0.1', { maxResponseBytes: 1000 })
+    const res = await post(capped.url)
+    expect(res.status).toBe(502)
+    expect(((await res.json()) as { error: string }).error).toMatch(/too large/)
+    const open = forwarder.register(plugin, '127.0.0.1')
+    expect(await (await post(open.url)).text()).toBe(big)
+  })
+  it('a capped event stream ends with an error for each request id, never the event past the cap (#2171 re-review N3)', async () => {
+    const big = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'x', description: 'd'.repeat(5000) }] } })
+    const { plugin } = await upstream({ body: `data: ${big}\n\n`, type: 'text/event-stream' })
+    const forwarder = await PluginForwarder.start()
+    forwarders.push(forwarder)
+    const res = await post(forwarder.register(plugin, '127.0.0.1', { maxResponseBytes: 1000 }).url)
+    expect(res.status).toBe(200)
+    const text = await res.text()
+    expect(text).not.toContain('d'.repeat(100))
+    const events = text.split('\n\n').filter(Boolean).map((e) => JSON.parse(e.replace(/^data: /, '')) as { id: number; error: { message: string } })
+    expect(events).toEqual([{ jsonrpc: '2.0', id: 1, error: { code: -32603, message: expect.stringMatching(/too large/) as unknown } }])
+  })
+  it('a capped body that is not an event stream is cut off, never given SSE frames (#2171 final review M6)', async () => {
+    const { plugin } = await upstream({ body: 'e'.repeat(5000), type: 'text/plain', status: 500 })
+    const forwarder = await PluginForwarder.start()
+    forwarders.push(forwarder)
+    // The head may not have left yet: the request then fails, else its body does.
+    const text = await post(forwarder.register(plugin, '127.0.0.1', { maxResponseBytes: 1000 }).url)
+      .then((res) => res.text())
+      .catch(() => 'cut off')
+    expect(text).not.toContain('data:')
+    expect(text).not.toContain('e'.repeat(100))
+  })
 })

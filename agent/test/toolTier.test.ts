@@ -15,7 +15,7 @@ import { memoryAccess, rowsFromOverrides } from './support/memoryAccess.js'
 
 const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
 const tool = (name: string, risk: 'read' | 'write' | 'outward'): Tool =>
-  defineTool({ name, description: name, input: z.object({}), risk, routes: [], handler: async () => json({ ran: name }) })
+  defineTool({ name, label: name, description: name, input: z.object({}), risk, routes: [], handler: async () => json({ ran: name }) })
 const TOOLS = [tool('look', 'read'), tool('send', 'outward'), tool('ask_user', 'read')]
 
 function rig() {

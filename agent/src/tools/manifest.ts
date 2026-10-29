@@ -35,7 +35,9 @@ function hitlOf(tool: Tool): ToolManifestEntry['hitl'] {
   return tool.gated ? 'approval' : null
 }
 
-export async function toolManifest(tools: readonly Tool[] = DURABLE_TOOLS): Promise<ToolManifestEntry[]> {
+const listings = new WeakMap<readonly Tool[], Promise<ReadonlyMap<string, Record<string, unknown>>>>()
+
+async function listOnce(tools: readonly Tool[]): Promise<ReadonlyMap<string, Record<string, unknown>>> {
   // Listing calls no tool, so the services are never used.
   const server = createExternalServer(tools, {
     backend: createBackendClient('http://127.0.0.1:1'),
@@ -49,19 +51,39 @@ export async function toolManifest(tools: readonly Tool[] = DURABLE_TOOLS): Prom
   await client.connect(clientSide)
   try {
     const { tools: listed } = await client.listTools()
-    const byName = new Map(tools.map((t) => [t.name, t]))
-    return listed
-      .map((t) => ({
-        name: t.name,
-        description: t.description ?? '',
-        input_schema: t.inputSchema as Record<string, unknown>,
-        tier: byName.get(t.name)!.risk,
-        hitl: hitlOf(byName.get(t.name)!),
-      }))
-      .sort((a, b) => a.name.localeCompare(b.name))
+    return new Map(listed.map((t) => [t.name, t as Record<string, unknown>]))
   } finally {
     await client.close()
   }
+}
+
+/**
+ * The entries /mcp `tools/list` answers for `tools`, by name: listed through the /mcp
+ * projection itself, once per list (and so once per process for the default list).
+ */
+export function listExternal(tools: readonly Tool[] = DURABLE_TOOLS): Promise<ReadonlyMap<string, Record<string, unknown>>> {
+  let listing = listings.get(tools)
+  if (listing === undefined) {
+    listing = listOnce(tools)
+    listings.set(tools, listing)
+    // A failed listing is not kept: the next caller lists again.
+    listing.catch(() => listings.delete(tools))
+  }
+  return listing
+}
+
+export async function toolManifest(tools: readonly Tool[] = DURABLE_TOOLS): Promise<ToolManifestEntry[]> {
+  const listed = await listExternal(tools)
+  const byName = new Map(tools.map((t) => [t.name, t]))
+  return [...listed.values()]
+    .map((t) => ({
+      name: t.name as string,
+      description: (t.description as string | undefined) ?? '',
+      input_schema: t.inputSchema as Record<string, unknown>,
+      tier: byName.get(t.name as string)!.risk,
+      hitl: hitlOf(byName.get(t.name as string)!),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name))
 }
 
 /** The manifest as JSON at `file`. */

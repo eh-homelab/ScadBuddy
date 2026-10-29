@@ -49,6 +49,7 @@ async function read(ctx: ToolContext, activity_id: string) {
 export const activityTools = [
   defineTool({
     name: 'activity_list',
+    label: 'List background work',
     description:
       'List background work (renders, operations, print runs, agent operations), newest first, with its status ' +
       'and who started it. Without the outward tier only your own.',
@@ -76,6 +77,7 @@ export const activityTools = [
   }),
   defineTool({
     name: 'activity_get',
+    label: 'Read one piece of background work',
     description: 'Read one piece of background work: status, stages, result or error, and what it made.',
     input: z.object({ activity_id: ID }),
     risk: 'read',
@@ -84,6 +86,7 @@ export const activityTools = [
   }),
   defineTool({
     name: 'activity_watch',
+    label: 'Wait for background work to finish',
     description: 'Wait up to wait_seconds for a piece of background work to finish, then return it.',
     input: z.object({ activity_id: ID, wait_seconds: z.number().int().min(1).max(600).default(60) }),
     risk: 'read',

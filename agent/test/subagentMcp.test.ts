@@ -31,7 +31,7 @@ const ALICE: Owner = { kind: 'bearer', id: 'token:7', label: 'Alice token' }
 const BOB: Owner = { kind: 'bearer', id: 'token:8', label: 'Bob token' }
 
 const tool = (name: string, risk: 'read' | 'write' | 'outward'): Tool =>
-  defineTool({ name, description: name, input: z.object({}), risk, routes: [], handler: async () => json({ ran: name }) })
+  defineTool({ name, label: name, description: name, input: z.object({}), risk, routes: [], handler: async () => json({ ran: name }) })
 const TOOLS = [tool('look', 'read'), tool('change', 'write'), tool('send', 'outward')]
 
 function rig() {

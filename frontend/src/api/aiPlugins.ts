@@ -9,6 +9,7 @@
  * Errors come back as `{ detail }`, and a refused package install as
  * `{ detail, problems: string[] }` (422); `readProblem` keeps both on `ApiError.problem`.
  */
+import type { Omitted } from './capabilities'
 import { ApiError, command } from './client'
 
 export type RiskTier = 'read' | 'write' | 'outward'
@@ -30,7 +31,7 @@ export interface RemotePlugin {
   updated_at: string
 }
 
-/** One tool of a built-in set, with the tier ScadBuddy's code gives it: the least it can be set to. */
+/** One tool of a built-in set, with the tier ScadBuddy's code gives it (its default). */
 export interface BuiltInTool {
   name: string
   harness_name: string
@@ -39,9 +40,8 @@ export interface BuiltInTool {
 
 /**
  * ScadBuddy's own tool sets (#1953, agent/src/plugins/builtInTools.ts `BuiltInPluginView`), listed
- * first in `/plugins`: a tier per tool that can only be raised, and disabled tools. They are never
- * added, removed or tested (409 with `built_in: true`); `enabled` changes only where the set has a
- * switch (`switchable`).
+ * first in `/plugins`. Kept only so a `/plugins` read can tell them from remote plugins: their
+ * tools' access is edited through the capabilities routes (`./capabilities.ts`, #2171).
  */
 export interface BuiltInToolSet {
   name: string
@@ -51,18 +51,11 @@ export interface BuiltInToolSet {
   switchable: boolean
   tool_prefix: string
   tools: BuiltInTool[]
-  /** Raised tiers only. */
   tool_tiers: Record<string, RiskTier>
   disabled_tools: string[]
 }
 
 export type ListedPlugin = BuiltInToolSet | RemotePlugin
-
-export interface BuiltInToolSetPatch {
-  enabled?: boolean
-  tool_tiers?: Record<string, RiskTier>
-  disabled_tools?: string[]
-}
 
 export interface RemotePluginCreate {
   name: string
@@ -76,15 +69,20 @@ export interface RemotePluginPatch {
   enabled?: boolean
   auth_header?: string | null
   secret?: string | null
-  tool_tiers?: Record<string, RiskTier>
-  disabled_tools?: string[]
 }
 
 export interface PluginToolView {
   name: string
   harness_name: string
+  title: string | null
   description: string | null
   annotations: Record<string, unknown> | null
+  input_schema: Record<string, unknown> | null
+  output_schema: Record<string, unknown> | null
+  /** The server's entry as listed, minus what a cap removed (agent `access/listings.ts`). */
+  raw: Record<string, unknown>
+  /** What a cap removed from `raw`. */
+  omitted: Omitted[]
   tier: RiskTier
   tier_source: 'explicit' | 'default' | 'renamed' | 'collision'
   collides_with: string[]
@@ -251,6 +249,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
+/** The same request for the agent's other route groups (`api/capabilities.ts`). */
+export { request as aiRequest }
+
 /** The problems a refused install lists (422), or none. */
 export function refusalProblems(error: unknown): string[] {
   if (!(error instanceof ApiError)) return []
@@ -263,13 +264,8 @@ const json = (method: string, body: unknown): RequestInit => ({ method, body: JS
 
 export const aiPlugins = {
   listPlugins: () => request<ListedPlugin[]>('/plugins'),
-  updateBuiltIn: (name: string, body: BuiltInToolSetPatch) =>
-    request<BuiltInToolSet>(`/plugins/${seg(name)}`, json('PATCH', body)),
   createRemote: (body: RemotePluginCreate) => request<RemotePlugin>('/plugins', json('POST', body)),
-  updateRemote: (name: string, body: RemotePluginPatch) =>
-    request<RemotePlugin>(`/plugins/${seg(name)}`, json('PATCH', body)),
   deleteRemote: (name: string) => request<void>(`/plugins/${seg(name)}`, { method: 'DELETE' }),
-  testRemote: (name: string) => request<PluginTest>(`/plugins/${seg(name)}/test`, { method: 'POST' }),
 
   listPackages: () => request<ListedPackage[]>('/plugin-packages'),
   // The two fetches are the agent's commands (#1055): an Idempotency-Key per press, a

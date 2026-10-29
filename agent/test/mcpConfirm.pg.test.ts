@@ -223,6 +223,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const ran: unknown[] = []
       const guarded = defineTool({
         name: 'guarded_send',
+        label: 'guarded_send',
         description: 'test: an outward tool with a strict, refined top-level input',
         input: z
           .object({ from: z.number(), to: z.number() })
@@ -267,6 +268,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const ran: unknown[] = []
       const send = defineTool({
         name: 'lowered_send',
+        label: 'lowered_send',
         description: 'test: an outward tool the user lowers after the prepare',
         input: z.object({ n: z.number() }),
         risk: 'outward',

@@ -78,6 +78,8 @@ export type ForwardOptions = {
   record?: boolean
   /** The id its sessions are recorded under: the plugin's name (a registry plugin's) unless given (pluginSessions.ts `packageLedgerId`). */
   ledgerId?: string
+  /** Refuse a response body past this many bytes (the connection test's, #2171): 502, or the stream cut once it has begun. */
+  maxResponseBytes?: number
 }
 
 export type Registration = {
@@ -110,6 +112,7 @@ type Route = {
   /** The id they are recorded under (`ForwardOptions.ledgerId`). */
   ledgerId: string
   filterTools: boolean
+  maxResponseBytes: number | undefined
   /** Harness names hidden because two or more tools share them (learned from tools/list). */
   collided: Set<string>
   /** The requests this route has forwarded whose responses are rewritten, on whichever stream they arrive. */
@@ -390,6 +393,7 @@ export class PluginForwarder {
       record: options.record ?? false,
       ledgerId: options.ledgerId ?? plugin.name,
       filterTools: options.filterTools ?? true,
+      maxResponseBytes: options.maxResponseBytes,
       collided: new Set(),
       rewrites: { lists: new Set(), calls: new Map() },
     }
@@ -452,6 +456,8 @@ export class PluginForwarder {
     const { rewrites } = route
     /** This request's own tools/call ids: the replies it is expected to carry. */
     const own = new Set<unknown>()
+    /** Every request id this POST carries: told why when a capped response is cut (`maxResponseBytes`). */
+    const asked = new Set<unknown>()
     if (method === 'POST') {
       const read = await readBody(req)
       if (read === 'too large') return fail(res, 413, 'request body too large')
@@ -465,6 +471,7 @@ export class PluginForwarder {
       const messages = (Array.isArray(parsed) ? parsed : [parsed]) as JsonRpc[]
       for (const m of messages) {
         if (!isRecord(m)) continue
+        if (m.id !== undefined && m.id !== null) asked.add(m.id)
         if (m.method === 'tools/list' && route.filterTools && m.id !== undefined && m.id !== null) {
           if (rewrites.lists.size >= MAX_TRACKED_IDS) rewrites.lists.delete(rewrites.lists.values().next().value)
           rewrites.lists.add(m.id)
@@ -517,6 +524,41 @@ export class PluginForwarder {
         up.resume()
         return fail(res, 502, `plugin endpoint refused the credential (HTTP ${status}); OAuth discovery is not supported`)
       }
+      const max = route.maxResponseBytes
+      // Set by the cap's listener, which runs first: the chunk that passed the cap goes no further.
+      let cut = false
+      /** `up.pipe(res)`, or with a cap a copy that stops at `cut`. */
+      const pass = (): void => {
+        if (max === undefined) {
+          up.pipe(res)
+          return
+        }
+        up.on('data', (c: Buffer) => {
+          if (!cut) res.write(c)
+        })
+        up.on('end', () => res.end())
+      }
+      if (max !== undefined) {
+        let seen = 0
+        up.on('data', (c: Buffer | string) => {
+          seen += Buffer.byteLength(c)
+          if (seen <= max) return
+          cut = true
+          up.removeAllListeners('data')
+          up.removeAllListeners('end')
+          up.destroy()
+          // After this chunk's other listeners (emit calls a copy of the list), which see `cut`.
+          queueMicrotask(() => {
+            const why = `plugin response too large (over ${max} bytes)`
+            if (!res.headersSent) return fail(res, 502, why)
+            // Any other body already begun has no frame for the reason: cut it off.
+            if (!type.startsWith('text/event-stream')) return void res.destroy()
+            // An event stream already begun: each request this POST carried gets the reason as its error.
+            if (!res.writableEnded) for (const id of asked) res.write(`data: ${withheldError(id, why)}\n\n`)
+            res.end()
+          })
+        })
+      }
       const out = pick(up.headers, RESPONSE_HEADERS)
       const type = String(up.headers['content-type'] ?? '').toLowerCase()
       // A tool call's reply the rewrite cannot mark (#258): an error status (the
@@ -532,14 +574,16 @@ export class PluginForwarder {
       }
       if (status !== 200) {
         res.writeHead(status, out)
-        up.pipe(res)
+        pass()
         return
       }
       // Every 200 JSON or SSE body goes through the rewrite, GET streams
       // included: a response is matched to its request by id, on any stream.
       if (type.startsWith('application/json')) {
         const chunks: Buffer[] = []
-        up.on('data', (c: Buffer) => chunks.push(c))
+        up.on('data', (c: Buffer) => {
+          if (!cut) chunks.push(c)
+        })
         up.on('end', () => {
           let text = Buffer.concat(chunks).toString('utf8')
           try {
@@ -560,6 +604,7 @@ export class PluginForwarder {
         const blocks = new SseBlocks()
         up.setEncoding('utf8')
         up.on('data', (chunk: string) => {
+          if (cut) return
           for (const block of blocks.feed(chunk)) {
             const rewritten = rewriteSseEvent(block, rewrites, route)
             if (rewritten !== undefined) {
@@ -587,7 +632,7 @@ export class PluginForwarder {
         return
       }
       res.writeHead(status, out)
-      up.pipe(res)
+      pass()
     })
     upstream.end(body)
   }

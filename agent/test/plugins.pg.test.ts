@@ -8,6 +8,9 @@ import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
 import { loadEnabledPlugins, PluginError, PluginStore } from '../src/plugins/registry.js'
+import { Capabilities } from '../src/access/capabilities.js'
+import { ToolListings } from '../src/access/listings.js'
+import { remoteProvider } from '../src/access/providers.js'
 import type { PluginTest } from '../src/plugins/testConnection.js'
 import type { PluginView } from '../src/routes/plugins.js'
 import { kekFromBase64, SealError } from '../src/secrets.js'
@@ -234,6 +237,103 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(await db.sql`SELECT 1 FROM ai_tool_listings WHERE source = 'remote:mem'`).toHaveLength(0)
       })
 
+      const UI_CONTEXT = { actor: { kind: 'browser', id: 'browser', label: 'Browser' }, surface: 'http' } as const
+      const rowsBy = (name: string) =>
+        db.sql<{ item: string; access: string; updated_by: string }[]>`
+          SELECT item, access, updated_by FROM ai_access WHERE source = ${`remote:${name}`} ORDER BY item`
+      const oldColumns = async (name: string) => {
+        const [row] = await db.sql<{ enabled: boolean; tool_tiers: unknown; disabled_tools: string[] }[]>`
+          SELECT enabled, tool_tiers, disabled_tools FROM ai_plugins WHERE name = ${name}`
+        return row
+      }
+
+      it('setToolAccess writes ai_plugins and ai_access, so an older replica reads the same', async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await store.setToolAccess('mem', 'b', 'off', UI_CONTEXT)
+        const summary = await store.setToolAccess('mem', 'a', 'read', UI_CONTEXT)
+        expect(summary).toMatchObject({ tool_tiers: { a: 'read' }, disabled_tools: ['b'], enabled: false })
+        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
+        expect(await rowsBy('mem')).toEqual([
+          { item: '*', access: 'off', updated_by: 'system' },
+          { item: 'a', access: 'read', updated_by: 'browser:browser' },
+          { item: 'b', access: 'off', updated_by: 'browser:browser' },
+        ])
+        // A tier over a disabled tool moves it out of disabled_tools.
+        await store.setToolAccess('mem', 'b', 'write', UI_CONTEXT)
+        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: { a: 'read', b: 'write' }, disabled_tools: [] })
+        await expect(store.setToolAccess('gone', 'a', 'off', UI_CONTEXT)).rejects.toMatchObject({ name: 'PluginError', status: 404 })
+        // A tier needs a name Claude Code keeps; off takes any.
+        await expect(store.setToolAccess('mem', 'files.list', 'read', UI_CONTEXT)).rejects.toMatchObject({ status: 400 })
+        await store.setToolAccess('mem', 'files.list', 'off', UI_CONTEXT)
+        expect((await oldColumns('mem'))?.disabled_tools).toEqual(['files.list'])
+      })
+
+      it('setToolAccess refuses the 257th change of one kind in the page\'s words, not a field the page never shows (final review M7)', async () => {
+        const names = Array.from({ length: 256 }, (_, i) => `t${i}`)
+        await store.create(
+          { name: 'mem', url: 'https://hs.example/mcp', disabled_tools: names, tool_tiers: Object.fromEntries(names.map((n) => [`r${n}`, 'read'])) },
+          kek,
+        )
+        const off = store.setToolAccess('mem', 'x', 'off', UI_CONTEXT)
+        await expect(off).rejects.toMatchObject({ name: 'PluginError', status: 400 })
+        await expect(off).rejects.toThrow('At most 256 tools of plugin "mem" can be off: reset one of them first')
+        const read = store.setToolAccess('mem', 'x', 'read', UI_CONTEXT)
+        await expect(read).rejects.toThrow('At most 256 tools of plugin "mem" can have an access other than off or the default: reset one of them first')
+        // A change to a tool already counted, or a reset, still goes through.
+        await store.setToolAccess('mem', 'rt0', 'write', UI_CONTEXT)
+        await store.setToolAccess('mem', 't0', null, UI_CONTEXT)
+        await store.setToolAccess('mem', 'x', 'off', UI_CONTEXT)
+      })
+
+      it("setToolAccess attributes only the changed row: the others keep their author and time", async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
+        await db.sql`UPDATE ai_access SET updated_by = 'migration:2171', updated_at = now() - interval '1 day'
+          WHERE source = 'remote:mem' AND item = 'a'`
+        const times = () =>
+          db.sql<{ item: string; updated_by: string; t: string }[]>`
+            SELECT item, updated_by, updated_at::text AS t FROM ai_access WHERE source = 'remote:mem' ORDER BY item`
+        const [, a0, b0] = await times()
+        await store.setToolAccess('mem', 'c', 'write', UI_CONTEXT)
+        const [, a1, b1, c1] = await times()
+        expect(a1).toEqual(a0)
+        expect(a1?.updated_by).toBe('migration:2171')
+        expect(b1).toEqual(b0)
+        expect(c1).toMatchObject({ item: 'c', updated_by: 'browser:browser' })
+      })
+
+      it('setToolAccess keeps a tool named __proto__ as its own key', async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await store.setToolAccess('mem', '__proto__', 'read', UI_CONTEXT)
+        const [row] = await db.sql<{ j: string }[]>`SELECT tool_tiers::text AS j FROM ai_plugins WHERE name = 'mem'`
+        expect(row?.j).toBe('{"__proto__": "read"}')
+        expect(await rowsBy('mem')).toContainEqual({ item: '__proto__', access: 'read', updated_by: 'browser:browser' })
+        // A write to another tool keeps it, and the summary names it.
+        const summary = await store.setToolAccess('mem', 'other', 'write', UI_CONTEXT)
+        expect(Object.hasOwn(summary.tool_tiers, '__proto__')).toBe(true)
+        expect(summary.tool_tiers['__proto__']).toBe('read')
+        const [after] = await db.sql<{ j: string }[]>`SELECT tool_tiers::text AS j FROM ai_plugins WHERE name = 'mem'`
+        expect(after?.j).toBe('{"other": "write", "__proto__": "read"}')
+        expect(await rowsBy('mem')).toContainEqual({ item: '__proto__', access: 'read', updated_by: 'browser:browser' })
+      })
+
+      it("a source switch through the tree records the UI's actor", async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        const caps = new Capabilities([
+          remoteProvider({ plugins: store, listings: new ToolListings(db.sql), refresh: () => Promise.reject(new Error('not called')) }),
+        ])
+        expect((await caps.setEnabled('remote:mem', true, UI_CONTEXT)).enabled).toBe(true)
+        expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'on', updated_by: 'browser:browser' }])
+      })
+
+      it('setToolAccess null removes the tool from both', async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
+        await store.setToolAccess('mem', 'a', null, UI_CONTEXT)
+        const summary = await store.setToolAccess('mem', 'b', null, UI_CONTEXT)
+        expect(summary).toMatchObject({ tool_tiers: {}, disabled_tools: [] })
+        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: {}, disabled_tools: [] })
+        expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'off', updated_by: 'system' }])
+      })
+
       it('registers plugins disabled: enabled: true is refused at create', async () => {
         await expect(
           store.create({ name: 'mem', url: 'https://hs.example/mcp', enabled: true }, kek),
@@ -243,7 +343,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     describe('the routes', () => {
-      function app(testPlugin = vi.fn((): Promise<PluginTest> => Promise.resolve({ ok: true, detail: 'connected', duration_ms: 1, server: null, tools: [], truncated: false }))) {
+      function app(testPlugin = vi.fn((): Promise<PluginTest> => Promise.resolve({ ok: true, detail: 'connected', duration_ms: 1, server: null, tools: [], truncated: false, stored: [] }))) {
         return {
           testPlugin,
           app: createApp({

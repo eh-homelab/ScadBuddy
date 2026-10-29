@@ -99,6 +99,7 @@ function virtualPrinterTools(): Tool[] {
   return [
     defineTool({
       name: 'list_virtual_printers',
+      label: 'List virtual printers',
       description:
         "Bambuddy's virtual printers (`items`): each with its `mode`, `model`/`model_name`, `enabled`, `status.running`, " +
         '`target` (the registry printer it forwards to, null for any printer of its model), `printer_id` (its own ' +
@@ -120,6 +121,7 @@ function virtualPrinterTools(): Tool[] {
 
     defineTool({
       name: 'get_virtual_printer',
+      label: 'Read a virtual printer',
       description: 'One Bambuddy virtual printer, as list_virtual_printers lists them.',
       input: z.object({ vp_id: vpId }),
       risk: 'read',
@@ -139,6 +141,7 @@ function virtualPrinterTools(): Tool[] {
 
     defineTool({
       name: 'diagnose_virtual_printer',
+      label: "Check a virtual printer's setup",
       description:
         "Bambuddy's setup checks for a virtual printer: `overall` (ok, warnings or problems) and each check's `id` " +
         '(enabled, running, bind_interface, access_code, target_printer, port_ftps, port_mqtt, port_bind, ' +
@@ -159,6 +162,7 @@ function virtualPrinterTools(): Tool[] {
 
     defineTool({
       name: 'create_virtual_printer',
+      label: 'Create a virtual printer',
       description: 'Creates a Bambuddy virtual printer.' + VP_WRITE,
       input: z.object({
         name: z.string().min(1).max(80),
@@ -188,6 +192,7 @@ function virtualPrinterTools(): Tool[] {
 
     defineTool({
       name: 'update_virtual_printer',
+      label: 'Edit a virtual printer',
       description:
         'Changes a Bambuddy virtual printer: only the fields given change; `target` null takes its target off.' +
         VP_WRITE,
@@ -215,6 +220,7 @@ function virtualPrinterTools(): Tool[] {
 
     defineTool({
       name: 'delete_virtual_printer',
+      label: 'Delete a virtual printer',
       description:
         'Deletes a Bambuddy virtual printer; slicers can no longer send to it. Its registry row is kept, reported as ' +
         'no longer in Bambuddy.' +
@@ -238,6 +244,7 @@ function virtualPrinterTools(): Tool[] {
 export const printerTools: Tool[] = [
   defineTool({
     name: 'list_printers',
+    label: 'List printers',
     description:
       `Every printer in ScadBuddy's registry, with its Bambuddy link and its LAN link. ${ROW_FIELDS}${LAN_IN_SETTINGS}` +
       PAGED,
@@ -253,6 +260,7 @@ export const printerTools: Tool[] = [
 
   defineTool({
     name: 'get_printer',
+    label: "Read a printer's details",
     description: `One printer in the registry. ${ROW_FIELDS}${LAN_IN_SETTINGS}`,
     input: z.object({ printer }),
     risk: 'read',
@@ -266,6 +274,7 @@ export const printerTools: Tool[] = [
 
   defineTool({
     name: 'discover_printers',
+    label: 'Discover Bambuddy printers',
     description:
       "Bambuddy's active printers, each with `linked_to` (the registry printer that is it, or null) and whether " +
       'it can be linked: one whose serial Bambuddy does not report can only be linked to a printer created by ' +
@@ -281,6 +290,7 @@ export const printerTools: Tool[] = [
 
   defineTool({
     name: 'sync_printers_from_bambuddy',
+    label: 'Import printers from Bambuddy',
     description:
       "Imports and links Bambuddy's printers and virtual printers into the registry in one idempotent pass " +
       '(#4439, #4747): a linked row for every active Bambuddy printer that reports a serial; an empty LAN link ' +
@@ -315,6 +325,7 @@ export const printerTools: Tool[] = [
 
   defineTool({
     name: 'create_printer',
+    label: 'Add a printer',
     description:
       'Adds a printer to the registry by its serial (on the printer, or in Bambu Handy), with a name. Link it to ' +
       'Bambuddy or the LAN afterwards. A serial already registered is refused, naming the row that has it.',
@@ -339,6 +350,7 @@ export const printerTools: Tool[] = [
 
   defineTool({
     name: 'update_printer',
+    label: 'Edit a printer',
     description: "Renames a printer or sets its `preferred_path`, how a print reaches it.",
     input: z.object({ printer, name: z.string().min(1).max(80).optional(), preferred_path: path.optional() }),
     risk: 'write',
@@ -357,6 +369,7 @@ export const printerTools: Tool[] = [
 
   defineTool({
     name: 'link_printer_bambuddy',
+    label: 'Link a printer to Bambuddy',
     description:
       'Links a registry printer to the Bambuddy printer it is (`bambuddy_printer_id`, as discover_printers lists ' +
       'them). Refused when the serials differ, or another row already links that Bambuddy printer.',
@@ -381,6 +394,7 @@ export const printerTools: Tool[] = [
 
   defineTool({
     name: 'unlink_printer_bambuddy',
+    label: 'Unlink a printer from Bambuddy',
     description: 'Unlinks a registry printer from its Bambuddy printer; the row keeps its LAN link and history.',
     input: z.object({ printer }),
     risk: 'write',
@@ -399,6 +413,7 @@ export const printerTools: Tool[] = [
 
   defineTool({
     name: 'unlink_printer_lan',
+    label: "Remove a printer's LAN link",
     description:
       "Removes a printer's LAN link: its stored access code is deleted and ScadBuddy stops watching the printer, " +
       'so printing to it over the LAN needs the user to link it again in Settings > Printers.',
@@ -420,6 +435,7 @@ export const printerTools: Tool[] = [
 
   defineTool({
     name: 'delete_printer',
+    label: 'Delete a printer',
     description:
       'Deletes a printer from the registry, with its LAN link. Refused (HTTP 409) while it is linked to a ' +
       'Bambuddy printer: unlink it first.',

@@ -759,10 +759,14 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
 - **`tool`, `agent`, `ask_session`** run on the agent's `agent-tools` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS`, read by the API when it starts a run).
 - **Tool tiers come from the agent** (#2704), as its own turns resolve them (the tool's
-  definition, Settings' raised tiers, disabled tools), never from a file in the image.
-  Each `tool(...)` call first asks the activity `flow_tool_tier` on `agent-tools`; the
-  answer can raise the tiers the run started with but never lower them. The API asks
-  the `agent` container in its own pod, `GET /internal/flows/tools` on
+  definition and its access in Settings → Tools & plugins, `off` included), never from a
+  file in the image. Each `tool(...)` call first asks the activity `flow_tool_tier` on
+  `agent-tools`, and the answer is the tier, raised or lowered from the one the run
+  started with (#2171, behind `workflow.patched("flow-access-2171")` in
+  `backend/scadbuddy/workflows/flow_tools.py`; a run recorded before it only raised). A
+  call is tried up to three times only when both that tier and the tool's tier in code
+  (`declared`) are `read`: a tool lowered to `read` is still the code it was. The API
+  asks the `agent` container in its own pod, `GET /internal/flows/tools` on
   `SCADBUDDY_AGENT_INTERNAL_URL` (default `http://127.0.0.1:8081`; the agent answers
   only a loopback peer, and the ingress never routes that path), when a run starts, a
   grant is approved, and for the editor's tool list. If the agent does not answer, a
@@ -1246,19 +1250,25 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     name, URL and header name). Changing the URL or the header name needs the
     value again. No route returns it; views show the header name and the last
     four characters.
-  - **Every tool is `outward`, so it needs approval, until you set its tier.**
-    `tool_tiers` sets tools to `read` or `write` (or `outward` explicitly).
-    `disabled_tools` removes tools from the model's view entirely. MCP
-    annotations such as `readOnlyHint` are only shown as a suggestion by the
-    test; they never change a tier.
+  - **Every tool is `outward`, so it needs approval, until you set its access.**
+    In Settings → Tools & plugins (#2171) each listed tool has one select:
+    `off`, `read`, `write` or `outward`. `off` removes the tool from the
+    model's view and refuses a call to it. Choosing `outward` (the default)
+    resets the tool. MCP annotations such as `readOnlyHint` are shown as the
+    server's claims and as a suggestion; they never change an access.
   - Claude Code renames every character outside `[A-Za-z0-9_-]` in a tool
     name to `_` (`files.list` becomes `mcp__<name>__files_list`). So only
-    tools already named in that alphabet can take a tier; others stay
-    `outward` (or disable them, by their real name). When two tools end up
-    with the same name, both are hidden from the model, and the test marks
-    them `collision`.
+    tools already named in that alphabet can take a tier; a renamed tool
+    takes `off` or `outward` only. When two tools end up with the same name,
+    both are hidden from the model and fixed `off`, and the test marks them
+    `collision`.
+  - For one release (until #4828), `tool_tiers` and `disabled_tools` stay on
+    `POST /plugins` and `PATCH /plugins/{name}`, and the page's writes also
+    keep those columns of `ai_plugins` right for an older replica. The page
+    itself writes through `/api/v1/ai/capabilities` (below and
+    [`docs/ai/operating.md`, "The capabilities API"](docs/ai/operating.md#the-capabilities-api)).
   - New plugins start disabled (`enabled: true` on create is refused). Run
-    the test, review the tools, then enable.
+    the test, review the tools, then turn the plugin's source switch on.
 
   | Route | |
   |---|---|
@@ -1267,6 +1277,7 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `PATCH /api/v1/ai/plugins/{name}` | change any of those but `name`, and `enabled`; `secret: null` removes the header |
   | `DELETE /api/v1/ai/plugins/{name}` | remove |
   | `POST /api/v1/ai/plugins/{name}/test` | through the forwarder: connect, one `tools/list` (10 s timeout), and report each tool with its harness name and tier |
+  | `/api/v1/ai/capabilities` and its six sub-routes | Settings → Tools & plugins (#2171): every source with its tools and their access; a source's switch, a tool's access, its reset, its details, and `POST …/{source}/refresh` (the test above, which also stores the listing). See [`docs/ai/operating.md`, "The capabilities API"](docs/ai/operating.md#the-capabilities-api) |
 
   Writes and the test go through the same guard as credential writes (next
   bullet). Reads are guarded too (`uiReadProblem`): HTTPS through the trusted

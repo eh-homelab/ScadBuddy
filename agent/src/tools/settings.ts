@@ -42,6 +42,7 @@ export function redact(value: unknown, labels = false): unknown {
 export const settingsTools: Tool[] = [
   defineTool({
     name: 'get_settings',
+    label: 'Read ScadBuddy settings',
     description:
       'ScadBuddy settings: the Bambuddy URL, whether an API key is set (never the key), default printer, ' +
       'plate and display unit.',
@@ -53,6 +54,7 @@ export const settingsTools: Tool[] = [
 
   defineTool({
     name: 'test_bambuddy_connection',
+    label: 'Test the Bambuddy connection',
     description:
       'Check that Bambuddy is reachable and accepts the configured API key; lists the printers it can see ' +
       'and each Bambuddy scope ScadBuddy uses. Only Read Status is checked; the write scopes are ' +
@@ -66,6 +68,7 @@ export const settingsTools: Tool[] = [
 
   defineTool({
     name: 'get_bambuddy_status',
+    label: "Read Bambuddy's status",
     description:
       "Bambuddy's version, and whether it photographs a print when it finishes (capture_finish_photo). " +
       "Read-only: ScadBuddy never changes Bambuddy's settings; the user turns it on in Bambuddy.",
@@ -79,6 +82,7 @@ export const settingsTools: Tool[] = [
 
   defineTool({
     name: 'get_remembered_choices',
+    label: 'Read remembered printer and spool choices',
     description:
       'What the print dialog remembers (#322): per-model printer and spool choices, per-printer plates, ' +
       'the print options at each scope, and the project each model was last filed in (`model_projects`, keyed ' +
@@ -95,6 +99,7 @@ export const settingsTools: Tool[] = [
 
   defineTool({
     name: 'get_print_targets',
+    label: 'List print targets',
     description:
       "Bambuddy's printers (with model and live status), and library folders: the farm " +
       'context a print is planned against.',
@@ -107,6 +112,7 @@ export const settingsTools: Tool[] = [
 
   defineTool({
     name: 'get_print_options',
+    label: 'Read remembered print settings',
     description:
       'Remembered print options (timelapse, bed levelling, AMS, …) at each scope: global, per printer and ' +
       'per model, and the printer the per-printer scope keys on (the Settings printer).',
@@ -134,6 +140,7 @@ export const settingsTools: Tool[] = [
   // silently change every print, so they stay `write`.
   defineTool({
     name: 'set_print_options',
+    label: 'Remember print options',
     description:
       'Remember print options for one scope (global, a printer, or what is printed: a model, or a Bambuddy ' +
       'library file as scope "model" with key "library:<file id>"). A settings write, so it needs a human approval.',
