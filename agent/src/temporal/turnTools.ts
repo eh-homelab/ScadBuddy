@@ -103,6 +103,12 @@ export type TurnServer = {
    * refuses the call, at the tier check (so it never parks) and at the call.
    */
   refusal?(): Promise<string | undefined>
+  /**
+   * Its tools set off in Settings → Tools & plugins, by their own (bare) names (#4757: a
+   * local package server's): left out of the listing and refused on call, as the
+   * forwarder does for an http server's disabled tools.
+   */
+  offTools?: ReadonlySet<string>
   /** The text the model reads instead of a call's result (#982: a page the lists do not let it read), or undefined. */
   screen?(harnessName: string, input: unknown, text: string): Promise<string | undefined>
   /**
@@ -527,6 +533,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         const tooLong: string[] = []
         for (const { server, offered } of listings) {
           for (const { tool, name } of offered ?? []) {
+            if (isOffTool(server, tool.name)) continue
             const turnName = turnToolName(server.name, tool.name)
             const tier = server.fixedTier?.(`mcp__${server.name}__${name}`)
             if (turnName.length > MAX_TURN_TOOL_NAME) {
@@ -568,13 +575,16 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
       const caller = await turnCaller(deps, TURN_TOOL_TIER_ACTIVITY, '')
       const signal = Context.current().cancellationSignal
       return withServers(deps, { ...caller.context, signal }, async (set) => {
-        const { server, harnessName } = await resolve(deps, caller.context, set, tool, signal, 'tier')
-        // A flow takes its call's queue from here, since it lists nothing (turn_tools).
-        const queue = pinned(deps, server) ? { task_queue: deps.hostQueue! } : {}
         // As a guard's deny below: not parked, since its call refuses it with the reason. A
         // switch that cannot be read is refused too: an approval could not run the call.
-        const off = await refusalOf(server)
-        if (off !== undefined) return { tier: 'write', declared: 'outward', refused: off, ...queue }
+        // Read before the listing: a server switched off is not listed (turnServers.ts).
+        const named = serverOf(set, tool).server
+        const off = await refusalOf(named)
+        if (off !== undefined) return { tier: 'write', declared: 'outward', refused: off, ...(pinned(deps, named) ? { task_queue: deps.hostQueue! } : {}) }
+        const { server, harnessName, tool: found } = await resolve(deps, caller.context, set, tool, signal, 'tier')
+        // A flow takes its call's queue from here, since it lists nothing (turn_tools).
+        const queue = pinned(deps, server) ? { task_queue: deps.hostQueue! } : {}
+        if (isOffTool(server, found.name)) return { tier: 'write', declared: 'outward', refused: offToolReason(server, found.name), ...queue }
         const verdict = server.guard ? await judgeInput(server.guard.bind(server), harnessName, input) : undefined
         // A refused call is not parked, since no approval could run it: its call refuses
         // it with the reason (turnToolActivity). It is answered as not outward; `refused`
@@ -587,6 +597,17 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
     },
   }
 }
+
+/** Whether the tool (its own name) is set off on the server (`TurnServer.offTools`), by that name or the one Claude Code gives it. */
+function isOffTool(server: TurnServer, raw: string): boolean {
+  const off = server.offTools
+  if (!off || off.size === 0) return false
+  const name = harnessToolName(raw)
+  return off.has(raw) || [...off].some((d) => harnessToolName(d) === name)
+}
+
+const offToolReason = (server: TurnServer, raw: string) =>
+  `tool "${raw}" of plugin ${server.name} is switched off in Settings → Tools & plugins; the user can turn it back on there`
 
 /** Why `server` refuses its calls now; a refusal read that fails refuses them too (fail closed). */
 async function refusalOf(server: TurnServer): Promise<string | undefined> {
@@ -618,11 +639,8 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
     const signal = context.cancellationSignal
     return withServers(deps, { ...caller.context, signal }, async (set) => {
       const scrub = (text: string) => redact(text, set.secrets)
-      const { server, tool, harnessName, client: keptClient } = await resolve(deps, caller.context, set, name, signal, 'call')
-      const verdict = server.guard ? await judgeInput(server.guard.bind(server), harnessName, input) : undefined
-      const tier = tierAfter(server.tierOf(harnessName, input), verdict)
       const startedAt = new Date()
-      const record = (outcome: 'ok' | 'error' | 'refused', detail?: string) =>
+      const record = (tier: RiskTier, outcome: 'ok' | 'error' | 'refused', detail?: string) =>
         deps.audit?.record({
           kind: 'tool_call',
           action: name,
@@ -640,12 +658,21 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
           startedAt,
           finishedAt: new Date(),
         })
+      // Its server's switch first: a server switched off is not listed (turnServers.ts).
+      const { parts, server: named } = serverOf(set, name)
+      const off = await refusalOf(named)
+      if (off !== undefined) {
+        await record(named.tierOf(`mcp__${named.name}__${parts.tool}`, input), 'refused', off)
+        throw ApplicationFailure.nonRetryable(off, TOOL_ERROR)
+      }
+      const { server, tool, harnessName, client: keptClient } = await resolve(deps, caller.context, set, name, signal, 'call')
+      const verdict = server.guard ? await judgeInput(server.guard.bind(server), harnessName, input) : undefined
+      const tier = tierAfter(server.tierOf(harnessName, input), verdict)
       const refuse = async (message: string, type: string): Promise<never> => {
-        await record('refused', message)
+        await record(tier, 'refused', message)
         throw ApplicationFailure.nonRetryable(message, type)
       }
-      const off = await refusalOf(server)
-      if (off !== undefined) await refuse(off, TOOL_ERROR)
+      if (isOffTool(server, tool.name)) await refuse(offToolReason(server, tool.name), TOOL_ERROR)
       if (verdict && 'deny' in verdict) await refuse(verdict.deny, TOOL_ERROR)
       if (!principal.tiers.includes(tier)) {
         const who = caller.context.flow ? "this flow run's starter" : "this session's turn"
@@ -679,7 +706,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         }
       } catch (err) {
         if (signal.aborted) throw new CancelledFailure('the call was cancelled')
-        await record('error', (err as Error).message)
+        await record(tier, 'error', (err as Error).message)
         throw ApplicationFailure.nonRetryable(scrub(`${name} failed: ${(err as Error).message}`), TOOL_ERROR)
       } finally {
         clearInterval(heartbeat)
@@ -691,7 +718,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
       // none is kept (#982). It reads what a classic turn's hook reads (`screenedText`).
       const withheld = server.screen ? await screened(server, harnessName, input, screenedText(content)) : undefined
       if (withheld !== undefined) {
-        await record(result.isError ? 'error' : 'ok')
+        await record(tier, result.isError ? 'error' : 'ok')
         if (result.isError) throw ApplicationFailure.nonRetryable(withheld, TOOL_ERROR)
         return withheld
       }
@@ -706,7 +733,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
               flow === undefined && deps.blobs && session ? { session, blobs: deps.blobs, toolUseId } : undefined,
             )
       const text = scrub((reset ? `[${reset}]\n\n` : '') + (typeof answer === 'string' ? answer : answer.text))
-      await record(result.isError ? 'error' : 'ok')
+      await record(tier, result.isError ? 'error' : 'ok')
       if (result.isError) throw ApplicationFailure.nonRetryable(text, TOOL_ERROR)
       return typeof answer === 'string' ? text : { text, images: answer.images }
     })

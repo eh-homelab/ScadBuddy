@@ -6,6 +6,15 @@ import type { Database } from '../src/db.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
 import { loadEnabledPlugins, PluginStore } from '../src/plugins/registry.js'
 import { kekFromBase64 } from '../src/secrets.js'
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { liveAccess } from '../src/access/live.js'
+import { packageServerSource } from '../src/access/model.js'
+import { AccessResolver } from '../src/access/resolver.js'
+import { AccessStore } from '../src/access/store.js'
+import { hashTree } from '../src/plugins/packages/hash.js'
+import { forwardPackageServers } from '../src/plugins/packages/mcp.js'
 import { turnServers } from '../src/temporal/turnServers.js'
 import { type FakeMcp, startFakeMcp } from './support/fakeMcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -70,5 +79,27 @@ describe.skipIf(skip !== '')(`remote plugins on ai_access${skip}`, () => {
     expect(server?.name).toBe('mem')
     expect(server?.tierOf('mcp__mem__a', {})).toBe('read')
     expect(server?.tierOf('mcp__mem__recall', {})).toBe('outward')
+  })
+
+  // #4757: a classic turn builds its package servers with the resolver over ai_access.
+  it("a package server set off in ai_access is absent from the classic seam's access", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'pkg-access-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'notes' }))
+    await writeFile(path.join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { api: { type: 'http', url: mcp.url } } }))
+    const pkg = { name: 'notes', contentHash: (await hashTree(dir)).hash, dir, allowed: false, builtinTools: [] }
+    const access = new AccessStore(db.sql)
+    const resolver = new AccessResolver(access)
+    const loopback = async () => ['127.0.0.1']
+    const on = await forwardPackageServers([pkg], forwarder, loopback, { access: resolver })
+    expect(on.servers).toEqual([{ name: 'plugin_notes_api', pkg: 'notes', server: 'api' }])
+    on.release()
+    await access.setEnabled(packageServerSource('notes', 'api'), false)
+    const servers = await forwardPackageServers([pkg], forwarder, loopback, { access: resolver })
+    expect(servers.plugins).toEqual([])
+    expect(servers.servers).toEqual([])
+    // The seam of a turn that still names the server (built before the switch) answers off per call.
+    const seam = liveAccess(resolver, { tools: [], remote: [], packageServers: on.servers })
+    expect(await seam('mcp__plugin_notes_api__recall', {})).toBe('off')
   })
 })

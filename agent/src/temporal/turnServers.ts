@@ -24,7 +24,7 @@ import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
-import type { PackageServers } from '../plugins/packages/mcp.js'
+import { declaredPackageServers, type PackageServers, serverAccess } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
 import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
 import type { SessionFiles } from '../workspace/store.js'
@@ -99,7 +99,7 @@ export type TurnServerDeps = {
   /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`). */
   remotePlugins?: (() => Promise<PluginsForRun>) | undefined
   /** Tool access (#2171, ai_access): http_request's switch and tier, and each package server's switch. Defaults without it. */
-  access?: Pick<AccessResolver, 'entry' | 'enabled'> | undefined
+  access?: Pick<AccessResolver, 'entry' | 'enabled' | 'pluginSources'> | undefined
   /**
    * The headless browser's lists and the sessions' approved origins (#982,
    * browser/store.ts): the remote plugins' browser_* calls are judged by them, as a
@@ -172,6 +172,28 @@ export function builtinNote(names: readonly string[]): string {
   )
 }
 
+const switchedOff = (server: string, pkg: string) =>
+  `${server} of plugin package ${pkg} is switched off in Settings → Tools & plugins; the user can turn it back on there`
+
+/** A plugin's MCP session kept for the durable session, on a forwarder route of its own (#2581). */
+function keptRoute(keep: ReturnType<NonNullable<PluginsForRun['keep']>>): Pick<TurnServer, 'keep'> {
+  if (!keep) return {}
+  return {
+    keep: {
+      fingerprint: keep.fingerprint,
+      connect: async () => {
+        const route = keep.register()
+        try {
+          return { client: await connectHttp(route.url), release: route.release }
+        } catch (err) {
+          route.release()
+          throw err
+        }
+      },
+    },
+  }
+}
+
 export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Promise<TurnServers> {
   return async (context) => {
     const servers: TurnServer[] = []
@@ -205,27 +227,13 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         // Its forwarder URL is new each run; its tools change with what Settings disabled.
         listingKey: JSON.stringify(plugin.disabledTools),
         tierOf,
-        // A browser call's tier depends on the page it opens (#982): any may park.
-        mayPark: (name) => browser?.covers(name) === true || tierOf(name) === 'outward',
+        // Any may park (#4757): a tier raised to outward later in the turn is asked about, and
+        // a browser call's tier depends on the page it opens (#982). `turn_tool_tier` decides
+        // each call; the listed tier is the transcript's label only.
+        mayPark: () => true,
         fixedTier: (name) => (browser?.covers(name) && name.endsWith('__browser_navigate') ? undefined : tierOf(name)),
         ...browserParts,
-        // Its MCP session is kept for the durable session, on its own route (#2581).
-        ...(keep
-          ? {
-              keep: {
-                fingerprint: keep.fingerprint,
-                connect: async () => {
-                  const route = keep.register()
-                  try {
-                    return { client: await connectHttp(route.url), release: route.release }
-                  } catch (err) {
-                    route.release()
-                    throw err
-                  }
-                },
-              },
-            }
-          : {}),
+        ...keptRoute(keep),
       })
     }
     const http = deps.httpRequest
@@ -334,7 +342,9 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       // Otherwise a call (not a listing) builds every loaded package's servers: a share
       // that threw is known only by sharing again, so for that one the listing is the
       // guard, since a call can only name a tool the listing offered (#2620).
-      servers.push(...localPackageServers(offered, problems))
+      // Every server's switch and stored tools, in one read (#4757).
+      const switches = await serverAccess(offered, deps.access)
+      servers.push(...localPackageServers(offered, problems, switches))
       const named = [...new Set(offered.filter((p) => p.allowed).flatMap((p) => p.builtinTools))].filter((n) => provided.has(n)).sort()
       const builtins = deps.builtins
       if (named.length && builtins) {
@@ -380,21 +390,38 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         browserPlugins.push(plugin.name)
         // Its tiers from ai_access (#2171), an unlisted tool outward, as a remote plugin's above.
         const tiers = pluginTierResolver([plugin])
+        const tierOf = (name: string) => tiers(name) ?? 'outward'
         const at = forwardedPackages.servers.find((s) => s.name === plugin.name)
         servers.push({
           name: plugin.name,
           connect: () => connectHttp(plugin.url),
           listingKey: JSON.stringify(plugin.disabledTools),
-          tierOf: (name) => tiers(name) ?? 'outward',
+          tierOf,
+          // As a remote plugin's: any may park, the listed tier is the transcript's label only.
+          mayPark: () => true,
+          fixedTier: (name) => (browser?.covers(name) && name.endsWith('__browser_navigate') ? undefined : tierOf(name)),
+          ...keptRoute(forwardedPackages.keep?.(plugin.name)),
           // Its `*` switch at each tier check and call (#4757); a server not found is refused.
           refusal: async () => {
             if (!at) return `${plugin.name} is not a known package server`
-            return (await access.enabled(packageServerSource(at.pkg, at.server)))
-              ? undefined
-              : `${at.server} of plugin package ${at.pkg} is switched off in Settings → Tools & plugins; the user can turn it back on there`
+            return (await access.enabled(packageServerSource(at.pkg, at.server))) ? undefined : switchedOff(at.server, at.pkg)
           },
           ...browserParts,
         })
+      }
+      // A call (never a listing) to a server switched off since its turn's listing is refused
+      // by its switch, not parked for an approval no one could use (#4757).
+      if (!context.listing) {
+        const present = new Set(servers.map((s) => s.name))
+        for (const { name, pkg, server } of declaredPackageServers(offered)) {
+          if (present.has(name) || switches.get(packageServerSource(pkg, server))?.enabled !== false) continue
+          servers.push({
+            name,
+            connect: () => Promise.reject(new Error(`${name} is switched off`)),
+            tierOf: () => 'outward',
+            refusal: async () => switchedOff(server, pkg),
+          })
+        }
       }
     }
     return {

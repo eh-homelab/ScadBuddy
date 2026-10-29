@@ -7,7 +7,16 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { declaredConfigs } from '../harness/plugins.js'
 import { hashTree, PackageContentError } from '../plugins/packages/hash.js'
 import type { LoadedPackage } from '../plugins/packages/install.js'
-import { packageServerName, touch, withoutRemoteServers } from '../plugins/packages/mcp.js'
+import { packageServerSource } from '../access/model.js'
+import {
+  collidingServerNames,
+  collisionProblem,
+  packageServerName,
+  type ServerAccess,
+  touch,
+  withoutRemoteServers,
+} from '../plugins/packages/mcp.js'
+import { pluginTierResolver } from '../plugins/registry.js'
 import { type TurnPackage, type TurnServer } from './turnTools.js'
 
 // Plugin packages in a durable session (#2320). A classic turn hands Claude Code each
@@ -25,7 +34,9 @@ import { type TurnPackage, type TurnServer } from './turnTools.js'
 //     `sharePackage`, and the segment runner refuses a copy that still does), and here
 //     each call goes through the gate. They carry the
 //     names Claude Code gives them (`plugin_<package>_<server>`), so their tiers are
-//     the classic turn's: no package tool is ScadBuddy's, so every one is outward.
+//     the classic turn's: each server's `package:<pkg>/mcp:<server>` rows in ai_access,
+//     a tool with none outward; a server switched off there is not offered, nor any whose
+//     name another package server carries too (#4757).
 //     An http server is reached only through the loopback forwarder, as a remote
 //     plugin is and as a classic turn reaches it (plugins/packages/mcp.ts
 //     `forwardPackageServers`: the egress-checked address, no redirect, no OAuth
@@ -180,10 +191,18 @@ async function connectStdio(config: McpConfig, root: string): Promise<Client> {
 
 /**
  * The local MCP servers of the packages approved with `allow_refused`, as turn servers;
- * their http servers come through the forwarder instead (turnServers.ts).
+ * their http servers come through the forwarder instead (turnServers.ts). A server
+ * switched off in `access` (by `packageServerSource`; one missing from it too) is not
+ * started, nor one whose name another package server carries (`collidingServerNames`).
+ * A tool's tier is its stored one, else outward; a tool set off is `offTools`.
  */
-export function localPackageServers(loaded: readonly LoadedPackage[], problems: string[]): TurnServer[] {
+export function localPackageServers(
+  loaded: readonly LoadedPackage[],
+  problems: string[],
+  access: ReadonlyMap<string, ServerAccess>,
+): TurnServer[] {
   const servers: TurnServer[] = []
+  const colliding = collidingServerNames(loaded)
   for (const pkg of loaded) {
     for (const { map } of declaredConfigs(pkg.dir).mcp) {
       for (const [server, config] of entries(map)) {
@@ -193,7 +212,24 @@ export function localPackageServers(loaded: readonly LoadedPackage[], problems: 
           problems.push(`plugin package ${pkg.name}: MCP server "${server}" has a name a durable session cannot offer`)
           continue
         }
-        servers.push({ name, connect: () => connectStdio(config, pkg.dir), tierOf: () => 'outward' })
+        const collision = collisionProblem(colliding, pkg.name, server)
+        if (collision) {
+          problems.push(collision)
+          continue
+        }
+        const stored = access.get(packageServerSource(pkg.name, server))
+        if (!stored?.enabled) continue
+        const tiers = pluginTierResolver([{ name, toolTiers: stored.toolTiers }])
+        const tierOf = (harnessName: string) => tiers(harnessName) ?? 'outward'
+        servers.push({
+          name,
+          connect: () => connectStdio(config, pkg.dir),
+          tierOf,
+          // Any may park: a tier raised to outward later in the turn is asked about.
+          mayPark: () => true,
+          fixedTier: tierOf,
+          ...(stored.disabledTools.length ? { offTools: new Set(stored.disabledTools) } : {}),
+        })
       }
     }
   }

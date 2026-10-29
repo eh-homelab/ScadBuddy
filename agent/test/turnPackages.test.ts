@@ -6,14 +6,36 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { PluginForwarder } from '../src/plugins/forwarder.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
 import type { LoadedPackage, PackagesForRun } from '../src/plugins/packages/install.js'
-import { declaresRemoteServers, forwardPackageServers, type PackageServers, withoutRemoteServers } from '../src/plugins/packages/mcp.js'
+import {
+  collidingServerNames,
+  declaresRemoteServers,
+  forwardPackageServers,
+  type PackageServers,
+  serverAccess,
+  withoutRemoteServers,
+} from '../src/plugins/packages/mcp.js'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { MockActivityEnvironment } from '@temporalio/testing'
+import { z } from 'zod'
+import { packageServerSource, type AccessRow } from '../src/access/model.js'
+import { AccessResolver } from '../src/access/resolver.js'
+import { memoryAccess } from './support/memoryAccess.js'
 import { buildHarnessOptions } from '../src/harness/run.js'
 import { PluginRefusedError } from '../src/harness/plugins.js'
 import { localPackageServers, PACKAGE_COPY_KEPT_MS, sharePackage, sharedName, sweepPackageCopies } from '../src/temporal/turnPackages.js'
 import { builtinNote, turnServers } from '../src/temporal/turnServers.js'
 import { BUILTIN_SERVER } from '../src/builtins/server.js'
 import type { SessionFiles } from '../src/workspace/store.js'
-import { connectHttp } from '../src/temporal/turnTools.js'
+import {
+  connectHttp,
+  connectInProcess,
+  TURN_TOOL_TIER_ACTIVITY,
+  TURN_TOOLS_ACTIVITY,
+  turnToolActivities,
+  turnToolActivity,
+  type TurnServer,
+  type TurnToolsResult,
+} from '../src/temporal/turnTools.js'
 import { startFakeMcp } from './support/fakeMcp.js'
 
 // Plugin packages in a durable turn (#2320): shared on the payload volume by content
@@ -159,8 +181,8 @@ describe('plugin packages in a durable turn', () => {
   it('starts a local server only for a package approved with allow_refused', async () => {
     const pkg = await fakePackage({ mcpServers: { local: { command: 'node', args: ['${CLAUDE_PLUGIN_ROOT}/s.mjs'] } } })
     const problems: string[] = []
-    expect(localPackageServers([pkg], problems)).toEqual([])
-    const allowed = localPackageServers([{ ...pkg, allowed: true }], problems)
+    expect(localPackageServers([pkg], problems, await serverAccess([pkg]))).toEqual([])
+    const allowed = localPackageServers([{ ...pkg, allowed: true }], problems, await serverAccess([{ ...pkg, allowed: true }]))
     expect(allowed.map((s) => s.name)).toEqual(['plugin_notes_local'])
     expect(allowed[0]!.tierOf('mcp__plugin_notes_local__ping', {})).toBe('outward')
     expect(problems).toEqual([])
@@ -412,5 +434,153 @@ describe('plugin packages in a durable turn', () => {
     expect(urls.length).toBeGreaterThan(0)
     for (const url of urls) expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/p\//)
     ok.release()
+  })
+})
+
+// #4757: a package's MCP servers take their `*` switch at turn start, and servers whose
+// names Claude Code would make equal are none of them offered, in both runtimes.
+describe("a package's MCP servers: their switch and their names (#4757)", () => {
+  const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
+  const off = (pkg: string, server: string): AccessRow => ({ source: packageServerSource(pkg, server), item: '*', access: 'off', updated_by: 'test' })
+
+  async function listedNames(pkg: LoadedPackage, rows: AccessRow[]): Promise<string[]> {
+    const { access } = memoryAccess(rows)
+    const resolver = new AccessResolver(access)
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const load = async (): Promise<PackagesForRun> => ({ paths: [pkg.dir], allowedPaths: [], builtinTools: [], loaded: [pkg], problems: [], release: () => {} })
+    const servers = turnServers({
+      access: resolver,
+      packages: { load, root, localRoot: root, forward: (loaded) => forwardPackageServers(loaded, forwarder, toLoopback, { access: resolver }) },
+    })
+    const activities = turnToolActivities({ sessions: { ownerOf: async (id) => (id === SESSION ? (OWNER as never) : undefined) }, servers })
+    const env = new MockActivityEnvironment({ activityType: TURN_TOOLS_ACTIVITY, workflowExecution: { workflowId: `session-${SESSION}`, runId: 'r' } })
+    const { tools } = (await env.run(activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    return tools.map((t) => t.name)
+  }
+
+  it('a package server switched off is not forwarded and its tools are not listed', async () => {
+    const mcp = await startFakeMcp({})
+    try {
+      const pkg = await fakePackage({ mcpServers: { api: { type: 'http', url: mcp.url } } })
+      const { access } = memoryAccess([off('notes', 'api')])
+      const servers = await forwardPackageServers([pkg], forwarder, toLoopback, { access: new AccessResolver(access) })
+      expect(servers.plugins).toEqual([])
+      expect(servers.servers).toEqual([])
+      expect(servers.problems).toEqual([])
+      expect(await listedNames(pkg, [off('notes', 'api')])).toEqual([])
+      expect(mcp.requests).toEqual([])
+    } finally {
+      await mcp.close()
+    }
+  })
+
+  it('a package server is forwarded with no row (on by default)', async () => {
+    const mcp = await startFakeMcp({})
+    try {
+      const pkg = await fakePackage({ mcpServers: { api: { type: 'http', url: mcp.url } } })
+      const { access } = memoryAccess()
+      const servers = await forwardPackageServers([pkg], forwarder, toLoopback, { access: new AccessResolver(access) })
+      expect(servers.plugins.map((p) => p.name)).toEqual(['plugin_notes_api'])
+      servers.release()
+      expect(await listedNames(pkg, [])).toContain('plugin_notes_api__recall')
+    } finally {
+      await mcp.close()
+    }
+  })
+
+  it('servers named alike through harnessToolName are none of them offered, each said', async () => {
+    const http = { mcpServers: { s: { type: 'http', url: 'https://notes.example/mcp' } } }
+    const dotted = { ...(await fakePackage(http)), name: 'a.b' }
+    const plain = { ...(await fakePackage(http)), name: 'a_b' }
+    expect([...collidingServerNames([dotted, plain]).entries()]).toEqual([
+      [
+        'plugin_a_b_s',
+        [
+          { pkg: 'a.b', server: 's' },
+          { pkg: 'a_b', server: 's' },
+        ],
+      ],
+    ])
+    const servers = await forwardPackageServers([dotted, plain], forwarder, toLoopback)
+    expect(servers.plugins).toEqual([])
+    expect(servers.problems).toEqual([
+      'plugin package a.b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a_b are, so none of them is offered',
+      'plugin package a_b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a.b are, so none of them is offered',
+    ])
+    // One package alone is offered.
+    const alone = await forwardPackageServers([plain], forwarder, toLoopback)
+    expect(alone.plugins.map((p) => p.name)).toEqual(['plugin_a_b_s'])
+    alone.release()
+  })
+
+  it("a local server named like another package's is not started", async () => {
+    const local = { ...(await fakePackage({ mcpServers: { s: { command: 'node', args: ['s.mjs'] } } })), name: 'a.b', allowed: true }
+    const http = { ...(await fakePackage({ mcpServers: { s: { type: 'http', url: 'https://notes.example/mcp' } } })), name: 'a_b' }
+    const problems: string[] = []
+    expect(localPackageServers([local, http], problems, await serverAccess([local, http]))).toEqual([])
+    expect(problems).toEqual(['plugin package a.b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a_b are, so none of them is offered'])
+    const forwarded = await forwardPackageServers([local, http], forwarder, toLoopback)
+    expect(forwarded.plugins).toEqual([])
+    expect(forwarded.problems).toEqual(['plugin package a_b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a.b are, so none of them is offered'])
+  })
+
+  it('a local server switched off is not started', async () => {
+    const pkg = { ...(await fakePackage({ mcpServers: { local: { command: 'node', args: ['s.mjs'] } } })), allowed: true }
+    const { access } = memoryAccess([off('notes', 'local')])
+    const problems: string[] = []
+    const switches = await serverAccess([pkg], new AccessResolver(access))
+    expect(switches.get(packageServerSource('notes', 'local'))).toEqual({ enabled: false, toolTiers: {}, disabledTools: [] })
+    expect(localPackageServers([pkg], problems, switches)).toEqual([])
+    expect(problems).toEqual([])
+    // On by default.
+    expect(localPackageServers([pkg], problems, await serverAccess([pkg], new AccessResolver(memoryAccess().access))).map((s) => s.name)).toEqual([
+      'plugin_notes_local',
+    ])
+  })
+
+  it("a local server's tool takes its stored tier, and an off one is neither listed nor run", async () => {
+    const pkg = { ...(await fakePackage({ mcpServers: { local: { command: 'node', args: ['s.mjs'] } } })), allowed: true }
+    const source = packageServerSource('notes', 'local')
+    const { access } = memoryAccess([
+      { source, item: 'look', access: 'read', updated_by: 'test' },
+      { source, item: 'wipe', access: 'off', updated_by: 'test' },
+    ])
+    const [server] = localPackageServers([pkg], [], await serverAccess([pkg], new AccessResolver(access)))
+    expect(server!.tierOf('mcp__plugin_notes_local__look', {})).toBe('read')
+    expect(server!.tierOf('mcp__plugin_notes_local__other', {})).toBe('outward')
+    expect([...(server!.offTools ?? [])]).toEqual(['wipe'])
+    // The same server over an in-process MCP server with those tools, as the turn lists and calls it.
+    const calls: string[] = []
+    const mcp = () => {
+      const s = new McpServer({ name: 'local', version: '1' })
+      for (const name of ['look', 'wipe']) {
+        s.registerTool(name, { description: name, inputSchema: { x: z.string().optional() } }, async () => {
+          calls.push(name)
+          return { content: [{ type: 'text', text: name }] }
+        })
+      }
+      return s
+    }
+    const inProcess: TurnServer = { ...server!, connect: () => connectInProcess(mcp) }
+    const deps = {
+      sessions: { ownerOf: async (id: string) => (id === SESSION ? (OWNER as never) : undefined) },
+      servers: async () => ({ servers: [inProcess], problems: [], secrets: [], release: () => {} }),
+      approvals: { approved: async () => true },
+    }
+    const env = (type: string) => new MockActivityEnvironment({ activityType: type, activityId: 'tool-t1', workflowExecution: { workflowId: `session-${SESSION}`, runId: 'r' } })
+    const activities = turnToolActivities(deps)
+    const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    expect(tools.map((t) => [t.name, t.tier])).toEqual([['plugin_notes_local__look', 'read']])
+    expect(await env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'plugin_notes_local__look', input: {} })).toEqual({
+      tier: 'read',
+      declared: 'read',
+    })
+    expect(await env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'plugin_notes_local__wipe', input: {} })).toMatchObject({
+      tier: 'write',
+      refused: expect.stringContaining('tool "wipe" of plugin plugin_notes_local is switched off'),
+    })
+    await expect(env('turn:plugin_notes_local__wipe').run(turnToolActivity(deps), {})).rejects.toThrow(/tool "wipe" of plugin plugin_notes_local is switched off/)
+    expect(await env('turn:plugin_notes_local__look').run(turnToolActivity(deps), {})).toBe('look')
+    expect(calls).toEqual(['look'])
   })
 })

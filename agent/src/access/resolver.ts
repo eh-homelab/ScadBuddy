@@ -57,6 +57,14 @@ export class AccessResolver {
     return pluginOverrides(source, this.reader ? await this.reader.rows([source]) : [])
   }
 
+  /** Each source's switch, tool tiers and disabled tools, in one read (a turn's package servers). */
+  async pluginSources(
+    sources: readonly string[],
+  ): Promise<Map<string, { enabled: boolean; toolTiers: Record<string, RiskTier>; disabledTools: string[] }>> {
+    const rows = this.reader && sources.length > 0 ? await this.reader.rows(sources) : []
+    return new Map(sources.map((s) => [s, { enabled: sourceEnabled(s, rows), ...pluginOverrides(s, rows) }]))
+  }
+
   async enabled(source: string): Promise<boolean> {
     return sourceEnabled(source, this.reader ? await this.reader.rows([source]) : [])
   }
