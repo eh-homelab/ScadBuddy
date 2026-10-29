@@ -1,6 +1,11 @@
 import { z } from 'zod'
 import { enterWorktree } from '../builtins/session.js'
+import { offCallItem, offItemReason } from '../access/items.js'
+import { BUILTIN_SOURCES } from '../access/model.js'
+import type { AccessResolver } from '../access/resolver.js'
 import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
+import { OWN_PLUGIN_DIR } from '../harness/ownPlugin.js'
+import { callPluginOf, itemsOfPlugin, OWN_PLUGIN_NAME } from '../plugins/packages/vet.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import { SessionError, type SessionManager } from '../sessions/manager.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -83,8 +88,33 @@ export async function agentTypes(dir?: string): Promise<string[]> {
   return Object.keys(await loadAgentDefinitions(dir))
 }
 
+/** What decides whether a subagent type may run: Settings → Tools & plugins, and the own plugin it is from. */
+type TypeAccess = { access?: Pick<AccessResolver, 'rows'> | undefined; ownPlugin?: string | undefined }
+
+/**
+ * Why a chat may not run as subagent `type` (#4757 Task 6 review I3): the type, or the own
+ * plugin, is switched off, in the call rule's words (access/items.ts `offItemReason`); or the
+ * access cannot be read (fail closed). Undefined when it may, or with no access to read.
+ */
+async function typeRefused(type: string, deps: TypeAccess): Promise<string | undefined> {
+  if (!deps.access) return undefined
+  const plugin = callPluginOf(OWN_PLUGIN_NAME, BUILTIN_SOURCES.ownPlugin, itemsOfPlugin(deps.ownPlugin ?? OWN_PLUGIN_DIR, OWN_PLUGIN_NAME))
+  let rows
+  try {
+    rows = await deps.access.rows([plugin.source])
+  } catch {
+    return `Agent type '${type}' is refused: its Settings → Tools & plugins entry cannot be read`
+  }
+  const off = offCallItem('Agent', { subagent_type: type }, [plugin], rows)
+  return off ? offItemReason(off) : undefined
+}
+
 /** Why an agent() cannot run with these options, or its chat's settings. */
-async function chatSettings(opts: AgentOptions, types: () => Promise<string[]>): Promise<{ model?: string; effort?: string; type?: string } | string> {
+async function chatSettings(
+  opts: AgentOptions,
+  types: () => Promise<string[]>,
+  deps: TypeAccess = {},
+): Promise<{ model?: string; effort?: string; type?: string } | string> {
   if (opts.isolation !== undefined && opts.isolation !== 'worktree') return `isolation must be 'worktree'; got ${JSON.stringify(opts.isolation)}`
   if (opts.isolation === 'worktree') return enterWorktree().text
   if (opts.effort !== undefined && !EFFORTS.includes(opts.effort)) return `effort must be one of ${EFFORTS.join(', ')}; got ${JSON.stringify(opts.effort)}`
@@ -95,6 +125,8 @@ async function chatSettings(opts: AgentOptions, types: () => Promise<string[]>):
     const bare = opts.agentType.replace(/^scadbuddy:/, '')
     const known = await types()
     if (!known.includes(bare)) return `Agent type '${opts.agentType}' not found. Available agents: general-purpose, ${known.join(', ')}`
+    const refused = await typeRefused(bare, deps)
+    if (refused) return refused
     type = bare
   }
   return { ...(opts.model ? { model: opts.model } : {}), ...(opts.effort ? { effort: opts.effort } : {}), ...(type ? { type } : {}) }
@@ -135,14 +167,14 @@ function validator(schema: unknown): (value: unknown) => string | undefined {
 
 export function managerAgents(
   manager: Pick<SessionManager, 'startChild' | 'send' | 'interrupt' | 'edits'> & { events: Pick<EventLog, 'read'> },
-  options: { agentTypes?: () => Promise<string[]> } = {},
+  options: { agentTypes?: () => Promise<string[]> } & TypeAccess = {},
 ): WorkflowAgents {
   const types = options.agentTypes ?? (() => agentTypes())
   return {
     async run(call) {
       const label = call.opts.label ?? call.prompt.split('\n')[0]!.slice(0, 60)
       if (call.signal.aborted) return { ok: false, result: null, error: 'stopped' }
-      const settings = await chatSettings(call.opts, types)
+      const settings = await chatSettings(call.opts, types, options)
       if (typeof settings === 'string') return { ok: false, result: null, error: settings }
       const child = await manager.startChild(call.sessionId, call.owner, { title: `${call.workflow} · ${label}`, tags: ['workflow'], agent: settings })
       await call.onChild?.(child.id)

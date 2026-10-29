@@ -12,8 +12,8 @@ import path from 'node:path'
 import type { SDKMessage, SessionStore } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, ROOT_CONTEXT } from '@opentelemetry/api'
 import { NoUsableCredentialError, type PooledCredential } from '../harness/fallback.js'
-import { BUILTIN_SOURCES, packageServerSource, packageSource, type ToolAccess } from '../access/model.js'
-import { type CallPlugin, skillItem, subagentItem } from '../access/items.js'
+import { type AccessRow, BUILTIN_SOURCES, packageServerSource, packageSource, type ToolAccess } from '../access/model.js'
+import { type CallPlugin, offCallItem, subagentItem } from '../access/items.js'
 import type { PackageAccess } from '../access/resolver.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
 import { liveAccess } from '../access/live.js'
@@ -29,7 +29,7 @@ import type { PluginEndpoint, PluginsForRun } from '../plugins/forwarder.js'
 import type { PackagesForRun } from '../plugins/packages/install.js'
 import { builtinsOffOf, derivedPackage, omitsAny, omittedOf, packageOmitted } from '../plugins/packages/derived.js'
 import { collidingServerNames, localServers, type PackageServers, serverAccess, type ServerAccess, unofferableNameProblem, unofferedLocalServers } from '../plugins/packages/mcp.js'
-import { itemsOfPlugin, OWN_PLUGIN_NAME, type PackageItems } from '../plugins/packages/vet.js'
+import { callPluginOf, itemsOfPlugin, OWN_PLUGIN_NAME, type PackageItems } from '../plugins/packages/vet.js'
 import { harnessToolName, toolPrefix } from '../plugins/registry.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import { withSpan } from '../telemetry/trace.js'
@@ -403,8 +403,8 @@ export class TurnRunner {
       // The plugins a Skill, Agent or Task call may name, their items from the loaded pins
       // (never a stored review's), so each call is refused when it names one that is off.
       const callPlugins: CallPlugin[] = [
-        ...inTurn.map((p) => callPlugin(p.name, packageSource(p.name), loadedItems.get(p.dir)!)),
-        ...(ownPlugin !== undefined ? [callPlugin(OWN_PLUGIN_NAME, BUILTIN_SOURCES.ownPlugin, ownItems ?? itemsOfPlugin(this.deps.ownPlugin!, OWN_PLUGIN_NAME))] : []),
+        ...inTurn.map((p) => callPluginOf(p.name, packageSource(p.name), loadedItems.get(p.dir)!)),
+        ...(ownPlugin !== undefined ? [callPluginOf(OWN_PLUGIN_NAME, BUILTIN_SOURCES.ownPlugin, ownItems ?? itemsOfPlugin(this.deps.ownPlugin!, OWN_PLUGIN_NAME))] : []),
       ]
       const callBuiltins = [...new Set(allowedLoaded.flatMap((p) => p.builtinTools))].map((name) => ({
         name,
@@ -510,7 +510,20 @@ export class TurnRunner {
       )
       // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
       const model = session.agentModel ?? settingModel
-      const agentDefinition = session.agentType ? (await loadAgentDefinitions())[session.agentType] : undefined
+      // Not while that subagent, or the own plugin, is switched off (#4757 Task 6 review I3): the
+      // chat's next turn runs as no subagent rather than as one Settings turned off.
+      const ownCall = callPlugins.find((p) => p.source === BUILTIN_SOURCES.ownPlugin)
+      const ownOff: AccessRow[] = [...(itemAccess.get(BUILTIN_SOURCES.ownPlugin)?.off.subagents ?? [])].map((n) => ({
+        source: BUILTIN_SOURCES.ownPlugin,
+        item: subagentItem(n),
+        access: 'off',
+        updated_by: '',
+      }))
+      const typeOff =
+        session.agentType != null &&
+        this.deps.ownPlugin !== undefined &&
+        (ownCall === undefined || offCallItem('Agent', { subagent_type: session.agentType }, [ownCall], ownOff) !== undefined)
+      const agentDefinition = session.agentType && !typeOff ? (await loadAgentDefinitions())[session.agentType] : undefined
       // The http_request tool (#827): on unless `builtin:http` is switched off, or its
       // item is `off`, in ai_access (#2171); an item set to a tier is its tier. Its
       // saved bodies live in Postgres, so any replica serves them (#2374), and it
@@ -765,17 +778,6 @@ export class TurnRunner {
           recordMemoryActivity({ audit: this.deps.audit, events: this.deps.events }, session, turnId, activity, secrets),
       })
     return { hooks, recallMaxQueryChars }
-  }
-}
-
-/** A loaded plugin as the call rule sees it (access/items.ts `CallPlugin`): its items and aliases from what it holds. */
-function callPlugin(name: string, source: string, items: PackageItems): CallPlugin {
-  return {
-    name,
-    source,
-    items: [...[...items.skills.keys()].map(skillItem), ...[...items.subagents.keys()].map(subagentItem)],
-    // The whole frontmatter names, never a review's cut ones.
-    aliases: Object.fromEntries(items.declared),
   }
 }
 

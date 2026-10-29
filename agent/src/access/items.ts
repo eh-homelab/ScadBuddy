@@ -106,9 +106,33 @@ export function namesItem(tool: string): boolean {
  * `strings -n 20 claude | grep -o 'function RTe(e){.\{120\}'`:
  * `function RTe(e){return e.normalize("NFKC").toLowerCase().replace(/[\p{White_Space}\p{Pd}_]+/gu,"")}`,
  * imported by the Agent tool's chunk.
+ *
+ * Case is folded only in the BMP (#4757 Task 6 review m3): Node 24 has Unicode 17, Python
+ * 3.14's `unicodedata` Unicode 16, and they differ only in the case mappings of letters past
+ * the BMP (the U+16EA0 block, new in 17; measured over every code point). A name holding
+ * such a letter, or a code point either runtime has unassigned, is `unsureAgentType`: the
+ * call rule then reaches every subagent instead of comparing.
  */
 export function agentTypeForm(name: string): string {
-  return name.normalize('NFKC').toLowerCase().replace(/[\p{White_Space}\p{Pd}_]+/gu, '')
+  let out = ''
+  let run = ''
+  for (const c of name.normalize('NFKC')) {
+    if (c.codePointAt(0)! > 0xffff) {
+      out += run.toLowerCase() + c
+      run = ''
+    } else run += c
+  }
+  // Final sigma too: whether a sigma is final hangs on the letter before it being cased, which the two
+  // Unicode versions also differ on (U+0295); `ς` as `σ` only makes more names alike (fail closed).
+  return (out + run.toLowerCase()).replace(/[\p{White_Space}\p{Pd}_]+/gu, '').replaceAll('\u03C2', '\u03C3')
+}
+
+/** Whether an agent type holds a letter past the BMP or an unassigned code point (`agentTypeForm`). */
+export function unsureAgentType(name: string): boolean {
+  for (const c of name.normalize('NFKC')) {
+    if (/\p{Cn}/u.test(c) || (c.codePointAt(0)! > 0xffff && /\p{L}/u.test(c))) return true
+  }
+  return false
 }
 
 /**
@@ -160,7 +184,9 @@ export function offCallItem(tool: string, input: unknown, plugins: readonly Call
     const at = called.indexOf(':')
     const head = at > 0 ? called.slice(0, at) : undefined
     const spellings = [called, ...(head !== undefined && reaches(call.kind, head, plugin.name) ? [called.slice(at + 1)] : [])]
-    const itemNamed = (name: string) => spellings.some((as) => reaches(call.kind, as, name) || reaches(call.kind, as, `${plugin.name}:${name}`))
+    // An agent type the two runtimes might fold apart reaches every subagent (fail closed).
+    const unsure = call.kind === 'subagent' && unsureAgentType(called)
+    const itemNamed = (name: string) => unsure || spellings.some((as) => reaches(call.kind, as, name) || reaches(call.kind, as, `${plugin.name}:${name}`))
     // An alias key is the loaded pin's whole frontmatter name, or a stored review's cut one.
     const aliasNamed = (key: string) => spellings.some((as) => reaches(call.kind, as, key) || reaches(call.kind, cutName(as), key))
     const direct = plugin.items.filter((id) => id.startsWith(prefix) && itemNamed(id.slice(prefix.length)))

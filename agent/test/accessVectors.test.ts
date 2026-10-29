@@ -241,6 +241,29 @@ function build(): Vectors {
       // JS trim() also removes U+FEFF, which Python's str.strip() keeps: a port trims by the JS set.
       { name: 'a skill name with a byte order mark before it', tool: 'Skill', input: { skill: '\uFEFFpa:jot\u3000' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: off(PA, 'skill:jot') },
       { name: 'a switch reaches only a name the plugin has', tool: 'Agent', input: { subagent_type: 'general-purpose' }, plugins: PLUGINS, rows: [row(PA, '*', 'off')], expect: null },
+      // Task 6 review I1: the plugins in the turn's order (packages, then the own plugin), the first that refuses names the reason.
+      {
+        name: 'one name off in a package and in the own plugin: the package is named',
+        tool: 'Skill',
+        input: { skill: 'print' },
+        plugins: [{ name: 'pa', source: PA, items: ['skill:print'], aliases: {} }, PLUGINS[2]!],
+        rows: [row(OWN, 'skill:print', 'off'), row(PA, 'skill:print', 'off')],
+        expect: off(PA, 'skill:print'),
+      },
+      // Task 6 review m1: an alias key over the cap is compared whole; a call that differs from it past the cap names another.
+      { name: 'a name that differs from an alias over the cap only past it', tool: 'Agent', input: { subagent_type: `pa:${OVER.slice(0, 128)}zzz` }, plugins: [PA_LONG], rows: [row(PA, 'subagent:review:deep', 'off')], expect: null },
+      // Task 6 review m7: JS trim() trims U+2028, not U+0085 nor \x1c (Python's str.strip() differs on all three).
+      { name: 'a skill name between line separators', tool: 'Skill', input: { skill: ' pa:jot ' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: off(PA, 'skill:jot') },
+      { name: 'a skill name after a next line is another name', tool: 'Skill', input: { skill: '\u0085pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: null },
+      { name: 'a skill name after a file separator is another name', tool: 'Skill', input: { skill: '\u001Cpa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: null },
+      { name: 'a subagent type with a hyphen and a next line in it', tool: 'Agent', input: { subagent_type: 'pa:re‐view\u0085er' }, plugins: PLUGINS, rows: [row(PA, 'subagent:reviewer', 'off')], expect: off(PA, 'subagent:reviewer') },
+      // Task 6 review m3: case is folded only where both runtimes' Unicode agree (the BMP); an agent type holding a letter
+      // past it, or a code point either one has unassigned, reaches every subagent of each plugin (fail closed).
+      { name: 'an agent type with a letter past the BMP reaches every subagent', tool: 'Agent', input: { subagent_type: 'pb:\u{10400}' }, plugins: PLUGINS, rows: [row(PB, 'subagent:reviewer', 'off')], expect: off(PB, 'subagent:reviewer') },
+      { name: 'an agent type with a Unicode 17 letter reaches every subagent', tool: 'Agent', input: { subagent_type: 'x\u{16EA0}' }, plugins: PLUGINS, rows: [row(OWN, 'subagent:print-analyst', 'off')], expect: off(OWN, 'subagent:print-analyst') },
+      { name: 'an agent type with an unassigned code point reaches every subagent', tool: 'Agent', input: { subagent_type: 'x\u{E0080}' }, plugins: PLUGINS, rows: [row(PA, 'subagent:review:deep', 'off')], expect: off(PA, 'subagent:review:deep') },
+      { name: 'a final sigma is a sigma (its context differs between Unicode versions)', tool: 'Agent', input: { subagent_type: '\u0295\u03A3' }, plugins: [{ name: 'pz', source: 'package:pz', items: ['subagent:\u0295\u03C3'], aliases: {} }], rows: [row('package:pz', 'subagent:\u0295\u03C3', 'off')], expect: off('package:pz', 'subagent:\u0295\u03C3') },
+      { name: 'an agent type with an emoji is compared as it is', tool: 'Agent', input: { subagent_type: '\u{1F916}' }, plugins: PLUGINS, rows: [row(PA, 'subagent:reviewer', 'off')], expect: null },
     ],
   }
 }

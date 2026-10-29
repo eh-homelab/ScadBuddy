@@ -175,9 +175,13 @@ class TurnPackage:
     builtin_tools: list[str] = field(default_factory=list)
     # Its skills and subagents (``skill:<name>``, ``subagent:<name>``) and their aliases, from
     # the loaded pin (#4757): the segment runner refuses a Skill or Agent call naming an off
-    # one (access.py ``off_call_item``). A listing from an older agent has neither.
+    # one (access.py ``off_call_item``), the aliases keyed by whole frontmatter names, for
+    # matching only. A listing from an older agent has neither.
     items: list[str] = field(default_factory=list)
     aliases: dict[str, list[str]] = field(default_factory=dict)
+    # The built-ins it names, before the listing leaves out the switched-off ones
+    # (``builtin_tools``): a Skill, Agent or Task call reads their access per call.
+    named_builtins: list[str] = field(default_factory=list)
 
 
 @dataclass

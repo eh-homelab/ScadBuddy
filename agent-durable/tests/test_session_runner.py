@@ -13,6 +13,7 @@ import dataclasses
 import hashlib
 import os
 import shutil
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
@@ -54,8 +55,9 @@ from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.credentials import Credential, credential_aad
 from scadbuddy_durable.gate.names import PENDING_INPUT_QUERY, RESPOND_UPDATE
 from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
-from scadbuddy_durable.session import tools
-from scadbuddy_durable.session.models import BUDGET_EXHAUSTED, ImageRef
+from scadbuddy_durable.session import access, tools
+from scadbuddy_durable.session.events import translate
+from scadbuddy_durable.session.models import BUDGET_EXHAUSTED, ImageRef, TurnPackage
 from scadbuddy_durable.session.package_hash import hash_tree
 from scadbuddy_durable.session.runner import (
     DURABLE_PREFIX,
@@ -65,17 +67,21 @@ from scadbuddy_durable.session.runner import (
     PLUGIN_REJECTION,
     VIEW_IMAGES_TOOL,
     VIEW_TOOL_IMAGES_TOOL,
+    CallAccess,
     HeldText,
     Image,
     ScadBuddyRunner,
     SegmentCalls,
     TurnSettings,
+    call_builtins_of,
+    call_plugins_of,
     image_problem,
     image_size,
     merged_hooks,
     own_call_plugin,
     own_plugin_copy,
     same_subagent,
+    sweep_own_plugin_copies,
     tool_images_loader,
     view_tool_images_tool,
     with_refusals,
@@ -587,11 +593,18 @@ async def _segment_options(
     *,
     plugin_dir: str | None = None,
     agent: tuple[str | None, str | None, str | None] | None = None,
+    agents_dir: str | None = None,
 ) -> dict[str, Any]:
     await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
     recording = Recording()
     runner = ScadBuddyRunner(
-        connect, KEK, cwd=str(tmp_path), plugin_dir=plugin_dir, make_runner=recording
+        connect,
+        KEK,
+        cwd=str(tmp_path),
+        plugin_dir=plugin_dir,
+        agents_dir=agents_dir,
+        own_plugin_root=str(tmp_path / "own"),
+        make_runner=recording,
     )
     async with running(temporal_env, connect, runner) as (client, queue):
         sid = await insert_session(agent_db)
@@ -1969,3 +1982,180 @@ def test_own_call_plugin_names_its_items_as_the_agent_does(tmp_path: Path) -> No
         "subagent:model-author",
         "subagent:print-analyst",
     )
+
+
+# ---- #4757 Task 6 review, fix round 1 ----
+
+
+def test_call_plugins_put_the_packages_before_the_own_plugin(tmp_path: Path) -> None:
+    """I1: the classic turn's order (turnRunner.ts callPlugins), so the first plugin that
+    refuses, and so the reason, is the same in both runtimes."""
+    own = own_call_plugin(str(_own_plugin(tmp_path)), str(OWN_AGENTS))
+    pkg = TurnPackage("pa", f"{'1' * 64}/pa", "sha256:" + "1" * 64, items=["skill:print"])
+    plugins = call_plugins_of(own, [pkg])
+    assert [p.name for p in plugins] == ["pa", "scadbuddy"]
+    rows = [
+        access.AccessRow("builtin:own-plugin", "skill:print", "off", "browser:browser"),
+        access.AccessRow("package:pa", "skill:print", "off", "browser:browser"),
+    ]
+    off = access.off_call_item("Skill", {"skill": "print"}, plugins, rows)
+    assert off == access.OffCallItem("package:pa", "skill:print")
+
+
+def test_own_call_plugin_keeps_a_frontmatter_name_over_the_cap_whole(tmp_path: Path) -> None:
+    """m1: alias keys are whole frontmatter names, as the classic call rule has them."""
+    plugin = _own_plugin(tmp_path)
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    over = "deep-" * 40
+    (agents / "deep.md").write_text(f"---\nname: {over}\ndescription: d\n---\nD.\n")
+    assert own_call_plugin(str(plugin), str(agents)).aliases == {
+        f"subagent:{over}": ("subagent:deep",)
+    }
+
+
+async def test_a_packages_builtin_skill_is_read_per_call(agent_db: Conn, connect: Connect) -> None:
+    """I2 (Task 5 review M4): an allowed package that names Skill gives every Skill call that
+    built-in's access, read as each call is made: off refuses it in a classic turn's words."""
+    judge = CallAccess(connect, [], {"Skill": ["notes"]}).check
+    call = {"tool_name": "Skill", "tool_input": {"skill": "anything"}}
+    assert await judge(call) == {}  # no row: outward, which a durable call cannot ask (listed)
+    await agent_db.execute(
+        "INSERT INTO ai_access (source, item, access, updated_by)"
+        " VALUES ('package:notes', 'builtin:Skill', 'off', 'browser:browser')"
+    )
+    denied = await judge(call)
+    assert denied["hookSpecificOutput"]["permissionDecisionReason"] == (
+        "Skill is disabled in Settings → Tools & plugins; the user can turn it back on there"
+    )
+    assert await judge({"tool_name": "Agent", "tool_input": {"subagent_type": "x"}}) == {}
+    await agent_db.execute("UPDATE ai_access SET access = 'write' WHERE source = 'package:notes'")
+    assert await judge(call) == {}
+
+
+def test_builtin_access_is_the_strictest_of_the_packages_naming_it() -> None:
+    rows = [
+        access.AccessRow("package:a", "builtin:Skill", "read", "b"),
+        access.AccessRow("package:b", "builtin:Skill", "write", "b"),
+        access.AccessRow("package:c", "builtin:Skill", "bogus", "b"),
+    ]
+    assert access.builtin_access("Skill", ["a", "b"], rows) == "write"
+    assert access.builtin_access("Skill", ["a", "c"], rows) == "outward"  # no tier: outward
+    assert access.builtin_access("Skill", [], rows) == "outward"
+
+
+async def test_the_call_hook_names_a_packages_builtins_from_its_listing(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """I2: the runner hands the call hook each allowed package's named built-ins (before the
+    listing's switched-off filter), so one off at turn start and back on mid-turn reads right."""
+    pkg = TurnPackage(
+        "notes", "x", "sha256:" + "0" * 64, allowed=True, builtin_tools=[], named_builtins=["Skill"]
+    )
+    other = TurnPackage("plain", "y", "sha256:" + "0" * 64, named_builtins=["Skill"])
+    assert call_builtins_of([pkg, other]) == {"Skill": ["notes"]}
+    old = TurnPackage("old", "z", "sha256:" + "0" * 64, allowed=True, builtin_tools=["Agent"])
+    assert call_builtins_of([old]) == {"Agent": ["old"]}  # a listing from an older agent
+
+
+async def test_a_call_without_a_tool_use_id_is_judged_too() -> None:
+    """m2: fail closed whatever Claude Code sends."""
+    asked: list[Any] = []
+
+    async def judge(data: Any) -> dict[str, Any]:
+        asked.append(data)
+        return {"hookSpecificOutput": {"permissionDecision": "deny"}}
+
+    started: Any = SegmentCalls([], judge).hooks()["PreToolUse"][0].hooks[0]
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        answer = await started({"tool_name": "Skill", "tool_input": {"skill": "x"}}, None, None)
+    finally:
+        _EMIT.reset(token)
+    assert answer["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert len(asked) == 1 and seen == []
+
+
+async def test_a_workflow_agents_type_switched_off_runs_as_no_subagent(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """I3: a Workflow agent's chat whose type is an off subagent does not run as it, from the
+    next segment on; on, it does."""
+    plugin = str(_own_plugin(tmp_path))
+
+    async def options() -> dict[str, Any]:
+        await agent_db.execute("DELETE FROM ai_credentials")
+        made = await _segment_options(
+            temporal_env,
+            agent_db,
+            connect,
+            tmp_path,
+            plugin_dir=plugin,
+            agent=(None, None, "print-analyst"),
+            agents_dir=str(OWN_AGENTS),
+        )
+        return dict(made["extra_options"])
+
+    assert (await options())["extra_args"] == {"agent": "print-analyst"}
+    await agent_db.execute(
+        "INSERT INTO ai_access (source, item, access, updated_by)"
+        " VALUES ('builtin:own-plugin', 'subagent:print-analyst', 'off', 'browser:browser')"
+    )
+    assert "extra_args" not in await options()
+    await agent_db.execute("UPDATE ai_access SET item = '*' WHERE source = 'builtin:own-plugin'")
+    assert "extra_args" not in await options()
+
+
+async def test_a_failed_own_plugin_copy_tells_the_session(tmp_path: Path) -> None:
+    """m4: as a classic turn says it (a plugin_unavailable error event), not only a log line."""
+    plugin = _own_plugin(tmp_path)
+    blocked = tmp_path / "blocked"
+    blocked.write_text("a file, not a folder")
+    runner = ScadBuddyRunner(
+        None,  # type: ignore[arg-type]
+        KEK,
+        cwd=str(tmp_path),
+        plugin_dir=str(plugin),
+        own_plugin_root=str(blocked / "own"),
+    )
+    settings = TurnSettings(
+        long_edge=1, model=None, own_plugin=True, own_off=frozenset({"skill:print"})
+    )
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        assert runner._own_plugin("session-x", settings) is None
+    finally:
+        _EMIT.reset(token)
+    [event] = seen
+    assert event["type"] == "plugin_unavailable"
+    assert event["message"].startswith("ScadBuddy's own plugin was not loaded: ")
+    [panel] = translate("s", event, {})
+    assert (panel["type"], panel["code"]) == ("error", "plugin_unavailable")
+    assert panel["message"] == event["message"]
+
+
+def test_own_plugin_copies_are_swept(tmp_path: Path) -> None:
+    """m5: as the agent sweeps its package copies (turnPackages.ts sweepPackageCopies): a copy
+    no segment used for a week, and a half-made one after an hour; a used one is kept."""
+    plugin = tmp_path / "scadbuddy"
+    shutil.copytree(OWN_SKILLS, plugin / "skills")
+    root = tmp_path / "own"
+    used = Path(own_plugin_copy(str(plugin), frozenset({"skill:print"}), str(root))).parent
+    stale = root / ("e" * 64)
+    (stale / "scadbuddy").mkdir(parents=True)
+    half = root / ".tmp-dead"
+    half.mkdir()
+    fresh = root / ".tmp-live"
+    fresh.mkdir()
+    now = time.time()
+    week = 7 * 24 * 3600
+    os.utime(stale, (now - week - 60, now - week - 60))
+    os.utime(half, (now - 3700, now - 3700))
+    os.utime(used, (now - week - 60, now - week - 60))
+    # Using a copy touches it, and the sweep runs before it is used.
+    assert Path(own_plugin_copy(str(plugin), frozenset({"skill:print"}), str(root))).parent == used
+    assert sorted(p.name for p in root.iterdir()) == sorted([used.name, ".tmp-live"])
+    later = sweep_own_plugin_copies(str(root), now + week + 120)
+    assert sorted(later) == sorted([used.name, ".tmp-live"])

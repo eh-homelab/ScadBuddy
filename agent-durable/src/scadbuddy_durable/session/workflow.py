@@ -71,6 +71,7 @@ with workflow.unsafe.imports_passed_through():
         RespondRequest,
         validate_respond,
     )
+    from scadbuddy_durable.session import access
     from scadbuddy_durable.session import tools as manifest
     from scadbuddy_durable.session.models import (
         BUDGET_EXHAUSTED,
@@ -118,7 +119,7 @@ ENGINE_PARKED = frozenset({"Bash", "PowerShell"})
 BUILTIN_TIER = "builtin_tier"
 BUILTIN_ACCESS_PATCH = "builtin-access-4757"
 # A classic turn's words for a tool switched off (agent harness/permissions.ts decideLive).
-BUILTIN_OFF = "{} is disabled in Settings → Tools & plugins; the user can turn it back on there"
+BUILTIN_OFF = access.TOOL_OFF
 TURN_TOOLS_TIMEOUT = timedelta(minutes=2)
 # #2581: a session's plugin calls are pinned to the replica that listed them, which keeps
 # its MCP client on each plugin (agent temporal/sessionClients.ts), so a stateful plugin

@@ -193,12 +193,35 @@ def cut_name(text: str) -> str:
 def agent_type_form(name: str) -> str:
     """An agent type as Claude Code 2.1.310 compares it when none is named exactly
     (items.ts ``agentTypeForm``): NFKC, lower case, without White_Space, dashes (Pd) or
-    underscores."""
+    underscores. Case is folded only in the BMP, where Python's Unicode (16 in 3.14) and
+    Node's (17 in Node 24) agree; past it they differ (the U+16EA0 block), so a name with a
+    letter there is ``unsure_agent_type``, as is one with a code point either has unassigned."""
+    out: list[str] = []
+    run: list[str] = []
+    for c in unicodedata.normalize("NFKC", name):
+        if ord(c) > 0xFFFF:
+            out.append("".join(run).lower())
+            out.append(c)
+            run = []
+        else:
+            run.append(c)
+    out.append("".join(run).lower())
+    # Final sigma as items.ts has it: U+03C2 as U+03C3 (whether a sigma is final differs too).
     return "".join(
-        c
-        for c in unicodedata.normalize("NFKC", name).lower()
+        "\u03c3" if c == "\u03c2" else c
+        for c in "".join(out)
         if c != "_" and c not in _WHITE_SPACE and unicodedata.category(c) not in ("Zs", "Pd")
     )
+
+
+def unsure_agent_type(name: str) -> bool:
+    """Whether an agent type holds a letter past the BMP or an unassigned code point
+    (items.ts ``unsureAgentType``): the call rule then reaches every subagent."""
+    for c in unicodedata.normalize("NFKC", name):
+        category = unicodedata.category(c)
+        if category == "Cn" or (ord(c) > 0xFFFF and category.startswith("L")):
+            return True
+    return False
 
 
 def _reaches(kind: str, called: str, name: str) -> bool:
@@ -242,6 +265,8 @@ def off_call_item(
         return any(r.source == source and r.item == item and r.access == "off" for r in rows)
 
     at = called.find(":")
+    # An agent type the two runtimes might fold apart reaches every subagent (fail closed).
+    unsure = kind == "subagent" and unsure_agent_type(called)
     for plugin in plugins:
         spellings = [called]
         if at > 0 and _reaches(kind, called[:at], plugin.name):
@@ -250,7 +275,7 @@ def off_call_item(
         def item_named(
             name: str, plugin: CallPlugin = plugin, spellings: list[str] = spellings
         ) -> bool:
-            return any(
+            return unsure or any(
                 _reaches(kind, s, name) or _reaches(kind, s, f"{plugin.name}:{name}")
                 for s in spellings
             )
@@ -277,6 +302,26 @@ def off_call_item(
         if item is not None:
             return OffCallItem(plugin.source, item)
     return None
+
+
+_STRICTNESS = ("read", "write", "outward", "off")
+
+
+def builtin_access(name: str, packages: Sequence[str], rows: Sequence[AccessRow]) -> str:
+    """A package built-in's access across the packages naming it (agent resolver.ts
+    ``builtin``): each package's ``builtin:<name>`` row, ``outward`` without one (or with no
+    tier), the strictest winning; ``outward`` when no package names it."""
+    item = f"builtin:{name}"
+    each = []
+    for package in packages:
+        source = f"package:{package}"
+        found = next((r.access for r in rows if r.source == source and r.item == item), None)
+        each.append(found if found in TOOL_ACCESS else "outward")
+    return max(each, key=_STRICTNESS.index) if each else "outward"
+
+
+#: A classic turn's words for a tool switched off (agent harness/permissions.ts decideLive).
+TOOL_OFF = "{} is disabled in Settings → Tools & plugins; the user can turn it back on there"
 
 
 def off_item_reason(off: OffCallItem) -> str:

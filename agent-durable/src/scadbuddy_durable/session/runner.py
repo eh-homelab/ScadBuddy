@@ -60,9 +60,10 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import urllib.parse
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -635,6 +636,8 @@ class SegmentCalls:
         name = str(data.get("tool_name") or "")
         call = str(data.get("tool_use_id") or tool_use_id or "")
         if not call or self._workflows(name):
+            if not call and self._judge is not None and name in access.CALL_TOOLS:
+                return await self._judge(data)  # judged whatever Claude Code sends
             return {}
         event: dict[str, Any] = {
             "type": "tool_call",
@@ -779,7 +782,7 @@ def own_call_plugin(plugin_dir: str, agents_dir: str | None) -> access.CallPlugi
     """The own plugin as the call rule sees it (agent turnRunner.ts ``callPlugin`` of
     ``itemsOfPlugin``): its skills by folder, its subagents by file stem (the image keeps
     them outside the plugin, ``agents_dir``), and each frontmatter ``name`` that differs as
-    an alias, cut as a review cuts it."""
+    an alias, whole, as the classic call rule has it (``PackageItems.declared``)."""
     items: list[str] = []
     aliases: dict[str, list[str]] = {}
 
@@ -792,12 +795,12 @@ def own_call_plugin(plugin_dir: str, agents_dir: str | None) -> access.CallPlugi
         items.append(f"skill:{name}")
         declared = frontmatter_name(folder / "SKILL.md")
         if declared is not None and declared != name:
-            alias(f"skill:{access.cut_name(declared)}", f"skill:{name}")
+            alias(f"skill:{declared}", f"skill:{name}")
     for stem, file in _agent_files(os.path.join(plugin_dir, "agents"), agents_dir).items():
         items.append(f"subagent:{stem}")
         declared = frontmatter_name(file)
         if declared is not None and declared != stem:
-            alias(f"subagent:{access.cut_name(declared)}", f"subagent:{stem}")
+            alias(f"subagent:{declared}", f"subagent:{stem}")
     return access.CallPlugin(
         OWN_PLUGIN_NAME,
         access.OWN_PLUGIN_SOURCE,
@@ -809,6 +812,43 @@ def own_call_plugin(plugin_dir: str, agents_dir: str | None) -> access.CallPlugi
 def _off_names(off: frozenset[str], kind: str) -> set[str]:
     prefix = f"{kind}:"
     return {i[len(prefix) :] for i in off if i.startswith(prefix)}
+
+
+#: A copy no segment used for this long is swept, as the agent sweeps its package copies
+#: (turnPackages.ts PACKAGE_COPY_KEPT_MS); a half-made one after TMP_KEPT_S.
+COPY_KEPT_S = 7 * 24 * 3600
+TMP_KEPT_S = 3600
+_COPY_NAME = re.compile(r"[0-9a-f]{64}")
+
+
+def sweep_own_plugin_copies(root: str, now: float | None = None) -> list[str]:
+    """Removes the own plugin's copies under ``root`` no segment used for ``COPY_KEPT_S``
+    (``own_plugin_copy`` touches the one it hands out), and ``.tmp-``/``.sweep-`` folders
+    a worker left half-made, after ``TMP_KEPT_S``. Each is moved aside first, then removed."""
+    at = time.time() if now is None else now
+    try:
+        names = os.listdir(root)
+    except FileNotFoundError:
+        return []
+    removed: list[str] = []
+    for name in names:
+        if _COPY_NAME.fullmatch(name):
+            keep = COPY_KEPT_S
+        elif name.startswith((".tmp-", ".sweep-")):
+            keep = TMP_KEPT_S
+        else:
+            continue
+        path = os.path.join(root, name)
+        try:
+            if not os.path.isdir(path) or at - os.lstat(path).st_mtime < keep:
+                continue
+            aside = os.path.join(root, f".sweep-{uuid.uuid4().hex}")
+            os.rename(path, aside)
+        except OSError:
+            continue
+        shutil.rmtree(aside, ignore_errors=True)
+        removed.append(name)
+    return removed
 
 
 def own_plugin_copy(plugin_dir: str, off: frozenset[str], root: str) -> str:
@@ -832,6 +872,7 @@ def own_plugin_copy(plugin_dir: str, off: frozenset[str], root: str) -> str:
         return plugin_dir
     base = os.path.basename(os.path.normpath(plugin_dir))
     os.makedirs(root, exist_ok=True)
+    sweep_own_plugin_copies(root)
     tmp = os.path.join(root, f".tmp-{uuid.uuid4().hex}")
     try:
         made = os.path.join(tmp, base)
@@ -852,6 +893,7 @@ def own_plugin_copy(plugin_dir: str, off: frozenset[str], root: str) -> str:
                 return False
 
         if matches():
+            os.utime(target)  # used: kept by the sweep
             return kept
         if os.path.lexists(target):
             # Not what its name says: moved aside whole, then replaced.
@@ -867,6 +909,38 @@ def own_plugin_copy(plugin_dir: str, off: frozenset[str], root: str) -> str:
         return kept
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def call_plugins_of(
+    own: access.CallPlugin | None, loaded: Sequence[TurnPackage]
+) -> list[access.CallPlugin]:
+    """The segment's plugins as the call rule sees them, in the classic turn's order
+    (turnRunner.ts ``callPlugins``): each loaded package, then the own plugin while loaded."""
+    return [
+        *(
+            access.CallPlugin(
+                p.name,
+                f"package:{p.name}",
+                tuple(p.items),
+                {k: tuple(v) for k, v in p.aliases.items()},
+            )
+            for p in loaded
+        ),
+        *([own] if own is not None else []),
+    ]
+
+
+def call_builtins_of(loaded: Sequence[TurnPackage]) -> dict[str, list[str]]:
+    """Skill, Agent and Task as the loaded allowed packages name them (the agent's
+    ``named_builtins``, or ``builtin_tools`` from an older listing): each, the packages."""
+    out: dict[str, list[str]] = {}
+    for p in loaded:
+        if not p.allowed:
+            continue
+        for named in sorted(set(p.named_builtins) | set(p.builtin_tools)):
+            if named in access.CALL_TOOLS:
+                out.setdefault(named, []).append(p.name)
+    return out
 
 
 def _deny(reason: str) -> dict[str, Any]:
@@ -888,22 +962,40 @@ class CallAccess:
     keeps a hook's decision for these tools: its ``_guard_hooks`` drops one only for its own
     server's calls and ``tool_activities``."""
 
-    def __init__(self, connect: Connect, plugins: list[access.CallPlugin]) -> None:
+    def __init__(
+        self,
+        connect: Connect,
+        plugins: list[access.CallPlugin],
+        builtins: Mapping[str, Sequence[str]] | None = None,
+    ) -> None:
         self._connect = connect
         self._plugins = plugins
+        # Skill, Agent or Task as an allowed package's built-in, with the packages naming it
+        # (Task 5 review M4): each call also takes that built-in's access (access.py
+        # ``builtin_access``), as a classic turn's seam reads it (agent access/live.ts).
+        self._builtins = dict(builtins or {})
 
     async def check(self, data: Any) -> dict[str, Any]:
         tool = str(data.get("tool_name") or "")
-        if tool not in access.CALL_TOOLS or not self._plugins:
+        packages = list(self._builtins.get(tool, ()))
+        if tool not in access.CALL_TOOLS or not (self._plugins or packages):
             return {}
+        sources = list(
+            dict.fromkeys([*(p.source for p in self._plugins), *(f"package:{n}" for n in packages)])
+        )
         try:
             async with self._connect() as conn:
-                rows = await access.read_rows(conn, [p.source for p in self._plugins])
+                rows = await access.read_rows(conn, sources)
         except Exception as err:
             logger.warning("tool access could not be read for %s: %s", tool, type(err).__name__)
             return _deny(f"{tool} is refused: its Settings → Tools & plugins entry cannot be read")
         off = access.off_call_item(tool, data.get("tool_input"), self._plugins, rows)
-        return {} if off is None else _deny(access.off_item_reason(off))
+        if off is not None:
+            return _deny(access.off_item_reason(off))
+        # Outward runs: a hook cannot park a call (the agent's listing says so to the session).
+        if packages and access.builtin_access(tool, packages, rows) == "off":
+            return _deny(access.TOOL_OFF.format(tool))
+        return {}
 
 
 class ScadBuddyRunner:
@@ -1007,17 +1099,8 @@ class ScadBuddyRunner:
             url = self._subagent_url
         else:
             self._refused_url = None
-        if self._agents is None:
-            self._agents = subagents.load_agents(self._agents_dir)
         token = subagents.token_for(self._kek, session, str(row[2]), row[0], row[1])
-        names = _off_names(off, "subagent")
-        stems = {frontmatter_name(f): stem for stem, f in _agent_files(self._agents_dir).items()}
-        defined = {
-            name: agent
-            for name, agent in self._agents.items()
-            if name not in names and stems.get(name) not in names
-        }
-        extra["agents"] = subagents.with_server(defined, url, token)
+        extra["agents"] = subagents.with_server(self._defined(True, off), url, token)
         # Pre-approved for the subagents that have the server; the main agent has none.
         extra["allowed_tools"] = [*extra.get("allowed_tools", []), f"mcp__{subagents.SERVER}"]
 
@@ -1026,6 +1109,22 @@ class ScadBuddyRunner:
         as a classic turn loads only a cached copy that does (plugins/packages/install.ts).
         One that does not is left out, as the agent leaves out one it cannot load."""
         return [d for _, d in self._loaded_packages(workflow_id, context)]
+
+    def _defined(self, loaded: bool, off: frozenset[str]) -> dict[str, AgentDefinition]:
+        """ScadBuddy's subagent definitions this segment may run, by frontmatter ``name``:
+        none while the own plugin is not loaded (switched off, or no copy), and none switched
+        off (``off``, by file stem or frontmatter ``name``, #4757)."""
+        if not loaded or self._agents_dir is None:
+            return {}
+        if self._agents is None:
+            self._agents = subagents.load_agents(self._agents_dir)
+        names = _off_names(off, "subagent")
+        stems = {frontmatter_name(f): stem for stem, f in _agent_files(self._agents_dir).items()}
+        return {
+            name: agent
+            for name, agent in self._agents.items()
+            if name not in names and stems.get(name) not in names
+        }
 
     def _loaded_packages(
         self, workflow_id: str, context: SegmentContext
@@ -1073,6 +1172,14 @@ class ScadBuddyRunner:
                 "segment of %s: the own plugin is not loaded: no copy without what is off (%s)",
                 workflow_id,
                 type(err).__name__,
+            )
+            # Said to the session as a classic turn says it (turnRunner.ts plugin_unavailable).
+            emit(
+                {
+                    "type": "plugin_unavailable",
+                    "message": "ScadBuddy's own plugin was not loaded: no copy without what is"
+                    f" switched off could be made ({type(err).__name__})",
+                }
             )
             return None
 
@@ -1317,7 +1424,9 @@ class ScadBuddyRunner:
             await self._subagent_tools(session, extra, settings.own_off)
         if settings.effort:
             extra["effort"] = settings.effort
-        if settings.agent_type and settings.agent_type in (self._agents or {}):
+        if settings.agent_type and settings.agent_type in self._defined(
+            own_dir is not None, settings.own_off
+        ):
             # The chat's turns run as that subagent (Claude Code's --agent), as a classic turn's do.
             extra["extra_args"] = {"agent": settings.agent_type}
         plugins = [{"type": "local", "path": own_dir}] if own_dir is not None else []
@@ -1327,25 +1436,15 @@ class ScadBuddyRunner:
             extra["plugins"] = plugins
         # The loaded plugins as the call rule sees them (#4757): each Skill or Agent call is
         # refused while the item it names is off, read as it is made.
-        call_plugins = [
-            *(
-                [own_call_plugin(self._plugin_dir, self._agents_dir)]
-                if own_dir is not None and self._plugin_dir is not None
-                else []
-            ),
-            *(
-                access.CallPlugin(
-                    p.name,
-                    f"package:{p.name}",
-                    tuple(p.items),
-                    {k: tuple(v) for k, v in p.aliases.items()},
-                )
-                for p, _ in loaded
-            ),
-        ]
-        calls = SegmentCalls(
-            list(inp.tool_activities), CallAccess(self._connect, call_plugins).check
+        packages = [p for p, _ in loaded]
+        call_plugins = call_plugins_of(
+            own_call_plugin(self._plugin_dir, self._agents_dir)
+            if own_dir is not None and self._plugin_dir is not None
+            else None,
+            packages,
         )
+        judge = CallAccess(self._connect, call_plugins, call_builtins_of(packages)).check
+        calls = SegmentCalls(list(inp.tool_activities), judge)
         extra["hooks"] = merged_hooks(extra.get("hooks"), calls.hooks())
         out = await self._on_credentials(
             session, workflow_id, inp, attempt, credentials, budget - spent, extra, settings, calls

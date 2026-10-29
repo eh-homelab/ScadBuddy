@@ -73,7 +73,7 @@ describe('plugin packages in a durable turn', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
     const local = await mkdtemp(path.join(os.tmpdir(), 'turn-local-'))
     const shared = await sharePackage(pkg, root, local)
-    expect(shared).toEqual({ name: 'notes', dir: `${sharedName(pkg.contentHash)}/notes`, content_hash: pkg.contentHash, allowed: false, builtin_tools: [], items: ['skill:jot'], aliases: {} })
+    expect(shared).toEqual({ name: 'notes', dir: `${sharedName(pkg.contentHash)}/notes`, content_hash: pkg.contentHash, allowed: false, builtin_tools: [], items: ['skill:jot'], aliases: {}, named_builtins: [] })
     const skill = path.join(root, shared.dir, 'skills', 'jot', 'SKILL.md')
     expect(await readFile(skill, 'utf8')).toContain('Jot it down.')
     // Something else on the shared volume changed it: copied again from the verified cache.
@@ -208,11 +208,22 @@ describe('plugin packages in a durable turn', () => {
     expect(call.packages).toBeUndefined()
     const listing = await servers({ session: 's', owner: OWNER, signal, listing: true })
     expect(listing.packages).toEqual([
-      { name: 'notes', dir: `${sharedName(pkg.contentHash)}/notes`, content_hash: pkg.contentHash, allowed: true, builtin_tools: ['Bash', 'Skill'], items: ['skill:jot'], aliases: {} },
+      {
+        name: 'notes',
+        dir: `${sharedName(pkg.contentHash)}/notes`,
+        content_hash: pkg.contentHash,
+        allowed: true,
+        builtin_tools: ['Bash', 'Skill'],
+        items: ['skill:jot'],
+        aliases: {},
+        named_builtins: ['Bash', 'WebFetch', 'Skill'],
+      },
     ])
     expect(listing.problems).toEqual([
       'plugin package broken was not loaded: refused',
       expect.stringContaining('plugin package notes names WebFetch: a durable session cannot ask you'),
+      // Task 6 review I2: Skill takes its access per call, but a hook cannot park it.
+      'plugin package notes names Skill: a durable session cannot ask you before such a call runs, so there each runs unless it is switched off in Settings → Tools & plugins; a classic session asks you while it is outward',
     ])
     await listing.release()
     await call.release()
@@ -243,7 +254,10 @@ describe('plugin packages in a durable turn', () => {
     expect(listing.notes).toEqual([builtinNote(['Read', 'WebFetch'])])
     expect(listing.notes?.[0]).toContain('Read (mcp__durable__builtin__Read)')
     // Only what nothing provides is left out, and said.
-    expect(listing.problems).toEqual([expect.stringContaining('plugin package notes names Monitor: a durable session cannot ask you')])
+    expect(listing.problems).toEqual([
+      expect.stringContaining('plugin package notes names Monitor: a durable session cannot ask you'),
+      expect.stringContaining('plugin package notes names Skill, Task: a durable session cannot ask you before such a call runs'),
+    ])
     await listing.release()
     // A flow has no session workspace: no built-ins there.
     const flow = await servers({ session: 'flow-x', flow: 'x', owner: OWNER, signal })
@@ -607,6 +621,17 @@ describe("a package's items in a durable turn (#4757)", () => {
     expect(existsSync(path.join(root, shared!.dir, 'agents', 'deep.md'))).toBe(false)
     expect(shared!.items).toEqual(['skill:jot', 'subagent:deep'])
     expect(shared!.aliases).toEqual({ 'subagent:deep-review': ['subagent:deep'] })
+  })
+
+  it('lists an alias over the name cap whole, as the classic call rule matches it (Task 6 review m1)', async () => {
+    const pkg = await fakePackage(undefined)
+    const over = 'deep-'.repeat(40)
+    await mkdir(path.join(pkg.dir, 'agents'), { recursive: true })
+    await writeFile(path.join(pkg.dir, 'agents', 'deep.md'), `---\nname: ${over}\ndescription: reviews\n---\nReview.\n`)
+    const loaded = { ...pkg, contentHash: (await hashTree(pkg.dir)).hash }
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const [shared] = (await listingOver([loaded], [], root)).packages!
+    expect(shared!.aliases).toEqual({ [`subagent:${over}`]: ['subagent:deep'] })
   })
 
   it('one package off, one write: Bash offered in neither runtime', async () => {

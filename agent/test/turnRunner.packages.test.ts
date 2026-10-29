@@ -97,6 +97,19 @@ describe("a classic turn's packages and own plugin (#4757)", () => {
     expect(Object.keys(loaded.hooks)).toEqual(['PreToolUse'])
   })
 
+  it("a Workflow agent's chat whose type is switched off runs as no subagent (Task 6 review I3)", async () => {
+    const run = async (rows: AccessRow[]) => {
+      const rig = await turnRunnerForTest({ ownPlugin: OWN_PLUGIN_DIR, packages: forRun([]), access: rows })
+      const turn = await rig.runner.assemble({ ...rig.session, agentType: 'print-analyst' }, rig.principal)
+      turn.release()
+      return turn.run
+    }
+    expect((await run([])).agent?.name).toBe('print-analyst')
+    expect((await run([row(BUILTIN_SOURCES.ownPlugin, 'subagent:print-analyst', 'off')])).agent).toBeUndefined()
+    expect((await run([row(BUILTIN_SOURCES.ownPlugin, SOURCE_ITEM, 'off')])).agent).toBeUndefined()
+    expect((await run([row(BUILTIN_SOURCES.ownPlugin, 'subagent:model-author', 'off')])).agent?.name).toBe('print-analyst')
+  })
+
   it('the own plugin is loaded as a copy without its disabled subagent', async () => {
     const { turn } = await assemble([], [row(BUILTIN_SOURCES.ownPlugin, 'subagent:print-analyst', 'off'), row(BUILTIN_SOURCES.ownPlugin, 'skill:print', 'off')])
     const own = turn.run.ownPlugin!

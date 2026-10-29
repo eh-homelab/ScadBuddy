@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { isMap, isNode, isScalar, parseDocument, visit } from 'yaml'
 import { declaredConfigs, hookEvents, isInside, isOutsideProblem, noCommand, pluginProblems } from '../../harness/plugins.js'
-import { cutName, skillItem, subagentItem } from '../../access/items.js'
+import { type CallPlugin, cutName, skillItem, subagentItem } from '../../access/items.js'
 import { LISTING_CAPS, storableCut } from '../../access/listings.js'
 import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 
@@ -573,6 +573,17 @@ export function packageItems(root: string, manifest: Record<string, unknown>, fa
  */
 export function itemsOfPlugin(root: string, packageName: string): PackageItems {
   return packageItems(root, declaredConfigs(path.resolve(root)).manifest, packageName)
+}
+
+/** A loaded plugin as the call rule sees it (access/items.ts `CallPlugin`): its items, and its aliases by whole frontmatter name. */
+export function callPluginOf(name: string, source: string, items: PackageItems): CallPlugin {
+  return {
+    name,
+    source,
+    items: [...[...items.skills.keys()].map(skillItem), ...[...items.subagents.keys()].map(subagentItem)],
+    // The whole frontmatter names, never a review's cut ones.
+    aliases: Object.fromEntries(items.declared),
+  }
 }
 
 type ItemsRead = {

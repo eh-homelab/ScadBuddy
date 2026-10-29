@@ -235,11 +235,13 @@ export type TurnPackage = {
    * Its skills and subagents (`skill:<name>`, `subagent:<name>`) and `PackageItems.aliases`,
    * read from the loaded pin, the off ones too (#4757): the segment runner's call rule
    * (agent-durable access.py `off_call_item`) refuses a Skill or Agent call naming an off one.
-   * The aliases are the review's cut names, never the whole frontmatter ones: the rule cuts
-   * the call's name before it compares it with one.
+   * The aliases are keyed by the whole frontmatter names of the loaded pin (`PackageItems.declared`),
+   * as the classic turn's call rule has them: for matching only, never shown.
    */
   items: string[]
   aliases: Record<string, string[]>
+  /** The built-ins it names, before `builtin_tools` leaves out the switched-off ones: a Skill, Agent or Task call reads their access per call. */
+  named_builtins: string[]
 }
 
 export type TurnToolsResult = {

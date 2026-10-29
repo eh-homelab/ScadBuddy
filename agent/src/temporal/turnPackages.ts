@@ -102,8 +102,22 @@ export async function sharePackage(
     allowed: pkg.allowed,
     builtin_tools: pkg.builtinTools.filter((t) => !builtinsOff.has(t)),
     items: [...[...source.items.skills.keys()].map(skillItem), ...[...source.items.subagents.keys()].map(subagentItem)],
-    aliases: Object.fromEntries(source.items.aliases),
+    aliases: Object.fromEntries(source.items.declared),
+    named_builtins: pkg.allowed ? [...pkg.builtinTools] : [],
   }
+}
+
+/** The built-ins every durable turn already offers that a package may name: each call takes the built-in's access in the segment's hook, which cannot park one. */
+const HOOKED = ['Skill', 'Agent', 'Task']
+
+/** What the session is told of an allowed package that names Skill, Agent or Task (#4757 Task 6 review I2), or undefined. */
+export function unaskedBuiltinsNote(pkg: TurnPackage): string | undefined {
+  const named = pkg.named_builtins.filter((t) => HOOKED.includes(t))
+  if (!named.length) return undefined
+  return (
+    `plugin package ${pkg.name} names ${named.join(', ')}: a durable session cannot ask you before such a call runs, so there ` +
+    'each runs unless it is switched off in Settings → Tools & plugins; a classic session asks you while it is outward'
+  )
 }
 
 /** A copy is kept this long after the last turn that shared it (#2395). */

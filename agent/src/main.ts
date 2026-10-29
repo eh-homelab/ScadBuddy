@@ -801,7 +801,7 @@ const background =
         tz: agentTimezone(),
         paths,
         secrets: toolServices.secrets,
-        agents: managerAgents(sessions),
+        agents: managerAgents(sessions, { access: accessResolver }),
         workspace,
       })
     : undefined
