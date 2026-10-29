@@ -82,7 +82,7 @@ export function BrowserOriginsSetting() {
       >
         <CardContent className="space-y-4 py-4">
           <p id="browser-origins-help" className="text-xs text-muted-foreground">
-            For the assistant&rsquo;s own browser (the Playwright plugin in Settings &rarr; Plugins). Sites it may open
+            For the assistant&rsquo;s own browser (the Playwright plugin in Settings &rarr; Tools &amp; plugins). Sites it may open
             without asking, sites it may never open (even if you approve), and anything else asks you in the chat first,
             where you can allow it once, for that chat, or always. One per line: a site such as{' '}
             <code>makerworld.com</code> (https only), all its subdomains as <code>*.example.com</code>, an exact origin
@@ -140,7 +140,7 @@ export function BrowserOriginsSetting() {
         </SaveFooter>
       </form>
       <CardContent className="border-t py-4">
-        <h3 className="text-sm font-medium">Approved in chats</h3>
+        <h5 className="text-sm font-medium">Approved in chats</h5>
         {current.approved.length === 0 ? (
           <p className="mt-1 text-xs text-muted-foreground">None yet. Sites you allow for one chat are listed here.</p>
         ) : (

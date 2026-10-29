@@ -15,15 +15,15 @@ from typing import Any
 
 import pytest
 
+from tests.support.fake_lan import skip_unless
+
 RECORDER_PY = (
     Path(__file__).resolve().parents[2] / "e2e-stack" / "bambuddy-recorder" / "recorder.py"
 )
 RECORDINGS = Path(__file__).parent / "bambuddy" / "recordings"
 FAKE_REPORT = Path(__file__).resolve().parents[2] / "e2e-stack" / "fake-printer" / "report.json"
 
-pytestmark = pytest.mark.skipif(
-    not RECORDER_PY.is_file(), reason=f"{RECORDER_PY} is not in this tree"
-)
+pytestmark = skip_unless([] if RECORDER_PY.is_file() else [f"{RECORDER_PY} is not in this tree"])
 
 
 def _load() -> ModuleType:

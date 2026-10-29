@@ -179,7 +179,7 @@ class TurnPackage:
 class SegmentContext:
     images: list[ImageRef] = field(default_factory=list)
     system_append: str | None = None
-    # The tools Settings → Plugins disabled: the segment runner leaves them undeclared.
+    # The tools Settings → Tools & plugins disabled: the segment runner leaves them undeclared.
     disabled_tools: list[str] = field(default_factory=list)
     # The turn's plugin packages (#2320), which the segment runner loads once each hashes
     # to its pin.
@@ -244,12 +244,12 @@ class MemoryRecalled:
 @dataclass
 class GateSettings:
     """The timers of the session's entries (ai_settings), read when a turn starts, and
-    the tools' Settings → Plugins overrides (#2088), sanitised against the manifest
+    the registry tools' access in ai_access (#2088, #2171), resolved against the manifest
     (tools.sanitise_overrides). Defaulted: a turn an older worker started read none."""
 
     approval_expiry_s: int
     question_expiry_s: int
-    # Raised tiers by tool name: only raises, never lowers.
+    # Every tier that differs from the manifest's, by tool name, raised or lowered.
     tool_tiers: dict[str, str] = field(default_factory=dict)
     disabled_tools: list[str] = field(default_factory=list)
 

@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { AccessStore } from '../src/access/store.js'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import { SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
@@ -91,6 +92,20 @@ describe.skipIf(!TEST_DATABASE_URL)(`warm eviction notifications${TEST_DATABASE_
     received.length = 0
     await settings.setMany({ [builtInToolsSetting('claude')]: { raised: {}, disabled: [] } })
     await expect.poll(() => received).toContain('*')
+  })
+
+  it('an ai_access write tells every cache', async () => {
+    const access = new AccessStore(db.sql)
+    await access.setItem('builtin:scadbuddy', 'get_model', 'read')
+    await expect.poll(() => received).toContain('*')
+    received.length = 0
+    await expect(access.setItem('builtin:scadbuddy', '*', 'read')).rejects.toThrow()
+    // A write that passes the checks but fails in the database (NUL is not valid text) rolls back
+    // with its notification; the next write's is the first any cache hears.
+    await expect(access.setItem('builtin:scadbuddy', 'bad\u0000name', 'read')).rejects.toThrow()
+    await access.setItem('builtin:scadbuddy', 'get_model', 'write')
+    await expect.poll(() => received).toEqual(['*'])
+    expect(await db.sql`SELECT access FROM ai_access WHERE item = 'get_model'`).toEqual([{ access: 'write' }])
   })
 
   it('marking a session done evicts its process here and names it to every replica', async () => {

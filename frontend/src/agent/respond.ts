@@ -12,14 +12,17 @@ export const respondPath = (requestId: string) => `/api/v1/ai/pending-input/${en
 
 /** A copy of the route's `RespondBody`; agent `test/respondBody.panel.test.ts` parses every body built here with it (#1386). */
 export type RespondBody =
-  | { kind: 'approval'; decision: 'approve' | 'deny' }
+  | { kind: 'approval'; decision: 'approve' | 'deny'; input_hash?: string }
   | { kind: 'answer'; answers: Record<string, string> }
   | { kind: 'answer'; choice: string }
   | { kind: 'answer'; text: string }
 
-/** The body for an approval card's decision. */
-export function decisionBody(approve: boolean): RespondBody {
-  return { kind: 'approval', decision: approve ? 'approve' : 'deny' }
+/**
+ * The body for an approval card's decision. With the entry's `input_hash` (#4813), the agent
+ * refuses it (`input_mismatch`) unless it is still the call whose summary the card showed.
+ */
+export function decisionBody(approve: boolean, inputHash?: string | null): RespondBody {
+  return { kind: 'approval', decision: approve ? 'approve' : 'deny', ...(inputHash ? { input_hash: inputHash } : {}) }
 }
 
 /**

@@ -212,6 +212,25 @@ def test_a_backfill_sent_again_with_its_key_is_the_one_claim_end_to_end(
     assert other.json()["id"] != first.json()["id"]
 
 
+def test_a_backfill_starts_a_run_even_when_its_render_finished_and_is_held(
+    client: TestClient, app: FastAPI, pool: Pool
+) -> None:
+    """#4870 answers a plain render with a finished job of its key; a backfill is not
+    one. Its attach follows the run's settling event for the job it recorded, so the
+    render it asks for is a new run, whatever finished job of the key is still held."""
+    output_id = legacy_output(client, app)
+    # The render the output was saved from: done, held, and a plain render's answer.
+    plain = client.post("/api/v1/models/pasted/render", json={"inputs": {"params": {}}})
+    assert plain.status_code == 202, plain.text
+    saved_from = plain.json()["job_id"]
+    assert client.get(f"/api/v1/jobs/{saved_from}").json()["status"] == "done"
+    queued = client.post(f"/api/v1/outputs/{output_id}/backfill")
+    assert queued.status_code == 202, queued.text
+    assert queued.json()["id"] != saved_from
+    assert wait_for_job(client, queued.json()["id"])["status"] == "done"
+    assert attached(client, output_id)["manifest"]
+
+
 def test_an_unknown_output_is_a_404(client: TestClient) -> None:
     assert client.post(f"/api/v1/outputs/{'0' * 32}/backfill").status_code == 404
 

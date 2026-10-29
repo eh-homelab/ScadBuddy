@@ -11,6 +11,7 @@ import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderSta
 import { itemAnchor } from '../components/orders/itemLink'
 import { OrderItemsTable } from '../components/orders/OrderItemsTable'
 import { itemPrice } from '../components/orders/price'
+import { QUANTITY_HINT, parseQuantity } from '../components/orders/quantity'
 import { QuoteEditor } from '../components/orders/QuoteEditor'
 import { refusalItems, refusalText } from '../components/orders/refusal'
 import { ShipmentForm } from '../components/orders/ShipmentForm'
@@ -23,7 +24,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
-import { timeAgo } from '../lib/format'
+import { dueAt, dueDay, timeAgo } from '../lib/format'
 import { formatMoney, toMinor } from '../lib/money'
 import { useAsync } from '../lib/useAsync'
 
@@ -252,7 +253,7 @@ export function OrderPage() {
                   void act(() =>
                     api.updateOrder(order.id, {
                       ...(notes !== null ? { notes } : {}),
-                      ...(due !== null ? { due_at: due ? `${due}T00:00:00Z` : null } : {}),
+                      ...(due !== null ? { due_at: due ? dueAt(due) : null } : {}),
                     }),
                   ).then(() => {
                     setNotes(null)
@@ -267,7 +268,7 @@ export function OrderPage() {
                 <div className="flex flex-wrap items-end gap-2">
                   <div className="flex flex-col gap-1">
                     <Label htmlFor="order-due">Due</Label>
-                    <Input id="order-due" type="date" className="w-40" disabled={ended} value={due ?? (order.due_at ? order.due_at.slice(0, 10) : '')} onChange={(e) => setDue(e.target.value)} />
+                    <Input id="order-due" type="date" className="w-40" disabled={ended} value={due ?? (order.due_at ? dueDay(order.due_at) : '')} onChange={(e) => setDue(e.target.value)} />
                   </div>
                   <Button type="submit" size="sm" variant="outline" disabled={busy || ended || (notes === null && due === null)}>
                     Save details
@@ -498,9 +499,9 @@ function ItemDrawer({
         className="flex flex-wrap items-end gap-2"
         onSubmit={(event) => {
           event.preventDefault()
-          const count = Number(quantity)
-          if (!Number.isInteger(count) || count < 1) {
-            setError('Enter a quantity of 1 or more.')
+          const count = parseQuantity(quantity)
+          if (count === null) {
+            setError(QUANTITY_HINT)
             return
           }
           void run(() => api.updateOrderItem(order.id, item.id, { ...(count !== item.quantity ? { quantity: count } : {}), ...(title.trim() !== item.title ? { title: title.trim() } : {}) }))

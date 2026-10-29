@@ -1,6 +1,8 @@
 import type { Hono } from 'hono'
 import { z } from 'zod'
-import { httpRequestEnabled, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
+import { BUILTIN_SOURCES } from '../access/model.js'
+import { sourceEnabled } from '../access/resolve.js'
+import type { AccessReader, AccessWriter } from '../access/store.js'
 import type { AuditContext } from '../audit/log.js'
 import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
@@ -8,17 +10,17 @@ import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/http-request (#827): turns the assistant's `http_request`
-// tool on or off for session turns. Stored in `ai_settings` under
-// `http_request_enabled`, read at the start of every turn by
-// sessions/manager.ts. ON by default (#827): anything but a stored `false` is
-// on.
+// tool on or off for session turns. It is the `builtin:http` source's switch in
+// `ai_access` (#2171): its `*` row, read at the start of every turn
+// (sessions/turnRunner.ts, temporal/turnServers.ts). ON by default (#827): on
+// unless that row is `off`.
 //
 //   GET /api/v1/ai/settings/http-request   { "enabled": boolean }
 //   PUT /api/v1/ai/settings/http-request   body { "enabled": boolean }
 //
 // The PUT is a settings write (outward, spec §8.1), so it passes guard.ts
 // `uiRequestProblem`: from the UI's origin, through the HTTPS ingress, JSON
-// only. The store audits the write as the UI user (credentials.ts SettingsStore.set).
+// only. The store audits the write as the UI user (access/store.ts AccessStore).
 
 export type SettingsRepo = {
   get<T>(key: string): Promise<T | undefined>
@@ -28,7 +30,7 @@ export type SettingsRepo = {
 
 export type HttpRequestRouteDeps = {
   /** Undefined when there is no database (spec §9). */
-  settings: SettingsRepo | undefined
+  access: (AccessReader & AccessWriter) | undefined
   /** Applies migrations; the routes answer 503 until it resolves true. */
   ready: () => Promise<boolean>
   remoteAddress: RemoteAddress
@@ -48,25 +50,25 @@ export const HTTP_REQUEST_SETTING_PATH = '/api/v1/ai/settings/http-request'
 export function registerHttpRequestRoutes(app: Hono, deps: HttpRequestRouteDeps): void {
   const base = HTTP_REQUEST_SETTING_PATH
 
-  async function repo(): Promise<SettingsRepo | string> {
-    if (!deps.settings) return NO_DATABASE
-    return (await deps.ready()) ? deps.settings : NOT_READY
+  async function repo(): Promise<(AccessReader & AccessWriter) | string> {
+    if (!deps.access) return NO_DATABASE
+    return (await deps.ready()) ? deps.access : NOT_READY
   }
 
   app.get(base, async (c) => {
     const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, WHAT)
     if (problem) return c.json({ detail: problem }, 403)
-    const settings = await repo()
-    if (typeof settings === 'string') return c.json({ detail: settings }, 503)
-    const view: HttpRequestSettingView = { enabled: httpRequestEnabled(await settings.get<unknown>(SETTING_HTTP_REQUEST)) }
+    const access = await repo()
+    if (typeof access === 'string') return c.json({ detail: access }, 503)
+    const view: HttpRequestSettingView = { enabled: sourceEnabled(BUILTIN_SOURCES.http, await access.rows([BUILTIN_SOURCES.http])) }
     return c.json(view)
   })
 
   app.put(base, async (c) => {
     const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress, `changes to ${WHAT}`)
     if (problem) return c.json({ detail: problem }, 403)
-    const settings = await repo()
-    if (typeof settings === 'string') return c.json({ detail: settings }, 503)
+    const access = await repo()
+    if (typeof access === 'string') return c.json({ detail: access }, 503)
     let body: z.infer<typeof PutBody>
     try {
       body = PutBody.parse(await c.req.json())
@@ -77,7 +79,7 @@ export function registerHttpRequestRoutes(app: Hono, deps: HttpRequestRouteDeps)
           : 'body is not valid JSON'
       return c.json({ detail }, 400)
     }
-    await settings.set(SETTING_HTTP_REQUEST, body.enabled, { actor: UI_ACTOR, surface: 'http', clientIp: deps.remoteAddress(c) })
+    await access.setEnabled(BUILTIN_SOURCES.http, body.enabled, { actor: UI_ACTOR, surface: 'http', clientIp: deps.remoteAddress(c) })
     const view: HttpRequestSettingView = { enabled: body.enabled }
     return c.json(view)
   })
@@ -85,16 +87,16 @@ export function registerHttpRequestRoutes(app: Hono, deps: HttpRequestRouteDeps)
 
 declare module '../app.js' {
   interface AppDeps {
-    /** `ai_settings` (credentials.ts SettingsStore); the HTTP request tool's setting (#827) and the other settings routes (session limits #790, routes/sessionLimits.ts, ...) answer 503 without it. */
+    /** `ai_settings` (credentials.ts SettingsStore); the settings routes (session limits #790, routes/sessionLimits.ts, ...) answer 503 without it. */
     settings?: SettingsRepo | undefined
   }
 }
 
-/** The HTTP request tool's setting (#827). */
+/** The HTTP request tool's switch (#827). `deps.access` is declared in app.ts. */
 export const route: RouteModule = {
   register(app, deps) {
     registerHttpRequestRoutes(app, {
-      settings: deps.settings,
+      access: deps.access,
       ready: ready(deps),
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,

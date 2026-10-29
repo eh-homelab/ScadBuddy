@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
+import { migrate, MIGRATIONS } from '../src/db/migrations.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
@@ -103,7 +104,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await store.create({ name: 'mem', url: 'https://hs.example/mcp', secret: TOKEN }, kek)
         await db.sql`UPDATE ai_plugins SET url = 'https://attacker.example/mcp' WHERE name = 'mem'`
         await expect(store.reveal('mem', kek)).rejects.toThrow(SealError)
-        await db.sql`UPDATE ai_plugins SET url = 'https://hs.example/mcp', enabled = true WHERE name = 'mem'`
+        await db.sql`UPDATE ai_plugins SET url = 'https://hs.example/mcp' WHERE name = 'mem'`
+        await store.update('mem', { enabled: true }, kek)
         await expect(store.reveal('mem', otherKek)).rejects.toThrow(SealError)
         // A plugin that cannot be opened is reported and left out, not loaded without its header.
         const loaded = await store.enabled(otherKek)
@@ -155,6 +157,81 @@ describe.skipIf(!TEST_DATABASE_URL)(
         // With the address the check passed, for the forwarder to connect to.
         expect(loaded.plugins.map((p) => [p.plugin.name, p.address])).toEqual([['good', '203.0.113.10']])
         expect(loaded.problems).toEqual([expect.stringMatching(/plugin moved was not loaded: .*169\.254\.169\.254/)])
+      })
+
+      const accessRows = async (name: string) =>
+        db.sql<{ item: string; access: string }[]>`
+          SELECT item, access FROM ai_access WHERE source = ${`remote:${name}`} ORDER BY item`
+
+      it('stores tool_tiers, disabled_tools and enabled in ai_access, and keeps writing them to ai_plugins for one release', async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { c: 'write' } }, kek)
+        expect(await accessRows('mem')).toEqual([
+          { item: '*', access: 'off' },
+          { item: 'c', access: 'write' },
+        ])
+        await store.update('mem', { enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
+        expect(await accessRows('mem')).toEqual([
+          { item: '*', access: 'on' },
+          { item: 'a', access: 'read' },
+          { item: 'b', access: 'off' },
+        ])
+        const [old] = await db.sql<{ enabled: boolean; tool_tiers: unknown; disabled_tools: string[] }[]>`
+          SELECT enabled, tool_tiers, disabled_tools FROM ai_plugins WHERE name = 'mem'`
+        expect(old).toEqual({ enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
+        // Disabled wins over a tier for the same tool.
+        await store.update('mem', { tool_tiers: { a: 'read', b: 'read' } }, kek)
+        expect(await accessRows('mem')).toEqual([
+          { item: '*', access: 'on' },
+          { item: 'a', access: 'read' },
+          { item: 'b', access: 'off' },
+        ])
+      })
+
+      it('enabled() lists a plugin whose ai_access says on, with its tiers and disabled tools from ai_access', async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await store.create({ name: 'other', url: 'https://other.example/mcp' }, kek)
+        await store.update('mem', { enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
+        // The dual-written columns disagree (written past the mirror trigger): ai_access wins, either way.
+        await db.sql`ALTER TABLE ai_plugins DISABLE TRIGGER ai_plugins_mirror_access`
+        await db.sql`UPDATE ai_plugins SET enabled = false, tool_tiers = '{"a":"outward"}', disabled_tools = '{}' WHERE name = 'mem'`
+        await db.sql`UPDATE ai_plugins SET enabled = true WHERE name = 'other'`
+        const { plugins } = await store.enabled(kek)
+        expect(plugins.map((p) => [p.name, p.toolTiers, p.disabledTools])).toEqual([['mem', { a: 'read' }, ['b']]])
+        expect(await store.get('mem')).toMatchObject({ enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
+        expect(await store.get('other')).toMatchObject({ enabled: false })
+      })
+
+      it('a plugin an older replica creates after the copy reads as on with its tiers', async () => {
+        // An older replica writes only the old columns.
+        await db.sql`
+          INSERT INTO ai_plugins (name, kind, url, enabled, tool_tiers, disabled_tools)
+          VALUES ('mem', 'remote_mcp', 'https://hs.example/mcp', true, '{"a":"read","b":"write"}', ${['b']})`
+        const { plugins } = await store.enabled(kek)
+        expect(plugins.map((p) => [p.name, p.toolTiers, p.disabledTools])).toEqual([['mem', { a: 'read' }, ['b']]])
+      })
+
+      it("an older replica's switch-on is seen, and a new replica's partial update keeps it", async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await db.sql`UPDATE ai_plugins SET enabled = true, disabled_tools = ${['x']} WHERE name = 'mem'`
+        expect(await store.get('mem')).toMatchObject({ enabled: true, disabled_tools: ['x'] })
+        await store.update('mem', { tool_tiers: { a: 'read' } }, kek)
+        const [old] = await db.sql<{ enabled: boolean; tool_tiers: unknown; disabled_tools: string[] }[]>`
+          SELECT enabled, tool_tiers, disabled_tools FROM ai_plugins WHERE name = 'mem'`
+        expect(old).toEqual({ enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['x'] })
+        expect(await accessRows('mem')).toEqual([
+          { item: '*', access: 'on' },
+          { item: 'a', access: 'read' },
+          { item: 'x', access: 'off' },
+        ])
+      })
+
+      it('delete forgets the plugin\'s access rows', async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' } }, kek)
+        await store.update('mem', { enabled: true }, kek)
+        await db.sql`INSERT INTO ai_tool_listings (source, tools) VALUES ('remote:mem', '[]')`
+        expect(await store.delete('mem')).toBe(true)
+        expect(await accessRows('mem')).toEqual([])
+        expect(await db.sql`SELECT 1 FROM ai_tool_listings WHERE source = 'remote:mem'`).toHaveLength(0)
       })
 
       it('registers plugins disabled: enabled: true is refused at create', async () => {
@@ -365,6 +442,30 @@ describe.skipIf(!TEST_DATABASE_URL)(
         ])
         expect(JSON.stringify(logged)).toContain('[redacted]')
         expect(JSON.stringify(logged)).not.toContain(TOKEN)
+      })
+    })
+
+    describe('before the access migration', () => {
+      let empty: Database
+      let dropEmpty: () => Promise<void>
+      beforeEach(async () => {
+        ;({ db: empty, drop: dropEmpty } = await throwawayDatabase({ empty: true }))
+      })
+      afterEach(async () => {
+        await dropEmpty()
+      })
+
+      it('a plugin switched on before the migration stays on', async () => {
+        await migrate(
+          empty.sql,
+          MIGRATIONS.filter((m) => m.id < '20261026T2200Z_access'),
+        )
+        await empty.sql`
+          INSERT INTO ai_plugins (name, kind, url, enabled, tool_tiers, disabled_tools)
+          VALUES ('mem', 'remote_mcp', 'https://hs.example/mcp', true, '{"a":"read"}', ${['b']})`
+        await migrate(empty.sql, MIGRATIONS)
+        const { plugins } = await new PluginStore(empty.sql).enabled(kek)
+        expect(plugins.map((p) => [p.name, p.toolTiers, p.disabledTools])).toEqual([['mem', { a: 'read' }, ['b']]])
       })
     })
   },

@@ -208,7 +208,10 @@ export function ActivityDrawer({ id, onClose }: Props) {
                 )}
                 {row.via_tool && (
                   <Row label="Via tool">
-                    <Link to="/settings#plugins" className={LINK}>
+                    {/* Every tool's tier and disable settings, a remote plugin's (`<server>__<tool>`)
+                        and ScadBuddy's own, are in Remote MCP plugins for now: ScadBuddy's own
+                        tools' tables are in that section (`RemotePlugins.tsx`) until they move. */}
+                    <Link to="/settings/tools#remote" className={LINK}>
                       {row.via_tool}
                     </Link>
                   </Row>

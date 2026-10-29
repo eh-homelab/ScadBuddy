@@ -21,6 +21,11 @@ export function syncSummary(result: PrinterSyncResult): string {
   ]
   if (result.lan_linked) parts.push(`${result.lan_linked} LAN links filled`)
   if (result.lan_failed) parts.push(`${result.lan_failed} LAN links not filled`)
+  // #4850 review: such a VP was still imported (its action says how); only its target is unknown.
+  const missing = result.target_missing
+  if (missing) {
+    parts.push(`${missing} ${missing === 1 ? 'virtual printer' : 'virtual printers'} forwarding to a printer not here`)
+  }
   return parts.join(', ')
 }
 

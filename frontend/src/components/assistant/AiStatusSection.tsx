@@ -36,9 +36,9 @@ export function AiStatusSection() {
       {/* #2456 — not "Assistant": it sits inside the Assistant section, and two landmarks
           of one name cannot be told apart. */}
       <CardHeader className="border-b">
-        <h2 id="ai-status-heading" className="font-heading text-sm font-medium">
+        <h4 id="ai-status-heading" className="font-heading text-sm font-medium">
           Assistant status
-        </h2>
+        </h4>
       </CardHeader>
       <CardContent className="space-y-2 text-[13px]">
         <p aria-live="polite" data-testid="ai-status" data-state={state} className="flex flex-wrap items-center gap-1.5">

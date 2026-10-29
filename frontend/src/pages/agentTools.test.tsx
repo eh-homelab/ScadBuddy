@@ -189,8 +189,8 @@ describe('source editor tools', () => {
 })
 
 describe('settings tools', () => {
-  async function seeded() {
-    renderPage(<Shell />)
+  async function seeded(ui = <Shell />) {
+    renderPage(ui, { route: '/settings/general' })
     await waitFor(() =>
       expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('https://bambuddy.internal.nullreference.io'),
     )
@@ -227,6 +227,63 @@ describe('settings tools', () => {
     const pipeline = await bridge.call('set_field', { field: 'pipeline_id', value: '1' })
     expect(!pipeline.ok && pipeline.error.code).toBe('invalid_args')
     expect(JSON.stringify(form)).not.toContain('pipeline_id')
+  })
+
+  it('sets a field in another area, and goes there', async () => {
+    await seeded(
+      <>
+        <Shell />
+        <Where />
+      </>,
+    )
+    expect(screen.getByTestId('where')).toHaveTextContent('/settings/general')
+    expect(await bridge.call('set_field', { field: 'display_unit', value: 'in' })).toMatchObject({ ok: true })
+    expect(screen.getByTestId('where')).toHaveTextContent('/settings/library')
+    expect(screen.getByLabelText('Show dimensions in')).toBeVisible()
+  })
+
+  it("lists Bambuddy's printers for printer_id, and refuses one it does not report", async () => {
+    await seeded()
+    // The targets load after the settings.
+    await waitFor(async () =>
+      expect(await bridge.call('get_form', {})).toMatchObject({
+        ok: true,
+        result: {
+          choices: {
+            printer_id: [
+              { value: '1', name: '3DP-31B-598' },
+              { value: '2', name: '3DP-77A-114' },
+            ],
+          },
+        },
+      }),
+    )
+    const bad = await bridge.call('set_field', { field: 'printer_id', value: '9' })
+    expect(!bad.ok && bad.error.code).toBe('invalid_args')
+    expect(await bridge.call('set_field', { field: 'printer_id', value: '2' })).toMatchObject({ ok: true })
+    expect(screen.getByLabelText('Printer')).toHaveTextContent('3DP-77A-114')
+    // None is a choice too.
+    expect(await bridge.call('set_field', { field: 'printer_id', value: '' })).toMatchObject({ ok: true })
+    expect(screen.getByLabelText('Printer')).toHaveTextContent('None')
+  })
+
+  it('sets the default plate in the Preview section, from its plates only', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    await seeded()
+    await waitFor(async () => {
+      const form = await bridge.call('get_form', {})
+      expect(form.ok && (form.result as { choices: { default_plate: string[] } }).choices.default_plate).toContain(
+        'A1 mini',
+      )
+    })
+    const bad = await bridge.call('set_field', { field: 'default_plate', value: 'No such plate' })
+    expect(!bad.ok && bad.error.code).toBe('invalid_args')
+    expect(await bridge.call('set_field', { field: 'default_plate', value: 'A1 mini' })).toMatchObject({
+      ok: true,
+      result: { saved: false },
+    })
+    expect(screen.getByLabelText('Default plate')).toHaveTextContent('A1 mini')
+    expect(put).not.toHaveBeenCalled()
   })
 
   it("unfolds a folded section to show the agent's edit (#3414)", async () => {

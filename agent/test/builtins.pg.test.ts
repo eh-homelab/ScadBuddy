@@ -2,7 +2,12 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { BUILTIN_SOURCES } from '../src/access/model.js'
+import { AccessStore } from '../src/access/store.js'
+import { UI_ACTOR } from '../src/audit/writes.js'
 import type { Database } from '../src/db.js'
+import { BuiltInPackages, ownPluginEnabled } from '../src/plugins/packages/builtins.js'
+import { OWN_PLUGIN_NAME } from '../src/plugins/packages/vet.js'
 import { type BuiltinResult, GREP_BUDGET_MS } from '../src/builtins/files.js'
 import { BUILTIN_SERVER, builtinServer, type BuiltinContext } from '../src/builtins/server.js'
 import { TASKS_PATH } from '../src/builtins/session.js'
@@ -325,5 +330,32 @@ describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipp
   it('hands a search to the nested query as it was asked', async () => {
     expect((await call('WebSearch', { query: 'openscad' })).text).toBe('Web search results for query: "openscad"')
     expect(searched).toEqual([{ query: 'openscad' }])
+  })
+})
+
+// #2171: ScadBuddy's own plugin is the `builtin:own-plugin` source; its switch is that source's `*` row.
+describe.skipIf(skip !== undefined)(`ScadBuddy's own plugin in ai_access${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  let db: Database
+  let drop: () => Promise<void>
+  beforeEach(async () => {
+    ;({ db, drop } = await throwawayDatabase())
+    expect(await db.ready()).toBe(true)
+  })
+  afterEach(async () => {
+    await drop()
+  })
+
+  it("switching ScadBuddy's own plugin off stores builtin:own-plugin '*' off, and ownPluginEnabled answers false", async () => {
+    const access = new AccessStore(db.sql)
+    const packages = new BuiltInPackages(access)
+    expect(await ownPluginEnabled(access)).toBe(true)
+    expect((await packages.setEnabled(OWN_PLUGIN_NAME, false, { actor: UI_ACTOR, surface: 'http' }))?.enabled).toBe(false)
+    expect(await db.sql`SELECT source, item, access FROM ai_access WHERE source = ${BUILTIN_SOURCES.ownPlugin}`).toEqual([
+      { source: BUILTIN_SOURCES.ownPlugin, item: '*', access: 'off' },
+    ])
+    expect(await ownPluginEnabled(access)).toBe(false)
+    expect((await packages.get(OWN_PLUGIN_NAME))?.enabled).toBe(false)
+    await packages.setEnabled(OWN_PLUGIN_NAME, true, { actor: UI_ACTOR, surface: 'http' })
+    expect(await ownPluginEnabled(access)).toBe(true)
   })
 })

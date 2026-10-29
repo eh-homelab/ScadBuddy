@@ -1,4 +1,7 @@
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
+import { type AccessRow, remoteSource, type ToolAccess } from '../access/model.js'
+import { pluginOverrides, sourceEnabled } from '../access/resolve.js'
+import { forgetSource, updatedBy, writeEnabled, writeTools } from '../access/store.js'
 import { isLoopbackPeer } from '../http/origins.js'
 import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { assertHostAllowed, EgressError, isPrivateAddress, type Resolver, systemResolver } from '../http/egress.js'
@@ -338,7 +341,7 @@ export function validateDisabledTools(tools: readonly string[]): string[] {
     throw new PluginError(`disabled_tools has more than ${MAX_TOOL_ENTRIES} entries`, 400)
   }
   for (const tool of tools) {
-    if (!DISABLED_TOOL_NAME_RE.test(tool)) {
+    if (tool === '*' || !DISABLED_TOOL_NAME_RE.test(tool)) {
       throw new PluginError(`disabled_tools: "${tool}" is not a tool name (1–128 characters, no control characters)`, 400)
     }
   }
@@ -385,6 +388,7 @@ type Row = {
   name: string
   kind: PluginKind
   url: string
+  /** The old columns `enabled`, `tool_tiers` and `disabled_tools` are still written for one release (#2171), never read. */
   enabled: boolean
   auth_header: string | null
   secret_sealed: Buffer | null
@@ -395,21 +399,48 @@ type Row = {
   disabled_tools: string[]
   created_at: Date
   updated_at: Date
+  /** The plugin's `remote:<name>` rows of ai_access (#2171): its enabled flag, tiers and disabled tools. */
+  access_rows: AccessRow[]
 }
 
+// The plugin's ai_access rows, read with its row. The prefix is remoteSource's.
+const ACCESS_ROWS = `(SELECT coalesce(jsonb_agg(jsonb_build_object('source', a.source, 'item', a.item, 'access', a.access,
+    'updated_by', a.updated_by)), '[]'::jsonb)
+  FROM ai_access a WHERE a.source = '${remoteSource('')}' || ai_plugins.name) AS access_rows`
+
 const SUMMARY_COLUMNS = `name, kind, url, enabled, auth_header, kek_id, last4, tool_tiers, disabled_tools,
-  created_at, updated_at`
+  created_at, updated_at, ${ACCESS_ROWS}`
+
+const ALL_COLUMNS = `*, ${ACCESS_ROWS}`
+
+/** The plugin's access as ai_access gives it. */
+function access(row: Pick<Row, 'name' | 'access_rows'>): { enabled: boolean; toolTiers: Record<string, RiskTier>; disabledTools: string[] } {
+  const source = remoteSource(row.name)
+  return { enabled: sourceEnabled(source, row.access_rows), ...pluginOverrides(source, row.access_rows) }
+}
+
+/** `tool_tiers` and `disabled_tools` as ai_access tool rows: a disabled tool is `off`, whatever its tier. */
+function toolRows(tiers: Record<string, RiskTier>, disabled: readonly string[]): Record<string, ToolAccess> {
+  return { ...tiers, ...Object.fromEntries(disabled.map((tool) => [tool, 'off' as const])) }
+}
+
+async function selectRow(tx: TransactionSql, name: string): Promise<Row> {
+  const [row] = await tx.unsafe<Row[]>(`SELECT ${ALL_COLUMNS} FROM ai_plugins WHERE name = $1`, [name])
+  if (!row) throw new Error(`plugin ${name} is gone inside its own transaction`)
+  return row
+}
 
 function summary(row: Omit<Row, 'secret_sealed' | 'dek_sealed'>): PluginSummary {
+  const { enabled, toolTiers, disabledTools } = access(row)
   return {
     name: row.name,
     kind: row.kind,
     url: row.url,
-    enabled: row.enabled,
+    enabled,
     auth_header: row.auth_header,
     secret_last4: row.last4,
-    tool_tiers: row.tool_tiers,
-    disabled_tools: row.disabled_tools,
+    tool_tiers: toolTiers,
+    disabled_tools: disabledTools,
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
     kekId: row.kek_id,
@@ -430,12 +461,8 @@ function sealFor(name: string, url: string, header: string, secret: string, kek:
 }
 
 export function openPlugin(row: Row, kek: Kek | undefined): RemotePlugin {
-  const plugin: RemotePlugin = {
-    name: row.name,
-    url: row.url,
-    toolTiers: row.tool_tiers,
-    disabledTools: row.disabled_tools,
-  }
+  const { toolTiers, disabledTools } = access(row)
+  const plugin: RemotePlugin = { name: row.name, url: row.url, toolTiers, disabledTools }
   if (row.secret_sealed && row.dek_sealed && row.kek_id && row.auth_header) {
     if (!kek) throw new SealError('no key-encryption key is configured to open the plugin secret')
     const value = openSecret(
@@ -521,31 +548,40 @@ export class PluginStore implements PluginRepo {
     } else if (input.auth_header) {
       throw new PluginError('auth_header needs a secret', 400)
     }
-    const rows = await this.sql<Row[]>`
-      INSERT INTO ai_plugins (name, kind, url, enabled, auth_header, secret_sealed, dek_sealed, kek_id, last4,
-                              tool_tiers, disabled_tools)
-      VALUES (${name}, 'remote_mcp', ${url}, false, ${sealed?.header ?? null},
-              ${sealed?.envelope.secretSealed ?? null}, ${sealed?.envelope.dekSealed ?? null},
-              ${sealed?.envelope.kekId ?? null}, ${sealed?.last4 ?? null},
-              ${this.sql.json(tiers)}, ${disabled})
-      ON CONFLICT (name) DO NOTHING
-      RETURNING *`
-    const row = rows[0]
-    if (!row) throw new PluginError(`a plugin named "${name}" already exists`, 409)
-    // A warm Claude Code was spawned with the plugins of its time (spec 2026-10-13 §5.3): every write here tells the caches (sessions/warmEvict.ts).
-    await notifyWarmEvict(this.sql, '*')
-    return summary(row)
+    return this.sql.begin(async (tx) => {
+      // The old columns too, for one release (#2171): an older replica still reads them.
+      const rows = await tx`
+        INSERT INTO ai_plugins (name, kind, url, enabled, auth_header, secret_sealed, dek_sealed, kek_id, last4,
+                                tool_tiers, disabled_tools)
+        VALUES (${name}, 'remote_mcp', ${url}, false, ${sealed?.header ?? null},
+                ${sealed?.envelope.secretSealed ?? null}, ${sealed?.envelope.dekSealed ?? null},
+                ${sealed?.envelope.kekId ?? null}, ${sealed?.last4 ?? null},
+                ${tx.json(tiers)}, ${disabled})
+        ON CONFLICT (name) DO NOTHING
+        RETURNING name`
+      if (rows.length === 0) throw new PluginError(`a plugin named "${name}" already exists`, 409)
+      const source = remoteSource(name)
+      // A row an earlier plugin of this name left behind is not this one's.
+      await forgetSource(tx, source)
+      await writeEnabled(tx, source, false, updatedBy())
+      await writeTools(tx, source, toolRows(tiers, disabled), updatedBy())
+      // A warm Claude Code was spawned with the plugins of its time (spec 2026-10-13 §5.3): every write here tells the caches (sessions/warmEvict.ts).
+      await notifyWarmEvict(tx, '*')
+      return summary(await selectRow(tx, name))
+    })
   }
 
   async update(name: string, patch: PluginPatch, kek: Kek | undefined): Promise<PluginSummary> {
     return this.sql.begin(async (tx) => {
-      const [current] = await tx<Row[]>`SELECT * FROM ai_plugins WHERE name = ${name} FOR UPDATE`
-      if (!current) throw new PluginError(`no plugin named "${name}"`, 404)
+      const [locked] = await tx`SELECT name FROM ai_plugins WHERE name = ${name} FOR UPDATE`
+      if (!locked) throw new PluginError(`no plugin named "${name}"`, 404)
+      const current = await selectRow(tx, name)
+      const stored = access(current)
       const url = patch.url === undefined ? current.url : normalisePluginUrl(patch.url)
-      const tiers = patch.tool_tiers === undefined ? current.tool_tiers : validateToolTiers(patch.tool_tiers)
+      const tiers = patch.tool_tiers === undefined ? stored.toolTiers : validateToolTiers(patch.tool_tiers)
       const disabled =
-        patch.disabled_tools === undefined ? current.disabled_tools : validateDisabledTools(patch.disabled_tools)
-      const enabled = patch.enabled ?? current.enabled
+        patch.disabled_tools === undefined ? stored.disabledTools : validateDisabledTools(patch.disabled_tools)
+      const enabled = patch.enabled ?? stored.enabled
 
       // The secret. Changing the URL or the header name re-binds it, which
       // needs the value typed in again (the stored one is not sent somewhere
@@ -589,38 +625,45 @@ export class PluginStore implements PluginRepo {
           last4: current.last4,
         }
       }
-      const [row] = await tx<Row[]>`
+      // The old columns too, for one release (#2171): an older replica still reads them.
+      await tx`
         UPDATE ai_plugins SET
           url = ${url}, enabled = ${enabled}, tool_tiers = ${tx.json(tiers)}, disabled_tools = ${disabled},
           auth_header = ${secretColumns.auth_header}, secret_sealed = ${secretColumns.secret_sealed},
           dek_sealed = ${secretColumns.dek_sealed}, kek_id = ${secretColumns.kek_id},
           last4 = ${secretColumns.last4}, updated_at = now()
-        WHERE name = ${name}
-        RETURNING *`
-      if (!row) throw new Error('UPDATE ... RETURNING returned no row')
+        WHERE name = ${name}`
+      const source = remoteSource(name)
+      if (patch.enabled !== undefined) await writeEnabled(tx, source, enabled, updatedBy())
+      if (patch.tool_tiers !== undefined || patch.disabled_tools !== undefined) {
+        await writeTools(tx, source, toolRows(tiers, disabled), updatedBy())
+      }
       await notifyWarmEvict(tx, '*')
-      return summary(row)
+      return summary(await selectRow(tx, name))
     })
   }
 
   async delete(name: string): Promise<boolean> {
-    const rows = await this.sql`DELETE FROM ai_plugins WHERE name = ${name}`
-    if (rows.count === 0) return false
-    await notifyWarmEvict(this.sql, '*')
-    return true
+    return this.sql.begin(async (tx) => {
+      const rows = await tx`DELETE FROM ai_plugins WHERE name = ${name}`
+      if (rows.count === 0) return false
+      await forgetSource(tx, remoteSource(name))
+      await notifyWarmEvict(tx, '*')
+      return true
+    })
   }
 
   async reveal(name: string, kek: Kek | undefined): Promise<RemotePlugin | undefined> {
-    const [row] = await this.sql<Row[]>`SELECT * FROM ai_plugins WHERE name = ${name}`
+    const [row] = await this.sql.unsafe<Row[]>(`SELECT ${ALL_COLUMNS} FROM ai_plugins WHERE name = $1`, [name])
     return row ? openPlugin(row, kek) : undefined
   }
 
-  /** Every enabled plugin, opened; one that cannot be opened is reported in `problems`, not loaded. */
+  /** Every plugin ai_access turns on, opened; one that cannot be opened is reported in `problems`, not loaded. */
   async enabled(kek: Kek | undefined): Promise<{ plugins: RemotePlugin[]; problems: string[] }> {
-    const rows = await this.sql<Row[]>`SELECT * FROM ai_plugins WHERE enabled ORDER BY name`
+    const rows = await this.sql.unsafe<Row[]>(`SELECT ${ALL_COLUMNS} FROM ai_plugins ORDER BY name`)
     const plugins: RemotePlugin[] = []
     const problems: string[] = []
-    for (const row of rows) {
+    for (const row of rows.filter((r) => access(r).enabled)) {
       try {
         plugins.push(openPlugin(row, kek))
       } catch (err) {

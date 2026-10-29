@@ -40,13 +40,13 @@ export function McpAuthBanner({ link = false, className = '' }: { link?: boolean
         {link ? (
           <>
             Turn it back on in{' '}
-            <Link to="/settings#assistant" className="underline">
+            <Link to="/settings/mcp#mcp-auth-mode" className="underline">
               Settings
             </Link>
             .
           </>
         ) : (
-          <>Turn it back on under Assistant &rarr; MCP authentication.</>
+          <>Turn it back on under Settings &rarr; MCP access.</>
         )}
       </CardContent>
     </Card>

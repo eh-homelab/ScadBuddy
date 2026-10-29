@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Loader2Icon } from 'lucide-react'
 import { api } from '../api/client'
@@ -16,7 +16,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
-import { timeAgo } from '../lib/format'
+import { dueAt, formatDueDate, timeAgo } from '../lib/format'
 import { DEFAULT_ORDERS_QUERY, isOrdersFiltered, parseOrdersQuery, toOrdersParams, type OrdersQuery } from '../lib/ordersQuery'
 import { useAsync } from '../lib/useAsync'
 
@@ -41,6 +41,8 @@ export function OrdersPage() {
   const [newDue, setNewDue] = useState('')
   const [createBusy, setCreateBusy] = useState(false)
   const [createError, setCreateError] = useState<string | null>(null)
+  // A customer was made in the dialog now open.
+  const madeCustomer = useRef(false)
 
   const onChange = useCallback(
     (next: OrdersQuery, options?: { typing?: boolean }) => setParams(toOrdersParams(next), { replace: options?.typing === true }),
@@ -69,6 +71,16 @@ export function OrdersPage() {
     )
   }
 
+  function closeCreate() {
+    setCreating(false)
+    // The list's names and Customer filter read `customers`: take in a customer made in
+    // the dialog once it closes, never under it (the picker already offers the new one).
+    if (madeCustomer.current) {
+      madeCustomer.current = false
+      customers.reload()
+    }
+  }
+
   async function create() {
     setCreateBusy(true)
     setCreateError(null)
@@ -76,10 +88,9 @@ export function OrdersPage() {
       // A customer made here stays picked when the order then fails, so a retry reuses it.
       const making = picker.value === NEW_CUSTOMER
       const customerId = await picker.resolve()
-      // The list's names and Customer filter read `customers`: take the new one in.
-      if (making) customers.reload()
-      const order = await api.createOrder({ customer_id: customerId, notes: newNotes, due_at: newDue ? `${newDue}T00:00:00Z` : null })
-      setCreating(false)
+      if (making) madeCustomer.current = true
+      const order = await api.createOrder({ customer_id: customerId, notes: newNotes, due_at: newDue ? dueAt(newDue) : null })
+      closeCreate()
       void navigate(`/orders/${order.id}`)
     } catch (err) {
       setCreateError(refusalText(err))
@@ -101,7 +112,7 @@ export function OrdersPage() {
     { key: 'customer', header: 'Customer', className: 'break-words', cell: (order) => names.get(order.customer_id) ?? order.customer_id },
     { key: 'status', header: 'Status', cell: (order) => <OrderStatusBadge status={order.status} onHold={order.on_hold} /> },
     { key: 'created', header: 'Made', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => timeAgo(order.created_at) },
-    { key: 'due', header: 'Due', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => (order.due_at ? dueDate(order.due_at) : '') },
+    { key: 'due', header: 'Due', className: 'whitespace-nowrap text-muted-foreground', cell: (order) => (order.due_at ? formatDueDate(order.due_at) : '') },
   ]
 
   return (
@@ -188,7 +199,7 @@ export function OrdersPage() {
           </div>
         )}
       </div>
-      <Dialog open={creating} onOpenChange={(open) => !open && !createBusy && setCreating(false)}>
+      <Dialog open={creating} onOpenChange={(open) => !open && !createBusy && closeCreate()}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>New order</DialogTitle>
@@ -208,7 +219,7 @@ export function OrdersPage() {
             </p>
           )}
           <DialogFooter>
-            <Button variant="outline" disabled={createBusy} onClick={() => setCreating(false)}>
+            <Button variant="outline" disabled={createBusy} onClick={closeCreate}>
               Cancel
             </Button>
             <Button disabled={createBusy} onClick={() => void create()}>
@@ -220,9 +231,4 @@ export function OrdersPage() {
       </Dialog>
     </div>
   )
-}
-
-/** A due date is a day, stored as that day's UTC midnight: shown as that day everywhere. */
-function dueDate(dueAt: string): string {
-  return new Date(dueAt).toLocaleDateString(undefined, { timeZone: 'UTC' })
 }

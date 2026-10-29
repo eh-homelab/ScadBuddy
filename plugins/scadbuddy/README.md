@@ -59,7 +59,7 @@ token are placeholders, filled in from the plugin's
   ([MCP servers in plugins](https://code.claude.com/docs/en/plugins/components)).
 
 The `/mcp` endpoint and its tools are ScadBuddy's agent sidecar (#251, #261). Mint
-the token in ScadBuddy Settings → Assistant → **MCP access tokens**.
+the token in ScadBuddy Settings → MCP access → **Tokens**.
 
 ## Inside ScadBuddy
 

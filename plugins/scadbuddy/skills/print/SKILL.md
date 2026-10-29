@@ -73,7 +73,7 @@ the LAN when it answers. `list_printers` and `discover_printers` read it. No too
 links a printer over the LAN: its access code is a device credential, typed
 only in Settings > Printers (`PUT /api/v1/printers/{printer_id}/lan` is listed as
 not a tool in `agent/src/tools/coverage.ts`). Send the user there, or open it with
-`browser_navigate` to `/settings#printers`, and never ask for the code in chat.
+`browser_navigate` to `/settings/printing#printers`, and never ask for the code in chat.
 `print_output` takes a registry `printer` (its `id`) in place of
 `printer_id`: the run prints on the Bambuddy printer the row links and is
 recorded with the row. Sent together, `printer_id` decides: a row merged away or

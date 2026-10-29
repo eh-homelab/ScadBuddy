@@ -1,11 +1,24 @@
 import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { Sql } from 'postgres'
+import { BUILTIN_SOURCES } from '../access/model.js'
+import { DEFAULT_ACCESS } from '../access/resolve.js'
+import type { AccessResolver } from '../access/resolver.js'
 import type { AuditSink } from '../audit/log.js'
 import { BACKGROUND_BUILTINS, BUILTIN_SERVER, builtinServer, PROVIDED } from '../builtins/server.js'
 import type { BackgroundTasks } from '../background/service.js'
 import type { NestedQueries } from '../builtins/web.js'
-import { dirBodies, HTTP_READ_TOOL_NAME, HTTP_SERVER, httpRequestEnabled, httpRequestServer, httpTierOf, type SavedBodies, SETTING_HTTP_REQUEST } from '../harness/httpRequest.js'
+import {
+  dirBodies,
+  HTTP_READ_TOOL_NAME,
+  HTTP_SERVER,
+  HTTP_TOOL,
+  HTTP_TOOL_NAME,
+  httpAccessTierOf,
+  httpRequestServer,
+  httpTierOf,
+  type SavedBodies,
+} from '../harness/httpRequest.js'
 import { PgHttpBodies } from '../sessions/httpBodies.js'
 import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
@@ -85,7 +98,8 @@ export async function sweepTurnDirs(root: string, sql: Sql, now = Date.now()): P
 export type TurnServerDeps = {
   /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`). */
   remotePlugins?: (() => Promise<PluginsForRun>) | undefined
-  settings?: { get<T>(key: string): Promise<T | undefined> } | undefined
+  /** Tool access (#2171, ai_access): http_request's switch and tier. Defaults without it. */
+  access?: Pick<AccessResolver, 'entry'> | undefined
   /**
    * The headless browser's lists and the sessions' approved origins (#982,
    * browser/store.ts): the remote plugins' browser_* calls are judged by them, as a
@@ -215,7 +229,11 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       })
     }
     const http = deps.httpRequest
-    if (http && httpRequestEnabled(await deps.settings?.get<unknown>(SETTING_HTTP_REQUEST))) {
+    // On unless `builtin:http` is switched off or its item is `off` (#2171); an item set to a tier is its tier.
+    const httpAccess = http ? await (deps.access ?? DEFAULT_ACCESS).entry(BUILTIN_SOURCES.http, HTTP_TOOL) : undefined
+    if (http && httpAccess?.enabled && httpAccess.access !== 'off') {
+      const httpTier = httpAccessTierOf(httpAccess.access)
+      const fixedHttpTier = httpAccess.access
       let saved: SavedBodies
       if (context.flow) {
         const saveDir = path.join(http.saveRoot, context.session, 'http')
@@ -252,11 +270,14 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
                 ...(http.limits ? { limits: http.limits } : {}),
               }).instance,
           ),
-        tierOf: (name, input) => httpTierOf(name, input) ?? 'outward',
-        // http_request is outward by its method; only reading a saved body never is.
+        tierOf: (name, input) => httpTier(name, input) ?? 'outward',
+        // Its method's tier, whatever its access: a POST lowered to read is still a POST.
+        declaredTierOf: (name, input) => httpTierOf(name, input) ?? 'outward',
+        // http_request may park whatever its access at the listing: a raise to outward later in
+        // the turn is asked about, as in a classic turn. Reading a saved body never parks.
         mayPark: (name) => name !== HTTP_READ_TOOL_NAME,
-        // http_request's tier is its method's; reading a saved body is always read.
-        fixedTier: (name) => (name === HTTP_READ_TOOL_NAME ? 'read' : undefined),
+        // http_request's tier is its method's, unless its access is a tier; reading a saved body is always read.
+        fixedTier: (name) => (name === HTTP_READ_TOOL_NAME ? 'read' : name === HTTP_TOOL_NAME ? fixedHttpTier : undefined),
         pinned: true,
       })
     }
@@ -356,7 +377,15 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       secrets.push(...forwardedPackages.secrets)
       for (const plugin of forwardedPackages.plugins) {
         browserPlugins.push(plugin.name)
-        servers.push({ name: plugin.name, connect: () => connectHttp(plugin.url), tierOf: () => 'outward', ...browserParts })
+        // Its tiers from ai_access (#2171), an unlisted tool outward, as a remote plugin's above.
+        const tiers = pluginTierResolver([plugin])
+        servers.push({
+          name: plugin.name,
+          connect: () => connectHttp(plugin.url),
+          listingKey: JSON.stringify(plugin.disabledTools),
+          tierOf: (name) => tiers(name) ?? 'outward',
+          ...browserParts,
+        })
       }
     }
     return {

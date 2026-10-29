@@ -698,12 +698,21 @@ async def test_no_model_setting_leaves_the_engine_default(
     assert "model" not in made
 
 
-async def test_the_own_plugin_loads_unless_settings_switched_it_off(
+async def test_the_own_plugin_off_in_ai_access_is_not_loaded(
     temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
 ) -> None:
+    """#2171: the own plugin's switch is its ai_access row, as a classic turn reads it
+    (builtin:own-plugin, item '*'); the old ai_settings key no longer decides. It is
+    written past the rolling deploy's mirror trigger, which would carry it into ai_access
+    (agent migration 20261026T2201Z_access_copy.sql, #4828)."""
+    await agent_db.execute("ALTER TABLE ai_settings DISABLE TRIGGER ai_settings_mirror_access")
+    await _setting(agent_db, "scadbuddy_plugin_enabled", "false")
     on = await _segment_options(temporal_env, agent_db, connect, tmp_path, plugin_dir="/skills")
     assert on["extra_options"]["plugins"] == [{"type": "local", "path": "/skills"}]
-    await _setting(agent_db, "scadbuddy_plugin_enabled", "false")
+    await agent_db.execute(
+        "INSERT INTO ai_access (source, item, access, updated_by)"
+        " VALUES ('builtin:own-plugin', '*', 'off', 'browser:browser')"
+    )
     await agent_db.execute("DELETE FROM ai_credentials")
     off = await _segment_options(temporal_env, agent_db, connect, tmp_path, plugin_dir="/skills")
     assert "plugins" not in off["extra_options"]

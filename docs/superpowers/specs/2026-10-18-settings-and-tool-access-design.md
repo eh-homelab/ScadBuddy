@@ -220,6 +220,9 @@ Assistant, Tools & plugins, MCP access and Audits are served by the agent. When
 section components' state under one shell that stays mounted across areas, so moving
 between areas keeps every edit. The guard asks only when leaving Settings with edits
 anywhere. Back keeps the #3247 behaviour inside an area.
+Every area stays mounted on purpose (`SettingsShell.tsx` hides the others), so drafts
+survive moving between areas, and every section loads on the first open of Settings; do
+not unmount hidden areas.
 
 ### 3.5 Small fixes on the way
 

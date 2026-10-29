@@ -425,11 +425,13 @@ class FakePrinter:
         conf, cert, key = self._broker_files()
         broker = await asyncio.create_subprocess_exec(config.mosquitto, "-c", str(conf))
         ftp = control = None
+        ftp_thread: threading.Thread | None = None
         threads: list[threading.Thread] = []
         try:
             await self._wait_for_broker(broker)
             ftp = _ftp_server(config, cert, key, self.received)
-            threads.append(threading.Thread(target=self._serve_ftp, args=(ftp,), daemon=True))
+            ftp_thread = threading.Thread(target=self._serve_ftp, args=(ftp,), daemon=True)
+            threads.append(ftp_thread)
             context = ssl.create_default_context(cafile=str(cert))
             async with aiomqtt.Client(
                 "127.0.0.1" if config.host in ("0.0.0.0", "::") else config.host,
@@ -456,8 +458,14 @@ class FakePrinter:
             if control is not None:
                 control.shutdown()
                 control.server_close()
+            # A bind that failed (the control port taken) leaves them unstarted: joining
+            # one would raise and hide the bind's OSError, which a caller retries on.
             for thread in threads:
-                thread.join(timeout=5)
+                if thread.ident is not None:
+                    thread.join(timeout=5)
+            # The FTP server's own thread closes it once started; unstarted, close it here.
+            if ftp is not None and (ftp_thread is None or ftp_thread.ident is None):
+                ftp.close_all()
             if broker.returncode is None:
                 broker.terminate()
                 try:

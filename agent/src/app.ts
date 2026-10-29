@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import type { UpgradeWebSocket } from 'hono/ws'
 import { aiStatus, type AiStatus, type CredentialState } from './aiStatus.js'
+import type { AccessStore } from './access/store.js'
 import type { AuditRepo } from './audit/log.js'
 import type { AttachmentStore } from './attachments/store.js'
 import { auditWrites, RefusalCoalescer } from './audit/writes.js'
@@ -42,6 +43,8 @@ export interface AppDeps {
   /** Undefined exactly when `database` is. */
   credentials: CredentialRepo | undefined
   remoteAddress: RemoteAddress
+  /** The tool-access store (#2171), shared by the plugins, plugin packages, http-request and printer-camera routes; undefined when there is no database. */
+  access?: AccessStore | undefined
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
   origins: OriginPolicy
   /** Gateway host resolver for the SSRF check; the system resolver when omitted. */

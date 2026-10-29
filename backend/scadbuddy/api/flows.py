@@ -557,7 +557,7 @@ async def start_flow_run(
                     id=run_id, status="terminated" if closed else "starting", repeated=True
                 )
             # As the agent will enforce them now (#2704): the run starts with them, and
-            # each call's own answer from the agent may only raise them.
+            # each call's own answer from the agent replaces them, raised or lowered (#2171).
             tool_tiers = await agent_tool_tiers(flows)
             # Checked only once no repeat answered: a repeat answers its run, whatever
             # has become of the grant it was sent with since.

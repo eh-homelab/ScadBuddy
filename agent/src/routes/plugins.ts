@@ -40,7 +40,7 @@ import { ready, type RouteModule } from './module.js'
 //
 // ScadBuddy's own tool sets (#1953, plugins/builtInTools.ts) are listed first,
 // `built_in: true`. A PATCH may raise their tools' tiers and disable tools
-// (never lower a tier: 400), and switch a set that has a switch; anything a
+// (a tier in either direction; an unknown tool or tier: 400), and switch a set that has a switch; anything a
 // remote plugin has and they do not (register, remove, URL, header, secret,
 // connection test) answers 409 `{ built_in: true }`.
 
@@ -320,8 +320,8 @@ export const route: RouteModule = {
       kek: deps.kek,
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
-      builtIns: new BuiltInTools(deps.settings),
-      switches: deps.settings ? new BuiltInPackages(deps.settings) : undefined,
+      builtIns: new BuiltInTools(deps.access),
+      switches: deps.access ? new BuiltInPackages(deps.access) : undefined,
       testPlugin:
         deps.testPlugin ??
         ((plugin, address) =>

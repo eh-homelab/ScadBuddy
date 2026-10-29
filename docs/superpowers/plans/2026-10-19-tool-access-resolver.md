@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-18-settings-and-tool-access-design.md` (§2 "Tool access", §4.1 to §4.4, §5 item 3, §6). Read it with this plan; the working copy carries #4209's edits.
 
+**Base:** written against main at `a2e9b6439`; refreshed against main at `2458e0e20` (2026-10-26) for #4442 (resolving tools' `prepareApproval`), #4530 (http_request binary bodies to the workspace) and #4633 (print triggers). Line references are main's at `2458e0e20`.
+
 ## Global Constraints
 
 - Agent check: `cd agent && pnpm lint && pnpm typecheck && pnpm test && pnpm build`.
@@ -17,13 +19,14 @@
 - Backend check: `cd backend && uv run --frozen ruff check . && uv run --frozen ruff format --check . && uv run --frozen mypy && uv run --frozen pytest -n auto`.
 - Postgres tests need `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test` (`docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432 postgres:17`), a role with `CREATEDB`.
 - Temporal tests need `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` naming a `temporal` CLI (or `temporal` on `PATH`); backend may use `SCADBUDDY_TEST_TEMPORAL_ADDRESS` with `matching.maxTaskQueuesInDeploymentVersion` raised.
-- Agent migrations are NEW files in `agent/src/db/migrations/` named `$(date -u +%Y%m%dT%H%MZ)_<slug>.sql`, slug `[a-z0-9_]`; never edit, rename or remove a merged file.
+- Agent migrations are NEW files in `agent/src/db/migrations/` named `$(date -u +%Y%m%dT%H%MZ)_<slug>.sql`, slug `[a-z0-9_]`; never edit, rename or remove a merged file. Both new files must sort after the newest merged one (`20261023T0615Z_session_resource_library_file.sql` at `2458e0e20`; check `ls agent/src/db/migrations | tail -1` before naming them).
 - `@temporalio/*` stay pinned exactly, all one version; nothing in this plan bumps them.
 - A change to `DurableSession` (agent-durable) or `ProjectWorkflow`'s host functions (backend) goes behind `workflow.patched(...)`; `ProjectWorkflow` must replay `backend/tests/fixtures/project_workflow_histories/`, and a new history is added beside them (never re-record one).
 - uv: use the image's uv (`uvx uv@0.13.1`, the Dockerfile's `ghcr.io/astral-sh/uv:0.13.1`); never run `uv lock` (local 0.6.16 rewrites `uv.lock`).
 - Kill processes only by pid or process group; never `pkill -f` or `killall`.
 - Nothing caches access: reads stay per call, or per turn where they are per turn now (tool lists, warm fingerprints); the per-call reads this plan adds are one `ai_access` query each.
-- The #2100 and #2088 tests (`agent/test/builtInTools.test.ts:281`, `:410`, `:421` block, `toolActivities*.test.ts`, `agent-durable/tests/test_tool_overrides.py`, `test_session_workflow.py:943-1046`) keep their names and assertions. Only their rigs change (they seed `ai_access` instead of `ai_settings`), and only the tighten-only assertions named in Tasks 4 and 11 are replaced.
+- The #2100 and #2088 tests (`agent/test/builtInTools.test.ts:281`, `:410`, `:421` block, `toolActivities*.test.ts`, `agent-durable/tests/test_tool_overrides.py`, `test_session_workflow.py:975-1072`) keep their names and assertions. Only their rigs change (`builtInTools.test.ts` and the agent-durable tests seed `ai_access` instead of `ai_settings`; `toolActivities*.test.ts` hand `toolOverrides` stand-ins and need none), and only the tighten-only assertions named in Tasks 4 and 11 are replaced.
+- #4442's `prepareApproval` (a resolving tool: `print_output`, `tools/print.ts:1101`) runs only for a call that parks, each place after its own `effectiveTool` read: `runJudgedByResult` (`tools/registry.ts:638-667`), the classic seam's `prepare` (`harness/permissions.ts:237-243`, built by `tools/harness.ts:54-84`), `runGated` (`temporal/toolActivities.ts:519-546`) and `gate.describe_call` (`:771-813`). So a resolving tool lowered below outward is never resolved at a gate and its handler resolves the printer itself (`print.ts:1108-1124`); one raised to outward is. Nothing in this plan changes those paths; they read the tier through `ToolServices.toolOverrides`, which Task 4 feeds. Their tests (`toolActivities.test.ts`'s describe_call and resolve cases, `test_session_workflow.py`'s `describe_tool_error` cases) keep their names and assertions.
 - Messages keep their current text where tests match it: `disabled in Settings → Plugins`, `cannot be read`, `raised to "outward" during this turn`.
 - Not in this PR: the capabilities API and UI, `label` on tools, filling `ai_tool_listings`, package hooks/skills/subagents items, subagent parking (`ASK_THE_MAIN_AGENT` stays), removing the http-request/printer-camera routes.
 
@@ -132,7 +135,7 @@ git commit -m "feat(agent): ai_access and ai_tool_listings, with the old setting
 **Files:**
 - Create: `agent/src/access/model.ts`, `agent/src/access/store.ts`
 - Create: `agent/test/support/memoryAccess.ts`
-- Modify: `agent/src/app.ts` (`AppDeps.access`), `agent/src/main.ts:206-215` (construct it)
+- Modify: `agent/src/app.ts` (`AppDeps.access`), `agent/src/main.ts:207-216` (construct it)
 - Test: `agent/test/accessStore.pg.test.ts`, `agent/test/warmEvict.pg.test.ts` (one case added)
 
 **Interfaces:**
@@ -197,7 +200,7 @@ git commit -m "feat(agent): AccessStore over ai_access, audited, evicting warm p
 - Test: `agent/test/accessVectors.test.ts`, `agent/test/accessResolver.test.ts`
 
 **Interfaces:**
-- Consumes: Task 2's `AccessRow`, `AccessReader`, `StoredOverrides`, `registrySource`, `MIGRATED_BY`, `isToolAccess`; `RiskTier`, `RISK_TIERS` (`harness/permissions.ts`); `ToolOverrides`, `ToolOverride`, `Tool` (`tools/registry.ts`); `ALL_TOOLS`.
+- Consumes: Task 2's `AccessRow`, `AccessReader`, `StoredOverrides`, `registrySource`, `MIGRATED_BY`, `isToolAccess`; `RiskTier`, `RISK_TIERS` (`harness/permissions.ts`); `ToolOverrides`, `ToolOverride`, `Tool` (`tools/registry.ts`); `ALL_TOOLS`. Nothing here lists tools by name: the resolver, `registrySource` and the gates take `ALL_TOOLS` (and `DURABLE_TOOLS`, `tools/manifest.ts:31`) as they stand, so tools added since `a2e9b6439` (orders `tools/orders.ts`, #4249/#4250; printers `tools/printers.ts`) are covered by their declared `risk`. None is named `browser_*`, so each is `builtin:scadbuddy`.
 - Produces (`access/resolve.ts`, pure, no I/O):
   - `export function toolAccess(declared: RiskTier, row: AccessRow | undefined, migratedRaisesOnly: boolean): ToolAccess`: the row's access when it is a `ToolAccess`; a row whose `updated_by === MIGRATED_BY` on a registry source counts only when `off` or above `declared`; otherwise `declared`.
   - `export function registryOverrides(tools: readonly { name: string; risk: RiskTier }[], rows: readonly AccessRow[]): StoredOverrides`: rows of `builtin:scadbuddy` and `builtin:browser` only, each row taken from the tool's own `registrySource`; `tool_tiers` holds every effective tier that differs from the tool's own (either direction), `disabled_tools` every `off`, sorted; rows naming no tool, or of another source, are ignored.
@@ -259,12 +262,12 @@ git commit -m "feat(agent): AccessResolver and the access vectors agent-durable 
 
 ### Task 4: ScadBuddy's own tools on the resolver, in either direction
 
-Every registry gate reads through `effectiveTool` and `ToolServices.toolOverrides`: `runJudgedByResult` (`tools/registry.ts:504-534`), `/mcp` (`tools/projections.ts:160`, `refreshOfferedTools` `:230-247`), the `agent-tools` activities (`temporal/toolActivities.ts:411-453`), `flow_tool_tier` and `/internal/flows/tools` (`temporal/flowTools.ts:29-59`), the subagent loopback (`routes/subagentMcp.ts:107-134`); and the classic turn's per-turn `BuiltInPolicy` (`plugins/builtInTools.ts:140`, `harness/run.ts:396-404`, read at `sessions/turnRunner.ts:289-291`). Swapping what feeds those two interfaces moves all of them; their code is untouched except `effectiveTool`.
+Every registry gate reads through `effectiveTool` and `ToolServices.toolOverrides`: `runJudgedByResult` (`tools/registry.ts:608-703`), `/mcp` (`tools/projections.ts:160`, `refreshOfferedTools` `:230-247`), `confirm_action` (`tools/approvals.ts:69-72`), the `agent-tools` activities (`temporal/toolActivities.ts:408-610`: `runAsActivity`, `runGated` reading at `:480`, and `decidedCalls` `:636-685` through it), #4442's `gate.describe_call` (`gateActivities` `:744-818`, reading at `:775`), #4442's classic `prepareApproval` (`tools/harness.ts:54-84`, reading at `:61`), `flow_tool_tier` and `/internal/flows/tools` (`temporal/flowTools.ts:29-59`), the subagent loopback (`routes/subagentMcp.ts:107-134`); and the classic turn's per-turn `BuiltInPolicy` (`plugins/builtInTools.ts:140`, `harness/run.ts:397-406`, read at `sessions/turnRunner.ts:291-292`). Swapping what feeds those two interfaces moves all of them; their code is untouched except `effectiveTool`. A pending action prepared while its tool was outward and confirmed after a lowering answers `cannot run` from `confirm_action` (`!effective.gated`), as today for any tool that is not gated; the model then calls the tool itself, which runs ungated.
 
 **Files:**
 - Modify: `agent/src/tools/registry.ts:117-143` (`ToolOverride` doc, `effectiveTool`)
 - Modify: `agent/src/plugins/builtInTools.ts` (header comment `:21-26`; `sanitise` `:70-86` removed; `validateOverrides` `:89-122`; `BuiltInPolicy` doc `:129-138`; `builtInPolicy` `:140-158`; `BuiltInTools` `:184-256`)
-- Modify: `agent/src/main.ts:215`, `agent/src/main.ts:259`; `agent/src/routes/plugins.ts:323` (`new BuiltInTools(deps.access)`)
+- Modify: `agent/src/main.ts:216`, `agent/src/main.ts:260`; `agent/src/routes/plugins.ts:323` (`new BuiltInTools(deps.access)`)
 - Test: `agent/test/builtInTools.test.ts`
 
 **Interfaces:**
@@ -273,15 +276,15 @@ Every registry gate reads through `effectiveTool` and `ToolServices.toolOverride
   - `effectiveTool(tool: Tool, services: Pick<ToolServices, 'toolOverrides'>): Promise<EffectiveTool>` (same signature): `risk = override?.tier ?? tool.risk`; `gated = risk === 'outward' && (tool.gated || tool.risk !== 'outward')`; `disabled = override?.disabled === true`.
   - `class BuiltInTools { constructor(access: (AccessReader & Partial<AccessWriter>) | undefined, sets?: readonly BuiltInToolSet[]) }`, same methods: `overrides(set)` = `registryOverrides(set.tools, await access.rows([...registry sources]))`; `update(set, patch, context)` writes `replaceTools` per registry source (a tool's own tier is not stored; a disabled tool is `off`; disabled wins); `registryOverrides()` delegates to `new AccessResolver(access, …).registryOverrides()`; `policy()` unchanged in shape.
   - `validateOverrides(set, patch, current): StoredOverrides` (same signature): known tools and valid tiers only; a lowered tier is accepted.
-  - `BuiltInPolicy.tierOf(harnessName, tier)` answers the stored tier where there is one (either direction), else `tier`; `raised` keeps its name and now lists every changed tier (the warm fingerprint's input, `turnRunner.ts:218`).
+  - `BuiltInPolicy.tierOf(harnessName, tier)` answers the stored tier where there is one (either direction), else `tier`; `raised` keeps its name and now lists every changed tier (the warm fingerprint's input, `turnRunner.ts:219`).
 
 - [ ] **Step 1: Move the test rigs onto `ai_access`, and write the new tests**
 
-Rig changes only (no `it` name or `expect` line changes): `memorySettings`/`withOverrides` (`:33-63`) become `memoryAccess(rowsFromOverrides('builtin:scadbuddy', tool_tiers, disabled_tools))`; each `values.set(builtInToolsSetting('scadbuddy'), X)` (`:300`, `:330`, the `rig.set` at `:446`) becomes `access.replaceTools('builtin:scadbuddy', …)` with the same overrides; `rig`'s `reads.n` (`:428-436`) counts `memoryAccess`'s `rows()` calls; `new BuiltInTools({ get: reject, set })` (`:352`) becomes a reader whose `rows` rejects; `app(settings)` (`:120-135`) also passes `access`. `toolActivities.test.ts` and `toolActivities.pg.test.ts` get the same rig change wherever they seed `builtin_tools.scadbuddy`.
+Rig changes only (no `it` name or `expect` line changes): `memorySettings`/`withOverrides` (`:33-63`) become `memoryAccess(rowsFromOverrides('builtin:scadbuddy', tool_tiers, disabled_tools))`; each `values.set(builtInToolsSetting('scadbuddy'), X)` (`:299`, `:330`, the `rig.set` at `:445`) becomes `access.replaceTools('builtin:scadbuddy', …)` with the same overrides; the durable `activities(...)` rig (`:380-386`) seeds `memoryAccess` the same way; `rig`'s `reads.n` (`:427-435`) counts `memoryAccess`'s `rows()` calls; `new BuiltInTools({ get: reject, set })` (`:352`) becomes a reader whose `rows` rejects; `app(settings)` (`:122-136`) also passes `access`. `toolActivities.test.ts` and `toolActivities.pg.test.ts` seed no `ai_settings` key (they hand `toolOverrides` stand-ins to `services(...)`, as #4442's describe_call case at `toolActivities.test.ts:860` does), so they run unchanged.
 
 Replaced (tighten-only assertions, by spec §6 "lowering a built-in accepted"):
 - `ignore a stored entry that would lower a tier or names no tool` (`:74`) becomes `ignores a stored row naming no tool, and keeps a lowered tier`: rows `{write tool: read, nope: outward, read tool: write}` → `{ tool_tiers: { [writeTool.name]: 'read', [readTool.name]: 'write' }, disabled_tools: [] }`.
-- the two lowering rows of `answers 400 for %s` (`:170-176`) leave its table; new test `accepts a lowered tier and stores it in ai_access`: PATCH `{ tool_tiers: { [outwardTool.name]: 'write' } }` → 200, `view.tool_tiers` equals `{ [outwardTool.name]: 'write' }`, the store holds `{ source: 'builtin:scadbuddy', item: outwardTool.name, access: 'write' }`.
+- the two lowering rows of `answers 400 for %s` (`:179-185`) leave its table; new test `accepts a lowered tier and stores it in ai_access`: PATCH `{ tool_tiers: { [outwardTool.name]: 'write' } }` → 200, `view.tool_tiers` equals `{ [outwardTool.name]: 'write' }`, the store holds `{ source: 'builtin:scadbuddy', item: outwardTool.name, access: 'write' }`.
 - `accepts a raised tier and a disabled tool, and stores them in ai_settings` (`:159`) is renamed `… stores them in ai_access`, its `values.get(builtInToolsSetting(...))` assertion now reading the store's rows.
 
 New tests:
@@ -306,7 +309,7 @@ Expected: PASS, including `refuses a call raised to outward after the turn read 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add agent/src/tools/registry.ts agent/src/plugins/builtInTools.ts agent/src/main.ts agent/src/routes/plugins.ts agent/test/builtInTools.test.ts agent/test/toolActivities.test.ts agent/test/toolActivities.pg.test.ts agent/test/flowTools.test.ts
+git add agent/src/tools/registry.ts agent/src/plugins/builtInTools.ts agent/src/main.ts agent/src/routes/plugins.ts agent/test/builtInTools.test.ts agent/test/flowTools.test.ts
 git commit -m "feat(agent): ScadBuddy's own tools take their access from ai_access, in either direction (#2171)"
 ```
 
@@ -316,8 +319,8 @@ git commit -m "feat(agent): ScadBuddy's own tools take their access from ai_acce
 
 **Files:**
 - Delete: `agent/src/tools/switches.ts`
-- Modify: `agent/src/tools/registry.ts:111-112` (`switchedOff` removed from `ToolServices`), `:525-526` (the switch step removed from `runJudgedByResult`; the order becomes unreadable, disabled, principal tier, #2100 seam check, prepare/confirm)
-- Modify: `agent/src/main.ts:104`, `:256-257`
+- Modify: `agent/src/tools/registry.ts:112-113` (`switchedOff` removed from `ToolServices`), `:629-630` (the switch step removed from `runJudgedByResult`; the order becomes unreadable, disabled, principal tier, #2100 seam check, prepare/confirm, where prepare is #4442's `tool.prepareApproval`)
+- Modify: `agent/src/main.ts:105`, `:257-258`
 - Modify: `agent/src/routes/printerCamera.ts:40-90` (reads and writes `deps.access`)
 - Test: `git mv agent/test/toolSwitches.test.ts agent/test/printerCameraAccess.test.ts`; `agent/test/flowTools.test.ts`
 
@@ -404,8 +407,8 @@ git commit -m "feat(agent): remote MCP plugins' enabled, tiers and disabled tool
 
 **Files:**
 - Modify: `agent/src/plugins/packages/builtins.ts:56-60`, `:122-164` (`builtInEnabled`, `ownPluginEnabled`, `BuiltInPackages`)
-- Modify: `agent/src/sessions/turnRunner.ts:300-305`, `:410-425`; its deps type gains `access?: AccessResolver`
-- Modify: `agent/src/temporal/turnServers.ts:88`, `:218`, `:247` (deps gain `access?: AccessResolver`)
+- Modify: `agent/src/sessions/turnRunner.ts:305-308`, `:409-438`; its deps type gains `access?: AccessResolver`
+- Modify: `agent/src/temporal/turnServers.ts:88`, `:218`, `:255` (deps gain `access?: AccessResolver`). Only the switch (`:218`) and the tier (`:255`) change; #4530's workspace wiring between them (`:238-249`: a flow run's http_request writes binary bodies to its starter's `principal` workspace, a session's to its own) and its body handling in `harness/httpRequest.ts` (`autoName`, `saveToWorkspace`) stay as they are.
 - Modify: `agent/src/routes/httpRequest.ts:50-85`; `agent/src/routes/plugins.ts:324`, `agent/src/routes/pluginPackages.ts:339` (`new BuiltInPackages(deps.access)`); `agent/src/plugins/builtInTools.ts:203`
 - Modify: `agent/src/main.ts` (one `new AccessResolver(access)` handed to the turn runner, the turn servers and `forwardPackageServers` callers)
 - Test: `agent/test/httpRequestRoutes.test.ts`, `agent/test/builtins.pg.test.ts`, `agent/test/harnessWiring.test.ts`
@@ -448,8 +451,8 @@ git commit -m "feat(agent): http_request and ScadBuddy's own plugin are switched
 
 **Files:**
 - Modify: `agent/src/plugins/packages/mcp.ts:69-75`, `:125-133`
-- Modify: `agent/src/temporal/turnServers.ts:347-352`
-- Modify: `agent/src/main.ts:407`, `:615` (pass the resolver)
+- Modify: `agent/src/temporal/turnServers.ts:355-360`
+- Modify: `agent/src/main.ts:408`, `:616` (pass the resolver)
 - Test: `agent/test/pluginPackages.test.ts`, `agent/test/pluginPackages.temporal.test.ts`
 
 **Interfaces:**
@@ -484,13 +487,13 @@ git commit -m "feat(agent): package MCP servers take their tools' access from ai
 
 ### Task 9: The classic seam decides each call from access as it is now
 
-Spec §4.4 (#4209): a lowered tier stops parking on the turn's next call, a raised one starts. The seam's resolver is per turn today (`harness/run.ts:396-404`); it gains one per-call read, and records what it applied so the in-process server's #2100 check compares against this call's decision.
+Spec §4.4 (#4209): a lowered tier stops parking on the turn's next call, a raised one starts. The seam's resolver is per turn today (`harness/run.ts:397-406`); it gains one per-call read, and records what it applied so the in-process server's #2100 check compares against this call's decision.
 
 **Files:**
 - Create: `agent/src/access/live.ts`, `agent/src/harness/seamLedger.ts`
-- Modify: `agent/src/harness/permissions.ts:208-260` (`makeCanUseTool`, `makePreToolUseHook`)
-- Modify: `agent/src/harness/run.ts` (`HarnessRun.live`, passed at `:415`)
-- Modify: `agent/src/tools/projections.ts:87-131` (`seamTierOf(tool, toolUseId)`), `agent/src/tools/harness.ts:40-76`
+- Modify: `agent/src/harness/permissions.ts:222-301` (`makeCanUseTool`, `makePreToolUseHook`)
+- Modify: `agent/src/harness/run.ts` (`HarnessRun.live`, passed to `makeCanUseTool` at `:410` and `makePreToolUseHook` at `:430`)
+- Modify: `agent/src/tools/projections.ts:87-131` (`seamTierOf(tool, toolUseId)`), `agent/src/tools/harness.ts:85-114` (`mcpServers`; #4442's `prepareApproval` at `:54-84` is untouched: it reads `effectiveTool` per call, the same registry access the live seam reads)
 - Modify: `agent/src/sessions/turnRunner.ts` (builds one `SeamLedger` and `liveAccess` per turn)
 - Test: `agent/test/accessLive.test.ts`
 
@@ -499,7 +502,7 @@ Spec §4.4 (#4209): a lowered tier stops parking on the turn's next call, a rais
 - Produces:
   - `export type LiveAccess = (harnessName: string) => Promise<ToolAccess | undefined>`; `export function liveAccess(resolver: AccessResolver, turn: { tools: readonly Tool[]; remote: readonly string[]; packageServers: readonly { name: string; pkg: string; server: string }[] }): LiveAccess`: `mcp__scadbuddy__<t>` → its registry access; `mcp__<remote>__<t>` → `item(remoteSource, t, 'outward')`; a package server's tool → `item(packageServerSource, t, 'outward')`; anything else (Skill, Agent, built-ins, http_request with no item row) → `undefined`, so the per-turn resolver stands.
   - `export class SeamLedger { record(toolUseId: string, tier: RiskTier): void; tierOf(toolUseId: string | undefined): RiskTier | undefined }`: one call's worth of entries, never pruned on its own; `turnRunner.ts` builds a fresh one per turn and drops it when the turn ends, so it lives only for the turn and a long one does not grow the entries it holds beyond that turn's own calls.
-  - `export type LiveSeam = { access: LiveAccess; ledger?: SeamLedger }`; `makeCanUseTool(tierOf, onDecision?, gate?, guard?, live?: LiveSeam)` and `makePreToolUseHook(…, live?: LiveSeam)`: `off` → deny `<tool> is disabled in Settings → Plugins; the user can turn it back on there`; a tier replaces `tierOf`'s; a read that throws → deny `<tool> is refused: its Settings → Plugins entry cannot be read`; the tier applied is recorded under the call's tool_use id.
+  - `export type LiveSeam = { access: LiveAccess; ledger?: SeamLedger }`; `makeCanUseTool(tierOf, onDecision?, gate?, guard?, prepare?, live?: LiveSeam)` (after #4442's `prepare?: ApprovalPreparer`, `:227`) and `makePreToolUseHook(tierOf, onDecision?, gate?, guard?, live?: LiveSeam)`: `off` → deny `<tool> is disabled in Settings → Plugins; the user can turn it back on there`; a tier replaces `tierOf`'s; a read that throws → deny `<tool> is refused: its Settings → Plugins entry cannot be read`; the tier applied is recorded under the call's tool_use id. The live tier is applied before `decide`, so `prepare` runs only when the call parks by it: a tool lowered mid-turn is never prepared, one raised to outward mid-turn parks what `prepare` resolves.
   - `HarnessRun.live?: LiveSeam`; `createHarnessServer(…, seamTierOf: (tool: Tool, toolUseId?: string) => Risk)`; `harnessTools(...).mcpServers(…, { builtIn, ledger })` uses `ledger.tierOf(toolUseId) ?? builtIn.tierOf(...)`.
 
 - [ ] **Step 1: Write the failing tests** (`accessLive.test.ts`, over `memoryAccess`, a turn-start `policy()` and `buildHarnessOptions`)
@@ -510,6 +513,7 @@ Spec §4.4 (#4209): a lowered tier stops parking on the turn's next call, a rais
 - `a call the seam parked after a mid-turn raise runs once approved` (ledger records `outward` for `toolu_1`; the in-process server's call with `_meta` tool_use id `toolu_1` runs; no `raised to "outward" during this turn`)
 - `a remote tool lowered mid-turn stops parking` (`mcp__hs__recall` stored `read`)
 - `the seam fails closed when access cannot be read`
+- `a resolving tool lowered mid-turn runs without its prepareApproval` (a `defineTool` stand-in with `risk: 'outward'` and a `prepareApproval` spy, lowered to `write` after the turn's policy; `canUseTool` → `allow`, the spy never called)
 
 - [ ] **Step 2: Run them to verify they fail**
 
@@ -536,14 +540,14 @@ git commit -m "feat(agent): the classic seam reads each call's access as it is n
 
 **Files:**
 - Create: `agent/src/temporal/toolTier.ts`
-- Modify: `agent/src/temporal/toolActivities.ts:297` (registered beside `FLOW_TOOL_TIER_ACTIVITY`)
+- Modify: `agent/src/temporal/toolActivities.ts:327` (registered beside `FLOW_TOOL_TIER_ACTIVITY`)
 - Test: `agent/test/toolTier.test.ts`
 
 **Interfaces:**
-- Consumes: `effectiveTool` (Task 4); `sessionOf` (`temporal/turnTools.ts`); `DURABLE_ONLY_NAMES`.
+- Consumes: `effectiveTool` (Task 4); `sessionOf` (`temporal/toolActivities.ts:306`); `DURABLE_ONLY_NAMES` (`tools/answerTools.ts:71`).
 - Produces: `export const TOOL_TIER_ACTIVITY = 'tool_tier'`; `export function toolTierActivity(tools: readonly Tool[], services: Pick<ToolServices, 'toolOverrides'>): (input: unknown) => Promise<{ tier: Risk; disabled: boolean }>`: `{tool}` for a `session-<uuid>` workflow only (`UnknownSession` otherwise), `ToolError` for an unknown or answer tool, non-retryable; one `effectiveTool` read.
 
-- [ ] **Step 1: Write the failing test** (`MockActivityEnvironment` as `builtInTools.test.ts:364-379`)
+- [ ] **Step 1: Write the failing test** (`MockActivityEnvironment` as `builtInTools.test.ts:372-378`)
 
 - `answers a lowered outward tool as write and a raised read tool as outward`
 - `answers an off tool as disabled`
@@ -576,9 +580,9 @@ git commit -m "feat(agent): tool_tier, a durable session's per-call access of Sc
 - Create: `agent-durable/src/scadbuddy_durable/session/access.py`
 - Modify: `agent-durable/src/scadbuddy_durable/session/tools.py:37` (`OVERRIDES_SETTING` removed), `:130-180` (`sanitise_overrides`, `apply_overrides`)
 - Modify: `agent-durable/src/scadbuddy_durable/session/activities.py:1-10` (docstring), `:77-96` (`gate_settings`)
-- Modify: `agent-durable/src/scadbuddy_durable/session/models.py:230-239` (`GateSettings` comments only: `tool_tiers` is now every changed tier, either direction)
-- Modify: `agent-durable/src/scadbuddy_durable/session/runner.py:213`, `:658-680` (own plugin from `ai_access`)
-- Test: `agent-durable/tests/test_access_vectors.py` (new), `tests/test_tool_overrides.py`, `tests/test_session_workflow.py:943-1046`, `tests/test_session_runner.py`
+- Modify: `agent-durable/src/scadbuddy_durable/session/models.py:245-254` (`GateSettings` comments only: `tool_tiers` is now every changed tier, either direction)
+- Modify: `agent-durable/src/scadbuddy_durable/session/runner.py:213`, `:738-765` (`_settings`: own plugin from `ai_access`, read at `:745` and `:761`)
+- Test: `agent-durable/tests/test_access_vectors.py` (new), `tests/test_tool_overrides.py`, `tests/test_session_workflow.py:975-1072`, `tests/test_session_runner.py`
 
 **Interfaces:**
 - Consumes: `agent/test/fixtures/access-vectors.json` (Task 3), `ai_access` (Task 1).
@@ -592,11 +596,11 @@ git commit -m "feat(agent): tool_tier, a durable session's per-call access of Sc
 
 - [ ] **Step 1: Write the failing tests**
 
-`test_access_vectors.py` (path as `test_codec.py:33`): `test_every_registry_vector_matches` (parametrized over `registry`, including `durable_only`; `sanitise_overrides` over the vector's tools as `ManifestEntry` with its `hitl`), `test_every_source_vector_matches`, `test_registry_sources_match`.
+`test_access_vectors.py` (path as `test_codec.py:34`): `test_every_registry_vector_matches` (parametrized over `registry`, including `durable_only`; `sanitise_overrides` over the vector's tools as `ManifestEntry` with its `hitl`), `test_every_source_vector_matches`, `test_registry_sources_match`.
 
 `test_tool_overrides.py`, replaced (tighten-only): `test_only_raises_of_known_tools_are_kept` becomes `test_lowered_and_raised_tiers_of_known_tools_are_kept`: `builtin:scadbuddy` rows by `browser:browser` of `render_preview` outward (a raise), `print_output` read (a lowering), `ask_user` outward (an answer tool), `no_such_tool` outward, `wait_for_user` `bogus`, plus a `render_preview` row under `remote:hs` → `tiers == {"render_preview": "outward", "print_output": "read"}`, `disabled == []`. `test_a_row_of_the_wrong_shape_overrides_nothing` keeps its name over rows whose access is `"on"`, `"none"` or `""`, which give `({}, [])`. New: `test_a_lowered_outward_tool_never_parks` (`apply_overrides(..., {"print_output": "write"}, set())` → `not needs_approval`, `retry_policy.maximum_attempts == 1`); `test_per_call_parks_every_tool_but_a_disabled_one`. The other tests there keep names and assertions.
 
-`test_session_workflow.py`: `_overrides` (`:946`) writes `ai_access` rows by `rowsFromOverrides`'s rule (disabled wins, `updated_by` `browser:browser`) instead of `ai_settings`. Replaced (tighten-only): `test_an_override_never_lowers_a_tool_below_its_own_tier` becomes `test_an_outward_tool_lowered_to_read_runs_without_parking` (`print_output` read → no `approval.required`, stand-in ran once). New: `test_gate_settings_reads_lowered_raised_and_off_from_ai_access`, `test_the_camera_off_is_refused_by_the_durable_gate_and_never_parks` (a manifest with `get_printer_camera`; row off → `disabled_tools == ["get_printer_camera"]`).
+`test_session_workflow.py`: `_overrides` (`:978`) writes `ai_access` rows by `rowsFromOverrides`'s rule (disabled wins, `updated_by` `browser:browser`) instead of `ai_settings`. Replaced (tighten-only): `test_an_override_never_lowers_a_tool_below_its_own_tier` becomes `test_an_outward_tool_lowered_to_read_runs_without_parking` (`print_output` read → no `approval.required`, stand-in ran once). New: `test_gate_settings_reads_lowered_raised_and_off_from_ai_access`, `test_the_camera_off_is_refused_by_the_durable_gate_and_never_parks` (a manifest with `get_printer_camera`; row off → `disabled_tools == ["get_printer_camera"]`).
 
 `test_session_runner.py`: `test_the_own_plugin_off_in_ai_access_is_not_loaded`.
 
@@ -624,15 +628,15 @@ git commit -m "feat(agent-durable): the gate reads ai_access by the shared vecto
 ### Task 12: Durable turns decide each call from access as it is now
 
 **Files:**
-- Modify: `agent-durable/src/scadbuddy_durable/session/workflow.py:107-125` (constants), `:356-367` (`_run_turn`), `:568-590` (`_park`)
+- Modify: `agent-durable/src/scadbuddy_durable/session/workflow.py:104-162` (constants: `TOOL_TIER` beside `TURN_TOOL_TIER` `:107`, the patch id with the other `workflow.patched` ids `:146-157`), `:369-382` (`_run_turn`), `:589-613` (`_park`, up to its `DESCRIBE_CALL`)
 - Modify: `agent-durable/src/scadbuddy_durable/session/tools.py` (`gate_call`)
-- Modify: `agent-durable/tests/session_support.py:102-240` (`StandInTools` gains `tool_tier`, answering from `stand_in.tiers`, default the manifest tier, and `stand_in.disabled`)
+- Modify: `agent-durable/tests/session_support.py:102-279` (`StandInTools` gains `tool_tier`, answering from `stand_in.tiers`, default the manifest tier, and `stand_in.disabled`)
 - Create: `agent-durable/tests/fixtures/durable_session_histories/raised.json` (recorded on the unpatched code in Step 1)
 - Test: `agent-durable/tests/test_session_workflow.py`
 
 **Interfaces:**
 - Consumes: Task 10's `tool_tier` activity (`{tool}` → `{tier, disabled}`); Task 11 `apply_overrides(..., per_call=)`.
-- Produces: `TOOL_ACCESS_PATCH = "tool-access-2171"`, `TOOL_TIER = "tool_tier"`; `async def _tier_now(self, name: str) -> dict[str, Any] | None` (the activity on `TOOLS_QUEUE`, `SHORT`, 3 attempts, `None` on failure); `tools.gate_call(tool: DurableTool, entry: ManifestEntry, tier: str) -> None` (sets `retry_policy` to `_ONCE` for `outward` or `hitl == "approval"`, else `_RETRY`). Under `workflow.patched(TOOL_ACCESS_PATCH)`: `_run_turn` calls `apply_overrides(..., per_call=True)`; `_park` asks `_tier_now` for a registry tool (`name in self._kinds and self._kinds[name] != "answer"`) and, when it answers not outward or disabled, calls `gate_call` and `decide(id, True, approver="scadbuddy")` (the activity refuses a disabled one by name); a failed answer parks (fail toward asking); an outward answer calls `gate_call` and parks as today. This auto-decision takes the same fast path as the existing `_outward` check it extends (`:576-580`): it runs before `build_entry`/`open_input`, so it opens no `ai_pending_input` entry and writes no `ai_audit` row, exactly like any other non-outward call today. The approval log (`ai_audit`, `surface`/`principal_id` on each row) only ever holds entries for calls that parked, so a call auto-let-through here — by a lowered tier, same as one whose static tier was never outward — never appears there to be confused with a person's `approver=responder.get("id")` row (`:876`); only a call that *was* parked and is then resolved (a lowered tier's `_tier_now` is read only before parking, never after) goes through `_resolved`/`_audit` at all. Unpatched histories run the turn-start gates exactly as before.
+- Produces: `TOOL_ACCESS_PATCH = "tool-access-2171"`, `TOOL_TIER = "tool_tier"`; `async def _tier_now(self, name: str) -> dict[str, Any] | None` (the activity on `TOOLS_QUEUE`, `SHORT`, 3 attempts, `None` on failure); `tools.gate_call(tool: DurableTool, entry: ManifestEntry, tier: str) -> None` (sets `retry_policy` to `_ONCE` for `outward` or `hitl == "approval"`, else `_RETRY`). Under `workflow.patched(TOOL_ACCESS_PATCH)`: `_run_turn` calls `apply_overrides(..., per_call=True)`; `_park` asks `_tier_now` for a registry tool (`name in self._kinds and self._kinds[name] != "answer"`) and, when it answers not outward or disabled, calls `gate_call` and `decide(id, True, approver="scadbuddy")` (the activity refuses a disabled one by name); a failed answer parks (fail toward asking); an outward answer calls `gate_call` and parks as today. This auto-decision takes the same fast path as the existing turn-tool `_outward` check it extends (`:597-601`): it runs before `DESCRIBE_CALL` (`:602-613`) and `build_entry`/`open_input`, so it opens no `ai_pending_input` entry, writes no `ai_audit` row and makes no #4442 resolving read (`gate.describe_call`'s `prepareApproval`), exactly like any other non-outward call today; such a call's activity then runs ungated, so `runGated` resolves nothing either. A `describe_call` refusal (#4442: `ToolError` or `BackendUnavailable`, told to the model through `_park_or_refuse` `:570-587` and `TurnStart.replaced`) is reached only by a call `_tier_now` answered outward, or could not answer. The approval log (`ai_audit`, `surface`/`principal_id` on each row) only ever holds entries for calls that parked, so a call auto-let-through here — by a lowered tier, same as one whose static tier was never outward — never appears there to be confused with a person's `approver=responder.get("id")` row (`:897`); only a call that *was* parked and is then resolved (a lowered tier's `_tier_now` is read only before parking, never after) goes through `_resolved`/`_audit` at all. #4442's workflow change (`request_id` in `DESCRIBE_CALL`'s input, `replaced`) carries no patch and adds none here. Unpatched histories run the turn-start gates exactly as before.
 
 - [ ] **Step 1: Record the unpatched history.** On the code as Task 11 left it, write `await handle.fetch_history()` of `test_a_tool_raised_to_outward_parks_and_runs_once_approved` to `tests/fixtures/durable_session_histories/raised.json` once (`history.to_json()`), with a module docstring line in `test_session_workflow.py` saying what recorded it and that it is never re-recorded.
 
@@ -667,14 +671,14 @@ git commit -m "feat(agent-durable): each call parks by its access as it is now, 
 ### Task 13: Backend flows take the agent's tier in either direction
 
 **Files:**
-- Modify: `backend/scadbuddy/workflows/flow_tools.py:184-226` (constant), `:846-878` (`_live_tier`)
-- Modify: `backend/tests/flows/test_tool_host_function.py:208-230`
+- Modify: `backend/scadbuddy/workflows/flow_tools.py:242-248` (constant, beside `FLOW_LIVE_TIERS_PATCH` `:245`), `:889-922` (`_live_tier`)
+- Modify: `backend/tests/flows/test_tool_host_function.py:210-233`
 - Modify: `backend/tests/flows/test_project_replay.py:1-90` (docstring and `NAMES`)
 - Create: `backend/tests/fixtures/project_workflow_histories/lowered.json` (recorded by the new test)
 
 **Interfaces:**
 - Consumes: the agent's `flow_tool_tier` answer (Tasks 4 and 5: lowered tiers, the camera as disabled).
-- Produces: `FLOW_ACCESS_PATCH = "flow-access-2171"`; `_live_tier(name: str, own: str | None) -> str` (same signature): under `workflow.patched(FLOW_ACCESS_PATCH)` it returns the agent's tier as given; unpatched it keeps the raise-only `max(own, tier)` at `:876-877`. Its docstring says so.
+- Produces: `FLOW_ACCESS_PATCH = "flow-access-2171"`; `_live_tier(name: str, own: str | None) -> str` (same signature): under `workflow.patched(FLOW_ACCESS_PATCH)` it returns the agent's tier as given; unpatched it keeps the raise-only `max(own, tier)` at `:919-921`. Its docstring says so. `_live_tier` is reached only under `FLOW_LIVE_TIERS_PATCH` (`_run_tool` `:931`), so the new check sits inside it; turn tools (`_turn_tier` `:807-847`) take the agent's `turn_tool_tier` as given already and are untouched. Since `a2e9b6439` no patch has landed in `flow_tools.py` (#4633 added only `PrintFinished`/`PrintFailed` to `trigger()`, `:1258-1303`, data with no command), so the patch ids the new one sits beside are still `FLOW_BEATLESS_TIER_PATCH`, `FLOW_BEATLESS_CALL_PATCH`, `FLOW_TURN_TOOLS_PATCH`, `FLOW_HOST_QUEUE_PATCH`, `FLOW_PINNED_CALL_PATCH` (per call), `FLOW_LIVE_TIERS_PATCH`, `FLOW_NARROWED_PATCH`, `FLOW_GRANT_PATCH` and `FLOW_ESCALATION_PATCH`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -682,7 +686,7 @@ Replaced (raise-only): `test_the_agents_tier_never_lowers_the_runs_own` becomes 
 
 New: `test_a_tool_lowered_from_outward_runs_without_approval` (`agent.tiers["send_to_bambuddy"] = "write"` before the run) and `test_the_camera_off_is_refused_before_it_parks` (`agent.disabled.add("get_printer_camera")`; result names `disabled`; `run.steps == []`).
 
-`test_project_replay.py`: `NAMES` gains `"lowered"`, and the docstring says it was recorded on #2171's workflow by `test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call`.
+`test_project_replay.py`: `NAMES` (`:57-69`, eleven histories, `slept` through `beatless`) gains `"lowered"` last, and the docstring says it was recorded on #2171's workflow by `test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call`.
 
 - [ ] **Step 2: Run them to verify they fail**
 

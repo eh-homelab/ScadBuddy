@@ -211,6 +211,30 @@ class VirtualPrinter(BambuddyModel):
         return upper if _SERIAL.fullmatch(upper) else None
 
 
+class VirtualPrinterCheck(BambuddyModel):
+    """One of Bambuddy's diagnostic checks (``schemas/printer.py`` ``DiagnosticCheck``,
+    v1.3.0b1-daily.20261025): ``id`` names the check (``enabled``, ``running``,
+    ``bind_interface``, ``access_code``, ``target_printer``, ``port_ftps``, ``port_mqtt``,
+    ``port_bind``, ``certificate``), ``status`` is ``pass``, ``fail``, ``warn`` or
+    ``skip``, and ``params`` the values its text names."""
+
+    id: str
+    status: str
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class VirtualPrinterDiagnostic(BambuddyModel):
+    """``GET /api/v1/virtual-printers/{id}/diagnostic`` (``VPDiagnosticResult``,
+    ``backend/app/schemas/virtual_printer.py``): ``overall`` is ``ok``, ``warnings`` or
+    ``problems``."""
+
+    vp_id: int
+    vp_name: str
+    mode: str
+    overall: str
+    checks: list[VirtualPrinterCheck] = Field(default_factory=list)
+
+
 class VirtualPrinterList(BambuddyModel):
     """``GET /api/v1/virtual-printers``: the VPs, and every model code with its name."""
 

@@ -393,6 +393,11 @@ def require_job(render: RenderService, job_id: str) -> Job:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no job with id {job_id!r}") from None
 
 
+def plain_render() -> bool:
+    """What `render_model` is asked through its route: a plain render (#4870)."""
+    return True
+
+
 @router.post(
     "/models/{slug}/render",
     response_model=RenderAccepted,
@@ -458,6 +463,9 @@ async def render_model(
     # A dependency, not read here off `request`: the backfill calls this with its own
     # request, and cannot hand its caller a 202 to follow (#3042).
     respond_async: Annotated[bool, Depends(prefers_async)],
+    # #4870: a request through the route needs only the job, so a finished one of its
+    # key will do. A caller whose work follows the run it starts passes False.
+    reuse_finished: Annotated[bool, Depends(plain_render)],
     idempotency_key: IdempotencyKey = None,
 ) -> RenderAccepted | JSONResponse:
     if body.supersedes is not None and idempotency_key is None:
@@ -522,6 +530,7 @@ async def render_model(
                 whole_inputs=pipeline,
                 request_id=idempotency_key,
                 accept_within=FAST_ACCEPT if respond_async else None,
+                reuse_finished=reuse_finished,
             )
         except CommandStillAcceptingError as error:
             if not respond_async:

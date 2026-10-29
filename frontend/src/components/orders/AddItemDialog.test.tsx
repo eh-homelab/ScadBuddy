@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import { MAZE_SLUG } from '../../mocks/fixtures'
 import { resetMockState } from '../../mocks/handlers'
@@ -12,6 +12,8 @@ const NOVA = 'c'.repeat(32)
 
 describe('AddItemDialog (#4251)', () => {
   beforeEach(() => resetMockState())
+  // Here, not at the end of a test: a failed assertion must not leak a spy into the next.
+  afterEach(() => vi.restoreAllMocks())
 
   it("adds a template's current version with its default settings, pinned to its full commit", async () => {
     const add = vi.spyOn(api, 'addOrderItem')
@@ -42,7 +44,6 @@ describe('AddItemDialog (#4251)', () => {
     const added = order.items.find((i) => i.title === 'Maze for Ada')
     expect(added?.reference.commit).toBe(model.version)
     expect(added?.quantity).toBe(2)
-    add.mockRestore()
   })
 
   it('adds one of the template\'s saved outputs by its id', async () => {
@@ -59,7 +60,6 @@ describe('AddItemDialog (#4251)', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
     await waitFor(() => expect(onClose).toHaveBeenCalled())
     expect(add).toHaveBeenCalledWith(ORDER_DRAFT, { output_id: NOVA, quantity: 1 })
-    add.mockRestore()
   })
 
   it('keeps the estimate\'s filament when another output is picked, and estimates that one', async () => {
@@ -77,8 +77,6 @@ describe('AddItemDialog (#4251)', () => {
     await waitFor(() => expect(estimate).toHaveBeenLastCalledWith(NOVA, expect.any(String)))
     expect(within(dialog).getByRole('combobox', { name: 'Estimate with' })).toHaveTextContent(/Sunflower Yellow/)
     expect(priceBook).toHaveBeenCalledTimes(1)
-    priceBook.mockRestore()
-    estimate.mockRestore()
   })
 
   it("shows the order's refusal and stays open", async () => {
@@ -94,17 +92,41 @@ describe('AddItemDialog (#4251)', () => {
     expect(within(dialog).getByRole('button', { name: 'Add item' })).toBeEnabled()
   })
 
-  it('refuses a quantity under 1 before sending anything', async () => {
+  it.each(['0', '1e9', '2.5'])('refuses the quantity %s before sending anything (#4727)', async (typed) => {
     const add = vi.spyOn(api, 'addOrderItem')
     const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={() => {}} />)
     const dialog = screen.getByRole('dialog', { name: 'Add item' })
     await user.type(within(dialog).getByLabelText('Template'), 'maze')
     await user.click(await within(dialog).findByRole('button', { name: /Ball Maze/ }))
     await user.clear(within(dialog).getByLabelText('Quantity'))
-    await user.type(within(dialog).getByLabelText('Quantity'), '0')
+    await user.type(within(dialog).getByLabelText('Quantity'), typed)
     await user.click(within(dialog).getByRole('button', { name: 'Add item' }))
-    expect(await within(dialog).findByRole('alert')).toHaveTextContent('1 or more')
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('a whole number of 1 or more')
     expect(add).not.toHaveBeenCalled()
-    add.mockRestore()
+  })
+
+  it('offers no current version of a template whose inputs version is unknown (#4727)', async () => {
+    const real = api.listModels.bind(api)
+    vi.spyOn(api, 'listModels').mockImplementation(async () => (await real()).map(({ inputs_version: _, ...m }) => m))
+    const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.type(within(dialog).getByLabelText('Template'), 'maze')
+    await user.click(await within(dialog).findByRole('button', { name: /Ball Maze/ }))
+    expect(await within(dialog).findByRole('radio', { name: 'Current version, default settings' })).toBeDisabled()
+  })
+
+  it('starts another template from its own default, not the last pick (#4727)', async () => {
+    const { user } = renderPage(<AddItemDialog open orderId={ORDER_DRAFT} onAdded={() => {}} onClose={() => {}} />)
+    const dialog = screen.getByRole('dialog', { name: 'Add item' })
+    await user.type(within(dialog).getByLabelText('Template'), 'keychain')
+    await user.click(await within(dialog).findByRole('button', { name: /Name Keychain/ }))
+    expect(await within(dialog).findByRole('radio', { name: 'Reagan' })).toBeChecked()
+    await user.click(within(dialog).getByRole('radio', { name: 'Nova' }))
+    expect(within(dialog).getByRole('radio', { name: 'Nova' })).toBeChecked()
+    await user.click(within(dialog).getByRole('button', { name: 'Change' }))
+    await user.clear(within(dialog).getByLabelText('Template'))
+    await user.type(within(dialog).getByLabelText('Template'), 'keychain')
+    await user.click(await within(dialog).findByRole('button', { name: /Name Keychain/ }))
+    expect(await within(dialog).findByRole('radio', { name: 'Reagan' })).toBeChecked()
   })
 })

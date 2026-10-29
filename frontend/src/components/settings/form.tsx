@@ -43,9 +43,9 @@ export function SettingCard({
     <section aria-labelledby={id} className={cn('mt-4', className)}>
       <Card className="gap-0 py-0" {...props}>
         <CardHeader className="border-b py-3">
-          <h2 id={id} className="font-heading text-sm leading-snug font-medium">
+          <h4 id={id} className="font-heading text-sm leading-snug font-medium">
             {title}
-          </h2>
+          </h4>
           {description && <CardDescription className="text-xs">{description}</CardDescription>}
         </CardHeader>
         {children}
