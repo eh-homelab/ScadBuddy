@@ -212,6 +212,228 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
     })
   })
 
+  // #4757 Task 7: a package's `ai_access` rows and listings over its lifecycle.
+  describe("a package's access rows", () => {
+    const seed = async (source: string, items: Record<string, string>) => {
+      for (const [item, access] of Object.entries(items)) {
+        await db.sql`INSERT INTO ai_access (source, item, access, updated_by) VALUES (${source}, ${item}, ${access}, 'test')`
+      }
+    }
+    const list = async (source: string) => {
+      await db.sql`INSERT INTO ai_tool_listings (source, tools) VALUES (${source}, ${db.sql.json([])})`
+    }
+    const accessRows = async () =>
+      (await db.sql<{ source: string; item: string; access: string }[]>`
+        SELECT source, item, access FROM ai_access WHERE source LIKE 'package:%'`)
+        .map((r) => `${r.source} ${r.item}=${r.access}`)
+        .sort()
+    const listings = async () =>
+      (await db.sql<{ source: string }[]>`SELECT source FROM ai_tool_listings`).map((r) => r.source).sort()
+    const installApproved = async () => {
+      const installed = await install()
+      return store.approve('greeter', installed.commit_sha, installed.content_hash)
+    }
+    const repin = async (name = 'greeter') => {
+      const current = await store.pinOf(name)
+      const pending = await store.setPending(name, await installer.prepare({ ...current!.source, ref: 'main' }))
+      return store.approve(name, pending.pending!.commit_sha, pending.pending!.content_hash)
+    }
+    const hookRow = (view: PackageView) => `hook:Stop:${view.review.hooks[0]!.id!}`
+
+    it('an override survives a re-pin that keeps the hook, and a changed hook comes back on', async () => {
+      const first = await installApproved()
+      await seed('package:greeter', { [hookRow(first)]: 'off' })
+
+      repos.greeter!.commitFiles({ 'skills/hello/SKILL.md': '---\ndescription: New.\n---\n\nHello again.\n' })
+      const kept = await repin()
+      expect(hookRow(kept)).toBe(hookRow(first))
+      expect(await accessRows()).toEqual([`package:greeter ${hookRow(first)}=off`])
+
+      repos.greeter!.commitFiles({
+        'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Was the user waved at?' }] }] } }),
+      })
+      const changed = await repin()
+      expect(hookRow(changed)).not.toBe(hookRow(first))
+      expect(await accessRows()).toEqual([])
+    })
+
+    it('a re-pin drops the rows of a skill and a server the new pin no longer has', async () => {
+      await installApproved()
+      await seed('package:greeter', { '*': 'on', 'skill:hello': 'off', 'skill:wave': 'off', 'subagent:helper': 'off' })
+      await seed('package:greeter/mcp:mem', { '*': 'off', recall: 'read' })
+      await list('package:greeter/mcp:mem')
+
+      repos.greeter!.commitFiles({ 'skills/hello/SKILL.md': null, '.mcp.json': null })
+      await repin()
+      expect(await accessRows()).toEqual([
+        'package:greeter *=on',
+        'package:greeter skill:wave=off',
+        'package:greeter subagent:helper=off',
+      ])
+      expect(await listings()).toEqual([])
+    })
+
+    it("drops a one-skill package's root skill rows keyed by its old folder name", async () => {
+      repos.solo = gitRepo({
+        '.claude-plugin/plugin.json': JSON.stringify({ name: 'solo' }),
+        'SKILL.md': '---\ndescription: Alone.\n---\n\nAlone.\n',
+      })
+      const installed = await store.create(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/solo.git' })))
+      expect(installed.review.skills).toEqual(['solo:solo'])
+      // Before Task 4 the root skill was keyed by the cache folder it was vetted in.
+      await seed('package:solo', {
+        'skill:solo': 'off',
+        'skill:pkg': 'off',
+        [`skill:${installed.commit_sha}-${'0123456789abcdef'}`]: 'off',
+      })
+      await store.approve('solo', installed.commit_sha, installed.content_hash)
+      expect(await accessRows()).toEqual(['package:solo skill:solo=off'])
+    })
+
+    it("keeps a local server's rows while the pin, approved with allow_refused, still declares it", async () => {
+      repos.greeter!.commitFiles({
+        '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'https://mcp.example/mcp/' }, box: { command: 'box' } } }),
+      })
+      const installed = await install()
+      expect(installed.review.refused).toEqual([expect.stringMatching(/MCP server "box" is a local \(stdio\) server$/)])
+      await seed('package:greeter/mcp:box', { '*': 'off' })
+      await seed('package:greeter/mcp:mem', { recall: 'read' })
+      await store.approve('greeter', installed.commit_sha, installed.content_hash, true)
+      expect(await accessRows()).toEqual(['package:greeter/mcp:box *=off', 'package:greeter/mcp:mem recall=read'])
+
+      repos.greeter!.commitFiles({ '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'https://mcp.example/mcp/' } } }) })
+      await repin()
+      expect(await accessRows()).toEqual(['package:greeter/mcp:mem recall=read'])
+    })
+
+    it('a re-pin to a commit with a name past the alias bound fails before any row changes', async () => {
+      await installApproved()
+      await seed('package:greeter', { 'skill:hello': 'off', 'skill:gone': 'off' })
+      const before = await accessRows()
+      repos.greeter!.commitFiles({ 'agents/long.md': `---\nname: ${'a'.repeat(1025)}\ndescription: Long.\n---\n\nLong.\n` })
+      const current = await store.pinOf('greeter')
+      await expect(installer.prepare({ ...current!.source, ref: 'main' })).rejects.toThrow(/longer than 1024/)
+      expect(await accessRows()).toEqual(before)
+    })
+
+    it("removing a package forgets its items, its servers' rows and their listings", async () => {
+      const view = await installApproved()
+      await seed('package:greeter', { '*': 'on', 'skill:hello': 'off', [hookRow(view)]: 'off' })
+      await seed('package:greeter/mcp:mem', { '*': 'off', recall: 'read' })
+      await list('package:greeter/mcp:mem')
+      await seed('package:other', { 'skill:x': 'off' })
+      await seed('package:other/mcp:mem', { recall: 'read' })
+      await list('package:other/mcp:mem')
+
+      expect(await store.delete('greeter')).toBe(true)
+      expect(await accessRows()).toEqual(['package:other skill:x=off', 'package:other/mcp:mem recall=read'])
+      expect(await listings()).toEqual(['package:other/mcp:mem'])
+    })
+
+    it('a re-install starts at the defaults', async () => {
+      // What an older replica's remove left behind.
+      await seed('package:greeter', { '*': 'off', 'skill:hello': 'off' })
+      await seed('package:greeter/mcp:mem', { '*': 'off' })
+      await list('package:greeter')
+      await list('package:greeter/mcp:mem')
+      await install()
+      expect(await accessRows()).toEqual([])
+      expect(await listings()).toEqual([])
+      // A refused second install forgets nothing.
+      await seed('package:greeter', { 'skill:hello': 'off' })
+      await expect(install()).rejects.toMatchObject({ status: 409 })
+      expect(await accessRows()).toEqual(['package:greeter skill:hello=off'])
+    })
+
+    it('a package named a_b keeps its rows when a.b is removed', async () => {
+      const plugin = (name: string) => ({
+        '.claude-plugin/plugin.json': JSON.stringify({ name }),
+        'skills/s/SKILL.md': '---\ndescription: S.\n---\n\nS.\n',
+      })
+      repos.dot = gitRepo(plugin('a.b'))
+      repos.under = gitRepo(plugin('a_b'))
+      await store.create(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/dot.git' })))
+      await store.create(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/under.git' })))
+      for (const name of ['a.b', 'a_b', 'aXb', 'a.b.c']) {
+        await seed(`package:${name}`, { 'skill:s': 'off' })
+        await seed(`package:${name}/mcp:m`, { t: 'read' })
+        await list(`package:${name}/mcp:m`)
+      }
+
+      expect(await store.delete('a.b')).toBe(true)
+      expect(await accessRows()).toEqual([
+        'package:a.b.c skill:s=off',
+        'package:a.b.c/mcp:m t=read',
+        'package:aXb skill:s=off',
+        'package:aXb/mcp:m t=read',
+        'package:a_b skill:s=off',
+        'package:a_b/mcp:m t=read',
+      ])
+      expect(await store.delete('a_b')).toBe(true)
+      expect(await accessRows()).toEqual([
+        'package:a.b.c skill:s=off',
+        'package:a.b.c/mcp:m t=read',
+        'package:aXb skill:s=off',
+        'package:aXb/mcp:m t=read',
+      ])
+      expect(await listings()).toEqual(['package:a.b.c/mcp:m', 'package:aXb/mcp:m'])
+    })
+
+    it('a pending review without hook ids keeps the hook overrides', async () => {
+      const first = await installApproved()
+      await seed('package:greeter', { [hookRow(first)]: 'off', 'skill:gone': 'off' })
+      repos.greeter!.commitFiles({
+        'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Was the user waved at?' }] }] } }),
+      })
+      const current = await store.pinOf('greeter')
+      const pending = await store.setPending('greeter', await installer.prepare({ ...current!.source, ref: 'main' }))
+      // As an older replica stores it: no hook has an id.
+      await db.sql`
+        UPDATE ai_plugin_packages
+        SET pending_review = jsonb_set(pending_review, '{hooks}',
+          (SELECT jsonb_agg(h - 'id') FROM jsonb_array_elements(pending_review -> 'hooks') AS h))`
+      await store.approve('greeter', pending.pending!.commit_sha, pending.pending!.content_hash)
+      // It cannot tell a kept hook from a lost one, so no hook row goes; the lost skill does.
+      expect(await accessRows()).toEqual([`package:greeter ${hookRow(first)}=off`])
+    })
+
+    it("rows an older replica's approval left are pruned by the next write to the package", async () => {
+      const view = await installApproved()
+      await seed('package:greeter', {
+        'skill:hello': 'off',
+        'skill:gone': 'off',
+        'subagent:gone': 'off',
+        'builtin:Bash': 'off',
+        [hookRow(view)]: 'off',
+        'hook:Stop:0000000000000000': 'off',
+      })
+      await seed('package:greeter/mcp:mem', { recall: 'read' })
+      await seed('package:greeter/mcp:old', { '*': 'off' })
+      await list('package:greeter/mcp:old')
+
+      await store.setEnabled('greeter', true)
+      expect(await accessRows()).toEqual([
+        `package:greeter ${hookRow(view)}=off`,
+        'package:greeter skill:hello=off',
+        'package:greeter/mcp:mem recall=read',
+      ])
+      expect(await listings()).toEqual([])
+
+      // setPending and discardPending prune on the current review too.
+      await seed('package:greeter', { 'skill:gone': 'off' })
+      repos.greeter!.commitFiles({ 'README.md': 'v2\n' })
+      await store.setPending('greeter', await installer.prepare({ ...(await store.pinOf('greeter'))!.source, ref: 'main' }))
+      expect(await accessRows()).not.toContain('package:greeter skill:gone=off')
+      await seed('package:greeter', { 'skill:gone': 'off' })
+      await store.discardPending('greeter')
+      expect(await accessRows()).not.toContain('package:greeter skill:gone=off')
+      // And so does approving the current pin again.
+      await seed('package:greeter', { 'skill:gone': 'off' })
+      await store.approve('greeter', view.commit_sha, view.content_hash)
+      expect(await accessRows()).not.toContain('package:greeter skill:gone=off')
+    })
+  })
+
   describe('the routes', () => {
     const appDeps = (): AppDeps => ({
         database: { ping: () => Promise.resolve(true), ready: () => db.ready() },
