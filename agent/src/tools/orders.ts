@@ -417,8 +417,9 @@ export const orderTools: Tool[] = [
         return deleted(item_id)
       }
       const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
-      // An accept is outward: a custom item repriced here stays quoted (the backend reads
-      // `accept` only then).
+      // An accept is outward: a custom item repriced here stays quoted. The tool does not
+      // read the item's kind, so it sends the flag on any edit of a quantity or price; on a
+      // model item the backend reads nothing of it (a quantity there drops the quote).
       if (body.quantity !== undefined || body.unit_price_minor !== undefined) body.accept = false
       return json(
         await ok(
