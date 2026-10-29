@@ -1211,6 +1211,53 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   replaces the old switch (spec §4.2; `agent/src/routes/printerCamera.ts`, #1911). The
   route `PUT /api/v1/ai/settings/printer-camera` writes that row.
 
+### The capabilities API
+
+Settings → Tools & plugins reads and writes `ai_access` through seven agent routes
+([`agent/src/routes/capabilities.ts`](../../agent/src/routes/capabilities.ts), over
+`agent/src/access/capabilities.ts` and `agent/src/access/providers.ts`; spec §4.6):
+
+| Route | |
+|---|---|
+| `GET /api/v1/ai/capabilities` | `{ sources }`: every source with its items (`id`, `kind`, `name`, `harness_name`, `label`, `description`, `default`, `access`, `overridden`, `allowed`, `fixed`, …), its `enabled` and `switchable`, its `options_route` and, for a remote plugin, `listed_at` |
+| `GET /api/v1/ai/capabilities/{source}` | one source |
+| `PUT /api/v1/ai/capabilities/{source}` | `{ "enabled": true\|false }`: the source switch (item `*`); 409 on a source that is not `switchable` |
+| `GET /api/v1/ai/capabilities/{source}/items/{item}` | the item with its input and output schemas, annotations, the raw listed entry and what the caps `omitted` |
+| `PUT /api/v1/ai/capabilities/{source}/items/{item}` | `{ "access": … }`: `off`, `read`, `write` or `outward` for a tool. Choosing the default deletes the row. 400 on an access the kind does not take, 409 on a `fixed` item or one outside `allowed` |
+| `DELETE /api/v1/ai/capabilities/{source}/items/{item}` | back to the default |
+| `POST /api/v1/ai/capabilities/{source}/refresh` | a remote plugin's connection test, which stores a good listing (`testAndList` in `agent/src/routes/plugins.ts`, shared with `POST /plugins/{name}/test`, one at a time per plugin; a second is 429) |
+
+- A source or item id is one percent-encoded path segment (`remote%3Ahindsight`). An
+  unknown one is 404. Every write answers the source as it is after the write.
+- The guards are the plugin routes' guards (`agent/src/routes/guard.ts`): reads behind
+  `uiReadProblem`, writes and the refresh behind `uiRequestProblem`, JSON bodies of at
+  most 4 KiB (`jsonBodyLimit`). These are the user's settings writes. No agent tool
+  calls them (`AGENT_ROUTES` in `agent/src/tools/coverage.ts`): the in-page assistant
+  changes an access only by working the page a person has open, through the browser
+  bridge (#4208).
+- Built-in writes go through `AccessStore` (`agent/src/access/store.ts`), which audits
+  them and sends the warm eviction. Remote writes go through `PluginRepo`
+  (`agent/src/plugins/registry.ts` `setToolAccess`) for one release (until #4828), so the
+  `ai_plugins` columns an older replica reads stay right. They record the writer in
+  `ai_access.updated_by` (`browser:browser` from the page, `updatedBy` in
+  `agent/src/access/store.ts`) and are not audited, as remote plugin writes are not.
+- A remote tool's label is its MCP `title`, else `annotations.title`, else its name
+  ([MCP tools, "Tool"](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool)).
+  Claude Code renames a tool name's characters outside `[A-Za-z0-9_-]` to `_`
+  (`harnessToolName`), so a renamed tool is `allowed: ["off", "outward"]`, and tools
+  that collide on one harness name are both `fixed` `off`.
+- A listing is kept in `ai_tool_listings`: each `tools/list` entry once, as the server
+  sent it, with its parts derived when read (`agent/src/access/listings.ts`). The caps
+  (`LISTING_CAPS`): 512 tools, a name of at most 128 characters (a longer one is
+  dropped), a title of 1,024, a description of 8,192, 64 KiB of JSON per schema, 16 KiB
+  for the annotations and for the other fields together, and 2 MiB per listing. Over the
+  listing cap the other fields go first, then the output schemas, the input schemas,
+  the annotations and the descriptions. Each removal is named in the tool's `omitted`.
+- The page asks one confirmation line when a choice ranks below the item's default
+  (`off` < `read` < `write` < `outward`; a by-call default such as `http_request`'s ranks
+  as `outward`), and nothing more. The routes ask nothing: a write takes effect from the
+  next call.
+
 ## 12. The HTTP request tool (#827)
 
 Session turns get an `http_request` tool ("curl"; `agent/src/harness/httpRequest.ts`)
