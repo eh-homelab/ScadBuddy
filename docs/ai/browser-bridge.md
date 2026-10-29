@@ -56,7 +56,7 @@ spec §8.1.
 | | `open_print_dialog` | **outward** |
 | source (`/m/<slug>/source`, `/new`) | `get_editor_text`, `get_problems` | read |
 | | `replace_range` (not saved) | write |
-| settings (`/settings`) | `get_form`, `test_connection` | read |
+| settings (`/settings/…`) | `get_form`, `test_connection` | read |
 | | `set_field` (not saved; `SETTINGS_FIELDS` only, and never the API key) | write |
 
 Notes, each from the tool's own entry:
@@ -71,7 +71,16 @@ Notes, each from the tool's own entry:
 **Stable tool list** (spec §5.2): the catalogue is the same on every route. A tool whose
 page is not mounted answers `unavailable` instead of disappearing (`call()` in
 `bridge.ts`). The error codes are `unknown_tool`, `unavailable`, `invalid_args`,
-`refused`, `timeout` and `failed` (`ErrorCode`, `types.ts`).
+`refused`, `timeout`, `failed` and `stale_tab` (`ErrorCode`, `types.ts`).
+
+`stale_tab` (#4884) answers a call on a tab from an older build whose lazy tool
+catalogue the server no longer has. `installStaleChunkReload`
+([`staleChunks.ts`](../../frontend/src/lib/staleChunks.ts)) `preventDefault()`s Vite's
+`vite:preloadError` and reloads, which makes the import resolve `undefined`; without
+that reload the import rejects. Both are answered as `stale_tab`, and `listTools()`
+answers `{ ok: false, error }` the same way. The message tells the agent the tab is
+reloading (or must be reloaded) and that, since a reload is a new tab, an agent that
+paired by code must pair again with `browser_pair`.
 
 ## `data-agent-user-only`
 
@@ -222,9 +231,9 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   (`TAB_WAIT_RATE_LIMIT`, apart from the model's own attention limit); past it a call
   fails at once with "The user was not asked for the tab: …". Every wait opened counts,
   including ones withdrawn because their calls stopped.
-  The tab's own errors (`unavailable`, `invalid_args`, `refused`, `failed`) come back
-  as `the tab answered <tool> with <code>: …`, with the tab's message in the
-  untrusted-data envelope (#258), because it can quote the page.
+  The tab's own errors (`unavailable`, `invalid_args`, `refused`, `failed`,
+  `stale_tab`) come back as `the tab answered <tool> with <code>: …`, with the tab's
+  message in the untrusted-data envelope (#258), because it can quote the page.
 - **Results** are what `bridge.call()` returned, as JSON, in the untrusted-data
   envelope with the source "the user's open ScadBuddy tab". A result over 200 000
   bytes of UTF-8 (measured with `TextEncoder`, not string length) is answered by the tab
@@ -324,46 +333,76 @@ in Postgres as well as in the hub (`ai_session_tabs`,
 [`bridge/sessionTabs.ts`](../../agent/src/bridge/sessionTabs.ts), #2086): a call that runs
 where the session's messages never arrived reads it there. The row is written on every
 message the user sends and is what every replica uses; a replica's own copy answers only
-when there is no row or it cannot be read. Then the call goes there through
-Postgres (#1916, [`bridge/relay.ts`](../../agent/src/bridge/relay.ts)):
+when there is no row or it cannot be read. Then the call goes to the replica holding
+the tab through Temporal (#4780, [`bridge/relay.ts`](../../agent/src/bridge/relay.ts),
+[`temporal/bridgeCall.ts`](../../agent/src/temporal/bridgeCall.ts)):
 
 ```mermaid
 sequenceDiagram
-  participant A as caller replica
-  participant PG as Postgres
   participant B as replica holding the tab
-  A->>PG: INSERT request row, NOTIFY scadbuddy_bridge {call, tab, row}
-  PG-->>B: NOTIFY (every replica hears it)
-  B->>PG: DELETE … RETURNING the row (only a replica holding the tab)
-  B->>PG: NOTIFY {ack}
-  PG-->>A: ack
+  participant PG as Postgres
+  participant A as caller replica
+  participant T as Temporal
+  B->>PG: hello: ai_tab_owners row (tab → agent-tools.<B>)
+  A->>PG: read the tab's owner queue
+  A->>T: start BridgeCall on agent-tools
+  T->>B: activity bridge.tab on agent-tools.<B> (B only, one attempt)
   B->>B: run the call on the tab, as a local call
-  B->>PG: INSERT answer row, NOTIFY {result, row}
-  PG-->>A: result
-  A->>PG: DELETE … RETURNING the answer row
+  B-->>T: the answer, as the activity's result
+  T-->>A: the workflow's result
+  A->>PG: delete the call's payload key
 ```
 
-- **Bodies are rows** in `ai_bridge_messages`, inserted in the transaction that sends
-  the NOTIFY, because a NOTIFY payload is capped at 8000 bytes and a tab's result can be
-  200 000. Taking a row with `DELETE … RETURNING` runs a call once even when a reconnect
-  leaves the tab id briefly on two replicas. So a forwarded call's arguments and the
-  tab's result, page snapshots included, are written to Postgres. A row nobody took
-  stays there until a sweep finds it more than 10 minutes old, and a replica sweeps only
-  when it next forwards something, so such a row can outlive those 10 minutes.
-- **The channel is `scadbuddy_bridge`**, LISTENed on the event bus's connection
-  (`events/pgListener.ts` `listenAlso`), not `scadbuddy_events`: the backend logs every
-  payload on that one it cannot decode.
-- **No replica holds the tab:** nobody acks within 3 s (`ACK_TIMEOUT_MS`), and the call
-  answers the usual "the paired ScadBuddy tab is not connected". The ack is what tells
-  that apart from a slow tab. Before answering, the caller withdraws its request row;
-  when the row is already gone, a replica took it and its ack is late or was lost, so
-  the caller waits for the answer as if acked rather than report a tab that may be
-  running the call as not connected.
+- **The owner is a row** in `ai_tab_owners`, the queue of the replica whose socket the
+  tab reached (`agent-tools.<identity>`, `main.ts` `HOST_QUEUE`, which that replica's
+  host worker polls). A tab's hello claims it; its socket's close releases it only while
+  the row still names that replica, so a reconnect to another replica that overtakes the
+  old socket keeps the newer owner. A replica drops its own rows at start (a container
+  restart keeps its identity). A replica claims tabs only while its host worker serves
+  `bridge.tab`. Every 30 s (`OWNER_REFRESH_MS`) it refreshes the rows of the tabs it holds
+  and makes a missing one again: a claim lost while the database was down, or a row that
+  a missed call dropped. It never takes back a row that names another replica.
+- **One replica runs a call:** the activity is scheduled on the owner's queue only, with
+  one attempt, so the other replicas do no work for it.
+- **Every call is sealed:** the arguments and the tab's result (page snapshots, form
+  contents, the editor's text) are the workflow's payloads, and each `BridgeCall`
+  workflow, `bridge-<uuid>`, is a subject of its own with a key made for it under the
+  KEK ([`temporal/payloadCodec.ts`](../../agent/src/temporal/payloadCodec.ts)
+  `subjectOf`), whether or not the call is for a session. The caller deletes the key
+  once it has the answer, so the history cannot be read again. No replica caches a bridge
+  key (`PgPayloadKeys` reads it from the row each time), so no copy outlives the row in
+  memory. A key that a cancelled call left is deleted by the hourly sweep
+  (`sweepBridgeKeys`, older than an hour). Without
+  the KEK no call goes through Temporal: it is refused, or (for one release) takes the
+  Postgres relay below.
+- **Inline, capped:** a bridge payload is never kept in the payload store (only a
+  session's are), so nothing is left on the data share. The request and the answer are
+  each capped at 256 KiB of JSON (`MAX_BRIDGE_BYTES`), past a tab's own 200 000 bytes and
+  its envelope; sealing adds about a third (base64 inside JSON), so a sealed payload stays
+  under Temporal's 512 KB warning. Past the cap the call answers `too_large`.
+- **No replica holds the tab:** there is no row, or no worker takes the activity within
+  3 s (`ACK_TIMEOUT_MS`, its schedule-to-start timeout: the owner's pod is gone), and the
+  call answers the usual "the paired ScadBuddy tab is not connected". The row is then
+  deleted only if nobody claimed or refreshed it after the call read it, so a live owner
+  that was only slow keeps its row, or makes it again at its next refresh.
+- **A failed call answers, never throws:** if the owner's row cannot be read or Temporal
+  refuses the start, the call ran nowhere, so it takes the old relay while that exists,
+  or answers `no_answer`. Once the workflow has started, a failure or a timeout answers
+  `no_answer` and is never sent again: the owner may have run it, and a click must not
+  run twice. If the owner's run throws, the workflow completes with a `no_answer`
+  outcome.
 - **Timeouts:** the replica holding the tab applies the call's own timeout and answers
   `no_answer`, as for a local call; the caller gives up on that replica after the timeout
-  plus 3 s. `browser_status` asks the same way for the tab's route and live tools.
-- **Not covered:** a NOTIFY sent while a replica's listening connection is down is lost,
-  so the call times out. A cancelled call stops waiting but is not withdrawn from the
+  plus 3 s (the activity's start-to-close). `browser_status` asks the same way for the
+  tab's route and live tools.
+- **During the rollout of #4780 (one release, #4868):** the Postgres relay of #1916
+  ([`bridge/pgRelay.ts`](../../agent/src/bridge/pgRelay.ts): rows in
+  `ai_bridge_messages`, NOTIFY `scadbuddy_bridge`, every replica hears every call) still
+  runs beside it. A replica on the new build answers its requests for the tabs it holds,
+  and tries it for a call the Temporal path cannot place: no row (the tab is on a replica
+  still on the old build), an owner that is gone or no longer holds the tab, or no KEK.
+  #4868 removes it and drops the table.
+- **Not covered:** a cancelled call cancels its workflow, but is not withdrawn from the
   tab, as with a local call. Without a database there is no relay, and only tabs on the
   same process can be reached.
 

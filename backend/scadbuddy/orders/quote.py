@@ -94,6 +94,11 @@ class SliceQuoteRequest(BaseModel):
 
     #: The printer to slice for, as the dialog's; omitted, the configured one.
     printer_id: int | None = None
+    #: The registry printer (#4551), as the print dialog's run names it: sent with
+    #: ``printer_id`` it must link that Bambuddy printer, and alone it names a printer
+    #: only the LAN reaches. A printer a run reaches over the LAN is sliced for with no
+    #: Bambuddy call (plan 2026-10-18 D2, D3).
+    printer: str | None = Field(default=None, max_length=64)
     #: One spool per slot (``slot_id`` from 1, the dialog's).
     filament_plan: FilamentPlan
     choices: PrintChoices
@@ -300,7 +305,10 @@ def _at_defaults(inputs: Mapping[str, Any], schema: CustomizerSchema | None) -> 
     if schema is None:
         return dict(inputs)
     params = inputs.get("params", {})
-    return {**inputs, "params": with_defaults(schema, params if isinstance(params, dict) else {})}
+    if not isinstance(params, dict):
+        # A malformed row is compared exactly, never read as an all-defaults render.
+        return dict(inputs)
+    return {**inputs, "params": with_defaults(schema, params)}
 
 
 async def ensure_output(

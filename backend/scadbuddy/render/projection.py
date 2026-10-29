@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from pathlib import PurePosixPath
 from typing import Any
 
 from psycopg import Connection
@@ -534,6 +535,34 @@ class JobProjection:
             raise JobNotFoundError(job_id)
         return _job(row)
 
+    def reuse_done(self, key: str) -> Job | None:
+        """The newest done render of ``key`` whose result is still held (#4870), or
+        None. Its row is locked while its refs are counted, and its `reused_at` set in
+        the same transaction: the prune, which deletes a row with its refs, either took
+        it first (no row) or waits and then keeps it for another TTL, refs and all."""
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "SELECT * FROM render_jobs WHERE render_key = %s AND state = 'done'"
+                " AND kind = 'render' AND workflow_run_id IS NOT NULL"
+                " ORDER BY finished_at DESC, id DESC LIMIT 1 FOR UPDATE",
+                (key,),
+            ).fetchone()
+            if row is None:
+                return None
+            job = _job(row)
+            if job.result is None or not job.outputs:
+                return None
+            keys = sorted(_held_keys(job))
+            held = conn.execute(
+                "SELECT count(*) AS held FROM blob_refs"
+                " WHERE holder_kind = 'job' AND holder_id = %s AND key = ANY(%s)",
+                (job.id, keys),
+            ).fetchone()
+            if held is None or held["held"] != len(keys):
+                return None
+            conn.execute("UPDATE render_jobs SET reused_at = now() WHERE id = %s", (job.id,))
+        return job
+
     def queue_position(self, job: Job) -> int | None:
         """Where a pending ``job`` waits (#1638): 1 when no pending job was submitted
         before it, None once it has started or settled. Render and arrange jobs share
@@ -618,8 +647,10 @@ class JobProjection:
         cutoff = (now_ or now()) - timedelta(seconds=ttl)
         with self._pool.connection() as conn, conn.transaction():
             rows = conn.execute(
+                # A reuse (#4870) keeps a row as long as a finish does.
                 "DELETE FROM render_jobs WHERE state IN ('done', 'failed', 'cancelled')"
-                " AND coalesce(finished_at, created_at) < %s RETURNING id",
+                " AND greatest(coalesce(finished_at, created_at), reused_at) < %s"
+                " RETURNING id",
                 (cutoff,),
             ).fetchall()
             removed = [row["id"] for row in rows]
@@ -642,3 +673,21 @@ def _piece_keys(inputs: dict[str, Any] | None) -> list[str]:
     """The Parts an arrange's `ArrangeInputs` places, once each."""
     items = (inputs or {}).get("items", [])
     return list(dict.fromkeys(item["part"]["piece_key"] for item in items))
+
+
+def _held_keys(job: Job) -> set[str]:
+    """Every blob a done job's answer reads: each output's, and the pieces its results'
+    files are in (`blobs/<key>/<file>`, relative to the data dir)."""
+    keys: set[str] = set()
+    for output in job.outputs:
+        keys.update(output.blob_keys)
+        if output.files_key is not None:
+            keys.add(output.files_key)
+    results = [job.result, *(output.result for output in job.outputs)]
+    for result in results:
+        assert result is not None
+        for rel in (result.model_3mf, result.preview_glb):
+            parts = PurePosixPath(rel).parts
+            if len(parts) >= 3 and parts[0] == "blobs":
+                keys.add(parts[1])
+    return keys

@@ -228,7 +228,7 @@ artifact.
     parking, approving and denying outward calls (#471).
 - **Postgres tests.** They run when `SCADBUDDY_TEST_DATABASE_URL` is set
   ([`agent/test/support/postgres.ts`](../../agent/test/support/postgres.ts)); PR #379
-  ran them against `postgres:17`.
+  ran them against `postgres:17`; CI now runs them on `postgres:18` (#4760).
 - **Permission seam unit tests.** [`agent/test/permissions.test.ts`](../../agent/test/permissions.test.ts).
 - **Plugin vetting tests.** [`agent/test/plugins.test.ts`](../../agent/test/plugins.test.ts),
   with the fixtures in `agent/test/fixtures/plugins/`.

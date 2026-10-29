@@ -7,6 +7,7 @@ import { server } from './src/mocks/server'
 import { resetDisplayUnit } from './src/lib/units'
 import { resetRealtime } from './src/lib/realtime'
 import { resetAiAvailability } from './src/agent/chat/availability'
+import { clearToasts } from './src/lib/toast'
 import { FakeIntersectionObserver, resetIntersections } from './src/test/intersection'
 import { resending } from './src/test/resend'
 import { sharedInFlight } from './src/test/inFlight'
@@ -66,6 +67,8 @@ afterEach(async () => {
   // Back pressed there (#3671). Under fake timers jsdom's traversal waits on them too,
   // so there is nothing to wait for.
   cleanup()
+  // The toast stack is module state; an approval's toast (#4813) would outlive its test.
+  clearToasts()
   if (!vi.isFakeTimers()) await new Promise((resolve) => setTimeout(resolve, 0))
   // #3243 — the next test starts with none of this one's requests still in flight; one
   // that does not end in time is named here, against the test that left it, rather than

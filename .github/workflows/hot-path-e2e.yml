@@ -6,17 +6,19 @@
 # names the calls it saw: that is AC1's check working, not a flake (#4629 removed the
 # last ones, from the dialog's analyzers and the Prints page).
 #
-# Weekly and on demand, never a PR check: it builds three images and prints twice, and
-# it is not in ci.yml's `CI Summary` needs (plan decision 6). On a PR that touches
-# e2e-stack/ (or this file, or the fakes' tests) only the `fakes` job runs: the two
-# fakes' own tests and ruff over e2e-stack/ (#4187, below), a minute's work.
+# No job here is a required check: none is in ci.yml's `CI Summary` needs (plan
+# decision 6). The `stack` job runs weekly and on demand, never on a PR: it builds three
+# images and prints twice. On a PR that touches the `paths` below (e2e-stack/, the
+# backend, this file) only `fakes` runs: the two fakes' own tests and ruff and mypy over
+# them (#4187), a minute's work.
 #
-# #4187, settled here rather than in backend-pytest: the fake printer's test needs
-# mosquitto, which the test image does not carry, and mounting e2e-stack/ into the four
-# backend-pytest shards would still skip it. Installing mosquitto on this runner keeps
-# the test image, and so every backend-pytest shard and its cache, unchanged, at the cost
-# of the tests running only here: on a PR that touches what they test, weekly, and on
-# demand.
+# #4541: the backend's tests that drive a native run against the fake printer
+# (`tests/test_print_native_workflow.py`, `tests/api/test_hot_path_native.py`, among them
+# the AC1 check that a native run builds no Bambuddy client) and the fakes' own tests run
+# in every backend-pytest shard: the Dockerfile's `test` stage carries mosquitto
+# (`SCADBUDDY_TEST_MQTT`) and the two fakes from e2e-stack/. This workflow's `native` job,
+# which ran them on a runner of its own before that, is gone. `fakes` stays for the lint
+# of e2e-stack/, which no other job runs.
 name: Hot path e2e
 
 on:
@@ -26,9 +28,9 @@ on:
   pull_request:
     paths:
       - e2e-stack/**
-      - backend/tests/printers/test_fake_printer.py
-      - backend/tests/test_bambuddy_recorder.py
       - .github/workflows/hot-path-e2e.yml
+      # The whole backend (#4766 review): the fakes are tested against its LAN client.
+      - backend/**
 
 permissions:
   contents: read
@@ -150,9 +152,11 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      # No `--with-deps`: see ci.yml's frontend-e2e job (#4882).
       - name: Install Playwright browsers
         working-directory: frontend
-        run: pnpm exec playwright install --with-deps chromium
+        timeout-minutes: 5
+        run: pnpm exec playwright install chromium
 
       - name: run.sh --mode both
         run: e2e-stack/run.sh --mode both --no-build

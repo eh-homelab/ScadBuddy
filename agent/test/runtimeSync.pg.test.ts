@@ -95,6 +95,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL 
         disabledTools: [],
         raisedTiers: [],
         httpRequest: false,
+        httpTier: null,
         builtinTools: [],
         recallMaxQueryChars: null,
         transientRetries: null,

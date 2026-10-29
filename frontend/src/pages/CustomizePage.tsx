@@ -1,7 +1,7 @@
 import { Suspense, lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router'
 import { committed, touchAfterRender, waitFor } from '../agent/highlight'
-import { AgentToolError } from '../agent/types'
+import { AgentToolError, type ToolImpl, type ToolImpls } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
 import { missingFonts } from '../lib/fonts'
@@ -83,6 +83,18 @@ const WARN = 'border-destructive/40 bg-destructive/10 text-destructive'
 
 /** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
 const NOTHING: ParamValues = Object.freeze({})
+/** #4885 — the budget a parameter tool gives `schemaLoaded`; `render` gives it its own `timeout_ms`. */
+const SCHEMA_WAIT_MS = 10_000
+
+/** The model an agent tool call was made on, to check the page against after every wait. */
+type CallOn = { slug: string; version: string | undefined }
+
+/** Runs `wait` with `budget` ms and answers the ms left of it. */
+async function spend(budget: number, wait: (timeout: number) => Promise<unknown>): Promise<number> {
+  const started = performance.now()
+  await wait(budget)
+  return Math.max(0, budget - (performance.now() - started))
+}
 
 const FLYOUT_ID = 'parameters-flyout'
 /**
@@ -526,7 +538,11 @@ export function CustomizePage() {
   }, [])
 
   const live = useLatest({
+    slug,
+    version,
     schema,
+    schemaLoading: schemaState.loading,
+    schemaError: schemaState.error,
     values,
     extra,
     inputs,
@@ -634,11 +650,48 @@ export function CustomizePage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- everything else is read through `live`
   }, [slug, uiVersion])
 
+  function notLoaded(error: Error | undefined) {
+    return new AgentToolError('timeout', error ? `The model did not load: ${error.message}` : 'The model is still loading.')
+  }
+
   function requireSchema() {
-    if (!schema) {
-      throw new AgentToolError('timeout', schemaState.error ? `The model did not load: ${schemaState.error.message}` : 'The model is still loading.')
-    }
+    if (!schema) throw notLoaded(schemaState.error)
     return schema
+  }
+
+  /**
+   * #4894, #4900 — throws `unavailable` when the page has moved off the model the call was
+   * made on, so a wait that outlasts the move never acts on, or reports, another model.
+   */
+  function stillOn(on: CallOn) {
+    const { slug: slugNow, version: versionNow } = live.current
+    if (slugNow !== on.slug || versionNow !== on.version) {
+      throw new AgentToolError(
+        'unavailable',
+        `The page moved off "${on.slug}" while this call waited; nothing was changed.`,
+      )
+    }
+  }
+
+  /**
+   * #4885 — the tools are live as soon as the page mounts, before its schema has loaded,
+   * so a call that needs the schema waits for the fetch in flight rather than answering
+   * "still loading" at once. A failed or absent schema still answers at once. The wait
+   * spends the call's `budget` ms and answers what is left of it, for the rest of the call.
+   */
+  function schemaLoaded(on: CallOn, budget: number): Promise<number> {
+    return spend(budget, (timeout) =>
+      waitFor(
+        () => {
+          stillOn(on)
+          const { schema: loaded, schemaLoading, schemaError } = live.current
+          if (loaded) return loaded
+          if (schemaError || !schemaLoading) throw notLoaded(schemaError)
+          return undefined
+        },
+        { timeout, what: 'the model to load' },
+      ),
+    )
   }
 
   function requireParam(name: string): Param {
@@ -676,101 +729,125 @@ export function CustomizePage() {
     }
   }
 
+  const customizeTools: ToolImpls = {
+    get_params: () => {
+      const current = requireSchema()
+      return {
+        slug,
+        version: version ?? null,
+        params: allParams(current).map((param) => ({
+          name: param.name,
+          caption: param.caption ?? null,
+          type: param.type,
+          group: param.group || null,
+          value: values[param.name] ?? param.initial ?? null,
+          initial: param.initial ?? null,
+          min: param.min ?? undefined,
+          max: param.max ?? undefined,
+          step: param.step ?? undefined,
+          max_length: param.max_length ?? undefined,
+          options: param.options?.map((option) => ({ name: option.name, value: option.value })),
+          samples: param.samples?.length ? param.samples : undefined,
+        })),
+        changed: diffFromDefaults(current, values).map((diff) => diff.name),
+        inputs: joinInputs(values, extra),
+        ui_summary: describeRef.current?.() ?? null,
+      }
+    },
+    set_param: async ({ name, value }) => {
+      const next = checked(name, value)
+      onChange(name, next)
+      showTouched(name)
+      await committed(() => live.current.values[name] === next)
+      return { name, value: next, rendering: 'after the usual debounce; render waits for it' }
+    },
+    set_params: async ({ values: wanted }) => {
+      const entries = Object.entries(wanted)
+      if (entries.length === 0) throw new AgentToolError('invalid_args', 'values is empty.')
+      const problems: string[] = []
+      const next: ParamValues = {}
+      for (const [name, value] of entries) {
+        try {
+          next[name] = checked(name, value)
+        } catch (cause) {
+          problems.push(cause instanceof Error ? cause.message : String(cause))
+        }
+      }
+      // All or nothing: one bad value leaves every field as it was.
+      if (problems.length > 0) throw new AgentToolError('invalid_args', problems.join(' '))
+      latestInputs.current = withParams(latestInputs.current, next)
+      setEdits((current) => ({
+        of: current.of,
+        values: { ...(current.values ?? current.of ?? NOTHING), ...next },
+        extra: current.extra,
+      }))
+      showTouched(Object.keys(next)[0] ?? '')
+      await committed(() => Object.entries(next).every(([name, value]) => live.current.values[name] === value))
+      return { values: next }
+    },
+    reset_param: async ({ name }) => {
+      if (name === undefined) {
+        const current = requireSchema()
+        onReset()
+        await committed(() => diffFromDefaults(current, live.current.values).length === 0)
+        return { reset: 'all' }
+      }
+      const param = requireParam(name)
+      if (param.initial === null || param.initial === undefined) {
+        throw new AgentToolError('invalid_args', `"${name}" has no default to go back to.`)
+      }
+      const initial = param.initial
+      onChange(name, initial)
+      showTouched(name)
+      await committed(() => live.current.values[name] === initial)
+      return { name, value: initial }
+    },
+    render: async ({ timeout_ms }) => {
+      // Past `on`, only `live` is read, so this closure may outlast the render it came from.
+      const on = { slug, version }
+      const left = await schemaLoaded(on, timeout_ms)
+      await waitFor(
+        () => {
+          stillOn(on)
+          return live.current.upToDate ? true : undefined
+        },
+        { timeout: left, what: 'the preview render of the current values' },
+      )
+      return renderReport()
+    },
+    select_plate: async ({ printer_model }) => {
+      setPrinterModel(printer_model)
+      const plateNow = await waitFor(
+        () => {
+          const { printerModel: model, plateState: state } = live.current
+          return model === printer_model && !state.loading ? state : undefined
+        },
+        { timeout: 10_000, what: 'the plate to load' },
+      )
+      if (plateNow.error) throw new AgentToolError('failed', plateNow.error.message)
+      return { plate: plateNow.data ?? null }
+    },
+  }
+  const latestTools = useLatest(customizeTools)
+  /**
+   * #4885 — waits for the schema, then runs the tool as the latest render has it: the
+   * render this call arrived in has no schema, and its `values` and callbacks are stale.
+   */
+  function afterSchema<N extends 'get_params' | 'set_param' | 'set_params' | 'reset_param'>(name: N): ToolImpl<N> {
+    return async (args) => {
+      await schemaLoaded({ slug, version }, SCHEMA_WAIT_MS)
+      return (latestTools.current[name] as ToolImpl<N>)(args)
+    }
+  }
+
   useAgentHandlers(
     'customize',
     {
-      get_params: () => {
-        const current = requireSchema()
-        return {
-          slug,
-          version: version ?? null,
-          params: allParams(current).map((param) => ({
-            name: param.name,
-            caption: param.caption ?? null,
-            type: param.type,
-            group: param.group || null,
-            value: values[param.name] ?? param.initial ?? null,
-            initial: param.initial ?? null,
-            min: param.min ?? undefined,
-            max: param.max ?? undefined,
-            step: param.step ?? undefined,
-            max_length: param.max_length ?? undefined,
-            options: param.options?.map((option) => ({ name: option.name, value: option.value })),
-            samples: param.samples?.length ? param.samples : undefined,
-          })),
-          changed: diffFromDefaults(current, values).map((diff) => diff.name),
-          inputs: joinInputs(values, extra),
-          ui_summary: describeRef.current?.() ?? null,
-        }
-      },
-      set_param: async ({ name, value }) => {
-        const next = checked(name, value)
-        onChange(name, next)
-        showTouched(name)
-        await committed(() => live.current.values[name] === next)
-        return { name, value: next, rendering: 'after the usual debounce; render waits for it' }
-      },
-      set_params: async ({ values: wanted }) => {
-        const entries = Object.entries(wanted)
-        if (entries.length === 0) throw new AgentToolError('invalid_args', 'values is empty.')
-        const problems: string[] = []
-        const next: ParamValues = {}
-        for (const [name, value] of entries) {
-          try {
-            next[name] = checked(name, value)
-          } catch (cause) {
-            problems.push(cause instanceof Error ? cause.message : String(cause))
-          }
-        }
-        // All or nothing: one bad value leaves every field as it was.
-        if (problems.length > 0) throw new AgentToolError('invalid_args', problems.join(' '))
-        latestInputs.current = withParams(latestInputs.current, next)
-        setEdits((current) => ({
-          of: current.of,
-          values: { ...(current.values ?? current.of ?? NOTHING), ...next },
-          extra: current.extra,
-        }))
-        showTouched(Object.keys(next)[0] ?? '')
-        await committed(() => Object.entries(next).every(([name, value]) => live.current.values[name] === value))
-        return { values: next }
-      },
-      reset_param: async ({ name }) => {
-        if (name === undefined) {
-          const current = requireSchema()
-          onReset()
-          await committed(() => diffFromDefaults(current, live.current.values).length === 0)
-          return { reset: 'all' }
-        }
-        const param = requireParam(name)
-        if (param.initial === null || param.initial === undefined) {
-          throw new AgentToolError('invalid_args', `"${name}" has no default to go back to.`)
-        }
-        const initial = param.initial
-        onChange(name, initial)
-        showTouched(name)
-        await committed(() => live.current.values[name] === initial)
-        return { name, value: initial }
-      },
-      render: async ({ timeout_ms }) => {
-        requireSchema()
-        await waitFor(() => (live.current.upToDate ? true : undefined), {
-          timeout: timeout_ms,
-          what: 'the preview render of the current values',
-        })
-        return renderReport()
-      },
-      select_plate: async ({ printer_model }) => {
-        setPrinterModel(printer_model)
-        const plateNow = await waitFor(
-          () => {
-            const { printerModel: model, plateState: state } = live.current
-            return model === printer_model && !state.loading ? state : undefined
-          },
-          { timeout: 10_000, what: 'the plate to load' },
-        )
-        if (plateNow.error) throw new AgentToolError('failed', plateNow.error.message)
-        return { plate: plateNow.data ?? null }
-      },
+      ...customizeTools,
+      get_params: afterSchema('get_params'),
+      set_param: afterSchema('set_param'),
+      set_params: afterSchema('set_params'),
+      reset_param: afterSchema('reset_param'),
     },
     () => ({
       slug,

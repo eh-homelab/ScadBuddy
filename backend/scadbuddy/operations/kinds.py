@@ -58,6 +58,10 @@ class OperationKind:
     #: instead of once the effect ended (#2462): for a fire-and-forget effect the caller
     #: follows anyway, which would otherwise ride out the command deadline every time.
     answers_running: bool = False
+    #: Top-level request fields left out of the operation key (#4747): a value sealed
+    #: with a random IV differs on every send, so a re-send could not find its record.
+    #: The request must carry a keyed stand-in for it (a MAC) in its place.
+    unkeyed: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         # Temporal reads `maximum_attempts=0` as unlimited (review #1063 fourth review 2).
@@ -116,9 +120,17 @@ def build_kinds(
     return kinds
 
 
-def operation_key(kind: str, subject: str, request: dict[str, Any], request_id: str) -> str:
-    """The kind, its subject, the canonical body and the client's key (§4.2 step 1)."""
-    canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
+def operation_key(
+    kind: str,
+    subject: str,
+    request: dict[str, Any],
+    request_id: str,
+    unkeyed: frozenset[str] = frozenset(),
+) -> str:
+    """The kind, its subject, the canonical body and the client's key (§4.2 step 1);
+    without the kind's ``unkeyed`` fields."""
+    keyed = {k: v for k, v in request.items() if k not in unkeyed} if unkeyed else request
+    canonical = json.dumps(keyed, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{kind}\n{subject}\n{canonical}\n{request_id}".encode()).hexdigest()
 
 

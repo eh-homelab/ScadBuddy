@@ -523,9 +523,9 @@ function UnusedCheckouts({ installed, onRemoved }: { installed: readonly Install
 
   return (
     <section aria-labelledby={headingId} className="space-y-2">
-      <h3 id={headingId} className="text-sm font-medium">
+      <h4 id={headingId} className="text-sm font-medium">
         Checkouts no model uses
-      </h3>
+      </h4>
       <p className="text-xs text-muted-foreground">
         Unpinning a library keeps its checkout on the volume. Remove the ones nothing pins any more.
       </p>

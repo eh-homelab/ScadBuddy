@@ -1,7 +1,9 @@
+import type * as CatalogModule from './catalog'
 import { takeSnapshot, type Snapshot } from './snapshot'
 import {
   AgentToolError,
   type CallResult,
+  type ToolError,
   type Scope,
   type ToolImpls,
   type ToolInfo,
@@ -24,8 +26,77 @@ export interface RegisterOptions {
   describe?: () => unknown
 }
 
+type Catalog = typeof CatalogModule
+
+/** Loads the tool catalogue; `undefined` is a preload error the stale-chunk reload swallowed. */
+export type CatalogLoader = () => Promise<Catalog | undefined>
+
 /** zod and the schemas load on first use, so the entry chunk carries neither. */
-const loadCatalog = () => import('./catalog')
+const importCatalog: CatalogLoader = () => import('./catalog')
+
+/** What `listTools()` answers: the tools, or the typed error `call()` would give. */
+export type ListToolsResult = { ok: true; tools: ToolInfo[] } | { ok: false; error: ToolError }
+
+/**
+ * A module the browser could not fetch, as each engine words it. Matched on message text,
+ * so an engine that rewords its message turns a stale tab back into `failed`. Read from
+ * each engine's source on its main branch as of 2026-10-27 (no release pinned):
+ * - Chromium: "Failed to fetch dynamically imported module: <url>"
+ *   (`third_party/blink/renderer/core/script/dynamic_module_resolver.cc`);
+ * - Firefox: "error loading dynamically imported module: <url>"
+ *   (`JSMSG_DYNAMIC_IMPORT_FAILED`, `js/public/friend/ErrorNumbers.msg`);
+ * - WebKit/Safari: "Importing a module script failed."
+ *   (`Source/WebCore/bindings/js/ScriptModuleLoader.cpp`);
+ * - Vite 8.3.5's preload helper: "Unable to preload CSS for <url>".
+ */
+const MODULE_FETCH_FAILURE =
+  /dynamically imported module|Importing a module script failed|Unable to preload CSS/i
+
+function isModuleFetchFailure(cause: unknown): boolean {
+  return cause instanceof Error && MODULE_FETCH_FAILURE.test(cause.message)
+}
+
+/**
+ * The lazy tool catalogue, or the `stale_tab` error (#4884). On a tab from an older
+ * build the chunk is gone from the server: `installStaleChunkReload` `preventDefault()`s
+ * Vite's `vite:preloadError` and reloads, and Vite's preload helper then resolves the
+ * import with `undefined` rather than rejecting. Without the reload (the same build
+ * failed already, or there is no sessionStorage) the import rejects instead, with a
+ * failed fetch of a module. Either way the agent is told the tab is stale, never handed
+ * a TypeError. The reload starts a new tab id (`tabId.ts`), so an agent that paired by
+ * code has to pair again. Any other rejection (the catalogue throwing as it evaluates)
+ * is not staleness, and reloading would not help: that answers `failed`.
+ */
+async function loadOrStale<T>(load: () => Promise<T | undefined>): Promise<{ module: T } | { error: ToolError }> {
+  let module: T | undefined
+  try {
+    module = await load()
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause)
+    if (!isModuleFetchFailure(cause)) {
+      return { error: { code: 'failed', message: `The tab's tool catalogue failed to load: ${reason}` } }
+    }
+    return {
+      error: {
+        code: 'stale_tab',
+        message:
+          `The tab could not load its tool catalogue (${reason}); it is probably running an older ` +
+          'ScadBuddy build. Ask the user to reload the tab; an agent that paired by code must then ' +
+          'pair again with browser_pair.',
+      },
+    }
+  }
+  if (module) return { module }
+  return {
+    error: {
+      code: 'stale_tab',
+      message:
+        'The tab was running an older ScadBuddy build and is reloading to the current one; nothing ' +
+        'was run. Wait for it to come back, then call again. The reload ends this tab, so an agent ' +
+        'that paired by code must pair again with browser_pair.',
+    },
+  }
+}
 
 /**
  * The tab's side of the browser tools (#254). Pages and components register the
@@ -39,6 +110,13 @@ export class AgentBridge {
   private readonly listeners = new Set<() => void>()
   private nextId = 1
   private route: string | null = null
+
+  private readonly loadCatalog: CatalogLoader
+
+  /** `loadCatalog` is for tests, which stand in for a stale tab's failed import. */
+  constructor(loadCatalog: CatalogLoader = importCatalog) {
+    this.loadCatalog = loadCatalog
+  }
 
   /** The router's location; the shell reports it so a MemoryRouter or basename is honoured. */
   setRoute(route: string) {
@@ -88,11 +166,16 @@ export class AgentBridge {
    * The live tools for the current route, or with `all` every tool the app has — each
    * marked `live` or not, which is the stable list a session's tool set is built from.
    */
-  async listTools({ all = false }: { all?: boolean } = {}): Promise<ToolInfo[]> {
-    const { TOOLS } = await loadCatalog()
+  async listTools({ all = false }: { all?: boolean } = {}): Promise<ListToolsResult> {
+    const loaded = await loadOrStale(this.loadCatalog)
+    if ('error' in loaded) return { ok: false, error: loaded.error }
+    const { TOOLS } = loaded.module
+    // Unguarded: the catalogue imports zod statically, so once it has loaded so has zod.
+    // Keep the destructure at the import: rolldown tree-shakes a dynamic import by the
+    // members read there, and handing the namespace on keeps all of zod (+290 KB).
     const { toJSONSchema } = await import('zod')
     const live = new Set(this.liveNames())
-    return (Object.keys(TOOLS) as ToolName[])
+    const tools = (Object.keys(TOOLS) as ToolName[])
       .filter((name) => all || live.has(name))
       .map((name) => {
         const spec = TOOLS[name]
@@ -106,10 +189,13 @@ export class AgentBridge {
           live: live.has(name),
         }
       })
+    return { ok: true, tools }
   }
 
   async call(name: string, args: unknown = {}): Promise<CallResult> {
-    const { TOOLS, SCOPE_ROUTES } = await loadCatalog()
+    const loaded = await loadOrStale(this.loadCatalog)
+    if ('error' in loaded) return { ok: false, error: loaded.error }
+    const { TOOLS, SCOPE_ROUTES } = loaded.module
     if (!Object.hasOwn(TOOLS, name)) {
       return { ok: false, error: { code: 'unknown_tool', message: `There is no tool called "${name}".` } }
     }

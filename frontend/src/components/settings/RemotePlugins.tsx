@@ -31,7 +31,7 @@ import { ChoiceSelect, LoadingLines, SettingBody, SettingCard } from './form'
 import { Spinner } from '../ui/spinner'
 
 /**
- * Settings → Plugins (#297, #464, #1953). First ScadBuddy's own tool sets (`built_in`): the
+ * Settings → Tools & plugins (#297, #464, #1953). First ScadBuddy's own tool sets (`built_in`): the
  * same per-tool table as a remote plugin, but a tier can only be raised above the tier the
  * code gives the tool (the select starts there), and a set is never removed. Then remote MCP
  * servers the assistant reaches

@@ -38,7 +38,14 @@ describe('McpAuthBanner (#1921)', () => {
     renderPage(<McpAuthBanner link />)
     const banner = await screen.findByTestId('mcp-auth-banner')
     expect(banner).toHaveTextContent('with full access')
-    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings#assistant')
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings/mcp#mcp-auth-mode')
+  })
+
+  it('names the area in text when it does not link', async () => {
+    setMcpAuthMode('disabled', 'outward')
+    renderPage(<McpAuthBanner />)
+    const banner = await screen.findByTestId('mcp-auth-banner')
+    expect(banner).toHaveTextContent('Turn it back on under Settings → MCP access.')
   })
 
   it('says nothing when the agent cannot answer', async () => {

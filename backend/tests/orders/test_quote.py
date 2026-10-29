@@ -482,6 +482,21 @@ async def test_an_output_saved_before_defaults_were_filled_still_matches(shop: S
     )
 
 
+async def test_an_output_with_malformed_params_is_compared_exactly(shop: Shop) -> None:
+    """A malformed output row's params are not read as none at all: filled, they would
+    look like an all-defaults render and match an item that names the defaults."""
+    meta = OutputMeta.model_construct(id="out-9", slug="demo", model_version="a" * 40)
+    full = {"params": {"width": 10, "label": "hi"}, "v": 0}
+    resolved = ResolvedReference(
+        shop.item.reference.model_copy(update={"inputs": full}), shop.item.colours
+    )
+    item = shop.lifecycle.update_item(
+        shop.order.id, shop.item.id, BY, reference=resolved, output_id="out-9"
+    )
+    malformed = {"params": "width=10", "v": 0}
+    assert not output_matches(FakeOutputs(meta, malformed), "out-9", item, SCHEMA)
+
+
 async def test_ensure_output_reuses_an_arranged_output(shop: Shop) -> None:
     """#4565: an arranged output records a content hash, not the commit the item pins,
     and no render of the reference remakes the arrangement: it is the one sliced."""

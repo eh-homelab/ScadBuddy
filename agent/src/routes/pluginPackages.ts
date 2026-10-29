@@ -336,7 +336,7 @@ export const route: RouteModule = {
   register(app, deps) {
     registerPluginPackageRoutes(app, {
       packages: deps.pluginPackages,
-      builtIns: deps.settings ? new BuiltInPackages(deps.settings) : undefined,
+      builtIns: deps.access ? new BuiltInPackages(deps.access) : undefined,
       installer: deps.packageInstaller,
       commands: deps.commands,
       ready: ready(deps),

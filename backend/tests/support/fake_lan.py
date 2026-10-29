@@ -33,10 +33,26 @@ MOSQUITTO = os.environ.get("SCADBUDDY_TEST_MQTT") or shutil.which("mosquitto")
 SERIAL = "01P00FAKE000001"
 ACCESS_CODE = "12345678"
 
-needs_fake_lan = [
-    pytest.mark.skipif(MOSQUITTO is None, reason="needs mosquitto on PATH or SCADBUDDY_TEST_MQTT"),
-    pytest.mark.skipif(not PRINTER_PY.is_file(), reason=f"{PRINTER_PY} is not in this tree"),
-]
+#: Set in the Dockerfile's `test` stage, which carries mosquitto and the fakes (#4541): a
+#: test that would skip for want of either fails there instead, so a backend-pytest shard
+#: never passes with the fake-printer tests silently skipped.
+FAKES_REQUIRED = bool(os.environ.get("SCADBUDDY_TEST_FAKES_REQUIRED"))
+
+
+def skip_unless(missing: list[str]) -> list[pytest.MarkDecorator]:
+    """A test module's marks for what it needs from e2e-stack/ and the broker: a skip
+    naming each missing piece, or, with `FAKES_REQUIRED`, a failure at collection."""
+    if missing and FAKES_REQUIRED:
+        raise RuntimeError("SCADBUDDY_TEST_FAKES_REQUIRED is set, but " + "; ".join(missing))
+    return [pytest.mark.skip(reason="; ".join(missing))] if missing else []
+
+
+needs_fake_lan = skip_unless(
+    [
+        *(["needs mosquitto on PATH or SCADBUDDY_TEST_MQTT"] if MOSQUITTO is None else []),
+        *([f"{PRINTER_PY} is not in this tree"] if not PRINTER_PY.is_file() else []),
+    ]
+)
 
 
 def load_fake_printer() -> ModuleType:

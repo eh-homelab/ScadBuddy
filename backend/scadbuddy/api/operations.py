@@ -291,7 +291,9 @@ async def recorded(
     from; None without a client key, since each such request is its own command."""
     if idempotency_key is None:
         return None
-    return await ops.store.find(operation_key(kind.name, subject, _body(request), idempotency_key))
+    return await ops.store.find(
+        operation_key(kind.name, subject, _body(request), idempotency_key, kind.unkeyed)
+    )
 
 
 async def _running(ops: OperationCommands, workflow_id: str) -> bool:
@@ -416,7 +418,7 @@ async def _run_operation(
         # The record's jsonb holds none: its insert would fail, as a 503 every retry
         # repeats (#965).
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, f"{nul} contains a NUL byte")
-    key = operation_key(kind.name, subject, body, idempotency_key)
+    key = operation_key(kind.name, subject, body, idempotency_key, kind.unkeyed)
     recorded = await ops.store.find(key)
     if recorded is not None:
         return _answer(recorded, response, repeated=True)

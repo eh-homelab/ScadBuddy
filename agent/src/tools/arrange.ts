@@ -81,6 +81,15 @@ export const arrangeTools: Tool[] = [
       objects: z.array(arrangeObject).min(1).max(200),
       goal: goal.default('fewest_plates'),
       printer_id: z.number().int().optional(),
+      printer: z
+        .string()
+        .uuid()
+        .optional()
+        .describe(
+          "A registry printer's `id` (list_printers, get_printers_now): packs for its plate, read from the " +
+            "registry; beside `printer_id` it must link that Bambuddy printer. A row only the LAN reaches is " +
+            'named by this alone.',
+        ),
       filament_plan: z
         .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(false) })
         .optional(),
@@ -114,7 +123,7 @@ export const arrangeTools: Tool[] = [
       `Arrange ${objects.length} object${objects.length === 1 ? '' : 's'} (${goal.replaceAll('_', ' ')}) and save the result`,
     // Its own wait for the render, after the backend has accepted it.
     waitsMs: (_, ctx) => ACCEPTING_MS + ctx.renderWaitMs,
-    handler: async ({ objects, goal, printer_id, filament_plan, colours, name, slug, read_budget }, ctx) => {
+    handler: async ({ objects, goal, printer_id, printer, filament_plan, colours, name, slug, read_budget }, ctx) => {
       // A job on the render queue: under the same per-principal bounds as render_model,
       // its slot held until the job settles, past this call when it is handed back running.
       const deadline = renderDeadline(ctx)
@@ -127,6 +136,7 @@ export const arrangeTools: Tool[] = [
             objects,
             goal,
             printer_id: printer_id ?? null,
+            printer: printer ?? null,
             filament_plan: filament_plan ?? null,
             colours: colours ?? null,
             name: name ?? null,

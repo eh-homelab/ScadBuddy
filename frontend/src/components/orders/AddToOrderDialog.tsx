@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { api } from '../../api/client'
-import type { Customer, Order, OrderEstimate, PriceBook } from '../../api/types'
-import { formatMoney } from '../../lib/money'
+import type { Customer, Order } from '../../api/types'
 import { DEFAULT_ORDERS_QUERY } from '../../lib/ordersQuery'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
@@ -12,7 +11,8 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { CustomerPicker } from './CustomerPicker'
 import { useCustomerPicker } from './useCustomerPicker'
-import { filamentLabel } from './FilamentsEditor'
+import { QUANTITY_HINT, parseQuantity } from './quantity'
+import { RoughEstimate } from './RoughEstimate'
 import { refusalText } from './refusal'
 
 const NEW = '__new__'
@@ -33,12 +33,6 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
   const [quantity, setQuantity] = useState('1')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [filamentId, setFilamentId] = useState('')
-  const book = useAsync(() => (open ? api.priceBook() : Promise.resolve(null as PriceBook | null)), [open])
-  const estimate = useAsync(
-    () => (open && filamentId ? api.orderEstimate(outputId, filamentId) : Promise.resolve(null as OrderEstimate | null)),
-    [open, outputId, filamentId],
-  )
   const chosen = picker.chosen
   const orders = useAsync(
     () => (chosen ? api.orders({ ...DEFAULT_ORDERS_QUERY, customer: chosen }, { limit: 100 }) : Promise.resolve({ items: [] as Order[], next_cursor: null })),
@@ -69,9 +63,9 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
   }, [chosen, openOrders])
 
   async function add() {
-    const count = Number(quantity)
-    if (!Number.isInteger(count) || count < 1) {
-      setError('Enter how many to make, 1 or more.')
+    const count = parseQuantity(quantity)
+    if (count === null) {
+      setError(QUANTITY_HINT)
       return
     }
     setBusy(true)
@@ -127,35 +121,7 @@ export function AddToOrderDialog({ open, outputId, outputName, onClose }: { open
             <Label htmlFor="order-quantity">Quantity</Label>
             <Input id="order-quantity" inputMode="numeric" className="w-24" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
           </div>
-          {(book.data?.filaments ?? []).length > 0 && (
-            <div className="flex flex-col gap-1">
-              <Label htmlFor="order-estimate-filament">Estimate with</Label>
-              <Select value={filamentId} onValueChange={setFilamentId}>
-                <SelectTrigger id="order-estimate-filament" aria-label="Estimate with">
-                  <SelectValue placeholder="Pick a filament for a rough estimate" />
-                </SelectTrigger>
-                <SelectContent position="popper">
-                  {(book.data?.filaments ?? []).map((f) => (
-                    <SelectItem key={f.id} value={f.id}>
-                      {filamentLabel(f)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              {estimate.data && (
-                <p className="text-[13px] text-muted-foreground" data-testid="order-estimate">
-                  An estimate: about <span className="sb-num text-foreground">{estimate.data.grams} g</span>, filament{' '}
-                  <span className="sb-num text-foreground">{formatMoney(estimate.data.filament_minor, estimate.data.currency, estimate.data.minor_exponent)}</span>
-                  {estimate.data.unknown_parts > 0 ? `, leaving out ${estimate.data.unknown_parts} part(s) with no volume` : ''}. Quote it from a slice once it is on an order.
-                </p>
-              )}
-              {estimate.error && (
-                <p className="text-[13px] text-muted-foreground" data-testid="order-estimate">
-                  No estimate: {refusalText(estimate.error)}
-                </p>
-              )}
-            </div>
-          )}
+          {open && <RoughEstimate outputId={outputId} />}
           {(error ?? customers.error?.message) && (
             <p role="alert" className="text-[13px] text-warn">
               {error ?? customers.error?.message}

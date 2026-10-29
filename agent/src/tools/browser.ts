@@ -28,7 +28,7 @@ import { errorName } from '../telemetry/scrub.js'
 //
 // Not here: the `screenshot()` fallback of #254, which PR #339 left out of the
 // tab on purpose. And not a browser plugin's tools (Playwright MCP, added in
-// Settings → Plugins): a separate browser that never sees the user's tab.
+// Settings → Tools & plugins): a separate browser that never sees the user's tab.
 
 /** Where a tab's answer comes from, for the untrusted-data envelope (#258). */
 const SOURCE =
@@ -151,7 +151,11 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
       // The tab's answers can quote the page, so they go in the untrusted envelope (#258).
       if (HUB_CODES.has(code)) throw new ToolError(message)
       const detail = issues?.length ? `${message} ${issues.map((i) => `${i.path || '(root)'}: ${i.message}`).join('; ')}` : message
-      throw new ToolError(`the tab answered ${spec.tool} with ${code}`, undefined, detail)
+      // stale_tab's guidance is ScadBuddy's own, said here outside the envelope (#4884):
+      // inside it the model is told not to follow instructions, and the tab's text is
+      // only a quote of what the page said.
+      const hint = code === 'stale_tab' ? ` (${STALE_TAB_HINT})` : ''
+      throw new ToolError(`the tab answered ${spec.tool} with ${code}${hint}`, undefined, detail)
     },
   })
 }
@@ -186,7 +190,7 @@ export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): s
 
 /** Why a read retried after a tab wait can still find no tab here. */
 const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
-  // Neutral (#1410): the hub reaches a tab on any replica (bridge/relay.ts, #1916), so it dropped again,
+  // Neutral (#1410): the hub reaches a tab on any replica (bridge/relay.ts, #4780), so it dropped again,
   // or the replica holding it did not answer.
   reconnected: 'The session\'s tab reconnected, but it cannot be reached now: it may have dropped again.',
   user_back: 'The user said they were back, but no tab is attached here yet.',
@@ -194,6 +198,15 @@ const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
 
 /** bridge/hub.ts `HubErrorCode`: the hub's own answers, in ScadBuddy's words. */
 const HUB_CODES: ReadonlySet<string> = new Set<HubErrorCode>(['no_browser', 'no_answer', 'disconnected', 'busy'])
+
+/**
+ * The tab is running an older ScadBuddy build than the server's (#4884): it is reloading
+ * to the current one, or the user has to reload it. A reload is a new tab, so a pairing
+ * made by code ends with it.
+ */
+export const STALE_TAB_HINT =
+  'the tab is on an older ScadBuddy build and nothing was run; it reloads to the current build, or the user ' +
+  'must reload it. Wait, check browser_status, and if you paired by code, pair again with browser_pair'
 
 const PREFIX = "In the user's own open ScadBuddy tab, which they watch as it happens: "
 
@@ -270,7 +283,7 @@ export const browserTools: Tool[] = [
     tool: 'navigate',
     description:
       PREFIX +
-      'go to a route in the app, e.g. "/", "/settings", "/m/name-keychain", "/m/name-keychain/source". The ' +
+      'go to a route in the app, e.g. "/", "/settings/general", "/m/name-keychain", "/m/name-keychain/source". The ' +
       'catalogue ("/") takes its search, filters, sort and view from the query: ' +
       '"/?q=keychain&tag=a&tag=b&origin=builtin|mine&sort=name&view=list" (tags are ANDed). Returns the route ' +
       'that ended up on screen (an unknown path lands on "/").',
@@ -457,7 +470,7 @@ export const browserTools: Tool[] = [
     risk: 'read',
   }),
 
-  // ── Settings ("/settings") ────────────────────────────────────────────────────
+  // ── Settings ("/settings/…") ────────────────────────────────────────────────────
   forwarded({
     tool: 'get_form',
     description:

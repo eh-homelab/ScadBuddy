@@ -19,9 +19,11 @@ applied at all; the problem names the item it waits on.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
-from collections.abc import Callable
-from dataclasses import dataclass
+import re
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Path, Query, Response, status
@@ -73,9 +75,10 @@ from scadbuddy.bambuddy.print_run import RunRoute, run_route
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
+from scadbuddy.core.gitrepo import COMMIT_ID_PATTERN
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import DATABASE_ERRORS, DATABASE_UNAVAILABLE_PROBLEM, ApiError
-from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.catalogue import Catalogue, declares_pipeline
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore, require_output
 from scadbuddy.library.settings_store import ModelPrintChoices, SettingsStore, StoredSettings
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
@@ -83,6 +86,7 @@ from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.hot_path import native_backends
+from scadbuddy.render.provenance import source_version
 from scadbuddy.render.read_budget import ReadBudget, budget_of
 from scadbuddy.render.runner import OpenSCADError, with_defaults
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -255,48 +259,70 @@ class ParamsCheck:
     config: ConfigDep
     fetcher: FetcherDep
 
-    async def __call__(self, target: AnalysisTarget) -> CustomizerSchema | None:
-        """The live schema the params were checked against, for `_subject`'s match;
-        None for a target that names no template."""
+    async def __call__(self, target: AnalysisTarget) -> SchemaAt | None:
+        """The schemas `_newest_render` matches at, for a target that names a template;
+        None for one that does not."""
         if target.slug is None:
             return None
         require_model_exists(self.catalogue, target.slug)
-        if not target.params:
-            # Nothing to refuse, but an all-defaults target still matches at the
-            # defaults (#4774). With no schema to read, it is matched as sent.
+        if target.params:
+            _, schema = await schema_of(
+                target.slug,
+                None,
+                paths=self.paths,
+                history=self.history,
+                config=self.config,
+                fetcher=self.fetcher,
+            )
+            require_valid_params(schema, target.params)
+        return SchemaAt(self, target.slug)
+
+
+@dataclass
+class SchemaAt:
+    """The schema of ``slug`` at each revision an output was rendered at, read once
+    each, and only when `_newest_render` needs it (#4774)."""
+
+    check: ParamsCheck
+    slug: str
+    read: dict[str | None, CustomizerSchema | None] = field(default_factory=dict)
+
+    async def __call__(self, version: str | None) -> CustomizerSchema | None:
+        """None for a pipeline template, whose params need not be `model.scad`'s, or
+        for a revision with no schema to read: then the params are matched as sent."""
+        if version not in self.read:
+            check = self.check
+            # A version that is no commit (a content hash, where there is no history)
+            # can only be read as the live source, and only while that is still it.
+            commit = version is not None and re.fullmatch(COMMIT_ID_PATTERN, version)
             try:
-                _, schema = await schema_of(
-                    target.slug,
-                    None,
-                    paths=self.paths,
-                    history=self.history,
-                    config=self.config,
-                    fetcher=self.fetcher,
+                source, schema = await schema_of(
+                    self.slug,
+                    version if commit else None,
+                    paths=check.paths,
+                    history=check.history,
+                    config=check.config,
+                    fetcher=check.fetcher,
                 )
+                pipeline = await asyncio.to_thread(declares_pipeline, source.scad.parent, self.slug)
+                current = commit or version in (
+                    source.version,
+                    await asyncio.to_thread(source_version, source.scad.parent),
+                )
+                self.read[version] = None if pipeline or not current else schema
             except (ApiError, OpenSCADError):
-                return None
-            return schema
-        _, schema = await schema_of(
-            target.slug,
-            None,
-            paths=self.paths,
-            history=self.history,
-            config=self.config,
-            fetcher=self.fetcher,
-        )
-        require_valid_params(schema, target.params)
-        return schema
+                self.read[version] = None
+        return self.read[version]
 
 
 ParamsCheckDep = Annotated[ParamsCheck, Depends()]
 
 
 def _subject(
-    target: AnalysisTarget,
-    outputs: OutputStore,
-    catalogue: Catalogue,
-    schema: CustomizerSchema | None = None,
+    target: AnalysisTarget, outputs: OutputStore, catalogue: Catalogue
 ) -> tuple[str | None, dict[str, ParamValue], OutputMeta | None]:
+    """The subject's template, params and output; a configuration's output is found
+    after, by `_newest_render`."""
     if target.library_file_id is not None:
         return None, {}, None
     if target.output_id is not None:
@@ -304,20 +330,28 @@ def _subject(
         return output.slug, outputs.params(output.id), output
     assert target.slug is not None
     require_model_exists(catalogue, target.slug)
-    params = target.params or {}
+    return target.slug, target.params or {}, None
 
-    def filled(values: dict[str, ParamValue]) -> dict[str, ParamValue]:
-        # #4774: a render fills the params a request omits at their defaults, so an
-        # output records them whole, and one saved before that records them as sent:
-        # both sides filled, the same configuration matches either way.
-        return with_defaults(schema, values) if schema is not None else values
 
-    wanted = filled(params)
-    meta = next(
-        (row for row in outputs.list_for(target.slug) if filled(outputs.params(row.id)) == wanted),
-        None,
-    )
-    return target.slug, params, meta
+async def _newest_render(
+    slug: str,
+    params: dict[str, ParamValue],
+    outputs: OutputStore,
+    schema_at: Callable[[str | None], Awaitable[CustomizerSchema | None]] | None,
+) -> OutputMeta | None:
+    """The newest output of ``slug`` rendered with ``params``. A render fills the params
+    a request omits at their defaults, so an output records them whole, and one saved
+    before that records them as sent (#4774). One whose params differ is compared again
+    with both sides filled at the defaults of the revision it was rendered at, so a
+    default that changed since never makes an output match what it did not render."""
+    for row in await asyncio.to_thread(outputs.list_for, slug):
+        recorded = await asyncio.to_thread(outputs.params, row.id)
+        if recorded == params:
+            return row
+        schema = await schema_at(row.model_version) if schema_at is not None else None
+        if schema is not None and with_defaults(schema, recorded) == with_defaults(schema, params):
+            return row
+    return None
 
 
 def _remembered(
@@ -346,11 +380,29 @@ async def _context(
     native: NativeLibrary | None = None,
     printers: Printers | None = None,
     spools: Spools | None = None,
-    schema: CustomizerSchema | None = None,
+    schema: SchemaAt | None = None,
 ) -> AnalysisContext:
-    slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue, schema)
+    slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
+    if meta is None and target.output_id is None and slug is not None:
+        meta = await _newest_render(slug, params, outputs, schema)
     settings = store.load()
     remembered = _remembered(target, slug, settings)
+    # What both paths below judge, built once so they cannot drift apart (#4685).
+    gather = functools.partial(
+        gather_context,
+        outputs=outputs,
+        settings=settings,
+        slug=slug,
+        params=params,
+        request=request,
+        meta=meta,
+        remembered=remembered,
+        library_subject=target.library_file_id,
+        cache=paths.cache,
+        budget=budget,
+        downloads=downloads,
+        native=native,
+    )
     route: RunRoute | None = None
     #: Why the named registry printer cannot be judged (gone, a disagreeing pair): the
     #: analysis goes on without it, as `dialog_route` would, and says so.
@@ -405,44 +457,14 @@ async def _context(
                 plate_ids=request.plate_ids,
             )
 
-        return await gather_context(
-            outputs=outputs,
-            settings=settings,
-            slug=slug,
-            params=params,
-            request=request,
-            meta=meta,
-            remembered=remembered,
-            library_subject=target.library_file_id,
-            cache=paths.cache,
-            budget=budget,
-            downloads=downloads,
-            native=native,
-            route=route,
-            trays=trays,
-        )
+        return await gather(route=route, trays=trays)
     library_file_id: int | None = None
     if meta is not None:
         # Any copy will do: every one is this output's 3MF, and the filament read only
         # needs the plate's slots.
         copies = await uploads.for_output(meta.id)
         library_file_id = copies[-1].id if copies else None
-    return await gather_context(
-        outputs=outputs,
-        settings=settings,
-        slug=slug,
-        params=params,
-        request=request,
-        meta=meta,
-        library_file_id=library_file_id,
-        remembered=remembered,
-        library_subject=target.library_file_id,
-        cache=paths.cache,
-        budget=budget,
-        downloads=downloads,
-        native=native,
-        refused=refused,
-    )
+    return await gather(library_file_id=library_file_id, refused=refused)
 
 
 def _find_fix(context: AnalysisContext, body: FixRequest) -> tuple[AnalyzerDiagnostic, Fix]:

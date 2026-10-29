@@ -5,6 +5,8 @@ import path from 'node:path'
 import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
+import { AccessResolver } from './access/resolver.js'
+import { AccessStore } from './access/store.js'
 import { createApp } from './app.js'
 import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
@@ -43,7 +45,9 @@ import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
-import { PgTabRelay } from './bridge/relay.js'
+import { PgTabRelay } from './bridge/pgRelay.js'
+import { TemporalTabRelay } from './bridge/relay.js'
+import { PostgresTabOwnerStore } from './bridge/tabOwners.js'
 import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
 import { PgMcpSessionRelay } from './mcp/sessionRelay.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
@@ -83,7 +87,14 @@ import { type ListedTools, turnToolActivities, turnToolActivity } from './tempor
 import { DURABLE_TOOLS } from './tools/manifest.js'
 import { PgAnswers } from './gate/answers.js'
 import { AgentWorker, workerIdentity } from './temporal/worker.js'
-import { FilePayloadStore, PgPayloadKeys, rewrapPayloadKeys, subjectDataConverter } from './temporal/payloadCodec.js'
+import {
+  dropPayloadKey,
+  FilePayloadStore,
+  PgPayloadKeys,
+  rewrapPayloadKeys,
+  subjectDataConverter,
+  sweepBridgeKeys,
+} from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
 import { DURABLE_TASK_QUEUE, DurableTurns } from './sessions/durable.js'
@@ -102,7 +113,6 @@ import { PendingActionStore } from './tools/pending.js'
 import type { ToolServices } from './tools/registry.js'
 import { RenderLimiter, settingsRenderLimits } from './tools/renderLimits.js'
 import { SessionFiles, WORKSPACE_SWEEP_MS } from './workspace/store.js'
-import { toolSwitches } from './tools/switches.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
@@ -211,9 +221,13 @@ const oidcRepo = settings
   ? new SettingsOidcConfigRepo(settings, (detail) => console.error(`mcp auth: ${detail}`))
   : undefined
 const oidcProvider = new OidcProvider()
+// The registry's tools let it keep the old ai_settings keys for older replicas (access/legacy.ts, #4828).
+const access = database ? new AccessStore(database.sql, audit, ALL_TOOLS) : undefined
+// Each item's effective access, read at each call (#2171): the turns' http_request and own-plugin switches.
+const accessResolver = new AccessResolver(access)
 const plugins = database ? new PluginStore(database.sql) : undefined
-// ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_settings.
-const builtInTools = new BuiltInTools(settings)
+// ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_access (#2171).
+const builtInTools = new BuiltInTools(access)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
 const pluginForwarder = await PluginForwarder.start({
@@ -228,11 +242,27 @@ const backend = createBackendClient(config.backendUrl)
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
 // of its own, retried in the background, feeding MCP resource subscriptions.
 const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
-// browser_* calls for a tab connected to another replica (#1916, bridge/relay.ts),
-// on the listener's connection: made before start(), so its first LISTEN covers it.
-const tabRelay = database && events ? new PgTabRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
-// /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts),
-// on the same connection, for the same reason.
+// This replica's own queue: a pinned turn tool's calls (#2320), a classic session's
+// Monitor commands, which run where its turns' Bash runs, and the browser_* calls other
+// replicas make for a tab connected here (#4780).
+const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
+// browser_* calls for a tab connected to another replica (#4780, bridge/relay.ts): an
+// activity on the owner's HOST_QUEUE, through Temporal, sealed. Its client is set once made
+// (temporalClient below), only with the KEK. For one release (#4868) the Postgres relay
+// (#1916, bridge/pgRelay.ts) runs beside it, for replicas still on the old build: on the
+// listener's connection, made before start(), so its first LISTEN covers it.
+const tabRelay = database
+  ? new TemporalTabRelay({
+      owners: new PostgresTabOwnerStore(database.sql),
+      hostQueue: HOST_QUEUE,
+      ready: database.ready,
+      fallback: events ? new PgTabRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined,
+    })
+  : undefined
+// The rows a process before this one left under the same identity (a container restart).
+void tabRelay?.releaseAll()
+// /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts), on
+// the listener's connection: made before start(), so its first LISTEN covers it.
 const mcpRelay = database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
 events?.start()
 const resources = new ResourceHub(events)
@@ -254,9 +284,7 @@ const toolServices: ToolServices = {
   publicBaseUrl: config.publicUrl,
   // The render limits in Settings, read live (tools/renderLimits.ts).
   ...(settings ? { renderLimiter: new RenderLimiter(settingsRenderLimits(settings)) } : {}),
-  // The tools Settings can turn off (#1911): read from ai_settings at each call.
-  switchedOff: toolSwitches(settings),
-  // Settings → Plugins' raised tiers and disabled tools (#1953), read at each call.
+  // Settings → Tools & plugins' changed tiers and disabled tools (#1953, #2171), read at each call.
   toolOverrides: builtInTools.registryOverrides(),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
@@ -327,9 +355,6 @@ const tokens =
 // consumer (below) wakes its followers for sessions other replicas write.
 const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
 
-// This replica's own queue: a pinned turn tool's calls (#2320), and a classic session's
-// Monitor commands, which run where its turns' Bash runs.
-const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
 // A session's background tasks (CronCreate, ScheduleWakeup, Monitor, TaskStop), in either mode:
 // each a `BackgroundTask` workflow on agent-tools that sends its prompt when due. Its
 // payloads are task ids only, so its client has no codec.
@@ -379,9 +404,10 @@ const sessions =
         paths,
         ...(dataKeys ? { payloadKeys: dataKeys } : {}),
         ...(settings ? { settings } : {}),
+        access: accessResolver,
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
-        // Settings → Plugins' overrides of the built-in tools (#1953), per turn.
+        // Settings → Tools & plugins' overrides of the built-in tools (#1953), per turn.
         builtInTools: () => builtInTools.policy(),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
         // subagents, with the Skill and Agent tools they need.
@@ -405,9 +431,9 @@ const sessions =
           : {}),
         // Enabled plugin packages (#297), materialised from their pins, per turn.
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
-        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true }),
-        // The http_request tool (#827): on for a turn unless the
-        // `http_request_enabled` setting is false (routes/httpRequest.ts).
+        packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true, access: accessResolver }),
+        // The http_request tool (#827): on for a turn unless `builtin:http` is
+        // switched off in ai_access (routes/httpRequest.ts, #2171).
         httpRequest: {},
         // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
         ...(workspace ? { workspace } : {}),
@@ -533,12 +559,12 @@ if (database) {
   setInterval(sweep, 3600_000).unref()
 }
 // The payload keys of sessions whose row is gone (#3317): a durable fork whose workflow could not
-// start. Every hour, once the database is ready.
+// start; and of browser calls a cancel or a lost caller left (#4780). Every hour, once the database is ready.
 if (database) {
   const sweep = () =>
     void database
       .ready()
-      .then((ok) => (ok ? sweepOrphanedSessionKeys(database.sql) : 0))
+      .then(async (ok) => (ok ? (await sweepOrphanedSessionKeys(database.sql)) + (await sweepBridgeKeys(database.sql)) : 0))
       .catch((err: unknown) => console.error('orphaned payload key sweep failed:', (err as Error).message))
   sweep()
   setInterval(sweep, 3600_000).unref()
@@ -600,7 +626,7 @@ const turnToolDeps = temporal
       flows: new PgFlowRuns(temporal.sql),
       servers: turnServers({
         ...(durableRemotePlugins ? { remotePlugins: durableRemotePlugins } : {}),
-        ...(settings ? { settings } : {}),
+        access: accessResolver,
         // The headless browser's lists (#982), as a classic turn's.
         browserOrigins: new BrowserOrigins(temporal.sql, settings),
         credentialSecrets: durableCredentialSecrets,
@@ -613,7 +639,7 @@ const turnToolDeps = temporal
                 load: () => loadPackagesForRun(pluginPackages, packageInstaller),
                 root: config.payloadDir ? path.join(config.payloadDir, SHARED_PACKAGES) : undefined,
                 localRoot: path.join(paths.stateDir, 'plugins-local'),
-                forward: (loaded) => forwardPackageServers(loaded, pluginForwarder),
+                forward: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { access: accessResolver }),
               },
             }
           : {}),
@@ -798,6 +824,9 @@ const hostWorkers =
           default: turnToolActivity(turnToolDeps),
           // A classic session's Monitor commands, in its directory on this replica.
           ...(background ? { bg_monitor_command: background.bg_monitor_command } : {}),
+          // Other replicas' browser_* calls for a tab connected here (#4780).
+          // Its tabs are claimed once this worker polls (startHosting, below).
+          ...(tabRelay ? tabRelay.hostActivities() : {}),
         },
         ...(sessionHosting
           ? {
@@ -814,8 +843,28 @@ const hostWorkers =
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
       })
     : undefined
+// This replica claims its tabs in ai_tab_owners only once its host worker polls HOST_QUEUE with
+// bridge.tab: a claim before (or with a worker that never started) would send other replicas'
+// calls to wait out the ack timeout (#4806 review).
+if (tabRelay && hostWorkers) {
+  const relay = tabRelay
+  const pinned = hostWorkers.pinned
+  // Unref'd, so a worker that never connects does not hold the process open at shutdown.
+  const polling = setInterval(() => {
+    if (pinned.state() !== 'ok') return
+    clearInterval(polling)
+    relay.startHosting()
+  }, 200)
+  polling.unref()
+}
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
 if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
+// The browser relay's calls go through Temporal only sealed, each under a key of its own
+// that is deleted once the caller has the answer (#4780): so only with the codec.
+if (tabRelay && temporalClient && dataConverter && payloadKeys && database) {
+  const keys = payloadKeys
+  tabRelay.useClient({ client: temporalClient, dropKey: (subject) => dropPayloadKey(database.sql, keys, subject) })
+}
 // A durable session's turns (plan 5c PR 3): only with the codec, so a session's
 // payloads are never sent to Temporal unsealed; without it a durable start is refused.
 if (sessions && temporalClient && payloadKeys && database) {
@@ -891,6 +940,7 @@ const app = createApp({
   backend: () => backendReachable(backend),
   kek,
   credentials,
+  access,
   plugins,
   pluginForwarder,
   pluginPackages,

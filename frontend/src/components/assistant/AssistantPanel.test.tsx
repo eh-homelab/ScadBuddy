@@ -146,7 +146,7 @@ describe('assistant panel', () => {
     const panel = await screen.findByRole('complementary', { name: 'Assistant' })
     const banner = await within(panel).findByTestId('mcp-auth-banner')
     expect(banner).toHaveTextContent('with read-only access')
-    expect(within(banner).getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings#assistant')
+    expect(within(banner).getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings/mcp#mcp-auth-mode')
   })
 
   it('has no banner while /mcp needs a token (#1921)', async () => {
@@ -366,6 +366,32 @@ describe('assistant panel', () => {
     expect(screen.getByTestId('assistant-attention-live')).toBeEmptyDOMElement()
     expect(plain).toHaveAttribute('title', 'Assistant (Ctrl+`)')
     await waitFor(() => expect(document.title).toBe('ScadBuddy'))
+  })
+
+  it('toasts an approval no session shows, never with Approve on its clipped text, and lists it in the panel (#4813)', async () => {
+    setPendingApprovals(2)
+    const { user } = renderShell()
+    const toasts = within(screen.getByTestId('toasts'))
+    await waitFor(() => expect(toasts.getAllByRole('button', { name: 'Deny' })).toHaveLength(2))
+    expect(toasts.getAllByText('send_to_bambuddy, asked by You: {}')).toHaveLength(2)
+    // The detail is clipped (line-clamp), so the toast never approves: Review opens the whole
+    // card, and Deny (which runs nothing) is the one decision it offers.
+    expect(toasts.queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument()
+    expect(toasts.queryByRole('link', { name: 'Approve' })).not.toBeInTheDocument()
+    for (const review of toasts.getAllByRole('link', { name: 'Review' })) expect(review).toHaveAttribute('href', '/activity')
+    for (const deny of toasts.getAllByRole('button', { name: 'Deny' })) expect(deny).toHaveAttribute('data-agent-user-only')
+    await user.click(toasts.getAllByRole('button', { name: 'Deny' })[0]!)
+    await waitFor(() => expect(respondRequests()).toHaveLength(1))
+    expect(respondRequests()[0]!.body).toEqual({ kind: 'approval', decision: 'deny', input_hash: '0'.repeat(64) })
+    // Decided, it leaves the badge's read; the other one waits in the panel the badge opens,
+    // whose card shows the summary in full beside its Approve.
+    await user.click(await screen.findByRole('button', { name: 'Assistant, 1 waiting for you' }))
+    const listed = await screen.findByRole('region', { name: 'Approvals waiting for you' })
+    expect(within(listed).getAllByTestId('pending-approval')).toHaveLength(1)
+    // Its toast goes too once it is decided in the panel.
+    await user.click(within(listed).getByRole('button', { name: 'Approve' }))
+    await waitFor(() => expect(toasts.queryByRole('button', { name: 'Deny' })).not.toBeInTheDocument())
+    expect(respondRequests()[1]!.body).toEqual({ kind: 'approval', decision: 'approve', input_hash: '0'.repeat(64) })
   })
 
   it('shows a running session on the header button with the panel closed, apart from what waits (#1125)', async () => {

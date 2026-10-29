@@ -31,6 +31,10 @@ class AgentTiers:
 
     def __init__(self, tiers: Mapping[str, str], disabled: Iterable[str] = ()) -> None:
         self.tiers = dict(tiers)
+        #: Each tool's tier in code (`declared`), which Settings does not change: as given.
+        self.declared = dict(tiers)
+        #: Tools answered with no `declared`, as an agent from before it answers.
+        self.declared_missing: set[str] = set()
         self.disabled = set(disabled)
         #: Every tool the workflow asked about, in order.
         self.asked: list[str] = []
@@ -44,7 +48,10 @@ class AgentTiers:
                 raise ApplicationError(
                     f"the agent has no tool {name}", type="ToolError", non_retryable=True
                 )
-            return {"tier": self.tiers[name], "disabled": name in self.disabled}
+            answer: dict[str, Any] = {"tier": self.tiers[name], "disabled": name in self.disabled}
+            if name not in self.declared_missing:
+                answer["declared"] = self.declared.get(name, self.tiers[name])
+            return answer
 
         return flow_tool_tier
 

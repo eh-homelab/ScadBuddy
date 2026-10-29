@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { act, screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { takeSnapshot } from '../../agent/snapshot'
@@ -223,12 +224,68 @@ describe('PrintersPanel (#3823)', () => {
     const virtual = await screen.findByRole('listitem', { name: 'Printer H2C Virtual' })
     expect(virtual).toHaveTextContent('Bambuddy virtual printer → 3DP-31B-598 (queue)')
     expect(virtual).toHaveTextContent('Not a printer to print on')
+    expect(virtual).not.toHaveTextContent('No longer in Bambuddy')
     // Not a print target: no path, no LAN form, nothing to link.
     expect(within(virtual).queryByRole('combobox')).toBeNull()
     expect(within(virtual).queryByRole('form')).toBeNull()
     const garage = screen.getByRole('listitem', { name: GARAGE })
     await waitFor(() => expect(garage).toHaveTextContent('Bambuddy printer 2'))
     expect(within(garage).getByLabelText('Bambuddy sync note for Garage')).toHaveTextContent('withholds the access code')
+  })
+
+  it('counts a virtual printer whose target is missing as imported, and says the target is missing (#4850)', async () => {
+    const reason = 'Bambuddy forwards this virtual printer to Bambuddy printer 4, which no printer here is linked to'
+    server.use(
+      http.post('/api/v1/printers/sync-bambuddy', () =>
+        HttpResponse.json({
+          dry_run: false,
+          virtual_printers_error: null,
+          created: 1,
+          linked: 0,
+          already_linked: 0,
+          skipped: 0,
+          conflicts: 0,
+          lan_linked: 0,
+          lan_failed: 0,
+          target_missing: 1,
+          entries: [
+            {
+              kind: 'bambuddy_virtual',
+              name: 'Lonely VP',
+              bambuddy_vp_id: 4,
+              printer_id: '00000000-0000-4000-8000-0000000000f4',
+              action: 'created',
+              reason,
+              changed: true,
+              target_missing: true,
+            },
+          ],
+        }),
+      ),
+    )
+    const { user } = renderPage(<PrintersPanel bambuddyConfigured />)
+    await screen.findByRole('listitem', { name: GARAGE })
+    await user.click(screen.getByRole('button', { name: 'Import from Bambuddy' }))
+    const status = await screen.findByRole('status')
+    expect(status).toHaveTextContent('1 added, 0 linked, 0 already linked, 0 skipped, 0 conflicts')
+    expect(status).toHaveTextContent('1 virtual printer forwarding to a printer not here')
+    expect(status).toHaveTextContent(`Lonely VP: added (${reason})`)
+  })
+
+  it('says a virtual printer Bambuddy no longer lists is kept (#4889)', async () => {
+    const gone = {
+      ...printersState()[0]!,
+      id: '00000000-0000-4000-8000-0000000000f9',
+      name: 'Gone VP',
+      kind: 'bambuddy_virtual' as const,
+      bambuddy_printer_id: null,
+      bambuddy_vp_id: 9,
+      bambuddy_active: false,
+    }
+    server.use(http.get('/api/v1/printers', () => HttpResponse.json([gone])))
+    renderPage(<PrintersPanel bambuddyConfigured />)
+    const row = await screen.findByRole('listitem', { name: 'Printer Gone VP' })
+    expect(row).toHaveTextContent('No longer in Bambuddy: the row is kept.')
   })
 
   it('says why Import from Bambuddy is off without a Bambuddy (#4439)', async () => {

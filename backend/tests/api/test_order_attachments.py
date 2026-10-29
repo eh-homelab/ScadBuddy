@@ -13,7 +13,9 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from scadbuddy.orders import attachments as attachments_module
 from scadbuddy.orders.store import ATTACHMENT_HOLDER
+from scadbuddy.store.cache import StaleBlobError
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import AGENT, create_order
 from tests.api.test_orders_lifecycle import add_item
@@ -264,12 +266,15 @@ def test_caption_and_role_are_edited_and_refusals_are_answered(client: TestClien
     )
     assert client.patch(base, json={"role": "nonsense"}).status_code == 422
     assert client.patch(base, json={"filename": "x"}).status_code == 422
-    role = next(
-        e
-        for e in client.get(f"/api/v1/orders/{order['id']}/events").json()
-        if e["kind"] == "attachment.role"
-    )
+    # The same caption again is no change, so it is not on the audit line twice.
+    assert client.patch(base, json={"caption": "the customer's drawing"}).status_code == 200
+    events = client.get(f"/api/v1/orders/{order['id']}/events").json()
+    role = next(e for e in events if e["kind"] == "attachment.role")
     assert role["detail"] == {"attachment_id": added["id"], "from_role": "other", "to": "reference"}
+    # #4676: a caption edit is on the audit line too.
+    assert [e["detail"] for e in events if e["kind"] == "attachment.caption"] == [
+        {"attachment_id": added["id"], "from_caption": "", "to": "the customer's drawing"}
+    ]
 
     assert attach(client, order["id"], PDF, "x.pdf", role="bogus").status_code == 422
     assert attach(client, "no-such-order", PDF, "x.pdf").status_code == 404
@@ -294,6 +299,11 @@ def test_deleting_a_draft_item_removes_its_files_and_their_holds(client: TestCli
     on_order = attach(client, order["id"], PDF, "brief.pdf").json()
     photo = attach(client, order["id"], png((32, 32)), "mock.png", item_id=item["id"]).json()
     sketch = attach(client, order["id"], PDF + b"x", "sketch.pdf", item_id=item["id"]).json()
+    commit = client.get(f"/api/v1/models/{SLUG}").json()["version"]
+    other = add_item(
+        client, order["id"], slug=SLUG, commit=commit, inputs={"params": {"width": 9}}, quantity=1
+    )
+    kept = attach(client, order["id"], PDF + b"y", "other.pdf", item_id=other["id"]).json()
     marked = client.put(
         f"/api/v1/orders/{order['id']}/items/{item['id']}/delivered",
         json={"attachment_id": photo["id"]},
@@ -302,8 +312,13 @@ def test_deleting_a_draft_item_removes_its_files_and_their_holds(client: TestCli
 
     assert client.delete(f"/api/v1/orders/{order['id']}/items/{item['id']}").status_code == 204
     detail = client.get(f"/api/v1/orders/{order['id']}").json()
-    assert [a["id"] for a in detail["attachments"]] == [on_order["id"]]
-    assert holders(client) == {on_order["id"]: f"attachment-{on_order['sha256']}"}
+    # `Lifecycle.delete_item` takes the item's files by subject (`subject_attachments`,
+    # #4724): the order's own file and the other item's stay, with their holds.
+    assert [a["id"] for a in detail["attachments"]] == [on_order["id"], kept["id"]]
+    assert holders(client) == {
+        on_order["id"]: f"attachment-{on_order['sha256']}",
+        kept["id"]: f"attachment-{kept['sha256']}",
+    }
     removed = [
         e["detail"]
         for e in client.get(f"/api/v1/orders/{order['id']}/events").json()
@@ -331,3 +346,19 @@ def test_an_item_past_draft_keeps_its_files_when_its_delete_is_refused(
     detail = client.get(f"/api/v1/orders/{order['id']}").json()
     assert [a["id"] for a in detail["attachments"]] == [kept["id"]]
     assert holders(client) == {kept["id"]: f"attachment-{kept['sha256']}"}
+
+
+def test_an_upload_while_the_store_moves_is_told_to_wait(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mid `/store/migrate`, bytes stored on the other backend lose the publish's swap
+    (`CachedBlobStore.claim`): the answer says to send them again, not a bare failure."""
+    order, _ = shop(client)
+
+    async def moving(*_: object) -> str:
+        raise StaleBlobError("piece attachment-x was published by a later attempt")
+
+    monkeypatch.setattr(attachments_module, "keep", moving)
+    answer = attach(client, order["id"], PDF, "brief.pdf")
+    assert answer.status_code == 503, answer.text
+    assert "not on this store's backend" in answer.json()["detail"]

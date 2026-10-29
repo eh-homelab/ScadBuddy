@@ -20,7 +20,7 @@ import {
   withDefaults,
   type HttpRequestContext,
   HttpRequestInput,
-  httpRequestEnabled,
+  httpAccessTierOf,
   httpRequestServer,
   httpTierOf,
   readSavedResponse,
@@ -469,11 +469,16 @@ describe('the in-process server', () => {
   })
 })
 
-describe('the setting', () => {
-  it('is on unless stored false', () => {
-    expect(httpRequestEnabled(undefined)).toBe(true)
-    expect(httpRequestEnabled(true)).toBe(true)
-    expect(httpRequestEnabled('no')).toBe(true)
-    expect(httpRequestEnabled(false)).toBe(false)
+describe("http_request's access (#2171)", () => {
+  it('takes a tier its item is set to whatever the method, and the method\'s tier otherwise', () => {
+    const outward = httpAccessTierOf('outward')
+    expect(outward(HTTP_TOOL_NAME, { method: 'GET', url: 'x' })).toBe('outward')
+    expect(outward(HTTP_READ_TOOL_NAME, {})).toBe('read')
+    expect(outward('mcp__scadbuddy__list_models', {})).toBeUndefined()
+    expect(httpAccessTierOf('read')(HTTP_TOOL_NAME, { method: 'POST', url: 'x' })).toBe('read')
+    for (const override of [undefined, 'off'] as const) {
+      expect(httpAccessTierOf(override)(HTTP_TOOL_NAME, { method: 'GET', url: 'x' })).toBe('read')
+      expect(httpAccessTierOf(override)(HTTP_TOOL_NAME, { method: 'POST', url: 'x' })).toBe('outward')
+    }
   })
 })

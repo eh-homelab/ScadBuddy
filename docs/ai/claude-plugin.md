@@ -10,7 +10,7 @@ today.
 > **Status.** The skills and subagents load in your Claude Code, and in ScadBuddy's own
 > harness through its copy of the plugin ([Inside ScadBuddy](#inside-scadbuddy), #896). The MCP server the plugin connects to,
 > `<your ScadBuddy>/mcp`, is served by the agent sidecar (#368), and its bearer tokens
-> are minted in Settings → Assistant → **MCP access tokens** (#251).
+> are minted in Settings → MCP access → **MCP access tokens** (#251).
 
 ## What is in it
 
@@ -52,7 +52,7 @@ declares:
 | Key | Required | Enter |
 |---|---|---|
 | `scadbuddy_url` | yes | Your ScadBuddy's HTTPS base URL, **with no trailing slash**, for example `https://scadbuddy.example.org`. The server URL is `${user_config.scadbuddy_url}/mcp` ([`.mcp.json`](../../plugins/scadbuddy/.mcp.json)). |
-| `scadbuddy_token` | no; `sensitive` | A bearer token minted in ScadBuddy Settings → Assistant → **MCP access tokens** ([operating.md](operating.md#41-mcp-access-tokens)), sent as `Authorization: Bearer …`. Leave it empty only if the operator set the MCP auth mode to `disabled`. |
+| `scadbuddy_token` | no; `sensitive` | A bearer token minted in ScadBuddy Settings → MCP access → **MCP access tokens** ([operating.md](operating.md#41-mcp-access-tokens)), sent as `Authorization: Bearer …`. Leave it empty only if the operator set the MCP auth mode to `disabled`. |
 
 What the server does (spec §8.2–§8.4; [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts)):
 
@@ -106,7 +106,7 @@ loopback MCP server under the name `scadbuddy`, and their tool names stay
 The server answers only a loopback peer, with a token the segment runner mints from the
 KEK for the session's running turn and owner. Every call is decided from the session as
 it is when the call runs: the turn still running, the owner unchanged, the turn sender's
-tiers cut to what its credential holds now, and Settings → Plugins applied. An outward
+tiers cut to what its credential holds now, and Settings → Tools & plugins applied. An outward
 call is refused with a note telling the subagent to leave it to the main agent, where it
 parks for approval. The server is the subagents' own (#2562): the runner passes each
 definition in `agents/` to Claude Code with the server inline

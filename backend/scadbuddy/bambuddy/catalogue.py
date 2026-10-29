@@ -16,7 +16,8 @@ import logging
 import math
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from functools import cached_property, partial
 from pathlib import Path
@@ -24,6 +25,7 @@ from pathlib import Path
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from fastapi import status
+from psycopg import AsyncConnection
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
@@ -248,6 +250,11 @@ CATALOGUE_VERSION = 1
 CATALOGUE_ORPHAN_AGE = 7 * 24 * 3600.0
 #: The HKDF label of :func:`catalogue_name_key`.
 NAME_KEY_INFO = b"scadbuddy:bambuddy:catalogue_name:v1"
+#: Prefixes the key of :func:`catalogue_refresh_claim`'s advisory lock.
+REFRESH_LOCK_PREFIX = "scadbuddy-catalogue-refresh:"
+#: How long a refresh waits to connect for its claim, in seconds, before it refreshes
+#: unclaimed.
+REFRESH_CLAIM_CONNECT_TIMEOUT = 5
 
 _ADAPTER = TypeAdapter(Catalogue)
 
@@ -274,6 +281,12 @@ _refreshing: dict[Path, asyncio.Task[None]] = {}
 #: The first reads running in this process, one per file with nothing kept yet, which
 #: every open of that file waits on (#2906).
 _reading: dict[Path, asyncio.Task[Catalogue]] = {}
+#: When this process last found each file's refresh claimed by another replica
+#: (``time.monotonic``), so its opens do not each ask again until that one is done.
+_refused: dict[Path, float] = {}
+#: How long a refused claim is not asked again, in seconds: about as long as a
+#: refresh takes on prod (1.4 to 12 s, #4528).
+REFUSED_CLAIM_BACKOFF = 15.0
 
 
 def catalogue_name_key(kek: Kek | None) -> bytes | None:
@@ -287,17 +300,76 @@ def catalogue_name_key(kek: Kek | None) -> bytes | None:
 
 #: A catalogue read deferred: what the dialog's check is given (#4196).
 ReadCatalogue = Callable[[], Awaitable[Catalogue]]
+#: Held while one replica refreshes a kept file (#4528): entered with the file, it
+#: yields whether this replica may refresh it, False while another one does.
+RefreshClaim = Callable[[Path], AbstractAsyncContextManager[bool]]
 
 
-def kept_catalogue(client: BambuddyClient, cache: Path, kek: Kek | None) -> ReadCatalogue:
+def catalogue_refresh_claim(conninfo: str) -> RefreshClaim:
+    """A :data:`RefreshClaim` held across every replica on the database at ``conninfo``
+    (#4528): a session-level ``pg_try_advisory_lock`` per file, on a connection of its
+    own that is closed on the way out, so a replica that dies mid-refresh lets go with
+    its connection. On prod two replicas refreshed the same expired copy within seconds,
+    each reading Bambuddy's ~1 MB ``/slicer/presets``, since :data:`_refreshing` is per
+    process. A claim that cannot connect is granted: a database that does not answer
+    costs a second read, never a copy left unrefreshed."""
+
+    @asynccontextmanager
+    async def claim(path: Path) -> AsyncIterator[bool]:
+        conn: AsyncConnection[tuple[object, ...]] | None = None
+        try:
+            conn = await AsyncConnection.connect(
+                conninfo, autocommit=True, connect_timeout=REFRESH_CLAIM_CONNECT_TIMEOUT
+            )
+        except Exception as error:
+            # Said by its type only: a connection error can quote the conninfo.
+            logger.warning(
+                "could not claim the preset catalogue's refresh",
+                extra={"error": type(error).__name__},
+            )
+        if conn is None:
+            # Outside the handler, so a refresh's own error never carries the connect
+            # error, and its conninfo, as its context.
+            yield True
+            return
+        try:
+            # Keyed by the file's name alone, which holds while every replica shares
+            # one cache volume (#2978). Replicas with caches of their own would skip a
+            # refresh while another replica refreshed its own copy, so the key would
+            # then need the volume too.
+            cursor = await conn.execute(
+                "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                (f"{REFRESH_LOCK_PREFIX}{path.name}",),
+            )
+            row = await cursor.fetchone()
+            yield bool(row and row[0])
+        finally:
+            await conn.close()
+
+    return claim
+
+
+def kept_catalogue(
+    client: BambuddyClient, cache: Path, kek: Kek | None, refresh_claim: RefreshClaim | None
+) -> ReadCatalogue:
     """:func:`cached_catalogue` for ``client`` as a reader, its file named under
     :func:`catalogue_name_key` as the dialog's choices name it: what the dialog's check
     reads (#4196)."""
-    return partial(cached_catalogue, client, cache, name_key=catalogue_name_key(kek))
+    return partial(
+        cached_catalogue,
+        client,
+        cache,
+        name_key=catalogue_name_key(kek),
+        refresh_claim=refresh_claim,
+    )
 
 
 async def cached_catalogue(
-    client: BambuddyClient, cache: Path, *, name_key: bytes | None = None
+    client: BambuddyClient,
+    cache: Path,
+    *,
+    name_key: bytes | None = None,
+    refresh_claim: RefreshClaim | None = None,
 ) -> Catalogue:
     """:func:`_catalogue`, kept in a file under ``cache`` per Bambuddy (#2361, #2978).
 
@@ -307,7 +379,9 @@ async def cached_catalogue(
     read. Only the print dialog reads it, its choices and its check (#4196): the run,
     which slices with what it resolves, still reads the catalogue fresh. A failed read
     is not kept.
-    ``name_key`` is :func:`catalogue_name_key`'s.
+    ``name_key`` is :func:`catalogue_name_key`'s. With ``refresh_claim``
+    (:func:`catalogue_refresh_claim`) one replica at a time refreshes a file (#4528);
+    without it, one task per process does.
 
     With nothing kept, the opens of that file wait on one read and fail with it
     (#2906), rather than each reading ``/slicer/presets`` (~6 s). The read is shielded
@@ -323,8 +397,10 @@ async def cached_catalogue(
             reading.add_done_callback(lambda done: _settle_first_read(path, done))
         return await asyncio.shield(reading)
     age, catalogue = kept
-    if age >= CATALOGUE_TTL and path not in _refreshing:
-        task = asyncio.create_task(_refresh(client.config, path))
+    refused = _refused.get(path)
+    backing_off = refused is not None and time.monotonic() - refused < REFUSED_CLAIM_BACKOFF
+    if age >= CATALOGUE_TTL and path not in _refreshing and not backing_off:
+        task = asyncio.create_task(_refresh(client.config, path, refresh_claim))
         _refreshing[path] = task
         task.add_done_callback(lambda _: _refreshing.pop(path, None))
     return catalogue
@@ -466,13 +542,24 @@ def _settle_first_read(path: Path, done: asyncio.Task[Catalogue]) -> None:
         done.exception()
 
 
-async def _refresh(config: BambuddyConfig, path: Path) -> None:
+async def _refresh(config: BambuddyConfig, path: Path, claim: RefreshClaim | None) -> None:
     """Read the catalogue again with a client of its own, since the request's closes
-    when it answers. A failure keeps the old one for the next open to retry."""
+    when it answers. A failure keeps the old one for the next open to retry.
+
+    Only under ``claim`` (#4528): a replica that another one is refreshing for reads
+    nothing, and one that takes the claim just after the last holder renamed a fresh
+    copy in finds the file no longer expired and reads nothing either."""
     try:
-        async with BambuddyClient(config) as client:
-            catalogue = await _catalogue(client)
-        await _keep_and_hold(path, catalogue)
+        async with _claimed(claim, path) as claimed:
+            if not claimed:
+                _refused[path] = time.monotonic()
+                return
+            _refused.pop(path, None)
+            if not await asyncio.to_thread(_expired, path):
+                return
+            async with BambuddyClient(config) as client:
+                catalogue = await _catalogue(client)
+            await _keep_and_hold(path, catalogue)
     except Exception as error:
         # Nothing awaits this task, so whatever fails ends here, and only by its type:
         # a pydantic error quotes Bambuddy's body (#3446). A problem's type is ScadBuddy's
@@ -484,6 +571,24 @@ async def _refresh(config: BambuddyConfig, path: Path) -> None:
                 "problem": error.type if isinstance(error, ApiError) else None,
             },
         )
+
+
+@asynccontextmanager
+async def _claimed(claim: RefreshClaim | None, path: Path) -> AsyncIterator[bool]:
+    """``claim`` on ``path``; with none, this process's own dedup is the only one."""
+    if claim is None:
+        yield True
+        return
+    async with claim(path) as claimed:
+        yield claimed
+
+
+def _expired(path: Path) -> bool:
+    """Whether the kept file is past :data:`CATALOGUE_TTL`, or cannot be looked at."""
+    try:
+        return time.time() - path.stat().st_mtime >= CATALOGUE_TTL
+    except OSError:
+        return True
 
 
 async def stop_refreshes() -> None:
@@ -506,3 +611,4 @@ def forget_catalogues() -> None:
     _reading.clear()
     _parsed.clear()
     _misses.clear()
+    _refused.clear()

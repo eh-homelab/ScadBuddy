@@ -127,6 +127,25 @@ describe('OrdersPage (#4249)', () => {
     createCustomer.mockRestore()
   })
 
+  it('refuses a new customer whose email is not an address, and makes nothing (#4691)', async () => {
+    const createCustomer = vi.spyOn(api, 'createCustomer')
+    const { user } = renderPage(<OrdersPage />, { route: '/orders' })
+    await screen.findByRole('table', { name: 'Orders' })
+    await user.click(screen.getByRole('button', { name: 'New order' }))
+    const dialog = screen.getByRole('dialog', { name: 'New order' })
+    await choose(user, within(dialog).getByRole('combobox', { name: 'Customer for the new order' }), 'New customer…')
+    await user.type(within(dialog).getByLabelText('Customer name'), 'Grace Hopper')
+    await user.type(within(dialog).getByLabelText('Email'), 'grace at example')
+    await user.click(within(dialog).getByRole('button', { name: 'Create order' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Enter the email as name@example.com, or leave it empty.')
+    expect(createCustomer).not.toHaveBeenCalled()
+    await user.clear(within(dialog).getByLabelText('Email'))
+    await user.type(within(dialog).getByLabelText('Email'), 'grace@example.com')
+    await user.click(within(dialog).getByRole('button', { name: 'Create order' }))
+    await waitFor(() => expect(createCustomer).toHaveBeenCalledTimes(1))
+    createCustomer.mockRestore()
+  })
+
   it('keeps the customer it made when the order fails, so a retry makes no second', async () => {
     const createOrder = vi.spyOn(api, 'createOrder').mockRejectedValueOnce(new Error('The server is away.'))
     const { user } = renderPage(
@@ -145,13 +164,16 @@ describe('OrdersPage (#4249)', () => {
     const listed = vi.spyOn(api, 'customers')
     await user.click(within(dialog).getByRole('button', { name: 'Create order' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('The server is away.')
-    // The list re-reads its customers, so its names and filter take the new one in.
-    await waitFor(() => expect(listed).toHaveBeenCalled())
-    listed.mockRestore()
+    // The list's customers are not re-read under the open dialog (#4728); the picker
+    // offers the new one.
+    expect(listed).not.toHaveBeenCalled()
     expect(picker).toHaveTextContent('Grace Hopper')
     expect(within(dialog).queryByLabelText('Customer name')).toBeNull()
     await user.click(within(dialog).getByRole('button', { name: 'Create order' }))
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent(/^\/orders\/o-/))
+    // Closed, the list re-reads them, so its names and filter take the new one in.
+    expect(listed).toHaveBeenCalled()
+    listed.mockRestore()
     expect(await api.customers({ q: 'grace' })).toHaveLength(1)
     expect(createOrder).toHaveBeenCalledTimes(2)
     createOrder.mockRestore()

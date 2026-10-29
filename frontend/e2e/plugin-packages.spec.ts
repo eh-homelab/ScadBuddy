@@ -27,7 +27,7 @@ test.describe('assistant plugins in Settings (#297)', () => {
   test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the agent service is not in the real stack yet')
 
   test('installs, reviews, approves the exact pin, enables, re-pins with a diff and removes', async ({ page }) => {
-    await page.goto('/settings')
+    await page.goto('/settings/tools')
     const section = page.getByRole('region', { name: 'Plugin packages' })
     await expect(section.getByText('No plugin packages installed.')).toBeVisible()
 
@@ -92,7 +92,7 @@ test.describe('assistant plugins in Settings (#297)', () => {
   })
 
   test('the in-page agent cannot install or approve', async ({ page }) => {
-    await page.goto('/settings')
+    await page.goto('/settings/tools')
     await page.waitForFunction(() => Boolean((globalThis as { __scadbuddyBridge?: unknown }).__scadbuddyBridge))
     const section = page.getByRole('region', { name: 'Plugin packages' })
     await expect(section.getByText('No plugin packages installed.')).toBeVisible()
@@ -123,7 +123,7 @@ test.describe('assistant plugins in Settings (#297)', () => {
   })
 
   test('tests a plugin endpoint and reviews its tool tiers', async ({ page }) => {
-    await page.goto('/settings')
+    await page.goto('/settings/tools')
     const section = page.getByRole('region', { name: 'Plugins', exact: true })
     const card = section.getByRole('listitem', { name: 'Plugin endpoint hindsight' })
     await expect(card).toContainText('Authorization: …9f3a')

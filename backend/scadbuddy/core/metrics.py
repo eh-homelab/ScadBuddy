@@ -97,7 +97,8 @@ class Metrics:
         )
         self.render_coalesced = Counter(
             "scadbuddy_render_jobs_coalesced",
-            "Render requests answered with an identical job already waiting."
+            "Render requests answered with an identical job already waiting, or one"
+            " already done whose result is still held (#4870)."
             " A request answered 202 accepting is counted by the follow that gets its"
             " answer; a follow sent again after a dropped answer counts it again (#2340).",
             ["kind"],

@@ -1,3 +1,4 @@
+import type { AccessResolver } from '../access/resolver.js'
 import type { nestedQueries } from '../builtins/nested.js'
 import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
@@ -19,6 +20,7 @@ import type { ProbeVerdict } from '../harness/credentialErrors.js'
 import type { CredentialSource } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { ApprovalPreparer, TierResolver } from '../harness/permissions.js'
+import type { SeamLedger } from '../harness/seamLedger.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../harness/run.js'
 import { type HttpLimits, type SavedMeta, savedBody } from '../harness/httpRequest.js'
@@ -33,7 +35,7 @@ import { QuestionService } from '../questions/service.js'
 import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
 import type { QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
-import type { FlowTurn, TabWait, WaitForTab } from '../tools/registry.js'
+import type { FlowTurn, TabWait, Tool, WaitForTab } from '../tools/registry.js'
 import type { AuditContext, AuditDeps } from '../audit/log.js'
 import { turnCostEntry } from '../audit/turn.js'
 import type { TurnTrace } from '../telemetry/turn.js'
@@ -287,7 +289,7 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
       })
       if ('reconnected' in verdict && verdict.reconnected) {
         // reconnected() runs on whichever replica saw the tab. isBack reaches a tab on
-        // another replica too (bridge/relay.ts, #1916); when it still finds none, nothing
+        // another replica too (bridge/relay.ts, #4780); when it still finds none, nothing
         // here will end a later wait but its timer (#1308), so the rest of the turn does
         // not wait. A failed check does not latch.
         if (!(await isBack(turn).catch(() => true))) {
@@ -699,6 +701,13 @@ export type SessionManagerDeps = {
   /** Asks the endpoint about a refused or rate-limited credential; fallback.ts's own probe when omitted. */
   probe?: (credential: Credential, model: string | undefined) => Promise<ProbeVerdict>
   settings?: SettingsReader
+  /**
+   * Tool access (#2171, ai_access): the http_request and own-plugin switches, and http_request's
+   * tier, per turn; with it, the seam also reads each call's access (access/live.ts). Defaults without it.
+   */
+  access?: Pick<AccessResolver, 'enabled' | 'entry' | 'item' | 'switchedItem'>
+  /** The registry tools the in-process server offers (tools/harness.ts), whose access the seam reads per call. */
+  tools?: readonly Tool[]
   tierOf?: TierResolver
   /** Each registry call's title for the panel (#782, tools/harness.ts `titleOf`). */
   titleOf?: TitleResolver
@@ -707,7 +716,14 @@ export type SessionManagerDeps = {
     session: SessionRecord,
     turn: TurnPrincipal,
     /** #815 §2: how a browser_* call that finds no tab waits for it; only in a session the browser user owns. */
-    extras?: { waitForTab?: WaitForTab; turnContext?: () => Context; builtIn?: BuiltInPolicy; secrets?: () => readonly string[] },
+    extras?: {
+      waitForTab?: WaitForTab
+      turnContext?: () => Context
+      builtIn?: BuiltInPolicy
+      secrets?: () => readonly string[]
+      /** The tier the seam applied to each of the turn's calls (#2171). */
+      ledger?: Pick<SeamLedger, 'tierOf'>
+    },
   ) => Record<string, McpSdkServerConfigWithInstance>
   /**
    * What an outward call parks, for a registry tool that resolves its arguments (#4442,
@@ -715,7 +731,7 @@ export type SessionManagerDeps = {
    */
   prepareApproval?: (session: SessionRecord, turn: TurnPrincipal) => ApprovalPreparer
   /**
-   * Settings → Plugins' overrides of the built-in tools (#1953,
+   * Settings → Tools & plugins' overrides of the built-in tools (#1953,
    * plugins/builtInTools.ts `BuiltInTools.policy`): read once per turn, as the
    * remote plugins are.
    */
@@ -752,8 +768,8 @@ export type SessionManagerDeps = {
   memory?: MemoryOptions | undefined
   /**
    * The assistant's `http_request` tool (#827, harness/httpRequest.ts). A
-   * session's turns get it when this is set and the `http_request_enabled`
-   * setting is not `false`; it is on by default.
+   * session's turns get it when this is set and `builtin:http` is not switched
+   * off in `access` (#2171); it is on by default.
    */
   httpRequest?: {
     /** Tests only: a resolver other than the system's. */

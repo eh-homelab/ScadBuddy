@@ -1081,6 +1081,30 @@ def test_reopening_a_cancelled_order_holds_its_quotes_files_again(shop: Shop) ->
     assert _held_keys(shop) == {quote.id: {"quote-a", "quote-one"}}
 
 
+def test_a_cancel_row_naming_no_status_reopens_with_no_items_and_says_why(
+    shop: Shop, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#4725: a cancel's audit row whose `from_status` is not a status leaves nothing to
+    bring back, and the fallback is logged, so a reopen with no items can be explained."""
+    order = shop.order()
+    item = shop.item(order)
+    shop.lifecycle.cancel_order(order.id, BY)
+    with shop.rows.transaction() as conn:
+        conn.execute(
+            "UPDATE order_events SET detail = detail || '{\"from_status\": 7}'::jsonb"
+            " WHERE order_id = %s AND detail->>'to' = 'cancelled'",
+            (order.id,),
+        )
+    with caplog.at_level("WARNING", logger="scadbuddy.orders.lifecycle"):
+        reopened = shop.lifecycle.reopen_order(order.id, BY)
+    assert reopened.status == "draft"
+    assert shop.get_item(item).status == "cancelled"
+    assert [r.getMessage() for r in caplog.records] == [
+        f"order {order.number} reopens as draft with no items:"
+        " its cancel's audit row names no status it was cancelled from"
+    ]
+
+
 def test_reopening_a_closed_order_holds_its_quotes_files_again(shop: Shop) -> None:
     order = shop.order()
     item = shop.item(order)

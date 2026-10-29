@@ -29,9 +29,8 @@ from scadbuddy.bambuddy.preview import start_preview
 from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.print_run import (
     PrintRunRequest,
-    ensured_route,
     resolve_project,
-    run_route,
+    slice_route,
 )
 from scadbuddy.bambuddy.print_source import LibrarySource, OutputSource, PrintSource
 from scadbuddy.bambuddy.project_file import file_into_project
@@ -50,13 +49,13 @@ from scadbuddy.bambuddy.send import (
 )
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.bambuddy.virtual_printers import virtual_printer_kinds
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.reads import NativeLibraries, no_native_copies, reads_for
 from scadbuddy.printers.component import PRINTERS
-from scadbuddy.printers.hot_path import native_backends
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.slicing.component import SLICING
@@ -350,22 +349,9 @@ def bambuddy_kinds_over(
         body = PrintRunRequest.model_validate(request["request"])
         # The run's own decision (plan 2026-10-18 D2): a native run's slice builds no
         # Bambuddy client (D3).
-        route = (
-            await run_route(
-                settings,
-                printers,
-                reports,
-                printer=body.printer,
-                printer_id=body.printer_id,
-                say_fallback=False,
-            )
-            if printers is not None and native_backends(settings)
-            else None
+        route = await slice_route(
+            settings, printers, reports, printer=body.printer, printer_id=body.printer_id
         )
-        if route is not None and route.row is None and route.printer_id is not None:
-            # As the run's check: a printer with no row yet takes the row it makes.
-            async with client_for(settings) as client:
-                route = await ensured_route(client, settings, printers, reports, route)
         lan = route is not None and route.native
         own = await library()
         # The native library a native run's copy goes into: the API's own
@@ -449,6 +435,8 @@ def bambuddy_kinds_over(
             run_attempts=3,
             where="Bambuddy's inbox folder",
         ),
+        # #4747: Bambuddy's virtual printers, written from Settings > Printers.
+        *virtual_printer_kinds(settings_store=settings_store, printers=printers),
     ]
 
 

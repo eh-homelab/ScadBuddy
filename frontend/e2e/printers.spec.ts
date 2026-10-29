@@ -9,7 +9,7 @@ test.describe('printers', () => {
   test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the real stack is covered by real-backend.spec.ts')
 
   test('links a discovered printer and a LAN printer, and Now printing labels each path', async ({ page }) => {
-    await page.goto('/settings#printers')
+    await page.goto('/settings/printing#printers')
     const section = page.getByRole('region', { name: 'Printers' })
 
     // A row by serial only: link it to the Bambuddy printer 3DP-77A-114.

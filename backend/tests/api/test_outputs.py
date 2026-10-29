@@ -11,9 +11,10 @@ import threading
 import time
 import zipfile
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import trimesh
@@ -22,6 +23,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from scadbuddy.api import outputs as outputs_api
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.api.jobs import draw_view
 from scadbuddy.core.gitrepo import GitError, GitTimeoutError, RevisionNotFoundError
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
@@ -271,6 +273,75 @@ def test_an_upload_replaces_a_drawn_thumbnail(client: TestClient, model: str) ->
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").content == PNG_BYTES
 
 
+def test_an_uploaded_thumbnail_is_announced(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #4822: an open History page shows the old image, or "No preview", until it is told.
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    published = _recording_events(state, monkeypatch)
+    put = client.put(
+        f"/api/v1/outputs/{created['id']}/thumbnail",
+        files={"file": ("capture.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert put.status_code == 204
+    updated = _output_updates(published)
+    assert [(e.output_id, e.slug) for e in updated] == [(created["id"], model)]
+
+
+def test_a_replaced_thumbnail_has_a_new_version(client: TestClient, model: str) -> None:
+    # #4841: an open History page reads the list again, but an unchanged image URL is
+    # never fetched again, so the record says which image the thumbnail is.
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    assert created["thumbnail_version"] is None
+    store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+
+    def version() -> str | None:
+        detail = client.get(f"/api/v1/outputs/{created['id']}").json()
+        listed = client.get(f"/api/v1/models/{model}/outputs").json()
+        assert [o["thumbnail_version"] for o in listed if o["id"] == created["id"]] == [
+            detail["thumbnail_version"]
+        ]
+        return cast("str | None", detail["thumbnail_version"])
+
+    assert store.write_drawn_thumbnail(created["id"], b"\x89PNG\r\n\x1a\ndrawn") is True
+    drawn = version()
+    assert drawn is not None
+    put = client.put(
+        f"/api/v1/outputs/{created['id']}/thumbnail",
+        files={"file": ("capture.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert put.status_code == 204
+    uploaded = version()
+    assert uploaded is not None
+    assert uploaded != drawn
+    assert version() == uploaded
+
+
+def test_a_refused_thumbnail_upload_is_not_announced(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    published = _recording_events(state, monkeypatch)
+    put = client.put(
+        "/api/v1/outputs/" + "0" * 32 + "/thumbnail",
+        files={"file": ("capture.png", PNG_BYTES, "image/png")},
+        headers=press(),
+    )
+    assert put.status_code == 404
+    assert _output_updates(published) == []
+
+
 def test_a_drawn_thumbnail_never_replaces_one_already_there(client: TestClient, model: str) -> None:
     created = client.post(
         f"/api/v1/models/{model}/outputs",
@@ -330,12 +401,22 @@ def test_an_output_with_nothing_to_draw_shows_no_thumbnail(
         headers=press(),
     ).json()
     calls = _counting_draws(monkeypatch, lambda *_: None)
+    # An empty mesh stays empty: remembered for good, however long the wait.
+    monkeypatch.setattr(outputs_api, "RETRY_DRAW_AFTER", 0.05)
 
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
+    time.sleep(0.1)
     # Remembered: listed with no thumbnail, and not drawn again on the next read.
     assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
     assert calls == [created["id"]]
+
+
+def _until(condition: Callable[[], bool]) -> None:
+    deadline = time.monotonic() + 10
+    while not condition() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert condition()
 
 
 def test_a_draw_past_its_budget_keeps_its_slot_until_it_ends(
@@ -356,21 +437,193 @@ def test_a_draw_past_its_budget_keeps_its_slot_until_it_ends(
         return None
 
     calls = _counting_draws(monkeypatch, stuck)
-    slots: asyncio.Semaphore = state.outputs.thumbnail_draws
-    free = slots._value
+    store: OutputStore = state.outputs
 
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 503
     # The thread still runs, so it still holds its slot.
-    assert slots._value == free - 1
+    assert store.draws_running == 1
     assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
     assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 404
     assert calls == [created["id"]]
 
     release.set()
-    deadline = time.monotonic() + 10
-    while slots._value != free and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert slots._value == free
+    _until(lambda: store.draws_running == 0)
+
+
+def _recording_events(state: Any, monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Every event the app publishes, as it publishes them."""
+    published: list[Any] = []
+    publish = state.events.publish
+
+    def recorded(event: Any) -> None:
+        published.append(event)
+        publish(event)
+
+    monkeypatch.setattr(state.events, "publish", recorded)
+    return published
+
+
+def _output_updates(published: list[Any]) -> list[Any]:
+    return [e for e in published if getattr(e, "kind", None) == "output.updated"]
+
+
+def test_a_draw_that_ends_after_its_read_gave_up_is_announced(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #4811: the page that got the 503 shows "No preview" until its list is read again.
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    budget = state.config
+    state.config = dataclasses.replace(budget, render_timeout=0.2)
+    published = _recording_events(state, monkeypatch)
+    release = threading.Event()
+    draw = draw_view
+
+    def slow(*args: Any) -> bytes | None:
+        release.wait(30)
+        return draw(*args)
+
+    _counting_draws(monkeypatch, slow)
+    url = f"/api/v1/outputs/{created['id']}/thumbnail"
+    assert client.get(url).status_code == 503
+    assert _output_updates(published) == []
+
+    release.set()
+    store: OutputStore = state.outputs
+    _until(lambda: store.draws_running == 0)
+    updated = _output_updates(published)
+    assert [(e.output_id, e.slug) for e in updated] == [(created["id"], model)]
+    state.config = budget
+    assert client.get(url).status_code == 200
+
+
+def test_a_draw_its_read_waited_for_is_not_announced(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The read itself answers with it: a History page of new outputs is not re-listed
+    # once per drawn thumbnail.
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    published = _recording_events(state, monkeypatch)
+    assert client.get(f"/api/v1/outputs/{created['id']}/thumbnail").status_code == 200
+    assert _output_updates(published) == []
+
+
+def test_a_timeout_that_lands_as_the_draw_ends_serves_the_drawing(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    published = _recording_events(state, monkeypatch)
+    calls = _counting_draws(monkeypatch, draw_view)
+
+    async def late(awaitable: Any, timeout: float | None) -> Any:
+        if not isinstance(awaitable, asyncio.Future):
+            return await asyncio.wait_for(awaitable, timeout)
+        # The draw ends, then the budget runs out before the read resumes.
+        await awaitable
+        raise TimeoutError
+
+    # Only the route module's `asyncio`: the rest of the app keeps the real one.
+    patched = SimpleNamespace(**{**vars(asyncio), "wait_for": late})
+    monkeypatch.setattr(outputs_api, "asyncio", patched)
+    url = f"/api/v1/outputs/{created['id']}/thumbnail"
+    response = client.get(url)
+    assert response.status_code == 200
+    assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
+    # Not remembered as undrawable, and not announced: this read answered with it.
+    assert state.outputs.drawable_thumbnail(created["id"]) is True
+    assert _output_updates(published) == []
+    assert calls == [created["id"]]
+
+
+def test_a_read_queued_behind_a_failed_draw_does_not_draw_again(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    store: OutputStore = getattr(client.app.state, STATE_ATTR).outputs  # type: ignore[attr-defined]
+    # One slot, so the second read waits for the first draw's.
+    store.thumbnail_draws = asyncio.Semaphore(1)
+    release = threading.Event()
+
+    def stuck(*_: Any) -> bytes | None:
+        release.wait(30)
+        return None
+
+    calls = _counting_draws(monkeypatch, stuck)
+    url = f"/api/v1/outputs/{created['id']}/thumbnail"
+    with ThreadPoolExecutor(2) as pool:
+        first = pool.submit(client.get, url)
+        _until(lambda: len(calls) == 1)
+        second = pool.submit(client.get, url)
+        # Long enough for the second read to pass its first check and queue.
+        time.sleep(0.3)
+        release.set()
+        assert first.result().status_code == 404
+        assert second.result().status_code == 404
+    assert calls == [created["id"]]
+
+
+@pytest.mark.parametrize("outcome", ["timeout", "error"])
+def test_a_draw_that_timed_out_or_failed_is_tried_again_later(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    _drawing_thumbnails(client)
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model)},
+        headers=press(),
+    ).json()
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    budget = state.config
+    state.config = dataclasses.replace(budget, render_timeout=0.2)
+    monkeypatch.setattr(outputs_api, "RETRY_DRAW_AFTER", 3.0)
+    draw = draw_view
+    failing = [True]
+
+    def flaky(*args: Any) -> bytes | None:
+        if failing[0]:
+            if outcome == "timeout":
+                time.sleep(0.5)
+            raise OSError("the preview mesh is unreadable")
+        return draw(*args)
+
+    _counting_draws(monkeypatch, flaky)
+    url = f"/api/v1/outputs/{created['id']}/thumbnail"
+    assert client.get(url).status_code == (503 if outcome == "timeout" else 404)
+    store: OutputStore = state.outputs
+    _until(lambda: store.draws_running == 0)
+    failing[0] = False
+    state.config = budget
+    # Not right away: a busy moment is not retried on every read.
+    assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is False
+    assert client.get(url).status_code == 404
+
+    _until(lambda: store.drawable_thumbnail(created["id"]))
+    assert client.get(f"/api/v1/outputs/{created['id']}").json()["has_thumbnail"] is True
+    response = client.get(url)
+    assert response.status_code == 200
+    assert response.content.startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_a_thumbnail_that_is_not_a_png_is_refused(client: TestClient, model: str) -> None:
