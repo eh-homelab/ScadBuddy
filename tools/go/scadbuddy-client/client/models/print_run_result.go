@@ -19,6 +19,10 @@ type PrintRunResult struct {
 	folder_id PrintRunResult_PrintRunResult_folder_idable
 	// The lan property
 	lan []LanStartedable
+	// The lan_stopped property
+	lan_stopped LanStoppedable
+	// The lan_waiting property
+	lan_waiting []int32
 	// The library_file_id property
 	library_file_id *int32
 	// The path property
@@ -690,6 +694,32 @@ func (m *PrintRunResult) GetFieldDeserializers() map[string]func(i878a80d2330e89
 		}
 		return nil
 	}
+	res["lan_stopped"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateLanStoppedFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetLanStopped(val.(LanStoppedable))
+		}
+		return nil
+	}
+	res["lan_waiting"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfPrimitiveValues("int32")
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]int32, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = *(v.(*int32))
+				}
+			}
+			m.SetLanWaiting(res)
+		}
+		return nil
+	}
 	res["library_file_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetInt32Value()
 		if err != nil {
@@ -823,6 +853,18 @@ func (m *PrintRunResult) GetLan() []LanStartedable {
 	return m.lan
 }
 
+// GetLanStopped gets the lan_stopped property value. The lan_stopped property
+// returns a LanStoppedable when successful
+func (m *PrintRunResult) GetLanStopped() LanStoppedable {
+	return m.lan_stopped
+}
+
+// GetLanWaiting gets the lan_waiting property value. The lan_waiting property
+// returns a []int32 when successful
+func (m *PrintRunResult) GetLanWaiting() []int32 {
+	return m.lan_waiting
+}
+
 // GetLibraryFileId gets the library_file_id property value. The library_file_id property
 // returns a *int32 when successful
 func (m *PrintRunResult) GetLibraryFileId() *int32 {
@@ -911,6 +953,18 @@ func (m *PrintRunResult) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a
 			}
 		}
 		err := writer.WriteCollectionOfObjectValues("lan", cast)
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("lan_stopped", m.GetLanStopped())
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetLanWaiting() != nil {
+		err := writer.WriteCollectionOfInt32Values("lan_waiting", m.GetLanWaiting())
 		if err != nil {
 			return err
 		}
@@ -1022,6 +1076,16 @@ func (m *PrintRunResult) SetLan(value []LanStartedable) {
 	m.lan = value
 }
 
+// SetLanStopped sets the lan_stopped property value. The lan_stopped property
+func (m *PrintRunResult) SetLanStopped(value LanStoppedable) {
+	m.lan_stopped = value
+}
+
+// SetLanWaiting sets the lan_waiting property value. The lan_waiting property
+func (m *PrintRunResult) SetLanWaiting(value []int32) {
+	m.lan_waiting = value
+}
+
 // SetLibraryFileId sets the library_file_id property value. The library_file_id property
 func (m *PrintRunResult) SetLibraryFileId(value *int32) {
 	m.library_file_id = value
@@ -1079,6 +1143,8 @@ type PrintRunResultable interface {
 	GetCopies() *int32
 	GetFolderId() PrintRunResult_PrintRunResult_folder_idable
 	GetLan() []LanStartedable
+	GetLanStopped() LanStoppedable
+	GetLanWaiting() []int32
 	GetLibraryFileId() *int32
 	GetPath() *PrintRunResult_path
 	GetPrinterId() PrintRunResult_PrintRunResult_printer_idable
@@ -1093,6 +1159,8 @@ type PrintRunResultable interface {
 	SetCopies(value *int32)
 	SetFolderId(value PrintRunResult_PrintRunResult_folder_idable)
 	SetLan(value []LanStartedable)
+	SetLanStopped(value LanStoppedable)
+	SetLanWaiting(value []int32)
 	SetLibraryFileId(value *int32)
 	SetPath(value *PrintRunResult_path)
 	SetPrinterId(value PrintRunResult_PrintRunResult_printer_idable)
