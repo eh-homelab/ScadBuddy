@@ -100,7 +100,7 @@ export type TurnServer = {
   /**
    * Why its calls are refused now, read at each tier check and each call (#4757: a package
    * server switched off in Settings → Tools & plugins), or undefined. A read that fails
-   * rejects: the tier check then fails (the call parks) and the call is never made.
+   * refuses the call, at the tier check (so it never parks) and at the call.
    */
   refusal?(): Promise<string | undefined>
   /** The text the model reads instead of a call's result (#982: a page the lists do not let it read), or undefined. */
@@ -571,8 +571,9 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         const { server, harnessName } = await resolve(deps, caller.context, set, tool, signal, 'tier')
         // A flow takes its call's queue from here, since it lists nothing (turn_tools).
         const queue = pinned(deps, server) ? { task_queue: deps.hostQueue! } : {}
-        // As a guard's deny below: not parked, since its call refuses it with the reason.
-        const off = await server.refusal?.()
+        // As a guard's deny below: not parked, since its call refuses it with the reason. A
+        // switch that cannot be read is refused too: an approval could not run the call.
+        const off = await refusalOf(server)
         if (off !== undefined) return { tier: 'write', declared: 'outward', refused: off, ...queue }
         const verdict = server.guard ? await judgeInput(server.guard.bind(server), harnessName, input) : undefined
         // A refused call is not parked, since no approval could run it: its call refuses
@@ -584,6 +585,15 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         return { tier: tierAfter(server.tierOf(harnessName, input), verdict), declared, ...queue }
       })
     },
+  }
+}
+
+/** Why `server` refuses its calls now; a refusal read that fails refuses them too (fail closed). */
+async function refusalOf(server: TurnServer): Promise<string | undefined> {
+  try {
+    return await server.refusal?.()
+  } catch {
+    return `${server.name}: could not read the server's switch, so the call is refused`
   }
 }
 
@@ -634,7 +644,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         await record('refused', message)
         throw ApplicationFailure.nonRetryable(message, type)
       }
-      const off = await server.refusal?.()
+      const off = await refusalOf(server)
       if (off !== undefined) await refuse(off, TOOL_ERROR)
       if (verdict && 'deny' in verdict) await refuse(verdict.deny, TOOL_ERROR)
       if (!principal.tiers.includes(tier)) {

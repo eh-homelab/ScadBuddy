@@ -219,10 +219,18 @@ describe('a turn tool whose server refuses its calls (#4757)', () => {
     expect(h.audits).toEqual([expect.objectContaining({ outcome: 'refused', detail: OFF })])
   })
 
-  it('a switch that cannot be read refuses the call and fails the tier check', async () => {
+  // Fix round 2: a failed read answers refused at the tier check, so the call never parks
+  // for an approval that could not run it, and the call is refused (fail closed).
+  it('a switch that cannot be read is answered refused at the tier check and refuses the call', async () => {
     const h = harness({ refusal: () => Promise.reject(new Error('db down')) })
-    await expect(env(TURN_TOOL_TIER_ACTIVITY, 'tier-1').run(h.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__read_note', input: { id: 'a' } })).rejects.toThrow('db down')
-    await expect(env('turn:notes__read_note').run(h.call, { id: 'a' })).rejects.toThrow('db down')
+    const why = "notes: could not read the server's switch, so the call is refused"
+    expect(await env(TURN_TOOL_TIER_ACTIVITY, 'tier-1').run(h.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__post', input: { method: 'POST', body: 'x' } })).toEqual({
+      tier: 'write',
+      declared: 'outward',
+      refused: why,
+    })
+    const refused = await failure(env('turn:notes__post', 'tool-toolu_approved').run(h.call, { method: 'POST', body: 'x' }))
+    expect(refused.message).toBe(why)
     expect(h.calls).toEqual([])
   })
 
