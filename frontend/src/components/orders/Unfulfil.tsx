@@ -16,7 +16,8 @@ import { refusalText } from './refusal'
 
 /**
  * The confirm step of Unfulfil: the item's latest accepted attempt stops counting as
- * made, and the item goes back to approved. The attempt stays on the record.
+ * made, and the item goes back to approved, or failed if its latest attempt failed. The
+ * attempt stays on the record.
  */
 export function UnfulfilDialog({
   orderId,
@@ -61,7 +62,7 @@ export function UnfulfilDialog({
         <AlertDialogHeader>
           <AlertDialogTitle>{`Unfulfil ${item.title}?`}</AlertDialogTitle>
           <AlertDialogDescription>
-            The latest accepted attempt stops counting as made, and the item goes back to approved. The attempt stays on the
+            The latest accepted attempt stops counting as made, and the item goes back to approved, or failed if its latest attempt failed. The attempt stays on the
             record, and you can accept it again. The order's history records the change.
           </AlertDialogDescription>
         </AlertDialogHeader>
