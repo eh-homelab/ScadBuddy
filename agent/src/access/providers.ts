@@ -189,6 +189,14 @@ function disabledAs(plugin: PluginSummary, tool: string): string | undefined {
   return plugin.disabled_tools.find((d) => harnessToolName(d) === harnessToolName(tool))
 }
 
+/** Why a colliding tool is hidden: the other tools by name (never itself), "both" only for a pair. */
+function collisionReason(view: Pick<PluginToolView, 'name' | 'collides_with'>): string {
+  const others = [...new Set(view.collides_with)].filter((n) => n !== view.name)
+  if (others.length === 0) return 'Listed more than once under this name, so it is hidden'
+  const all = view.collides_with.length + 1 > 2 ? 'all of them are' : 'both are'
+  return `Shares its name with ${others.join(', ')}, so ${all} hidden`
+}
+
 function remoteItem(plugin: PluginSummary, view: PluginToolView, listed: ListedTool): ItemView {
   const collision = view.tier_source === 'collision'
   const renamed = view.tier_source === 'renamed'
@@ -209,7 +217,7 @@ function remoteItem(plugin: PluginSummary, view: PluginToolView, listed: ListedT
     overridden: row !== undefined,
     missing: false,
     allowed: renamed ? ['off', 'outward'] : null,
-    fixed: collision ? { access: 'off', reason: `Shares its name with ${view.collides_with.join(', ')}, so both are hidden` } : null,
+    fixed: collision ? { access: 'off', reason: collisionReason(view) } : null,
     reason:
       other !== undefined
         ? `Off because "${other}" is off, which Claude Code names the same: reset "${other}" to change it`

@@ -214,9 +214,21 @@ describe('remote MCP plugins as capability sources', () => {
     const { caps, setToolAccess } = setup({ listings: { 'remote:hs': listing([{ name: 'recall' }, { name: 'recall' }, { name: 'retain' }]) } })
     const source = await caps.source('remote:hs')
     expect(source.items.map((i) => i.id)).toEqual(['recall', 'retain'])
-    expect(item(source, 'recall')).toMatchObject({ access: 'off', fixed: { access: 'off', reason: 'Shares its name with recall, so both are hidden' } })
+    expect(item(source, 'recall')).toMatchObject({ access: 'off', fixed: { access: 'off', reason: 'Listed more than once under this name, so it is hidden' } })
     expect((await refusal(caps.setItem('remote:hs', 'recall', 'read', ctx))).status).toBe(409)
     expect(setToolAccess).not.toHaveBeenCalled()
+  })
+
+  it('three tools on one harness name say all of them, naming only the others', async () => {
+    const { caps } = setup({ listings: { 'remote:hs': listing([{ name: 'a.b' }, { name: 'a_b' }, { name: 'a-b' }, { name: 'a.b' }, { name: 'c.d' }, { name: 'c_d' }, { name: 'c d' }]) } })
+    const source = await caps.source('remote:hs')
+    expect(source.items.map((i) => i.id)).toEqual(['a.b', 'a_b', 'a-b', 'c.d', 'c_d', 'c d'])
+    // a-b is not renamed onto a_b, so only a.b (twice) and a_b share one name.
+    expect(item(source, 'a.b').fixed?.reason).toBe('Shares its name with a_b, so all of them are hidden')
+    expect(item(source, 'a_b').fixed?.reason).toBe('Shares its name with a.b, so all of them are hidden')
+    expect(item(source, 'a-b').fixed).toBeNull()
+    expect(item(source, 'c.d').fixed?.reason).toBe('Shares its name with c_d, c d, so all of them are hidden')
+    expect(item(source, 'c d').fixed?.reason).toBe('Shares its name with c.d, c_d, so all of them are hidden')
   })
 
   it('setItem off then read moves the tool between disabled_tools and tool_tiers', async () => {
