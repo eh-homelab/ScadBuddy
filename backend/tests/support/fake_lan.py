@@ -101,7 +101,9 @@ async def start_fake_printer(
     ("Address already in use"): start again on new ports, up to ``attempts`` times. The
     MQTT port's clash is the broker's exit; the FTPS and control ports' is the bind's
     EADDRINUSE (#4765, #4944)."""
-    for attempt in range(attempts):
+    attempt = 0
+    while True:
+        attempt += 1
         ports = Ports(free_port(), free_port(), free_port())
         printer = module.FakePrinter(config_for(ports))
         ready = asyncio.Event()
@@ -118,7 +120,7 @@ async def start_fake_printer(
                 clash = getattr(error, "errno", None) == errno.EADDRINUSE or (
                     "mosquitto exited" in str(error)
                 )
-                if not clash or attempt == attempts - 1:
+                if not clash or attempt == attempts:
                     raise
                 continue
         if not ready.is_set():
@@ -127,7 +129,6 @@ async def start_fake_printer(
                 await task
             raise AssertionError("the fake printer did not come up")
         return printer, task, ports
-    raise AssertionError("unreachable")
 
 
 @asynccontextmanager
