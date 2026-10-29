@@ -48,3 +48,19 @@ export function matches(item: ItemView, filter: string): boolean {
   if (needle === '') return true
   return [item.label, item.name, item.description ?? ''].some((text) => text.toLowerCase().includes(needle))
 }
+
+/**
+ * The one line a lowering says (#2171, spec §4.1), first match. `defaultAccess` `null` is a
+ * by-call default, which ranks as outward. Nothing else is said: no checkbox and no extra
+ * warning for an outward tool (#4208).
+ */
+export function lowerLine(defaultAccess: Access | null, from: Access | 'default', to: Access): string | null {
+  const asksFirst = defaultAccess === 'outward' || defaultAccess === null
+  if (to === 'off') return 'The assistant will not be able to use it.'
+  if (to === 'write' && defaultAccess === 'outward' && (from === 'read' || from === 'off')) {
+    return 'It will be able to change things without asking first.'
+  }
+  if ((to === 'read' || to === 'write') && asksFirst) return 'It will run without asking first.'
+  if (to === 'read' && defaultAccess === 'write') return 'Callers limited to read will be able to use it.'
+  return null
+}
