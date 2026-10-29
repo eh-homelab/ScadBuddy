@@ -127,11 +127,11 @@ describe('Built-in (#2171)', () => {
 
   it('turns HTTP requests off with the source switch', async () => {
     const { user } = renderSettingsSection(<BuiltIn />, { route })
-    const toggle = within(await card('HTTP requests')).getByRole('switch', { name: 'Enable HTTP requests' })
+    const toggle = within(await card('HTTP requests')).getByRole('switch', { name: 'Enabled (HTTP requests)' })
     expect(toggle).toBeChecked()
     expect(isUserOnly(toggle)).toBe(false)
     await user.click(toggle)
-    await waitFor(async () => expect(within(await card('HTTP requests')).getByRole('switch', { name: 'Enable HTTP requests' })).not.toBeChecked())
+    await waitFor(async () => expect(within(await card('HTTP requests')).getByRole('switch', { name: 'Enabled (HTTP requests)' })).not.toBeChecked())
     expect((await aiCapabilities.list()).find((s) => s.id === 'builtin:http')?.enabled).toBe(false)
   })
 

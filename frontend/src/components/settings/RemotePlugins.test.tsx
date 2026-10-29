@@ -118,7 +118,7 @@ describe('RemotePluginsPanel', () => {
       const recall = within(card).getAllByRole('combobox', { name: accessName('recall') })
       expect(recall).toHaveLength(1)
       expect(recall[0]).toBeDisabled()
-      expect(within(card).getByText('Shares its name with recall, so both are hidden')).toBeInTheDocument()
+      expect(within(card).getByText('Listed more than once under this name, so it is hidden')).toBeInTheDocument()
       expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/)
     } finally {
       errors.mockRestore()
@@ -177,7 +177,7 @@ describe('RemotePluginsPanel', () => {
     const source = await within(card).findByRole('region', { name: 'Source hindsight' })
     expect(within(card).queryByRole('button', { name: /^(Enable|Disable)$/ })).toBeNull()
     expect(within(card).getAllByRole('switch')).toHaveLength(1)
-    await user.click(within(source).getByRole('switch', { name: 'Enable hindsight' }))
+    await user.click(within(source).getByRole('switch', { name: 'Enabled (hindsight)' }))
     await waitFor(() => expect(badge(card, 'Enabled')).toBeInTheDocument())
     expect(badge(card, 'Disabled')).toBeNull()
     expect((await hindsight()).enabled).toBe(true)
@@ -316,7 +316,7 @@ describe('RemotePluginsPanel', () => {
     expect(isUserOnly(screen.getByLabelText('Header value'))).toBe(true)
 
     await tested(user, card)
-    expect(isUserOnly(within(card).getByRole('switch', { name: 'Enable hindsight' }))).toBe(false)
+    expect(isUserOnly(within(card).getByRole('switch', { name: 'Enabled (hindsight)' }))).toBe(false)
     const selects = within(card).getAllByRole('combobox', { name: /^Access of / })
     expect(selects).toHaveLength(5)
     for (const select of selects) expect(isUserOnly(select)).toBe(false)

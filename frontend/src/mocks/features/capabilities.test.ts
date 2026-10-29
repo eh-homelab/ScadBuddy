@@ -57,7 +57,13 @@ describe('capabilities mock (#2171)', () => {
     setListedToolNames(['recall', 'recall', 'retain'])
     const { source } = await aiCapabilities.refresh('remote:hindsight')
     expect(source.items.map((i) => i.id)).toEqual(['recall', 'retain'])
-    expect(source.items[0]).toMatchObject({ access: 'off', fixed: { access: 'off', reason: 'Shares its name with recall, so both are hidden' } })
+    expect(source.items[0]).toMatchObject({ access: 'off', fixed: { access: 'off', reason: 'Listed more than once under this name, so it is hidden' } })
+  })
+
+  it('three tools on one harness name say all of them, naming only the others, as the agent does', async () => {
+    setListedToolNames(['c.d', 'c_d', 'c d'])
+    const { source } = await aiCapabilities.refresh('remote:hindsight')
+    expect(source.items.find((i) => i.id === 'c.d')?.fixed?.reason).toBe('Shares its name with c_d, c d, so all of them are hidden')
   })
 
   it("a tool off through a stored entry of another name says which to reset, as the agent does (final review I2)", async () => {

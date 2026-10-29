@@ -147,7 +147,7 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await expect(source.getByRole('combobox', { name: 'Access of retain' })).toHaveText('write')
     await expect(source.getByRole('button', { name: 'Reset retain' })).toBeVisible()
 
-    await source.getByRole('switch', { name: 'Enable hindsight' }).click()
+    await source.getByRole('switch', { name: 'Enabled (hindsight)', exact: true }).click()
     await expect(card.locator('[data-slot="badge"]', { hasText: 'Enabled' })).toBeVisible()
 
     // Stored, not only shown: a reload reads the access and the switch back.
@@ -156,6 +156,6 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await source.getByRole('button', { name: 'hindsight', exact: true }).click()
     await expect(source.getByRole('combobox', { name: 'Access of retain' })).toHaveText('write')
     await expect(source.getByRole('combobox', { name: 'Access of recall' })).toHaveText('read')
-    await expect(source.getByRole('switch', { name: 'Enable hindsight' })).toBeChecked()
+    await expect(source.getByRole('switch', { name: 'Enabled (hindsight)', exact: true })).toBeChecked()
   })
 })

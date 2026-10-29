@@ -67,12 +67,12 @@ describe('SourceCard', () => {
     const http_ = source({ id: 'builtin:http', title: 'HTTP requests', switchable: true }, 1)
     const { user } = renderPage(<Harness start={http_} />)
     // Named for its source, so several switches on one page sound apart; the visible label stays.
-    const toggle = screen.getByRole('switch', { name: 'Enable HTTP requests' })
+    const toggle = screen.getByRole('switch', { name: 'Enabled (HTTP requests)' })
     expect(within(card('HTTP requests')).getByText('Enabled')).toBeVisible()
     expect(toggle).toBeChecked()
     expect(isUserOnly(toggle)).toBe(false)
     await user.click(toggle)
-    await waitFor(() => expect(screen.getByRole('switch', { name: 'Enable HTTP requests' })).not.toBeChecked())
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Enabled (HTTP requests)' })).not.toBeChecked())
 
     renderPage(<Harness start={source()} />)
     expect(within(card('ScadBuddy tools')).queryByRole('switch')).toBeNull()

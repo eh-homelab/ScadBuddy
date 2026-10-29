@@ -201,6 +201,14 @@ function disabledAs(plugin: RemotePlugin, tool: string): string | undefined {
   return plugin.disabled_tools.find((d) => harnessOf(d) === harnessOf(tool))
 }
 
+/** The agent's `collisionReason`: the other tools by name (never itself), "both" only for a pair. */
+function collisionReason(view: PluginToolView): string {
+  const others = [...new Set(view.collides_with)].filter((n) => n !== view.name)
+  if (others.length === 0) return 'Listed more than once under this name, so it is hidden'
+  const all = view.collides_with.length + 1 > 2 ? 'all of them are' : 'both are'
+  return `Shares its name with ${others.join(', ')}, so ${all} hidden`
+}
+
 function listedItem(plugin: RemotePlugin, view: PluginToolView): ItemView {
   const renamed = view.tier_source === 'renamed'
   // The agent's `remoteProvider`: tools colliding on one harness name are fixed off, both.
@@ -221,7 +229,7 @@ function listedItem(plugin: RemotePlugin, view: PluginToolView): ItemView {
     overridden: row !== undefined,
     missing: false,
     allowed: renamed ? ['off', 'outward'] : null,
-    fixed: collision ? { access: 'off', reason: `Shares its name with ${view.collides_with.join(', ')}, so both are hidden` } : null,
+    fixed: collision ? { access: 'off', reason: collisionReason(view) } : null,
     reason:
       other !== undefined
         ? `Off because "${other}" is off, which Claude Code names the same: reset "${other}" to change it`

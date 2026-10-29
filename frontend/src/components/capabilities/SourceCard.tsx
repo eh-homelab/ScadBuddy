@@ -63,7 +63,7 @@ export function SourceCard({
             {source.switchable && (
               <SwitchField
                 label="Enabled"
-                ariaLabel={`Enable ${source.title}`}
+                ariaLabel={`Enabled (${source.title})`}
                 checked={source.enabled}
                 onCheckedChange={(on) => void setEnabled(on)}
                 disabled={busy}
