@@ -1,5 +1,5 @@
 import type { AuditContext } from '../audit/log.js'
-import { HTTP_TOOL, HTTP_TOOL_NAME } from '../harness/httpRequest.js'
+import { HTTP_TOOL, HTTP_TOOL_DESCRIPTION, HTTP_TOOL_NAME } from '../harness/httpRequest.js'
 import { BROWSER_ORIGINS_PATH } from '../routes/browserOrigins.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import { listExternal } from '../tools/manifest.js'
@@ -31,6 +31,7 @@ const rowOf = (rows: readonly AccessRow[], source: string, item: string): Access
   rows.find((r) => r.source === source && r.item === item)
 
 function registryItem(tool: Tool, rows: readonly AccessRow[]): ItemView {
+  // The item's own access: a source `*` switch (builtin:browser's, #4757) is not folded in.
   const access = toolAccess(tool.risk, rowOf(rows, registrySource(tool.name), tool.name), true)
   return {
     id: tool.name,
@@ -60,7 +61,7 @@ function httpItem(rows: readonly AccessRow[]): ItemView {
     name: HTTP_TOOL,
     harness_name: HTTP_TOOL_NAME,
     label: 'Make an HTTP request',
-    description: null,
+    description: HTTP_TOOL_DESCRIPTION,
     default: null,
     default_note: HTTP_DEFAULT_NOTE,
     suggested: null,
@@ -73,6 +74,8 @@ function httpItem(rows: readonly AccessRow[]): ItemView {
   }
 }
 
+// Every built-in item is a tool until #4757: builtin:own-plugin's skills and subagents take on/off,
+// and #4757 replaces this with a write per item kind.
 function toolWrite(access: Access): Exclude<Access, 'on'> {
   if (access === 'on') throw new CapabilityError('a tool takes off, read, write or outward, not "on"', 400)
   return access

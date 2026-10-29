@@ -801,18 +801,22 @@ function signalOf(extra: unknown): AbortSignal | undefined {
   return signal instanceof AbortSignal ? signal : undefined
 }
 
+/** What the model reads of http_request, and the Tools and plugins page shows. */
+export const HTTP_TOOL_DESCRIPTION =
+  'Make one HTTP request, like curl, to any http or https URL: the internet or the local network. ' +
+  'GET and HEAD run at once; POST, PUT, PATCH and DELETE wait for the user to approve that exact request. ' +
+  'Only the headers you give are sent. Returns the status, the response headers and the body ' +
+  `(up to ${INLINE_MAX_BYTES} bytes inline); a longer text body is saved and read with ${HTTP_READ_TOOL}. ` +
+  'A binary body (an image, a 3MF, a zip) is stored as a workspace file and the result names it; ' +
+  'workspace_read reads it, an image as an image. ' +
+  'With save_to_workspace any body is stored as that workspace file instead. ' +
+  `Follows up to ${MAX_REDIRECTS} redirects.`
+
 /** The in-process MCP server a turn gets while the setting is on. */
 export function httpRequestServer(context: HttpRequestContext): McpSdkServerConfigWithInstance {
   const request = tool(
     HTTP_TOOL,
-    'Make one HTTP request, like curl, to any http or https URL: the internet or the local network. ' +
-      'GET and HEAD run at once; POST, PUT, PATCH and DELETE wait for the user to approve that exact request. ' +
-      'Only the headers you give are sent. Returns the status, the response headers and the body ' +
-      `(up to ${INLINE_MAX_BYTES} bytes inline); a longer text body is saved and read with ${HTTP_READ_TOOL}. ` +
-      'A binary body (an image, a 3MF, a zip) is stored as a workspace file and the result names it; ' +
-      'workspace_read reads it, an image as an image. ' +
-      'With save_to_workspace any body is stored as that workspace file instead. ' +
-      `Follows up to ${MAX_REDIRECTS} redirects.`,
+    HTTP_TOOL_DESCRIPTION,
     HttpRequestInput,
     async (args, extra) => {
       const result = await runHttpRequest(withDefaults(args), context, signalOf(extra))

@@ -3,10 +3,12 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import type { AuditContext } from '../src/audit/log.js'
-import { Capabilities, CapabilityError, type SourceView } from '../src/access/capabilities.js'
+import { Capabilities, CapabilityError, type CapabilityProvider, type ItemView, type SourceView } from '../src/access/capabilities.js'
 import { BUILTIN_SOURCES, MIGRATED_BY } from '../src/access/model.js'
 import { builtInProviders } from '../src/access/providers.js'
+import { HTTP_TOOL_DESCRIPTION } from '../src/harness/httpRequest.js'
 import { BROWSER_ORIGINS_PATH } from '../src/routes/browserOrigins.js'
+import { listExternal } from '../src/tools/manifest.js'
 import { createExternalServer } from '../src/tools/projections.js'
 import { defineTool, json, type Tool } from '../src/tools/registry.js'
 import { services } from './helpers/mcp.js'
@@ -131,6 +133,7 @@ describe('the capabilities tree', () => {
     expect(item(http, 'http_request')).toMatchObject({
       kind: 'tool',
       label: 'Make an HTTP request',
+      description: HTTP_TOOL_DESCRIPTION,
       harness_name: 'mcp__scadbuddy_http__http_request',
       default: null,
       access: null,
@@ -201,5 +204,48 @@ describe('the capabilities tree', () => {
     expect(details.item).toMatchObject({ id: 'send_x', access: 'outward' })
     await caps.details(BUILTIN_SOURCES.scadbuddy, 'get_x')
     expect(listTools).toHaveBeenCalledTimes(1)
+  })
+  it('refuses a write to a fixed item, and an access its allowed list leaves out (409), writing nothing', async () => {
+    const base: Omit<ItemView, 'id' | 'name' | 'harness_name' | 'allowed' | 'fixed' | 'reason'> = {
+      kind: 'tool',
+      label: 'x',
+      description: null,
+      default: 'outward',
+      default_note: null,
+      suggested: null,
+      access: 'outward',
+      overridden: false,
+      missing: false,
+    }
+    const pinned: ItemView = { ...base, id: 'dup', name: 'dup', harness_name: 'mcp__p__dup', allowed: null, fixed: { access: 'off', reason: 'two tools share "dup"' }, reason: null }
+    const renamed: ItemView = { ...base, id: 'a.b', name: 'a.b', harness_name: 'mcp__p__a_b', allowed: ['off', 'outward'], fixed: null, reason: 'Claude Code renames "a.b"' }
+    const source: SourceView = { id: 'remote:p', kind: 'remote', title: 'p', enabled: true, switchable: true, options_route: null, listed_at: null, items: [pinned, renamed], children: [] }
+    const setItem = vi.fn(async () => {})
+    const resetItem = vi.fn(async () => {})
+    const provider: CapabilityProvider = {
+      owns: (id) => id === 'remote:p',
+      list: async () => [source],
+      get: async (id) => (id === 'remote:p' ? source : undefined),
+      setEnabled: async () => {},
+      setItem,
+      resetItem,
+      details: async () => undefined,
+    }
+    const caps = new Capabilities([provider])
+    await expect(caps.setItem('remote:p', 'dup', 'read', ctx)).rejects.toMatchObject({ status: 409, message: 'two tools share "dup"' })
+    await expect(caps.resetItem('remote:p', 'dup', ctx)).rejects.toMatchObject({ status: 409, message: 'two tools share "dup"' })
+    await expect(caps.setItem('remote:p', 'a.b', 'write', ctx)).rejects.toMatchObject({ status: 409, message: 'Claude Code renames "a.b"' })
+    expect(setItem).not.toHaveBeenCalled()
+    expect(resetItem).not.toHaveBeenCalled()
+    await caps.setItem('remote:p', 'a.b', 'off', ctx)
+    expect(setItem).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failed listing is not kept: the next call lists again', async () => {
+    const tools: readonly Tool[] = [stand('get_y', 'read')]
+    const listTools = vi.spyOn(Client.prototype, 'listTools').mockRejectedValueOnce(new Error('listing failed'))
+    await expect(listExternal(tools)).rejects.toThrow('listing failed')
+    expect([...(await listExternal(tools)).keys()]).toEqual(['get_y'])
+    expect(listTools).toHaveBeenCalledTimes(2)
   })
 })
