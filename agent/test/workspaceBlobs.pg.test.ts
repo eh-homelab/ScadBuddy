@@ -431,9 +431,17 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
       const held = new Promise<void>((resolve) => (release = resolve))
       let locked!: () => void
       const isLocked = new Promise<void>((resolve) => (locked = resolve))
-      // A key creation for the child, mid-insert: it holds the lock and has seen the row.
+      await db.sql`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
+      // A key creation for the child, mid-insert: it holds the lock, has seen the row and
+      // inserted its key, as keyFor's insert does, and has not committed yet.
       const creation = db.sql.begin(async (tx) => {
         await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
+        const inserted = await tx`
+          INSERT INTO ai_payload_keys (subject, dek_sealed, kek_id)
+          SELECT ${subject}, ${Buffer.alloc(61, 2)}, 'test'
+          WHERE EXISTS (SELECT 1 FROM ai_sessions WHERE id::text = substr(${subject}, 9))
+          RETURNING subject`
+        expect(inserted).toHaveLength(1)
         locked()
         await held
       })
@@ -448,6 +456,7 @@ describe.skipIf(skip !== undefined)(`workspace files in the blob store${skip ? `
         await dropping
       }
       expect(await db.sql`SELECT 1 FROM ai_sessions WHERE id = ${child.id}`).toHaveLength(0)
+      // The key the creation committed went with the row.
       expect(await db.sql`SELECT 1 FROM ai_payload_keys WHERE subject = ${subject}`).toHaveLength(0)
     })
   })
