@@ -25,7 +25,7 @@ from fastapi import status
 from scadbuddy.bambuddy.client import client_for, maybe_client
 from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
-from scadbuddy.bambuddy.print_run import PrintRunRequest, slice_route
+from scadbuddy.bambuddy.print_run import PrintRunRequest, registry_printer, slice_route
 from scadbuddy.bambuddy.print_source import OutputSource
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
@@ -263,6 +263,13 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         slots = await asyncio.to_thread(
             quote_check, orders.store, policy, request["order_id"], request["item_id"], body
         )
+        if body.printer is not None:
+            # A registry printer the run would refuse (a disagreeing pair, a virtual
+            # printer) is refused here, before the 202, as Arrange refuses it (#4551).
+            settings = await asyncio.to_thread(core.settings_store.load)
+            await registry_printer(
+                body.printer, body.printer_id, settings, components.get(PRINTERS).store
+            )
         return {"slots": {str(slot): filament for slot, filament in slots.items()}}
 
     async def quote_run_kind(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:

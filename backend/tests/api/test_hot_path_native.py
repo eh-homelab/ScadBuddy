@@ -582,6 +582,30 @@ def test_a_quote_for_the_native_row_asks_bambuddy_nothing(
     assert slicer.calls == 1
 
 
+def test_a_quote_naming_a_disagreeing_printer_is_refused_before_it_starts(
+    native_app: TestClient, model: str, fake_lan: FakeLan
+) -> None:
+    """#4551 review: a registry `printer` the run would refuse beside `printer_id` is the
+    quote's check's 422, as Arrange's, never a failed operation after the 202."""
+    row = lan_row(native_app, fake_lan)
+    output = make_output(native_app, model)
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+    assert filaments.status_code == 200, filaments.text
+    dialog = {k: v for k, v in run_body(row, filaments.json()).items() if k != "copies"}
+    pla, petg = price_book(native_app)
+    order = create_order(native_app, create_customer(native_app)["id"])
+    item = add_item(native_app, order["id"], output_id=output, quantity=1)
+
+    refused = native_app.post(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}/quote",
+        json={**dialog, "printer_id": 1, "filaments": {"0": pla, "1": petg}},
+        headers=press(),
+    )
+
+    assert refused.status_code == 422, refused.text
+    assert "disagreeing printer" in refused.json()["detail"]
+
+
 def test_the_native_analysis_names_a_plan_spool_the_trays_do_not_hold(
     native_app: TestClient, model: str, spans: InMemorySpanExporter, fake_lan: FakeLan
 ) -> None:

@@ -774,6 +774,9 @@ async def arrange_outputs(
         )
         if row is not None and row.model:
             plate_model, printer_id = row.model, None
+        # Else (a row gone since, or one with no model yet) `printer_id`'s Bambuddy
+        # printer names the plate below, as it did before the registry: the one read
+        # left, and only for a printer Bambuddy links.
     library: dict[int, LibraryObjects] = {}
     budget = budget_of(state.settings, body.read_budget)
     # On native the plain files are read from it (#3827): Bambuddy only names the plate.
