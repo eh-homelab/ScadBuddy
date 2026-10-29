@@ -105,13 +105,37 @@ def test_layer_1_without_a_fetch_keeps_waiting() -> None:
     watch = probe()
     run(watch, [report("PREPARE", layer=0), report("RUNNING", layer=1), report("RUNNING", layer=2)])
     assert not watch.done
-    assert watch.missing() == "no rack fetch (tar_id stayed 20)"
+    assert watch.missing() == "no rack fetch (tar_id stayed 20) (last RUNNING)"
 
 
 def test_a_layer_above_the_baseline_is_no_reset() -> None:
     watch = probe(report("FINISH", name="old", layer=3, tar=19))
     run(watch, [report("RUNNING", layer=5, tar=16)])
     assert watch.fetched == [16] and not watch.reset and not watch.done
+
+
+def test_the_mounted_hotend_parked_is_no_fetch() -> None:
+    # tar_id back on the baseline's hotend before the pick's first fetch (#4936 review).
+    watch = probe(report("FINISH", name="old", layer=54, tar=19), sent=frozenset({16, 17}))
+    shown = run(
+        watch,
+        [
+            report("PREPARE", layer=0, tar=255),
+            report("PREPARE", layer=0, tar=19),
+            report("PREPARE", layer=0, tar=16),
+        ],
+    )
+    assert watch.fetched == [16]
+    assert shown == ["parking rack hotend 19", "fetching rack hotend 16"]
+    with pytest.raises(ProbeError, match="fetched 19"):
+        watch.feed(report("RUNNING", layer=0, tar=19))
+
+
+def test_a_pause_fails() -> None:
+    watch = probe()
+    watch.feed(report("RUNNING", layer=0, tar=16))
+    with pytest.raises(ProbeError, match="paused"):
+        watch.feed(report("PAUSE", layer=0, tar=16))
 
 
 def test_a_fetch_the_mapping_does_not_name_fails() -> None:

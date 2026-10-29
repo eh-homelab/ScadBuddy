@@ -11,14 +11,15 @@ and counts only a change it saw after the printer took this job:
 - the job is ours from the first report that names its ``subtask_name`` (unique per
   run, so no earlier job can carry it) in ``PREPARE``, ``SLICING`` or ``RUNNING``; the
   baseline is idle (`idle_problem`), so such a state is this job's;
-- a rack fetch is a ``tar_id`` (16 or more) that differs from the last one seen, the
-  baseline's first;
+- a rack fetch is a ``tar_id`` naming a rack hotend (`RACK_IDS`) that differs from the
+  last one seen, the baseline's first; before the pick's first fetch, the baseline's
+  own hotend (when the pick does not send it) is that hotend parked, not a fetch;
 - layer 1 counts only after the job reported a ``layer_num`` reset: 0, or lower than
   the baseline's.
 
 It ends (`done`) once the job is past layer 1 with at least one rack fetch seen, and
 fails on a fetch the mapping does not name, a ``print_error`` other than the
-baseline's, or the job ending (``FAILED``/``FINISH``) before that.
+baseline's, or the job pausing (``PAUSE``) or ending (``FAILED``/``FINISH``) before that.
 """
 
 from __future__ import annotations
@@ -26,7 +27,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from scadbuddy.printers.status import RACK_FIRST_ID
+from scadbuddy.printers.nozzle_mapping import RACK_POSITION_BASE, RACK_POSITIONS
+
+#: The rack hotends' physical ids (16 to 21); ``tar_id`` holds others too.
+RACK_IDS = frozenset(RACK_POSITION_BASE + p for p in RACK_POSITIONS)
 
 #: The states a printer may start a print from. ``FINISH`` and ``FAILED`` leave the last
 #: job's plate where it was: the printer reports no empty-bed flag, so an empty bed is
@@ -61,7 +65,7 @@ def fetch_problem(baseline: dict[str, Any], sent: frozenset[int]) -> str | None:
     """Why the pick can show no fetch, or ``None``: every rack hotend it sends is the one
     already on the toolhead, so ``tar_id`` never changes and `RackProbe` never ends."""
     mounted = tar_id(baseline)
-    if not {n for n in sent if n >= RACK_FIRST_ID} - {mounted}:
+    if not {n for n in sent if n in RACK_IDS} - {mounted}:
         return f"the pick {sorted(sent)} sends no rack hotend but the mounted {mounted}"
     return None
 
@@ -88,13 +92,15 @@ class RackProbe:
     #: A report named the job: the printer took it, so it is the probe's to stop.
     taken: bool = False
     started: bool = False
+    #: The job's last ``gcode_state``, once started.
+    state: str | None = None
     reset: bool = False
     layer: int | None = None
     fetched: list[int] = field(default_factory=list)
     _last_tar: int | None = None
 
     def __post_init__(self) -> None:
-        self._last_tar = tar_id(self.baseline)
+        self._last_tar = self._mounted = tar_id(self.baseline)
         self._baseline_layer = _int(self.baseline.get("layer_num"))
         self._baseline_error = _int(self.baseline.get("print_error")) or 0
 
@@ -117,6 +123,10 @@ class RackProbe:
                 return []
             self.started = True
         shown: list[str] = []
+        self.state = state
+        if state == "PAUSE":
+            # A runout or an HMS pause waits for someone at the printer: never a pass.
+            raise ProbeError(f"the job paused before it was verified: {self.missing()}")
         if state in ("FAILED", "FINISH"):
             raise ProbeError(
                 f"the job ended ({state}, print_error {error}) before it was verified: "
@@ -127,7 +137,11 @@ class RackProbe:
         target = tar_id(report)
         if target is not None and target != self._last_tar:
             self._last_tar = target
-            if target >= RACK_FIRST_ID:
+            if target == self._mounted and target not in self.sent and not self.fetched:
+                # Before the pick's first fetch, the baseline's own hotend is that hotend
+                # handled (parked), not fetched; after it, the hotend is fetched again.
+                shown.append(f"parking rack hotend {target}")
+            elif target in RACK_IDS:
                 self.fetched.append(target)
                 shown.append(f"fetching rack hotend {target}")
                 if target not in self.sent:
@@ -158,4 +172,4 @@ class RackProbe:
             gaps.append(f"no layer_num reset (baseline {self._baseline_layer})")
         elif (self.layer or 0) < 1:
             gaps.append("not yet RUNNING layer 1")
-        return "; ".join(gaps) or "nothing"
+        return f"{'; '.join(gaps) or 'nothing'} (last {self.state})"
