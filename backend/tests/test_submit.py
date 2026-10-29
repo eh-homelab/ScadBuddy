@@ -1282,6 +1282,7 @@ async def test_a_legacy_cancel_that_fails_is_a_warning_and_the_supersede_still_s
     assert second.id != old.id
     assert (await asyncio.to_thread(projection.read, old.id)).state == "cancelled"
     warned = _submit_warnings(caplog)
+    assert any(r.name == "psycopg.pool" for r in caplog.records)  # still reproduces #4943
     assert warned and getattr(warned[0], "job_id", None) == old.id
     assert (
         service.metrics.registry.get_sample_value(
@@ -1311,6 +1312,7 @@ async def test_a_legacy_cancel_that_fails_with_anything_else_never_fails_the_sup
 
     assert (await asyncio.to_thread(projection.read, old.id)).state == "cancelled"
     warned = _submit_warnings(caplog)
+    assert any(r.name == "psycopg.pool" for r in caplog.records)  # still reproduces #4943
     assert warned and getattr(warned[0], "error_type", None) == "ValueError"
 
 
