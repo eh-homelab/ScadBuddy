@@ -65,12 +65,61 @@ const state = {
   listed: new Set<string>(),
 }
 
+/**
+ * The state is kept in `sessionStorage` too, so a reload shows what was written, as the agent's
+ * rows would (the handlers' own state lives in the page and starts again on a reload). Each
+ * Playwright test has its own context, so nothing leaks between tests; `reset` clears it.
+ */
+const STORAGE_KEY = 'sb-mock-capabilities'
+
+type Stored = {
+  rows: [string, Access][]
+  enabled: [string, boolean][]
+  listed: string[]
+  remote: Record<string, { tool_tiers: Record<string, RiskTier>; disabled_tools: string[]; enabled: boolean }>
+}
+
+function save(): void {
+  const stored: Stored = {
+    rows: [...state.rows],
+    enabled: [...state.enabled],
+    listed: [...state.listed],
+    remote: Object.fromEntries(
+      remotePluginList().map((p) => [p.name, { tool_tiers: p.tool_tiers, disabled_tools: p.disabled_tools, enabled: p.enabled }]),
+    ),
+  }
+  try {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(stored))
+  } catch {
+    // No storage (a private window, a test without it): the state lasts as long as the page.
+  }
+}
+
+function load(): void {
+  let stored: Stored | null
+  try {
+    stored = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? 'null') as Stored | null
+  } catch {
+    return
+  }
+  if (stored === null) return
+  for (const [k, access] of stored.rows) state.rows.set(k, access)
+  for (const [id, on] of stored.enabled) state.enabled.set(id, on)
+  for (const name of stored.listed) state.listed.add(name)
+  for (const [name, access] of Object.entries(stored.remote)) setRemotePluginAccess(name, access)
+}
+
 export function reset(): void {
   state.rows.clear()
   state.enabled.clear()
   state.listed.clear()
+  try {
+    sessionStorage.removeItem(STORAGE_KEY)
+  } catch {
+    // Nothing stored.
+  }
 }
-reset()
+load()
 
 const key = (source: string, item: string) => `${source}\u0000${item}`
 const detail = (status: number, text: string) => HttpResponse.json({ detail: text }, { status })
@@ -331,10 +380,12 @@ function refresh(id: string): RefreshResult {
   return { test, source: found(id) }
 }
 
-/** Answers `run`'s value, or its refusal as `{ detail }` with its status. */
-function answer(run: () => unknown) {
+/** Answers `run`'s value, or its refusal as `{ detail }` with its status; a write is saved. */
+function answer(run: () => unknown, writes = false) {
   try {
-    return HttpResponse.json(run() as Record<string, unknown>)
+    const value = run() as Record<string, unknown>
+    if (writes) save()
+    return HttpResponse.json(value)
   } catch (err) {
     if (err instanceof Refusal) return detail(err.status, err.message)
     throw err
@@ -368,7 +419,7 @@ export const handlers = [
   http.put(`${base}/:source`, async ({ params, request }) => {
     const body = await bodyOf(request, 'enabled', isBoolean)
     if ('error' in body) return detail(400, body.error)
-    return answer(() => setEnabled(param(params.source), body.value))
+    return answer(() => setEnabled(param(params.source), body.value), true)
   }),
 
   http.get(`${base}/:source/items/:item`, ({ params }) => answer(() => details(param(params.source), param(params.item)))),
@@ -376,10 +427,10 @@ export const handlers = [
   http.put(`${base}/:source/items/:item`, async ({ params, request }) => {
     const body = await bodyOf(request, 'access', isAccess)
     if ('error' in body) return detail(400, body.error)
-    return answer(() => setItem(param(params.source), param(params.item), body.value))
+    return answer(() => setItem(param(params.source), param(params.item), body.value), true)
   }),
 
-  http.delete(`${base}/:source/items/:item`, ({ params }) => answer(() => resetItem(param(params.source), param(params.item)))),
+  http.delete(`${base}/:source/items/:item`, ({ params }) => answer(() => resetItem(param(params.source), param(params.item)), true)),
 
-  http.post(`${base}/:source/refresh`, ({ params }) => answer(() => refresh(param(params.source)))),
+  http.post(`${base}/:source/refresh`, ({ params }) => answer(() => refresh(param(params.source)), true)),
 ]

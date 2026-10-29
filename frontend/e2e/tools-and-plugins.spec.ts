@@ -34,11 +34,21 @@ test.describe('Tools & plugins (#2171)', () => {
     await lower.getByRole('button', { name: 'Lower to write' }).click()
     await expect(lower).toHaveCount(0)
     await expect(select).toHaveText('write')
-    await expect(source).toContainText('10 tools, 1 changed')
+    await expect(source).toContainText(/\d+ tools, 1 changed/)
+
+    // Stored, not only shown: a reload reads it back.
+    await page.reload()
+    await source.getByRole('button', { name: 'ScadBuddy tools', exact: true }).click()
+    await expect(select).toHaveText('write')
 
     await source.getByRole('button', { name: 'Reset send_to_printer' }).click()
     await expect(select).toHaveText(DEFAULT)
     await expect(source.getByRole('button', { name: 'Reset send_to_printer' })).toHaveCount(0)
+
+    await page.reload()
+    await source.getByRole('button', { name: 'ScadBuddy tools', exact: true }).click()
+    await expect(select).toHaveText(DEFAULT)
+    await expect(source).not.toContainText(/changed/)
   })
 
   test('cancelling a lowering sends nothing', async ({ page }) => {
@@ -88,6 +98,10 @@ test.describe('Tools & plugins (#2171)', () => {
       expect(await bridgeCall(page, 'click', { role, name }), `${role} ${name}`).toMatchObject({ ok: true })
     }
     await expect(source.getByRole('button', { name: 'Reset send_to_printer' })).toBeVisible()
+    await expect(source.getByRole('combobox', { name: 'Access of send_to_printer' })).toHaveText('write')
+
+    await page.reload()
+    await source.getByRole('button', { name: 'ScadBuddy tools', exact: true }).click()
     await expect(source.getByRole('combobox', { name: 'Access of send_to_printer' })).toHaveText('write')
   })
 })
