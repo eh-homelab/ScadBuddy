@@ -83,6 +83,7 @@ from scadbuddy_durable.session.activities import SessionActivities
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
     BUILTIN_CALL_UPDATE,
+    BUILTIN_RELEASE_UPDATE,
     FORK_POINT_QUERY,
     MESSAGE_MAX,
     SEGMENT_CONTEXT_QUERY,
@@ -539,8 +540,9 @@ async def test_the_handler_set_is_the_gates_and_the_plugins(
     updates = {u.name for u in definition.update_definitions}
     signals = {s.name for s in definition.signal_definitions}
     queries = {q.name for q in definition.query_definitions}
-    # builtin_call: the segment runner's hook asks the gate about a hooked built-in (#4757).
-    assert {"send_message", "respond", "cancel_input", "builtin_call"} <= updates
+    # builtin_call and builtin_release: the segment runner's hook asks the gate about a hooked
+    # built-in, and ends its entry when the segment ends first (#4757).
+    assert {"send_message", "respond", "cancel_input", "builtin_call", "builtin_release"} <= updates
     assert {"interrupt", "end"} <= signals
     assert {"pending_input", "segment_context", "turn", "fork_point"} <= queries
     ours = {
@@ -548,6 +550,7 @@ async def test_the_handler_set_is_the_gates_and_the_plugins(
         "respond",
         "cancel_input",
         "builtin_call",
+        "builtin_release",
         "interrupt",
         "end",
         "pending_input",
@@ -1575,10 +1578,56 @@ async def test_a_hooked_call_outside_a_turn_is_refused(
         result_type=dict,
     )
     assert answer["go"] is False
-    bad = await handle.execute_update(
-        BUILTIN_CALL_UPDATE, {"call_id": "t2", "tool": "Bash", "input": {}}, result_type=dict
-    )
-    assert bad["go"] is False
+
+
+async def _accepted_updates(handle: WorkflowHandle[Any, Any]) -> list[str]:
+    history = await handle.fetch_history()
+    return [
+        e.workflow_execution_update_accepted_event_attributes.accepted_request.input.name
+        for e in history.events
+        if e.HasField("workflow_execution_update_accepted_event_attributes")
+    ]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"call_id": "t2", "tool": "Bash", "input": {}},
+        {"call_id": "", "tool": "Skill", "input": {}},
+        {"call_id": "t3", "tool": "Skill", "input": "not an object"},
+        {"tool": "Skill", "input": {}},
+    ],
+)
+async def test_a_malformed_hooked_call_is_rejected_leaving_no_history(
+    harness: Harness, agent_db: Conn, connect: Connect, args: dict[str, Any]
+) -> None:
+    """Task 6 re-review R3: the static refusals are the validator's, so none is recorded."""
+    _, handle = await harness.session(agent_db)
+    before = await _accepted_updates(handle)
+    with pytest.raises(WorkflowUpdateFailedError):
+        await handle.execute_update(BUILTIN_CALL_UPDATE, args, result_type=dict)
+    with pytest.raises(WorkflowUpdateFailedError):
+        await handle.execute_update(BUILTIN_RELEASE_UPDATE, {"call_id": "nobody"})
+    assert await _accepted_updates(handle) == before
+
+
+async def test_a_hooked_call_whose_segment_ended_is_cancelled_and_leaves_the_panel(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """Task 6 re-review R5: the segment's end releases its waiting call: the entry is
+    cancelled, leaves the panel, and the ask is answered as refused."""
+    sid, handle, asked = await _hooked_skill(harness, agent_db, ["outward"])
+
+    async def two() -> bool:
+        return len(await handle.query(PENDING_INPUT_QUERY)) == 2
+
+    await until(two)
+    await handle.execute_update(BUILTIN_RELEASE_UPDATE, {"call_id": "toolu_skill"})
+    assert [e["tool"] for e in await handle.query(PENDING_INPUT_QUERY)] == ["ask_user"]
+    answer = await asked
+    assert answer["go"] is False
+    assert await _open_rows(agent_db, sid) == 1
+    await _replays(harness, handle)
 
 
 async def test_a_hooked_skill_from_its_fixture_replays(harness: Harness) -> None:

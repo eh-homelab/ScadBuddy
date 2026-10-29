@@ -1,31 +1,33 @@
-import { LISTING_CAPS, storableCut } from './listings.js'
-import { type AccessRow, SOURCE_ITEM, type ToolAccess } from './model.js'
+import { LISTING_CAPS, storableCut } from "./listings.js";
+import { type AccessRow, SOURCE_ITEM, type ToolAccess } from "./model.js";
+import { inUnicodeDoubt } from "./unicodeDoubt.js";
 
 // The items of a package or the own plugin (#4757, spec §4.1): a skill, a subagent or a
 // hook is switched `on` or `off`; an allowed built-in takes a tool's access. Each is an
 // `ai_access` row under its source, its item named by kind. Anything else is a tool.
 
-export type SwitchAccess = 'on' | 'off'
+export type SwitchAccess = "on" | "off";
 /** What one row holds: a tier or `off` (a tool, a built-in), or `on` (a switched item, a source's `*`). */
-export type Access = ToolAccess | 'on'
-export type ItemKind = 'tool' | 'hook' | 'skill' | 'subagent' | 'builtin'
+export type Access = ToolAccess | "on";
+export type ItemKind = "tool" | "hook" | "skill" | "subagent" | "builtin";
 
-export const skillItem = (name: string): string => `skill:${name}`
-export const subagentItem = (name: string): string => `subagent:${name}`
-export const builtinItem = (name: string): string => `builtin:${name}`
+export const skillItem = (name: string): string => `skill:${name}`;
+export const subagentItem = (name: string): string => `subagent:${name}`;
+export const builtinItem = (name: string): string => `builtin:${name}`;
 /** `id`: the hook's 16 hex digits. */
-export const hookItem = (event: string, id: string): string => `hook:${event}:${id}`
+export const hookItem = (event: string, id: string): string =>
+  `hook:${event}:${id}`;
 
-const PREFIXES: readonly [string, Exclude<ItemKind, 'tool'>][] = [
-  ['skill:', 'skill'],
-  ['subagent:', 'subagent'],
-  ['builtin:', 'builtin'],
-  ['hook:', 'hook'],
-]
+const PREFIXES: readonly [string, Exclude<ItemKind, "tool">][] = [
+  ["skill:", "skill"],
+  ["subagent:", "subagent"],
+  ["builtin:", "builtin"],
+  ["hook:", "hook"],
+];
 
 /** The kind a name's prefix gives; `itemKindIn` is what a stored row is (its source decides). */
 export function itemKindOf(item: string): ItemKind {
-  return PREFIXES.find(([prefix]) => item.startsWith(prefix))?.[1] ?? 'tool'
+  return PREFIXES.find(([prefix]) => item.startsWith(prefix))?.[1] ?? "tool";
 }
 
 /**
@@ -34,32 +36,48 @@ export function itemKindOf(item: string): ItemKind {
  * tools, whatever their names (a remote tool may be named `skill:x`).
  */
 export function holdsItems(source: string): boolean {
-  return source === OWN_PLUGIN_SOURCE || (source.startsWith('package:') && !source.includes('/mcp:'))
+  return (
+    source === OWN_PLUGIN_SOURCE ||
+    (source.startsWith("package:") && !source.includes("/mcp:"))
+  );
 }
 
 /** An item's kind in its source: by prefix only where the source holds items, else a tool. */
 export function itemKindIn(source: string, item: string): ItemKind {
-  return holdsItems(source) ? itemKindOf(item) : 'tool'
+  return holdsItems(source) ? itemKindOf(item) : "tool";
 }
 
-const OWN_PLUGIN_SOURCE = 'builtin:own-plugin'
+const OWN_PLUGIN_SOURCE = "builtin:own-plugin";
 
 /** Least to most strict: across the packages that name one built-in, the strictest wins. */
-export const BUILTIN_STRICTNESS: readonly ToolAccess[] = ['read', 'write', 'outward', 'off']
+export const BUILTIN_STRICTNESS: readonly ToolAccess[] = [
+  "read",
+  "write",
+  "outward",
+  "off",
+];
 
-export function strictest(accesses: readonly ToolAccess[]): ToolAccess | undefined {
-  let out: ToolAccess | undefined
+export function strictest(
+  accesses: readonly ToolAccess[],
+): ToolAccess | undefined {
+  let out: ToolAccess | undefined;
   for (const access of accesses) {
-    if (out === undefined || BUILTIN_STRICTNESS.indexOf(access) > BUILTIN_STRICTNESS.indexOf(out)) out = access
+    if (
+      out === undefined ||
+      BUILTIN_STRICTNESS.indexOf(access) > BUILTIN_STRICTNESS.indexOf(out)
+    )
+      out = access;
   }
-  return out
+  return out;
 }
 
 /** `"<plugin>:<name>"`, split at the first `:`; undefined when either part is empty. */
-export function pluginOfName(qualified: string): { plugin: string; name: string } | undefined {
-  const at = qualified.indexOf(':')
-  if (at <= 0 || at === qualified.length - 1) return undefined
-  return { plugin: qualified.slice(0, at), name: qualified.slice(at + 1) }
+export function pluginOfName(
+  qualified: string,
+): { plugin: string; name: string } | undefined {
+  const at = qualified.indexOf(":");
+  if (at <= 0 || at === qualified.length - 1) return undefined;
+  return { plugin: qualified.slice(0, at), name: qualified.slice(at + 1) };
 }
 
 /**
@@ -68,7 +86,35 @@ export function pluginOfName(qualified: string): { plugin: string; name: string 
  * it). A Skill/Agent call's name is cut with it before its alias lookup, so the two agree.
  */
 export function cutName(text: string): string {
-  return storableCut(text, LISTING_CAPS.name)
+  return storableCut(text, LISTING_CAPS.name);
+}
+
+/**
+ * The bound on an alias key's name (#4757 Task 6 re-review R1), in UTF-16 units: a loaded
+ * pin's frontmatter `name` is kept whole up to it, so no unbounded name enters a turn's
+ * listing (a durable turn's history). A longer one is kept cut to it, as a prefix key: a
+ * call whose name cut the same way equals it reaches it (fail closed).
+ */
+export const ALIAS_KEY_CAP = 1024;
+
+/** A frontmatter name as an alias key holds it (`ALIAS_KEY_CAP`). */
+export function aliasKeyName(text: string): string {
+  return storableCut(text, ALIAS_KEY_CAP);
+}
+
+/** `aliases` with every key's name (after its `<kind>:`) bounded by `aliasKeyName`; keys that become one share their targets. */
+export function boundedAliases(
+  aliases: Iterable<readonly [string, readonly string[]]>,
+): Record<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const [key, targets] of aliases) {
+    const at = key.indexOf(":");
+    const bounded = `${key.slice(0, at + 1)}${aliasKeyName(key.slice(at + 1))}`;
+    const into = out.get(bounded) ?? [];
+    for (const t of targets) if (!into.includes(t)) into.push(t);
+    out.set(bounded, into);
+  }
+  return Object.fromEntries(out);
 }
 
 /**
@@ -77,25 +123,27 @@ export function cutName(text: string): string {
  * `PackageItems.aliases`.
  */
 export type CallPlugin = {
-  name: string
-  source: string
-  items: readonly string[]
-  aliases: Readonly<Record<string, readonly string[]>>
-}
+  name: string;
+  source: string;
+  items: readonly string[];
+  aliases: Readonly<Record<string, readonly string[]>>;
+};
 
 /** What a refused call names: the source, and its item (`*` when the whole source is switched off). */
-export type OffCallItem = { source: string; item: string }
+export type OffCallItem = { source: string; item: string };
 
 /** The calls that name a plugin's item: the field that names it, and the item kind. `Task` is Agent's old name. */
-const CALLS: Readonly<Record<string, { field: string; kind: 'skill' | 'subagent' }>> = {
-  Skill: { field: 'skill', kind: 'skill' },
-  Agent: { field: 'subagent_type', kind: 'subagent' },
-  Task: { field: 'subagent_type', kind: 'subagent' },
-}
+const CALLS: Readonly<
+  Record<string, { field: string; kind: "skill" | "subagent" }>
+> = {
+  Skill: { field: "skill", kind: "skill" },
+  Agent: { field: "subagent_type", kind: "subagent" },
+  Task: { field: "subagent_type", kind: "subagent" },
+};
 
 /** Whether `tool` is a call `offCallItem` judges. */
 export function namesItem(tool: string): boolean {
-  return Object.hasOwn(CALLS, tool)
+  return Object.hasOwn(CALLS, tool);
 }
 
 /**
@@ -114,25 +162,38 @@ export function namesItem(tool: string): boolean {
  * call rule then reaches every subagent instead of comparing.
  */
 export function agentTypeForm(name: string): string {
-  let out = ''
-  let run = ''
-  for (const c of name.normalize('NFKC')) {
+  let out = "";
+  let run = "";
+  for (const c of name.normalize("NFKC")) {
     if (c.codePointAt(0)! > 0xffff) {
-      out += run.toLowerCase() + c
-      run = ''
-    } else run += c
+      out += run.toLowerCase() + c;
+      run = "";
+    } else run += c;
   }
   // Final sigma too: whether a sigma is final hangs on the letter before it being cased, which the two
   // Unicode versions also differ on (U+0295); `ς` as `σ` only makes more names alike (fail closed).
-  return (out + run.toLowerCase()).replace(/[\p{White_Space}\p{Pd}_]+/gu, '').replaceAll('\u03C2', '\u03C3')
+  return (out + run.toLowerCase())
+    .replace(/[\p{White_Space}\p{Pd}_]+/gu, "")
+    .replaceAll("\u03C2", "\u03C3");
 }
 
-/** Whether an agent type holds a letter past the BMP or an unassigned code point (`agentTypeForm`). */
+/**
+ * Whether an agent type holds a letter past the BMP or an unassigned code point (`agentTypeForm`):
+ * unassigned here, or in agent-durable's older Unicode (`unicodeDoubt.ts`), so both runtimes answer
+ * alike (Task 6 re-review R6). Claude Code's own Unicode version is not known to either.
+ */
 export function unsureAgentType(name: string): boolean {
-  for (const c of name.normalize('NFKC')) {
-    if (/\p{Cn}/u.test(c) || (c.codePointAt(0)! > 0xffff && /\p{L}/u.test(c))) return true
+  for (const c of name.normalize("NFKC")) {
+    const cp = c.codePointAt(0)!;
+    // Unassigned here, or in agent-durable's Unicode (`inUnicodeDoubt`), or a letter past the BMP.
+    if (
+      /\p{Cn}/u.test(c) ||
+      inUnicodeDoubt(cp) ||
+      (cp > 0xffff && /\p{L}/u.test(c))
+    )
+      return true;
   }
-  return false
+  return false;
 }
 
 /**
@@ -142,8 +203,15 @@ export function unsureAgentType(name: string): boolean {
  * then matched exactly, by name, alias or directory listing name (`bR`, `Bs`). A subagent
  * type as its Agent tool takes it: as it is, exactly, else by `agentTypeForm`.
  */
-function reaches(kind: 'skill' | 'subagent', called: string, name: string): boolean {
-  return called === name || (kind === 'subagent' && agentTypeForm(called) === agentTypeForm(name))
+function reaches(
+  kind: "skill" | "subagent",
+  called: string,
+  name: string,
+): boolean {
+  return (
+    called === name ||
+    (kind === "subagent" && agentTypeForm(called) === agentTypeForm(name))
+  );
 }
 
 /**
@@ -151,10 +219,10 @@ function reaches(kind: 'skill' | 'subagent', called: string, name: string): bool
  * trimmed by JavaScript's `trim()` set (it removes U+FEFF and the line terminators, which
  * Python's `str.strip()` does not all remove: a port trims by this set).
  */
-function calledName(kind: 'skill' | 'subagent', raw: string): string {
-  if (kind === 'subagent') return raw
-  const trimmed = raw.trim()
-  return trimmed.startsWith('/') ? trimmed.slice(1) : trimmed
+function calledName(kind: "skill" | "subagent", raw: string): string {
+  if (kind === "subagent") return raw;
+  const trimmed = raw.trim();
+  return trimmed.startsWith("/") ? trimmed.slice(1) : trimmed;
 }
 
 /**
@@ -169,37 +237,76 @@ function calledName(kind: 'skill' | 'subagent', raw: string): string {
  * answers: any one refuses the call (fail closed). A row refuses only an item its plugin has.
  * Pure: agent-durable's `off_call_item` is the same rule, and the `calls` access vectors pin both.
  */
-export function offCallItem(tool: string, input: unknown, plugins: readonly CallPlugin[], rows: readonly AccessRow[]): OffCallItem | undefined {
-  const call = Object.hasOwn(CALLS, tool) ? CALLS[tool] : undefined
-  if (!call || typeof input !== 'object' || input === null || Array.isArray(input)) return undefined
-  const raw = (input as Record<string, unknown>)[call.field]
-  if (typeof raw !== 'string') return undefined
-  const called = calledName(call.kind, raw)
-  if (called === '') return undefined
-  const prefix = `${call.kind}:`
-  const isOff = (source: string, item: string) => rows.some((r) => r.source === source && r.item === item && r.access === 'off')
+export function offCallItem(
+  tool: string,
+  input: unknown,
+  plugins: readonly CallPlugin[],
+  rows: readonly AccessRow[],
+): OffCallItem | undefined {
+  const call = Object.hasOwn(CALLS, tool) ? CALLS[tool] : undefined;
+  if (
+    !call ||
+    typeof input !== "object" ||
+    input === null ||
+    Array.isArray(input)
+  )
+    return undefined;
+  const raw = (input as Record<string, unknown>)[call.field];
+  if (typeof raw !== "string") return undefined;
+  const called = calledName(call.kind, raw);
+  if (called === "") return undefined;
+  const prefix = `${call.kind}:`;
+  const isOff = (source: string, item: string) =>
+    rows.some(
+      (r) => r.source === source && r.item === item && r.access === "off",
+    );
   for (const plugin of plugins) {
     // The whole name, and the rest of it once a `<plugin>:` naming this plugin comes off (an
     // alias key is cut alone, so only the rest is cut before it is compared with one).
-    const at = called.indexOf(':')
-    const head = at > 0 ? called.slice(0, at) : undefined
-    const spellings = [called, ...(head !== undefined && reaches(call.kind, head, plugin.name) ? [called.slice(at + 1)] : [])]
+    const at = called.indexOf(":");
+    const head = at > 0 ? called.slice(0, at) : undefined;
+    const spellings = [
+      called,
+      ...(head !== undefined && reaches(call.kind, head, plugin.name)
+        ? [called.slice(at + 1)]
+        : []),
+    ];
     // An agent type the two runtimes might fold apart reaches every subagent (fail closed).
-    const unsure = call.kind === 'subagent' && unsureAgentType(called)
-    const itemNamed = (name: string) => unsure || spellings.some((as) => reaches(call.kind, as, name) || reaches(call.kind, as, `${plugin.name}:${name}`))
+    const unsure = call.kind === "subagent" && unsureAgentType(called);
+    const itemNamed = (name: string) =>
+      unsure ||
+      spellings.some(
+        (as) =>
+          reaches(call.kind, as, name) ||
+          reaches(call.kind, as, `${plugin.name}:${name}`),
+      );
     // An alias key is the loaded pin's whole frontmatter name, or a stored review's cut one.
-    const aliasNamed = (key: string) => spellings.some((as) => reaches(call.kind, as, key) || reaches(call.kind, cutName(as), key))
-    const direct = plugin.items.filter((id) => id.startsWith(prefix) && itemNamed(id.slice(prefix.length)))
+    const aliasNamed = (key: string) =>
+      spellings.some(
+        (as) =>
+          reaches(call.kind, as, key) ||
+          reaches(call.kind, cutName(as), key) ||
+          reaches(call.kind, aliasKeyName(as), key),
+      );
+    const direct = plugin.items.filter(
+      (id) => id.startsWith(prefix) && itemNamed(id.slice(prefix.length)),
+    );
     const aliased = Object.entries(plugin.aliases)
-      .filter(([key]) => key.startsWith(prefix) && aliasNamed(key.slice(prefix.length)))
-      .flatMap(([, targets]) => targets.filter((t) => plugin.items.includes(t)))
-    const reached = [...new Set([...direct, ...aliased])]
-    if (reached.length === 0) continue
-    if (isOff(plugin.source, SOURCE_ITEM)) return { source: plugin.source, item: SOURCE_ITEM }
-    const item = reached.find((id) => isOff(plugin.source, id))
-    if (item !== undefined) return { source: plugin.source, item }
+      .filter(
+        ([key]) =>
+          key.startsWith(prefix) && aliasNamed(key.slice(prefix.length)),
+      )
+      .flatMap(([, targets]) =>
+        targets.filter((t) => plugin.items.includes(t)),
+      );
+    const reached = [...new Set([...direct, ...aliased])];
+    if (reached.length === 0) continue;
+    if (isOff(plugin.source, SOURCE_ITEM))
+      return { source: plugin.source, item: SOURCE_ITEM };
+    const item = reached.find((id) => isOff(plugin.source, id));
+    if (item !== undefined) return { source: plugin.source, item };
   }
-  return undefined
+  return undefined;
 }
 
 /**
@@ -208,7 +315,13 @@ export function offCallItem(tool: string, input: unknown, plugins: readonly Call
  * (its `off_item_reason`; the `calls` vectors pin the text).
  */
 export function offItemReason(off: OffCallItem): string {
-  const owner = off.source === OWN_PLUGIN_SOURCE ? "ScadBuddy's own plugin" : `plugin package ${off.source.slice('package:'.length)}`
-  const what = off.item === SOURCE_ITEM ? owner : `${itemKindOf(off.item)} "${off.item.slice(off.item.indexOf(':') + 1)}" of ${owner}`
-  return `${what} is switched off in Settings → Tools & plugins; the user can turn it back on there`
+  const owner =
+    off.source === OWN_PLUGIN_SOURCE
+      ? "ScadBuddy's own plugin"
+      : `plugin package ${off.source.slice("package:".length)}`;
+  const what =
+    off.item === SOURCE_ITEM
+      ? owner
+      : `${itemKindOf(off.item)} "${off.item.slice(off.item.indexOf(":") + 1)}" of ${owner}`;
+  return `${what} is switched off in Settings → Tools & plugins; the user can turn it back on there`;
 }

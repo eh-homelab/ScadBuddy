@@ -76,7 +76,9 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy_durable.session.models import (
         BUDGET_EXHAUSTED,
         BUILTIN_CALL_UPDATE,
+        BUILTIN_RELEASE_UPDATE,
         FORK_POINT_QUERY,
+        HOOKED_WAIT_S,
         MAX_SEGMENTS,
         MESSAGE_MAX,
         PROJECTS_QUEUE,
@@ -125,7 +127,6 @@ BUILTIN_OFF = access.TOOL_OFF
 # segment runner's hook asks the gate (BUILTIN_CALL_UPDATE) and waits. Their approval waits
 # at most HOOKED_WAIT_S, inside the segment's own hour (models.SEGMENT_TIMEOUT).
 HOOKED_BUILTINS = frozenset({"Skill", "Agent", "Task"})
-HOOKED_WAIT_S = 50 * 60
 TURN_TOOLS_TIMEOUT = timedelta(minutes=2)
 # #2581: a session's plugin calls are pinned to the replica that listed them, which keeps
 # its MCP client on each plugin (agent temporal/sessionClients.ts), so a stateful plugin
@@ -1131,19 +1132,11 @@ class DurableSession:
         engine-parked built-in goes (``_park``: its access again, then an approval entry with
         the same request id, panel entry and timer), answered once decided. The call runs only
         on ``go``; a refusal's reason is a classic turn's words."""
-        call_id = str(args.get("call_id") or "")
-        tool = str(args.get("tool") or "")
-        tool_input = args.get("input")
-        if (
-            not workflow.patched(BUILTIN_ACCESS_PATCH)
-            or self._turn is None
-            or tool not in HOOKED_BUILTINS
-            or not call_id
-            or call_id in self._hooked
-            or call_id in self._seen
-            or not isinstance(tool_input, dict)
-        ):
-            return {"go": False, "reason": f"{tool} could not be asked about: no such call"}
+        call_id = str(args["call_id"])
+        tool = str(args["tool"])
+        tool_input = args["input"]
+        if not workflow.patched(BUILTIN_ACCESS_PATCH) or self._turn is None:
+            return {"go": False, "reason": f"{tool} could not be asked about: no turn is running"}
         turn = self._turn
         self._hooked[call_id] = None
         try:
@@ -1155,6 +1148,45 @@ class DurableSession:
         go = decided is not None and decided[0]
         reason = turn.replaced.pop(call_id, None) or turn.refusals.pop(call_id, None)
         return {"go": go, "reason": None if go else reason or f"{tool} was not approved"}
+
+    @builtin_call.validator
+    def _validate_builtin_call(self, args: dict[str, Any]) -> None:
+        """What is refused before it is accepted, so it leaves no history (re-review R3)."""
+        call_id = args.get("call_id") if isinstance(args, dict) else None
+        if (
+            not isinstance(args, dict)
+            or args.get("tool") not in HOOKED_BUILTINS
+            or not isinstance(call_id, str)
+            or not call_id
+            or call_id in self._hooked
+            or call_id in self._seen
+            or not isinstance(args.get("input"), dict)
+        ):
+            raise ValueError("not a Skill, Agent or Task call this session can ask about")
+
+    @workflow.update(name=BUILTIN_RELEASE_UPDATE)
+    async def builtin_release(self, args: dict[str, Any]) -> None:
+        """The segment that asked about ``call_id`` ended before it was decided (re-review R5):
+        its entry is cancelled and leaves the panel, as an interrupt cancels one; a decision
+        that came first stands."""
+        call_id = str(args["call_id"])
+
+        def placed() -> bool:
+            decided = self._hooked.get(call_id, False) is not None
+            return decided or any(p.call_id == call_id and p.opened for p in self._parked.values())
+
+        await workflow.wait_condition(placed)
+        for parked in [p for p in self._parked.values() if p.call_id == call_id]:
+            if parked.entry.state == "pending":
+                await self._resolve(parked, "cancelled", SYSTEM, None, "its segment ended")
+        if call_id in self._hooked and self._hooked[call_id] is None:
+            self._hooked[call_id] = (False, "scadbuddy")
+
+    @builtin_release.validator
+    def _validate_builtin_release(self, args: dict[str, Any]) -> None:
+        call_id = args.get("call_id") if isinstance(args, dict) else None
+        if not isinstance(call_id, str) or self._hooked.get(call_id, False) is not None:
+            raise ValueError("no hooked call waits under that id")
 
     @workflow.update(name=CANCEL_INPUT_UPDATE)
     async def cancel_input(self, args: dict[str, Any]) -> str:

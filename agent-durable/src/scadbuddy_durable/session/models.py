@@ -23,6 +23,13 @@ SEND_MESSAGE_UPDATE = "send_message"
 #: allowed package's built-in makes outward (#4757): parked as an engine-parked built-in is,
 #: its answer ``{"go": bool, "reason": str | None}`` once decided.
 BUILTIN_CALL_UPDATE = "builtin_call"
+#: Ends a call the hook asked about whose segment ended before it was decided (re-review R5).
+BUILTIN_RELEASE_UPDATE = "builtin_release"
+#: A hooked call's approval waits at most this long (its timer), inside the segment's hour.
+HOOKED_WAIT_S = 50 * 60
+#: The hook's own deadline on that wait: past the gate's timer, below the activity's hour,
+#: so a gate that never answers refuses the call rather than letting it run (re-review R2).
+PARK_DEADLINE_S = HOOKED_WAIT_S + 5 * 60
 # What the segment runner reads from its workflow: the turn's images (Ruling 5) and the
 # system prompt's append (SegmentContext).
 SEGMENT_CONTEXT_QUERY = "segment_context"

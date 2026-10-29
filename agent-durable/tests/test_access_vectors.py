@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -75,3 +76,31 @@ def test_calls(vector: dict[str, Any]) -> None:
         None if off is None else {**dataclasses.asdict(off), "reason": access.off_item_reason(off)}
     )
     assert got == vector["expect"]
+
+
+def _cn_ranges() -> list[list[int]]:
+    out: list[list[int]] = []
+    start = -1
+    for cp in range(0x110001):
+        cn = cp <= 0x10FFFF and not 0xD800 <= cp <= 0xDFFF and unicodedata.category(chr(cp)) == "Cn"
+        if cn and start < 0:
+            start = cp
+        if not cn and start >= 0:
+            out.append([start, cp - 1])
+            start = -1
+    return out
+
+
+def test_unassigned_here_is_unassigned_in_node_or_in_its_doubt_table() -> None:
+    """Task 6 re-review R6: the agent's UNICODE_DOUBT is exactly what this Python leaves
+    unassigned and Node has assigned, so the call rule's unsure answer is one in both. A
+    Python or Node bump that moves either fails here until the table is regenerated."""
+    unicode = VECTORS["unicode"]
+
+    def points(ranges: list[list[int]]) -> set[int]:
+        return {cp for a, b in ranges for cp in range(a, b + 1)}
+
+    node, doubt = points(unicode["cn"]), points(unicode["doubt"])
+    here = points(_cn_ranges())
+    assert node <= here, f"assigned here, unassigned in Node {unicode['node']}"
+    assert here - node == doubt

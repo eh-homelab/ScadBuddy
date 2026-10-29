@@ -52,6 +52,7 @@ of the segment's declared tools (#2088), so Claude is never offered them.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import fnmatch
 import json
@@ -92,6 +93,7 @@ from temporalio.claude_agent_sdk import (
 # test_the_plugins_runner_publishes_text_through_the_held_contextvar and
 # test_a_refused_credentials_scripted_notice_never_reaches_the_transcript (#3383).
 from temporalio.claude_agent_sdk._events import _EMIT, emit
+from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy_durable.credentials import (
@@ -110,6 +112,8 @@ from scadbuddy_durable.session.fallback import classify, credentials_fault
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
     BUILTIN_CALL_UPDATE,
+    BUILTIN_RELEASE_UPDATE,
+    PARK_DEADLINE_S,
     SEGMENT_CONTEXT_QUERY,
     SEGMENT_TIMEOUT,
     SegmentContext,
@@ -591,6 +595,27 @@ CallJudge = Callable[[Any], Awaitable[dict[str, Any]]]
 #: Asks the gate about a call (tool_use id, tool, input), waiting while it is parked:
 #: ``{"go": bool, "reason": str | None}`` (workflow.py ``builtin_call``).
 ParkCall = Callable[[str, str, Any], Awaitable[dict[str, Any]]]
+ReleaseCall = Callable[[str], Awaitable[None]]
+
+
+def segment_gate(client: Client, workflow_id: str, run_id: str) -> tuple[ParkCall, ReleaseCall]:
+    """The hook's two Updates of its own session's run (Task 6 re-review R4): ask about a
+    call (``builtin_call``) and, when the segment ends before it is decided, release it
+    (``builtin_release``). A later run knows neither call, so it would refuse both anyway."""
+    handle = client.get_workflow_handle(workflow_id, run_id=run_id)
+
+    async def park(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        answer: dict[str, Any] = await handle.execute_update(
+            BUILTIN_CALL_UPDATE,
+            {"call_id": call, "tool": tool, "input": tool_input},
+            result_type=dict,
+        )
+        return answer
+
+    async def release(call: str) -> None:
+        await handle.execute_update(BUILTIN_RELEASE_UPDATE, {"call_id": call})
+
+    return park, release
 
 
 class SegmentCalls:
@@ -711,11 +736,10 @@ class SegmentCalls:
 
     def hooks(self) -> dict[str, list[HookMatcher]]:
         return {
-            # Long enough for a call the gate parked (CallAccess, ``park``) to be decided:
-            # Claude Code's default is 60 s; the gate's own wait is shorter than the segment.
-            "PreToolUse": [
-                HookMatcher(hooks=[self._started], timeout=SEGMENT_TIMEOUT.total_seconds())
-            ],
+            # Longer than anything the hook waits for (re-review R2): Claude Code's default is
+            # 60 s, and a hook it times out lets the call go on to the permission check, which
+            # allows Skill. The hook's own deadline on the gate (PARK_DEADLINE_S) comes first.
+            "PreToolUse": [HookMatcher(hooks=[self._started], timeout=HOOK_TIMEOUT_S)],
             "PostToolUse": [HookMatcher(hooks=[self._ended])],
             "PostToolUseFailure": [HookMatcher(hooks=[self._ended])],
             "SubagentStart": [HookMatcher(hooks=[self._subagent_started])],
@@ -791,7 +815,7 @@ def own_call_plugin(plugin_dir: str, agents_dir: str | None) -> access.CallPlugi
     """The own plugin as the call rule sees it (agent turnRunner.ts ``callPlugin`` of
     ``itemsOfPlugin``): its skills by folder, its subagents by file stem (the image keeps
     them outside the plugin, ``agents_dir``), and each frontmatter ``name`` that differs as
-    an alias, whole, as the classic call rule has it (``PackageItems.declared``)."""
+    an alias, bounded as the classic call rule has it (``access.bounded_aliases``)."""
     items: list[str] = []
     aliases: dict[str, list[str]] = {}
 
@@ -811,10 +835,7 @@ def own_call_plugin(plugin_dir: str, agents_dir: str | None) -> access.CallPlugi
         if declared is not None and declared != stem:
             alias(f"subagent:{declared}", f"subagent:{stem}")
     return access.CallPlugin(
-        OWN_PLUGIN_NAME,
-        access.OWN_PLUGIN_SOURCE,
-        tuple(items),
-        {k: tuple(v) for k, v in aliases.items()},
+        OWN_PLUGIN_NAME, access.OWN_PLUGIN_SOURCE, tuple(items), access.bounded_aliases(aliases)
     )
 
 
@@ -962,6 +983,11 @@ def _deny(reason: str) -> dict[str, Any]:
     }
 
 
+#: The PreToolUse matcher's timeout: past the segment's own hour, so the hook's deadline on
+#: the gate (``PARK_DEADLINE_S``) and the activity's timeout both come first.
+HOOK_TIMEOUT_S = SEGMENT_TIMEOUT.total_seconds() + 10 * 60
+
+
 class CallAccess:
     """Skill, Agent and Task calls judged by access as each is made (#4757, spec §4.4): the
     segment's plugins' ``ai_access`` rows read per call, so an item switched off mid-segment
@@ -977,8 +1003,13 @@ class CallAccess:
         plugins: list[access.CallPlugin],
         builtins: Mapping[str, Sequence[str]] | None = None,
         park: ParkCall | None = None,
+        release: ReleaseCall | None = None,
     ) -> None:
         self._connect = connect
+        # Ends a call's gate entry when its segment ends first (re-review R5).
+        self._release = release
+        # Calls asked of the gate and not yet answered.
+        self._waiting: set[str] = set()
         self._plugins = plugins
         # An outward one parks at the workflow's gate, as an engine-parked built-in does.
         self._park = park
@@ -1016,14 +1047,41 @@ class CallAccess:
         call = str(data.get("tool_use_id") or "")
         if self._park is None or not call:
             return _deny(f"{tool} needs approval, and it could not be asked for")
+        self._waiting.add(call)
         try:
-            answer = await self._park(call, tool, data.get("tool_input") or {})
+            # The hook's own deadline (re-review R2): a gate that never answers refuses it.
+            answer = await asyncio.wait_for(
+                self._park(call, tool, data.get("tool_input") or {}), PARK_DEADLINE_S
+            )
+        except TimeoutError:
+            logger.warning("%s was not decided by the hook's deadline", tool)
+            await self._release_one(call)
+            return _deny(f"{tool} needs approval, and it was not decided in time")
         except Exception as err:
             logger.warning("%s could not be parked: %s", tool, type(err).__name__)
+            await self._release_one(call)
             return _deny(f"{tool} needs approval, and it could not be asked for")
+        self._waiting.discard(call)
         if answer.get("go") is True:
             return {}
         return _deny(str(answer.get("reason") or f"{tool} was not approved"))
+
+    async def _release_one(self, call: str) -> None:
+        if call not in self._waiting:
+            return
+        self._waiting.discard(call)
+        if self._release is None:
+            return
+        try:
+            await self._release(call)
+        except Exception as err:
+            # Its timer still ends it; the call itself never runs (its hook denied it or ended).
+            logger.warning("a waiting call could not be released: %s", type(err).__name__)
+
+    async def release_waiting(self) -> None:
+        """Releases every call still waiting at the gate: its segment has ended (R5)."""
+        for call in list(self._waiting):
+            await self._release_one(call)
 
 
 class ScadBuddyRunner:
@@ -1471,22 +1529,27 @@ class ScadBuddyRunner:
             else None,
             packages,
         )
-        handle = activity.client().get_workflow_handle(workflow_id)
-
-        async def park(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
-            answer: dict[str, Any] = await handle.execute_update(
-                BUILTIN_CALL_UPDATE,
-                {"call_id": call, "tool": tool, "input": tool_input},
-                result_type=dict,
-            )
-            return answer
-
-        judge = CallAccess(self._connect, call_plugins, call_builtins_of(packages), park).check
-        calls = SegmentCalls(list(inp.tool_activities), judge)
-        extra["hooks"] = merged_hooks(extra.get("hooks"), calls.hooks())
-        out = await self._on_credentials(
-            session, workflow_id, inp, attempt, credentials, budget - spent, extra, settings, calls
+        park, release = segment_gate(
+            activity.client(), workflow_id, activity.info().workflow_run_id or ""
         )
+        gate = CallAccess(self._connect, call_plugins, call_builtins_of(packages), park, release)
+        calls = SegmentCalls(list(inp.tool_activities), gate.check)
+        extra["hooks"] = merged_hooks(extra.get("hooks"), calls.hooks())
+        try:
+            out = await self._on_credentials(
+                session,
+                workflow_id,
+                inp,
+                attempt,
+                credentials,
+                budget - spent,
+                extra,
+                settings,
+                calls,
+            )
+        finally:
+            # A call still waiting has lost its hook with the segment: end its entry (R5).
+            await asyncio.shield(gate.release_waiting())
         if out.cost_usd > 0 or not out.is_error:
             async with self._connect() as conn:
                 await conn.execute(

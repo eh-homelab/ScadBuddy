@@ -55,9 +55,18 @@ from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.credentials import Credential, credential_aad
 from scadbuddy_durable.gate.names import PENDING_INPUT_QUERY, RESPOND_UPDATE
 from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
-from scadbuddy_durable.session import access, tools
+from scadbuddy_durable.session import access, models, tools
+from scadbuddy_durable.session import runner as runner_module
 from scadbuddy_durable.session.events import translate
-from scadbuddy_durable.session.models import BUDGET_EXHAUSTED, ImageRef, TurnPackage
+from scadbuddy_durable.session.models import (
+    BUDGET_EXHAUSTED,
+    BUILTIN_CALL_UPDATE,
+    BUILTIN_RELEASE_UPDATE,
+    PARK_DEADLINE_S,
+    SEGMENT_TIMEOUT,
+    ImageRef,
+    TurnPackage,
+)
 from scadbuddy_durable.session.package_hash import hash_tree
 from scadbuddy_durable.session.runner import (
     DURABLE_PREFIX,
@@ -81,6 +90,7 @@ from scadbuddy_durable.session.runner import (
     own_call_plugin,
     own_plugin_copy,
     same_subagent,
+    segment_gate,
     sweep_own_plugin_copies,
     tool_images_loader,
     view_tool_images_tool,
@@ -2012,6 +2022,12 @@ def test_own_call_plugin_keeps_a_frontmatter_name_over_the_cap_whole(tmp_path: P
     assert own_call_plugin(str(plugin), str(agents)).aliases == {
         f"subagent:{over}": ("subagent:deep",)
     }
+    # R1: past the alias bound a name is listed cut to it, never whole.
+    huge = "h" * 1500
+    (agents / "huge.md").write_text(f"---\nname: {huge}\ndescription: d\n---\nH.\n")
+    aliases = own_call_plugin(str(plugin), str(agents)).aliases
+    assert aliases[f"subagent:{huge[: access.ALIAS_KEY_CAP]}"] == ("subagent:huge",)
+    assert all(len(k) <= len("subagent:") + access.ALIAS_KEY_CAP for k in aliases)
 
 
 async def test_a_packages_builtin_skill_is_read_per_call(agent_db: Conn, connect: Connect) -> None:
@@ -2067,6 +2083,97 @@ async def test_a_packages_builtin_skill_is_read_per_call(agent_db: Conn, connect
 
     failed = await CallAccess(connect, [], {"Skill": ["notes"]}, broken).check(call)
     assert failed["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+SKILL_CALL = {"tool_name": "Skill", "tool_input": {"skill": "anything"}, "tool_use_id": "t1"}
+
+
+async def test_a_park_that_never_answers_is_refused_at_the_hooks_own_deadline(
+    connect: Connect, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 6 re-review R2: a gate that never answers refuses the call at the hook's own
+    deadline, past the gate's timer and below the segment's hour, and the hook's matcher
+    outlasts it, so Claude Code never times the hook out and runs the call unasked."""
+    assert models.HOOKED_WAIT_S < PARK_DEADLINE_S < SEGMENT_TIMEOUT.total_seconds()
+    [matcher] = SegmentCalls([]).hooks()["PreToolUse"]
+    assert matcher.timeout is not None and matcher.timeout > SEGMENT_TIMEOUT.total_seconds()
+    monkeypatch.setattr(runner_module, "PARK_DEADLINE_S", 0.2)
+    released: list[str] = []
+
+    async def never(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def release(call: str) -> None:
+        released.append(call)
+
+    out = await CallAccess(connect, [], {"Skill": ["notes"]}, never, release).check(SKILL_CALL)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "was not decided in time" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert released == ["t1"]
+
+
+async def test_a_call_still_waiting_when_its_segment_ends_is_released(connect: Connect) -> None:
+    """Task 6 re-review R5: the segment's end releases every call still waiting at the gate,
+    so its panel entry is cancelled rather than left pending with nothing to run."""
+    entered = asyncio.Event()
+    released: list[str] = []
+
+    async def waits(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def release(call: str) -> None:
+        released.append(call)
+
+    gate = CallAccess(connect, [], {"Skill": ["notes"]}, waits, release)
+    task = asyncio.ensure_future(gate.check(SKILL_CALL))
+    await entered.wait()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    await gate.release_waiting()
+    await gate.release_waiting()  # once only
+    assert released == ["t1"]
+
+    async def answers(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        return {"go": True}
+
+    decided = CallAccess(connect, [], {"Skill": ["notes"]}, answers, release)
+    assert await decided.check(SKILL_CALL) == {}
+    await decided.release_waiting()
+    assert released == ["t1"]  # a decided call is not released
+
+
+async def test_the_segments_gate_updates_its_own_run() -> None:
+    """Task 6 re-review R4: the hook's Updates name the run the segment belongs to."""
+    seen: list[tuple[str, str | None, str, Any]] = []
+
+    class Handle:
+        def __init__(self, wid: str, run_id: str | None) -> None:
+            self.wid, self.run_id = wid, run_id
+
+        async def execute_update(self, name: str, arg: Any, **_kw: Any) -> Any:
+            seen.append((self.wid, self.run_id, name, arg))
+            return {"go": True, "reason": None}
+
+    class FakeClient:
+        def get_workflow_handle(self, wid: str, *, run_id: str | None = None) -> Handle:
+            return Handle(wid, run_id)
+
+    park, release = segment_gate(FakeClient(), "session-1", "run-7")  # type: ignore[arg-type]
+    assert await park("t1", "Skill", {"skill": "x"}) == {"go": True, "reason": None}
+    await release("t1")
+    assert seen == [
+        (
+            "session-1",
+            "run-7",
+            BUILTIN_CALL_UPDATE,
+            {"call_id": "t1", "tool": "Skill", "input": {"skill": "x"}},
+        ),
+        ("session-1", "run-7", BUILTIN_RELEASE_UPDATE, {"call_id": "t1"}),
+    ]
 
 
 def test_builtin_access_is_the_strictest_of_the_packages_naming_it() -> None:

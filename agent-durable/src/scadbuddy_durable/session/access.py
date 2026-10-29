@@ -181,13 +181,37 @@ def _utf16_cut(text: str, cap: int) -> str:
     return "".join(out)
 
 
+def _storable_cut(text: str, cap: int) -> str:
+    return "".join(
+        "\ufffd" if c == "\0" or 0xD800 <= ord(c) <= 0xDFFF else c for c in _utf16_cut(text, cap)
+    )
+
+
 def cut_name(text: str) -> str:
     """A name as a package review stores it (items.ts ``cutName``): cut to ``NAME_CAP`` and
     made storable (no lone surrogate, no NUL; each becomes U+FFFD)."""
-    return "".join(
-        "\ufffd" if c == "\0" or 0xD800 <= ord(c) <= 0xDFFF else c
-        for c in _utf16_cut(text, NAME_CAP)
-    )
+    return _storable_cut(text, NAME_CAP)
+
+
+#: The bound on an alias key's name (items.ts ``ALIAS_KEY_CAP``), in UTF-16 units: a longer
+#: frontmatter name is listed cut to it, a prefix key a call cut the same way reaches.
+ALIAS_KEY_CAP = 1024
+
+
+def alias_key_name(text: str) -> str:
+    """A frontmatter name as an alias key holds it (items.ts ``aliasKeyName``)."""
+    return _storable_cut(text, ALIAS_KEY_CAP)
+
+
+def bounded_aliases(aliases: Mapping[str, Sequence[str]]) -> dict[str, tuple[str, ...]]:
+    """Every key's name bounded by ``alias_key_name`` (items.ts ``boundedAliases``); keys that
+    become one share their targets."""
+    out: dict[str, list[str]] = {}
+    for key, targets in aliases.items():
+        at = key.find(":")
+        into = out.setdefault(f"{key[: at + 1]}{alias_key_name(key[at + 1 :])}", [])
+        into.extend(t for t in targets if t not in into)
+    return {k: tuple(v) for k, v in out.items()}
 
 
 def agent_type_form(name: str) -> str:
@@ -216,7 +240,11 @@ def agent_type_form(name: str) -> str:
 
 def unsure_agent_type(name: str) -> bool:
     """Whether an agent type holds a letter past the BMP or an unassigned code point
-    (items.ts ``unsureAgentType``): the call rule then reaches every subagent."""
+    (items.ts ``unsureAgentType``): the call rule then reaches every subagent. Unassigned is
+    this Python's Unicode (16); the agent takes the code points Node's Unicode (17) added as
+    unsure too (``unicodeDoubt.ts``, checked by ``test_access_vectors.py``), so the two
+    runtimes answer alike. Neither knows Claude Code's own Unicode version: a fold it does
+    differently past what both are sure of is the residual, and only ever toward refusal."""
     for c in unicodedata.normalize("NFKC", name):
         category = unicodedata.category(c)
         if category == "Cn" or (ord(c) > 0xFFFF and category.startswith("L")):
@@ -282,7 +310,10 @@ def off_call_item(
 
         def alias_named(key: str, spellings: list[str] = spellings) -> bool:
             return any(
-                _reaches(kind, s, key) or _reaches(kind, cut_name(s), key) for s in spellings
+                _reaches(kind, s, key)
+                or _reaches(kind, cut_name(s), key)
+                or _reaches(kind, alias_key_name(s), key)
+                for s in spellings
             )
 
         direct = [i for i in plugin.items if i.startswith(prefix) and item_named(i[len(prefix) :])]
