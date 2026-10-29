@@ -299,10 +299,18 @@ class LanActivities:
                 raise _failed(f"{row.name} reports this print stopped.")
             if state in TAKEN_STATES:
                 return LanStarted(subtask_name=input.subtask_name, started_at=first.received_at)
-            # FINISH under its name is the printer naming it over the last job's FINISH,
-            # never a print that ran (#4935): the earlier attempt saw no move, and this
-            # one follows it by seconds, which no print finishes in. The printer is idle,
-            # so the command is sent again.
+            if state == "FINISH":
+                # Either the printer names it over the last job's FINISH and never moved
+                # (#4935), or it printed and ended while the earlier attempt was unsure:
+                # that attempt and its re-upload can take minutes, as long as a short
+                # print. The report cannot tell which, so neither is assumed: sent again,
+                # it might print over a finished part; read as printed, it may never have.
+                raise _failed(
+                    f"{row.name} shows this print as finished, but ScadBuddy did not see it"
+                    " start, so it cannot tell whether it printed. Check the printer and"
+                    " its bed, then print again if it did not.",
+                    status_code=status.HTTP_409_CONFLICT,
+                )
         command, warnings = await self._command(row, printer, input)
         started = await self._taken(row, lan, input, command, error_before)
         return started.model_copy(update={"warnings": warnings})

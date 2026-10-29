@@ -167,31 +167,37 @@ async def test_from_failed_a_new_error_is_this_starts(pg_pool: PgPool) -> None:
         await _start(pg_pool, lan)
 
 
-async def test_a_retry_that_finds_its_name_over_finish_sends_it_again(
+async def test_a_retry_that_finds_its_name_over_finish_is_neither_sent_nor_printed(
     pg_pool: PgPool,
 ) -> None:
-    """Review of #4980: the earlier attempt saw only the name move, and no print finishes
-    in the seconds between attempts, so the name over ``FINISH`` is not a start. The
-    printer is idle: the command is sent again, and the move is the start."""
-    lan = Scripted(
-        state(gcode_state="FINISH", **{**LAST, "subtask_name": NAME}),
-        [state(gcode_state="RUNNING", subtask_name=NAME, layer_num=0)],
-    )
-    started = await _start(pg_pool, lan)
-    [command] = lan.commands
-    assert command is not None and command["print"]["command"] == "project_file"
-    assert started.started_at == T0 + timedelta(seconds=1)
+    """Reviews of #4980: the name over ``FINISH`` on a retry is a stale report, or a short
+    print that ran while the earlier attempt was unsure (that gap can be minutes). Sent
+    again it might print over a finished part, and read as printed it may never have: the
+    run fails and says so, and nothing is sent."""
+    lan = Scripted(state(gcode_state="FINISH", **{**LAST, "subtask_name": NAME}), [])
+    with pytest.raises(ApplicationError, match="cannot tell whether it printed") as raised:
+        await _start(pg_pool, lan)
+    assert raised.value.type != LAN_UNSURE and lan.commands == []
 
 
 async def test_attempts_over_a_stale_finish_never_read_as_printed(pg_pool: PgPool) -> None:
     """Review of #4980: attempt 1 is unsure over the name on the last job's ``FINISH``;
     attempt 2's baseline is that same report. Neither is a start, so the run never reads
-    the stale ``FINISH`` as this print's end."""
+    the stale ``FINISH`` as this print's end, and the plate is sent once."""
     stale = state(gcode_state="FINISH", **{**LAST, "subtask_name": NAME})
     first = Scripted(state(gcode_state="FINISH", **LAST), [stale])
     second = Scripted(stale, [stale])
-    outcomes = await _attempts(pg_pool, first, second)
-    assert all(
-        isinstance(outcome, ApplicationError) and outcome.type == LAN_UNSURE for outcome in outcomes
-    )
-    assert all(command is not None for command in [*first.commands, *second.commands])
+    unsure, refused = await _attempts(pg_pool, first, second)
+    assert isinstance(unsure, ApplicationError) and unsure.type == LAN_UNSURE
+    assert isinstance(refused, ApplicationError) and refused.type != LAN_UNSURE
+    assert len(first.commands) == 1 and second.commands == []
+
+
+@pytest.mark.parametrize("moved", ["PREPARE", "SLICING", "RUNNING", "PAUSE"])
+async def test_a_retry_that_finds_its_print_running_is_that_start(
+    pg_pool: PgPool, moved: str
+) -> None:
+    """A state only a print it took can be in: no second command, started at the probe."""
+    lan = Scripted(state(gcode_state=moved, subtask_name=NAME), [])
+    started = await _start(pg_pool, lan)
+    assert lan.commands == [] and started.started_at == T0
