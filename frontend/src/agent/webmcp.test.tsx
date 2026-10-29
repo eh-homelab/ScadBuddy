@@ -1,5 +1,5 @@
 import { screen, waitFor } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SettingsPage } from '../pages/SettingsPage'
 import { renderPage } from '../test/utils'
 import { AgentBridge, bridge as appBridge } from './bridge'
@@ -71,6 +71,68 @@ describe('WebMCP', () => {
     expect(registered.every((entry) => entry.signal?.aborted)).toBe(true)
 
     disconnect()
+  })
+
+  it('registers nothing on a stale tab, and says why once per distinct error (#4884)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let chunk = 'catalog-old.js'
+    const load = vi.fn(() => Promise.reject(new TypeError(`Failed to fetch dynamically imported module: /assets/${chunk}`)))
+    const bridge = new AgentBridge(load)
+    bridge.register({ search: () => [] }, { label: 'page' })
+    setWebMcpEnabled(true)
+    const disconnect = connectWebMcp(bridge)
+    try {
+      await waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringMatching(/not registered \(stale_tab\)/)))
+      expect(registered).toEqual([])
+
+      // Route changes retry; the same failure is not warned about again. Awaiting the very
+      // promises sync() awaits: sync() subscribed to each first, so its continuation (the
+      // warning, or not) has run by the time this await resumes.
+      const listings = vi.spyOn(bridge, 'listTools')
+      bridge.register({ get_params: () => null }, { label: 'customize' })()
+      expect(listings).toHaveBeenCalledTimes(2)
+      await Promise.all(listings.mock.results.map((result) => result.value))
+      expect(warn).toHaveBeenCalledTimes(1)
+
+      // A different failure is warned about.
+      chunk = 'catalog-other.js'
+      bridge.register({ get_params: () => null }, { label: 'customize' })
+      await waitFor(() => expect(warn).toHaveBeenCalledTimes(2))
+      expect(warn).toHaveBeenLastCalledWith(expect.stringContaining('catalog-other.js'))
+      expect(registered).toEqual([])
+    } finally {
+      disconnect()
+      warn.mockRestore()
+    }
+  })
+
+  it('warns again about the same failure once the tools have registered in between', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let stale = true
+    const load = vi.fn(() =>
+      stale
+        ? Promise.reject(new TypeError('Failed to fetch dynamically imported module: /assets/catalog-old.js'))
+        : import('./catalog'),
+    )
+    const bridge = new AgentBridge(load)
+    bridge.register({ search: () => [] }, { label: 'page' })
+    setWebMcpEnabled(true)
+    const disconnect = connectWebMcp(bridge)
+    try {
+      await waitFor(() => expect(warn).toHaveBeenCalledTimes(1))
+
+      stale = false
+      const off = bridge.register({ get_params: () => null }, { label: 'customize' })
+      await waitFor(() => expect(active()).toContain('get_params'))
+
+      stale = true
+      off()
+      await waitFor(() => expect(warn).toHaveBeenCalledTimes(2))
+      expect(warn.mock.calls[1]).toEqual(warn.mock.calls[0])
+    } finally {
+      disconnect()
+      warn.mockRestore()
+    }
   })
 
   it('reads as off when storage is unavailable', () => {

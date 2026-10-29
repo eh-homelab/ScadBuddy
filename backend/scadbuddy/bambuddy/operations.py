@@ -50,6 +50,7 @@ from scadbuddy.bambuddy.send import (
 )
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.bambuddy.virtual_printers import virtual_printer_kinds
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, waiting_on_bambuddy
@@ -449,6 +450,8 @@ def bambuddy_kinds_over(
             run_attempts=3,
             where="Bambuddy's inbox folder",
         ),
+        # #4747: Bambuddy's virtual printers, written from Settings > Printers.
+        *virtual_printer_kinds(settings_store=settings_store, printers=printers),
     ]
 
 

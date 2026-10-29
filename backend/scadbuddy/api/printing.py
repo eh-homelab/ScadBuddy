@@ -59,7 +59,11 @@ from scadbuddy.api.operations import (
     temporal_refused,
     temporal_unavailable,
 )
-from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
+from scadbuddy.bambuddy.catalogue import (
+    catalogue_name_key,
+    catalogue_refresh_claim,
+    kept_catalogue,
+)
 from scadbuddy.bambuddy.choices import (
     ChoicesView,
     choices_for_output,
@@ -1088,7 +1092,14 @@ async def post_check(
             print_settings=print_settings,
             printers=printers.store,
             reports=printers.reports,
-            catalogue=None if client is None else kept_catalogue(client, paths.cache, store.kek),
+            catalogue=None
+            if client is None
+            else kept_catalogue(
+                client,
+                paths.cache,
+                store.kek,
+                catalogue_refresh_claim(store.defaults.database_url),
+            ),
             # A native run's check (plan 2026-10-18 D2) reads these, never `client`.
             profiles=slicing.profiles,
             native=await library.serving_native(),
@@ -1326,6 +1337,7 @@ async def get_choices(
             printer_id=printer_id,
             cache=paths.cache,
             catalogue_key=catalogue_name_key(store.kek),
+            refresh_claim=catalogue_refresh_claim(store.defaults.database_url),
             rack=rack,
         )
     return await with_lan_printers(view, settings, printers)

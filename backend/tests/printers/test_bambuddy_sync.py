@@ -21,6 +21,7 @@ from scadbuddy.printers.bambuddy_sync import (
     plan_printer,
     printer_view,
     sync_printers,
+    sync_virtual_printers,
 )
 from scadbuddy.printers.component import Printers
 from scadbuddy.printers.lan_models import LanReport
@@ -754,9 +755,30 @@ async def test_a_vp_bambuddy_no_longer_lists_is_reported_and_kept(
     printers: FakePrinters, store: PrinterStore
 ) -> None:
     await run(printers, FakeClient([], [vp(1, VP_SERIAL, None)]))
+    assert store.list()[0].bambuddy_active is True
+    printers.changed_ids.clear()
     result = await run(printers, FakeClient([], []))
     assert [e.action for e in result.entries] == ["missing"]
-    assert len(store.list()) == 1
+    (row,) = store.list()
+    # #4889: marked on the row, not only in the result; listed again, it is back.
+    assert row.bambuddy_active is False and printers.changed_ids == [row.id]
+    dry = await run(printers, FakeClient([], [vp(1, VP_SERIAL, None)]), dry_run=True)
+    assert dry.dry_run and store.require(row.id).bambuddy_active is False
+    await run(printers, FakeClient([], [vp(1, VP_SERIAL, None)]))
+    assert store.require(row.id).bambuddy_active is True
+
+
+async def test_the_follow_after_a_vp_write_marks_one_bambuddy_no_longer_lists(
+    printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#4889: the follow a delete runs (`sync_virtual_printers`) marks the gone VP's
+    row, as the full sync does, rather than leaving it listed until the next sweep."""
+    await run(printers, FakeClient([], [vp(1, VP_SERIAL, None), vp(2, OTHER_SERIAL, None)]))
+    await sync_virtual_printers(
+        cast(Any, printers), cast(Any, FakeClient([], [vp(2, OTHER_SERIAL, None)]))
+    )
+    active = {row.bambuddy_vp_id: row.bambuddy_active for row in store.list()}
+    assert active == {1: False, 2: True}
 
 
 async def test_unreadable_virtual_printers_still_sync_the_printers(
@@ -779,6 +801,18 @@ async def test_the_access_code_reaches_no_log_and_no_result(
     result2 = await run(printers, client)
     assert CODE not in caplog.text
     assert CODE not in result.model_dump_json() and CODE not in result2.model_dump_json()
+
+
+async def test_the_virtual_pass_alone_runs_over_a_bare_store(store: PrinterStore) -> None:
+    """Review #4784: the print worker has no `Printers`; a VP write there still brings
+    the registry along, and no probe runs (a VP gets no LAN link)."""
+    from scadbuddy.printers.bambuddy_sync import StoreRegistry, sync_virtual_printers
+
+    client = FakeClient([bambuddy(1, SERIAL)], [vp(5, VP_SERIAL, None)], codes={1: CODE})
+    await sync_virtual_printers(StoreRegistry(store), cast(Any, client))
+    (row,) = store.list()
+    assert row.kind == "bambuddy_virtual" and row.bambuddy_vp_id == 5
+    assert row.lan_host is None
 
 
 async def test_the_housekeeping_sweep_logs_a_missing_target_quietly_unless_there_is_news(

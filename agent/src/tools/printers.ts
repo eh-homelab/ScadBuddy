@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { ok } from './call.js'
+import { command } from './command.js'
 import { defineTool, json, type Tool } from './registry.js'
 import { page, PAGED, pageInput } from './pagination.js'
 
@@ -35,7 +36,7 @@ function shown<T extends Row>(row: T): Omit<T, 'serial'> {
 const ROW_FIELDS =
   'Each row has `id` (the registry id the printer tools take), `name`, `model`, `bambuddy_printer_id` (the ' +
   'Bambuddy printer it is, or null), `lan_host` and `has_access_code` (its LAN link, the code itself never ' +
-  'shown), `preferred_path` and `bambuddy_active`; `kind` (`physical`, or `bambuddy_virtual` for one of ' +
+  'shown), `preferred_path` and `bambuddy_active` (for a virtual printer, whether Bambuddy still lists it); `kind` (`physical`, or `bambuddy_virtual` for one of ' +
   "Bambuddy's virtual printers, never a printer to print on: `bambuddy_vp_id`, `vp_mode`, and `forwards_to`, " +
   "the registry printer it forwards to: null with `bambuddy_view.target_printer_id` null is Bambuddy's 'any " +
   "printer of its model', but null with a `target_printer_id` means its target has no row here, never 'any'); " +
@@ -50,6 +51,189 @@ const LAN_IN_SETTINGS =
   'code in chat. The one tool that makes a LAN link is sync_printers_from_bambuddy (outward, approved), which ' +
   "fills an empty link from Bambuddy's address and access code when Bambuddy gives the code, and moves a " +
   "link that follows Bambuddy's address when that address changes."
+
+// Bambuddy's virtual printers (#4747 item 4): routes under /api/v1/printers/virtual
+// (backend/scadbuddy/api/printers.py). Reads are `read`; every write changes what Bambuddy
+// advertises to slicers on the LAN, so it is `outward`. No tool takes a virtual printer's
+// access code, as no tool takes a printer's (#4340 review I1): it is typed in Settings >
+// Printers only.
+
+const VP_SOURCE = "Bambuddy's virtual printers, with names typed by whoever set them up"
+const vpId = z.number().int().positive().describe("A Bambuddy virtual printer's `id`, as list_virtual_printers lists them")
+const vpMode = z
+  .enum(['archive', 'review', 'queue', 'proxy'])
+  .describe(
+    "What a print sent to it does: `archive` (Bambuddy's 'immediate': archive it), `review`, `queue` (archive and " +
+      "add to Bambuddy's print queue; `auto_dispatch` starts it when the printer is free) or `proxy` (relay live to " +
+      'its target, which proxy needs)',
+  )
+const vpTarget = z
+  .string()
+  .uuid()
+  .nullable()
+  .describe(
+    'The registry printer it forwards to (a list_printers `id` linked to a Bambuddy printer), or null for one ' +
+      "Bambuddy's queue sends to any free printer of its model",
+  )
+const vpFields = {
+  enabled: z.boolean().optional(),
+  mode: vpMode.optional(),
+  model: z.string().max(16).optional().describe("A model code from list_virtual_printers' `models`, such as O1C"),
+  target: vpTarget.optional(),
+  auto_dispatch: z.boolean().optional(),
+  queue_force_color_match: z.boolean().optional(),
+  save_ams_mapping: z.boolean().optional(),
+  gcode_injection: z.boolean().optional(),
+  bind_ip: z.string().max(253).optional().describe('The pod interface it listens on, as Bambuddy reports them'),
+  remote_interface_ip: z.string().max(253).optional(),
+}
+const VP_AUTH =
+  " Bambuddy accepts it only while its auth is off (list_virtual_printers' `auth_enabled`); otherwise the answer " +
+  "names the 'Settings (admin only)' scope, which no API key holds."
+const VP_WRITE =
+  VP_AUTH +
+  " The registry's rows follow the write. An untargeted one needs an access code to be enabled: the user sets it " +
+  'in Settings > Printers, never in chat.'
+
+function virtualPrinterTools(): Tool[] {
+  return [
+    defineTool({
+      name: 'list_virtual_printers',
+      description:
+        "Bambuddy's virtual printers (`items`): each with its `mode`, `model`/`model_name`, `enabled`, `status.running`, " +
+        '`target` (the registry printer it forwards to, null for any printer of its model), `printer_id` (its own ' +
+        "registry row), `bind_ip`, `remote_interface_ip` and `access_code_set` (never the code); Bambuddy's " +
+        '`models`; and `auth_enabled`, Bambuddy\'s auth (on, no virtual printer can be changed from here). A ' +
+        'virtual printer is never a printer to print on: print on its target.' +
+        PAGED,
+      input: z.object({ ...pageInput }),
+      risk: 'read',
+      source: VP_SOURCE,
+      bambuddyScope: ['Read Status'],
+      routes: ['GET /api/v1/printers/virtual'],
+      handler: async (args, { backend }) => {
+        const listed = await ok(backend.GET('/api/v1/printers/virtual'), "list Bambuddy's virtual printers")
+        const printers = page(listed.printers.map(shown), args, (vp) => String(vp.id), 'list_virtual_printers')
+        return json({ ...printers, models: listed.models, auth_enabled: listed.auth_enabled })
+      },
+    }),
+
+    defineTool({
+      name: 'get_virtual_printer',
+      description: 'One Bambuddy virtual printer, as list_virtual_printers lists them.',
+      input: z.object({ vp_id: vpId }),
+      risk: 'read',
+      source: VP_SOURCE,
+      bambuddyScope: ['Read Status'],
+      routes: ['GET /api/v1/printers/virtual/{vp_id}'],
+      handler: async ({ vp_id }, { backend }) =>
+        json(
+          shown(
+            await ok(
+              backend.GET('/api/v1/printers/virtual/{vp_id}', { params: { path: { vp_id } } }),
+              'read the virtual printer',
+            ),
+          ),
+        ),
+    }),
+
+    defineTool({
+      name: 'diagnose_virtual_printer',
+      description:
+        "Bambuddy's setup checks for a virtual printer: `overall` (ok, warnings or problems) and each check's `id` " +
+        '(enabled, running, bind_interface, access_code, target_printer, port_ftps, port_mqtt, port_bind, ' +
+        'certificate), `status` (pass, fail, warn or skip) and `params`.',
+      input: z.object({ vp_id: vpId }),
+      risk: 'read',
+      source: VP_SOURCE,
+      bambuddyScope: ['Read Status'],
+      routes: ['GET /api/v1/printers/virtual/{vp_id}/diagnostic'],
+      handler: async ({ vp_id }, { backend }) =>
+        json(
+          await ok(
+            backend.GET('/api/v1/printers/virtual/{vp_id}/diagnostic', { params: { path: { vp_id } } }),
+            'diagnose the virtual printer',
+          ),
+        ),
+    }),
+
+    defineTool({
+      name: 'create_virtual_printer',
+      description: 'Creates a Bambuddy virtual printer.' + VP_WRITE,
+      input: z.object({
+        name: z.string().min(1).max(80),
+        ...vpFields,
+        // Bambuddy's own defaults (VirtualPrinterCreate), sent explicitly.
+        enabled: z.boolean().default(false),
+        mode: vpMode.default('archive'),
+        auto_dispatch: z.boolean().default(true),
+        queue_force_color_match: z.boolean().default(false),
+        save_ams_mapping: z.boolean().default(false),
+        gcode_injection: z.boolean().default(false),
+      }),
+      risk: 'outward',
+      source: VP_SOURCE,
+      bambuddyScope: ['Settings (admin only)'],
+      routes: ['POST /api/v1/printers/virtual'],
+      summarize: ({ name, mode }) => `Create Bambuddy virtual printer ${name}${mode ? ` (${mode})` : ''}`,
+      handler: async (body, ctx) =>
+        json(
+          shown(
+            await command(ctx, `create virtual printer ${body.name}`, (headers) =>
+              ctx.backend.POST('/api/v1/printers/virtual', { body, headers }),
+            ),
+          ),
+        ),
+    }),
+
+    defineTool({
+      name: 'update_virtual_printer',
+      description:
+        'Changes a Bambuddy virtual printer: only the fields given change; `target` null takes its target off.' +
+        VP_WRITE,
+      input: z.object({
+        vp_id: vpId,
+        name: z.string().min(1).max(80).optional(),
+        ...vpFields,
+        tailscale_disabled: z.boolean().optional().describe("Turn off Bambuddy's Tailscale address for it"),
+      }),
+      risk: 'outward',
+      source: VP_SOURCE,
+      bambuddyScope: ['Settings (admin only)'],
+      routes: ['PUT /api/v1/printers/virtual/{vp_id}'],
+      summarize: ({ vp_id, ...fields }) =>
+        `Change Bambuddy virtual printer ${vp_id}: ${Object.keys(fields).join(', ') || 'nothing'}`,
+      handler: async ({ vp_id, ...body }, ctx) =>
+        json(
+          shown(
+            await command(ctx, `change virtual printer ${vp_id}`, (headers) =>
+              ctx.backend.PUT('/api/v1/printers/virtual/{vp_id}', { params: { path: { vp_id } }, body, headers }),
+            ),
+          ),
+        ),
+    }),
+
+    defineTool({
+      name: 'delete_virtual_printer',
+      description:
+        'Deletes a Bambuddy virtual printer; slicers can no longer send to it. Its registry row is kept, reported as ' +
+        'no longer in Bambuddy.' +
+        VP_AUTH,
+      input: z.object({ vp_id: vpId }),
+      risk: 'outward',
+      source: VP_SOURCE,
+      bambuddyScope: ['Settings (admin only)'],
+      routes: ['DELETE /api/v1/printers/virtual/{vp_id}'],
+      summarize: ({ vp_id }) => `Delete Bambuddy virtual printer ${vp_id}`,
+      handler: async ({ vp_id }, ctx) =>
+        json(
+          await command(ctx, `delete virtual printer ${vp_id}`, (headers) =>
+            ctx.backend.DELETE('/api/v1/printers/virtual/{vp_id}', { params: { path: { vp_id } }, headers }),
+          ),
+        ),
+    }),
+  ]
+}
 
 export const printerTools: Tool[] = [
   defineTool({
@@ -249,4 +433,6 @@ export const printerTools: Tool[] = [
       return json({ deleted: id })
     },
   }),
+
+  ...virtualPrinterTools(),
 ]

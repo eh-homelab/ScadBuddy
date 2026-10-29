@@ -563,10 +563,11 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   starts polling, because Temporal 1.28 accepts a build only once it has a poller.
 - **Shutdown:** SIGTERM (tini forwards it; no `preStop` needed) starts the
   drain. The worker keeps polling until no workflow pinned to its build is
-  running. If its build is still (or again) the current one, as on a restart of the
+  running. If its build is still (or again) the current one and another worker of
+  that build polls the render queue (seen in the last 90 s), as on a restart of the
   same build (a manifest change, a node drain), it stops after 30 s instead, because
-  the next pod of that build serves its pinned runs; it logs "stopping without
-  draining" then, so a pod that never comes back is visible. The drain lasts at
+  that worker serves its pinned runs; it logs "stopping without draining" then. A
+  current build with no other poller of it drains in full (#4869). The drain lasts at
   most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
   SDK gives in-flight activities up to `SCADBUDDY_RENDER_TIMEOUT + 60` s. If the
   drain's bound passes first, the worker exits anyway (it logs "drain timed out"):
@@ -575,9 +576,13 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   `3 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` plus a little slack for teardown
   (e.g. 30 s): **690 s** at the default 120 s timeout. Roll a new build out with
   `RollingUpdate` and `maxSurge >= 1`, so the new build is current before the old
-  pod drains. Under `Recreate` the old build is still current when it stops, so it
-  stops after the 30 s, and the new build's pod makes itself current only after it
-  starts: runs pinned to the old build then have no poller.
+  pod drains. Under `Recreate` the old build is still current when it stops and no
+  other worker of it polls, so it drains in full before the new build's pod starts.
+- **Readiness (#4869):** `/readyz` on 9090 answers 503 until the render queue routes
+  to this build (`/healthz` never waits on it). Point the `readinessProbe` at it (the
+  liveness and startup probes stay on `/healthz`): a rolling update then stops an old
+  pod only once the new build is current, so the old pod drains rather than leave its
+  pinned runs to a build that cannot serve them.
 - **Temporal itself** comes from the Temporal operator with a CNPG Postgres in
   `eh-homelab/clusters` (clusters#1454). `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` (the
   API hosting the worker) is for dev and tests only.

@@ -266,7 +266,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `QueueFullError`), `submit.py` (`RenderService`, what the routes type against as
   `RenderDep`: submit starts `render-<render_key>` with update-with-start; the
   workflow's first (local) activity inserts the row, identical requests join it as
-  claims, and a supersede sends the old execution `release`, #1053), `projection.py` (`render_jobs` as a projection
+  claims, and a supersede sends the old execution `release`, #1053; with `reuse_finished`
+  (the render route, an order's quote) a `done` job of the key whose refs still hold its
+  result answers at once, its `reused_at` keeping it from the prune,
+  `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output
+  backfill's attach does, leaves it off), `projection.py` (`render_jobs` as a projection
   the workflow writes in place through the `project` activity), `pg_store.py` (the
   backend's migrations), `worker_role.py` (#601: `RENDER_GRANTS`, everything the
   render worker's own role `scadbuddy_render` may touch, granted by the API at start;
@@ -661,6 +665,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   with a banner), `elements.ts` (`sb-param`/`sb-preview`/`sb-generate`, rendered by portal). Inputs are `{params, v, …ui state}` (`backend/scadbuddy/render/inputs.py`);
   `backend/scadbuddy/api/template_ui.py` serves `ui/**` live and at `/versions/{commit}/`;
   `api/static.py` `PAGE_CSP` (mirrored in `frontend/page-csp.txt`) is the page's policy.
+  Its one `script-src` hash is `frontend/index.html`'s inline entry-reload handler (#4873):
+  a page whose entry `index-*.js` or CSS 404s mid-rollout reloads, up to 3 times per failed
+  URL, for parse-time tags only (a lazy chunk's CSS is `staleChunks.ts`'s, #4874). Editing
+  that script changes the hash; `src/entryReload.test.ts` names the new one.
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
   as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,

@@ -58,6 +58,8 @@ export function connectWebMcp(bridge: AgentBridge, preference: WebMcpPreference 
 
   let controller: AbortController | null = null
   let generation = 0
+  /** Errors already warned about: a route change retries, and would repeat the same one. */
+  const warned = new Set<string>()
 
   async function sync() {
     const mine = ++generation
@@ -66,9 +68,23 @@ export function connectWebMcp(bridge: AgentBridge, preference: WebMcpPreference 
     if (!preference.enabled()) return
     controller = new AbortController()
     const { signal } = controller
-    const tools = await bridge.listTools()
+    const listed = await bridge.listTools()
     if (mine !== generation) return
-    for (const tool of tools) {
+    // A stale tab (#4884) usually reloads and the next page load registers the tools. If
+    // it does not (the stale-chunk guard already spent its reload), say why the browser
+    // lists no ScadBuddy tools; the next route change tries again.
+    if (!listed.ok) {
+      const warning = `ScadBuddy: WebMCP tools not registered (${listed.error.code}): ${listed.error.message}`
+      if (!warned.has(warning)) {
+        warned.add(warning)
+        console.warn(warning)
+      }
+      return
+    }
+    // Recovered: a later failure, even the same one, is news again. "Recovered" means
+    // listTools() succeeded, not that any tool was registered (the list may be empty).
+    warned.clear()
+    for (const tool of listed.tools) {
       await context!
         .registerTool(
           {

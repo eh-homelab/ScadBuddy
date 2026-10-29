@@ -224,6 +224,7 @@ describe('PrintersPanel (#3823)', () => {
     const virtual = await screen.findByRole('listitem', { name: 'Printer H2C Virtual' })
     expect(virtual).toHaveTextContent('Bambuddy virtual printer → 3DP-31B-598 (queue)')
     expect(virtual).toHaveTextContent('Not a printer to print on')
+    expect(virtual).not.toHaveTextContent('No longer in Bambuddy')
     // Not a print target: no path, no LAN form, nothing to link.
     expect(within(virtual).queryByRole('combobox')).toBeNull()
     expect(within(virtual).queryByRole('form')).toBeNull()
@@ -269,6 +270,22 @@ describe('PrintersPanel (#3823)', () => {
     expect(status).toHaveTextContent('1 added, 0 linked, 0 already linked, 0 skipped, 0 conflicts')
     expect(status).toHaveTextContent('1 virtual printer forwarding to a printer not here')
     expect(status).toHaveTextContent(`Lonely VP: added (${reason})`)
+  })
+
+  it('says a virtual printer Bambuddy no longer lists is kept (#4889)', async () => {
+    const gone = {
+      ...printersState()[0]!,
+      id: '00000000-0000-4000-8000-0000000000f9',
+      name: 'Gone VP',
+      kind: 'bambuddy_virtual' as const,
+      bambuddy_printer_id: null,
+      bambuddy_vp_id: 9,
+      bambuddy_active: false,
+    }
+    server.use(http.get('/api/v1/printers', () => HttpResponse.json([gone])))
+    renderPage(<PrintersPanel bambuddyConfigured />)
+    const row = await screen.findByRole('listitem', { name: 'Printer Gone VP' })
+    expect(row).toHaveTextContent('No longer in Bambuddy: the row is kept.')
   })
 
   it('says why Import from Bambuddy is off without a Bambuddy (#4439)', async () => {

@@ -151,7 +151,11 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
       // The tab's answers can quote the page, so they go in the untrusted envelope (#258).
       if (HUB_CODES.has(code)) throw new ToolError(message)
       const detail = issues?.length ? `${message} ${issues.map((i) => `${i.path || '(root)'}: ${i.message}`).join('; ')}` : message
-      throw new ToolError(`the tab answered ${spec.tool} with ${code}`, undefined, detail)
+      // stale_tab's guidance is ScadBuddy's own, said here outside the envelope (#4884):
+      // inside it the model is told not to follow instructions, and the tab's text is
+      // only a quote of what the page said.
+      const hint = code === 'stale_tab' ? ` (${STALE_TAB_HINT})` : ''
+      throw new ToolError(`the tab answered ${spec.tool} with ${code}${hint}`, undefined, detail)
     },
   })
 }
@@ -194,6 +198,15 @@ const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
 
 /** bridge/hub.ts `HubErrorCode`: the hub's own answers, in ScadBuddy's words. */
 const HUB_CODES: ReadonlySet<string> = new Set<HubErrorCode>(['no_browser', 'no_answer', 'disconnected', 'busy'])
+
+/**
+ * The tab is running an older ScadBuddy build than the server's (#4884): it is reloading
+ * to the current one, or the user has to reload it. A reload is a new tab, so a pairing
+ * made by code ends with it.
+ */
+export const STALE_TAB_HINT =
+  'the tab is on an older ScadBuddy build and nothing was run; it reloads to the current build, or the user ' +
+  'must reload it. Wait, check browser_status, and if you paired by code, pair again with browser_pair'
 
 const PREFIX = "In the user's own open ScadBuddy tab, which they watch as it happens: "
 
