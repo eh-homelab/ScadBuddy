@@ -118,6 +118,7 @@ from scadbuddy.workflows.client import (
     connect,
     current_routing,
     drained,
+    draining_marks,
     follow_worker,
     is_current,
     make_current,
@@ -581,24 +582,52 @@ async def _serve_versioned(
     # Set once this worker's drain mark is written (#4948): until then a stopping peer
     # cannot tell this worker from one that serves, so this one trusts no peer either.
     marked = asyncio.Event()
+    # A peer's mark younger than this may be a drain still going, and an older one is
+    # pruned: a pod of one build drains as long as this one.
+    marked_within = (drain_timeout or 0) + POLLER_SEEN_WITHIN + DRAIN_MARK_SLACK
+    drain_began = datetime.now(UTC)  # set again when the drain begins
+
+    async def mark() -> None:
+        await mark_draining(
+            client,
+            deployment_name=deployment_name,
+            build_id=build_id,
+            identities=identities,
+            since=drain_began,
+            prune_within=marked_within,
+        )
+        marked.set()
 
     async def still_current() -> bool:
         if not marked.is_set():
             return False
         try:
-            return await is_current(
-                client,
-                namespace=client.namespace,
-                build_id=build_id,
-                deployment_name=deployment_name,
-            ) and await polled_elsewhere(
-                client,
-                task_queue,
-                deployment_name=deployment_name,
-                build_id=build_id,
-                identities=identities,
-                marked_within=(drain_timeout or 0) + POLLER_SEEN_WITHIN + DRAIN_MARK_SLACK,
-            )
+            if not (
+                await is_current(
+                    client,
+                    namespace=client.namespace,
+                    build_id=build_id,
+                    deployment_name=deployment_name,
+                )
+                and await polled_elsewhere(
+                    client,
+                    task_queue,
+                    deployment_name=deployment_name,
+                    build_id=build_id,
+                    identities=identities,
+                    marked_within=marked_within,
+                )
+            ):
+                return False
+            # The start's clear, cancelled at stop, may still land after the mark and
+            # remove it; a stopping peer would then count this worker. So trust only a
+            # mark that is still there, and write it again when it is gone.
+            marks = await draining_marks(client, deployment_name=deployment_name, build_id=build_id)
+            if all(identity in marks for identity in identities):
+                return True
+            logger.warning("this worker's drain mark is gone; writing it again")
+            await mark()
+            return False
         except RPCError:
             logger.warning(
                 "could not read the deployment's current build or the queue's pollers",
@@ -672,18 +701,7 @@ async def _serve_versioned(
             "stopping: draining this build's workflows",
             extra={"build_id": build_id, "timeout_s": drain_timeout},
         )
-        since = datetime.now(UTC)
-
-        async def mark() -> None:
-            await mark_draining(
-                client,
-                deployment_name=deployment_name,
-                build_id=build_id,
-                identities=identities,
-                since=since,
-            )
-            marked.set()
-
+        drain_began = datetime.now(UTC)
         marking = asyncio.create_task(
             _until_written(mark, "could not mark this worker draining yet")
         )

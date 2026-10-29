@@ -573,9 +573,12 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   `UpdateWorkerDeploymentVersionMetadata`), and a stopping worker does not count a
   poller with such a mark (#4948). So two pods of one build that stop together (a
   node drain that evicts both) both drain in full. A worker that cannot write its
-  mark trusts no other poller; one that cannot read the marks drains in full. A
-  mark older than the drain's bound plus 150 s is ignored, and a worker removes its
-  own at start, since a container restarted in its pod keeps its identity. The drain lasts at
+  mark trusts no other poller; one that cannot read the marks drains in full, and
+  one whose mark is gone when it would leave writes it again first. A mark older
+  than the drain's bound plus `POLLER_SEEN_WITHIN` (`workflows/client.py`) plus
+  `DRAIN_MARK_SLACK` (`worker.py`) is ignored, and each new mark removes those. A
+  worker removes its own at start, since a container restarted in its pod keeps
+  its identity. The drain lasts at
   most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
   SDK gives in-flight activities up to `SCADBUDDY_RENDER_TIMEOUT + 60` s. If the
   drain's bound passes first, the worker exits anyway (it logs "drain timed out"):
