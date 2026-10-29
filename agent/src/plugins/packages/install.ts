@@ -15,7 +15,7 @@ import {
 } from './source.js'
 import type { PackagePin, PackageRepo, PreparedPackage } from './store.js'
 import { builtInNamed } from './builtins.js'
-import { capProblems, type Endpoint, vetPackage } from './vet.js'
+import { capProblems, type Endpoint, itemsOfPlugin, LISTING_PACKAGES_BUDGET, listedPackageSize, vetPackage } from './vet.js'
 
 // Installing a plugin package, and turning its pin back into a directory for a
 // harness run (issue #297, "Installing a plugin"; the SDK "loads plugins by
@@ -478,7 +478,9 @@ export type PackagesForRun = {
 /**
  * The enabled packages for one harness run, each materialised and verified.
  * A package that cannot be loaded is left out and named in `problems`; the run
- * goes ahead without it (as for remote MCP plugins, registry.ts).
+ * goes ahead without it (as for remote MCP plugins, registry.ts). So is one that would take
+ * the turn's packages past `LISTING_PACKAGES_BUDGET` (#4757 Task 6 re-review R9), in the
+ * pins' order (by name): both runtimes load through here, so both leave out the same ones.
  */
 export async function loadPackagesForRun(
   store: Pick<PackageRepo, 'enabledPins'>,
@@ -490,6 +492,7 @@ export async function loadPackagesForRun(
   const problems: string[] = []
   const releases: (() => void)[] = []
   const loaded: LoadedPackage[] = []
+  let listed = 0
   for (const pin of await store.enabledPins()) {
     // A package stored under a built-in's name before builtins.ts (a reserved name
     // was allowable) would shadow the built-in: never loaded, only removable.
@@ -499,6 +502,13 @@ export async function loadPackagesForRun(
     }
     try {
       const { dir, release, builtinTools: wanted } = await installer.acquire(pin)
+      const size = listedPackageSize(pin.name, itemsOfPlugin(dir, pin.name), pin.allowRefused ? wanted : [])
+      if (listed + size > LISTING_PACKAGES_BUDGET) {
+        release()
+        problems.push(`plugin package ${pin.name} was not loaded: the turn's packages would take more than ${LISTING_PACKAGES_BUDGET} bytes of its listing with it`)
+        continue
+      }
+      listed += size
       if (pin.allowRefused) {
         allowedPaths.push(dir)
         for (const tool of wanted) builtinTools.add(tool)

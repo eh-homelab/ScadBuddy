@@ -6,7 +6,7 @@ import path from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { PluginForwarder } from '../src/plugins/forwarder.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
-import type { LoadedPackage, PackagesForRun } from '../src/plugins/packages/install.js'
+import { type LoadedPackage, loadPackagesForRun, type PackagesForRun } from '../src/plugins/packages/install.js'
 import {
   collidingServerNames,
   declaresRemoteServers,
@@ -681,16 +681,22 @@ describe("a package's items in a durable turn (#4757)", () => {
     expect(Buffer.byteLength(JSON.stringify({ items: shared.items, aliases: shared.aliases }))).toBeLessThanOrEqual(LISTING_ITEMS_BUDGET)
   })
 
-  it("leaves out the packages past the listing's total budget, each said, in the order they load (Task 6 re-review R9)", async () => {
+  it("leaves out the same packages past the listing's total budget in classic and durable, each said, in load order (Task 6 re-review R9, fix round 5)", async () => {
     // Five packages each under its own budget (100 names of ~2.5 KB) take more than the listing's together.
-    const loaded = [
-      ...(await Promise.all(['p1', 'p2', 'p3', 'p4', 'p5'].map((n) => bulky(n, 100, 'ü名', 500)))),
-      await bulky('p6', 1, 'x', 1),
-    ]
+    const pkgs = [...(await Promise.all(['p1', 'p2', 'p3', 'p4', 'p5'].map((n) => bulky(n, 100, 'ü名', 500)))), await bulky('p6', 1, 'x', 1)]
+    const pins = pkgs.map((p) => ({ name: p.name, fetchUrl: 'https://git.test/x.git', fetchPath: '', commit: 'c', contentHash: p.contentHash }))
+    const installer = { acquire: async (pin: { name: string }) => ({ dir: pkgs.find((p) => p.name === pin.name)!.dir, release: () => {}, builtinTools: [] }) }
+    const load = () => loadPackagesForRun({ enabledPins: async () => pins }, installer)
+    const note = expect.stringMatching(/^plugin package p5 was not loaded: .*listing/)
+    // Classic: the directories Claude Code is handed.
+    const classic = await load()
+    expect(classic.paths).toEqual(['p1', 'p2', 'p3', 'p4', 'p6'].map((n) => pkgs.find((p) => p.name === n)!.dir))
+    expect(classic.problems).toEqual([note])
+    // Durable: the listing's packages, from the same load.
     const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
-    const listing = await listingOver(loaded, [], root)
+    const listing = await turnServers({ packages: { load, root, localRoot: root, forward: none } })({ session: 's', owner: OWNER, signal: new AbortController().signal, listing: true })
     expect(listing.packages!.map((p) => p.name)).toEqual(['p1', 'p2', 'p3', 'p4', 'p6'])
-    expect(listing.problems).toContainEqual(expect.stringMatching(/^plugin package p5 was not loaded: .*listing/))
+    expect(listing.problems).toEqual([note])
     expect(Buffer.byteLength(JSON.stringify(listing.packages))).toBeLessThanOrEqual(LISTING_PACKAGES_BUDGET)
   })
 
