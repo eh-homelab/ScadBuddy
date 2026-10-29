@@ -3,21 +3,25 @@ import { type Principal, tiersUpTo } from '../src/auth/principal.js'
 import { TabHub, type TabConnection } from '../src/bridge/hub.js'
 import { PostgresPairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame, CallOutcome } from '../src/bridge/protocol.js'
-import { PgTabRelay } from '../src/bridge/relay.js'
+import { PgTabRelay } from '../src/bridge/pgRelay.js'
+import { TemporalTabRelay } from '../src/bridge/relay.js'
 import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
+import { PostgresTabOwnerStore } from '../src/bridge/tabOwners.js'
 import type { Database } from '../src/db.js'
 import { PgEventListener } from '../src/events/pgListener.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
-// #1916: two agent replicas on one database (bridge/relay.ts). Each has its own
+// #1916: two agent replicas on one database (bridge/pgRelay.ts). Each has its own
 // listener connection, relay and hub, as main.ts wires them; a call made on
 // replica A for a tab whose socket is on replica B reaches it through Postgres.
+// Kept for one release beside the Temporal relay (#4780, #4868): here it is the
+// fallback of a TemporalTabRelay with no client, so every call takes it.
 
 const TAB = 'tab-aaaaaaaaaaaaaaaaaaaaaa'
 const browser: Principal = { id: 'browser', kind: 'browser', tiers: tiersUpTo('outward') }
 const anonymous: Principal = { id: 'anonymous:session-1', kind: 'anonymous', tiers: ['read', 'write'] }
 
-type Replica = { hub: TabHub; relay: PgTabRelay; listener: PgEventListener }
+type Replica = { hub: TabHub; relay: PgTabRelay; temporal: TemporalTabRelay; listener: PgEventListener }
 
 /** A tab on `hub`; `answer` decides each call's outcome (undefined: never answers). */
 async function tab(hub: TabHub, answer: (frame: Extract<AgentFrame, { type: 'call' }>) => CallOutcome | undefined) {
@@ -48,14 +52,20 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
       log: () => {},
     })
     listener.start()
+    const temporal = new TemporalTabRelay({
+      owners: new PostgresTabOwnerStore(db.sql),
+      hostQueue: `agent-tools.test-${Math.random()}`,
+      fallback: relay,
+      log: () => {},
+    })
     const hub = new TabHub({
       pairings: new PostgresPairingStore(db.sql),
-      relay,
+      relay: temporal,
       sessionTabs: new PostgresSessionTabStore(db.sql),
       callTimeoutMs: 2_000,
       log: () => {},
     })
-    return { hub, relay, listener }
+    return { hub, relay, temporal, listener }
   }
 
   beforeAll(async () => {
@@ -63,7 +73,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
     expect(await db.ready()).toBe(true)
   })
   beforeEach(async () => {
-    await db.sql`TRUNCATE ai_browser_pairings, ai_bridge_messages, ai_session_tabs`
+    await db.sql`TRUNCATE ai_browser_pairings, ai_bridge_messages, ai_session_tabs, ai_tab_owners`
     a = replica()
     b = replica()
     await Promise.all([a.listener.ready(), b.listener.ready()])
@@ -188,14 +198,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
   })
 
   it('answers not connected when the tab left the owner between being claimed and run', async () => {
-    b.relay.serve({ holds: () => true, run: async () => ({ op: 'gone' }) })
+    b.relay.serve({ holds: () => true, tabs: () => [TAB], run: async () => ({ op: 'gone' }) })
     a.hub.pairSession('s1', TAB)
     const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })
     expect(outcome).toMatchObject({ ok: false, error: { code: 'no_browser', message: expect.stringMatching(/tab is not connected/) } })
   })
 
   it('gives up on an owner that acked and then never answered', async () => {
-    b.relay.serve({ holds: () => true, run: () => new Promise(() => {}) })
+    b.relay.serve({ holds: () => true, tabs: () => [TAB], run: () => new Promise(() => {}) })
     a.hub.pairSession('s1', TAB)
     const outcome = await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal(), timeoutMs: 300 })
     expect(outcome).toMatchObject({
@@ -251,24 +261,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`browser calls across replicas${TEST_DATABAS
     }
   })
 
-  it('writes a session tab only while it is still the one seen (#2271 review)', async () => {
-    const store = new PostgresSessionTabStore(db.sql)
-    const id = await chatSession()
-    expect(await store.setIf(id, 'tab-a', undefined)).toBe(true)
-    expect(await store.setIf(id, 'tab-b', undefined)).toBe(false) // a row now
-    expect(await store.setIf(id, 'tab-b', 'tab-x')).toBe(false)
-    expect(await store.get(id)).toBe('tab-a')
-    expect(await store.setIf(id, 'tab-b', 'tab-a')).toBe(true)
-    expect(await store.get(id)).toBe('tab-b')
-  })
-
-  it('pairs a session with no row whatever tab was seen: the seen tab may be this replica\'s map (#3478 review)', async () => {
-    const store = new PostgresSessionTabStore(db.sql)
-    const id = await chatSession()
-    expect(await store.setIf(id, 'tab-a', 'tab-x')).toBe(true)
-    expect(await store.get(id)).toBe('tab-a')
-    expect(await store.setIf(id, 'tab-b', 'tab-x')).toBe(false) // a row now, naming another tab
-    expect(await store.get(id)).toBe('tab-a')
+  // #4780 rollout: a replica on the new build calls a tab on one still on the old build,
+  // which writes no ai_tab_owners row. With no row, the call takes this relay, not Temporal.
+  it('falls back to this relay when no replica claims the tab in ai_tab_owners', async () => {
+    const start = vi.fn(() => Promise.reject(new Error('Temporal must not be used')))
+    a.temporal.useClient({ client: { workflow: { start } } as never, dropKey: async () => {} })
+    const t = await tab(b.hub, () => ({ ok: true, result: 'from the old build' }))
+    // B's host worker never polls (no startHosting), so it claims nothing, as an old build.
+    expect(await db.sql`SELECT 1 FROM ai_tab_owners WHERE tab_id = ${TAB}`).toHaveLength(0)
+    a.hub.pairSession('s1', TAB)
+    expect(await a.hub.call({ principal: browser, sessionId: 's1' }, 'snapshot', {}, { signal: signal() })).toEqual({
+      ok: true,
+      result: 'from the old build',
+    })
+    expect(t.calls).toHaveLength(1)
+    expect(start).not.toHaveBeenCalled()
   })
 
   it('keeps a tab connected here local: nothing goes through the database', async () => {

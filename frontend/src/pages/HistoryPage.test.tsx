@@ -675,6 +675,113 @@ describe('HistoryPage', () => {
     expect(within(await row(without.name!)).getByLabelText(`No preview of ${without.name!}`)).toBeInTheDocument()
   })
 
+  it('says there is no preview when the thumbnail does not load (#4775)', async () => {
+    const { user } = render()
+    const reagan = await row('Reagan')
+    const preview = within(reagan).getByRole('button', { name: 'Preview Reagan' })
+    await user.click(preview)
+    const dialog = await screen.findByRole('dialog', { name: 'Reagan' })
+    // The server could not draw one: the image answers 404 instead of a PNG.
+    fireEvent.error(within(dialog).getByRole('img', { name: 'Preview of Reagan' }))
+    expect(within(dialog).queryByRole('img')).not.toBeInTheDocument()
+    expect(within(dialog).getByText('No preview')).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    fireEvent.error(preview.querySelector('img')!)
+    expect(within(reagan).queryByRole('button', { name: 'Preview Reagan' })).not.toBeInTheDocument()
+    expect(within(reagan).getByLabelText('No preview of Reagan')).toBeInTheDocument()
+  })
+
+  it('shows a thumbnail that arrives after one failed to load (#4775)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    const reagan = outputs.find((o) => o.name === 'Reagan')!
+    const listed = (hasThumbnail: boolean) =>
+      server.use(
+        http.get('/api/v1/models/:slug/outputs', () =>
+          HttpResponse.json(outputs.map((o) => (o.id === reagan.id ? { ...o, has_thumbnail: hasThumbnail } : o))),
+        ),
+      )
+    render()
+    const item = await row('Reagan')
+    fireEvent.error(within(item).getByRole('button', { name: 'Preview Reagan' }).querySelector('img')!)
+    expect(within(item).getByLabelText('No preview of Reagan')).toBeInTheDocument()
+    await waitFor(() => expect(realtime.following()).toContain('model:name-keychain'))
+
+    // The list read again says it has none, then that an upload gave it one.
+    listed(false)
+    await realtime.signal('model:name-keychain', 'output.updated')
+    expect(within(await row('Reagan')).getByLabelText('No preview of Reagan')).toBeInTheDocument()
+    listed(true)
+    await realtime.signal('model:name-keychain', 'output.updated')
+    expect(await within(await row('Reagan')).findByRole('button', { name: 'Preview Reagan' })).toBeInTheDocument()
+  })
+
+  it('tries a thumbnail again each time the list is read, though it still says it has one (#4811)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    render()
+    const item = await row('Reagan')
+    // The draw outlived its read (a 503); it said it had one, and still does.
+    fireEvent.error(within(item).getByRole('button', { name: 'Preview Reagan' }).querySelector('img')!)
+    expect(within(item).getByLabelText('No preview of Reagan')).toBeInTheDocument()
+    await waitFor(() => expect(realtime.following()).toContain('model:name-keychain'))
+
+    // The draw ended and said so: the list is read again, with has_thumbnail unchanged.
+    await realtime.signal('model:name-keychain', 'output.updated')
+    expect(await within(await row('Reagan')).findByRole('button', { name: 'Preview Reagan' })).toBeInTheDocument()
+  })
+
+  it('fetches a drawn or replaced thumbnail, in the row and in the larger preview (#4841)', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    const reagan = outputs.find((o) => o.name === 'Reagan')!
+    const listed = (version: string | null) =>
+      server.use(
+        http.get('/api/v1/models/:slug/outputs', () =>
+          HttpResponse.json(outputs.map((o) => (o.id === reagan.id ? { ...o, thumbnail_version: version } : o))),
+        ),
+      )
+    // No file yet: the first read draws one, with no version to name.
+    listed(null)
+    const { user } = render()
+    const picture = async () =>
+      within(await row('Reagan')).getByRole('button', { name: 'Preview Reagan' }).querySelector('img')
+    expect(await picture()).toHaveAttribute('src', `/api/v1/outputs/${reagan.id}/thumbnail`)
+    await waitFor(() => expect(realtime.following()).toContain('model:name-keychain'))
+
+    // The draw ended and said so: the list names the file it wrote.
+    listed('a1')
+    await realtime.signal('model:name-keychain', 'output.updated')
+    await waitFor(async () =>
+      expect(await picture()).toHaveAttribute('src', `/api/v1/outputs/${reagan.id}/thumbnail?v=a1`),
+    )
+
+    // An upload replaced the image while the larger preview was open: the same
+    // elements would never fetch it again.
+    await user.click(within(await row('Reagan')).getByRole('button', { name: 'Preview Reagan' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Reagan' })
+    listed('b2')
+    await realtime.signal('model:name-keychain', 'output.updated')
+    await waitFor(() =>
+      expect(within(dialog).getByRole('img', { name: 'Preview of Reagan' })).toHaveAttribute(
+        'src',
+        `/api/v1/outputs/${reagan.id}/thumbnail?v=b2`,
+      ),
+    )
+    await user.keyboard('{Escape}')
+    expect(await picture()).toHaveAttribute('src', `/api/v1/outputs/${reagan.id}/thumbnail?v=b2`)
+  })
+
   it('offers Queue, Download 3MF and Rename on every output (#2288)', async () => {
     const { user } = render()
     for (const name of ['Reagan', 'Nova', 'Workshop']) {

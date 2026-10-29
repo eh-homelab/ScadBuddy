@@ -79,7 +79,7 @@ describe('SessionTouched', () => {
     setSessionResources('sess-lib2', [row({ type: 'library', id: 'MCAD', model: null, action: 'modified', tool: 'x' })])
     renderPage(<SessionTouched sessionId="sess-lib2" />)
     const libraries = await screen.findByRole('group', { name: 'Libraries' })
-    expect(within(libraries).getByRole('link', { name: 'MCAD' })).toHaveAttribute('href', '/settings#libraries')
+    expect(within(libraries).getByRole('link', { name: 'MCAD' })).toHaveAttribute('href', '/settings/library#libraries')
   })
 
   it('groups what the session touched by kind, each linking to its page', async () => {

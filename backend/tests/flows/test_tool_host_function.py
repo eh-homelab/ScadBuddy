@@ -207,11 +207,11 @@ async def test_a_tool_the_agent_raises_in_settings_waits_for_approval(
     assert served.calls == []
 
 
-async def test_the_agents_tier_never_lowers_the_runs_own(
+async def test_a_tier_lowered_while_the_run_is_under_way_takes_effect_on_its_next_call(
     outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
 ) -> None:
-    """An agent that answers lower than the tiers the run started with (an older replica,
-    a tier lowered since) only raises: the call still waits for approval."""
+    """#2171: the agent's tier is taken as given, in either direction: a tool lowered
+    since the run started runs without approval. Records `lowered.json`."""
     served, queue = tools
     run_id = await outward.run(
         script(
@@ -226,8 +226,49 @@ async def test_the_agents_tier_never_lowers_the_runs_own(
     await AgentClient(outward.client, run.workflow_id).provide_callback_result(
         run.waiting_on[0].call_id, result={"answer": "yes"}
     )
-    parked = await outward.row(run_id, lambda r: any(w.kind == "approval" for w in r.waiting_on))
-    assert [w.fn for w in parked.waiting_on] == ["tool:send_to_bambuddy"]
+    run = await outward.finished(run_id)
+    assert run.status == "succeeded"
+    assert [s.outward for s in run.steps if s.fn == "tool:send_to_bambuddy"] == [False]
+    assert [c[0] for c in served.calls] == ["send_to_bambuddy"]
+    if RECORD:
+        handle = outward.client.get_workflow_handle(f"flow-{run_id}")
+        (HISTORIES / "lowered.json").write_text((await handle.fetch_history()).to_json())
+
+
+async def test_a_tool_lowered_from_outward_runs_without_approval(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    served, queue = tools
+    agent.tiers["send_to_bambuddy"] = "write"
+    run_id = await outward.run(
+        script("return await tool('send_to_bambuddy', {'output_id': 'o1'})"),
+        tools_queue=queue,
+        tool_tiers={"send_to_bambuddy": "outward"},
+    )
+    run = await outward.finished(run_id)
+    assert run.status == "succeeded"
+    assert [s.outward for s in run.steps] == [False]
+    assert [c[0] for c in served.calls] == ["send_to_bambuddy"]
+
+
+async def test_the_camera_off_is_refused_before_it_parks(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    served, queue = tools
+    agent.tiers["get_printer_camera"] = "outward"
+    agent.disabled.add("get_printer_camera")
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('get_printer_camera', {})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "disabled" in (run.result or "")
+    assert run.steps == []
     assert served.calls == []
 
 
@@ -341,6 +382,50 @@ async def test_a_write_tool_runs_once_even_when_its_attempt_fails(
     assert [c[0] for c in served.calls] == ["make_thing"]
 
 
+async def test_an_outward_tool_lowered_to_read_runs_once_even_when_its_attempt_fails(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    """#2171, review I2: whether a retry is safe is the code's to say. A tool outward in
+    code that Settings lowered to read runs without approval, but is never sent again."""
+    served, queue = tools
+    agent.tiers["make_thing"] = "read"
+    agent.declared["make_thing"] = "outward"
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('make_thing', {})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "lost its answer" in (run.result or "")
+    assert [s.outward for s in run.steps] == [False]
+    assert [c[0] for c in served.calls] == ["make_thing"]
+
+
+async def test_a_read_tool_from_an_agent_that_does_not_say_its_declared_tier_runs_once(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    """An agent from before `declared` says nothing of the code tier: counted outward."""
+    served, queue = tools
+    agent.tiers["make_thing"] = "read"
+    agent.declared_missing.add("make_thing")
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('make_thing', {})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "lost its answer" in (run.result or "")
+    assert [c[0] for c in served.calls] == ["make_thing"]
+
+
 class TurnTools:
     """The agent's turn tools (#2320): `turn_tool_tier` on the tools queue, and each call
     the activity `turn:<server>__<tool>`, here on a replica's own queue, as a pinned
@@ -360,6 +445,12 @@ class TurnTools:
         self.call_delay_s = 0.0
         self.tiered: list[str] = []
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
+        #: Set: http_request's access in Settings, its tier whatever the method (#2171).
+        self.access: str | None = None
+        #: Set: every call fails with this retryable message, as one that lost its answer.
+        self.call_fails: str | None = None
+        #: False: the tier answers no `declared`, as an agent from before it answers.
+        self.says_declared = True
 
     def tier(self) -> Any:
         @activity.defn(name="turn_tool_tier")
@@ -378,7 +469,11 @@ class TurnTools:
                     non_retryable=True,
                 )
             method = args["input"].get("method")
-            return {"tier": "read" if method == "GET" else "outward", "task_queue": self.host}
+            declared = "read" if method == "GET" else "outward"
+            answer: dict[str, Any] = {"tier": self.access or declared, "task_queue": self.host}
+            if self.says_declared:
+                answer["declared"] = declared
+            return answer
 
         return turn_tool_tier
 
@@ -389,6 +484,8 @@ class TurnTools:
             fields = activity.payload_converter().from_payload(args[0].payload, dict)
             self.calls.append((info.activity_type, info.activity_id, fields))
             await asyncio.sleep(self.call_delay_s)
+            if self.call_fails is not None:
+                raise ApplicationError(self.call_fails)
             return f"{fields['method']} done"
 
         return turn_call
@@ -403,6 +500,32 @@ async def turn_tools(outward: Outward) -> AsyncIterator[tuple[TurnTools, str]]:
         Worker(outward.client, task_queue=served.host, activities=[served.call()]),
     ):
         yield served, queue
+
+
+@pytest.mark.parametrize("says_declared", [True, False])
+async def test_an_http_post_lowered_to_read_runs_once_when_its_attempt_fails(
+    outward: Outward, turn_tools: tuple[TurnTools, str], says_declared: bool
+) -> None:
+    """#2171, review residual (c): http_request set to read in Settings runs a POST without
+    approval, but a POST is still a POST: it is never sent again. An agent that does not
+    say `declared` counts as outward."""
+    served, queue = turn_tools
+    served.access = "read"
+    served.call_fails = "lost its answer"
+    served.says_declared = says_declared
+    run_id = await outward.run(
+        script(
+            "try:",
+            "    await tool('scadbuddy_http__http_request', {'method': 'POST'})",
+            "except Exception as e:",
+            "    return str(e)",
+        ),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "lost its answer" in (run.result or "")
+    assert [s.outward for s in run.steps] == [False]
+    assert len(served.calls) == 1
 
 
 async def test_a_turn_tool_runs_on_the_queue_its_tier_names(

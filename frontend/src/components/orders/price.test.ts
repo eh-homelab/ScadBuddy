@@ -1,9 +1,31 @@
 import { describe, expect, it } from 'vitest'
-import type { OrderItemDetail } from '../../api/types'
+import type { OrderItemDetail, Quote } from '../../api/types'
 import { byCreated, itemPrice, parseUnitPrice, unitPrice } from './price'
 
-function priced(quantity: number, quotes: { id: string; created_at: string; unit_price_minor: number; total_minor: number; accepted: boolean }[]) {
-  return { quantity, quotes } as unknown as OrderItemDetail
+type QuoteFields = Pick<Quote, 'id' | 'created_at' | 'unit_price_minor' | 'total_minor' | 'accepted'>
+
+/** A whole `Quote` from the fields these tests vary, so the fixture keeps in step with the type. */
+function quote({ id, created_at, unit_price_minor, total_minor, accepted }: QuoteFields): Quote {
+  return {
+    id,
+    order_item_id: 'i-1',
+    created_at,
+    source: 'manual',
+    accepted,
+    sliced_sha256: null,
+    sliced_blob_key: null,
+    plates: [],
+    lines: [{ kind: 'manual', label: 'Quoted by hand', quantity: 1, unit_minor: unit_price_minor, amount_minor: unit_price_minor }],
+    unit_cost_minor: unit_price_minor,
+    unit_price_minor,
+    quantity: unit_price_minor ? Math.round(total_minor / unit_price_minor) : 0,
+    total_minor,
+    created_by: { kind: 'browser', principal: null, session: null },
+  }
+}
+
+function priced(quantity: number, quotes: QuoteFields[]): Pick<OrderItemDetail, 'quantity' | 'quotes'> {
+  return { quantity, quotes: quotes.map(quote) }
 }
 
 describe('unitPrice', () => {
@@ -52,6 +74,14 @@ describe('byCreated', () => {
     const whole = { id: 'b', created_at: '2026-10-24T23:00:00Z' }
     const later = { id: 'a', created_at: '2026-10-24T23:00:00.123Z' }
     expect([later, whole].sort(byCreated).map((q) => q.id)).toEqual(['b', 'a'])
+  })
+
+  it('breaks a tie on the millisecond by the microseconds, as the backend does (#4725)', () => {
+    const first = { id: 'z', created_at: '2026-10-24T23:00:00.123100Z' }
+    const second = { id: 'a', created_at: '2026-10-24T23:00:00.123900Z' }
+    expect([second, first].sort(byCreated).map((q) => q.id)).toEqual(['z', 'a'])
+    // A whole millisecond and its own microseconds: .123 is .123000.
+    expect([{ id: 'b', created_at: '2026-10-24T23:00:00.123001Z' }, { id: 'c', created_at: '2026-10-24T23:00:00.123Z' }].sort(byCreated).map((q) => q.id)).toEqual(['c', 'b'])
   })
 
   it('breaks a tie by id', () => {

@@ -5,9 +5,10 @@ A submit starts `TemplatePipeline` as ``render-<render_key>`` with update-with-s
 the workflow's first activity inserts the `render_jobs` row and its `accepted`
 Update answers it, so a row exists only once its execution does and nothing needs
 reconciling. An identical request that reaches the open execution joins it as one more
-claim (workflow state); a supersede sends the job's execution its `release` Update,
-and the last one cancels it. The projection publishes every ``job.*``
-event in its own transaction; nothing is announced here.
+claim (workflow state); one whose render has already finished is answered with that
+`done` job while its refs still hold its result (#4870), with no run. A supersede sends
+the job's execution its `release` Update, and the last one cancels it. The projection
+publishes every ``job.*`` event in its own transaction; nothing is announced here.
 """
 
 from __future__ import annotations
@@ -218,16 +219,22 @@ class RenderService:
         whole_inputs: bool = False,
         request_id: str | None = None,
         accept_within: timedelta | None = None,
+        reuse_finished: bool = False,
     ) -> Job:
         """Start the job's execution, or join the open one rendering the same content,
-        and answer the row its first activity wrote. ``whole_inputs``: a pipeline
-        template's job, keyed on all of its inputs (§3.4). ``request_id`` (the request's
-        `Idempotency-Key`) makes a re-sent request the same claim, not another: it is
-        the `accepted` Update's id, which Temporal answers with its first outcome on
-        the open run and, once that run has closed, on the closed one (until another
-        run of the key starts). ``accept_within`` is how long the Update is waited on
-        before `CommandStillAcceptingError` (``None``: `COMMAND_ANSWER_DEADLINE`), shorter
-        for a client that follows the Update itself (`follow`, spec 2026-10-13)."""
+        and answer the row its first activity wrote. With ``reuse_finished``, a finished
+        job of the same content whose result is still held answers instead
+        (`JobProjection.reuse_done`, #4870): for a caller that needs only the job's
+        answer. One whose work follows the run (a backfill attaches on the settling
+        event of the job it recorded) leaves it False and gets a run.
+        ``whole_inputs``: a pipeline template's job, keyed on all of its inputs (§3.4).
+        ``request_id`` (the request's `Idempotency-Key`) makes a re-sent request the
+        same claim, not another: it is the `accepted` Update's id, which Temporal
+        answers with its first outcome on the open run and, once that run has closed,
+        on the closed one (until another run of the key starts). ``accept_within`` is
+        how long the Update is waited on before `CommandStillAcceptingError` (``None``:
+        `COMMAND_ANSWER_DEADLINE`), shorter for a client that follows the Update itself
+        (`follow`, spec 2026-10-13)."""
         refusal: Exception | None = None
         with span("render.submit", attributes={"scadbuddy.slug": slug}) as current:
             try:
@@ -240,6 +247,7 @@ class RenderService:
                     whole_inputs=whole_inputs,
                     request_id=request_id,
                     accept_within=accept_within,
+                    reuse_finished=reuse_finished,
                 )
             except (ApiError, QueueFullError) as error:
                 if isinstance(error, ApiError) and error.status >= 500:
@@ -272,6 +280,7 @@ class RenderService:
         whole_inputs: bool = False,
         request_id: str | None = None,
         accept_within: timedelta | None = None,
+        reuse_finished: bool = False,
     ) -> tuple[Job, bool]:
         if self.snapshots is not None:
             # The bambuddy store (spec §6.1): workers read the source from the store,
@@ -311,6 +320,21 @@ class RenderService:
             # The same render it replaces: answered with it, as the row did (no claim).
             self.metrics.render_coalesced.labels("render").inc()
             return previous, True
+        # #4870: update-with-start joins only an open run, so a render that already
+        # finished would run its pipeline again. A done job of the key whose result is
+        # still held is the answer, with no row and no run; the key decides, so a newer
+        # revision or a changed keyed input is another key and renders.
+        done = (
+            await asyncio.to_thread(self.store.reuse_done, start.render_key)
+            if reuse_finished
+            else None
+        )
+        if done is not None:
+            if previous is not None:
+                # Never raises: a release that fails is a warning, as in `_started`.
+                await self._supersede(previous, request_id)
+            self.metrics.render_coalesced.labels("render").inc()
+            return done, True
         return await self._answer(start, previous, request_id, accept_within)
 
     async def _answer(

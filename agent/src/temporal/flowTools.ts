@@ -36,11 +36,15 @@ export async function flowToolTiers(tools: readonly Tool[], services: Pick<ToolS
   return Promise.all(tools.filter(forFlows).map((tool) => tierOf(tool, services)))
 }
 
-/** `flow_tool_tier`: `{tool}` to `{tier, disabled}`, for a `flow-<run id>` workflow only. */
+/**
+ * `flow_tool_tier`: `{tool}` to `{tier, disabled, declared}`, for a `flow-<run id>` workflow
+ * only. `declared` is the code's tier: whether a retry is safe is the code's to say, so the
+ * flow retries only when both tiers are `read` (#2171).
+ */
 export function flowToolTierActivity(
   tools: readonly Tool[],
   services: Pick<ToolServices, 'toolOverrides'>,
-): (input: unknown) => Promise<{ tier: Risk; disabled: boolean }> {
+): (input: unknown) => Promise<{ tier: Risk; disabled: boolean; declared: Risk }> {
   const byName = new Map(tools.map((t) => [t.name, t]))
   return async (input: unknown) => {
     const workflowId = Context.current().info.workflowExecution?.workflowId
@@ -55,6 +59,6 @@ export function flowToolTierActivity(
       throw ApplicationFailure.nonRetryable(`${name} is not for flows: a flow has no session and no browser tab`, 'NotForFlows')
     }
     const { tier, disabled } = await tierOf(tool, services)
-    return { tier, disabled }
+    return { tier, disabled, declared: tool.risk }
   }
 }

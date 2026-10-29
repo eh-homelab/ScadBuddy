@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { packageServerSource } from '../../access/model.js'
+import type { AccessResolver } from '../../access/resolver.js'
 import { existsSync } from 'node:fs'
 import { cp, mkdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises'
 import path from 'node:path'
@@ -28,8 +30,9 @@ import { packageLedgerId } from '../pluginSessions.js'
 //
 // Each server is a plugin named as Claude Code names a plugin's server,
 // `plugin_<package>_<server>`, so its tools keep their harness names
-// (`mcp__plugin_<package>_<server>__<tool>`). No package tool is ScadBuddy's, so none
-// has a tier listed: every call is outward, as before. vet.ts allows no `$` in a URL or
+// (`mcp__plugin_<package>_<server>__<tool>`). Its tools' tiers and disabled tools are
+// the `package:<pkg>/mcp:<server>` rows in ai_access (#2171); a tool with none stored,
+// or every tool without the resolver, is outward. vet.ts allows no `$` in a URL or
 // header. The package is someone else's repository, so its URL and its one header are
 // checked as a remote plugin's are when it is registered (registry.ts
 // `normalisePluginUrl`, `validateHeaderName`, `validateSecret`: a token name, none the
@@ -39,6 +42,8 @@ import { packageLedgerId } from '../pluginSessions.js'
 
 export type PackageServers = {
   plugins: HarnessPlugin[]
+  /** Each of `plugins`, in order: its package and server, whose ai_access source the seam reads per call (access/live.ts). */
+  servers?: { name: string; pkg: string; server: string }[]
   /** Each server's `pluginEndpoint` (its declared URL and header), in `plugins` order. */
   endpoints?: PluginEndpoint[]
   problems: string[]
@@ -70,9 +75,11 @@ export async function forwardPackageServers(
   loaded: readonly LoadedPackage[],
   forwarder: Pick<PluginForwarder, 'register'>,
   resolve: Resolver = systemResolver,
-  options: Pick<ForwardOptions, 'record'> = {},
+  options: Pick<ForwardOptions, 'record'> & { access?: Pick<AccessResolver, 'plugin'> } = {},
 ): Promise<PackageServers> {
+  const { access, ...forwardOptions } = options
   const plugins: HarnessPlugin[] = []
+  const servers: NonNullable<PackageServers['servers']> = []
   const endpoints: PluginEndpoint[] = []
   const problems: string[] = []
   const secrets: string[] = []
@@ -118,25 +125,22 @@ export async function forwardPackageServers(
           problems.push(`${what} is not offered: ${err.message}`)
           continue
         }
-        const plugin: RemotePlugin = {
-          name,
-          url,
-          ...(header ? { header } : {}),
-          toolTiers: {},
-          disabledTools: [],
-        }
-        const registration = forwarder.register(plugin, address, { ...options, ledgerId: packageLedgerId(name) })
+        const { toolTiers, disabledTools } = access ? await access.plugin(packageServerSource(pkg.name, server)) : { toolTiers: {}, disabledTools: [] }
+        const plugin: RemotePlugin = { name, url, ...(header ? { header } : {}), toolTiers, disabledTools }
+        const registration = forwarder.register(plugin, address, { ...forwardOptions, ledgerId: packageLedgerId(name) })
         releases.push(registration.release)
         registrations.push(registration)
         if (header) secrets.push(...headerSecretVariants(header.value))
         secrets.push(registration.url)
-        plugins.push({ name, url: registration.url, toolTiers: {}, disabledTools: [] })
+        plugins.push({ name, url: registration.url, toolTiers, disabledTools })
+        servers.push({ name, pkg: pkg.name, server })
         endpoints.push(pluginEndpoint(plugin))
       }
     }
   }
   return {
     plugins,
+    servers,
     endpoints,
     problems,
     secrets,

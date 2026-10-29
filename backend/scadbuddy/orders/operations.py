@@ -14,6 +14,7 @@ run's failure, recorded with its text.
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Mapping
 from contextlib import aclosing
@@ -21,19 +22,22 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import client_for, maybe_client
 from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
-from scadbuddy.bambuddy.print_run import PrintRunRequest
+from scadbuddy.bambuddy.print_run import PrintRunRequest, registry_printer, slice_route
 from scadbuddy.bambuddy.print_source import OutputSource
+from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import declares_pipeline
+from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.operations import PIN_TIMEOUT
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, to_thread_to_end
 from scadbuddy.orders import attachments
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
-from scadbuddy.orders.models import Actor
+from scadbuddy.orders.models import Actor, Reference
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.quote import (
     MAX_SLICED_BYTES,
@@ -44,11 +48,18 @@ from scadbuddy.orders.quote import (
     quote_run,
 )
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.printers.component import PRINTERS
 from scadbuddy.render.job_models import Job
+from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.runner import OpenSCADError, cached_schema
+from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
+from scadbuddy.store.cache import StaleBlobError
 
 if TYPE_CHECKING:
     from scadbuddy.core.components import Components, Core
+
+logger = logging.getLogger(__name__)
 
 ORDER_ITEM_QUOTE = "order_item_quote"
 ORDER_ATTACHMENT_ADD = "order_attachment_add"
@@ -85,6 +96,25 @@ class PreviewSlicer:
     ) -> list[PreviewStarted]:
         core = self.core
         settings = await asyncio.to_thread(core.settings_store.load)
+        body = PrintRunRequest(
+            printer=request.printer,
+            printer_id=request.printer_id,
+            filament_plan=request.filament_plan,
+            choices=request.choices,
+        )
+        registry = self.components.get(PRINTERS)
+        # The run's own decision (plan 2026-10-18 D2), as the dialog's background slice
+        # makes it (`slice_route`): a quote for a printer a run reaches over the LAN
+        # builds no Bambuddy client (D3, #4551).
+        route = await slice_route(
+            settings,
+            registry.store,
+            registry.reports,
+            printer=body.printer,
+            printer_id=body.printer_id,
+        )
+        lan = route is not None and route.native
+        native_reads = await self.components.get(PRINT_LIBRARY).serving_native()
         outputs = LocalOutputs(core.outputs, core.catalogue)
         meta = await require(outputs, output_id)
         naming = await outputs.naming(meta)
@@ -96,15 +126,11 @@ class PreviewSlicer:
             # The quote's copy goes to the inbox, as the dialog's does.
             stem=None,
             print_settings=naming.print_settings,
+            # A native run's copy goes into the native library (D6).
+            native=native_reads if lan else None,
         )
         slicing = self.components.get(SLICING)
-        body = PrintRunRequest(
-            printer_id=request.printer_id,
-            filament_plan=request.filament_plan,
-            choices=request.choices,
-        )
-        native_reads = await self.components.get(PRINT_LIBRARY).serving_native()
-        async with client_for(settings) as client:
+        async with maybe_client(settings, native=lan) as client:
             return await start_preview_plates(
                 client,
                 source,
@@ -116,6 +142,8 @@ class PreviewSlicer:
                 native_slices=slicing.store,
                 temporal=slicing.temporal(),
                 native_reads=native_reads,
+                route=route,
+                title=naming.title,
             )
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
@@ -174,6 +202,28 @@ class PreviewSlicer:
         return bytes(data)
 
 
+async def reference_schema(core: Core, reference: Reference) -> CustomizerSchema | None:
+    """The schema of the reference's commit, for the quote's `output_matches` (#4774);
+    None for a pipeline template, whose params need not be `model.scad`'s, or when it
+    cannot be read: then the inputs are compared exactly, as before."""
+    try:
+        source = await resolve_source(
+            reference.slug,
+            reference.commit,
+            paths=core.paths,
+            history=core.history,
+            fetcher=CheckoutFetcher(core.libraries, core.installs, core.checkouts),
+        )
+        if await asyncio.to_thread(declares_pipeline, source.scad.parent, reference.slug):
+            return None
+        return await cached_schema(
+            source.scad, source.schema_cache, config=source.configure(core.config)
+        )
+    except (OSError, ValueError, GitError, RevisionNotFoundError, OpenSCADError):
+        logger.warning("no schema for an item's reference", exc_info=True)
+        return None
+
+
 class _Renders:
     """``RenderService`` as ``orders/quote.py`` ``ensure_output`` reads it."""
 
@@ -189,8 +239,14 @@ class _Renders:
         inputs: Mapping[str, Any] | None = None,
         whole_inputs: bool = False,
     ) -> Job:
+        # The quote reads the done job's outputs only, so a finished one will do (#4870).
         return await self.core.render.submit(
-            slug, params, model_version=model_version, inputs=inputs, whole_inputs=whole_inputs
+            slug,
+            params,
+            model_version=model_version,
+            inputs=inputs,
+            whole_inputs=whole_inputs,
+            reuse_finished=True,
         )
 
     def read(self, job_id: str) -> Job:
@@ -207,6 +263,15 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         slots = await asyncio.to_thread(
             quote_check, orders.store, policy, request["order_id"], request["item_id"], body
         )
+        if body.printer is not None:
+            # A registry printer the run would refuse (a disagreeing pair, a virtual
+            # printer) is refused here, before the 202, as Arrange refuses it (#4551).
+            # The run judges the pair again (`slice_route`): a row merged or deleted in
+            # between fails the quote then, as it would fail a run.
+            settings = await asyncio.to_thread(core.settings_store.load)
+            await registry_printer(
+                body.printer, body.printer_id, settings, components.get(PRINTERS).store
+            )
         return {"slots": {str(slot): filament for slot, filament in slots.items()}}
 
     async def quote_run_kind(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -228,6 +293,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             slicer=PreviewSlicer(core, components),
             blobs=core.store.blobs,
             refs=orders.refs,
+            schema_of=lambda reference: reference_schema(core, reference),
         )
         quote = await quote_run(
             run,
@@ -267,6 +333,15 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 status.HTTP_409_CONFLICT,
                 "this request's upload is no longer held; send it again",
             ) from None
+        except StaleBlobError:
+            # The same bytes are stored on the other backend of a `/store/migrate`
+            # (`CachedBlobStore.claim`): the upload works once the store has moved.
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "the stored copy of these bytes is not on this store's backend (a"
+                " `/store/migrate` in progress?); send the file again once it has flipped"
+                " `store_backend` and the API has restarted",
+            ) from None
         try:
             attachment = await to_thread_to_end(
                 lambda: orders.lifecycle.add_attachment(
@@ -296,6 +371,9 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             ORDER_ATTACHMENT_ADD,
             attachment_check,
             attachment_run,
+            # A second attempt after a partial failure would only repeat the same
+            # claimed bytes: the caller re-sends instead.
+            run_attempts=1,
             queue="library",
             # Moves (or copies) up to the upload limit into the blob store and publishes it.
             run_timeout=PIN_TIMEOUT,

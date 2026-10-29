@@ -32,7 +32,7 @@ ARG BAMBU_STUDIO_SHA256_AMD64=d501b103fac5424513ec0e8d6bc145fb30719de2c7d94d7320
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.13.5 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.6 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 # Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
@@ -810,9 +810,31 @@ RUN case "$TARGETARCH" in \
     && temporal --version
 ENV SCADBUDDY_TEST_TEMPORAL_DEV_SERVER=/usr/local/bin/temporal
 
+# The fake LAN printer's broker (#4541): tests/support/fake_lan.py runs
+# e2e-stack/fake-printer/printer.py in-process, which starts a mosquitto 2, so the
+# native-run tests (tests/test_print_native_workflow.py, tests/api/test_hot_path_native.py,
+# tests/printers/test_fake_printer.py) run in every backend-pytest shard rather than skip.
+# Unpinned like the base stage's packages; named by path, since /usr/sbin is not on
+# every PATH a test runner sets.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends mosquitto \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -x /usr/sbin/mosquitto
+# With both here, a fake-printer test that would skip fails instead
+# (tests/support/fake_lan.py `skip_unless`), so no shard passes with them skipped.
+ENV SCADBUDDY_TEST_MQTT=/usr/sbin/mosquitto \
+    SCADBUDDY_TEST_FAKES_REQUIRED=1
+
 # The slice_plate vectors the Rust workers test against too (workers/rust/vectors,
 # #3821): tests/slicing reads them from the repo layout, so they sit beside the backend.
 COPY workers/rust/vectors /app/workers/rust/vectors
+
+# The fakes the tests load from the repo layout (fake_lan.py's PRINTER_PY,
+# test_bambuddy_recorder.py's RECORDER_PY), beside the backend. Last, so a change to a
+# fake rebuilds no other layer.
+COPY e2e-stack/fake-printer /app/e2e-stack/fake-printer
+COPY e2e-stack/bambuddy-recorder /app/e2e-stack/bambuddy-recorder
 
 # Numeric, not `scadbuddy`: a name is unresolvable to anything outside this
 # image, and Kubernetes' `runAsNonRoot` admission check can only read a uid.

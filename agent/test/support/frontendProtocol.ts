@@ -104,7 +104,7 @@ export async function frontendTabLink(): Promise<{
 
 /** The panel's respond bodies (frontend/src/agent/respond.ts, #815), to parse them with the route's own schema (#1386). */
 export async function frontendRespondBodies(): Promise<{
-  decisionBody: (approve: boolean) => unknown
+  decisionBody: (approve: boolean, inputHash?: string | null) => unknown
   answerBody: (
     questions: readonly { question: string; options: readonly { label: string }[] }[],
     answers: readonly string[],

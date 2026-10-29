@@ -335,9 +335,9 @@ function AuditLogView() {
   return (
     <Card role="region" className="mt-4 gap-0 py-0" aria-labelledby="ai-audit-heading">
       <CardHeader className="border-b py-3">
-        <h2 id="ai-audit-heading" className="font-heading text-sm font-medium">
+        <h4 id="ai-audit-heading" className="font-heading text-sm font-medium">
           AI activity
-        </h2>
+        </h4>
       </CardHeader>
       <CardContent className="space-y-3 py-4">
         <p className="text-xs text-muted-foreground">

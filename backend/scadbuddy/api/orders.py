@@ -94,6 +94,9 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 100
 LIST_PARAMS = frozenset({"status", "customer_id", "q", "from", "to", "cursor", "limit"})
+#: A line item's largest quantity: `order_items.quantity` is an `integer` column
+#: (migration 20261020T0446Z_orders.sql), so a larger one is a 422, never a 500 (#4763).
+MAX_QUANTITY = 2**31 - 1
 
 
 # -- bodies (Ruling 12: no author, no status) ----------------------------------------------
@@ -147,7 +150,7 @@ class ReferenceBody(BaseModel):
 
 class ItemCreate(ReferenceBody):
     output_id: str | None = None
-    quantity: int = Field(ge=1)
+    quantity: int = Field(ge=1, le=MAX_QUANTITY)
     title: str | None = Field(default=None, max_length=200)
     notes: str = ""
 
@@ -160,7 +163,7 @@ class ItemPatch(BaseModel):
 
     reference: ReferenceBody | None = None
     output_id: str | None = None
-    quantity: int | None = Field(default=None, ge=1)
+    quantity: int | None = Field(default=None, ge=1, le=MAX_QUANTITY)
     title: str | None = Field(default=None, max_length=200)
     notes: str | None = None
     #: ``{slot: filament_id | null}`` over the item's ``colours`` (#4250 Ruling 6): the

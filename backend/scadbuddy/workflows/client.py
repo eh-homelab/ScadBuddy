@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from datetime import timedelta
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from temporalio.api.enums.v1 import TaskQueueKind, TaskQueueType
@@ -60,6 +60,11 @@ LIBRARY_DEPLOYMENT_NAME = "scadbuddy-library"
 #: The flow runs' worker's deployment (#4146): `--queue projects`.
 PROJECTS_DEPLOYMENT_NAME = "scadbuddy-projects"
 RPC_TIMEOUT = timedelta(seconds=10)
+#: How recently a poller must have polled to count as another worker still serving the
+#: queue (#4869). A worker's long poll waits up to about 60 s with no task, and
+#: `last_access_time` moves only when a poll arrives, so a live idle worker can look 60
+#: to 70 s old.
+POLLER_SEEN_WITHIN = 90.0
 
 logger = logging.getLogger(__name__)
 
@@ -326,6 +331,39 @@ async def routes_to(
         if current.deployment_name != deployment_name or current.build_id != build_id:
             return False
     return True
+
+
+async def polled_elsewhere(
+    client: Client,
+    task_queue: str,
+    *,
+    deployment_name: str,
+    build_id: str,
+    identities: Collection[str],
+    within: float = POLLER_SEEN_WITHIN,
+) -> bool:
+    """Whether a worker of ``build_id`` other than ``identities`` (the asking
+    worker's own) polled ``task_queue``'s workflow tasks in the last ``within`` seconds:
+    `DescribeTaskQueue`'s pollers, which name each one's identity and build (measured on
+    prod, 2026-10-27). A stopping worker leaves its pinned runs to such a worker only
+    (#4869): in a rollout the build is still current while the new pods, of the next
+    build, start, and none of them serves a run pinned to this one."""
+    described = await client.workflow_service.describe_task_queue(
+        DescribeTaskQueueRequest(
+            namespace=client.namespace,
+            task_queue=TaskQueue(name=task_queue),
+            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
+        ),
+        timeout=RPC_TIMEOUT,
+    )
+    since = datetime.now(UTC) - timedelta(seconds=within)
+    return any(
+        poller.deployment_options.deployment_name == deployment_name
+        and poller.deployment_options.build_id == build_id
+        and poller.identity not in identities
+        and poller.last_access_time.ToDatetime(tzinfo=UTC) >= since
+        for poller in described.pollers
+    )
 
 
 async def is_current(

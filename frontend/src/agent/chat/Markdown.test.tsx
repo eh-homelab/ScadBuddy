@@ -185,6 +185,7 @@ describe('page context', () => {
     expect(suggestedPrompts('/m/x')).toContain('Explain these settings')
     expect(suggestedPrompts('/m/x/source')).toContain('Why does this fail to render?')
     expect(suggestedPrompts('/settings')).toContain('Help me connect Bambuddy')
+    expect(suggestedPrompts('/settings/tools')).toContain('Help me connect Bambuddy')
   })
 
   it('shortens tool names', () => {

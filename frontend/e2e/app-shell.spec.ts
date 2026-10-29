@@ -15,7 +15,7 @@ test('the sidebar folds to icons and its links still go to their pages', async (
   await nav.getByRole('link', { name: 'Settings' }).hover()
   await expect(page.getByRole('tooltip')).toHaveText('Settings')
   await nav.getByRole('link', { name: 'Settings' }).click()
-  await expect(page).toHaveURL(/\/settings$/)
+  await expect(page).toHaveURL(/\/settings\/general$/)
   await expect(nav.getByRole('link', { name: 'Settings' })).toHaveAttribute('aria-current', 'page')
   // Kept for the next page load.
   await page.reload()

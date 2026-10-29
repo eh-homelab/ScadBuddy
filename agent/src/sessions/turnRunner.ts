@@ -12,13 +12,11 @@ import path from 'node:path'
 import type { SDKMessage, SessionStore } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, ROOT_CONTEXT } from '@opentelemetry/api'
 import { NoUsableCredentialError, type PooledCredential } from '../harness/fallback.js'
-import {
-  HTTP_SERVER,
-  httpRequestEnabled,
-  httpRequestServer,
-  httpTierOf,
-  SETTING_HTTP_REQUEST,
-} from '../harness/httpRequest.js'
+import { BUILTIN_SOURCES, type ToolAccess } from '../access/model.js'
+import { DEFAULT_ACCESS } from '../access/resolve.js'
+import { liveAccess } from '../access/live.js'
+import { SeamLedger } from '../harness/seamLedger.js'
+import { HTTP_SERVER, HTTP_TOOL, httpAccessTierOf, httpRequestServer, httpTierOf } from '../harness/httpRequest.js'
 import type { RiskTier, TierResolver } from '../harness/permissions.js'
 import { isQuestionTool } from '../harness/questions.js'
 import { harnessTierOf, type HarnessRun } from '../harness/run.js'
@@ -26,7 +24,6 @@ import { ensureSessionDir } from '../harness/stateDirs.js'
 import { createMemoryHooks, HindsightClient, hindsightTarget, type MemoryHooks, turnRecallMaxQueryChars } from '../memory/hindsight.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { PluginEndpoint, PluginsForRun } from '../plugins/forwarder.js'
-import { ownPluginEnabled } from '../plugins/packages/builtins.js'
 import type { PackagesForRun } from '../plugins/packages/install.js'
 import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
@@ -39,7 +36,7 @@ import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
 import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
-import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnSlot } from './turnSlot.js'
+import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnContext, type TurnSlot } from './turnSlot.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { nestedQueries } from '../builtins/nested.js'
 import { browserGuard } from '../browser/guard.js'
@@ -52,6 +49,8 @@ export type TurnRunnerDeps = Pick<
   | 'paths'
   | 'credentials'
   | 'settings'
+  | 'access'
+  | 'tools'
   | 'tierOf'
   | 'mcpServers'
   | 'prepareApproval'
@@ -100,10 +99,12 @@ export type FingerprintParts = {
   owner: string
   systemAppend: string
   disabledTools: string[]
-  /** Settings → Plugins' raised tiers (#1953), `<harness name>=<tier>`, sorted. */
+  /** Settings → Tools & plugins' raised tiers (#1953), `<harness name>=<tier>`, sorted. */
   raisedTiers: string[]
   /** Whether the run has the http_request tool (#827). */
   httpRequest: boolean
+  /** http_request's stored access in ai_access (#2171), its tier when one is set; null when none is stored. */
+  httpTier: ToolAccess | null
   builtinTools: string[]
   /** The package built-ins the session serves in place of Claude Code's (#2684): background ones and WebFetch. */
   servedBuiltins: string[]
@@ -135,7 +136,7 @@ export type AssembledTurn = {
    * plugins' header values (and their bare tokens).
    */
   secrets: string[]
-  /** Each tool's tier as the permission seam applies it, plugins' and Settings → Plugins' raised tiers included. */
+  /** Each tool's tier as the permission seam applies it, plugins' and Settings → Tools & plugins' raised tiers included. */
   eventTierOf: TierResolver
   /** As `eventTierOf`, but AskUserQuestion and ask_user are `read` where the user is asked (#940): what the panel shows and audits. */
   shownTierOf: TierResolver
@@ -180,6 +181,7 @@ export class TurnRunner {
     'tierOf',
     'browser',
     'builtInPolicy',
+    'live',
     'approvalGate',
     'prepareApproval',
     'questionGate',
@@ -215,8 +217,9 @@ export class TurnRunner {
     maxTurns: 'spawn', // the session row's cap, fixed for the session (fingerprint rule)
     maxBudgetUsd: 'spawn', // what is left of the budget at spawn: its own reuse check (budget rule)
     maxRetries: 'transientRetries', // the fallback's bound on Claude Code's retries, set per attempt (warmTurn.ts)
-    tierOf: 'plugins', // the registry's tiers, widened by each plugin's `toolTiers`
-    builtInPolicy: 'raisedTiers', // Settings -> Plugins' raised tiers and disabled built-ins (`disabledTools`)
+    tierOf: 'plugins', // the registry's tiers, widened by each plugin's `toolTiers` (http_request's: `httpTier`)
+    builtInPolicy: 'raisedTiers', // Settings → Tools & plugins' raised tiers and disabled built-ins (`disabledTools`)
+    live: 'plugins', // reads each call's access as it runs; the sources it reads are the plugins' (its ledger is the slot's turn's)
     approvalGate: 'slot',
     prepareApproval: 'tiers', // bound to the principal, as `mcpServers` is (#4442)
     questionGate: 'slot', // present only for a browser-owned session, which `owner` fingerprints
@@ -257,11 +260,15 @@ export class TurnRunner {
     const phase = <T,>(name: string, run: () => Promise<T>) =>
       withSpan(`agent.turn.${name}`, parent ? { parent } : {}, run)
     const registryTierOf = this.deps.tierOf ?? (() => undefined)
-    // The http tools' tier depends on the method in their input (#827).
-    const tierOf: TierResolver = (name, input) => httpTierOf(name, input) ?? registryTierOf(name, input)
+    // Without one, every source and item is at its default.
+    const access = this.deps.access ?? DEFAULT_ACCESS
+    // The http tools' tier depends on the method in their input (#827), unless
+    // http_request's access in ai_access is a tier (#2171), read with its switch below.
+    let httpTier: TierResolver = httpTierOf
+    const tierOf: TierResolver = (name, input) => httpTier(name, input) ?? registryTierOf(name, input)
     // Widened with the plugins' tiers once they are loaded below, so the
     // panel shows a plugin tool at the tier the permission seam applies.
-    // Settings → Plugins' raised tiers (#1953), once read below, over every tier shown.
+    // Settings → Tools & plugins' raised tiers (#1953), once read below, over every tier shown.
     let builtIn: BuiltInPolicy | undefined
     const raised = (name: string, tier: RiskTier | undefined) => (tier === undefined || !builtIn ? tier : builtIn.tierOf(name, tier))
     let eventTierOf: TierResolver = (name, input) => raised(name, tierOf(name, input))
@@ -301,9 +308,9 @@ export class TurnRunner {
       // Sets the memory hooks up only: the recall and retain they run later are
       // inside the run, not under this span.
       const memory = hindsight ? await phase('memory', () => this.memoryHooks(hindsight, secrets, session)) : undefined
-      // Settings → plugin packages may switch it off (plugins/packages/builtins.ts).
+      // Settings → plugin packages may switch it off: its source in ai_access (plugins/packages/builtins.ts).
       const ownPlugin =
-        this.deps.ownPlugin !== undefined && (await ownPluginEnabled(this.deps.settings))
+        this.deps.ownPlugin !== undefined && (await access.enabled(BUILTIN_SOURCES.ownPlugin))
           ? this.deps.ownPlugin
           : undefined
       const packagePlugins = this.deps.packagePlugins
@@ -339,6 +346,19 @@ export class TurnRunner {
           : undefined
       remotePlugins.push(...(packageServers?.plugins ?? []))
       secrets.push(...(packageServers?.secrets ?? []))
+      // Each call's access as it is now (#2171, spec §4.4), read by the seam over the turn's
+      // tiers; the tier it applies goes in the current turn's ledger, for the server's #2100 check.
+      const ledger = turnLedger(slot)
+      const live = this.deps.access
+        ? {
+            access: liveAccess(this.deps.access, {
+              tools: this.deps.tools ?? [],
+              remote: (forwarded?.plugins ?? []).map((p) => p.name),
+              packageServers: packageServers?.servers ?? [],
+            }),
+            ledger,
+          }
+        : undefined
       const pluginTiers = harnessTierOf({
         remotePlugins,
         tierOf,
@@ -406,22 +426,24 @@ export class TurnRunner {
           }
         }
       }
-      const [cwd, resume, settingModel, httpSetting] = await phase('session', () =>
+      const [cwd, resume, settingModel, httpAccess] = await phase('session', () =>
         Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.deps.store.exists(id),
           this.deps.settings?.get<string>(SETTING_MODEL),
-          this.deps.httpRequest ? this.deps.settings?.get<unknown>(SETTING_HTTP_REQUEST) : undefined,
+          this.deps.httpRequest ? access.entry(BUILTIN_SOURCES.http, HTTP_TOOL) : undefined,
         ]),
       )
       // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
       const model = session.agentModel ?? settingModel
       const agentDefinition = session.agentType ? (await loadAgentDefinitions())[session.agentType] : undefined
-      // The http_request tool (#827): on unless the setting is `false`. Its
+      // The http_request tool (#827): on unless `builtin:http` is switched off, or its
+      // item is `off`, in ai_access (#2171); an item set to a tier is its tier. Its
       // saved bodies live in Postgres, so any replica serves them (#2374), and it
       // never sees the turn's secrets except to refuse a request that carries one.
+      if (httpAccess) httpTier = httpAccessTierOf(httpAccess.access)
       const http =
-        this.deps.httpRequest && httpRequestEnabled(httpSetting)
+        this.deps.httpRequest && httpAccess?.enabled && httpAccess.access !== 'off'
           ? httpRequestServer(
               slotHttpContext(
                 {
@@ -461,6 +483,7 @@ export class TurnRunner {
           plugins: remotePlugins.map((p) => p.name),
         }),
         ...(builtIn ? { builtInPolicy: builtIn } : {}),
+        ...(live ? { live } : {}),
         approvalGate: (request) => {
           const turn = slot.current
           return turn ? turn.approvalGate(request) : Promise.resolve({ approved: false, message: NO_TURN })
@@ -500,6 +523,7 @@ export class TurnRunner {
                         : {}),
                       turnContext: () => slot.current?.trace.context() ?? ROOT_CONTEXT,
                       ...(builtIn ? { builtIn } : {}),
+                      ...(live ? { ledger } : {}),
                       // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
                       secrets: () => secrets,
                     })
@@ -586,10 +610,11 @@ export class TurnRunner {
         tiers: principal.tiers ? [...principal.tiers] : null,
         owner: `${session.owner.kind}:${session.owner.id}`,
         systemAppend: run.systemPromptAppend ?? '',
-        // Settings → Plugins' disabled built-ins; each plugin's own are in its `plugins` entry.
+        // Settings → Tools & plugins' disabled built-ins; each plugin's own are in its `plugins` entry.
         disabledTools: [...(builtIn?.disallowed ?? [])],
         raisedTiers: [...(builtIn?.raised ?? [])],
         httpRequest: http !== undefined,
+        httpTier: httpAccess?.access ?? null,
         builtinTools: run.builtinTools ?? [],
         servedBuiltins: served,
         backgroundTasks: this.deps.background !== undefined,
@@ -662,5 +687,27 @@ export class TurnRunner {
           recordMemoryActivity({ audit: this.deps.audit, events: this.deps.events }, session, turnId, activity, secrets),
       })
     return { hooks, recallMaxQueryChars }
+  }
+}
+
+/**
+ * The seam's ledger (harness/seamLedger.ts) as the assembly's callbacks see it: a fresh
+ * one for each turn the slot holds, dropped with it, so a warm process that serves many
+ * turns never holds more than one turn's calls. With no turn it records nothing.
+ */
+function turnLedger(slot: TurnSlot): Pick<SeamLedger, 'record' | 'tierOf'> {
+  const ledgers = new WeakMap<TurnContext, SeamLedger>()
+  return {
+    record(toolUseId, tier) {
+      const turn = slot.current
+      if (!turn) return
+      let ledger = ledgers.get(turn)
+      if (!ledger) ledgers.set(turn, (ledger = new SeamLedger()))
+      ledger.record(toolUseId, tier)
+    },
+    tierOf(toolUseId) {
+      const turn = slot.current
+      return turn ? ledgers.get(turn)?.tierOf(toolUseId) : undefined
+    },
   }
 }

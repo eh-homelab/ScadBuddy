@@ -17,6 +17,7 @@ const parts: FingerprintParts = {
   disabledTools: [],
   raisedTiers: [],
   httpRequest: true,
+  httpTier: null,
   builtinTools: [],
   recallMaxQueryChars: null,
   transientRetries: null,
@@ -37,6 +38,11 @@ describe('fingerprint', () => {
     const reordered = Object.fromEntries(Object.entries(parts).reverse()) as FingerprintParts
     expect(fingerprint(reordered)).toBe(fingerprint(parts))
   })
+  it('an http_request tier change changes the fingerprint', () => {
+    const outward = fingerprint({ ...parts, httpTier: 'outward' })
+    expect(outward).not.toBe(fingerprint(parts))
+    expect(fingerprint({ ...parts, httpTier: 'read' })).not.toBe(outward)
+  })
   it('changes with any field', () => {
     const changed: Record<keyof FingerprintParts, unknown> = {
       credentialId: 'c2',
@@ -52,6 +58,7 @@ describe('fingerprint', () => {
       disabledTools: ['Bash'],
       raisedTiers: ['Bash=write'],
       httpRequest: false,
+      httpTier: 'outward',
       builtinTools: ['Bash'],
       recallMaxQueryChars: 12,
       transientRetries: 2,

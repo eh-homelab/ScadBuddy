@@ -89,6 +89,7 @@ class PrinterRow(BaseModel):
     preferred_path: PrintPath = "auto"
     #: Whether Bambuddy listed its printer as active when it last answered: what the
     #: strip shows while Bambuddy is down.
+    #: For a virtual printer's row, whether Bambuddy still lists the VP (#4889).
     bambuddy_active: bool = True
     kind: PrinterKind = "physical"
     #: The Bambuddy virtual printer this row is (``kind`` ``bambuddy_virtual``).
@@ -100,6 +101,10 @@ class PrinterRow(BaseModel):
     bambuddy_view: BambuddyView | None = None
     #: Why the Bambuddy sync last could not fill or move the LAN link; never the code.
     lan_sync_error: str | None = None
+    #: Whether the LAN link still follows Bambuddy's address after a move to Bambuddy's
+    #: new one failed: the next sync tries the move again (#4796). Any link made or
+    #: removed clears it.
+    lan_move_pending: bool = False
     created_at: datetime
     updated_at: datetime
 

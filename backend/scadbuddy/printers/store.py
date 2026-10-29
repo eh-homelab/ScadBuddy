@@ -63,7 +63,7 @@ _COLUMNS = (
     "id, serial, name, model, bambuddy_printer_id, bambuddy_unlinked_id, lan_host, lan_cert_sha256,"
     " access_code_sealed IS NOT NULL AS has_access_code, preferred_path, bambuddy_active,"
     " kind, bambuddy_vp_id, forwards_to, vp_mode, bambuddy_view, lan_sync_error,"
-    " created_at, updated_at"
+    " lan_move_pending, created_at, updated_at"
 )
 _LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:printers', 0))"
 
@@ -241,9 +241,19 @@ def _row(data: dict[str, Any]) -> PrinterRow:
 
 
 class PrinterStore:
-    def __init__(self, pool: Pool, kek: Kek | None, *, events: EventBus | None = None) -> None:
+    def __init__(
+        self,
+        pool: Pool,
+        kek: Kek | None,
+        *,
+        events: EventBus | None = None,
+        previous_kek: Kek | None = None,
+    ) -> None:
         self.pool = pool
         self.kek = kek
+        #: The KEK before a rotation (`SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`), tried after
+        #: ``kek`` where a value sealed before the rotation may still be opened (#4888).
+        self.previous_kek = previous_kek
         #: Where a merge announces the two rows it touched (``printer.changed``).
         self.events = events
 
@@ -416,10 +426,29 @@ class PrinterStore:
         with self.pool.connection() as conn:
             conn.execute(
                 "UPDATE printers SET bambuddy_active = (bambuddy_printer_id = ANY(%s)),"
-                " updated_at = now() WHERE bambuddy_printer_id IS NOT NULL"
+                " updated_at = now() WHERE kind = 'physical'"
+                " AND bambuddy_printer_id IS NOT NULL"
                 " AND bambuddy_active IS DISTINCT FROM (bambuddy_printer_id = ANY(%s))",
                 (ids, ids),
             )
+
+    def mark_virtual_listed(self, listed: Iterable[int]) -> tuple[str, ...]:
+        """Record which virtual printers Bambuddy lists now on their rows' ``bambuddy_active``
+        (#4889): a VP's row is kept when Bambuddy drops the VP, marked no longer listed.
+        Writes only the rows that change, and returns their ids. Each of this and
+        `mark_bambuddy_active` writes ``bambuddy_active`` on its own kind of row only
+        (#4921), so neither can overwrite the other's whatever links a row holds."""
+        ids = sorted(set(listed))
+        with self.pool.connection() as conn:
+            changed = conn.execute(
+                "UPDATE printers SET bambuddy_active = (bambuddy_vp_id = ANY(%s)),"
+                " updated_at = now() WHERE kind = 'bambuddy_virtual'"
+                " AND bambuddy_vp_id IS NOT NULL"
+                " AND bambuddy_active IS DISTINCT FROM (bambuddy_vp_id = ANY(%s))"
+                " RETURNING id",
+                (ids, ids),
+            ).fetchall()
+        return tuple(str(row["id"]) for row in changed)
 
     def unlink_bambuddy(self, printer_id: str) -> PrinterRow:
         """Take the Bambuddy link off, and remember which it was, so the next strip read
@@ -464,7 +493,8 @@ class PrinterStore:
                 conn,
                 printer_id,
                 "lan_host = %s, lan_cert_sha256 = %s, access_code_sealed = %s,"
-                " access_code_dek_sealed = %s, access_code_kek_id = %s, lan_sync_error = NULL",
+                " access_code_dek_sealed = %s, access_code_kek_id = %s, lan_sync_error = NULL,"
+                " lan_move_pending = false",
                 (
                     body.host,
                     cert_sha256,
@@ -484,7 +514,8 @@ class PrinterStore:
                 conn,
                 printer_id,
                 "lan_host = NULL, lan_cert_sha256 = NULL, access_code_sealed = NULL,"
-                " access_code_dek_sealed = NULL, access_code_kek_id = NULL",
+                " access_code_dek_sealed = NULL, access_code_kek_id = NULL,"
+                " lan_move_pending = false",
                 (),
             )
 
@@ -522,7 +553,24 @@ class PrinterStore:
         model: str | None,
         listed: set[int] | frozenset[int] | None = None,
     ) -> PrinterRow:
-        """The row for a Bambuddy printer, made when there is none: the row linking that
+        """`ensure_bambuddy_written`'s row, for the callers that need only the row."""
+        row, _ = self.ensure_bambuddy_written(
+            bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed
+        )
+        return row
+
+    def ensure_bambuddy_written(
+        self,
+        bambuddy_printer_id: int,
+        *,
+        serial: str | None,
+        name: str,
+        model: str | None,
+        listed: set[int] | frozenset[int] | None = None,
+    ) -> tuple[PrinterRow, bool]:
+        """The row for a Bambuddy printer, and whether this call wrote anything, decided
+        under the lock (#4861: an adoption another caller made meanwhile is not this
+        one's). The row is made when there is none: the row linking that
         id; else the row holding ``serial`` (which it links, if that row has no Bambuddy
         link, or links to one Bambuddy no longer lists: a re-added printer); else a new
         row, ``preferred_path`` ``bambuddy``. Without a serial (Bambuddy withheld it) the
@@ -544,18 +592,18 @@ class PrinterStore:
             ).fetchone()
         linked = None if data is None else _row(data)
         if linked is not None and (data is not None and data["declined"]):
-            return linked
+            return linked, False
         if linked is not None and not self._adopts(linked, serial):
-            return linked
+            return linked, False
         merged: tuple[str, str] | None = None
         with self.pool.connection() as conn, conn.transaction():
             conn.execute(_LOCK)
-            row, merged = self._ensure_locked(
+            row, merged, wrote = self._ensure_locked(
                 conn, bambuddy_printer_id, serial=serial, name=name, model=model, listed=listed
             )
         if merged is not None:
             self._announce(*merged)
-        return row
+        return row, wrote
 
     @staticmethod
     def _adopts(linked: PrinterRow, serial: str | None) -> bool:
@@ -571,13 +619,15 @@ class PrinterStore:
         name: str,
         model: str | None,
         listed: set[int] | frozenset[int] | None,
-    ) -> tuple[PrinterRow, tuple[str, str] | None]:
+    ) -> tuple[PrinterRow, tuple[str, str] | None, bool]:
+        """The row, the merge it made (gone, kept), and whether it wrote."""
+
         def live(other: int | None) -> bool:
             return other is not None and (listed is None or other in listed)
 
         linked = self._one(conn, "bambuddy_printer_id", bambuddy_printer_id)
         if linked is not None and not self._adopts(linked, serial):
-            return linked, None
+            return linked, None, False
         if serial is not None:
             holder = self._one(conn, "serial", serial)
             if holder is not None and holder.bambuddy_unlinked_id == bambuddy_printer_id:
@@ -585,12 +635,12 @@ class PrinterStore:
                 # never linked again by serial. The Bambuddy printer keeps (or gets) its
                 # synthetic row, as one whose serial is withheld does.
                 if linked is not None:
-                    return linked, None
+                    return linked, None, False
                 serial = None
         if serial is not None:
             holder = self._one(conn, "serial", serial)
             if holder is None and linked is not None:  # the synthetic row learns its serial
-                return self._update(conn, linked.id, "serial = %s", (serial,)), None
+                return self._update(conn, linked.id, "serial = %s", (serial,)), None, True
             if (
                 holder is not None
                 and holder.kind == "physical"
@@ -603,33 +653,43 @@ class PrinterStore:
                 row = self._update(
                     conn, holder.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
                 )
-                return row, merged
+                return row, merged, True
             if linked is not None:  # the serial's row is another live Bambuddy printer's
-                return linked, None
+                return linked, None, False
             if holder is None:
-                return self._insert(
-                    conn,
-                    serial=serial,
-                    name=name,
-                    model=model,
-                    preferred_path="bambuddy",
-                    bambuddy_printer_id=bambuddy_printer_id,
-                ), None
+                return (
+                    self._insert(
+                        conn,
+                        serial=serial,
+                        name=name,
+                        model=model,
+                        preferred_path="bambuddy",
+                        bambuddy_printer_id=bambuddy_printer_id,
+                    ),
+                    None,
+                    True,
+                )
             # Two live Bambuddy printers report one serial: this one gets a row of its
             # own, as one with no serial would (`link_bambuddy` refuses the pair, 409).
         own = self._one(conn, "serial", synthetic_serial(bambuddy_printer_id))
         if own is not None:  # its link was taken off; it is still this printer's
-            return self._update(
-                conn, own.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)
-            ), None
-        return self._insert(
-            conn,
-            serial=synthetic_serial(bambuddy_printer_id),
-            name=name,
-            model=model,
-            preferred_path="bambuddy",
-            bambuddy_printer_id=bambuddy_printer_id,
-        ), None
+            return (
+                self._update(conn, own.id, "bambuddy_printer_id = %s", (bambuddy_printer_id,)),
+                None,
+                True,
+            )
+        return (
+            self._insert(
+                conn,
+                serial=synthetic_serial(bambuddy_printer_id),
+                name=name,
+                model=model,
+                preferred_path="bambuddy",
+                bambuddy_printer_id=bambuddy_printer_id,
+            ),
+            None,
+            True,
+        )
 
     # ── the Bambuddy sync (#4439, #4747) ──────────────────────────────────────────
 
@@ -655,11 +715,12 @@ class PrinterStore:
 
     def record_bambuddy_view(
         self, printer_id: str, view: BambuddyView, *, model: str | None = None
-    ) -> PrinterRow:
-        """Store what Bambuddy reports for the row. Its name follows Bambuddy's only
-        while it is still the name Bambuddy last gave (the user has not renamed it); its
-        model is filled only when it has none (#4439 "Refresh model/name only if the
-        user hasn't renamed it")."""
+    ) -> tuple[PrinterRow, bool]:
+        """Store what Bambuddy reports for the row, and say whether that wrote anything
+        (judged under the row's lock, so a change by someone else is not this one). Its
+        name follows Bambuddy's only while it is still the name Bambuddy last gave (the
+        user has not renamed it); its model is filled only when it has none (#4439
+        "Refresh model/name only if the user hasn't renamed it")."""
         with self.pool.connection() as conn, conn.transaction():
             # Under the row's lock, as `link_lan`: a rename landing between the read and
             # the write would otherwise be reverted.
@@ -677,17 +738,31 @@ class PrinterStore:
                 and name == row.name
                 and (row.model is not None or model is None)
             ):
-                return row  # a sync that changes nothing writes nothing
+                return row, False  # a sync that changes nothing writes nothing
+            return (
+                self._update(
+                    conn,
+                    printer_id,
+                    "bambuddy_view = %s, name = %s, model = COALESCE(model, %s)",
+                    (Jsonb(view.model_dump(mode="json")), name, model),
+                ),
+                True,
+            )
+
+    def set_lan_sync_error(
+        self, printer_id: str, error: str | None, *, move_pending: bool | None = None
+    ) -> PrinterRow:
+        """Record why the sync could not fill or move the LAN link; ``move_pending``
+        (`PrinterRow.lan_move_pending`) is left as it is when ``None``."""
+        with self.pool.connection() as conn:
+            if move_pending is None:
+                return self._update(conn, printer_id, "lan_sync_error = %s", (error,))
             return self._update(
                 conn,
                 printer_id,
-                "bambuddy_view = %s, name = %s, model = COALESCE(model, %s)",
-                (Jsonb(view.model_dump(mode="json")), name, model),
+                "lan_sync_error = %s, lan_move_pending = %s",
+                (error, move_pending),
             )
-
-    def set_lan_sync_error(self, printer_id: str, error: str | None) -> PrinterRow:
-        with self.pool.connection() as conn:
-            return self._update(conn, printer_id, "lan_sync_error = %s", (error,))
 
     def upsert_virtual(
         self,

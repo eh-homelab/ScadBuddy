@@ -9,6 +9,51 @@
     <link rel="icon" href="/logo.svg" type="image/svg+xml" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <title>ScadBuddy</title>
+    <!--
+      #4873: during a rollout this HTML can name one build's entry while the request for it
+      reaches a pod of the other build, which has no such file (a real 404, #395). The
+      entry never runs, so lib/staleChunks.ts cannot help; this reloads instead.
+      Only the tags parsed from this HTML: the listener goes at DOMContentLoaded, which
+      waits for the entry script and, before it runs, the stylesheets parsed ahead of it.
+      A lazy chunk's CSS fails later and stays with staleChunks.ts's per-build guard and
+      loadOptionalChunk's exemption (#4874). So the entry must not start a lazy chunk's
+      load synchronously, at module top level before DOMContentLoaded: that chunk's CSS
+      could then fail into this handler and the split with staleChunks.ts would break.
+      Up to 3 reloads per URL, as the next one can reach an old pod again. A failed script
+      waits a little longer each time (0, 0.5, 1 s); a failed stylesheet reloads at once,
+      as the entry script may already be rendering and a late reload would flash. Then the
+      URL is left failed for this tab, so it cannot loop, and a later build that changes
+      the file (a new name) still recovers. The 3 are per URL for the tab's whole session,
+      not 3 failures in a row: a reload that recovers still spends one. That is fine, as a
+      hashed name is one version of the file: a build that changes it gets a new name and
+      a fresh budget, and one that leaves it byte-identical keeps the name, which every pod
+      then serves. Without sessionStorage there is no guard, so no reload. Its sha256 is
+      in PAGE_CSP (backend/scadbuddy/api/static.py, frontend/page-csp.txt);
+      src/entryReload.test.ts fails when they drift.
+    -->
+    <script>
+      ;(function () {
+        function onError(event) {
+          var el = event.target
+          var url = el instanceof HTMLScriptElement ? el.src : el instanceof HTMLLinkElement && el.rel === 'stylesheet' ? el.href : ''
+          if (!url || url.indexOf(location.origin + '/assets/') !== 0) return
+          var tries
+          try {
+            var key = 'scadbuddy:entry-reload'
+            var failed = JSON.parse(sessionStorage.getItem(key) || '[]')
+            tries = failed.filter(function (seen) { return seen === url }).length
+            if (tries >= 3) return
+            sessionStorage.setItem(key, JSON.stringify(failed.concat(url).slice(-30)))
+          } catch (error) {
+            return
+          }
+          removeEventListener('error', onError, true)
+          setTimeout(function () { location.reload() }, el instanceof HTMLLinkElement ? 0 : 500 * tries)
+        }
+        addEventListener('error', onError, true)
+        addEventListener('DOMContentLoaded', function () { removeEventListener('error', onError, true) })
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>

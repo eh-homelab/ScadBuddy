@@ -10,6 +10,7 @@ import type {
 import { ActivityDrawer } from "../components/activity/ActivityDrawer";
 import { ActivityFilters } from "../components/activity/ActivityFilters";
 import { ActivityTable } from "../components/activity/ActivityTable";
+import { ApprovalsWaiting } from "../components/assistant/ApprovalsWaiting";
 import { sinceTime } from "../components/activity/labels";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -232,6 +233,8 @@ export function ActivityPage() {
     <div className="h-full overflow-y-auto" data-testid="activity-page">
       <div className="mx-auto flex max-w-6xl flex-col gap-4 px-4 py-6">
         <h1 className="text-xl font-semibold tracking-tight">Activity</h1>
+        {/* #4813 — what an MCP client prepared and only a person here can decide. */}
+        <ApprovalsWaiting />
         <ActivityFilters query={query} facets={facets.data} onChange={onChange} />
         {list.error ? (
           <p role="alert" className="text-[13px] text-warn">

@@ -6,7 +6,7 @@ import { expect, test, type Page } from '@playwright/test'
 test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the real stack is covered by real-backend.spec.ts')
 
 async function openHotendUsage(page: Page) {
-  await page.goto('/settings#remembered')
+  await page.goto('/settings/printing#hotend-usage')
   const rack = page.getByRole('region', { name: 'Hotend usage for 3DP-31B-598' })
   await rack.scrollIntoViewIfNeeded()
   await expect(rack).toBeVisible()

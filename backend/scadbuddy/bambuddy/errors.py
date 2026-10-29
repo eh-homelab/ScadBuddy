@@ -55,6 +55,11 @@ class Scope(StrEnum):
     #: a person confirmed it is in (#2164; Bambuddy ``auth.py`` maps
     #: ``INVENTORY_UPDATE`` to it).
     MANAGE_INVENTORY = "Manage Inventory"
+    #: Bambuddy's ``settings:update``, which a virtual printer's writes need (#4747). No
+    #: API key can hold it: it is admin-only and absent from ``_APIKEY_SCOPE_BY_PERMISSION``
+    #: (``backend/app/core/auth.py`` lines 79-82, maziggy/bambuddy v1.3.0b1-daily.20261025),
+    #: so such a write works only while Bambuddy's auth is off.
+    ADMIN_SETTINGS = "Settings (admin only)"
 
 
 def not_configured(detail: str) -> ApiError:
@@ -73,6 +78,31 @@ def upstream_detail(response: httpx.Response) -> str | None:
             return detail
         if detail is not None:
             return repr(detail)
+    return None
+
+
+def scrubbed_detail(response: httpx.Response) -> str | None:
+    """Bambuddy's message with no request value in it, for a call whose body carried a
+    secret (#4747: a virtual printer's access code). A FastAPI validation detail is a
+    list of errors, each echoing the field's ``input``; only each error's ``loc`` and
+    ``msg`` are kept."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, str):
+        return detail
+    if isinstance(detail, list):
+        parts = []
+        for item in detail:
+            if not isinstance(item, dict):
+                continue
+            loc = item.get("loc")
+            where = ".".join(str(p) for p in loc) if isinstance(loc, list) else ""
+            msg = item.get("msg") if isinstance(item.get("msg"), str) else "invalid"
+            parts.append(f"{where}: {msg}" if where else str(msg))
+        return "; ".join(parts) or None
     return None
 
 
@@ -122,6 +152,13 @@ def _answered(error: ApiError, answer: UpstreamAnswer) -> ApiError:
     return error
 
 
+def _detail(response: httpx.Response, scope: Scope) -> str | None:
+    """Bambuddy's message: scrubbed of request values for a settings write."""
+    if scope == Scope.ADMIN_SETTINGS:
+        return scrubbed_detail(response)
+    return upstream_detail(response)
+
+
 def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiError:
     """Turn a failed Bambuddy response into the problem the browser should see, with
     Bambuddy's own answer kept on it (`UpstreamAnswer`).
@@ -132,7 +169,7 @@ def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiErr
     answer = UpstreamAnswer(
         status=response.status_code,
         retry_after=retry_after(response.headers.get("Retry-After")),
-        detail=upstream_detail(response),
+        detail=_detail(response, scope),
     )
     return _answered(_mapped(response, scope=scope, what=what, answer=answer), answer)
 
@@ -141,10 +178,24 @@ def _mapped(
     response: httpx.Response, *, scope: Scope, what: str, answer: UpstreamAnswer
 ) -> ApiError:
     code = response.status_code
-    detail = upstream_detail(response)
+    detail = answer.detail  # `_detail`: scrubbed for a settings write
     suffix = f": {detail}" if detail else ""
+    # A settings write may carry a secret (a virtual printer's access code, #4747), which
+    # Bambuddy's body could echo: its detail is scrubbed and its body never kept.
+    body = None if scope == Scope.ADMIN_SETTINGS else upstream_body(response)
 
     if code in (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN):
+        if scope == Scope.ADMIN_SETTINGS and code == status.HTTP_403_FORBIDDEN:
+            return ApiError(
+                status.HTTP_409_CONFLICT,
+                f"Bambuddy refused the API key when asked to {what}. No Bambuddy API key can"
+                " change its settings while Bambuddy's auth is on: turn its auth off, or"
+                f" make the change in Bambuddy{suffix}",
+                title="Bambuddy API key scope",
+                type_=SCOPE_PROBLEM,
+                bambuddy_status=code,
+                required_scope=scope.value,
+            )
         return ApiError(
             status.HTTP_409_CONFLICT,
             f"Bambuddy refused the API key when asked to {what}. "
@@ -169,7 +220,7 @@ def _mapped(
             f"Bambuddy reported a conflict when asked to {what}{suffix}",
             type_=CONFLICT_PROBLEM,
             bambuddy_status=code,
-            bambuddy_body=upstream_body(response),
+            bambuddy_body=body,
         )
     if code == status.HTTP_422_UNPROCESSABLE_CONTENT:
         return ApiError(
@@ -177,7 +228,7 @@ def _mapped(
             f"Bambuddy rejected the request to {what}{suffix}",
             type_=REJECTED_PROBLEM,
             bambuddy_status=code,
-            bambuddy_body=upstream_body(response),
+            bambuddy_body=body,
         )
     if code == status.HTTP_429_TOO_MANY_REQUESTS:
         wait = (

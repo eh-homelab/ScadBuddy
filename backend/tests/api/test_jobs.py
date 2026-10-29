@@ -63,7 +63,7 @@ def test_render_is_accepted_and_the_job_completes(
     job = wait_for_job(client, accepted["job_id"])
     assert job["status"] == "done"
     assert job["slug"] == model
-    assert job["params"] == {"width": 12}
+    assert job["params"] == {"width": 12, "label": "hi"}
     assert job["colors"] == ["#FF0000"]
     assert job["warnings"] == ["OpenSCAD could not open logo.svg; the model rendered without it"]
     assert job["notes"] == ["a note"]
@@ -80,7 +80,51 @@ def test_render_is_accepted_and_the_job_completes(
 def test_render_with_no_params_uses_the_model_defaults(client: TestClient, model: str) -> None:
     response = client.post(f"/api/v1/models/{model}/render", json={})
     assert response.status_code == 202
-    assert wait_for_job(client, response.json()["job_id"])["params"] == {}
+    assert wait_for_job(client, response.json()["job_id"])["params"] == {
+        "width": 10,
+        "label": "hi",
+    }
+
+
+def test_omitted_defaults_render_as_the_same_job_as_sent_defaults(
+    client: TestClient, model: str
+) -> None:
+    """#4774: a sparse request (an agent's) and one that sends every default (the
+    browser's) are one render: each omitted parameter takes its default from the
+    revision's schema before the key is made."""
+    url = f"/api/v1/models/{model}/render"
+    sparse = client.post(url, json={"params": {"width": 12}})
+    assert sparse.status_code == 202, sparse.text
+    assert sparse.json()["inputs"] == {"params": {"width": 12, "label": "hi"}, "v": 0}
+    first = wait_for_job(client, sparse.json()["job_id"])
+    full = client.post(url, json={"params": {"width": 12, "label": "hi"}})
+    assert full.status_code == 202, full.text
+    second = wait_for_job(client, full.json()["job_id"])
+
+    assert first["params"] == second["params"] == {"width": 12, "label": "hi"}
+    assert first["inputs"] == {"params": {"width": 12, "label": "hi"}, "v": 0}
+    assert first["workflow_id"] == second["workflow_id"]
+    # #4870: the first had finished, so the second is answered with it.
+    assert first["id"] == second["id"]
+
+
+def test_a_render_already_finished_is_answered_with_its_job_at_once(
+    client: TestClient, model: str
+) -> None:
+    """#4870: no second row and no second run; the job reads as done straight away,
+    so the browser's first read (its subscription's confirmation) settles it."""
+    url = f"/api/v1/models/{model}/render"
+    first = client.post(url, json={"params": {"width": 13}})
+    assert first.status_code == 202, first.text
+    done = wait_for_job(client, first.json()["job_id"])
+    again = client.post(url, json={"params": {"width": 13}}, headers={"Idempotency-Key": "c" * 32})
+    assert again.status_code == 202, again.text
+    assert again.json()["job_id"] == done["id"]
+    assert again.json()["inputs"] == {"params": {"width": 13, "label": "hi"}, "v": 0}
+    read = client.get(again.json()["status_url"])
+    assert read.json()["status"] == "done"
+    assert read.json()["finished_at"] == done["finished_at"]
+    assert client.get(read.json()["preview_url"]).status_code == 200
 
 
 def test_an_unknown_parameter_is_rejected_by_name(client: TestClient, model: str) -> None:
@@ -647,8 +691,8 @@ def test_a_render_takes_inputs_and_the_job_reports_them(client: TestClient, mode
     accepted = client.post(f"/api/v1/models/{model}/render", json=body)
     assert accepted.status_code == 202
     job = client.get(accepted.json()["status_url"]).json()
-    assert job["params"] == {"width": 12}
-    assert job["inputs"] == {"params": {"width": 12}, "ui": {"tab": "lid"}, "v": 0}
+    assert job["params"] == {"width": 12, "label": "hi"}
+    assert job["inputs"] == {"params": {"width": 12, "label": "hi"}, "ui": {"tab": "lid"}, "v": 0}
 
 
 def test_a_coalesced_submit_answers_with_the_callers_own_inputs(
@@ -673,8 +717,16 @@ def test_a_coalesced_submit_answers_with_the_callers_own_inputs(
     second = client.post(url, json={"inputs": {"params": {"width": 5}, "ui": {"tab": "base"}}})
     assert first.status_code == second.status_code == 202, second.text
     assert second.json()["job_id"] == first.json()["job_id"]
-    assert first.json()["inputs"] == {"params": {"width": 5}, "ui": {"tab": "lid"}, "v": 0}
-    assert second.json()["inputs"] == {"params": {"width": 5}, "ui": {"tab": "base"}, "v": 0}
+    assert first.json()["inputs"] == {
+        "params": {"width": 5, "label": "hi"},
+        "ui": {"tab": "lid"},
+        "v": 0,
+    }
+    assert second.json()["inputs"] == {
+        "params": {"width": 5, "label": "hi"},
+        "ui": {"tab": "base"},
+        "v": 0,
+    }
     status = client.get(second.json()["status_url"]).json()
     assert status["inputs"]["ui"] == {"tab": "lid"}  # the submission that created it
 
@@ -683,7 +735,7 @@ def test_a_params_body_is_still_accepted_as_inputs(client: TestClient, model: st
     accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
     assert accepted.status_code == 202
     job = client.get(accepted.json()["status_url"]).json()
-    assert job["inputs"] == {"params": {"width": 12}, "v": 0}
+    assert job["inputs"] == {"params": {"width": 12, "label": "hi"}, "v": 0}
 
 
 @pytest.mark.parametrize(
@@ -807,7 +859,7 @@ def test_a_render_answered_at_once_is_its_job_under_respond_async(
     assert response.json() == {
         "job_id": "j" * 32,
         "status_url": f"/api/v1/jobs/{'j' * 32}",
-        "inputs": {"params": {"width": 12}, "v": 0},
+        "inputs": {"params": {"width": 12, "label": "hi"}, "v": 0},
     }
     assert "preference-applied" not in response.headers
     assert quick.await_args is not None

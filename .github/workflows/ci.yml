@@ -105,10 +105,15 @@ jobs:
       models: ${{ steps.detect.outputs.models }}
       image: ${{ steps.detect.outputs.image }}
       app: ${{ steps.detect.outputs.app }}
+      run_backend: ${{ steps.lanes.outputs.backend }}
+      run_agent_durable: ${{ steps.lanes.outputs.agent_durable }}
+      run_rust: ${{ steps.lanes.outputs.rust }}
+      run_image: ${{ steps.lanes.outputs.image }}
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          # The PR's merge commit and its base, for changed-paths.sh.
+          fetch-depth: 2
 
       - name: Detect which trees are present
         id: detect
@@ -167,6 +172,24 @@ jobs:
             echo "image=$image"
             echo "app=$app"
           } | tee -a "$GITHUB_OUTPUT"
+
+      # Which path-selected lanes this change needs (select-lanes.sh): no Python job
+      # runs on a change with no Python in it, no Rust job on one with no Rust. A
+      # push, the schedule, a dispatch, or a diff that cannot be read selects every
+      # lane. `CI Summary` re-derives the same answer from its own checkout, so a
+      # skipped lane job is accepted only where this change really does not need it.
+      - name: Select the lanes this change needs
+        id: lanes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          if .github/scripts/changed-paths.sh >"$RUNNER_TEMP/changed.txt"; then
+            .github/scripts/select-lanes.sh <"$RUNNER_TEMP/changed.txt" | tee -a "$GITHUB_OUTPUT"
+          else
+            .github/scripts/select-lanes.sh all | tee -a "$GITHUB_OUTPUT"
+          fi
 
   # ── Things that need neither half of the tree ───────────────────────────────
   lint:
@@ -241,6 +264,9 @@ jobs:
 
       - name: Test the Go selector
         run: .github/scripts/select-go.test.sh
+
+      - name: Test the lane selector
+        run: .github/scripts/select-lanes.test.sh
 
       - name: Test the Go client's spec workarounds
         run: .github/scripts/generate-go-client-jq.test.sh
@@ -493,8 +519,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # No `--with-deps` (#4882). ubuntu-latest already carries every library
+      # chromium needs; `--with-deps` only adds CJK/Thai/unifont fonts and
+      # upgrades, ~26 MB from azure.archive.ubuntu.com. That fetch normally
+      # takes 0-3 s, but at times trickles at 24-58 kB/s for 7-12 minutes, and
+      # every single-shard timeout here was that, not a test. The step timeout
+      # makes a stalled browser download fail this step by name.
+      # This rests on today's ubuntu-latest already having chromium's libraries.
+      # If a newer image lacks one, chromium fails at launch with a shared-library
+      # error: add a separate `pnpm exec playwright install-deps chromium` step
+      # with its own timeout, in this job and the two whose install steps point
+      # here: ci.yml's image job and hot-path-e2e.yml (#4883, #4886 reviews).
       - name: Install Playwright browsers
-        run: pnpm exec playwright install --with-deps chromium
+        timeout-minutes: 5
+        run: pnpm exec playwright install chromium
 
       # `--list` needs no server. Its last line is "Total: N tests in M files".
       - name: Count this shard's tests
@@ -614,7 +652,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: mirror.gcr.io/library/postgres:17@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        image: mirror.gcr.io/library/postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
@@ -753,12 +791,12 @@ jobs:
   agent-durable:
     name: Agent-durable lint, test, image
     needs: layout
-    if: ${{ needs.layout.outputs.agent_durable == 'true' }}
+    if: ${{ needs.layout.outputs.agent_durable == 'true' && needs.layout.outputs.run_agent_durable == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 35
     services:
       postgres:
-        image: mirror.gcr.io/library/postgres:17@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        image: mirror.gcr.io/library/postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
@@ -891,7 +929,7 @@ jobs:
   image:
     name: Image build, backend checks, container smoke, real-backend e2e
     needs: layout
-    if: ${{ needs.layout.outputs.image == 'true' }}
+    if: ${{ needs.layout.outputs.image == 'true' && needs.layout.outputs.run_image == 'true' }}
     runs-on: ubuntu-latest
     # Build, lint, mypy, the container smoke and the real-backend e2e; the backend
     # suite is `backend-pytest` (#1167), the slicer image `slicer-image` (#3821).
@@ -905,7 +943,7 @@ jobs:
     # too, since the app will not start without it.
     services:
       postgres:
-        image: mirror.gcr.io/library/postgres:17@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        image: mirror.gcr.io/library/postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
@@ -1084,10 +1122,12 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      # No `--with-deps`: see the frontend-e2e job (#4882).
       - name: Install Playwright browsers
         if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
         working-directory: frontend
-        run: pnpm exec playwright install --with-deps chromium
+        timeout-minutes: 5
+        run: pnpm exec playwright install chromium
 
       # The install-on-demand test is the only thing in this repo that depends
       # on a service outside it, and `CI Summary` — the one required check —
@@ -1219,7 +1259,7 @@ jobs:
   lfs-fixtures:
     name: LFS fixtures
     needs: layout
-    if: ${{ needs.layout.outputs.image == 'true' }}
+    if: ${{ needs.layout.outputs.image == 'true' && needs.layout.outputs.run_backend == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -1251,7 +1291,7 @@ jobs:
   backend-pytest:
     name: Backend pytest (${{ matrix.group }}/6)
     needs: [layout, lfs-fixtures]
-    if: ${{ needs.layout.outputs.image == 'true' }}
+    if: ${{ needs.layout.outputs.image == 'true' && needs.layout.outputs.run_backend == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     strategy:
@@ -1260,7 +1300,7 @@ jobs:
         group: [1, 2, 3, 4, 5, 6]
     services:
       postgres:
-        image: mirror.gcr.io/library/postgres:17@sha256:b8faeff7712663c2773a190181e1246e37e364b887611c04658c28b44e2408fe
+        image: mirror.gcr.io/library/postgres:18@sha256:edb0c08dc33befd0262ab3b5cf1c4f3f8cfd8b09e88c05b45adee29d6761ddb6
         env:
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: scadbuddy_test
@@ -1673,13 +1713,7 @@ jobs:
         run: |
           set -euo pipefail
           run=true
-          if [ "$EVENT_NAME" = "pull_request" ] \
-            && git rev-parse -q --verify 'HEAD^2' >/dev/null \
-            && git diff --name-only 'HEAD^1' HEAD >"$RUNNER_TEMP/changed.txt"; then
-            run=$(.github/scripts/select-go.sh <"$RUNNER_TEMP/changed.txt")
-          elif [ "$EVENT_NAME" = "merge_group" ] \
-            && git fetch -q --depth=1 origin "$QUEUE_BASE" \
-            && git diff --name-only "$QUEUE_BASE" HEAD >"$RUNNER_TEMP/changed.txt"; then
+          if .github/scripts/changed-paths.sh >"$RUNNER_TEMP/changed.txt"; then
             run=$(.github/scripts/select-go.sh <"$RUNNER_TEMP/changed.txt")
           fi
           echo "run=$run" | tee -a "$GITHUB_OUTPUT"
@@ -1693,10 +1727,13 @@ jobs:
 
   # ── Rust workers (workers/rust/, spec 2026-10-16 §7) ───────────────────────
   #
-  # Never path-gated: `CI Summary` requires it, and a skip it counted as a pass
-  # would be the vacuous-green trap `freshness` describes.
+  # Path-selected: it runs when `layout`'s `run_rust` lane does (select-lanes.sh).
+  # `CI Summary` re-derives that lane, so a skip on a change that touched Rust is
+  # still a failure, not the vacuous-green trap `freshness` describes.
   rust:
     name: Rust workers
+    needs: layout
+    if: ${{ needs.layout.outputs.run_rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -1763,9 +1800,11 @@ jobs:
   # The Dockerfile's `slicer` target: the Rust worker and the pinned Bambu Studio
   # CLI. A job of its own, so a Rust-only change does not wait on the backend
   # image; it shares none of that image's stages. A release build and the
-  # AppImage download when its cache misses. Never path-gated, as `rust`.
+  # AppImage download when its cache misses. Path-selected, as `rust`.
   slicer-image:
     name: Slicer image build and smoke
+    needs: layout
+    if: ${{ needs.layout.outputs.run_rust == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -2285,10 +2324,10 @@ jobs:
       # rather than trusting the `layout` job's outputs. That is what closes the
       # bootstrap allowance: a skipped `frontend` job is only acceptable if
       # frontend/ really is absent from this commit, and the only way to know
-      # that is to look.
+      # that is to look. Depth 2 for changed-paths.sh, which re-derives the lanes.
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 1
+          fetch-depth: 2
 
       - name: Assert every job either succeeded or was legitimately skipped
         env:
@@ -2310,6 +2349,7 @@ jobs:
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
           GO_CLIENT_RESULT: ${{ needs.go-client.result }}
           EVENT_NAME: ${{ github.event_name }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
           set -uo pipefail
           failed=0
@@ -2323,7 +2363,7 @@ jobs:
               return 0
             fi
             if [ "$result" = "skipped" ] && [ "$required" != "true" ]; then
-              echo "  skipped  ${label} (its source tree is not on this commit yet)"
+              echo "  skipped  ${label} (its tree is not on this commit, or this change does not touch it)"
               return 0
             fi
             echo "::error::${label} concluded '${result}'"
@@ -2349,6 +2389,22 @@ jobs:
           has_image=false
           if [ "$has_backend" = true ] && [ "$has_frontend" = true ] && [ "$has_models" = true ]; then has_image=true; fi
 
+          # The path-selected lanes, re-derived as `layout` derives them: a lane
+          # job is required where its tree is present AND this change needs it.
+          if .github/scripts/changed-paths.sh >"$RUNNER_TEMP/changed.txt"; then
+            lanes=$(.github/scripts/select-lanes.sh <"$RUNNER_TEMP/changed.txt")
+          else
+            lanes=$(.github/scripts/select-lanes.sh all)
+          fi
+          lane() { grep -qx "$1=true" <<<"$lanes" && echo true || echo false; }
+          need_backend=false
+          if [ "$has_image" = true ] && [ "$(lane backend)" = true ]; then need_backend=true; fi
+          need_image=false
+          if [ "$has_image" = true ] && [ "$(lane image)" = true ]; then need_image=true; fi
+          need_agent_durable=false
+          if [ "$has_agent_durable" = true ] && [ "$(lane agent_durable)" = true ]; then need_agent_durable=true; fi
+          need_rust=$(lane rust)
+
           # `app` is reported, not asserted: it gates STEPS inside the image
           # job, not a job of its own. It needs no assertion — when the API
           # entrypoint lands, those steps run, and any failure reds the image
@@ -2358,6 +2414,7 @@ jobs:
 
           echo "Tree on this commit: backend=${has_backend} frontend=${has_frontend} agent=${has_agent} models=${has_models} image=${has_image}"
           echo "Container smoke gated on the API entrypoint: app=${has_app}"
+          echo "Lanes this change needs: $(paste -sd' ' <<<"$lanes")"
           echo "Job results:"
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
@@ -2365,18 +2422,18 @@ jobs:
           assert "Frontend Playwright (every shard)"      "$FRONTEND_E2E_RESULT" "$has_e2e"
           assert "Frontend Playwright shards cover the suite" "$FRONTEND_E2E_SPLIT_RESULT" "$has_e2e"
           assert "Agent lint, typecheck, test, build, image" "$AGENT_RESULT" "$has_agent"
-          assert "Agent-durable lint, test, image"        "$AGENT_DURABLE_RESULT" "$has_agent_durable"
-          assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$has_image"
-          assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$has_image"
-          assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$has_image"
+          assert "Agent-durable lint, test, image"        "$AGENT_DURABLE_RESULT" "$need_agent_durable"
+          assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$need_image"
+          assert "Backend pytest (every shard)"           "$BACKEND_PYTEST_RESULT" "$need_backend"
+          assert "Backend pytest shards cover the suite"  "$BACKEND_PYTEST_SPLIT_RESULT" "$need_backend"
           assert "Template verify scripts"                "$MODELS_RESULT"   "$has_models"
           # Always required: the `go` job runs on every commit and reports "No Go
           # changes" itself when `go-select` found none, so a skip is a failure.
           assert "Select Go work"                         "$GO_SELECT_RESULT" true
           assert "Go modules"                             "$GO_RESULT"       true
-          # Always required, never path-gated.
-          assert "Rust workers"                           "$RUST_RESULT"     true
-          assert "Slicer image build and smoke"           "$SLICER_IMAGE_RESULT" true
+          # Required when this change touches Rust (select-lanes.sh).
+          assert "Rust workers"                           "$RUST_RESULT"     "$need_rust"
+          assert "Slicer image build and smoke"           "$SLICER_IMAGE_RESULT" "$need_rust"
 
           # `freshness` is PR-only — it diffs the API against the PR's base and
           # comments on the PR, and a push to main has neither. It is therefore

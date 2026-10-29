@@ -62,6 +62,6 @@ export async function waitFor<T>(
  * Waits for React to commit a change a handler just asked for, so the tool's answer —
  * and the caller's next tool — see the page as the user now does.
  */
-export function committed(check: () => boolean, what = 'the page to update'): Promise<true> {
-  return waitFor(() => (check() ? true : undefined), { timeout: 2000, what, interval: 10 })
+export function committed(check: () => boolean, what = 'the page to update', timeout = 2000): Promise<true> {
+  return waitFor(() => (check() ? true : undefined), { timeout, what, interval: 10 })
 }

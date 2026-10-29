@@ -67,8 +67,15 @@ export const approvalTools: Tool[] = [
       const tool = ctx.lookup?.(action.tool)
       // As it runs now (#1953): raised to outward since the prepare still runs here; disabled since, never.
       const effective = tool ? await effectiveTool(tool, ctx) : undefined
-      if (!tool || !effective?.gated) return errorResult(`pending action ${pending_action_id} is for ${action.tool}, which this server cannot run`)
-      if (effective.disabled) return refused(`${tool.name} is disabled in Settings → Plugins; nothing was sent`)
+      if (!tool || !effective) return errorResult(`pending action ${pending_action_id} is for ${action.tool}, which this server cannot run`)
+      if (effective.disabled) return refused(`${tool.name} is disabled in Settings → Tools & plugins; nothing was sent`)
+      // Lowered since (#2171): the call no longer asks, so there is nothing to confirm.
+      if (!effective.gated) {
+        return errorResult(
+          `${tool.name} no longer needs approval: it is "${effective.risk}" in Settings → Tools & plugins now. ` +
+            `Nothing was sent; call ${tool.name} directly with the same arguments.`,
+        )
+      }
       if (!hasTier(principal, effective.risk)) return refused(`${tool.name} needs the "${effective.risk}" tier`)
       // Parsed as the prepare parsed them, so the hash compares like with like.
       // The tool's own schema, as the prepare parsed it (runTool: `tool.parse`),

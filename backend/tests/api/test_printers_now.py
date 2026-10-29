@@ -14,8 +14,10 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
+from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink
+from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.models import LanLink, PrinterCreate
@@ -505,3 +507,43 @@ def test_an_unlink_survives_the_strips_next_read(client: TestClient) -> None:
     assert client.get(f"/api/v1/printers/{pid}").json()["bambuddy_printer_id"] is None
     assert [card["printer_id"] for card in strip.json()["printers"]] == [1]  # still shown
     assert client.delete(f"/api/v1/printers/{pid}").status_code == 204
+
+
+@respx.mock
+def test_a_native_printer_never_asks_bambuddy_for_its_status(client: TestClient) -> None:
+    """#4551: a row a run reaches natively is its LAN report's card even while that
+    report is stale (its path is set to the LAN), and Bambuddy's status is read only for
+    the Bambuddy-path printer beside it."""
+    configure(client)
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=[{**printer(1), "serial_number": SERIAL}, printer(2)])
+    )
+    native_status = respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=status(1))
+    )
+    bambuddy_status = respx.get(f"{API}/printers/2/status").mock(
+        return_value=httpx.Response(200, json=status(2))
+    )
+    registry = _registry(client)
+    pid = _lan_printer(client)
+    registry.store.link_bambuddy(pid, 1)
+    registry.reports.put(pid, {"gcode_state": "IDLE"}, datetime.now(UTC) - timedelta(seconds=91))
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+
+    async def read() -> PrintersNow:
+        async with client_for(state.settings_store.load()) as bambuddy:
+            return await printers_now(
+                bambuddy,
+                state.print_links,
+                registry.store,
+                registry.reports,
+                now=datetime.now(UTC),
+                native=frozenset({pid}),
+            )
+
+    cards = {card.id: card for card in asyncio.run(read()).printers}
+
+    assert cards[pid].path == "native"
+    assert not native_status.called
+    assert bambuddy_status.called
+    assert [card.path for card in cards.values() if card.id != pid] == ["bambuddy"]

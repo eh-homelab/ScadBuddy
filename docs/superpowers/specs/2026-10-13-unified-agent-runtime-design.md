@@ -1107,7 +1107,11 @@ with its workflow. The vector files stay while a Python reader of them remains.
 
 1. **The browser bridge.** `browser_*` tools need the tab's WebSocket, which lives in the
    HTTP process. Whether `bridge/relay.ts` (#1916) reaches a turn running in a worker pod
-   is unverified.
+   is unverified. *#4780:* the relay no longer goes through Postgres. A call for a tab on
+   another pod is a `BridgeCall` workflow whose one activity runs on the queue of the pod
+   that holds the tab (`ai_tab_owners`), so a caller needs Temporal and the database, not
+   the tab's socket (`agent/test/bridgeRelay.temporal.test.ts`). A worker-only `main.ts`
+   still has to build that relay.
 2. **Session-tab waits.** `sessions/manager.ts` `onSessionTab` is wired to the hub in
    `main.ts`; a worker pod has no hub.
 3. **Anything else the turn reaches in-process** in the HTTP process (an audit of
@@ -1118,3 +1122,48 @@ with its workflow. The vector files stay while a Python reader of them remains.
 Phases 1–5 stand. Phases 6–8 are on hold until they are rewritten around §14.3–§14.4:
 Phase 6 adds the worker Deployment before every session moves to `AgentSession`; Phase 7
 is unchanged; Phase 8 retires only the Python turn, not `agent-durable/`.
+### 14.7 The requirements of #4773, and what they change
+
+#4773 (2026-10-26) sets the outcome: agent sessions scale horizontally, every feature of
+classic and durable works in one runtime, and no session state lives only in a pod or in a
+workflow. R1 and R2 are the user's direction. R3–R7 are recommended there; the plan's
+decisions Q1–Q11 settle them before their steps start.
+
+- **R1.** ScadBuddy's own tools, remote plugins, package MCP servers and `http_request`
+  run as Temporal activities, not in the turn's process (plan Steps 9.2–9.3). This changes
+  §4's table ("Tool calls: in-process, inside the turn activity"), and it keeps three files
+  that §11 lists as retiring: `temporal/turnTools.ts`, `turnServers.ts` and
+  `sessionClients.ts` now serve sessions as well as flows. The transport, an Update on
+  `AgentSession` or one `ToolCall` workflow per call, is plan Q1. Temporal allows 10
+  in-flight Updates and 2000 in total per Workflow Execution
+  ([docs.temporal.io/cloud/limits](https://docs.temporal.io/cloud/limits)).
+- **R2.** Claude Code's own built-ins replace `agent/src/builtins/`'s copies (plan Step
+  9.6), so §6.8's "as in classic" means Claude Code's own tools. The exceptions are
+  ScadBuddy's background tools (§8) and, unless plan Q2 decides otherwise, the
+  egress-checked `WebFetch` and `WebSearch` (#2684).
+- **R3.** A session's working directory is on the NAS share, at subPath `Scadbuddy/sessions`
+  (plan Step 9.5). It is a working copy; the record stays the blob store (R7).
+- **R4.** If plan Q6 is accepted, the credential goes to a loopback gateway in the worker,
+  and Claude Code's `env` carries only a per-process token (plan Step 9.4). §6.7's first
+  bullet then changes from "the credential goes into the query's `env`" to "the token
+  goes into the query's `env`".
+- **R5.** `ai_pending_input` becomes the record of an open request, and the workflow keeps
+  only request ids and timers (plan Step 9.7). The gate's public shape (§3 non-goals) does
+  not change.
+- **R6.** A recurring cron job is a Temporal Schedule, and a one-shot wakeup stays a timer
+  workflow (plan Step 9.8). Forget already finds a session's background workflows by their
+  rows (`agent/src/sessions/forget.ts`, step 0). So §8's Visibility `STARTS_WITH` check
+  (§12) is no longer needed.
+- **R7.** Workspace bytes move to the blob store, sealed per session: #4789, PR #4812.
+
+Three contradictions are fixed here:
+
+- **D3** (§13) sizes "the agent container". After §14.3 the warm processes are in the
+  worker Deployment, so the 2Gi request and 8Gi limit apply to that Deployment's
+  container. The API pod's `agent` container is sized for HTTP only (plan Step 6.4).
+- **§6.3** copies the parent's transcript into a fork. The user's rule is that forks are
+  copy-on-write (#4212). Plan Step 6.5, if plan Q8 is accepted, reads the parent's entries
+  through the cut instead, and copies them only when the parent is forgotten.
+- **§14.3** says the API pod's `agent` container runs no turn. That holds, but the container
+  still runs one Temporal worker: `bridge.tab` on its own `agent-tools.<identity>` (#4806),
+  because the tab's socket is in that process.

@@ -173,6 +173,23 @@ def test_an_output_records_only_the_inputs_its_pipeline_job_rendered(
     assert accepted.json()["inputs"]["house"] == {"cols": 1}
 
 
+def test_a_pipeline_save_that_omits_a_param_is_refused(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """#4774: the render route leaves a pipeline's params as sent, so a save is not
+    filled at `model.scad`'s defaults either: one that omits `label`, which the job
+    rendered at `model.scad`'s default, is not the job's inputs."""
+    with_pipeline(paths, model)
+    job = _done(client, model, {"params": {"width": 10, "label": "hi"}, "v": 1})
+    sent = {"params": {"width": 10}, "v": 1}
+    refused = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": job["id"], "inputs": sent},
+        headers=press(),
+    )
+    assert refused.status_code == 422, refused.text
+
+
 def test_a_malformed_pipeline_declaration_reaches_the_worker(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

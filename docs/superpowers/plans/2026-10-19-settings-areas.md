@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Split the one-page Settings (`frontend/src/pages/SettingsPage.tsx`, 1,789 lines) into `/settings/:area` sub-pages built from one self-contained component per section, with no behaviour change beyond spec §3.5.
+**Goal:** Split the one-page Settings (`frontend/src/pages/SettingsPage.tsx`, 1,835 lines) into `/settings/:area` sub-pages built from one self-contained component per section, with no behaviour change beyond spec §3.5.
 
 **Architecture:** A shell (`SettingsShell`) under a set of providers (fold state, a dirty registry, one shared `GET /settings` cache, the Bambuddy targets/projects/status, the in-page agent's `settings` scope) renders every area at once and hides the inactive ones, so drafts kept in each section's own state survive area switches. Sections are files under `pages/settings/sections/` found by `import.meta.glob`; the ones that save through `PUT /settings` use `useBackendSettings`, which owns that section's draft, seed queue (#767), dirty state, errors, save, discard and reset. The new code is built beside the old page and routed only in Task 13, so the app and the old tests keep working until then.
 
@@ -15,14 +15,14 @@
 - Node 24; pnpm via corepack (`cd frontend && corepack enable && pnpm install --frozen-lockfile`).
 - The full check, run before every commit that touches more than one test file: `cd frontend && pnpm lint && pnpm typecheck && pnpm test && pnpm build`.
 - Playwright: `cd frontend && pnpm exec playwright test` (msw-mocked, against `pnpm preview`).
-- Run `cd frontend && pnpm gen:api` once before running single test files with `pnpm exec vitest run <file>` (it needs uv and the backend tree; `src/api/schema.d.ts` is gitignored and never committed).
+- Run `cd frontend && pnpm gen:api` once before running single test files with `pnpm exec vitest run <file>` (it needs uv and the backend tree; `src/api/schema.d.ts` is gitignored and never committed). `components/settings/Printers.test.tsx` reads `LanLink.access_code`'s bound from the exported OpenAPI spec (`specAccessCodeMax`, #4502), so it fails outside `pnpm test` without that spec; `SCADBUDDY_OPENAPI_JSON` set skips the export.
 - vitest under load can time out; re-run a timed-out test on an idle machine before debugging it.
 - msw mocks go under `src/mocks/features/` (auto-discovered, #508); this plan adds none and edits none.
 - Conventional-commit titles (`feat(frontend):`, `refactor(frontend):`, `test(frontend):`, `fix(frontend):`, `docs:`); each commit message ends with the session's attribution trailer.
 - No new files beyond those the tasks name. No edits outside `frontend/` except Task 15's listed agent strings and docs.
 - Section nav and area nav are plain `<a>`/`<Link>` links styled as tabs (#3671), never Radix Tabs.
 - No section id may equal an element id used anywhere on the page, and no section title may equal a heading inside it (two regions with one name break `getByRole` and Playwright's strict mode). This is why some titles below differ from the spec table (see Task 11, 12).
-- Areas and order (spec §3.2): `general`, `printing`, `library`, `assistant`, `tools`, `mcp`, `audits`, `system`. `/settings` → `/settings/general`; `/settings#<section>` → `/settings/<its area>#<section>`; an id no area holds → General.
+- Areas and order (spec §3.2, plus `printers` and `orders` in `printing` by ruling: #3823 and #4250 post-date the spec): `general`, `printing`, `library`, `assistant`, `tools`, `mcp`, `audits`, `system`. `/settings` → `/settings/general`; `/settings#<section>` → `/settings/<its area>#<section>`; an id no area holds → General.
 - Saving stays the user's: no agent handler saves (AI spec §8.1).
 
 ## Review Focus
@@ -32,6 +32,7 @@
 3. The agent's `set_field` on a field in another area (`display_unit` while on General): expected to navigate to `/settings/library`, unfold Preview, set the draft, keep General's draft, and report `unsaved: true` in `get_form`. Tests: Task 5 `set_field in another area navigates there, unfolds it and keeps other drafts`; Task 13 `settings tools` additions.
 4. An old bookmark naming a removed anchor (`/settings#assistant-plugins`, or `#assistant-model`, which is also `ModelSetting`'s input id): expected to land on the section that now holds it (`/settings/tools#packages`, `/settings/assistant#model`), never on the input. Tests: Task 2 `maps every old anchor to its new section`; Task 7 `sends an old anchor to its new section`.
 5. Settings changed elsewhere (`useSubscription('settings')`) while one section in another area is dirty: expected the banner, no section reseeded, the dirty draft kept, and "Load the latest" reseeding every section. Test: Task 3 `says changed elsewhere while any section is dirty, and Load the latest seeds every seeder`.
+6. Links to the sections added after the spec (`/settings#printers` and `/settings#orders`; the agent's `printers` tools and the `print` skill send users to the first, `printers.spec.ts` opens it): expected to land on `/settings/printing#printers` and `#orders`. The Orders section has a Save bar for its policy fields, while the price-book filaments under it save a row at a time (`FilamentsEditor`) and never mark the section dirty. Tests: Task 9 `opens the Printers and Orders sections from their old anchors`; Task 13 `holds the spec §3.2 table, with Printers and Orders in Printing`.
 
 ---
 
@@ -62,19 +63,19 @@ Modified: `pages/SettingsPage.tsx` (shrinks to the providers plus the shell in T
 **Files:**
 - Create: `frontend/src/pages/settings/values.ts`
 - Create: `frontend/src/pages/settings/values.test.ts`
-- Modify: `frontend/src/pages/SettingsPage.tsx:83-245` (delete the moved code, import it), `:366-381` (use `storeChoice`)
+- Modify: `frontend/src/pages/SettingsPage.tsx:85-255` (delete the moved code, import it), `:376-391` (use `storeChoice`)
 
 **Interfaces:**
 - Consumes: `FieldName`, `FieldSpec`, `SectionId`, `RUNTIME_FIELDS`, `envVar`, `serverValue` from `fields.ts`; `Settings` from `api/types`.
 - Produces:
   - `SECRETS: readonly ['bambuddy_api_key', 'bambuddy_render_api_key', 'google_fonts_api_key', 'store_s3_secret_access_key']`, `type Secret`, `isSecret(name: FieldName): name is Secret`
-  - `HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>>` (today's `:103-124`), `SPECS: Record<string, FieldSpec>`
+  - `HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>>` (today's `:105-128`), `SPECS: Record<string, FieldSpec>` (it now lists `slicer_backend` under `projects`, and `toPatchValue` passes it through as a string like `library_backend`)
   - `extraSpecs(settings: Settings | undefined): FieldSpec[]`, `fieldsOf(section: SectionId, settings: Settings | undefined): FieldName[]`
   - `DAY_SECONDS = 86400`, `RETENTIONS: readonly FieldName[]`, `RETENTION_MAX_DAYS = 3650`, `ACTIVITY_TTL`, `ACTIVITY_REPAIR`, `FOLLOW_NOBODY = 'none'` (today's values)
   - `baseline(settings: Settings, name: FieldName): string`, `type Problem = { problem: string }`, `toPatchValue(name: FieldName, raw: string, settings: Settings): unknown`, `isProblem(value: unknown): value is Problem`
   - `ofLimit(used: string, limit: number, format: (n: number) => string): string`
   - `type StoreChoice = { backend: 'local' | 'bambuddy' | 's3'; savedBambuddyUrl: boolean; bambuddyReady: boolean; s3Ready: boolean }`
-  - `storeChoice(settings: Settings, value: (name: FieldName) => string): StoreChoice` (the computation at `:370-381`)
+  - `storeChoice(settings: Settings, value: (name: FieldName) => string): StoreChoice` (the computation at `:380-391`)
 
 - [ ] **Step 1: Write the failing tests** in `values.test.ts`, building `settings` from `mockSettings` (`src/mocks/handlers`):
 
@@ -112,7 +113,7 @@ it('says a limit of 0 is none', () => {
 
 - [ ] **Step 2: Run** `cd frontend && pnpm exec vitest run src/pages/settings/values.test.ts`. Expected: FAIL, `Failed to resolve import "./values"`.
 
-- [ ] **Step 3: Move** `SettingsPage.tsx:83-245` (minus `SettingsPage`) into `values.ts` with the signatures above, exporting each; add `storeChoice` from `:370-381`. In `SettingsPage.tsx` import them and compute `const store = storeChoice(settings, value)` where `chosenBackend`, `bambuddyStoreReady`, `s3Ready`, `savedBambuddyUrl` were. No other change.
+- [ ] **Step 3: Move** `SettingsPage.tsx:85-255` (minus `SettingsPage`) into `values.ts` with the signatures above, exporting each; add `storeChoice` from `:380-391`. In `SettingsPage.tsx` import them and compute `const store = storeChoice(settings, value)` where `chosenBackend`, `bambuddyStoreReady`, `s3Ready`, `savedBambuddyUrl` were. No other change.
 
 - [ ] **Step 4: Run** the new test, then `pnpm exec vitest run src/pages/SettingsPage` . Expected: PASS for both (the old page is unchanged in behaviour).
 
@@ -211,10 +212,10 @@ git commit -m "feat(frontend): a registry of Settings sections and the /settings
   - `type SettingsCache = { settings: Settings | undefined; error: Error | undefined; loading: boolean; reload: () => void; register: (seeder: Seeder) => () => void; write: (names: 'all' | readonly FieldName[] | ((next: Settings) => readonly FieldName[]), request: () => Promise<Settings>) => Promise<Settings>; own: <T>(work: () => Promise<T>) => Promise<T>; changedElsewhere: boolean; loadLatest: () => void; keepMine: () => void }`
   - `SettingsCacheProvider({ children })` (inside `SettingsDirtyProvider`), `useSettingsCache(): SettingsCache`, `useLoadedSettings(): Settings` (throws `useLoadedSettings outside a loaded settings cache`), `SettingsLoaded({ children }: { children: ReactNode })` (renders children only once `settings` is defined)
   - `write`: takes every seeder's `begin()` before `request()`, then `setData(next)`, `setBambuddyLinks(next)`, and calls each seeder's `seed(names, itsSince)`; runs inside `own`.
-  - The subscription (today's `:395-421`, moved): ignores `'resync'` and any signal while an `own` is in flight; while `useAnyDirty()()` is true sets `changedElsewhere`; else `refresh` and, on landing, seeds every seeder `'all'` with its `begin()` taken then, or sets `changedElsewhere` if a section became dirty meanwhile. `loadLatest` seeds every seeder `'all'` with `begin()` now, clears the flag and refreshes; `keepMine` clears the flag.
+  - The subscription (today's `:405-431`, moved): ignores `'resync'` and any signal while an `own` is in flight; while `useAnyDirty()()` is true sets `changedElsewhere`; else `refresh` and, on landing, seeds every seeder `'all'` with its `begin()` taken then, or sets `changedElsewhere` if a section became dirty meanwhile. `loadLatest` seeds every seeder `'all'` with `begin()` now, clears the flag and refreshes; `keepMine` clears the flag.
 - Produces (`bambuddyResources.tsx`):
   - `type BambuddyResources = { connected: boolean; targets: AsyncState<BambuddyTargets | null>; projects: AsyncState<ProjectChoices | null>; status: AsyncState<BambuddyStatus | null> }`
-  - `BambuddyResourcesProvider({ children })` (inside the cache; `connected = Boolean(settings?.bambuddy_url)`, deps as today's `:302-314`), `useBambuddyResources(): BambuddyResources`
+  - `BambuddyResourcesProvider({ children })` (inside the cache; `connected = Boolean(settings?.bambuddy_url)`, deps as today's `:312-324`), `useBambuddyResources(): BambuddyResources`
 
 - [ ] **Step 1: Write the failing tests** in `cache.test.tsx` (wrap in `SettingsDirtyProvider > SettingsCacheProvider > BambuddyResourcesProvider`, rendered with `renderPage`):
 
@@ -261,7 +262,7 @@ it('fetches no targets until a Bambuddy URL is saved, and one for every reader a
 ```
 
 - [ ] **Step 2: Run** `pnpm exec vitest run src/pages/settings/cache.test.tsx`. Expected: FAIL, unresolved imports.
-- [ ] **Step 3: Implement** the three files with the signatures above. Subscription logic is today's `SettingsPage.tsx:395-421`; resources are today's `:302-314`.
+- [ ] **Step 3: Implement** the three files with the signatures above. Subscription logic is today's `SettingsPage.tsx:405-431`; resources are today's `:312-324`.
 - [ ] **Step 4: Run** the test. Expected: PASS.
 - [ ] **Step 5: Commit**
 
@@ -286,12 +287,12 @@ git commit -m "feat(frontend): one settings cache, a dirty registry and Bambuddy
   - `type BackendSettingsOptions = { effective?: (name: FieldName, raw: string, form: Omit<FormContext, 'changed'>) => string; alsoSend?: (form: FormContext) => Partial<SettingsUpdate>; alsoReset?: (name: FieldName, settings: Settings) => Partial<SettingsUpdate>; publish?: readonly FieldName[]; onSaved?: (next: Settings) => void; onReset?: (name: FieldName, next: Settings) => void }`
   - `type BackendSettings = { settings: Settings; value: (name: FieldName) => string; setField: (name: FieldName, next: string) => void; changed: (name: FieldName) => boolean; dirty: boolean; errors: Partial<Record<FieldName, string>>; sectionError: string | undefined; saving: boolean; savedAt: string | undefined; clearing: readonly Secret[]; clearSecret: (name: Secret) => void; save: () => Promise<boolean>; discard: () => void; reset: (name: FieldName) => Promise<void>; resetting: FieldName | null; resetError: string | null }`
   - `useBackendSettings(id: SectionId, fields: FieldsOf, options?: BackendSettingsOptions): BackendSettings`
-  - Behaviour, all moved from `SettingsPage.tsx`: the seed queue and effect (`:316-338`, scoped to this section's fields, starting with `{ names: 'all', since: new Map() }`; registers a `Seeder` with the cache), `value`/`setField` (`:357-364`), `changed` (`:383-388`, comparing `effective(...)` when given), `patchFor` (`:425-463`, the Connection-only branch replaced by `alsoSend`), `save` through `cache.write(next => [...fields(next), ...keys of alsoSend's body])` (`:466-504`), `discard` (`:506-516`), `reset` through `cache.write` with `{ reset: [name], ...alsoReset(name, settings) }` (`:518-542`). Reports `useReportDirty(id, dirty, <draft of options.publish>)`.
+  - Behaviour, all moved from `SettingsPage.tsx`: the seed queue and effect (`:326-348`, scoped to this section's fields, starting with `{ names: 'all', since: new Map() }`; registers a `Seeder` with the cache), `value`/`setField` (`:367-374`), `changed` (`:393-398`, comparing `effective(...)` when given), `patchFor` (`:435-473`, the Connection-only branch replaced by `alsoSend`), `save` through `cache.write(next => [...fields(next), ...keys of alsoSend's body])` (`:476-514`), `discard` (`:516-526`), `reset` through `cache.write` with `{ reset: [name], ...alsoReset(name, settings) }` (`:528-552`). Reports `useReportDirty(id, dirty, <draft of options.publish>)`.
 - Produces (`formParts.tsx`):
-  - `SavedSection({ form, id, title, description, children }: { form: BackendSettings; id: string; title: string; description?: ReactNode; children: ReactNode })`: today's `saved()` (`:747-765`) plus `form.resetError` as a `role="alert"` paragraph.
-  - `FieldBadge({ form, name }: { form: BackendSettings; name: FieldName })`: today's `badge()` (`:698-705`).
-  - `RuntimeRows({ form, section }: { form: BackendSettings; section: SectionId })`: today's `runtimeRow`/`runtimeRows` (`:712-745`).
-  - `Advanced({ label, invalid, children }: { label: string; invalid: boolean; children: ReactNode })`: moved from `:1726-1748` (the old page imports it from here).
+  - `SavedSection({ form, id, title, description, children }: { form: BackendSettings; id: string; title: string; description?: ReactNode; children: ReactNode })`: today's `saved()` (`:757-775`) plus `form.resetError` as a `role="alert"` paragraph.
+  - `FieldBadge({ form, name }: { form: BackendSettings; name: FieldName })`: today's `badge()` (`:708-715`).
+  - `RuntimeRows({ form, section }: { form: BackendSettings; section: SectionId })`: today's `runtimeRow`/`runtimeRows` (`:722-755`).
+  - `Advanced({ label, invalid, children }: { label: string; invalid: boolean; children: ReactNode })`: moved from `:1772-1794` (the old page imports it from here).
 
 - [ ] **Step 1: Write the failing tests.** The test file defines two harness sections: `Timing` (`useBackendSettings('rendering', ['render_timeout', 'job_ttl'])` with `RuntimeRows`) and `Store` (`useBackendSettings('projects', ['store_backend'], { effective: (n, raw, f) => n === 'store_backend' ? storeChoice(f.settings, f.value).backend : raw })`), plus a third, `Url`, on `['bambuddy_url']` with `alsoReset: (name, s) => (name === 'bambuddy_url' && s.store_backend === 'bambuddy' ? { store_backend: 'local' } : {})`. Render them under the Task 3 providers inside `SettingsLoaded`.
 
@@ -306,8 +307,8 @@ it('saves only its own changed fields', async () => {
   // edit Render timeout to 45 and the Url harness's field, then Save Rendering
   expect(put).toHaveBeenCalledWith({ render_timeout: 45 })
 })
-it('keeps an edit typed while its own save is in flight (#767)', async () => { /* as SettingsPage.sections.test.tsx:455 */ })
-it("keeps another section's edit when this one saves (#767)", async () => { /* as :483 */ })
+it('keeps an edit typed while its own save is in flight (#767)', async () => { /* as SettingsPage.sections.test.tsx:472 */ })
+it("keeps another section's edit when this one saves (#767)", async () => { /* as :500 */ })
 it('refuses a negative number before sending, tied to the field', async () => {
   // Render timeout '-1' → Save → no PUT, error 'Enter 0 or more.' with aria-describedby on the input
 })
@@ -342,14 +343,14 @@ git commit -m "feat(frontend): useBackendSettings, one section's PUT /settings f
 - Consumes: `useAgentHandlers`, `useLatest` (`agent/useAgentHandlers.ts`), `AgentToolError` (`agent/types.ts`), `committed`, `touchAfterRender` (`agent/highlight.ts`), `SETTINGS_FIELDS` (`agent/catalog.ts`), `useReveal` (`collapseState.ts`), Task 2 (`resolveLocation`, `SettingsSection`), Task 3 (`useAnyDirty`, `useSettingsCache`), `baseline` (Task 1).
 - Produces:
   - `type AgentFormField = (typeof SETTINGS_FIELDS)[number]`
-  - `AGENT_FIELD_HOME: Record<AgentFormField, { section: string; domId: string }>` = `bambuddy_url` connection/`bambuddy-url`, `public_url` connection/`public-url`, `library_folder_id` projects/`library-folder`, `printer_id` printing/`printer`, `default_plate` preview/`default-plate`, `display_unit` preview/`display-unit` (today's `form`, `:547-554`)
+  - `AGENT_FIELD_HOME: Record<AgentFormField, { section: string; domId: string }>` = `bambuddy_url` connection/`bambuddy-url`, `public_url` connection/`public-url`, `library_folder_id` projects/`library-folder`, `printer_id` printing/`printer`, `default_plate` preview/`default-plate`, `display_unit` preview/`display-unit` (today's `form`, `:557-564`)
   - `type AgentFieldBinding = { value: () => string; set: (next: string) => void; allowed?: () => readonly string[]; listed?: () => unknown }`
   - `type ConnectionAgent = { testStored: () => Promise<ConnectionTest>; lastTest: () => ConnectionTest | null; error: () => string | null; apiKeyTyped: () => boolean }`
   - `SettingsAgentProvider({ sections, children }: { sections: readonly SettingsSection[]; children: ReactNode })`: registers `useAgentHandlers('settings', { get_form, set_field, test_connection }, describe)`.
   - `useSettingsAgentField(field: AgentFormField, binding: AgentFieldBinding): void`, `useSettingsConnectionAgent(agent: ConnectionAgent): void`
-  - `get_form`: today's shape (`:576-589`): `values` (each field's binding, else `baseline` from the cache), `unsaved: useAnyDirty()()`, `has_api_key`, `api_key_typed`, `choices` `{ library_folder_id, printer_id, default_plate, display_unit }` from each binding's `listed()`, `last_test`, `error`.
-  - `set_field`: refuses a value outside `allowed()` with today's `invalid_args` message (`:591-597`); when the field's area (via `AGENT_FIELD_HOME[field].section` in `sections`) is not the current one (`resolveLocation(location.pathname, location.hash, sections).area`), `navigate('/settings/<area>')`; then `binding.set`, `reveal(domId)`, `touchAfterRender`, `await committed(() => binding.value() === next)`; returns `{ field, value, saved: false, note: 'The user saves each section with its own Save button.' }`.
-  - `test_connection`: refused with today's message (`:606-611`) while any section is dirty; else `agent.testStored()` → `{ ok, detail }`; a thrown error becomes `AgentToolError('failed', message)`.
+  - `get_form`: today's shape (`:586-599`): `values` (each field's binding, else `baseline` from the cache), `unsaved: useAnyDirty()()`, `has_api_key`, `api_key_typed`, `choices` `{ library_folder_id, printer_id, default_plate, display_unit }` from each binding's `listed()`, `last_test`, `error`.
+  - `set_field`: refuses a value outside `allowed()` with today's `invalid_args` message (`:601-607`); when the field's area (via `AGENT_FIELD_HOME[field].section` in `sections`) is not the current one (`resolveLocation(location.pathname, location.hash, sections).area`), `navigate('/settings/<area>')`; then `binding.set`, `reveal(domId)`, `touchAfterRender`, `await committed(() => binding.value() === next)`; returns `{ field, value, saved: false, note: 'The user saves each section with its own Save button.' }`.
+  - `test_connection`: refused with today's message (`:616-621`) while any section is dirty; else `agent.testStored()` → `{ ok, detail }`; a thrown error becomes `AgentToolError('failed', message)`.
 
 - [ ] **Step 1: Write the failing tests** with two fake sections in the test file, each rendering a `Section` (`controls.tsx`) with one input and binding it: `Here` (general, binds `bambuddy_url`, `domId` `bambuddy-url`, reports dirty) and `There` (library, `id` `preview`, binds `display_unit` with `allowed: () => ['mm', 'in']`, input id `display-unit`). Render under `SettingsCollapseProvider`, Task 3's providers and `SettingsAgentProvider sections={fakes}` at `/settings/general`, with a `Where` that prints the pathname.
 
@@ -431,15 +432,15 @@ git commit -m "feat(frontend): useLeaveGuard can let every path under a prefix t
   - `SettingsProviders({ sections, children }: { sections?: readonly SettingsSection[]; children: ReactNode })`: `SettingsCollapseProvider known={foldIdsOf(sections)}` > `TipProvider` > `SettingsDirtyProvider` > `SettingsCacheProvider` > `BambuddyResourcesProvider` > `SettingsAgentProvider sections`. Default `sections` is `SECTION_REGISTRY`.
   - `SettingsShell({ sections }: { sections?: readonly SettingsSection[] })`:
     - `const target = resolveLocation(pathname, hash, sections)`; when the address differs from `/settings/<target.area><target.hash>`, `navigate(..., { replace: true })` from an effect. It never returns early on a redirect: the areas stay mounted, so drafts survive.
-    - Cache error and loading render today's `:662-696` cards; otherwise the page: `h1` "Settings" and today's intro (`:810-815`), `McpAuthBanner` while `ai.available` (`:818`), the changed-elsewhere card (`:820-834`, wired to `loadLatest`/`keepMine`).
+    - Cache error and loading render today's `:672-706` cards; otherwise the page: `h1` "Settings" and today's intro (`:820-825`), `McpAuthBanner` while `ai.available` (`:828`), the changed-elsewhere card (`:830-844`, wired to `loadLatest`/`keepMine`).
     - One `<nav aria-label="Settings areas">` holding one `SidebarMenuSub` list: a column from `md` up, a sideways-scrolling strip below it (responsive classes on the one list, so each link exists once). Each item is `SidebarMenuSubButton asChild` around a `Link` to `/settings/<area>`, `aria-current="page"` on the current one, and `<Badge aria-label="unsaved" …/>` when any of its sections is in `useDirtySections()`.
-    - The pane (`ref`, class `sb-settings relative h-full overflow-y-auto`, as today `:776`) holds the sticky `<nav aria-label="Settings sections">` (today's `:777-807` markup, listing the current area's shown sections, `go(id, { inPlace: anyDirty })`), then one `<div data-area={id} hidden={id !== target.area}>` per area holding its sections, each in a `SectionSlot`.
+    - The pane (`ref`, class `sb-settings relative h-full overflow-y-auto`, as today `:786`) holds the sticky `<nav aria-label="Settings sections">` (today's `:787-817` markup, listing the current area's shown sections, `go(id, { inPlace: anyDirty })`), then one `<div data-area={id} hidden={id !== target.area}>` per area holding its sections, each in a `SectionSlot`.
     - `SectionSlot` (local): for a `hideWhenEmpty` section, observes `#<id>-body` with a `MutationObserver` (childList) and calls `CollapseContext.setEmpty(id, childElementCount === 0)`; the slot is `hidden` and its sub-nav link dropped while empty. A `hideWhenEmpty` section passes no `description` to `Section`.
     - For an area with `servedByAgent` while `!ai.available`: one `<p role="status">` "The assistant service is not answering: the settings it serves are hidden until it does." above its sections.
     - On an area change with no hash, the pane scrolls to the top.
-    - The `useSectionNav` ids are the current area's shown section ids (memoised); the reveal effect is today's `:351-354`.
-    - `useLeaveGuard(anyDirty, { within: '/settings' })` and today's dialog (`:1704-1721`), its list built from the dirty ids' registry titles.
-  - `testing.tsx`: `renderSettingsSection(ui: ReactElement, options?: { route?: string; sections?: readonly SettingsSection[] })` (renders `<SettingsProviders><SettingsLoaded>{ui}</SettingsLoaded></SettingsProviders>` with `renderPage`, default route `/settings/general`); `renderSettingsShell(sections: readonly SettingsSection[], options?: { route?: string })`; `region(name: string): HTMLElement` and `enter(user: UserEvent, field: HTMLElement, text: string)` as in today's `SettingsPage.sections.test.tsx:43-57`.
+    - The `useSectionNav` ids are the current area's shown section ids (memoised); the reveal effect is today's `:361-364`.
+    - `useLeaveGuard(anyDirty, { within: '/settings' })` and today's dialog (`:1750-1767`), its list built from the dirty ids' registry titles.
+  - `testing.tsx`: `renderSettingsSection(ui: ReactElement, options?: { route?: string; sections?: readonly SettingsSection[] })` (renders `<SettingsProviders><SettingsLoaded>{ui}</SettingsLoaded></SettingsProviders>` with `renderPage`, default route `/settings/general`); `renderSettingsShell(sections: readonly SettingsSection[], options?: { route?: string })`; `region(name: string): HTMLElement` and `enter(user: UserEvent, field: HTMLElement, text: string)` as in today's `SettingsPage.sections.test.tsx:44-60`.
 
 - [ ] **Step 1: Write the failing tests** in `SettingsShell.test.tsx` with fake sections: `alpha` (general, a `Section` with a text input labelled "Alpha" that reports `useReportDirty('alpha', value !== '')`), `beta` (library, input "Beta"), `packages` (tools), `ghost` (tools, `hideWhenEmpty`, renders `Section` with no children), and a route `/` beside the shell for leaving.
 
@@ -501,14 +502,14 @@ Each section is `frontend/src/pages/settings/sections/<id>.tsx` exporting `id`, 
 - Create: `sections/connection.tsx` (+ `.test.tsx`), `sections/diagnostics.tsx`, `sections/administration.tsx` (+ `.test.tsx`), `sections/about.tsx` (+ `.test.tsx`)
 
 **Interfaces:**
-- Consumes: Tasks 1, 3, 4, 5; `UpstreamAnswerDetails` moves into `connection.tsx` (from `SettingsPage.tsx:1750-1789`).
+- Consumes: Tasks 1, 3, 4, 5; `UpstreamAnswerDetails` moves into `connection.tsx` (from `SettingsPage.tsx:1796-1835`).
 - Produces:
-  - `connection` (general, 10, "Connection"): JSX `:843-1104`. `useBackendSettings('connection', (s) => fieldsOf('connection', s), { publish: ['bambuddy_url'], alsoSend: <today's :451-461 rule>, alsoReset: (name, s) => name === 'bambuddy_url' && s.store_backend === 'bambuddy' && s.library_backend !== 'native' ? { store_backend: 'local' } : {}, onSaved: () => { targets.reload(); projects.reload() }, onReset: (name) => <reload both for bambuddy_url, bambuddy_api_key> })`. Its own `testing`, `test`, `registering`, `sidebar`, `error` state; `runTest` (today's `:634-648`, the whole run inside `cache.own`, then `status.reload()`) and `addSidebar` (`:650-660`); `error` shows as `role="alert"` at the section's top. Binds `bambuddy_url` and `public_url` with `useSettingsAgentField`, and `useSettingsConnectionAgent({ testStored, lastTest, error, apiKeyTyped })` where `testStored` is today's `:612-628` minus the dirty check.
+  - `connection` (general, 10, "Connection"): JSX `:853-1114`. `useBackendSettings('connection', (s) => fieldsOf('connection', s), { publish: ['bambuddy_url'], alsoSend: <today's :461-471 rule>, alsoReset: (name, s) => name === 'bambuddy_url' && s.store_backend === 'bambuddy' && s.library_backend !== 'native' ? { store_backend: 'local' } : {}, onSaved: () => { targets.reload(); projects.reload() }, onReset: (name) => <reload both for bambuddy_url, bambuddy_api_key> })`. Its own `testing`, `test`, `registering`, `sidebar`, `error` state; `runTest` (today's `:644-658`, the whole run inside `cache.own`, then `status.reload()`) and `addSidebar` (`:660-670`); `error` shows as `role="alert"` at the section's top. Binds `bambuddy_url` and `public_url` with `useSettingsAgentField`, and `useSettingsConnectionAgent({ testStored, lastTest, error, apiKeyTyped })` where `testStored` is today's `:622-638` minus the dirty check.
   - `diagnostics` (system, 10, "Diagnostics"): `SavedSection` + `RuntimeRows section="diagnostics"`, fields `(s) => fieldsOf('diagnostics', s)` (its env-only extras included).
-  - `administration` (system, 20, "Administration"): JSX `:1587-1657`.
-  - `about` (system, 30, "About"): JSX `:1659-1700`; Bambuddy's version from `useBambuddyResources().status`.
+  - `administration` (system, 20, "Administration"): JSX `:1633-1703`.
+  - `about` (system, 30, "About"): JSX `:1705-1746`; Bambuddy's version from `useBambuddyResources().status`.
 - Tests moved:
-  - to `connection.test.tsx`: all of `SettingsPage.test.tsx` `describe('SettingsPage')` from 'loads the stored connection…' to 'shows no answer when the test passed', 'sends the key only when one was typed', 'clears the key field once it is saved', 'registers the Bambuddy sidebar entry'; `SettingsPage.sections.test.tsx` 'lists every scope…', 'says Bambuddy takes no finish photo…', 'typing a key after Remove key…', and from `describe('SettingsPage blob store (#426)')` 'warns while render workers…', 'drops the warning once a render key…', 'sends a typed render key with Connection…', 'removes a stored render key when Connection is saved'.
+  - to `connection.test.tsx`: from `SettingsPage.test.tsx` `describe('SettingsPage')`: 'loads the stored connection…', 'says when no key is stored yet', 'tests the connection and names the printers it found', 'names the missing scope…', 'shows what Bambuddy itself answered a failed test (#1542)', 'shows no answer when the test passed', 'sends the key only when one was typed', 'clears the key field once it is saved', 'registers the Bambuddy sidebar entry'; `SettingsPage.sections.test.tsx` 'lists every scope…', 'says Bambuddy takes no finish photo…', 'typing a key after Remove key…', and from `describe('SettingsPage blob store (#426)')` 'warns while render workers…', 'drops the warning once a render key…', 'sends a typed render key with Connection…', 'removes a stored render key when Connection is saved'.
   - to `administration.test.tsx`: all of `SettingsPage.activity.test.tsx`, and `describe('SettingsPage Administration (#668)')`.
   - to `about.test.tsx`: 'shows the build and the values only the deployment sets'.
 
@@ -517,22 +518,24 @@ git add frontend/src/pages/settings/sections/connection.tsx frontend/src/pages/s
 git commit -m "refactor(frontend): Connection, Diagnostics, Administration and About as section components"
 ```
 
-### Task 9: Printing (Printing defaults, Spool inventory, Remembered choices, Hotend usage)
+### Task 9: Printing (Printing defaults, Printers, Spool inventory, Orders, Remembered choices, Hotend usage)
 
 **Files:**
-- Create: `sections/printing.tsx` (+ `.test.tsx`), `sections/inventory.tsx`, `sections/remembered.tsx` (+ `.test.tsx`), `sections/hotend-usage.tsx`
+- Create: `sections/printing.tsx` (+ `.test.tsx`), `sections/printers.tsx` (+ `.test.tsx`), `sections/inventory.tsx`, `sections/orders.tsx` (+ `.test.tsx`), `sections/remembered.tsx` (+ `.test.tsx`), `sections/hotend-usage.tsx`
 
 **Interfaces:**
 - Produces:
-  - `printing` (printing, 10, "Printing defaults"): JSX `:1106-1161`, fields `fieldsOf('printing', s)`; binds `printer_id` (`allowed` = `['', ...printer ids]`, `listed` = `{ value, name }[]`, as `:559-583`).
-  - `inventory` (printing, 20, "Spool inventory"): `:1163-1169`.
-  - `remembered` (printing, 30, "Remembered choices"): `:1482-1489` without `HotendUsagePanel`, description unchanged.
-  - `hotend-usage` (printing, 40, "Hotend usage", `hideWhenEmpty`): `<Section id title><HotendUsagePanel targets={targets.data} /></Section>` (the panel renders nothing without targets).
-- Tests moved: to `printing.test.tsx`: 'keeps print runs forever…(#1052)', 'keeps finished operations…(#1053)', "shows the server refusing a retention below Temporal's…", 'refuses a print run retention under a day…', 'refuses a retention over ten years…'; to `remembered.test.tsx`: `describe('SettingsPage remembered choices (#322)')`.
+  - `printing` (printing, 10, "Printing defaults"): JSX `:1116-1171`, fields `fieldsOf('printing', s)`; binds `printer_id` (`allowed` = `['', ...printer ids]`, `listed` = `{ value, name }[]`, as `:569-593`).
+  - `printers` (printing, 20, "Printers", #3823): `:1173-1180`, a plain `Section` around `<PrintersPanel />` (`components/settings/Printers.tsx`); no form state, no `useBackendSettings`: each change in the panel applies at once, so it never reports dirty.
+  - `inventory` (printing, 30, "Spool inventory"): `:1181-1187`.
+  - `orders` (printing, 40, "Orders", #4249, #4250): `:1189-1198`; `useBackendSettings('orders', (s) => fieldsOf('orders', s))` (all runtime fields in `RUNTIME_FIELDS`: `orders_currency`, `pricing_*`, `rough_estimate_factor`; no hand-laid ones), `<SavedSection>` around `<RuntimeRows section="orders" />` and `<FilamentsEditor />` (`components/orders/FilamentsEditor.tsx`, saves a row at a time through the price-book API, outside the form), description unchanged. `RuntimeInput` renders `pricing_rounding` as a `ChoiceSelect` (`kind: 'select'` with `choices`, now in `controls.tsx`); nothing else is needed.
+  - `remembered` (printing, 50, "Remembered choices"): `:1528-1535` without `HotendUsagePanel`, description unchanged.
+  - `hotend-usage` (printing, 60, "Hotend usage", `hideWhenEmpty`): `<Section id title><HotendUsagePanel targets={targets.data} /></Section>` (the panel renders nothing without targets).
+- Tests moved: to `printing.test.tsx`: 'keeps print runs forever…(#1052)', 'keeps finished operations…(#1053)', "shows the server refusing a retention below Temporal's…", 'refuses a print run retention under a day…', 'refuses a retention over ten years…'; to `printers.test.tsx`: 'has a Printers section with the registry (#3823)' (`SettingsPage.test.tsx`); to `orders.test.tsx`: `describe('SettingsPage Orders (#4249)')` and `describe('SettingsPage Orders, the price book (#4250)')` (`SettingsPage.sections.test.tsx`; both save through `region('Orders')`'s `Save Orders`); to `remembered.test.tsx`: `describe('SettingsPage remembered choices (#322)')`. `components/settings/Printers.test.tsx` and the `components/orders/` tests stay where they are. Add one test to `printers.test.tsx`: `it('opens the Printers and Orders sections from their old anchors')`, with `renderSettingsShell` and `SECTION_REGISTRY` at `/settings#printers` and `/settings#orders`, expecting `/settings/printing#printers` and `/settings/printing#orders` and each region's name.
 
 ```bash
-git add frontend/src/pages/settings/sections/printing.tsx frontend/src/pages/settings/sections/printing.test.tsx frontend/src/pages/settings/sections/inventory.tsx frontend/src/pages/settings/sections/remembered.tsx frontend/src/pages/settings/sections/remembered.test.tsx frontend/src/pages/settings/sections/hotend-usage.tsx
-git commit -m "refactor(frontend): the Printing area's sections as components"
+git add frontend/src/pages/settings/sections/printing.tsx frontend/src/pages/settings/sections/printing.test.tsx frontend/src/pages/settings/sections/printers.tsx frontend/src/pages/settings/sections/printers.test.tsx frontend/src/pages/settings/sections/inventory.tsx frontend/src/pages/settings/sections/orders.tsx frontend/src/pages/settings/sections/orders.test.tsx frontend/src/pages/settings/sections/remembered.tsx frontend/src/pages/settings/sections/remembered.test.tsx frontend/src/pages/settings/sections/hotend-usage.tsx
+git commit -m "refactor(frontend): the Printing area's sections (with Printers and Orders) as components"
 ```
 
 ### Task 10: Library (Projects & files, Uploads, Fonts, Libraries, Rendering, Preview)
@@ -542,10 +545,10 @@ git commit -m "refactor(frontend): the Printing area's sections as components"
 
 **Interfaces:**
 - Produces:
-  - `projects` (library, 10, "Projects & files"): JSX `:1171-1401`; `useBackendSettings('projects', (s) => fieldsOf('projects', s), { effective: (n, raw, f) => n === 'store_backend' ? storeChoice(f.settings, f.value).backend : raw, alsoReset: (name, s) => name === 'library_folder_id' && s.store_backend === 'bambuddy' && s.library_backend !== 'native' ? { store_backend: 'local' } : {} })`; the "not saved yet" hint reads `usePeerDraft('bambuddy_url')` in place of `value('bambuddy_url')` (`:1257`); `storeUsage` from its own `useAsync(() => api.getStoreUsage(), [])`; binds `library_folder_id`.
-  - `uploads` (library, 20, "Uploads"): `:1403-1424`, its own `getAssetUsage`.
-  - `fonts` (library, 30, "Fonts"), `libraries` (library, 40, "Libraries", `:1430-1436`), `rendering` (library, 50, "Rendering").
-  - `preview` (library, 60, "Preview"): `:1438-1480`, its own `listPlates`; `onSaved: (next) => setDisplayUnit(next.display_unit)`; binds `default_plate` (`allowed` `['', ...names, stray]`, `listed` names) and `display_unit` (`['mm', 'in']`).
+  - `projects` (library, 10, "Projects & files"): JSX `:1199-1447`; `useBackendSettings('projects', (s) => fieldsOf('projects', s), { effective: (n, raw, f) => n === 'store_backend' ? storeChoice(f.settings, f.value).backend : raw, alsoReset: (name, s) => name === 'library_folder_id' && s.store_backend === 'bambuddy' && s.library_backend !== 'native' ? { store_backend: 'local' } : {} })`; the "not saved yet" hint reads `usePeerDraft('bambuddy_url')` in place of `value('bambuddy_url')` (`:1285`); `storeUsage` from its own `useAsync(() => api.getStoreUsage(), [])`; binds `library_folder_id`. It holds the Slicer choice (`slicer_backend`, a `ChoiceSelect` with id `slicer-backend`, listed in `HAND_LAID.projects`), moved as it is.
+  - `uploads` (library, 20, "Uploads"): `:1449-1470`, its own `getAssetUsage`.
+  - `fonts` (library, 30, "Fonts"), `libraries` (library, 40, "Libraries", `:1476-1482`), `rendering` (library, 50, "Rendering").
+  - `preview` (library, 60, "Preview"): `:1484-1526`, its own `listPlates`; `onSaved: (next) => setDisplayUnit(next.display_unit)`; binds `default_plate` (`allowed` `['', ...names, stray]`, `listed` names) and `display_unit` (`['mm', 'in']`).
 - Tests moved:
   - to `projects.test.tsx`: the rest of `describe('SettingsPage blob store (#426)')` (from 'seeds the Blob store choice…' to 'says a store cap of zero is no limit'), and `describe('SettingsPage S3 store')`. Tests that save Connection (the fall-backs, 'keeps the Bambuddy store on a Connection save…', 'offers the Bambuddy store only once its URL is saved…') render `<><Connection /><Projects /></>`.
   - to `uploads.test.tsx`: 'shows how much the upload store holds…(#296)', 'says a cap of zero is no limit', 'edits the upload limit in MB or GB and stores bytes'.
@@ -567,7 +570,7 @@ git commit -m "refactor(frontend): the Library area's sections as components"
 
 | id | order | title | content (today's line) |
 |---|---|---|---|
-| `assistant-credentials` | 10 | Status & credentials | `AiStatusSection`, `AiCredentialSection` (`:1494-1496`; never behind `ai.available`, #1000) |
+| `assistant-credentials` | 10 | Status & credentials | `AiStatusSection`, `AiCredentialSection` (`:1540-1542`; never behind `ai.available`, #1000) |
 | `model` | 20 | Model | `ModelSetting` |
 | `session-limits` | 30 | Session limits | `SessionLimitsSetting` |
 | `session-runtime` | 40 | Runtime | `SessionRuntimeSetting` |
@@ -576,7 +579,7 @@ git commit -m "refactor(frontend): the Library area's sections as components"
 | `workspace` | 70 | Workspace | `WorkspaceSettingsSetting` |
 | `default-session-mode` | 80 | Session mode | `SessionModeSetting` |
 | `durable-subagents` | 90 | Subagents | `DurableSubagentsSetting` (its card is titled "Durable subagents") |
-| `memory` | 100 | Memory | `ai.available && <MemorySettingsSetting />` (`:1575`) |
+| `memory` | 100 | Memory | `ai.available && <MemorySettingsSetting />` (`:1621`) |
 
 - Tests moved: to `assistant-credentials.test.tsx`, "names one landmark Assistant…" rewritten as `it('names its region Status & credentials, and the status inside it "Assistant status"')`: `document.getElementById('assistant-credentials')` has accessible name `Status & credentials`; `document.getElementById('ai-status-heading')!.closest('[role="region"]')` has `Assistant status`.
 
@@ -597,19 +600,19 @@ git commit -m "refactor(frontend): the Assistant area's sections as components"
 
 | id | area | order | title | content (today's line) |
 |---|---|---|---|---|
-| `builtin` | tools | 10 | Built-in | the WebMCP switch (`:1501-1513`), `HttpRequestSetting`, `BrowserOriginsSetting`, `PrinterCameraSetting` |
-| `packages` | tools | 20 | Packages (`hideWhenEmpty`) | `ai.available &&` the "Assistant plugins" paragraph (`:1568-1571`) and `PluginPackagesPanel` (its card is "Plugin packages") |
+| `builtin` | tools | 10 | Built-in | the WebMCP switch (`:1547-1559`), `HttpRequestSetting`, `BrowserOriginsSetting`, `PrinterCameraSetting` |
+| `packages` | tools | 20 | Packages (`hideWhenEmpty`) | `ai.available &&` the "Assistant plugins" paragraph (`:1614-1617`) and `PluginPackagesPanel` (its card is "Plugin packages") |
 | `remote` | tools | 30 | Remote MCP plugins (`hideWhenEmpty`) | `ai.available && <RemotePluginsPanel />` |
 | `mcp-auth-mode` | mcp | 10 | Auth mode (`hideWhenEmpty`) | `ai.available && <McpAuthSection onSaved={() => mcpAuthChanged()} />` |
 | `mcp-access-tokens` | mcp | 20 | Tokens (`hideWhenEmpty`) | `ai.available && <McpTokensSection publicUrl={settings.public_url} />` (the connect snippet stays inside it) |
-| `mcp-oidc` | mcp | 30 | OIDC sign-in (`hideWhenEmpty`) | `ai.available &&` `:1557-1561` |
+| `mcp-oidc` | mcp | 30 | OIDC sign-in (`hideWhenEmpty`) | `ai.available &&` `:1603-1607` |
 | `audit-log` | audits | 10 | Audit log (`hideWhenEmpty`) | `AiAuditSection` (its card is "AI activity") |
 
 - `McpTokensSection` (§3.5): the `authMode` prop goes; it reads `useMcpAuthVersion()` and `useAsync(() => api.getMcpAuth(), [version])`, and `authMode = auth.data?.mode ?? list?.auth_mode ?? null`.
 
 - [ ] **Step 1: Write the failing tests.** In `McpTokensSection.test.tsx`: `it('reads the auth mode itself, and again when it is saved elsewhere on the page')`: mock `getMcpAuth` answering `disabled`, render `<McpTokensSection />` alone, expect `findByTestId('mcp-auth-note')` to contain "MCP authentication is turned off"; switch the mock to `bearer`, `act(() => mcpAuthChanged())`, expect the note gone. Copy `SettingsPage.ai.test.tsx`'s first three tests into `mcp-access-tokens.test.tsx`, rendering `<><McpAuthMode /><McpAccessTokens /></>`.
 - [ ] **Step 2: Run** `pnpm exec vitest run src/components/McpTokensSection.test.tsx src/pages/settings/sections/`. Expected: FAIL (the note waits for a save; imports unresolved).
-- [ ] **Step 3: Implement** the McpTokensSection change, then the seven section files; in the old `SettingsPage.tsx` drop the `mcpAuthMode` state (`:293`) and the `authMode` prop (`:1553`).
+- [ ] **Step 3: Implement** the McpTokensSection change, then the seven section files; in the old `SettingsPage.tsx` drop the `mcpAuthMode` state (`:303`) and the `authMode` prop (`:1599`).
 - [ ] **Step 4: Run** the same command and `pnpm exec vitest run src/pages/SettingsPage`. Expected: PASS.
 - [ ] **Step 5: Commit**
 
@@ -623,9 +626,9 @@ git commit -m "refactor(frontend): Tools & plugins, MCP access and Audits sectio
 ### Task 13: Route the shell, delete the one-page Settings, move the page tests
 
 **Files:**
-- Modify: `frontend/src/App.tsx:107`
+- Modify: `frontend/src/App.tsx:115`
 - Modify: `frontend/src/pages/SettingsPage.tsx` (all of it: becomes the providers plus the shell)
-- Modify: `frontend/src/pages/settings/fields.ts:3-27`, `frontend/src/pages/settings/collapse.tsx:61-139`, `frontend/src/pages/settings/collapse.test.tsx`
+- Modify: `frontend/src/pages/settings/fields.ts:3-29`, `frontend/src/pages/settings/collapse.tsx:61-139`, `frontend/src/pages/settings/collapse.test.tsx`
 - Modify: `frontend/src/pages/SettingsPage.test.tsx`, `frontend/src/pages/SettingsPage.sections.test.tsx`, `frontend/src/pages/SettingsPage.ai.test.tsx`, `frontend/src/pages/agentTools.test.tsx:191-260`, `frontend/src/pages/settings/registry.test.ts`
 - Delete: `frontend/src/pages/SettingsPage.activity.test.tsx`
 
@@ -634,11 +637,11 @@ git commit -m "refactor(frontend): Tools & plugins, MCP access and Audits sectio
 - Produces:
   - `App.tsx`: `<Route path="settings/*" element={<SettingsPage />} />` (one route, so the shell stays mounted across areas).
   - `SettingsPage(): JSX.Element` = `<SettingsProviders><SettingsShell /></SettingsProviders>`.
-  - `fields.ts`: `SECTIONS` and `sectionTitle` removed; `export type SectionId = 'connection' | 'printing' | 'projects' | 'uploads' | 'rendering' | 'fonts' | 'preview' | 'diagnostics' | 'administration'`.
+  - `fields.ts`: `SECTIONS` and `sectionTitle` removed; `export type SectionId = 'connection' | 'printing' | 'orders' | 'projects' | 'uploads' | 'rendering' | 'fonts' | 'preview' | 'diagnostics' | 'administration'` (`orders` has runtime fields; `printers` and `inventory` own none, so they stay out).
   - `collapse.tsx`: `SubSection` and `SectionContents` removed (their empty-hiding is the shell's `SectionSlot`); `SettingsCollapseProvider` unchanged.
 
 - [ ] **Step 1: Write the failing tests.**
-  - `registry.test.ts`: `it('holds the spec §3.2 table')`: `AREAS.map((a) => [a.id, SECTION_REGISTRY.filter((s) => s.area === a.id).map((s) => s.id)])` equals `[['general', ['connection']], ['printing', ['printing', 'inventory', 'remembered', 'hotend-usage']], ['library', ['projects', 'uploads', 'fonts', 'libraries', 'rendering', 'preview']], ['assistant', ['assistant-credentials', 'model', 'session-limits', 'session-runtime', 'render-limits', 'images', 'workspace', 'default-session-mode', 'durable-subagents', 'memory']], ['tools', ['builtin', 'packages', 'remote']], ['mcp', ['mcp-auth-mode', 'mcp-access-tokens', 'mcp-oidc']], ['audits', ['audit-log']], ['system', ['diagnostics', 'administration', 'about']]]`; `it('sends every old anchor to a section that exists in its area')`.
+  - `registry.test.ts`: `it('holds the spec §3.2 table, with Printers and Orders in Printing')`: `AREAS.map((a) => [a.id, SECTION_REGISTRY.filter((s) => s.area === a.id).map((s) => s.id)])` equals `[['general', ['connection']], ['printing', ['printing', 'printers', 'inventory', 'orders', 'remembered', 'hotend-usage']], ['library', ['projects', 'uploads', 'fonts', 'libraries', 'rendering', 'preview']], ['assistant', ['assistant-credentials', 'model', 'session-limits', 'session-runtime', 'render-limits', 'images', 'workspace', 'default-session-mode', 'durable-subagents', 'memory']], ['tools', ['builtin', 'packages', 'remote']], ['mcp', ['mcp-auth-mode', 'mcp-access-tokens', 'mcp-oidc']], ['audits', ['audit-log']], ['system', ['diagnostics', 'administration', 'about']]]`; `it('sends every old anchor to a section that exists in its area')`.
   - `SettingsPage.test.tsx`: `it('gives every section an id, heading and body no other element on the page has')` (render `<SettingsPage />` at `/settings/general` with AI available, wait for seeding; for each registry id, `document.querySelectorAll('[id="<id>"]')`, `…-heading` and `…-body` each have length 1); `it('names no two regions alike')` (accessible names of every `section[aria-labelledby], [role="region"]` are distinct).
   - `agentTools.test.tsx` `describe('settings tools')`: `it('sets a field in another area, and goes there')`: render `<><Shell /><Where /></>`, `set_field display_unit` → `where` shows `/settings/library`, `getByLabelText('Show dimensions in')` visible.
 - [ ] **Step 2: Run** `pnpm exec vitest run src/pages/settings/registry.test.ts src/pages/SettingsPage.test.tsx src/pages/agentTools.test.tsx`. Expected: FAIL (old page routed, sections missing from a single page, new tests unmet).
@@ -660,13 +663,14 @@ git commit -m "feat(frontend): Settings by area at /settings/:area (#2171)"
 ### Task 14: Playwright specs on the area URLs
 
 **Files:**
-- Modify: `frontend/e2e/settings.spec.ts`, `hotend-usage.spec.ts:9`, `mcp-auth.spec.ts:15`, `mcp-tokens.spec.ts:35,61,67`, `plugin-packages.spec.ts:30,95,126`, `ai-audit.spec.ts:9`, `settings-tap-targets.spec.ts:39-47`, `agent-bridge.spec.ts:104-122`, `app-shell.spec.ts:18`, `page-titles.spec.ts:26`, `real-agent.spec.ts:65`
+- Modify: `frontend/e2e/settings.spec.ts`, `hotend-usage.spec.ts:9`, `mcp-auth.spec.ts:15`, `mcp-tokens.spec.ts:35,61,67`, `plugin-packages.spec.ts:30,95,126`, `printers.spec.ts:12`, `ai-audit.spec.ts:9`, `settings-tap-targets.spec.ts:39-47`, `agent-bridge.spec.ts:104-122`, `app-shell.spec.ts:18`, `page-titles.spec.ts:26`, `real-agent.spec.ts:65`
 
 **Interfaces:** none.
 
 - [ ] **Step 1: Edit the specs.**
   - `settings.spec.ts`: the round-trip at `/settings/library`; the leave test at `/settings/library` with `toHaveURL(/\/settings\/library$/)`; replace "shows every section link at desktop width" with `test('shows every area link, and each area’s section links, at desktop width')` looping the eight areas, the same box and overflow checks on both navs; `/settings#about` stays (it now asserts `toHaveURL(/\/settings\/system#about$/)` first); add `test('moves between areas with a draft, and asks only when leaving Settings')`: edit Render timeout on Library, click area "General", `expect(page.getByRole('alertdialog')).toHaveCount(0)`, back to Library, the value is kept, click "Models", the dialog lists Rendering.
   - `hotend-usage.spec.ts:9`: `/settings/printing#hotend-usage`.
+  - `printers.spec.ts:12` (#3823): `/settings/printing#printers`; the rest is unchanged (it finds `region` `Printers`).
   - `mcp-auth.spec.ts:15`, `mcp-tokens.spec.ts:35,61` and the frame match at `:67` (`endsWith('/settings/mcp')`): `/settings/mcp`.
   - `plugin-packages.spec.ts:30,95,126`: `/settings/tools`.
   - `ai-audit.spec.ts:9`: `/settings/audits`.
@@ -688,13 +692,13 @@ git commit -m "test(frontend): Playwright specs open Settings at its area URLs"
 ### Task 15: Links and text pointers (§3.5)
 
 **Files:**
-- Modify: `frontend/src/components/activity/ActivityDrawer.tsx:281-285`, test `ActivityDrawer.test.tsx:63`
+- Modify: `frontend/src/components/activity/ActivityDrawer.tsx:209-213`, test `ActivityDrawer.test.tsx:63`
 - Modify: `frontend/src/agent/chat/pageContext.ts:37`, test `frontend/src/agent/chat/Markdown.test.tsx:172,187`
 - Modify: `frontend/src/components/McpAuthBanner.tsx:43,49`, tests `McpAuthBanner.test.tsx:41`, `assistant/AssistantPanel.test.tsx:149`, `frontend/e2e/mcp-auth.spec.ts:46`
-- Modify: `frontend/src/components/assistant/SessionTouched.tsx:129`, test `SessionTouched.test.tsx:76`
+- Modify: `frontend/src/components/assistant/SessionTouched.tsx:131`, test `SessionTouched.test.tsx:82`
 - Modify: `frontend/src/agent/catalog.ts:42,265`
-- Modify (strings only): `agent/src/tools/registry.ts:540,543`, `agent/src/tools/approvals.ts:71`, `agent/src/routes/subagentMcp.ts:127`, `agent/src/temporal/toolActivities.ts:473`, `agent/src/tools/browser.ts:273,460`
-- Modify (docs): `plugins/scadbuddy/README.md:62` (the `PostToolUse` hook bumps `version` in `plugins/scadbuddy/.claude-plugin/plugin.json` and `agent/plugins/scadbuddy/.claude-plugin/plugin.json`, 0.1.24 → 0.1.25; bump both by hand if the edit did not go through the hook), `docs/ai/agent-sessions.md:258`, `docs/ai/browser-bridge.md:59`
+- Modify (strings only): `agent/src/tools/registry.ts:619,622`, `agent/src/tools/approvals.ts:71`, `agent/src/routes/subagentMcp.ts:127`, `agent/src/temporal/toolActivities.ts:503`, `agent/src/tools/browser.ts:273,460`
+- Modify (docs): `plugins/scadbuddy/README.md:62` (the `PostToolUse` hook bumps `version` in `plugins/scadbuddy/.claude-plugin/plugin.json` and `agent/plugins/scadbuddy/.claude-plugin/plugin.json`, 0.1.29 → 0.1.30; bump both by hand if the edit did not go through the hook), `docs/ai/agent-sessions.md:258`, `docs/ai/browser-bridge.md:59`
 
 **Interfaces:**
 - Produces: `toolSettingsPath(viaTool: string): string` in `ActivityDrawer.tsx`: `/settings/tools#remote` for a `<server>__<tool>` name, else `/settings/tools#builtin`.
@@ -703,15 +707,15 @@ git commit -m "test(frontend): Playwright specs open Settings at its area URLs"
   - `ActivityDrawer.test.tsx:63`: the `import_model` link has `href` `/settings/tools#builtin`; add `it('links a remote plugin tool to Remote MCP plugins')` with `via_tool: 'hindsight__recall'` → `/settings/tools#remote`.
   - `Markdown.test.tsx`: `expect(suggestedPrompts('/settings/tools')).toContain('Help me connect Bambuddy')` and the same for `/settings`.
   - `McpAuthBanner.test.tsx:41`, `AssistantPanel.test.tsx:149`: `href` `/settings/mcp#mcp-auth-mode`; the unlinked text reads "Turn it back on under Settings → MCP access."
-  - `SessionTouched.test.tsx:76`: `href` `/settings/library#libraries`.
+  - `SessionTouched.test.tsx:82`: `href` `/settings/library#libraries`.
 - [ ] **Step 2: Run** `cd frontend && pnpm exec vitest run src/components/activity/ActivityDrawer.test.tsx src/agent/chat/Markdown.test.tsx src/components/McpAuthBanner.test.tsx src/components/assistant/AssistantPanel.test.tsx src/components/assistant/SessionTouched.test.tsx`. Expected: FAIL on the new hrefs and prompts.
 - [ ] **Step 3: Implement.**
   - `pageContext.ts:37`: pattern `/settings/*` (matches `/settings` too).
   - `McpAuthBanner.tsx:43` link `/settings/mcp#mcp-auth-mode`; `:49` text "Turn it back on under Settings → MCP access."
-  - `SessionTouched.tsx:129`: `/settings/library#libraries`.
+  - `SessionTouched.tsx:131`: `/settings/library#libraries`.
   - `catalog.ts:42` example route `"/settings/general"`; `:265` `settings: 'settings ("/settings/…")'`.
   - Agent strings: every "Settings → Plugins" in the five listed messages becomes "Settings → Tools & plugins"; `browser.ts:273` example route `"/settings/general"`, `:460` comment `Settings ("/settings/…")`.
-  - Docs: `README.md:62` "Settings → MCP access → **Tokens**"; `agent-sessions.md:258` `/settings/library#libraries`; `browser-bridge.md:59` ``settings (`/settings/…`)``.
+  - Docs: `README.md:62` "Settings → MCP access → **Tokens**"; `agent-sessions.md:259` `/settings/library#libraries`; `browser-bridge.md:59` ``settings (`/settings/…`)``.
 - [ ] **Step 4: Run** the Step 2 command; `cd frontend && pnpm exec playwright test e2e/mcp-auth.spec.ts`; `cd agent && pnpm lint && pnpm typecheck && pnpm exec vitest run test/builtInTools.test.ts test/subagentMcp.test.ts test/toolSwitches.test.ts`; `.github/scripts/lint-plugin.sh`. Expected: PASS (the agent tests match `/disabled in Settings/`, which the new text keeps).
 - [ ] **Step 5: Commit**
 

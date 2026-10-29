@@ -2,7 +2,8 @@ import type { Sql } from 'postgres'
 import { randomUUID } from 'node:crypto'
 import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
 import { ROOT_CONTEXT } from '@opentelemetry/api'
-import { SETTING_HTTP_REQUEST } from '../../src/harness/httpRequest.js'
+import { type AccessRow, BUILTIN_SOURCES, SOURCE_ITEM } from '../../src/access/model.js'
+import { AccessResolver } from '../../src/access/resolver.js'
 import { SETTING_RECALL_MAX_QUERY_CHARS } from '../../src/memory/hindsight.js'
 import type { ApprovalRequest, RiskTier } from '../../src/harness/permissions.js'
 import { builtInPolicy } from '../../src/plugins/builtInTools.js'
@@ -13,6 +14,7 @@ import type { TurnContext } from '../../src/sessions/turnSlot.js'
 import type { SessionFiles } from '../../src/workspace/store.js'
 import { TurnTrace } from '../../src/telemetry/turn.js'
 import { fixedCredentials } from './fixedCredentials.js'
+import { memoryAccess } from './memoryAccess.js'
 import { browser, tempPaths } from './sessions.js'
 
 /**
@@ -29,10 +31,12 @@ export type TurnRunnerTestOptions = {
   /** The Hindsight plugin's tool tiers and disabled tools. */
   pluginToolTiers?: Record<string, RiskTier>
   pluginDisabledTools?: string[]
-  /** Settings → Plugins' raised tiers for ScadBuddy's own tools (#1953), by bare name. */
+  /** Settings → Tools & plugins' raised tiers for ScadBuddy's own tools (#1953), by bare name. */
   raisedTiers?: Record<string, RiskTier>
-  /** The stored http_request setting (#827); on when undefined. */
+  /** The http_request switch (#827), `builtin:http`'s `*` row in ai_access (#2171); on when undefined. */
   httpRequest?: boolean
+  /** Further ai_access rows (#2171). */
+  access?: AccessRow[]
   /** Whether the loaded package was approved with `allow_refused`. */
   allowRefused?: boolean
   /** The stored Hindsight recall query cap (#2655); the default when undefined. */
@@ -82,6 +86,10 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     claimedAt: now,
   }
   const principal: TurnPrincipal = {}
+  const rows: AccessRow[] = [...(options.access ?? [])]
+  if (options.httpRequest !== undefined) {
+    rows.push({ source: BUILTIN_SOURCES.http, item: SOURCE_ITEM, access: options.httpRequest ? 'on' : 'off', updated_by: 'test' })
+  }
   const runner = new TurnRunner({
     sql: unusedSql,
     paths,
@@ -90,12 +98,12 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
       get: <T>(key: string) => {
         const stored: Record<string, unknown> = {
           model: 'claude-test',
-          [SETTING_HTTP_REQUEST]: options.httpRequest,
           [SETTING_RECALL_MAX_QUERY_CHARS]: options.recallMaxQueryChars,
         }
         return Promise.resolve(stored[key] as T | undefined)
       },
     },
+    access: new AccessResolver(memoryAccess(rows).access),
     tierOf: () => 'read',
     mcpServers: () => ({ scadbuddy: createSdkMcpServer({ name: 'scadbuddy', tools: [] }) }),
     prepareApproval: options.prepareApproval ?? (() => async () => undefined),

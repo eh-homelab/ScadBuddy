@@ -37,6 +37,11 @@ export type ErrorCode =
   | 'timeout'
   /** The tool ran and failed. */
   | 'failed'
+  /**
+   * The tab runs an older build whose tool catalogue the server no longer has (#4884):
+   * the stale-chunk reload is under way, or the catalogue could not be loaded at all.
+   */
+  | 'stale_tab'
 
 export interface ToolError {
   code: ErrorCode

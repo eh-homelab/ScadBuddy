@@ -11,7 +11,7 @@ import type { TabRelay } from '../src/bridge/relay.js'
 import type { SessionTabStore } from '../src/bridge/sessionTabs.js'
 import { ChatConnection } from '../src/routes/chat.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { browserTools, tabBackNotRun } from '../src/tools/browser.js'
+import { browserTools, STALE_TAB_HINT, tabBackNotRun } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
@@ -198,6 +198,19 @@ describe('forwarding to the tab', () => {
     expect(firstText({ content: [{ type: 'text', text: message.slice(message.indexOf(': ') + 2) }] })).toBe(
       'The arguments do not match. value: too big',
     )
+  })
+
+  it("gives stale_tab's guidance as ScadBuddy's own text, outside the envelope (#4884)", async () => {
+    const hub = new TabHub()
+    await tab(hub, TAB, () => ({ ok: false, error: { code: 'stale_tab', message: 'The tab is reloading.' } }))
+    hub.pairSession('s1', TAB)
+    const result = await runTool(tool('browser_set_param'), { name: 'w', value: 9 }, ctx(hub.forSession('s1'), browser))
+    expect(result.isError).toBe(true)
+    const message = text(result)
+    const trusted = `the tab answered set_param with stale_tab (${STALE_TAB_HINT}): `
+    expect(message.startsWith(trusted)).toBe(true)
+    expect(STALE_TAB_HINT).toMatch(/browser_pair/)
+    expect(firstText({ content: [{ type: 'text', text: message.slice(trusted.length) }] })).toBe('The tab is reloading.')
   })
 
   it('lets a reconnect with the same tab id take over, closing the old socket', async () => {
@@ -409,7 +422,12 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
 
   it("leaves a session alone when attached from another tab while another replica holds the session's tab", async () => {
     const { rows, store } = sharedRows()
-    const relay: TabRelay = { serve: () => {}, forward: async () => ({ op: 'status', route: '/', live: [] }) }
+    const relay: TabRelay = {
+      serve: () => {},
+      attached: () => {},
+      detached: () => {},
+      forward: async () => ({ op: 'status', route: '/', live: [] }),
+    }
     const here = new TabHub({ sessionTabs: store, relay })
     await tab(here, TAB)
     rows.set('s-new', OTHER_TAB) // paired on the replica that holds OTHER_TAB
@@ -429,6 +447,8 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const logged: string[] = []
     const relay: TabRelay = {
       serve: () => {},
+      attached: () => {},
+      detached: () => {},
       forward: async () => {
         throw new Error('bridge insert failed')
       },

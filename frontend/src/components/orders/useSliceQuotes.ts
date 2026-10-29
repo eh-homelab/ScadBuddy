@@ -21,6 +21,10 @@ export interface SliceQuoteRun {
 
 export type SliceQuoteRuns = ReadonlyMap<string, SliceQuoteRun>
 
+/** An operation's activity row id is `operation:<id>`; a quote's subject `order_item:<id>`. */
+const OPERATION = 'operation:'
+const SUBJECT = 'order_item:'
+
 /**
  * #4693 — the order page's slice quotes, one per item. A quote is the `order_item_quote`
  * operation and runs for minutes (its `QUOTE_TIMEOUT` is 30), so it is followed here,
@@ -29,8 +33,9 @@ export type SliceQuoteRuns = ReadonlyMap<string, SliceQuoteRun>
  * request to `start`, waits only for the server to accept it (a refusal from its check
  * rejects, so the dialog keeps its choices), and closes; the item's row and drawer show
  * the run. `items` are the order's as the page last read them, which end a detached run.
- * Runs are this page's state only: a reload, or leaving the order and coming back, shows a
- * quote still slicing as idle until its quote lands.
+ * A quote still slicing when the page loads (after a reload, or on coming back to the
+ * order) is found through the activity index and followed by its operation id, so it shows
+ * as running and a second press cannot start a second one (#4736).
  */
 export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[] | undefined, onQuoted: () => void) {
   const [runs, setRuns] = useState<Map<string, SliceQuoteRun>>(() => new Map())
@@ -39,8 +44,15 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
   // `GET /operations/{id}` would otherwise run on for minutes after it is gone.
   const follows = useRef(new AbortController())
   const quoted = useRef(onQuoted)
+  // What the recovery below reads without running again on each change.
+  const seen = useRef({ items, runs })
+  // The operations a recovery followed on this order, running or ended: an activity row can
+  // stay `running` after its operation ended (its write was swallowed until the repair),
+  // and following it again on each reload would reload the order without end.
+  const followed = useRef(new Set<string>())
   useEffect(() => {
     quoted.current = onQuoted
+    seen.current = { items, runs }
   })
   useEffect(() => {
     current.current = orderId
@@ -48,6 +60,7 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
     follows.current = controller
     // Another order's runs are not this one's.
     setRuns(new Map())
+    followed.current = new Set()
     return () => {
       current.current = ''
       controller.abort()
@@ -78,8 +91,10 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
             orderId,
             itemId,
             body,
-            () => {
+            (operation) => {
               running = true
+              // Its own follow ends it; a stale activity row of it is not followed again.
+              followed.current.add(operation.id)
               accepted()
             },
             follows.current.signal,
@@ -109,6 +124,50 @@ export function useSliceQuotes(orderId: string, items: readonly OrderItemDetail[
   )
 
   const dismiss = useCallback((itemId: string) => update(orderId, itemId, null), [orderId, update])
+
+  // Each time this order's items are read (the page's first read, and every reload, so a
+  // quote started in another tab shows too): the quotes of them still running, which this
+  // page does not follow yet, followed as `start` follows its own. Best effort: without the
+  // activity index the item shows idle until its quote lands, as before.
+  const itemsOf = items !== undefined && items.length > 0 && items.every((i) => i.order_id === orderId) ? orderId : null
+  useEffect(() => {
+    if (itemsOf === null) return
+    const forOrder = itemsOf
+    const signal = follows.current.signal
+    api.runningQuotes().then(
+      (page) => {
+        for (const row of page.items) {
+          if (current.current !== forOrder) return
+          const operationId = row.id.startsWith(OPERATION) ? row.id.slice(OPERATION.length) : ''
+          const itemId = row.subject.startsWith(SUBJECT) ? row.subject.slice(SUBJECT.length) : ''
+          const item = seen.current.items?.find((i) => i.id === itemId)
+          if (!operationId || !item || seen.current.runs.has(itemId) || followed.current.has(operationId)) continue
+          followed.current.add(operationId)
+          const started = row.created_at ? Date.parse(row.created_at) : NaN
+          const run: SliceQuoteRun = { startedAt: Number.isNaN(started) ? Date.now() : started, error: null, known: item.quotes.map((q) => q.id) }
+          // Shown only once its operation reads as running: one that already ended behind a
+          // stale row is no run of this page's, and its old failure no error to show.
+          let shown = false
+          api
+            .followQuote(operationId, signal, () => {
+              shown = true
+              update(forOrder, itemId, run)
+            })
+            .then(
+              () => {
+                if (!shown) return
+                update(forOrder, itemId, null)
+                if (current.current === forOrder) quoted.current()
+              },
+              (cause: unknown) => {
+                if (shown) update(forOrder, itemId, mayHaveRun(cause) ? { ...run, detached: true } : { ...run, error: refusalText(cause) })
+              },
+            )
+        }
+      },
+      (cause: unknown) => console.debug('could not read the running slice quotes; their items show idle', cause),
+    )
+  }, [itemsOf, items, update])
 
   // A detached run ends when its quote shows on the item: a slice quote it did not have
   // (one typed by hand meanwhile is not it).

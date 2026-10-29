@@ -594,7 +594,9 @@ def test_the_detail_joins_provenance_files_media_and_outcome(
     assert body["provenance"] == {
         "slug": model,
         "model_version": meta.model_version,
-        "params": {"width": 12},
+        # #4774: the render filled the omitted `label` at its default, so the output
+        # records it; `params_diff` above still lists only what differs from defaults.
+        "params": {"width": 12, "label": "hi"},
         "output_id": output_id,
         "edit_url": f"/edit/{output_id}",
     }

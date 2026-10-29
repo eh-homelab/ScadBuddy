@@ -563,10 +563,11 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   starts polling, because Temporal 1.28 accepts a build only once it has a poller.
 - **Shutdown:** SIGTERM (tini forwards it; no `preStop` needed) starts the
   drain. The worker keeps polling until no workflow pinned to its build is
-  running. If its build is still (or again) the current one, as on a restart of the
+  running. If its build is still (or again) the current one and another worker of
+  that build polls the render queue (seen in the last 90 s), as on a restart of the
   same build (a manifest change, a node drain), it stops after 30 s instead, because
-  the next pod of that build serves its pinned runs; it logs "stopping without
-  draining" then, so a pod that never comes back is visible. The drain lasts at
+  that worker serves its pinned runs; it logs "stopping without draining" then. A
+  current build with no other poller of it drains in full (#4869). The drain lasts at
   most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
   SDK gives in-flight activities up to `SCADBUDDY_RENDER_TIMEOUT + 60` s. If the
   drain's bound passes first, the worker exits anyway (it logs "drain timed out"):
@@ -575,9 +576,13 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   `3 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` plus a little slack for teardown
   (e.g. 30 s): **690 s** at the default 120 s timeout. Roll a new build out with
   `RollingUpdate` and `maxSurge >= 1`, so the new build is current before the old
-  pod drains. Under `Recreate` the old build is still current when it stops, so it
-  stops after the 30 s, and the new build's pod makes itself current only after it
-  starts: runs pinned to the old build then have no poller.
+  pod drains. Under `Recreate` the old build is still current when it stops and no
+  other worker of it polls, so it drains in full before the new build's pod starts.
+- **Readiness (#4869):** `/readyz` on 9090 answers 503 until the render queue routes
+  to this build (`/healthz` never waits on it). Point the `readinessProbe` at it (the
+  liveness and startup probes stay on `/healthz`): a rolling update then stops an old
+  pod only once the new build is current, so the old pod drains rather than leave its
+  pinned runs to a build that cannot serve them.
 - **Temporal itself** comes from the Temporal operator with a CNPG Postgres in
   `eh-homelab/clusters` (clusters#1454). `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` (the
   API hosting the worker) is for dev and tests only.
@@ -1494,11 +1499,15 @@ What the API side needs for `slicer_backend` `native` (spec §5.2–§5.4, #3822
 A print that touches Bambuddy nowhere (its slice, its file, its printer state and its
 trays all ScadBuddy's own, over the LAN) takes four switches, in this order. Each is
 checked per run from the settings as they are then (`printers/hot_path.py`
-`hot_path_native`), so there is no fifth switch and no restart beyond the one noted:
+`hot_path_native`), so there is no fifth switch and no restart beyond the ones noted:
 
-1. **`store_backend` `s3`** (the blob store; "Blob store and render workers" above), with
-   the KEK mounted (`SCADBUDDY_SECRET_KEY_FILE`) on the API and the print worker, which
-   seals the printer's access code.
+1. **`store_backend` `s3` or `bambuddy`** (the blob store, restart; "Blob store and
+   render workers" above), with the KEK mounted (`SCADBUDDY_SECRET_KEY_FILE`) on the API
+   and the print worker, which seals the printer's access code. Both count as native
+   (`printers/hot_path.py` `NATIVE_STORES`). On `bambuddy` the blobs, the native library's
+   copy among them, live in Bambuddy's library: those reads are the store's calls, outside
+   the print path, but a print still needs Bambuddy up. Only `s3` takes Bambuddy out of
+   the print entirely, so the real-stack check below runs on it.
 2. **`library_backend` `native`** (Settings → *Projects & files*, restart; "Choosing
    ScadBuddy's own print library" above). A native run files its laid-out copy in the
    native library; a project is a Bambuddy path's, so a native run refuses a
@@ -1511,8 +1520,8 @@ checked per run from the settings as they are then (`printers/hot_path.py`
 
 `bambuddy_url` may stay set. A native run never builds a Bambuddy client; what still
 calls Bambuddy are the housekeeping sweeps and the spool providers' refresh (the
-`scadbuddy-spool-providers-<queue>` Schedule, `spool_overlay_refresh_seconds`, 300 s by
-default), on their own traces, and any run whose printer's path is `bambuddy`. The
+`scadbuddy-spool-providers-<queue>` Schedule, `spool_overlay_refresh_seconds` (restart),
+300 s by default), on their own traces, and any run whose printer's path is `bambuddy`. The
 dialog's filament step reads the loaded trays from the LAN report and lays the cached
 spool records over them; an overlay older than 30 minutes shows trays only, with a note.
 To go back, set `preferred_path` to `bambuddy` (or `slicer_backend`/`library_backend`
@@ -1522,7 +1531,7 @@ To check that a deployment's hot path is clear of Bambuddy, find the run's reque
 in Tempo (`{ name = "POST /api/v1/print/outputs/{output_id}/run" }`) and then
 `{ trace:id = "<its id>" && name =~ "bambuddy\\..*" }`: it returns no spans.
 
-The same walk runs against a real stack, by hand and weekly, never on a PR:
+The same walk runs against a real stack, by hand and weekly (never on a PR):
 
 ```bash
 e2e-stack/run.sh --mode both     # recorder, then no bambuddy_url; --keep leaves the stack up
@@ -1534,7 +1543,12 @@ Bambuddy recorder (`e2e-stack/bambuddy-recorder`) that fails every call, and run
 `frontend/e2e/real-hot-path.spec.ts`: a print goes through, and in the recorder pass the
 recorder saw nothing. It needs docker with compose v2, curl, python3 and the frontend's
 dependencies with Playwright's chromium; the header of `e2e-stack/run.sh` has the flags.
-CI runs it in `.github/workflows/hot-path-e2e.yml`; it is not in `CI Summary`.
+CI runs it in `.github/workflows/hot-path-e2e.yml`'s `stack` job, weekly and on dispatch;
+it is not in `CI Summary`. Its `fakes` job (the two fakes' own tests, and ruff and mypy
+over them) also runs, not required, on a PR that touches `e2e-stack/**`, `backend/**` or
+the workflow. The backend's native-run tests against the fake printer
+(`tests/test_print_native_workflow.py`, `tests/api/test_hot_path_native.py`) run in every
+`backend-pytest` shard: the Dockerfile's `test` stage carries mosquitto and both fakes.
 
 ### Switching continuous deploy off
 

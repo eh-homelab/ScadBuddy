@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '../../api/client'
 import type { SliceQuoteRequest } from '../../api/types'
+import { printersState } from '../../mocks/features/printers'
 import { resetMockState } from '../../mocks/handlers'
 import { FILAMENT_PETG, FILAMENT_PLA, ITEM_DRAFT, ORDER_DRAFT, item } from '../../mocks/features/orders/state'
 import { selectOption } from '../../test/select'
@@ -41,6 +42,10 @@ describe('QuoteEditor · a quote from a slice (#4250)', () => {
     )
     expect(body?.filament_plan.slots?.length).toBeGreaterThan(0)
     expect(body).not.toHaveProperty('project_id')
+    // #4551: the registry row beside the Bambuddy id, as the run names them.
+    const linked = printersState().find((row) => row.bambuddy_printer_id === body?.printer_id)
+    expect(linked).toBeDefined()
+    expect(body?.printer).toBe(linked?.id)
   })
 
   it('keeps the dialog and its choices open when the check refuses the quote (#4693)', async () => {

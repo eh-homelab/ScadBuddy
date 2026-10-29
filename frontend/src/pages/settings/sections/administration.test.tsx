@@ -1,14 +1,11 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../api/client'
-import { renderPage } from '../test/utils'
-import { SettingsPage } from './SettingsPage'
+import { api } from '../../../api/client'
+import { mockSettings, setMockSettings } from '../../../mocks/handlers'
+import { enter, region as regionNamed, renderSettingsSection } from '../testing'
+import { Component as Administration } from './administration'
 
-const region = () => {
-  const section = screen.getByText('Administration', { selector: 'h2 button' }).closest('section')
-  if (!section) throw new Error('no Administration section')
-  return section
-}
+const region = () => regionNamed('Administration')
 const save = () => within(region()).getByRole('button', { name: 'Save Administration' })
 
 // The next edit starts once the save has landed and its fields are re-seeded.
@@ -19,15 +16,14 @@ async function landed(put: { mock: { results: { value: unknown }[] } }, call: nu
 
 async function loaded() {
   await waitFor(() => expect(screen.getByLabelText('Notify me about activity from')).toBeInTheDocument())
-  await waitFor(() => expect(screen.getByLabelText('Bambuddy URL')).toHaveValue('https://bambuddy.internal.nullreference.io'))
 }
 
-describe('SettingsPage activity settings', () => {
+describe('Administration activity settings', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('shows the defaults as placeholders and sends nothing when another field is saved', async () => {
     const put = vi.spyOn(api, 'putSettings')
-    const { user } = renderPage(<SettingsPage />)
+    const { user } = renderSettingsSection(<Administration />)
     await loaded()
     const follow = screen.getByLabelText('Notify me about activity from')
     expect(follow).toHaveValue('')
@@ -45,7 +41,7 @@ describe('SettingsPage activity settings', () => {
 
   it('round-trips a list, follows nobody with "none", and returns to the default when emptied', async () => {
     const put = vi.spyOn(api, 'putSettings')
-    const { user } = renderPage(<SettingsPage />)
+    const { user } = renderSettingsSection(<Administration />)
     await loaded()
     const follow = screen.getByLabelText('Notify me about activity from')
 
@@ -76,7 +72,7 @@ describe('SettingsPage activity settings', () => {
 
   it('checks the retention bounds before sending, and empty is the default', async () => {
     const put = vi.spyOn(api, 'putSettings')
-    const { user } = renderPage(<SettingsPage />)
+    const { user } = renderSettingsSection(<Administration />)
     await loaded()
     const ttl = screen.getByLabelText('Keep activity for (seconds)')
     const repair = screen.getByLabelText('Repair activity rows from the last (seconds)')
@@ -110,7 +106,7 @@ describe('SettingsPage activity settings', () => {
   })
 
   it('keeps the retention fields under Advanced', async () => {
-    renderPage(<SettingsPage />)
+    renderSettingsSection(<Administration />)
     await loaded()
     const fold = '[data-slot=collapsible]'
     const details = screen.getByLabelText('Keep activity for (seconds)').closest(fold)
@@ -121,7 +117,7 @@ describe('SettingsPage activity settings', () => {
 
   it('opens the fold when a save refuses a field folded inside it (#3671)', async () => {
     const put = vi.spyOn(api, 'putSettings')
-    const { user } = renderPage(<SettingsPage />)
+    const { user } = renderSettingsSection(<Administration />)
     await loaded()
     const toggle = screen.getByRole('button', { name: 'Advanced: activity retention' })
     const ttl = screen.getByLabelText('Keep activity for (seconds)')
@@ -136,5 +132,43 @@ describe('SettingsPage activity settings', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'true')
     expect(ttl).toBeVisible()
     expect(put).not.toHaveBeenCalled()
+  })
+})
+
+describe('Administration (#668)', () => {
+  it('shows no Temporal UI link while its URL is empty', async () => {
+    renderSettingsSection(<Administration />)
+    await loaded()
+    const administration = region()
+    expect(within(administration).getByLabelText('Temporal UI URL')).toHaveValue('')
+    expect(within(administration).queryByRole('link', { name: /Temporal UI/ })).toBeNull()
+  })
+
+  it('links to the Temporal UI in a new tab once its URL is saved', async () => {
+    const { user } = renderSettingsSection(<Administration />)
+    await loaded()
+    const administration = region()
+    await enter(user, within(administration).getByLabelText('Temporal UI URL'), 'https://temporal.lan')
+    await user.click(save())
+    const link = await within(administration).findByRole('link', { name: /Temporal UI/ })
+    expect(link).toHaveAttribute('href', 'https://temporal.lan')
+    // A page that is not ScadBuddy's: a new tab, which also escapes Bambuddy's sandbox.
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link.getAttribute('rel')).toContain('noopener')
+    expect(mockSettings().temporal_ui_url).toBe('https://temporal.lan')
+    expect(mockSettings().sources?.['temporal_ui_url']).toBe('stored')
+  })
+
+  it('links to a Temporal UI the deployment set', async () => {
+    setMockSettings({
+      ...mockSettings(),
+      temporal_ui_url: 'https://temporal.env',
+      sources: { ...mockSettings().sources, temporal_ui_url: 'env' },
+    })
+    renderSettingsSection(<Administration />)
+    await loaded()
+    const link = await within(region()).findByRole('link', { name: /Temporal UI/ })
+    expect(link).toHaveAttribute('href', 'https://temporal.env')
+    expect(screen.getByTestId('source-temporal_ui_url')).toHaveTextContent('From SCADBUDDY_TEMPORAL_UI_URL')
   })
 })

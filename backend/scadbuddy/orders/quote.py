@@ -49,13 +49,23 @@ from scadbuddy.orders.lifecycle import (
     Lifecycle,
     LifecycleError,
 )
-from scadbuddy.orders.models import Actor, Filament, Order, OrderItem, PricingPolicy, Quote
+from scadbuddy.orders.models import (
+    Actor,
+    Filament,
+    Order,
+    OrderItem,
+    PricingPolicy,
+    Quote,
+    Reference,
+)
 from scadbuddy.orders.pricing import Plate, PlateFilament, Priced, PricingError, price
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.reference import colours_of, is_commit_id
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.render.inputs import inputs_key
 from scadbuddy.render.job_models import Job
+from scadbuddy.render.runner import with_defaults
+from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.slicing.slice_info import read_sliced
 from scadbuddy.store import BlobStore
 from scadbuddy.store.content_models import BlobScope
@@ -84,6 +94,11 @@ class SliceQuoteRequest(BaseModel):
 
     #: The printer to slice for, as the dialog's; omitted, the configured one.
     printer_id: int | None = None
+    #: The registry printer (#4551), as the print dialog's run names it: sent with
+    #: ``printer_id`` it must link that Bambuddy printer, and alone it names a printer
+    #: only the LAN reaches. A printer a run reaches over the LAN is sliced for with no
+    #: Bambuddy call (plan 2026-10-18 D2, D3).
+    printer: str | None = Field(default=None, max_length=64)
     #: One spool per slot (``slot_id`` from 1, the dialog's).
     filament_plan: FilamentPlan
     choices: PrintChoices
@@ -255,12 +270,21 @@ class Renders(Protocol):
 _SETTLED_JOB = frozenset({"failed", "cancelled"})
 
 
-def output_matches(outputs: OutputsRead, output_id: str | None, item: OrderItem) -> bool:
+def output_matches(
+    outputs: OutputsRead,
+    output_id: str | None,
+    item: OrderItem,
+    schema: CustomizerSchema | None = None,
+) -> bool:
     """The output is there and its ``meta.json`` and inputs are the reference's (Ruling
     7): its ``slug``, ``model_version`` and normalised inputs. An arranged output records
     a content hash where a render records its commit, and the item pins the template's
     commit instead (#4565): no render of the reference remakes the arrangement, so its
-    hash stands for the pinned commit."""
+    hash stands for the pinned commit.
+
+    With ``schema`` (the commit's), both inputs are compared at its defaults where they
+    omit one (#4774): an output saved before renders filled them records only the params
+    it was sent, and is still the render of a reference that names its defaults."""
     if output_id is None:
         return False
     try:
@@ -273,8 +297,18 @@ def output_matches(outputs: OutputsRead, output_id: str | None, item: OrderItem)
     return (
         meta.slug == reference.slug
         and (meta.model_version == reference.commit or arranged)
-        and inputs == reference.inputs
+        and _at_defaults(inputs, schema) == _at_defaults(reference.inputs, schema)
     )
+
+
+def _at_defaults(inputs: Mapping[str, Any], schema: CustomizerSchema | None) -> dict[str, Any]:
+    if schema is None:
+        return dict(inputs)
+    params = inputs.get("params", {})
+    if not isinstance(params, dict):
+        # A malformed row is compared exactly, never read as an all-defaults render.
+        return dict(inputs)
+    return {**inputs, "params": with_defaults(schema, params)}
 
 
 async def ensure_output(
@@ -288,13 +322,14 @@ async def ensure_output(
     filaments: Mapping[int, str],
     by: Actor,
     follow_every: float = FOLLOW_EVERY,
+    schema: CustomizerSchema | None = None,
 ) -> str:
     """The output the item slices (Ruling 7): its own while it matches the reference,
     else the reference rendered at its commit, waited on through the projection, saved
     as ``POST /outputs`` saves one (``create_output``, ``output_create``'s run) and set
     as the item's ``output_id``. An item with no colour slots takes the render's, with
-    ``filaments`` on them."""
-    if await asyncio.to_thread(output_matches, outputs, item.output_id, item):
+    ``filaments`` on them. ``schema`` is the reference commit's, for `output_matches`."""
+    if await asyncio.to_thread(output_matches, outputs, item.output_id, item, schema):
         assert item.output_id is not None
         return item.output_id
     reference = item.reference
@@ -517,6 +552,9 @@ class QuoteRun:
     blobs: BlobStore
     refs: BlobRefs
     follow_every: float = FOLLOW_EVERY
+    #: The schema of a reference's commit (None for a pipeline template, or none to
+    #: read), so `output_matches` compares inputs at their defaults (#4774).
+    schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None
 
 
 def subject_of(item_id: str) -> str:
@@ -539,6 +577,7 @@ async def quote_run(
     item = await asyncio.to_thread(store.item, item_id)
     if order is None or item is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order_id!r}")
+    schema = await run.schema_of(item.reference) if run.schema_of is not None else None
     output_id = await ensure_output(
         lifecycle=lifecycle,
         outputs=run.outputs,
@@ -549,6 +588,7 @@ async def quote_run(
         filaments=request.filaments,
         by=by,
         follow_every=run.follow_every,
+        schema=schema,
     )
     subject = subject_of(item_id)
     sliced = await slice_item(

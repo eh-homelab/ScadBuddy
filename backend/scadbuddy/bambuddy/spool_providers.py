@@ -21,7 +21,7 @@ from collections.abc import Callable
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import normalise_colour
 from scadbuddy.bambuddy.models import Spool, SpoolAssignment
-from scadbuddy.core.components import Components, Core
+from scadbuddy.core.components import Components
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.spools.models import (
@@ -31,7 +31,7 @@ from scadbuddy.spools.models import (
     clean_tray_uuid,
     tray_fingerprint,
 )
-from scadbuddy.spools.providers import SpoolProvider, SpoolProviderBuild
+from scadbuddy.spools.providers import ProviderCore, SpoolProvider, SpoolProviderBuild
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ class BambuddyProvider:
         return f"bambuddy:{row.bambuddy_printer_id}"
 
 
-def _build(core: Core, components: Components) -> SpoolProvider:
+def _build(core: ProviderCore, components: Components | None) -> SpoolProvider:
     return BambuddyProvider(core.settings_store.load)
 
 

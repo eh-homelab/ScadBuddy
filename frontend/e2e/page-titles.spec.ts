@@ -24,6 +24,7 @@ const PAGES = [
   '/workflows/flows/def-swap',
   '/workflows/runs/run-done',
   '/settings',
+  '/settings/tools',
   '/activity',
   // Orders (#4249), with the mock's fixtures (src/mocks/features/orders/state.ts).
   '/orders',
