@@ -266,6 +266,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         if body.printer is not None:
             # A registry printer the run would refuse (a disagreeing pair, a virtual
             # printer) is refused here, before the 202, as Arrange refuses it (#4551).
+            # The run judges the pair again (`slice_route`): a row merged or deleted in
+            # between fails the quote then, as it would fail a run.
             settings = await asyncio.to_thread(core.settings_store.load)
             await registry_printer(
                 body.printer, body.printer_id, settings, components.get(PRINTERS).store

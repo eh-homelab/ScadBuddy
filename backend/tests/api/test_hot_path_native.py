@@ -582,28 +582,53 @@ def test_a_quote_for_the_native_row_asks_bambuddy_nothing(
     assert slicer.calls == 1
 
 
+def _quote_body(client: TestClient, model: str, row: str) -> tuple[str, dict[str, Any]]:
+    """An order item of a fresh output, and the dialog's quote request for ``row``."""
+    output = make_output(client, model)
+    filaments = client.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+    assert filaments.status_code == 200, filaments.text
+    dialog = {k: v for k, v in run_body(row, filaments.json()).items() if k != "copies"}
+    pla, petg = price_book(client)
+    order = create_order(client, create_customer(client)["id"])
+    item = add_item(client, order["id"], output_id=output, quantity=1)
+    path = f"/api/v1/orders/{order['id']}/items/{item['id']}/quote"
+    return path, {**dialog, "filaments": {"0": pla, "1": petg}}
+
+
 def test_a_quote_naming_a_disagreeing_printer_is_refused_before_it_starts(
     native_app: TestClient, model: str, fake_lan: FakeLan
 ) -> None:
     """#4551 review: a registry `printer` the run would refuse beside `printer_id` is the
     quote's check's 422, as Arrange's, never a failed operation after the 202."""
     row = lan_row(native_app, fake_lan)
-    output = make_output(native_app, model)
-    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
-    assert filaments.status_code == 200, filaments.text
-    dialog = {k: v for k, v in run_body(row, filaments.json()).items() if k != "copies"}
-    pla, petg = price_book(native_app)
-    order = create_order(native_app, create_customer(native_app)["id"])
-    item = add_item(native_app, order["id"], output_id=output, quantity=1)
+    path, body = _quote_body(native_app, model, row)
 
-    refused = native_app.post(
-        f"/api/v1/orders/{order['id']}/items/{item['id']}/quote",
-        json={**dialog, "printer_id": 1, "filaments": {"0": pla, "1": petg}},
-        headers=press(),
-    )
+    refused = native_app.post(path, json={**body, "printer_id": 1}, headers=press())
 
     assert refused.status_code == 422, refused.text
     assert "disagreeing printer" in refused.json()["detail"]
+
+
+def test_a_quote_naming_a_virtual_printer_is_refused_before_it_starts(
+    native_app: TestClient, model: str, fake_lan: FakeLan
+) -> None:
+    """#4551 review, #4747: a Bambuddy virtual printer is no print target, so a quote
+    naming one is the check's 422 too."""
+    row = lan_row(native_app, fake_lan)
+    path, body = _quote_body(native_app, model, row)
+    virtual = _printers(native_app).store.create(
+        PrinterCreate(serial="09400A391800001", name="H2C virtual", model="H2C")
+    )
+    with _printers(native_app).store.pool.connection() as conn:
+        conn.execute(
+            "UPDATE printers SET kind = 'bambuddy_virtual', bambuddy_vp_id = 1 WHERE id = %s",
+            (virtual.id,),
+        )
+
+    refused = native_app.post(path, json={**body, "printer": virtual.id}, headers=press())
+
+    assert refused.status_code == 422, refused.text
+    assert "virtual printer" in refused.json()["detail"]
 
 
 def test_the_native_analysis_names_a_plan_spool_the_trays_do_not_hold(
