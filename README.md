@@ -1540,7 +1540,9 @@ yet (#4939), so clear the bed before each print ends. The run succeeds at the fi
 The dialog and the progress show each copy still to start as queued. A start that fails,
 or a cancel, stops the rest, and the progress says why. A wait longer than 7 days stops
 them too. A copy counts the one before as ended only after a report has shown that print
-by name, so an older report never starts the next over it. Each later copy joins its
+by name, so an older report never starts the next over it. If the printer's watch was down
+for the whole of a print and another print then replaced it on the printer, no report ever
+named it, so the next copy waits until the 7-day bound stops the rest. Each later copy joins its
 plate's slice again. Once that slice has been swept (6 hours after it finished), the plate
 is sliced again with the slicer profiles the image then has, so after an image update a
 later copy's G-code can differ from the first's.

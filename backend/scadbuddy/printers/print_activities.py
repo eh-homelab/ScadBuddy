@@ -324,7 +324,9 @@ class LanActivities:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         # Whether a report has named this print (`lan_ended`'s ``seen``), kept across a
-        # retry in the heartbeat's details.
+        # retry in the heartbeat's details. Only a hint: Temporal throttles heartbeats,
+        # so a worker that dies just after it flips may retry with it unset, which costs
+        # nothing while the report still names the print.
         details = activity.info().heartbeat_details
         seen = bool(details and details[0])
         while True:
