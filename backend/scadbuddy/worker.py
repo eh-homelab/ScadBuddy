@@ -113,6 +113,7 @@ from scadbuddy.workflows.client import (
     POLLER_SEEN_WITHIN,
     PRINT_DEPLOYMENT_NAME,
     PROJECTS_DEPLOYMENT_NAME,
+    any_serving,
     bambuddy_worker,
     clear_draining,
     connect,
@@ -123,7 +124,7 @@ from scadbuddy.workflows.client import (
     is_current,
     make_current,
     mark_draining,
-    polled_elsewhere,
+    pollers_elsewhere,
     projects_deployment,
     render_worker,
     routes_to,
@@ -607,10 +608,23 @@ async def _serve_versioned(
                 deployment_name=deployment_name,
             ):
                 return False
+            # The pollers first: with no other poller of this build, the usual rollout,
+            # the poll ends here and reads no version metadata (#4998).
+            others = await pollers_elsewhere(
+                client,
+                task_queue,
+                deployment_name=deployment_name,
+                build_id=build_id,
+                identities=identities,
+            )
+            if not others:
+                return False
             # One read of the marks serves both checks below (#4996), so they never
             # disagree. The start's clear, cancelled at stop, may still land after the
             # mark and remove it; a stopping peer would then count this worker. So trust
-            # only a mark that is still there, and write it again when it is gone. This
+            # only a mark that is still there, and write it again when it is gone. That
+            # happens only on a poll that finds a peer (#4998): with none, no worker can
+            # count this one, and a peer that comes later is seen by a later poll. This
             # narrows the race but does not close it: a cancelled clear can still land
             # after this read and before the peer's own check. That residual race is
             # accepted: it needs a clear held in flight past the grace, and its worst case
@@ -620,15 +634,7 @@ async def _serve_versioned(
                 logger.warning("this worker's drain mark is gone; writing it again")
                 await mark()
                 return False
-            return await polled_elsewhere(
-                client,
-                task_queue,
-                deployment_name=deployment_name,
-                build_id=build_id,
-                identities=identities,
-                marked_within=marked_within,
-                marks=marks,
-            )
+            return any_serving(others, marks, marked_within=marked_within)
         except RPCError:
             logger.warning(
                 "could not read the deployment's current build, the drain marks or the"

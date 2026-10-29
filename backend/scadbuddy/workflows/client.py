@@ -461,6 +461,47 @@ async def _read_marks(
     return marks, unparsable
 
 
+async def pollers_elsewhere(
+    client: Client,
+    task_queue: str,
+    *,
+    deployment_name: str,
+    build_id: str,
+    identities: Collection[str],
+    within: float = POLLER_SEEN_WITHIN,
+) -> set[str]:
+    """The workers of ``build_id`` other than ``identities`` (the asking worker's own)
+    that polled ``task_queue``'s workflow tasks in the last ``within`` seconds:
+    `DescribeTaskQueue`'s pollers, which name each one's identity and build (measured on
+    prod, 2026-10-27)."""
+    described = await client.workflow_service.describe_task_queue(
+        DescribeTaskQueueRequest(
+            namespace=client.namespace,
+            task_queue=TaskQueue(name=task_queue),
+            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
+        ),
+        timeout=RPC_TIMEOUT,
+    )
+    since = datetime.now(UTC) - timedelta(seconds=within)
+    return {
+        poller.identity
+        for poller in described.pollers
+        if poller.deployment_options.deployment_name == deployment_name
+        and poller.deployment_options.build_id == build_id
+        and poller.identity not in identities
+        and poller.last_access_time.ToDatetime(tzinfo=UTC) >= since
+    }
+
+
+def any_serving(
+    others: Collection[str], marks: Mapping[str, datetime], *, marked_within: float
+) -> bool:
+    """Whether one of ``others`` holds no drain mark from the last ``marked_within``
+    seconds (`mark_draining`), so it serves rather than drains (#4948)."""
+    marked_since = datetime.now(UTC) - timedelta(seconds=marked_within)
+    return any(identity not in marks or marks[identity] < marked_since for identity in others)
+
+
 async def polled_elsewhere(
     client: Client,
     task_queue: str,
@@ -470,47 +511,32 @@ async def polled_elsewhere(
     identities: Collection[str],
     marked_within: float,
     within: float = POLLER_SEEN_WITHIN,
-    marks: Mapping[str, datetime] | None = None,
 ) -> bool:
-    """Whether a worker of ``build_id`` other than ``identities`` (the asking
-    worker's own) polled ``task_queue``'s workflow tasks in the last ``within`` seconds:
-    `DescribeTaskQueue`'s pollers, which name each one's identity and build (measured on
-    prod, 2026-10-27). A stopping worker leaves its pinned runs to such a worker only
-    (#4869): in a rollout the build is still current while the new pods, of the next
-    build, start, and none of them serves a run pinned to this one.
+    """Whether another worker of ``build_id`` serves ``task_queue``: one of
+    `pollers_elsewhere` that `any_serving` finds unmarked. A stopping worker leaves its
+    pinned runs to such a worker only (#4869): in a rollout the build is still current
+    while the new pods, of the next build, start, and none of them serves a run pinned to
+    this one.
 
-    A poller marked draining in the last ``marked_within`` seconds (`mark_draining`) does
-    not count (#4948): two pods of one build that stop together would each count the
-    other. ``marks`` are the caller's own read of `draining_marks`, read here when None
-    (#4996). When the marks cannot be read, the answer is False."""
-    described = await client.workflow_service.describe_task_queue(
-        DescribeTaskQueueRequest(
-            namespace=client.namespace,
-            task_queue=TaskQueue(name=task_queue),
-            task_queue_type=TaskQueueType.TASK_QUEUE_TYPE_WORKFLOW,
-        ),
-        timeout=RPC_TIMEOUT,
+    A poller marked draining does not count (#4948): two pods of one build that stop
+    together would each count the other. The marks are read only once another poller is
+    found; when they cannot be read, the answer is False."""
+    others = await pollers_elsewhere(
+        client,
+        task_queue,
+        deployment_name=deployment_name,
+        build_id=build_id,
+        identities=identities,
+        within=within,
     )
-    now = datetime.now(UTC)
-    since = now - timedelta(seconds=within)
-    others = {
-        poller.identity
-        for poller in described.pollers
-        if poller.deployment_options.deployment_name == deployment_name
-        and poller.deployment_options.build_id == build_id
-        and poller.identity not in identities
-        and poller.last_access_time.ToDatetime(tzinfo=UTC) >= since
-    }
     if not others:
         return False
-    if marks is None:
-        try:
-            marks = await draining_marks(client, deployment_name=deployment_name, build_id=build_id)
-        except RPCError:
-            logger.warning("could not read this build's drain marks", exc_info=True)
-            return False
-    marked_since = now - timedelta(seconds=marked_within)
-    return any(identity not in marks or marks[identity] < marked_since for identity in others)
+    try:
+        marks = await draining_marks(client, deployment_name=deployment_name, build_id=build_id)
+    except RPCError:
+        logger.warning("could not read this build's drain marks", exc_info=True)
+        return False
+    return any_serving(others, marks, marked_within=marked_within)
 
 
 async def is_current(
