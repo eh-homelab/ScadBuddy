@@ -562,6 +562,27 @@ def test_a_failed_attempt_then_a_good_one_fulfils(shop: Shop) -> None:
     assert refused.value.slug == "fulfilment_accepted"
 
 
+def test_an_unfulfil_tells_the_bus_once_committed(shop: Shop) -> None:
+    order, item = shop.accepted()
+    attempt = shop.fulfilled(order, item)
+    assert shop.get(order).status == "ready"
+    seen = len(shop.events)
+    item = shop.lifecycle.unfulfil_item(order.id, item.id, BY)
+    assert item.status == "approved"
+    told = shop.events[seen:]
+    assert [type(e) for e in told] == [OrderChanged, OrderItemChanged]
+    assert isinstance(told[0], OrderChanged) and told[0].status == "in_production"
+    assert isinstance(told[1], OrderItemChanged)
+    assert (told[1].item_id, told[1].status, told[1].attempt) == (item.id, "approved", 1)
+    assert shop.kinds(order)[-2:] == ["item.unfulfilled", "order.status"]
+    # A refusal writes and tells nothing.
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.unfulfil_item(order.id, item.id, BY)
+    assert refused.value.slug == "item_not_fulfilled"
+    assert len(shop.events) == seen + 2
+    assert shop.rows.fulfilment(attempt.id) is not None
+
+
 def test_partial_attempts_add_up(shop: Shop) -> None:
     order, item = shop.accepted(quantity=3)
     first = shop.lifecycle.record_fulfilment(

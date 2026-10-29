@@ -55,6 +55,7 @@ DEFAULTS: dict[str, object] = {
     "orders_currency": "USD",
     "pricing_markup_percent": "0",
     "rough_estimate_factor": "1.15",
+    "orders_allow_unfulfil": True,
 }
 PRINTERS_BODY = [{"id": 1, "name": "3DP-31B-598", "model": "H2C", "access_code": "xxxx"}]
 

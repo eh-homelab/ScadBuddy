@@ -110,6 +110,14 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     help: 'Multiplies a part\'s enclosed volume for walls, infill and purge in the estimate before a slice, such as 1.15. More than 0.',
     advanced: true,
   },
+  // #4953 — whether a fulfilled line item may be unfulfilled (#4952), by a person or the agent.
+  {
+    name: 'orders_allow_unfulfil',
+    section: 'orders',
+    label: 'Allow Unfulfil on a line item',
+    kind: 'bool',
+    help: 'Off, a fulfilment is final: nobody can undo one, in the order page or through the agent. A change writes nothing to existing orders.',
+  },
   {
     name: 'temporal_ui_url',
     section: 'administration',

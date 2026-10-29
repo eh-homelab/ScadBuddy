@@ -2106,6 +2106,10 @@ export const api = {
   /** Undoes a cancel: the item takes the state its quotes and attempts give it again. */
   reopenOrderItem: (orderId: string, itemId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/reopen`, { method: 'POST' }),
+  /** #4952 — undoes a fulfilment: the latest accepted attempt no longer counts as made,
+   * and the item goes back to `approved` (or `failed`). */
+  unfulfilOrderItem: (orderId: string, itemId: string) =>
+    request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/unfulfil`, { method: 'POST' }),
   cancelOrderItem: (orderId: string, itemId: string) =>
     request<OrderItem>(`/orders/${seg(orderId)}/items/${seg(itemId)}/cancel`, { method: 'POST' }),
   // -- an order's files (#4251, spec 2026-10-18 §6.2) ---------------------------------------

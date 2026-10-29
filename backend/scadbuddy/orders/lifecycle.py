@@ -15,7 +15,8 @@ and the offending ids, with no HTTP shape: ``api/orders.py`` maps each to a 409 
 
 On hold (§7.2 as plan Ruling 14 narrows it): every transition that advances the order
 (``accept_order``, ``accept_quote``, ``record_fulfilment``, ``update_fulfilment``,
-``accept_fulfilment``, ``add_shipment``, ``update_shipment``, ``close_order``) is
+``accept_fulfilment``, ``unfulfil_item``, ``add_shipment``, ``update_shipment``,
+``close_order``) is
 refused with ``order_on_hold``; ``release``, the cancels, a payment and the plain edits
 go through, so a person can fix what the hold was for.
 """
@@ -1230,6 +1231,62 @@ class Lifecycle:
             order = self._rederive(conn, order, by)
         self._told(_Change(order, changed))
         return attempt
+
+    def unfulfil_item(
+        self, order_id: str, item_id: str, by: Actor, *, allowed: bool = True
+    ) -> OrderItem:
+        """Undo a fulfilment (#4952, §3.5 "Undo"): the item's latest accepted attempt
+        is marked not accepted (the row stays), and the item takes the status its
+        latest attempt gives it (`approved`, or `failed`). Refused for an item not
+        `fulfilled` and for one a shipment carries (take it off the shipment first),
+        and with ``allowed`` false (``orders_allow_unfulfil`` off, #4953) before
+        anything is read."""
+        if not allowed:
+            raise LifecycleError(
+                "unfulfil_disabled",
+                "unfulfilling a line item is turned off in Settings (orders_allow_unfulfil)",
+            )
+        with self.store.transaction() as conn:
+            order, item = self._in_production(conn, order_id, item_id)
+            if item.status != "fulfilled":
+                raise LifecycleError(
+                    "item_not_fulfilled",
+                    f"item {item_id} is {item.status}: only a fulfilled item unfulfils",
+                    items=[item.id],
+                )
+            carrying = [
+                shipment.id
+                for shipment in self.store.shipments(order.id, conn=conn)
+                if any(line.order_item_id == item.id for line in shipment.items)
+            ]
+            if carrying:
+                raise LifecycleError(
+                    "order_item_shipped",
+                    f"item {item_id} is on a shipment: take it off the shipment first",
+                    items=[item.id],
+                    shipments=carrying,
+                )
+            attempts = self.store.fulfilments(item.id, conn=conn)
+            # The accept that made it fulfilled: the latest one.
+            _, _, accepted = max(
+                (a.accepted_at, a.attempt, a) for a in attempts if a.accepted_at is not None
+            )
+            attempt = self.store.unaccept_fulfilment(conn, accepted.id)
+            status = self._after_attempt(attempts[-1].outcome)
+            item = self.store.update_item(conn, item.id, status=status)
+            self._event(
+                conn,
+                order,
+                by,
+                "item.unfulfilled",
+                item_id=item.id,
+                fulfilment_id=attempt.id,
+                attempt=attempt.attempt,
+                to=status,
+            )
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, attempt.attempt)]))
+        return item
 
     # -- shipments (§6.3) -----------------------------------------------------------------
 

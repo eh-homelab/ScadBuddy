@@ -54,6 +54,7 @@ describe('order tools (#4249)', () => {
       'order_item_accept_quote',
       'order_accept',
       'order_item_fulfil',
+      'order_item_unfulfil',
       'order_ship',
       'order_close',
       'order_cancel',
@@ -73,6 +74,7 @@ describe('order tools (#4249)', () => {
       order_item_accept_quote: 'outward',
       order_accept: 'outward',
       order_item_fulfil: 'outward',
+      order_item_unfulfil: 'outward',
       order_ship: 'outward',
       order_close: 'outward',
       order_cancel: 'outward',
@@ -260,6 +262,54 @@ describe('order tools (#4249)', () => {
       'ACCEPT',
       `SHIP {"carrier":"Post","items":[{"order_item_id":"${ITEM}","quantity":2}]}`,
     ])
+  })
+
+  it('unfulfils an item, and passes a shipped refusal on (#4952)', async () => {
+    const calls: string[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/unfulfil`, () => {
+        calls.push('UNFULFIL')
+        if (calls.length > 1) {
+          return HttpResponse.json(
+            {
+              type: 'https://scadbuddy.dev/problems/orders/order_item_shipped',
+              title: 'Conflict',
+              status: 409,
+              detail: 'on a shipment',
+              items: [ITEM],
+              shipments: ['s1'],
+            },
+            { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+          )
+        }
+        return HttpResponse.json({ id: ITEM, status: 'approved' })
+      }),
+    )
+    const unfulfil = tool('order_item_unfulfil')
+    const done = await unfulfil.execute({ order_id: ORDER, item_id: ITEM }, ctx())
+    expect(firstText(done)).toEqual({ id: ITEM, status: 'approved' })
+    await expect(unfulfil.execute({ order_id: ORDER, item_id: ITEM }, ctx())).rejects.toMatchObject({ status: 409 })
+    expect(calls).toEqual(['UNFULFIL', 'UNFULFIL'])
+    expect(unfulfil.summarize({ order_id: ORDER, item_id: ITEM })).toContain(`item ${ITEM}`)
+  })
+
+  it('passes the setting refusal on (#4953)', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/unfulfil`, () =>
+        HttpResponse.json(
+          {
+            type: 'https://scadbuddy.dev/problems/orders/unfulfil_disabled',
+            title: 'Conflict',
+            status: 409,
+            detail: 'unfulfilling a line item is turned off in Settings (orders_allow_unfulfil)',
+          },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const refused = tool('order_item_unfulfil').execute({ order_id: ORDER, item_id: ITEM }, ctx())
+    await expect(refused).rejects.toMatchObject({ status: 409 })
+    await expect(refused).rejects.toThrow('orders_allow_unfulfil')
   })
 
   it("passes a lifecycle refusal on with the backend's problem", async () => {

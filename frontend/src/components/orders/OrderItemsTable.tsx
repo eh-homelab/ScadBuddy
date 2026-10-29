@@ -1,8 +1,10 @@
 import { useId, useState } from 'react'
+import { MoreHorizontalIcon } from 'lucide-react'
 import { api } from '../../api/client'
-import type { OrderAttachment, OrderItemDetail, OrderStatus } from '../../api/types'
+import type { OrderAttachment, OrderItemDetail, OrderStatus, Shipment } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { Button } from '@/components/ui/button'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { DataTable, type Column } from '../records/DataTable'
 import { ItemPicture } from './ItemPicture'
@@ -11,12 +13,16 @@ import { itemPrice, parseUnitPrice, PRICED_WHILE, pricingQuote, UNIT_PRICE_HINT,
 import { refusalText } from './refusal'
 import { itemAnchor } from './itemLink'
 import type { SliceQuoteRuns } from './useSliceQuotes'
+import { UnfulfilDialog } from './Unfulfil'
+import { offersUnfulfil, UNFULFIL_OFF, UNFULFIL_SETTING, unfulfilBlock } from './unfulfilRules'
+import { Link } from 'react-router'
 
 /**
  * An order's line items (§3.3): picture, title, status, quantity, unit price and line
  * total; a row opens the item. While the order is draft or quoted (§3.4) the unit price
  * is typed here, recorded and accepted as the drawer's "Record and accept" does; past
- * `quoted` the accepted prices are pinned, and shown only.
+ * `quoted` the accepted prices are pinned, and shown only. A fulfilled item's row menu
+ * offers Unfulfil (#4952), with a confirm step.
  */
 export function OrderItemsTable({
   orderId,
@@ -30,6 +36,9 @@ export function OrderItemsTable({
   canAdd = false,
   selected = null,
   quoting,
+  onHold = false,
+  shipments = [],
+  unfulfilAllowed = true,
 }: {
   orderId: string
   /** The order's status: a unit price is typed only while it is draft or quoted. */
@@ -49,6 +58,12 @@ export function OrderItemsTable({
   selected?: string | null
   /** The page's slice quotes: a running one shows on its row (#4693). */
   quoting?: SliceQuoteRuns
+  /** The order is on hold: Unfulfil is refused (`order_on_hold`), and says why. */
+  onHold?: boolean
+  /** The order's shipments: Unfulfil is refused for an item one carries. */
+  shipments?: Shipment[]
+  /** #4953 — `orders_allow_unfulfil`: off, Unfulfil is disabled with a link to the setting. */
+  unfulfilAllowed?: boolean
 }) {
   const pricing = PRICED_WHILE.has(orderStatus)
   const columns: Column<OrderItemDetail>[] = [
@@ -132,6 +147,23 @@ export function OrderItemsTable({
       },
     },
   ]
+  if (items.some((item) => offersUnfulfil({ status: orderStatus }, item))) {
+    columns.push({
+      key: 'actions',
+      header: <span className="sr-only">Actions</span>,
+      className: 'w-10 text-right',
+      cell: (item) =>
+        offersUnfulfil({ status: orderStatus }, item) ? (
+          <ItemMenu
+            orderId={orderId}
+            item={item}
+            blocked={unfulfilAllowed ? unfulfilBlock({ on_hold: onHold }, shipments, item) : UNFULFIL_OFF}
+            off={!unfulfilAllowed}
+            onChanged={onChanged}
+          />
+        ) : null,
+    })
+  }
   return (
     <DataTable
       label="Line items"
@@ -144,6 +176,50 @@ export function OrderItemsTable({
       onOpen={onOpen}
       empty={canAdd ? 'No items yet. Add one with Add item above.' : 'No items.'}
     />
+  )
+}
+
+/**
+ * A fulfilled row's menu: Unfulfil, disabled with the reason when the backend would
+ * refuse it. Named without the item's title, as the unit price's Accept is.
+ */
+function ItemMenu({
+  orderId,
+  item,
+  blocked,
+  off,
+  onChanged,
+}: {
+  orderId: string
+  item: OrderItemDetail
+  blocked: string | null
+  /** The setting turned it off: the reason links to it. */
+  off: boolean
+  onChanged: () => void
+}) {
+  const [confirming, setConfirming] = useState(false)
+  return (
+    <>
+      <DropdownMenu modal={false}>
+        <DropdownMenuTrigger asChild>
+          <Button type="button" variant="ghost" size="icon-sm" aria-label="Row actions">
+            <MoreHorizontalIcon />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end" className="w-auto min-w-44">
+          <DropdownMenuItem variant="destructive" disabled={blocked !== null} onSelect={() => setTimeout(() => setConfirming(true), 0)}>
+            Unfulfil…
+          </DropdownMenuItem>
+          {blocked && <DropdownMenuLabel className="max-w-56 text-xs font-normal whitespace-normal text-muted-foreground">{blocked}</DropdownMenuLabel>}
+          {off && (
+            <DropdownMenuItem asChild>
+              <Link to={UNFULFIL_SETTING}>Open Settings → Orders</Link>
+            </DropdownMenuItem>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+      <UnfulfilDialog orderId={orderId} item={item} open={confirming} onOpenChange={setConfirming} onChanged={onChanged} />
+    </>
   )
 }
 

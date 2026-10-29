@@ -51,11 +51,14 @@ export class Refused extends Error {
   readonly slug: string
   readonly items: string[]
   readonly notFound: boolean
-  constructor(slug: string, message: string, items: string[] = [], notFound = false) {
+  /** The shipments in the way (`order_item_shipped`), as the backend's `shipments`. */
+  readonly shipments: string[]
+  constructor(slug: string, message: string, items: string[] = [], notFound = false, shipments: string[] = []) {
     super(message)
     this.slug = slug
     this.items = items
     this.notFound = notFound
+    this.shipments = shipments
   }
 }
 

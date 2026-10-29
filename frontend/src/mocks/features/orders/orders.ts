@@ -155,7 +155,10 @@ function reopenedStatus(item: OrderItem): [OrderItem['status'], boolean] {
 export function refused(request: Request, error: unknown) {
   if (error instanceof FilamentsRefused) return fieldProblem(request, 'filaments', error.message)
   if (!(error instanceof Refused)) throw error
-  const extensions = error.items.length > 0 ? { items: error.items } : {}
+  const extensions = {
+    ...(error.items.length > 0 ? { items: error.items } : {}),
+    ...(error.shipments.length > 0 ? { shipments: error.shipments } : {}),
+  }
   return error.notFound ? problem(request, 404, error.message) : problem(request, 409, error.message, PROBLEMS + error.slug, extensions)
 }
 
@@ -739,6 +742,38 @@ export const handlers = [
       event(order, 'fulfilment.accepted', { item_id: found.id, fulfilment_id: attempt.id, attempt: attempt.attempt, made })
       rederive(order)
       return attempt
+    }),
+  ),
+  // `Lifecycle.unfulfil_item` (#4952): the latest accepted attempt is no longer counted.
+  http.post('/api/v1/orders/:id/items/:item/unfulfil', ({ request, params }) =>
+    transition(request, () => {
+      // #4953 — the stored setting, checked before anything is read.
+      if (mockSettings().orders_allow_unfulfil === false) {
+        throw new Refused('unfulfil_disabled', 'unfulfilling a line item is turned off in Settings (orders_allow_unfulfil)')
+      }
+      const order = lock(String(params.id))
+      notEnded(order)
+      if (!DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)
+      notOnHold(order)
+      const found = itemOf(order, String(params.item))
+      if (found.status !== 'fulfilled') throw new Refused('item_not_fulfilled', `item ${found.id} is ${found.status}: only a fulfilled item unfulfils`, [found.id])
+      const carrying = shipmentsOf(order.id)
+        .filter((s) => s.items.some((line) => line.order_item_id === found.id))
+        .map((s) => s.id)
+      if (carrying.length > 0) {
+        throw new Refused('order_item_shipped', `item ${found.id} is on a shipment: take it off the shipment first`, [found.id], false, carrying)
+      }
+      const attempts = attemptsOf(found.id)
+      const accepted = attempts
+        .filter((f) => f.accepted_at)
+        .sort((a, b) => (a.accepted_at! < b.accepted_at! ? -1 : a.accepted_at! > b.accepted_at! ? 1 : a.attempt - b.attempt))
+        .at(-1)!
+      accepted.accepted_at = null
+      found.status = attempts.at(-1)!.outcome === 'failed' ? 'failed' : 'approved'
+      found.updated_at = now()
+      event(order, 'item.unfulfilled', { item_id: found.id, fulfilment_id: accepted.id, attempt: accepted.attempt, to: found.status })
+      rederive(order)
+      return found
     }),
   ),
 
