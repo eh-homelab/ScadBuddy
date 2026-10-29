@@ -285,6 +285,7 @@ const testing = new Set<string>()
 
 // Seconds: a running test ends within its timeout (testConnection.ts), and its lock and slot are
 // held until its listing write (ToolListings #putIfCurrent) commits; 2 s more covers that write.
+// It assumes the default timeout: a test given a longer one of its own would outlast the hint.
 const RETRY_AFTER_S = Math.ceil(DEFAULT_PLUGIN_TEST_TIMEOUT_MS / 1000) + 2
 const BUSY = { status: 429, body: { detail: 'a connection test for this plugin is already running' }, retryAfter: RETRY_AFTER_S } as const
 

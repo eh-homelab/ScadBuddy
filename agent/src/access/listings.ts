@@ -235,6 +235,7 @@ export class ToolListings {
       return 'unreachable'
     }
     if (!lease) return 'full'
+    // A 64-bit hash of the name: two names may share a key, which only costs a spurious `busy` and a retry.
     const key = `scadbuddy:ai_tool_listings:test:${name}`
     // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
     let healthy = false

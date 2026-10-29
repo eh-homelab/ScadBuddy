@@ -61,6 +61,8 @@ export function createLockClient(make: (max: number) => Sql): LockClient {
     async take() {
       if (held >= TEST_LOCK_CONNECTIONS) return undefined
       held++
+      // `held` caps the leases at TEST_LOCK_CONNECTIONS. While a retired client still has leases out, its
+      // pool and this new one both exist, so the replica's lock connections may briefly pass that number.
       const gen = current ?? { sql: make(TEST_LOCK_CONNECTIONS), out: 0, retired: false }
       current = gen
       all.add(gen)
