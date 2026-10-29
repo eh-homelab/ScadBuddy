@@ -453,6 +453,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   native library (nothing deletes it yet, #4337). The Customize page, the dialog's
   first read and its analysis, and the Prints page's queue and history panels ask
   Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
+  A run of several plates or copies is its own queue (#4541, `workflows/printing.py`
+  `_print_lan`): it succeeds at its first start, then `lan_wait` (`printers/print_activities.py`,
+  over the watch's `printer_reports`) waits out each print before the next starts, and
+  `print_lan_update` rewrites the result (`PrintRunResult.lan_waiting`, `lan_stopped`).
   A change to what a native run reads must keep `e2e-stack/`'s recorder pass at zero.
 - `e2e-stack/` — the real-stack e2e of the hot path (#4602): `compose.yaml` (ScadBuddy on
   moto's S3, the Temporal dev server, the slicer worker, a fake LAN printer and a

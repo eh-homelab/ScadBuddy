@@ -1527,6 +1527,16 @@ spool records over them; an overlay older than 30 minutes shows trays only, with
 To go back, set `preferred_path` to `bambuddy` (or `slicer_backend`/`library_backend`
 back); a Bambuddy print is unchanged.
 
+The printer has no queue, so a native run of several plates or copies is one (#4541). It
+slices every plate first, then starts the plates' copies one at a time, plate by plate.
+Each next one starts once the printer's report says the one before ended, finished or
+failed. Bambuddy's queue does the same with its defaults (`require_plate_clear` and
+`require_previous_success` off). Nothing asks for the plate to be cleared between them
+yet (#4939), so clear the bed before each print ends. The run succeeds at the first start.
+The dialog and the progress show each copy still to start as queued. A start that fails,
+or a cancel, stops the rest, and the progress says why. A wait longer than 7 days stops
+them too.
+
 To check that a deployment's hot path is clear of Bambuddy, find the run's request trace
 in Tempo (`{ name = "POST /api/v1/print/outputs/{output_id}/run" }`) and then
 `{ trace:id = "<its id>" && name =~ "bambuddy\\..*" }`: it returns no spans.

@@ -5,11 +5,12 @@ read 2026-10-18)."""
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.filaments import FilamentWarning
+from scadbuddy.bambuddy.stages import Stage
 
 
 class LanReport(BaseModel):
@@ -51,3 +52,19 @@ class LanStarted(BaseModel):
     #: printer picks the hotends itself. Never a serial. A start an earlier attempt took
     #: carries none, as no pick is made again.
     warnings: list[FilamentWarning] = Field(default_factory=list)
+    #: The plate it printed (#4541); ``None`` on a start from before a run could start
+    #: more than one.
+    plate_id: int | None = None
+    #: How it ended, once a later start of the same run waited for it (`lan_wait`): the
+    #: printer has moved on to that start since, so its report no longer says. ``None``
+    #: while it is the printer's print, read from the report.
+    ended: Stage | None = None
+    ended_message: str | None = None
+
+
+class LanStopped(BaseModel):
+    """Why a run started none of the plates it still had to start over the LAN (#4541):
+    a start or a wait that ``failed``, or a cancel."""
+
+    stage: Literal["failed", "cancelled"]
+    message: str

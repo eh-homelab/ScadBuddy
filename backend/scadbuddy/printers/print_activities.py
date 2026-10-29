@@ -15,6 +15,12 @@ merges them, so the latest merged state is what is read.
 
 The access code is opened from the row inside each activity, never passed in its input.
 
+A run of several plates or copies (#4541) starts the next one only once the printer has
+finished the one before: ``lan_wait`` polls the printer's latest report, which its
+`PrinterWatch` keeps in Postgres, until it shows that print ended (`progress.lan_ended`),
+as Bambuddy's queue starts its next item once the printer is idle. It holds no
+connection to the printer while it waits, so a print of hours costs a query a poll.
+
 A rack printer's plate (hot-path Task 8): ``lan_upload`` reads the plate's rack plan from
 the sliced 3MF, and ``lan_print`` ranks the rack in the report it reads as it starts
 (never Bambuddy's status) and sends the picks as ``nozzle_mapping``
@@ -65,6 +71,8 @@ from scadbuddy.printers.lan import (
 from scadbuddy.printers.lan_models import LanReport, LanStarted, ProjectFile
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.nozzle_mapping import choose_nozzles, read_rack_plan
+from scadbuddy.printers.progress import lan_ended
+from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.status import print_error_text, status_from_report
 from scadbuddy.printers.store import KekMissingError, NoAccessCodeError, PrinterStore
 from scadbuddy.rack.rank import rack_serials
@@ -78,9 +86,12 @@ from scadbuddy.workflows.print_models import (
     LAN_START_WAIT,
     LAN_UNSURE,
     LAN_UPLOAD_ACTIVITY,
+    LAN_WAIT_ACTIVITY,
+    LAN_WAIT_POLL,
     LanPrintInput,
     LanUploaded,
     LanUploadInput,
+    LanWaitInput,
     SlicedSource,
 )
 
@@ -166,6 +177,10 @@ class LanDeps:
     start_wait: float = LAN_START_WAIT
     #: Rack hotend usage (#836): ranks a rack print's pick (hot-path Task 8).
     rack: RackUsage | None = None
+    #: The printers' latest reports, which ``lan_wait`` polls (#4541).
+    reports: PrinterReportStore | None = None
+    #: Seconds between ``lan_wait``'s reads of the report.
+    wait_poll: float = LAN_WAIT_POLL
 
 
 class LanActivities:
@@ -296,6 +311,25 @@ class LanActivities:
             raise _unsure(f"{row.name}'s LAN connection dropped while it was started.") from None
         raise _unsure(f"{row.name} closed its LAN connection while it was started.")
 
+    @activity.defn(name=LAN_WAIT_ACTIVITY)
+    async def lan_wait(self, input: LanWaitInput) -> LanStarted:
+        """Until the printer's report shows ``input.started``'s print ended, then that
+        start with how (`LanStarted.ended`). Heartbeats every read, so a worker that dies
+        is noticed and the wait taken up again; the workflow bounds the whole wait."""
+        reports = self.d.reports
+        if reports is None:
+            raise _failed(
+                "This worker cannot read the printers' reports, so it cannot tell when a"
+                " print ends and start the next.",
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        while True:
+            ended = lan_ended(await asyncio.to_thread(reports.get, input.printer), input.started)
+            if ended is not None:
+                return ended
+            activity.heartbeat()
+            await asyncio.sleep(self.d.wait_poll)
+
     async def _nozzle_mapping(
         self, row: PrinterRow, printer: PrinterStatus, input: LanPrintInput
     ) -> tuple[list[int] | None, list[FilamentWarning]]:
@@ -403,4 +437,4 @@ class LanActivities:
         return _failed(f"{row.name} reported print error {print_error_text(code)}.")
 
     def all(self) -> list[Callable[..., Any]]:
-        return [self.lan_upload, self.lan_print]
+        return [self.lan_upload, self.lan_print, self.lan_wait]

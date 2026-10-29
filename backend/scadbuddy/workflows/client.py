@@ -46,7 +46,7 @@ from scadbuddy.workflows.pipelines import (
     TemplatePipeline,
 )
 from scadbuddy.workflows.printer_watch import PrinterWatch
-from scadbuddy.workflows.printing import PrintRunWorkflow
+from scadbuddy.workflows.printing import LanSequenceWorkflow, PrintRunWorkflow
 from scadbuddy.workflows.problems import operation_lost
 from scadbuddy.workflows.registered import RegisteredActivities
 
@@ -181,6 +181,8 @@ def bambuddy_worker(
         task_queue=task_queue,
         workflows=[
             PrintRunWorkflow,
+            # A LAN run's later plate copies (#4541); AUTO_UPGRADE by the worker's default.
+            LanSequenceWorkflow,
             OperationWorkflow,
             FollowPrint if build_id is None else VersionedFollowPrint,
             # Each LAN printer's report (#3823); AUTO_UPGRADE by the worker's default.

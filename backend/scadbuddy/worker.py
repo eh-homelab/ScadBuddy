@@ -1129,6 +1129,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             library=library,
             blobs=blobs,
             rack=rack,
+            # A run's next plate copy waits on the printer's report (#4541).
+            reports=reports,
         )
     )
     return PrintWorkerDeps(

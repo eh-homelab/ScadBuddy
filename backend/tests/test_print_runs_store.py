@@ -114,6 +114,26 @@ async def test_finish_is_guarded_on_running_and_publishes_in_the_transaction(
     assert len(events.published) == 2  # accepted, succeeded; not the no-op fail
 
 
+async def test_update_result_rewrites_only_a_succeeded_run(
+    store: PrintRunStore, events: Events
+) -> None:
+    """#4541: a LAN run's later starts rewrite its result; a running or failed run's
+    record is never touched, and the change is announced as the end was."""
+    running = await accept(store)
+    later = RESULT.model_copy(update={"lan_waiting": [1]})
+    assert (await store.update_result(running.id, "demo", later)).result is None
+    await store.succeed(running.id, "demo", RESULT)
+    updated = await store.update_result(running.id, "demo", later)
+    assert updated.status == "succeeded" and updated.result == later
+    assert (await store.get(running.id)) == updated
+    assert len(events.published) == 3  # accepted, succeeded, updated; not the no-op
+    failed = await accept(store, "k2", run_id="r2", wf_run="w2")
+    await store.fail(failed.id, "demo", REFUSED)
+    assert (await store.update_result(failed.id, "demo", later)).result is None
+    with pytest.raises(LookupError):
+        await store.update_result("nope", "demo", later)
+
+
 async def test_start_enqueue_marks_may_have_queued_on_a_later_failure(store: PrintRunStore) -> None:
     run = await accept(store)
     await store.start_enqueue(run.id)

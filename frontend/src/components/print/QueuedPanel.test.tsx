@@ -76,3 +76,18 @@ describe('QueuedPanel · the path the run took', () => {
     expect(screen.getByTestId('queued-items')).not.toHaveTextContent('over the LAN')
   })
 })
+
+// #4541 — the printer has no queue, so a LAN run of several plate copies is one.
+describe('QueuedPanel · a LAN run of several plate copies', () => {
+  it('says the rest start one at a time, as the printer finishes each', () => {
+    renderPanel({ ...queuedResult, path: 'native', copies: 3, lan_waiting: [1, 1] })
+    expect(screen.getByTestId('lan-waiting')).toHaveTextContent(
+      'The printer has no queue: ScadBuddy starts the other 2 one at a time, each once the printer has finished the one before.',
+    )
+  })
+
+  it('says nothing more once every one has started', () => {
+    renderPanel({ ...queuedResult, path: 'native', copies: 2, lan_waiting: [] })
+    expect(screen.queryByTestId('lan-waiting')).toBeNull()
+  })
+})

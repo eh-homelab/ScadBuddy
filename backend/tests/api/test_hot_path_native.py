@@ -258,14 +258,14 @@ def follow_until_settled(client: TestClient, output: str) -> dict[str, Any]:
 
 
 def _dialog_and_run(
-    client: TestClient, model: str, row: str
+    client: TestClient, model: str, row: str, *, copies: int = 1
 ) -> tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]:
     output = make_output(client, model)
     choices = client.get(f"/api/v1/print/outputs/{output}/choices", params={"printer": row})
     assert choices.status_code == 200, choices.text
     filaments = client.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
     assert filaments.status_code == 200, filaments.text
-    body = run_body(row, filaments.json())
+    body = {**run_body(row, filaments.json()), "copies": copies}
     checked = client.post(f"/api/v1/print/outputs/{output}/check", json=body)
     assert checked.status_code == 200, checked.text
     assert checked.json()["errors"] == [], checked.json()
@@ -319,6 +319,27 @@ def test_a_native_run_makes_no_bambuddy_call(
     sent = fake_lan.project_files()[-1]
     assert sent["ams_mapping"] == [0, 1]
     assert sent["use_ams"] is True
+
+
+def test_a_native_run_of_two_copies_prints_both_and_asks_bambuddy_nothing(
+    native_app: TestClient,
+    model: str,
+    spans: InMemorySpanExporter,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+) -> None:
+    """#4541: refused before; the run starts the second copy once the printer reports
+    the first finished, and the print settles once both have."""
+    row = lan_row(native_app, fake_lan, bambuddy_printer_id=1)
+    overlay(native_app)
+    with forbid_bambuddy(spans, BASE):
+        output, _, _, run = _dialog_and_run(native_app, model, row, copies=2)
+        assert run["status"] == "succeeded", run
+        progress = follow_until_settled(native_app, output)
+    assert (progress["route"], progress["stage"]) == ("lan", "done"), progress
+    assert (progress["copies"], progress["copies_completed"]) == (2, 2), progress
+    names = [sent["subtask_name"] for sent in fake_lan.project_files()]
+    assert len(names) == 2 and names[1] == f"{names[0]}-c2"
 
 
 def _a_colour_a_plate(paths: DataPaths, output: str) -> None:
