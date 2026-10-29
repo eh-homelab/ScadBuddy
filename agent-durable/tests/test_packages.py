@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -130,3 +131,33 @@ def test_the_runner_never_loads_a_package_that_declares_an_http_server(tmp_path:
     (package / ".mcp.json").write_text(json.dumps({"notes": {"type": "http", "url": "https://x"}}))
     context = SegmentContext(packages=[TurnPackage("notes", name, hash_tree(package))])
     assert _runner(root)._packages("session-x", context) == []
+
+
+def test_a_filtered_copy_hashing_to_its_listing_loads(tmp_path: Path) -> None:
+    """#4757: the agent shares a package without its off items, under that copy's own hash
+    (turnPackages.ts sharePackage), and lists that hash with the items and aliases of the
+    pin, the off ones too. The runner loads the copy by that hash, as it loads any."""
+    root = tmp_path / "plugins"
+    pin = _tree(tmp_path / "pin")
+    for skill in ("jot", "wipe"):
+        (pin / "skills" / skill).mkdir(parents=True)
+        (pin / "skills" / skill / "SKILL.md").write_text(f"---\nname: {skill}\n---\n{skill}\n")
+    shutil.copytree(pin, root / "staging" / "notes")
+    shutil.rmtree(root / "staging" / "notes" / "skills" / "wipe")
+    digest = hash_tree(root / "staging" / "notes")
+    assert digest != hash_tree(pin)
+    hex_ = digest.removeprefix("sha256:")
+    (root / "staging").rename(root / hex_)
+    listed = TurnPackage(
+        "notes",
+        f"{hex_}/notes",
+        digest,
+        items=["skill:jot", "skill:wipe"],
+        aliases={"skill:clean": ["skill:wipe"]},
+    )
+    assert _runner(root)._packages("session-x", SegmentContext(packages=[listed])) == [
+        str(root / hex_ / "notes")
+    ]
+    # Listed under the pin's hash instead, the copy is refused.
+    pinned = TurnPackage("notes", f"{hex_}/notes", hash_tree(pin))
+    assert _runner(root)._packages("session-x", SegmentContext(packages=[pinned])) == []

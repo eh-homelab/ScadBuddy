@@ -7,6 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { declaredConfigs } from '../harness/plugins.js'
 import { hashTree, PackageContentError } from '../plugins/packages/hash.js'
 import type { LoadedPackage } from '../plugins/packages/install.js'
+import { skillItem, subagentItem } from '../access/items.js'
 import { packageServerSource } from '../access/model.js'
 import {
   collidingServerNames,
@@ -100,6 +101,8 @@ export async function sharePackage(
     content_hash: contentHash,
     allowed: pkg.allowed,
     builtin_tools: pkg.builtinTools.filter((t) => !builtinsOff.has(t)),
+    items: [...[...source.items.skills.keys()].map(skillItem), ...[...source.items.subagents.keys()].map(subagentItem)],
+    aliases: Object.fromEntries(source.items.aliases),
   }
 }
 

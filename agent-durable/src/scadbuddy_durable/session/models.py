@@ -173,6 +173,11 @@ class TurnPackage:
     # Approved with allow_refused: loaded as it is, with the built-ins it names.
     allowed: bool = False
     builtin_tools: list[str] = field(default_factory=list)
+    # Its skills and subagents (``skill:<name>``, ``subagent:<name>``) and their aliases, from
+    # the loaded pin (#4757): the segment runner refuses a Skill or Agent call naming an off
+    # one (access.py ``off_call_item``). A listing from an older agent has neither.
+    items: list[str] = field(default_factory=list)
+    aliases: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass

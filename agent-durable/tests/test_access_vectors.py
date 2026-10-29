@@ -3,6 +3,7 @@ agent/test/accessVectors.test.ts writes the file, and this applies the same rule
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
@@ -50,3 +51,27 @@ def test_registry_sources_match() -> None:
     assert VECTORS["migrated_by"] == access.MIGRATED_BY
     for tool, source in VECTORS["registry_source"].items():
         assert access.registry_source(tool) == source
+
+
+def _plugins(raw: list[dict[str, Any]]) -> list[access.CallPlugin]:
+    return [
+        access.CallPlugin(
+            p["name"],
+            p["source"],
+            tuple(p["items"]),
+            {k: tuple(v) for k, v in p["aliases"].items()},
+        )
+        for p in raw
+    ]
+
+
+@pytest.mark.parametrize("vector", VECTORS["calls"], ids=lambda v: v["name"])
+def test_calls(vector: dict[str, Any]) -> None:
+    """agent/src/access/items.ts offCallItem and offItemReason, the same answer and words."""
+    off = access.off_call_item(
+        vector["tool"], vector["input"], _plugins(vector["plugins"]), _rows(vector["rows"])
+    )
+    got = (
+        None if off is None else {**dataclasses.asdict(off), "reason": access.off_item_reason(off)}
+    )
+    assert got == vector["expect"]

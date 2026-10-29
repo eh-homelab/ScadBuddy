@@ -231,6 +231,15 @@ export type TurnPackage = {
   /** Approved with `allow_refused`: loaded as it is, with `builtin_tools`. */
   allowed: boolean
   builtin_tools: string[]
+  /**
+   * Its skills and subagents (`skill:<name>`, `subagent:<name>`) and `PackageItems.aliases`,
+   * read from the loaded pin, the off ones too (#4757): the segment runner's call rule
+   * (agent-durable access.py `off_call_item`) refuses a Skill or Agent call naming an off one.
+   * The aliases are the review's cut names, never the whole frontmatter ones: the rule cuts
+   * the call's name before it compares it with one.
+   */
+  items: string[]
+  aliases: Record<string, string[]>
 }
 
 export type TurnToolsResult = {

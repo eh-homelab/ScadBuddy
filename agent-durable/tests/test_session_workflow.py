@@ -5,6 +5,9 @@ The model is the plugin's ScriptedClaude; agent-tools is a stand-in (session_sup
 ``fixtures/durable_session_histories/raised.json`` is the history of
 ``test_a_tool_raised_to_outward_parks_and_runs_once_approved`` as recorded on the code
 before ``tool-access-2171`` (#2171), payloads unsealed; it is never re-recorded.
+``bash.json`` is the history of
+``test_a_package_built_in_parks_runs_once_approved_and_the_runner_gets_the_package``,
+recorded the same way on the code before ``builtin-access-4757`` (#4757).
 """
 
 from __future__ import annotations
@@ -1404,6 +1407,77 @@ async def test_a_package_built_in_parks_runs_once_approved_and_the_runner_gets_t
     texts = [e["delta"] for e in await events(agent_db, sid) if e["type"] == "assistant.text.delta"]
     assert len(texts) == 1 and texts[0].startswith("Bash: ok"), texts
     await _replays(harness, handle)
+
+
+def _bash_then_asks(prompt: str, history: list[HistoryItem]) -> ToolCall | Final:
+    """Calls Bash, then asks a question, which holds the turn open to be read."""
+    if not history:
+        return ToolCall("Bash", {"command": "make notes"})
+    if len(history) == 1:
+        return ToolCall("ask_user", QUESTION)
+    return Final("done")
+
+
+async def test_bash_off_is_refused_and_lowered_runs_unasked(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#4757: an allowed package's Bash takes its access as each call comes (builtin_tier):
+    off, it is refused in a classic turn's words and never parks; lowered to write, it runs
+    with no one asked; outward, it parks as before."""
+    harness.stand_in.turn_packages = [NOTES_PACKAGE]
+    harness.stand_in.builtin_answers = ["off", "write", "outward"]
+    await harness.agent.shutdown()
+    harness.claude = ScriptedClaude(_bash_then_asks)
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "run it")
+        [entry] = await _parked(handle)
+        assert entry["kind"] == "answer"  # the question: Bash itself never parked
+        context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+        assert list(context.replaced.values()) == [
+            "Bash is disabled in Settings → Tools & plugins; the user can turn it back on there"
+        ]
+        assert await _open_rows(agent_db, sid) == 1
+        assert harness.stand_in.builtin_asked == [{"tool": "Bash", "packages": ["notes"]}]
+        await _replays(harness, handle)
+    harness.claude = None
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "run it")
+        assert await settled(connect, sid) == "idle"
+        log = await events(agent_db, sid)
+        assert "approval.required" not in _types(log)
+        assert await _open_rows(agent_db, sid) == 0
+        texts = [e["delta"] for e in log if e["type"] == "assistant.text.delta"]
+        assert len(texts) == 1 and texts[0].startswith("Bash: ok"), texts
+        await _replays(harness, handle)
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "run it")
+        [entry] = await _parked(handle)
+        assert (entry["kind"], entry["tool"]) == ("approval", "Bash")
+        await _replays(harness, handle)
+
+
+async def test_builtin_tier_failing_parks_after_three_attempts(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """An agent that cannot answer builtin_tier (an older one, mid-rollout) leaves the call
+    to a person: three attempts, then it parks."""
+    harness.stand_in.turn_packages = [NOTES_PACKAGE]
+    harness.stand_in.builtin_fails = True
+    _, handle = await harness.session(agent_db)
+    await send(handle, "run it")
+    [entry] = await _parked(handle)
+    assert (entry["kind"], entry["tool"]) == ("approval", "Bash")
+    assert len(harness.stand_in.builtin_asked) == 3
+    await _replays(harness, handle)
+
+
+async def test_a_turn_from_before_builtin_access_replays(harness: Harness) -> None:
+    """A history recorded before builtin-access-4757 (an allowed package's Bash call that
+    parked, then ran once approved) replays on this code without asking builtin_tier."""
+    path = Path(__file__).parent / "fixtures" / "durable_session_histories" / "bash.json"
+    await _replay(harness, WorkflowHistory.from_json("bash", path.read_text(encoding="utf-8")))
 
 
 async def test_a_turn_recalls_memories_into_its_prompt_and_retains_before_it_ends(

@@ -147,6 +147,12 @@ class StandInTools:
         self.listed_on: list[str] = []
         self.closed_on: list[str] = []
         self.called_on: list[str] = []
+        # builtin_tier (agent temporal/toolTier.ts, #4757): an engine-parked built-in's
+        # access, each answer in turn (outward once none is left); each request it got, and
+        # builtin_fails makes it fail (retryably).
+        self.builtin_answers: list[str] = []
+        self.builtin_asked: list[dict[str, Any]] = []
+        self.builtin_fails = False
 
     async def _response(self, tool: str) -> tuple[str, Any] | None:
         info = activity.info()
@@ -271,6 +277,13 @@ class StandInTools:
                 tier = self.tiers[args["tool"]] = self.tier_answers.pop(0)
             return {"tier": tier, "disabled": off}
 
+        @activity.defn(name="builtin_tier")
+        async def builtin_tier(args: dict[str, Any]) -> dict[str, str]:
+            self.builtin_asked.append(args)
+            if self.builtin_fails:
+                raise ApplicationError("the agent is away")
+            return {"tier": self.builtin_answers.pop(0) if self.builtin_answers else "outward"}
+
         @activity.defn(name="memory_recall")
         async def memory_recall(args: dict[str, Any]) -> dict[str, str | None]:
             self.memory.append(("memory_recall", args["turn_id"]))
@@ -310,6 +323,7 @@ class StandInTools:
             turn_tools_close,
             turn_tool_tier,
             tool_tier,
+            builtin_tier,
             turn_tool,
             memory_recall,
             memory_retain,

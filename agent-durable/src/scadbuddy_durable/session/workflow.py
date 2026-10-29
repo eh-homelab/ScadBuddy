@@ -112,6 +112,13 @@ TOOL_TIER = "tool_tier"
 TURN_TOOLS_PATCH = "turn-tools-2320"
 # The built-ins a package may name that run as their own activities, so a call can park.
 ENGINE_PARKED = frozenset({"Bash", "PowerShell"})
+# agent/src/temporal/toolTier.ts (#4757): a package built-in's access as it is now, the
+# strictest of the packages that name it. Under builtin-access-4757 each engine-parked call
+# asks it first: off refuses the call, read or write lets it through, outward parks.
+BUILTIN_TIER = "builtin_tier"
+BUILTIN_ACCESS_PATCH = "builtin-access-4757"
+# A classic turn's words for a tool switched off (agent harness/permissions.ts decideLive).
+BUILTIN_OFF = "{} is disabled in Settings → Tools & plugins; the user can turn it back on there"
 TURN_TOOLS_TIMEOUT = timedelta(minutes=2)
 # #2581: a session's plugin calls are pinned to the replica that listed them, which keeps
 # its MCP client on each plugin (agent temporal/sessionClients.ts), so a stateful plugin
@@ -605,6 +612,18 @@ class DurableSession:
             "answer" if self._kinds.get(name) == "answer" else "approval"
         )
         author = self._turn.author if self._turn else self._start.owner
+        if name in ENGINE_PARKED and workflow.patched(BUILTIN_ACCESS_PATCH):
+            tier = await self._builtin_tier(name)
+            if tier == "off":
+                if self._turn is not None:
+                    # Refused by Settings, not by a person: the model is told so in place of
+                    # the plugin's rejection, as a classic turn tells it.
+                    self._turn.replaced[str(call["id"])] = BUILTIN_OFF.format(name)
+                self._agent.decide(str(call["id"]), False, approver="scadbuddy")
+                return
+            if tier in ("read", "write"):
+                self._agent.decide(str(call["id"]), True, approver="scadbuddy")
+                return
         if name in self._turn_tools and not await self._outward(name, call):
             # A read or write call (an http GET, a plugin tool tiered read) goes straight
             # through, as the permission seam lets it; its activity checks the tier again.
@@ -874,6 +893,29 @@ class DurableSession:
             )
             return None
         return now
+
+    async def _builtin_tier(self, name: str) -> str | None:
+        """An engine-parked built-in's access as it is now (builtin_tier), over the turn's
+        packages that name it; None when the agent did not answer (an older one has no such
+        activity), and the call then parks: fail toward asking."""
+        try:
+            answer = await workflow.execute_activity(
+                BUILTIN_TIER,
+                {
+                    "tool": name,
+                    "packages": [p.name for p in self._packages if name in p.builtin_tools],
+                },
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=SHORT,
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3, non_retryable_error_types=["UnknownSession", "ToolError"]
+                ),
+                result_type=dict,
+            )
+        except FailureError:
+            return None
+        tier = answer.get("tier") if isinstance(answer, dict) else None
+        return tier if isinstance(tier, str) else None
 
     async def _outward(self, name: str, call: dict[str, Any]) -> bool:
         """Whether a turn tool's call is outward, by its input (turn_tool_tier). Only a

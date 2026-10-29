@@ -12,12 +12,14 @@ import contextlib
 import dataclasses
 import hashlib
 import os
+import shutil
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 from claude_agent_sdk import HookMatcher, ProcessError, ResultError
 from fake_anthropic import FakeAnthropic
@@ -54,6 +56,7 @@ from scadbuddy_durable.gate.names import PENDING_INPUT_QUERY, RESPOND_UPDATE
 from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
 from scadbuddy_durable.session import tools
 from scadbuddy_durable.session.models import BUDGET_EXHAUSTED, ImageRef
+from scadbuddy_durable.session.package_hash import hash_tree
 from scadbuddy_durable.session.runner import (
     DURABLE_PREFIX,
     IMAGE_TOO_LARGE,
@@ -70,6 +73,8 @@ from scadbuddy_durable.session.runner import (
     image_problem,
     image_size,
     merged_hooks,
+    own_call_plugin,
+    own_plugin_copy,
     same_subagent,
     tool_images_loader,
     view_tool_images_tool,
@@ -1650,3 +1655,317 @@ async def test_a_refused_credential_is_noted_but_never_disabled_unconfirmed(
     first = (await _health(agent_db))["http://127.0.0.1:9"]
     assert first[0] == "active"
     assert first[3] is not None and "401" in first[3]
+
+
+# ---- #4757: the own plugin's items, and Skill and Agent calls by access ----
+
+REPO = Path(__file__).resolve().parents[2]
+OWN_SKILLS = REPO / "plugins" / "scadbuddy" / "skills"
+OWN_AGENTS = REPO / "plugins" / "scadbuddy" / "agents"
+# The first line of print-analyst.md's prompt: a request that holds it is the subagent's.
+SUBAGENT_PROMPT = "You run one print-analyzer session"
+
+
+def _own_plugin(tmp_path: Path) -> Path:
+    """The image's layout: the own plugin's skills in a folder named scadbuddy."""
+    plugin = tmp_path / "scadbuddy"
+    plugin.mkdir()
+    (plugin / "skills").symlink_to(OWN_SKILLS)
+    return plugin
+
+
+def _results(body: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        b
+        for m in body.get("messages") or []
+        if isinstance(m.get("content"), list)
+        for b in m["content"]
+        if b.get("type") == "tool_result"
+    ]
+
+
+def _text_of(result: dict[str, Any]) -> str:
+    content = result.get("content")
+    if isinstance(content, list):
+        return "".join(str(c.get("text", "")) for c in content if isinstance(c, dict))
+    return str(content)
+
+
+async def _two_calls(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    call: dict[str, Any],
+    off: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The bundled Claude Code makes ``call`` twice in one segment; between the two, the
+    own plugin's ``off`` item is switched off. Answers the main thread's tool results and
+    the session's events."""
+    cur = await agent_db.execute("SHOW search_path")
+    row = await cur.fetchone()
+    assert row is not None
+    url, search_path = os.environ["SCADBUDDY_TEST_DATABASE_URL"], row[0]
+    main: list[list[dict[str, Any]]] = []
+
+    def switch_off() -> None:
+        with psycopg.connect(url, autocommit=True, options=f"-c search_path={search_path}") as c:
+            c.execute(
+                "INSERT INTO ai_access (source, item, access, updated_by)"
+                " VALUES ('builtin:own-plugin', %s, 'off', 'browser:browser')",
+                (off,),
+            )
+
+    def reply(body: dict[str, Any]) -> dict[str, Any]:
+        names = [t.get("name") for t in body.get("tools") or []]
+        if call["name"] not in names or SUBAGENT_PROMPT in str(body.get("system")):
+            return {"text": "ok"}  # Claude Code's own side requests, and the subagent's
+        results = _results(body)
+        main.append(results)
+        if len(results) == 0:
+            return {"tool_use": call}
+        if len(results) == 1:
+            switch_off()
+            return {"tool_use": call}
+        return {"text": "All done."}
+
+    fake = FakeAnthropic(reply).start()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    try:
+        await insert_gateway(agent_db, KEK, fake.url)
+        runner = ScadBuddyRunner(
+            connect,
+            KEK,
+            cwd=os.path.realpath(cwd),
+            plugin_dir=str(_own_plugin(tmp_path)),
+            subagent_url="http://127.0.0.1:9/mcp",
+            agents_dir=str(OWN_AGENTS),
+            make_runner=ClaudeAgentSdkRunner,
+            own_plugin_root=str(tmp_path / "own"),
+        )
+        async with running(temporal_env, connect, runner) as (client, queue):
+            sid = await insert_session(agent_db)
+            await agent_db.execute(
+                "UPDATE ai_sessions SET durable_turn_id = %s WHERE id = %s",
+                (str(uuid.uuid4()), sid),
+            )
+            handle = await start_session(client, sid, queue)
+            try:
+                await send(handle, "go")
+                assert await settled(connect, sid, timeout=180) == "idle"
+            finally:
+                await handle.terminate()
+        log = await events(agent_db, sid)
+    finally:
+        fake.close()
+        await asyncio.sleep(0)
+    final = next(r for r in reversed(main) if len(r) >= 2)
+    # The panel sees each call end, the refused one too.
+    opened = {e["id"] for e in log if e["type"] == "tool.call"}
+    ended = {e["id"] for e in log if e["type"] == "tool.result"}
+    assert len(opened) >= 2 and opened <= ended, (opened, ended)
+    return final, log
+
+
+async def test_a_skill_set_off_mid_segment_is_refused_on_its_next_call(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4757: the first Skill call runs; the skill is switched off; the next call of it in
+    the same segment is refused, naming the item as a classic turn names it."""
+    (first, second), _ = await _two_calls(
+        temporal_env,
+        agent_db,
+        connect,
+        tmp_path,
+        monkeypatch,
+        {"name": "Skill", "input": {"skill": "scadbuddy:print"}},
+        "skill:print",
+    )
+    assert not first.get("is_error"), first
+    assert second.get("is_error") is True
+    assert (
+        'skill "print" of ScadBuddy\'s own plugin is switched off in Settings → Tools & plugins'
+        in _text_of(second)
+    )
+
+
+async def test_a_subagent_set_off_mid_segment_is_refused_on_its_next_call(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (first, second), _ = await _two_calls(
+        temporal_env,
+        agent_db,
+        connect,
+        tmp_path,
+        monkeypatch,
+        {
+            "name": "Agent",
+            "input": {
+                "subagent_type": "print-analyst",
+                "description": "Analyse",
+                "prompt": "Analyse the print.",
+            },
+        },
+        "subagent:print-analyst",
+    )
+    assert not first.get("is_error"), first
+    assert second.get("is_error") is True
+    assert 'subagent "print-analyst" of ScadBuddy\'s own plugin is switched off' in _text_of(second)
+
+
+async def test_a_call_is_refused_when_access_cannot_be_read(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """Fail closed: the segment's call hook refuses a Skill or Agent call whose rows cannot
+    be read, and lets every other tool past it."""
+    options = await _segment_options(
+        temporal_env, agent_db, connect, tmp_path, plugin_dir=str(_own_plugin(tmp_path))
+    )
+    [matcher] = options["extra_options"]["hooks"]["PreToolUse"]
+    [check] = matcher.hooks
+    calls = check.__self__
+    call = {"tool_name": "Skill", "tool_input": {"skill": "print"}, "tool_use_id": "t1"}
+    assert await check(call, "t1", None) == {}
+
+    @contextlib.asynccontextmanager
+    async def broken() -> AsyncIterator[Conn]:
+        raise OSError("the database is away")
+        yield  # pragma: no cover
+
+    calls._judge.__self__._connect = broken
+    published: list[dict[str, Any]] = []
+    token = _EMIT.set(published.append)
+    try:
+        denied = await check({**call, "tool_use_id": "t2"}, "t2", None)
+        assert (
+            await check({"tool_name": "Bash", "tool_input": {}, "tool_use_id": "t3"}, "t3", None)
+            == {}
+        )
+    finally:
+        _EMIT.reset(token)
+    output = denied["hookSpecificOutput"]
+    assert (output["hookEventName"], output["permissionDecision"]) == ("PreToolUse", "deny")
+    assert output["permissionDecisionReason"] == (
+        "Skill is refused: its Settings → Tools & plugins entry cannot be read"
+    )
+    # The refused call ends as it is refused; the Bash call runs on.
+    assert [(e["type"], e["id"]) for e in published] == [
+        ("tool_call", "t2"),
+        ("tool_result", "t2"),
+        ("tool_call", "t3"),
+    ]
+    assert published[1]["status"] == "failed"
+
+
+def test_own_plugin_copy_leaves_out_off_skill_and_subagent(tmp_path: Path) -> None:
+    plugin = tmp_path / "scadbuddy"
+    shutil.copytree(OWN_SKILLS, plugin / "skills")
+    (plugin / "agents").mkdir()
+    (plugin / "agents" / "helper.md").write_text("---\nname: aide\ndescription: d\n---\nHelp.\n")
+    (plugin / "agents" / "other.md").write_text("---\nname: other\ndescription: d\n---\nO.\n")
+    root = tmp_path / "own"
+    off = frozenset({"skill:print", "subagent:aide"})
+    copy = Path(own_plugin_copy(str(plugin), off, str(root)))
+    # Named after the plugin's folder, under the copy's own hash.
+    assert copy.name == "scadbuddy"
+    assert copy.parent.name == hash_tree(copy).removeprefix("sha256:")
+    assert sorted(p.name for p in (copy / "skills").iterdir()) == ["authoring", "customize"]
+    assert [p.name for p in (copy / "agents").iterdir()] == ["other.md"]
+    assert (plugin / "skills" / "print").is_dir()  # the plugin itself is left as it is
+    # A copy already there is kept once it hashes to its name, replaced once it does not.
+    assert own_plugin_copy(str(plugin), off, str(root)) == str(copy)
+    (copy / "skills" / "authoring" / "SKILL.md").write_text("TAMPERED-4757")
+    again = Path(own_plugin_copy(str(plugin), off, str(root)))
+    assert again == copy
+    assert "TAMPERED-4757" not in (again / "skills" / "authoring" / "SKILL.md").read_text()
+
+
+async def test_own_plugin_loads_as_it_is_with_nothing_off(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    plugin = _own_plugin(tmp_path)
+    assert own_plugin_copy(str(plugin), frozenset(), str(tmp_path / "own")) == str(plugin)
+    # An off row for an item the plugin does not have changes nothing.
+    assert own_plugin_copy(str(plugin), frozenset({"skill:gone"}), str(tmp_path / "o")) == str(
+        plugin
+    )
+    on = await _segment_options(temporal_env, agent_db, connect, tmp_path, plugin_dir=str(plugin))
+    assert on["extra_options"]["plugins"] == [{"type": "local", "path": str(plugin)}]
+
+
+async def test_an_off_skill_loads_the_own_plugin_without_it(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    plugin = _own_plugin(tmp_path)
+    await agent_db.execute(
+        "INSERT INTO ai_access (source, item, access, updated_by)"
+        " VALUES ('builtin:own-plugin', 'skill:print', 'off', 'browser:browser')"
+    )
+    options = await _segment_options(
+        temporal_env, agent_db, connect, tmp_path, plugin_dir=str(plugin)
+    )
+    [loaded] = options["extra_options"]["plugins"]
+    assert loaded["path"] != str(plugin)
+    assert Path(loaded["path"]).name == "scadbuddy"
+    assert not (Path(loaded["path"]) / "skills" / "print").exists()
+    assert (Path(loaded["path"]) / "skills" / "authoring" / "SKILL.md").is_file()
+
+
+async def test_off_subagent_is_not_defined_inline(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    await agent_db.execute(
+        "INSERT INTO ai_access (source, item, access, updated_by)"
+        " VALUES ('builtin:own-plugin', 'subagent:print-analyst', 'off', 'browser:browser')"
+    )
+    recording = Recording()
+    runner = ScadBuddyRunner(
+        connect,
+        KEK,
+        cwd=str(tmp_path),
+        plugin_dir=str(_own_plugin(tmp_path)),
+        subagent_url="http://127.0.0.1:9/mcp",
+        agents_dir=str(OWN_AGENTS),
+        make_runner=recording,
+        own_plugin_root=str(tmp_path / "own"),
+    )
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        await agent_db.execute(
+            "UPDATE ai_sessions SET durable_turn_id = %s WHERE id = %s", (str(uuid.uuid4()), sid)
+        )
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    [made] = recording.made
+    assert sorted(made["extra_options"]["agents"]) == ["model-author"]
+
+
+def test_own_call_plugin_names_its_items_as_the_agent_does(tmp_path: Path) -> None:
+    plugin = own_call_plugin(str(_own_plugin(tmp_path)), str(OWN_AGENTS))
+    assert (plugin.name, plugin.source) == ("scadbuddy", "builtin:own-plugin")
+    assert plugin.items == (
+        "skill:authoring",
+        "skill:customize",
+        "skill:print",
+        "subagent:model-author",
+        "subagent:print-analyst",
+    )
