@@ -821,15 +821,20 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends mosquitto \
     && rm -rf /var/lib/apt/lists/* \
     && test -x /usr/sbin/mosquitto
-ENV SCADBUDDY_TEST_MQTT=/usr/sbin/mosquitto
-# The fakes the tests load from the repo layout (fake_lan.py's PRINTER_PY,
-# test_bambuddy_recorder.py's RECORDER_PY), beside the backend.
-COPY e2e-stack/fake-printer /app/e2e-stack/fake-printer
-COPY e2e-stack/bambuddy-recorder /app/e2e-stack/bambuddy-recorder
+# With both here, a fake-printer test that would skip fails instead
+# (tests/support/fake_lan.py `skip_unless`), so no shard passes with them skipped.
+ENV SCADBUDDY_TEST_MQTT=/usr/sbin/mosquitto \
+    SCADBUDDY_TEST_FAKES_REQUIRED=1
 
 # The slice_plate vectors the Rust workers test against too (workers/rust/vectors,
 # #3821): tests/slicing reads them from the repo layout, so they sit beside the backend.
 COPY workers/rust/vectors /app/workers/rust/vectors
+
+# The fakes the tests load from the repo layout (fake_lan.py's PRINTER_PY,
+# test_bambuddy_recorder.py's RECORDER_PY), beside the backend. Last, so a change to a
+# fake rebuilds no other layer.
+COPY e2e-stack/fake-printer /app/e2e-stack/fake-printer
+COPY e2e-stack/bambuddy-recorder /app/e2e-stack/bambuddy-recorder
 
 # Numeric, not `scadbuddy`: a name is unresolvable to anything outside this
 # image, and Kubernetes' `runAsNonRoot` admission check can only read a uid.

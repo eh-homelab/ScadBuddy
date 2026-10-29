@@ -28,7 +28,7 @@ from scadbuddy.bambuddy.clearance import (
     check_plates,
     clearance_for,
 )
-from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig, client_for
 from scadbuddy.bambuddy.concurrent import settled
 from scadbuddy.bambuddy.dispatch import (
     QueueOutcome,
@@ -1873,6 +1873,30 @@ async def ensured_route(
         native=(decide or hot_path_native)(settings, path),
         listed=printer,
     )
+
+
+async def slice_route(
+    settings: StoredSettings,
+    printers: PrinterStore | None,
+    reports: PrinterReportStore | None,
+    *,
+    printer: str | None,
+    printer_id: int | None,
+) -> RunRoute | None:
+    """The route a slice that is not a run takes, as the run's check takes it: the dialog's
+    background slice (`bambuddy/operations.py` `preview_run`) and a quote's
+    (`orders/operations.py` `PreviewSlicer`, #4551). ``None`` off the hot path's backends;
+    a printer with no row yet takes the row it makes (`ensured_route`), the one Bambuddy
+    read here. A printer the registry refuses is the run's refusal (`RunRefusalError`)."""
+    if printers is None or not native_backends(settings):
+        return None
+    route = await run_route(
+        settings, printers, reports, printer=printer, printer_id=printer_id, say_fallback=False
+    )
+    if route.row is None and route.printer_id is not None:
+        async with client_for(settings) as client:
+            route = await ensured_route(client, settings, printers, reports, route)
+    return route
 
 
 async def dialog_route(

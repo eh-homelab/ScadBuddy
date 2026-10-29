@@ -450,7 +450,9 @@ class PrintActivities:
         reads them (`api/printing.py` `_overlay_of`): Postgres reads only, and none for
         a run on Bambuddy's path, which plans on Bambuddy's inventory. Read from the
         printer's stored report, not the check's status: a tray's RFID keys, which match
-        it to its spool, never cross the history (`AmsTray.tray_uuid` is excluded). One
+        it to its spool, never cross the history (`AmsTray.tray_uuid` is excluded). Read
+        now, deliberately: a refresh since the dialog read it may give the run a warning
+        the dialog did not show, and the run's warnings are what is left to print with. One
         that cannot be read plans on the trays alone, as before: never the run's failure."""
         spools, printers, reports = self.d.spools, self.d.printers, self.d.reports
         if not prepared.lan_start or spools is None or printers is None or reports is None:
