@@ -648,6 +648,7 @@ export const printTools: Tool[] = [
   // (`lan_run`), as the dialog's panel and the Prints page card do.
   defineTool({
     name: 'stop_print_run',
+    label: 'Stop the rest of a LAN print run',
     description:
       'Stops the prints a run over the LAN (`path: "native"`) has not started yet: a run of several plates or ' +
       "copies starts each once the printer has ended the one before (`lan_waiting`). The print on the printer " +
@@ -671,6 +672,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'confirm_plate_clear',
+    label: 'Confirm the plate is clear',
     description:
       'Tells a run over the LAN that the printer\'s plate is clear, so it starts its next print. With "Wait for ' +
       'a cleared plate" on in Settings, such a run of several prints waits after each until someone says so ' +

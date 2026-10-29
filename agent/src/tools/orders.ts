@@ -573,6 +573,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_item_unfulfil',
+    label: 'Undo a line item\'s fulfilment',
     description:
       "Undo a line item's fulfilment (#4952): its latest accepted attempt is no longer counted as made (the attempt " +
       'stays, and order_item_fulfil may edit or accept it again), and the item goes back to the status its latest ' +
