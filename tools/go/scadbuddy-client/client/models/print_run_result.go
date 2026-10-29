@@ -19,6 +19,8 @@ type PrintRunResult struct {
 	folder_id PrintRunResult_PrintRunResult_folder_idable
 	// The lan property
 	lan []LanStartedable
+	// The lan_awaiting_clear property
+	lan_awaiting_clear *bool
 	// The lan_stopped property
 	lan_stopped LanStoppedable
 	// The lan_waiting property
@@ -613,6 +615,8 @@ type PrintRunResult_PrintRunResult_sliced_library_file_idable interface {
 func NewPrintRunResult() *PrintRunResult {
 	m := &PrintRunResult{}
 	m.SetAdditionalData(make(map[string]any))
+	lan_awaiting_clearValue := false
+	m.SetLanAwaitingClear(&lan_awaiting_clearValue)
 	pathValue := BAMBUDDY_PRINTRUNRESULT_PATH
 	m.SetPath(&pathValue)
 	routeValue := "slice_queue"
@@ -691,6 +695,16 @@ func (m *PrintRunResult) GetFieldDeserializers() map[string]func(i878a80d2330e89
 				}
 			}
 			m.SetLan(res)
+		}
+		return nil
+	}
+	res["lan_awaiting_clear"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetBoolValue()
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetLanAwaitingClear(val)
 		}
 		return nil
 	}
@@ -853,6 +867,12 @@ func (m *PrintRunResult) GetLan() []LanStartedable {
 	return m.lan
 }
 
+// GetLanAwaitingClear gets the lan_awaiting_clear property value. The lan_awaiting_clear property
+// returns a *bool when successful
+func (m *PrintRunResult) GetLanAwaitingClear() *bool {
+	return m.lan_awaiting_clear
+}
+
 // GetLanStopped gets the lan_stopped property value. The lan_stopped property
 // returns a LanStoppedable when successful
 func (m *PrintRunResult) GetLanStopped() LanStoppedable {
@@ -953,6 +973,12 @@ func (m *PrintRunResult) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a
 			}
 		}
 		err := writer.WriteCollectionOfObjectValues("lan", cast)
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteBoolValue("lan_awaiting_clear", m.GetLanAwaitingClear())
 		if err != nil {
 			return err
 		}
@@ -1076,6 +1102,11 @@ func (m *PrintRunResult) SetLan(value []LanStartedable) {
 	m.lan = value
 }
 
+// SetLanAwaitingClear sets the lan_awaiting_clear property value. The lan_awaiting_clear property
+func (m *PrintRunResult) SetLanAwaitingClear(value *bool) {
+	m.lan_awaiting_clear = value
+}
+
 // SetLanStopped sets the lan_stopped property value. The lan_stopped property
 func (m *PrintRunResult) SetLanStopped(value LanStoppedable) {
 	m.lan_stopped = value
@@ -1143,6 +1174,7 @@ type PrintRunResultable interface {
 	GetCopies() *int32
 	GetFolderId() PrintRunResult_PrintRunResult_folder_idable
 	GetLan() []LanStartedable
+	GetLanAwaitingClear() *bool
 	GetLanStopped() LanStoppedable
 	GetLanWaiting() []int32
 	GetLibraryFileId() *int32
@@ -1159,6 +1191,7 @@ type PrintRunResultable interface {
 	SetCopies(value *int32)
 	SetFolderId(value PrintRunResult_PrintRunResult_folder_idable)
 	SetLan(value []LanStartedable)
+	SetLanAwaitingClear(value *bool)
 	SetLanStopped(value LanStoppedable)
 	SetLanWaiting(value []int32)
 	SetLibraryFileId(value *int32)
