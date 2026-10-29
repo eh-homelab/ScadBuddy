@@ -318,12 +318,15 @@ describe('pricing tools (#4250)', () => {
         HttpResponse.json({ id: OPERATION, status: 'succeeded', result: QUOTE }),
       ),
     )
-    const answer = await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: SLICE }, ctx())
+    // #4551: a registry printer goes out beside the dialog's choices.
+    const printer = '3f2c7c1e-8a4b-4d7e-9f00-0123456789ab'
+    const answer = await tool('order_item_quote').execute({ order_id: ORDER, item_id: ITEM, slice: { ...SLICE, printer } }, ctx())
     expect(firstText(answer)).toEqual(QUOTE)
     expect(keys).toHaveLength(1)
     expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
     expect(body).toEqual({
       ...SLICE,
+      printer,
       filament_plan: { ...SLICE.filament_plan, force_colour_match: false },
       choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
     })

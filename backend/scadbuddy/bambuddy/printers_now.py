@@ -233,6 +233,7 @@ async def printers_now(
     reports: PrinterReportStore,
     *,
     now: datetime,
+    native: frozenset[str] = frozenset(),
 ) -> PrintersNow:
     """One card per registry printer (#3823). Every active Bambuddy printer first, in
     Bambuddy's order, each with its registry row (`ensure_bambuddy` makes one for a
@@ -241,7 +242,13 @@ async def printers_now(
     status, else offline. ``client`` is ``None`` when no Bambuddy is configured; a
     Bambuddy that fails to list its printers leaves every row it last listed as active
     a card that says so, or its LAN report (`PrinterRow.bambuddy_active`, recorded on
-    each answer), so the outage hides what Bambuddy hid (#4186 re-review N4)."""
+    each answer), so the outage hides what Bambuddy hid (#4186 re-review N4).
+
+    ``native`` is the rows a run reaches over the LAN (`print_run.lan_printers`): each
+    is its LAN report's card, never Bambuddy's status, even while that report is not
+    fresh (#4551, plan 2026-10-18 D4). Only the Bambuddy-path printers ask Bambuddy:
+    their status, and the listing, which is also how a printer the registry has not
+    seen yet reaches the strip."""
     active: list[Printer] = []
     unreachable: str | None = None
     if client is not None:
@@ -267,7 +274,7 @@ async def printers_now(
     latest: Reports = await asyncio.to_thread(reports.all)
 
     async def card(printer: Printer, row: PrinterRow) -> PrinterNow:
-        if _fresh(row, latest, now) or client is None:
+        if row.id in native or _fresh(row, latest, now) or client is None:
             return lan_card(row, latest.get(row.id), now=now)
         return await printer_now(client, links, printer, row)
 
@@ -279,7 +286,7 @@ async def printers_now(
         bambuddy_down = (
             unreachable is not None and row.bambuddy_printer_id is not None and row.bambuddy_active
         )
-        if bambuddy_down and not _fresh(row, latest, now):
+        if bambuddy_down and row.id not in native and not _fresh(row, latest, now):
             cards.append(_unreachable(row, unreachable or ""))
         elif row.lan_host is not None:
             cards.append(lan_card(row, latest.get(row.id), now=now))

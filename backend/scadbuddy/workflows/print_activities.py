@@ -18,7 +18,7 @@ import logging
 import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import status
@@ -80,6 +80,10 @@ from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.usage import RackUsage
 from scadbuddy.slicing.catalogue import catalogue_for
 from scadbuddy.slicing.start import NativeSliceStarter
+from scadbuddy.spools.component import Spools
+from scadbuddy.spools.models import Overlay
+from scadbuddy.spools.overlay import labels as spool_labels
+from scadbuddy.spools.overlay import printer_overlay
 from scadbuddy.workflows.print_models import (
     FAILED,
     REFUSED,
@@ -180,6 +184,9 @@ class PrintDeps:
     #: check names the run's row and chooses its path. ``None`` runs as before it.
     printers: PrinterStore | None = None
     reports: PrinterReportStore | None = None
+    #: The spool providers' records (plan 2026-10-18 D1): a native run's plan lays them
+    #: over its trays as the dialog does (#4551). ``None`` plans on the trays alone.
+    spools: Spools | None = None
 
 
 def problem(error: ApiError) -> PrintRunError:
@@ -415,6 +422,7 @@ class PrintActivities:
         try:
             async with maybe_client(settings, native=native) as client:
                 source = await self._source(client, input.accepted.source, settings)
+                overlay, labels = await self._overlay(input.accepted.prepared)
                 planned = await heartbeating(
                     plan_run(
                         client,
@@ -424,6 +432,8 @@ class PrintActivities:
                         input.accepted.prepared,
                         native=self.d.native,
                         title=await self._title(input.accepted.source) if native else None,
+                        overlay=overlay,
+                        provider_labels=labels,
                     )
                 )
                 if planned.lan_start and planned.copies > 1:
@@ -432,6 +442,35 @@ class PrintActivities:
                 return planned
         except ApiError as error:
             raise raised_as(error, FAILED) from None
+
+    async def _overlay(
+        self, prepared: PreparedPlates
+    ) -> tuple[Overlay | None, dict[str, str] | None]:
+        """The spool providers' records over a native run's trays (#4551), as the dialog
+        reads them (`api/printing.py` `_overlay_of`): Postgres reads only, and none for
+        a run on Bambuddy's path, which plans on Bambuddy's inventory. Read from the
+        printer's stored report, not the check's status: a tray's RFID keys, which match
+        it to its spool, never cross the history (`AmsTray.tray_uuid` is excluded). Read
+        now, deliberately: a refresh since the dialog read it may give the run a warning
+        the dialog did not show, and the run's warnings are what is left to print with. One
+        that cannot be read plans on the trays alone, as before: never the run's failure."""
+        spools, printers, reports = self.d.spools, self.d.printers, self.d.reports
+        if not prepared.lan_start or spools is None or printers is None or reports is None:
+            return None, None
+        try:
+            row = await asyncio.to_thread(printers.get, prepared.printer)
+            report = await asyncio.to_thread(reports.get, prepared.printer)
+            if row is None or report is None:
+                return None, None
+            overlay = await printer_overlay(spools, row, report, now=datetime.now(UTC))
+        except Exception:
+            logger.warning(
+                "a native run's spool overlay could not be read; planning on the trays alone",
+                extra={"printer": prepared.printer},
+                exc_info=True,
+            )
+            return None, None
+        return overlay, spool_labels(spools)
 
     @activity.defn(name="print_slice_start")
     async def slice_start(self, input: SliceStartInput) -> SliceStarted:

@@ -26,6 +26,8 @@ import trimesh
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from scadbuddy.bambuddy import print_run
+from scadbuddy.bambuddy.filaments import gather_plate_options
 from scadbuddy.bambuddy.print_run import run_route
 from scadbuddy.bambuddy.trays import tray_spool_id
 from scadbuddy.core.paths import DataPaths
@@ -38,9 +40,14 @@ from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
 from scadbuddy.spools.component import SPOOLS, Spools
-from scadbuddy.spools.models import SpoolSnapshot
+from scadbuddy.spools.models import Overlay, SpoolSnapshot
+from scadbuddy.workflows import print_activities
 from tests.api.conftest import follow_operation, set_fake_env
+from tests.api.test_customers import create as create_customer
 from tests.api.test_library_native import _one_colour, _upload
+from tests.api.test_order_quote import price_book, sliced_plate
+from tests.api.test_orders import create_order
+from tests.api.test_orders_lifecycle import add_item
 from tests.api.test_print_preview_native import _settings, _state, dialog_profiles
 from tests.api.test_print_preview_native import kek_file as kek_file  # the fixture, shared
 from tests.api.test_print_run_choices import follow_run
@@ -189,14 +196,14 @@ def lan_row(
     return row.id
 
 
-def overlay(client: TestClient, *, at: datetime | None = None) -> None:
+def overlay(client: TestClient, *, at: datetime | None = None, remaining_g: float = 640.0) -> None:
     """Bambuddy's record of the tagged spool, as the refresh writes it (outside AC1)."""
     snapshot = SpoolSnapshot(
         record_id="16",
         material="PLA",
         colour="#F5547C",
         brand="Bambu",
-        remaining_g=640.0,
+        remaining_g=remaining_g,
         tray_uuid=TAGGED_UUID,
     )
     _call(
@@ -382,6 +389,53 @@ def test_one_plate_of_several_slices_with_only_its_own_slots(
     assert run["status"] == "succeeded", run
 
 
+def test_a_native_runs_plan_lays_the_overlay_over_its_trays(
+    native_app: TestClient,
+    model: str,
+    spans: InMemorySpanExporter,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4551: the run's plan reads its trays with the spool overlay the dialog lays over
+    them, so its low-filament warnings judge the provider's grams (`filaments.check`),
+    and it still asks Bambuddy nothing. The fake model's slots weigh nothing, so what is
+    checked is the overlay each plate's trays are gathered with."""
+    planning = False
+    gathered: list[Overlay | None] = []
+    plan = print_run.plan_run
+    gather = gather_plate_options
+
+    async def plan_spy(*args: Any, **kwargs: Any) -> Any:
+        nonlocal planning
+        planning = True
+        try:
+            return await plan(*args, **kwargs)
+        finally:
+            planning = False
+
+    async def gather_spy(*args: Any, **kwargs: Any) -> Any:
+        if planning:
+            gathered.append(kwargs.get("overlay"))
+        return await gather(*args, **kwargs)
+
+    monkeypatch.setattr(print_activities, "plan_run", plan_spy)
+    monkeypatch.setattr(print_run, "gather_plate_options", gather_spy)
+    row = lan_row(native_app, fake_lan)
+    overlay(native_app, remaining_g=0.5)
+
+    with forbid_bambuddy(spans, BASE):
+        _, _, filaments, run = _dialog_and_run(native_app, model, row)
+
+    tagged = next(spool for spool in filaments["spools"] if spool["spool_id"] == TAGGED)
+    assert tagged["remaining_g"] == 0.5
+    assert run["status"] == "succeeded", run
+    (laid,) = gathered
+    assert laid is not None
+    records = [record for tray in laid.trays for record in tray.records.values()]
+    assert [(r.record_id, r.remaining_g) for r in records] == [("16", 0.5)]
+
+
 def test_a_stale_overlay_still_prints(
     native_app: TestClient,
     model: str,
@@ -492,6 +546,64 @@ def test_the_dialogs_analysis_on_the_native_row_asks_bambuddy_nothing(
     inputs = {row["name"]: row for row in report.json()["inputs"]}
     for name in ("printer", "filaments", "inventory"):
         assert inputs[name]["available"], inputs[name]
+
+
+def test_a_quote_for_the_native_row_asks_bambuddy_nothing(
+    native_app: TestClient,
+    model: str,
+    spans: InMemorySpanExporter,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+) -> None:
+    """#4551: a slice quote names the registry `printer`, as the dialog's run does, and
+    for a printer a run reaches over the LAN its background slices build no Bambuddy
+    client, with ``bambuddy_url`` set."""
+    row = lan_row(native_app, fake_lan)
+    overlay(native_app)
+    output = make_output(native_app, model)
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+    assert filaments.status_code == 200, filaments.text
+    dialog = {k: v for k, v in run_body(row, filaments.json()).items() if k != "copies"}
+    pla, petg = price_book(native_app)
+    order = create_order(native_app, create_customer(native_app)["id"])
+    item = add_item(native_app, order["id"], output_id=output, quantity=1)
+    slicer.sliced = sliced_plate(1, 3600, [12.5, 3.0])
+
+    with forbid_bambuddy(spans, BASE):
+        started = native_app.post(
+            f"/api/v1/orders/{order['id']}/items/{item['id']}/quote",
+            json={**dialog, "filaments": {"0": pla, "1": petg}},
+            headers=press(),
+        )
+        assert started.status_code == 202, started.text
+        op = follow_operation(native_app, started.json(), timeout=120, poll=0.2)
+
+    assert op["status"] == "succeeded", op
+    assert slicer.calls == 1
+
+
+def test_a_quote_naming_a_disagreeing_printer_is_refused_before_it_starts(
+    native_app: TestClient, model: str, fake_lan: FakeLan
+) -> None:
+    """#4551 review: a registry `printer` the run would refuse beside `printer_id` is the
+    quote's check's 422, as Arrange's, never a failed operation after the 202."""
+    row = lan_row(native_app, fake_lan)
+    output = make_output(native_app, model)
+    filaments = native_app.get(f"/api/v1/print/outputs/{output}/filaments", params={"printer": row})
+    assert filaments.status_code == 200, filaments.text
+    dialog = {k: v for k, v in run_body(row, filaments.json()).items() if k != "copies"}
+    pla, petg = price_book(native_app)
+    order = create_order(native_app, create_customer(native_app)["id"])
+    item = add_item(native_app, order["id"], output_id=output, quantity=1)
+
+    refused = native_app.post(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}/quote",
+        json={**dialog, "printer_id": 1, "filaments": {"0": pla, "1": petg}},
+        headers=press(),
+    )
+
+    assert refused.status_code == 422, refused.text
+    assert "disagreeing printer" in refused.json()["detail"]
 
 
 def test_the_native_analysis_names_a_plan_spool_the_trays_do_not_hold(
