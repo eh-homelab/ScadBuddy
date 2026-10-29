@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { isMap, isNode, isScalar, parseDocument, visit } from 'yaml'
@@ -66,7 +67,11 @@ import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 // symlinks and submodules, the content hash, and the egress check on every
 // URL the package declares.
 
-export type ReviewHook = { event: string; type: string; url?: string }
+/**
+ * `id` is `hookId`'s: its access row is `hook:<event>:<id>` (#4757). Always set by this
+ * vetting; absent only in a review stored before it. `matcher` is its group's, when a string.
+ */
+export type ReviewHook = { event: string; type: string; url?: string; id?: string; matcher?: string }
 export type ReviewMcpServer = { name: string; type: string; url: string }
 
 /** What Settings shows before the admin approves a pin. */
@@ -94,6 +99,19 @@ export type PackageReview = {
    * `builtinTools`). Absent in an older review.
    */
   builtin_tools?: string[]
+  /**
+   * Each `skills`, `commands` and `agents` entry to its frontmatter `description` (#4757);
+   * a skill and a command of one name share an entry, the skill's (the command's when the
+   * skill has none). A subagent named as a skill is keyed alike, and its description wins.
+   * Absent in an older review.
+   */
+  described?: Record<string, string | null>
+  /**
+   * A skill's or subagent's frontmatter `name` to its name here (without the `<plugin>:`),
+   * where they differ: Claude Code's `subagent_type` is the frontmatter name. Absent in an
+   * older review.
+   */
+  aliases?: Record<string, string>
 }
 
 export type Endpoint = { what: string; url: string }
@@ -319,14 +337,40 @@ function checkMarkdown(rel: string, text: string, problems: string[], builtins: 
   }
 }
 
-function hookHandlers(config: unknown): { event: string; handler: unknown }[] {
+/**
+ * JSON with every object's keys sorted, no whitespace, and values as `JSON.stringify`
+ * prints them (an `undefined` member left out, one in an array `null`). Not
+ * `gate/canonical.ts`, which refuses numbers: a hook's `timeout` is one.
+ */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((v) => (v === undefined ? 'null' : canonicalJson(v))).join(',')}]`
+  if (isRecord(value)) {
+    const members = Object.keys(value)
+      .sort()
+      .filter((k) => value[k] !== undefined)
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`)
+    return `{${members.join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+/**
+ * A hook's id (#4757): the first 16 hex digits of the sha256 of the canonical JSON of
+ * `{ event, matcher, handler }`. Two byte-identical hooks share one, so one access covers both.
+ */
+export function hookId(event: string, matcher: unknown, handler: unknown): string {
+  return createHash('sha256').update(canonicalJson({ event, matcher, handler })).digest('hex').slice(0, 16)
+}
+
+function hookHandlers(config: unknown): { event: string; matcher: unknown; handler: unknown }[] {
   const { events } = hookEvents(config)
   if (!isRecord(events)) return []
-  const out: { event: string; handler: unknown }[] = []
+  const out: { event: string; matcher: unknown; handler: unknown }[] = []
   for (const [event, groups] of Object.entries(events)) {
     for (const group of Array.isArray(groups) ? groups : [groups]) {
       const handlers = isRecord(group) ? group.hooks : undefined
-      for (const handler of Array.isArray(handlers) ? handlers : [handlers]) out.push({ event, handler })
+      const matcher = isRecord(group) ? group.matcher : undefined
+      for (const handler of Array.isArray(handlers) ? handlers : [handlers]) out.push({ event, matcher, handler })
     }
   }
   return out
@@ -337,49 +381,152 @@ function mcpEntries(map: unknown): [string, unknown][] {
   return isRecord(servers) ? Object.entries(servers) : []
 }
 
-export function skillNames(root: string, manifest: Record<string, unknown>): string[] {
+/** Each skill's name to its directory, relative to `root` (`.` for a package that is one skill). */
+function skillDirs(root: string, manifest: Record<string, unknown>): Map<string, string> {
   const dirs = ['skills', ...(Array.isArray(manifest.skills) ? manifest.skills : [manifest.skills])]
     .filter((d): d is string => typeof d === 'string')
     .map((d) => d.replace(/^\.\/+/, '').replace(/\/+$/, '') || '.')
-  const names = new Set<string>()
+  const out = new Map<string, string>()
+  const add = (name: string, dir: string) => {
+    if (!out.has(name)) out.set(name, path.relative(root, dir) || '.')
+  }
   for (const dir of dirs) {
     const abs = path.resolve(root, dir)
     if (!isInside(root, abs) || !existsSync(abs) || !statSync(abs).isDirectory()) continue
     if (existsSync(path.join(abs, 'SKILL.md')) && dir !== 'skills') {
-      names.add(path.basename(dir === '.' ? root : abs))
+      add(path.basename(dir === '.' ? root : abs), abs)
       continue
     }
     for (const entry of readdirSync(abs, { withFileTypes: true })) {
-      if (entry.isDirectory() && existsSync(path.join(abs, entry.name, 'SKILL.md'))) names.add(entry.name)
+      if (entry.isDirectory() && existsSync(path.join(abs, entry.name, 'SKILL.md'))) add(entry.name, path.join(abs, entry.name))
     }
   }
-  if (names.size === 0 && manifest.skills === undefined && existsSync(path.join(root, 'SKILL.md'))) {
-    names.add(path.basename(root))
+  if (out.size === 0 && manifest.skills === undefined && existsSync(path.join(root, 'SKILL.md'))) {
+    add(path.basename(root), root)
   }
-  return [...names].sort()
+  return out
 }
 
-export function markdownIn(root: string, value: unknown, fallback: string, recursive: boolean): string[] {
+export function skillNames(root: string, manifest: Record<string, unknown>): string[] {
+  return [...skillDirs(path.resolve(root), manifest).keys()].sort()
+}
+
+/** Each Markdown item's name (a nested one `<dir>:<name>` when `recursive`) to its file, relative to `root`. */
+function markdownFiles(root: string, value: unknown, fallback: string, recursive: boolean): Map<string, string> {
   const entries = value === undefined ? [fallback] : Array.isArray(value) ? value : [value]
-  const out = new Set<string>()
+  const out = new Map<string, string>()
+  const add = (name: string, file: string) => {
+    if (!out.has(name)) out.set(name, path.relative(root, file))
+  }
   for (const entry of entries) {
     if (typeof entry !== 'string') continue
     const rel = entry.replace(/^\.\/+/, '').replace(/\/+$/, '')
     const abs = path.resolve(root, rel)
     if (abs === root || !isInside(root, abs) || !existsSync(abs)) continue
     if (statSync(abs).isFile()) {
-      if (rel.endsWith('.md')) out.add(rel.replace(/\.md$/, '').split('/').pop()!)
+      if (rel.endsWith('.md')) add(rel.replace(/\.md$/, '').split('/').pop()!, abs)
       continue
     }
     const walk = (dir: string, prefix: string) => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
-        if (e.isFile() && e.name.endsWith('.md')) out.add(`${prefix}${e.name.slice(0, -3)}`)
+        if (e.isFile() && e.name.endsWith('.md')) add(`${prefix}${e.name.slice(0, -3)}`, path.join(dir, e.name))
         else if (e.isDirectory() && recursive) walk(path.join(dir, e.name), `${prefix}${e.name}:`)
       }
     }
     walk(abs, '')
   }
-  return [...out].sort()
+  return out
+}
+
+export function markdownIn(root: string, value: unknown, fallback: string, recursive: boolean): string[] {
+  return [...markdownFiles(path.resolve(root), value, fallback, recursive).keys()].sort()
+}
+
+/** Where an inline command (`plugin.json` `commands.<name>.content`) lives, in `packageItems`. */
+export const inlineCommandAt = (name: string): string => `.claude-plugin/plugin.json#commands.${name}`
+
+/** Each command's name to its file (relative to `root`) or its `inlineCommandAt`. */
+function commandFiles(root: string, manifest: Record<string, unknown>): Map<string, string> {
+  if (!isRecord(manifest.commands)) return markdownFiles(root, manifest.commands, 'commands', false)
+  return new Map(Object.keys(manifest.commands).map((name) => [name, inlineCommandAt(name)]))
+}
+
+/** A frontmatter key's one string value; undefined when absent, not one string, or unreadable. */
+function frontmatterValue(text: string | undefined, key: string): string | undefined {
+  if (text === undefined) return undefined
+  try {
+    const values = frontmatter(text)?.get(key)
+    return values?.length === 1 ? values[0] : undefined
+  } catch (err) {
+    if (err instanceof FrontmatterError) return undefined // checkMarkdown refuses it
+    throw err
+  }
+}
+
+function readText(root: string, rel: string): string | undefined {
+  try {
+    return readFileSync(path.join(root, rel), 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+export type PackageItems = {
+  /**
+   * Each skill item's name to where it lives: a skill's directory and a command's file or
+   * `inlineCommandAt`. A command is a skill item (Claude Code invokes it through the Skill
+   * tool), so a skill and a command of one name are one item, both listed, the skill first.
+   */
+  skills: Map<string, string[]>
+  /** Each subagent's name (`review:deep` for `agents/review/deep.md`) to its file. */
+  subagents: Map<string, string>
+  /** Each hook handler with the config it is in (`declaredConfigs(...).hooks[].where`); a repeat keeps its id. */
+  hooks: { id: string; event: string; where: string }[]
+  /** A skill's or subagent's frontmatter `name` to its item name, where they differ. */
+  aliases: Map<string, string>
+}
+
+/** Where each of the package's items lives (#4757), so a derived copy can leave one out. */
+export function packageItems(root: string, manifest: Record<string, unknown>): PackageItems {
+  return itemsOf(path.resolve(root), manifest).items
+}
+
+type Described = { items: PackageItems; descriptions: Map<string, string | null>; agentDescriptions: Map<string, string | null> }
+
+function itemsOf(root: string, manifest: Record<string, unknown>): Described {
+  const skills = new Map<string, string[]>()
+  const descriptions = new Map<string, string | null>()
+  const aliases = new Map<string, string>()
+  const alias = (text: string | undefined, name: string) => {
+    const declared = frontmatterValue(text, 'name')
+    if (declared !== undefined && declared !== name && !aliases.has(declared)) aliases.set(declared, name)
+  }
+  for (const [name, dir] of skillDirs(root, manifest)) {
+    const text = readText(root, path.join(dir, 'SKILL.md'))
+    skills.set(name, [dir])
+    descriptions.set(name, frontmatterValue(text, 'description') ?? null)
+    alias(text, name)
+  }
+  const inline = isRecord(manifest.commands) ? manifest.commands : {}
+  for (const [name, at] of commandFiles(root, manifest)) {
+    const def = inline[name]
+    const text = isRecord(def) ? (typeof def.content === 'string' ? def.content : undefined) : readText(root, at)
+    const description = isRecord(def) && typeof def.description === 'string' ? def.description : frontmatterValue(text, 'description')
+    skills.set(name, [...(skills.get(name) ?? []), at])
+    if (!descriptions.get(name)) descriptions.set(name, description ?? null)
+  }
+  const subagents = new Map<string, string>()
+  const agentDescriptions = new Map<string, string | null>()
+  for (const [name, file] of markdownFiles(root, manifest.agents, 'agents', true)) {
+    const text = readText(root, file)
+    subagents.set(name, file)
+    agentDescriptions.set(name, frontmatterValue(text, 'description') ?? null)
+    alias(text, name)
+  }
+  const hooks = declaredConfigs(root).hooks.flatMap(({ where, config }) =>
+    hookHandlers(config).map(({ event, matcher, handler }) => ({ id: hookId(event, matcher, handler), event, where })),
+  )
+  return { items: { skills, subagents, hooks, aliases }, descriptions, agentDescriptions }
 }
 
 /** Vets the package at `root` (a materialised copy) and builds its review. `fallbackName` is used without a manifest name. */
@@ -431,9 +578,10 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
 
   const hooks: ReviewHook[] = []
   for (const { where, config } of declared.hooks) {
-    for (const { event, handler } of hookHandlers(config)) {
+    for (const { event, matcher, handler } of hookHandlers(config)) {
       const type = isRecord(handler) && typeof handler.type === 'string' ? handler.type : 'command'
-      const hook: ReviewHook = { event, type }
+      const hook: ReviewHook = { event, type, id: hookId(event, matcher, handler) }
+      if (typeof matcher === 'string') hook.matcher = matcher
       if (!PACKAGE_HOOK_EVENTS.has(event)) {
         problems.push(
           `${where}: a ${event} hook is not allowed in a plugin package; it may decide or rewrite a tool call, or it is not known`,
@@ -479,6 +627,7 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
     }
   }
 
+  const described = itemsOf(abs, m)
   const review: PackageReview | undefined = name
     ? {
         name,
@@ -496,6 +645,11 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
         mcp_servers: mcpServers,
         files: files.filter((f) => /\.(md|json)$/i.test(f)),
         builtin_tools: [...builtins].sort(),
+        described: Object.fromEntries([
+          ...[...described.descriptions].map(([n, d]) => [`${name}:${n}`, d] as const),
+          ...[...described.agentDescriptions].map(([n, d]) => [`${name}:${n}`, d] as const),
+        ]),
+        aliases: Object.fromEntries(described.items.aliases),
       }
     : undefined
 

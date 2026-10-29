@@ -106,7 +106,8 @@ export interface PackageReview {
   skills: string[]
   commands: string[]
   agents: string[]
-  hooks: { event: string; type: string; url?: string }[]
+  /** `id` names its access row, `hook:<event>:<id>`; absent in a review stored before #4757. */
+  hooks: { event: string; type: string; url?: string; id?: string; matcher?: string }[]
   mcp_servers: { name: string; type: string; url: string }[]
   files: string[]
   /**
@@ -116,6 +117,8 @@ export interface PackageReview {
   refused?: string[]
   /** The Claude Code built-ins its skills and subagents name, offered while the pin is allowed. */
   builtin_tools?: string[]
+  /** Each skill, command and agent (`<plugin>:<name>`) to its frontmatter description (#4757). */
+  described?: Record<string, string | null>
 }
 
 export interface FileDiff {

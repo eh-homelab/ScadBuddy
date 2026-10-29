@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -16,7 +17,17 @@ import { FetchError, GitFetcher } from '../src/plugins/packages/git.js'
 import { normaliseGitUrl, normaliseRepoPath, validateRef, validateSource } from '../src/plugins/packages/source.js'
 import type { PackagePin } from '../src/plugins/packages/store.js'
 import { isInside } from '../src/harness/plugins.js'
-import { capProblems, frontmatter, isAllowlistedTool, markdownIn, skillNames, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
+import {
+  capProblems,
+  frontmatter,
+  hookId,
+  isAllowlistedTool,
+  markdownIn,
+  packageItems,
+  skillNames,
+  toolNames,
+  vetPackage,
+} from '../src/plugins/packages/vet.js'
 import { PluginError } from '../src/plugins/registry.js'
 import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
@@ -301,6 +312,110 @@ describe('vetting a package', () => {
     expect(isAllowlistedTool('mcp__scadbuddy__list_models')).toBe(true)
     expect(isAllowlistedTool('mcp__plugin_greeter_mem')).toBe(true)
     expect(isAllowlistedTool('Bash')).toBe(false)
+  })
+})
+
+describe("a package's items (#4757)", () => {
+  const STOP = { type: 'prompt', prompt: 'Did the user get greeted? $ARGUMENTS' }
+  const hooksFile = (groups: unknown) => ({ 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: groups } }) })
+  const sha16 = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16)
+
+  it('gives each hook an id from its event, matcher and handler', () => {
+    const plain = vetPackage(tree(GREETER)).review!.hooks
+    // Canonical JSON: keys sorted at every level, no whitespace, an absent matcher left out.
+    const expected = sha16(JSON.stringify({ event: 'Stop', handler: { prompt: STOP.prompt, type: 'prompt' } }))
+    expect(plain).toEqual([{ event: 'Stop', type: 'prompt', id: expected }])
+    expect(hookId('Stop', undefined, STOP)).toBe(expected)
+
+    const matched = vetPackage(tree({ ...GREETER, ...hooksFile([{ matcher: 'Bash', hooks: [{ ...STOP, timeout: 30 }] }]) })).review!.hooks
+    expect(matched).toEqual([
+      { event: 'Stop', type: 'prompt', matcher: 'Bash', id: sha16(`{"event":"Stop","handler":{"prompt":${JSON.stringify(STOP.prompt)},"timeout":30,"type":"prompt"},"matcher":"Bash"}`) },
+    ])
+    expect(matched[0]!.id).toMatch(/^[0-9a-f]{16}$/)
+    expect(hookId('Stop', 'Bash', { ...STOP, timeout: 30 })).toBe(matched[0]!.id)
+    expect(hookId('SubagentStop', 'Bash', { ...STOP, timeout: 30 })).not.toBe(matched[0]!.id)
+    expect(hookId('Stop', 'Read', { ...STOP, timeout: 30 })).not.toBe(matched[0]!.id)
+  })
+
+  it("a hook's id ignores key order and whitespace", () => {
+    const pretty = vetPackage(
+      tree({
+        ...GREETER,
+        'hooks/hooks.json': `{\n  "hooks": {\n    "Stop": [ { "hooks": [ { "prompt": ${JSON.stringify(STOP.prompt)},\n "type": "prompt" } ] } ]\n  }\n}\n`,
+      }),
+    ).review!.hooks
+    expect(pretty[0]!.id).toBe(vetPackage(tree(GREETER)).review!.hooks[0]!.id)
+    expect(hookId('Stop', { b: 1, a: [2, { d: 3, c: 4 }] }, STOP)).toBe(hookId('Stop', { a: [2, { c: 4, d: 3 }], b: 1 }, { prompt: STOP.prompt, type: 'prompt' }))
+  })
+
+  it("a hook's id changes with its url", () => {
+    const http = (url: string) => vetPackage(tree({ ...GREETER, ...hooksFile([{ hooks: [{ type: 'http', url }] }]) })).review!.hooks[0]!
+    const a = http('https://hooks.example/a')
+    const b = http('https://hooks.example/b')
+    expect(a.url).toBe('https://hooks.example/a')
+    expect(a.id).not.toBe(b.id)
+  })
+
+  it('two byte-identical hooks share an id', () => {
+    const hooks = vetPackage(tree({ ...GREETER, ...hooksFile([{ hooks: [STOP] }, { hooks: [STOP] }]) })).review!.hooks
+    expect(hooks).toHaveLength(2)
+    expect(hooks[0]!.id).toMatch(/^[0-9a-f]{16}$/)
+    expect(hooks[0]!.id).toBe(hooks[1]!.id)
+  })
+
+  it("records each skill's and subagent's frontmatter description", () => {
+    const review = vetPackage(
+      tree({ ...GREETER, 'skills/bare/SKILL.md': 'No frontmatter.\n', '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', commands: { shout: { content: '---\ndescription: Shouts.\n---\nShout.\n' } } }) }),
+    ).review!
+    expect(review.described).toEqual({
+      'greeter:hello': 'Greets the user by name.',
+      'greeter:bare': null,
+      'greeter:shout': 'Shouts.',
+      'greeter:helper': 'Helps.',
+    })
+    expect(vetPackage(tree(GREETER)).review!.described).toEqual({
+      'greeter:hello': 'Greets the user by name.',
+      'greeter:wave': 'Waves.',
+      'greeter:helper': 'Helps.',
+    })
+  })
+
+  it('packageItems finds a manifest-named skill directory and a nested subagent file', () => {
+    const root = tree({
+      ...GREETER,
+      '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', skills: ['./extra/solo'] }),
+      'extra/solo/SKILL.md': '---\ndescription: Alone.\n---\n',
+      'agents/review/deep.md': '---\ndescription: Reviews deeply.\n---\n',
+    })
+    const items = packageItems(root, { name: 'greeter', skills: ['./extra/solo'] })
+    expect(Object.fromEntries(items.skills)).toEqual({ hello: ['skills/hello'], solo: ['extra/solo'], wave: ['commands/wave.md'] })
+    expect(Object.fromEntries(items.subagents)).toEqual({ helper: 'agents/helper.md', 'review:deep': 'agents/review/deep.md' })
+    expect(items.hooks).toEqual([{ id: hookId('Stop', undefined, STOP), event: 'Stop', where: 'hooks/hooks.json' }])
+    expect(vetPackage(root).review!.agents).toEqual(['greeter:helper', 'greeter:review:deep'])
+  })
+
+  it('lists a command as a skill item, one with a skill of its name', () => {
+    const files = { ...GREETER, 'commands/hello.md': '---\ndescription: Says hello as a command.\n---\n' }
+    const items = packageItems(tree(files), {})
+    expect(items.skills.get('hello')).toEqual(['skills/hello', 'commands/hello.md'])
+    expect(items.skills.get('wave')).toEqual(['commands/wave.md'])
+    const inline = { name: 'greeter', commands: { shout: { content: 'Shout.' } } }
+    expect(packageItems(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify(inline) }), inline).skills.get('shout')).toEqual([
+      '.claude-plugin/plugin.json#commands.shout',
+    ])
+    // One description per name: the skill's.
+    expect(vetPackage(tree(files)).review!.described!['greeter:hello']).toBe('Greets the user by name.')
+  })
+
+  it("records a subagent's frontmatter name where it differs from its file", () => {
+    const root = tree({
+      ...GREETER,
+      'agents/review/deep.md': '---\nname: deep-review\ndescription: Reviews deeply.\n---\n',
+      'skills/hi/SKILL.md': '---\nname: greet\ndescription: Hi.\n---\n',
+    })
+    expect(Object.fromEntries(packageItems(root, {}).aliases)).toEqual({ 'deep-review': 'review:deep', greet: 'hi' })
+    expect(vetPackage(root).review!.aliases).toEqual({ 'deep-review': 'review:deep', greet: 'hi' })
+    expect(vetPackage(tree(GREETER)).review!.aliases).toEqual({})
   })
 })
 
