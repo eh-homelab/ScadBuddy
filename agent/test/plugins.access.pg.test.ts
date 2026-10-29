@@ -99,7 +99,7 @@ describe.skipIf(skip !== '')(`remote plugins on ai_access${skip}`, () => {
     expect(servers.plugins).toEqual([])
     expect(servers.servers).toEqual([])
     // The seam of a turn that still names the server (built before the switch) answers off per call.
-    const seam = liveAccess(resolver, { tools: [], remote: [], packageServers: on.servers })
+    const seam = liveAccess(resolver, { tools: [], remote: [], packageServers: on.servers, plugins: [], builtins: [] })
     expect(await seam('mcp__plugin_notes_api__recall', {})).toBe('off')
   })
 })

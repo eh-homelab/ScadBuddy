@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { isMap, isNode, isScalar, parseDocument, visit } from 'yaml'
 import { declaredConfigs, hookEvents, isInside, isOutsideProblem, noCommand, pluginProblems } from '../../harness/plugins.js'
-import { skillItem, subagentItem } from '../../access/items.js'
+import { cutName, skillItem, subagentItem } from '../../access/items.js'
 import { LISTING_CAPS, storableCut } from '../../access/listings.js'
 import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 
@@ -507,14 +507,9 @@ const MATCHER_CAP = LISTING_CAPS.title
 /** A hook url longer than this is refused (allowable), never stored cut: a cut url is another endpoint. */
 export const HOOK_URL_CAP = 2_048
 
-/**
- * A name as a review stores it: a frontmatter `name` (an alias key) or a hook event, cut to
- * `LISTING_CAPS.name` and made storable. Task 5 cuts a Skill/Agent call's name with this
- * before it looks the name up in `aliases`, so the two agree.
- */
-export function cutName(text: string): string {
-  return storableCut(text, NAME_CAP)
-}
+// A name as a review stores it (an alias key, a hook event): the one cut the call rule's
+// alias lookup uses too (access/items.ts `offCallItem`).
+export { cutName }
 
 /** `text` cut to `max` and made storable; `what` joins `cut` (once) when it was longer. */
 function capped(text: string, max: number, what: string, cut: string[]): string {
@@ -564,6 +559,15 @@ export type PackageItems = {
 /** Where each of the package's items lives (#4757), so a derived copy can leave one out. */
 export function packageItems(root: string, manifest: Record<string, unknown>, fallbackName?: string): PackageItems {
   return itemsOf(path.resolve(root), manifest, fallbackName).items
+}
+
+/**
+ * `PackageItems.aliases` of the package at `root` as it is loaded (#4757): read from its
+ * files, so a review stored before them cannot leave a name out. The call rule's
+ * (access/items.ts `CallPlugin.aliases`).
+ */
+export function aliasesOf(root: string, packageName: string): Record<string, string[]> {
+  return Object.fromEntries(packageItems(root, declaredConfigs(path.resolve(root)).manifest, packageName).aliases)
 }
 
 type ItemsRead = {

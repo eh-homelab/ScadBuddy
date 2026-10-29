@@ -657,6 +657,8 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
       blobs: new SessionBlobs(temporal.sql),
       // A flow call's images, sealed under its run's payload key (#2477).
       ...(payloadKeys ? { flowBlobs: new PgFlowBlobs(temporal.sql, payloadKeys) } : {}),
+      // A package built-in's access per call, `builtin_tier` (#4757).
+      access: accessResolver,
     }
   : undefined
 // A parked call holds on its entry's row, woken by `scadbuddy_input` on the event bus's connection (§5.4).

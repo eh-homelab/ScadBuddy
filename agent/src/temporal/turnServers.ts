@@ -1,9 +1,9 @@
 import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { Sql } from 'postgres'
-import { BUILTIN_SOURCES, packageServerSource } from '../access/model.js'
+import { BUILTIN_SOURCES, packageServerSource, packageSource } from '../access/model.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
-import type { AccessResolver } from '../access/resolver.js'
+import type { AccessResolver, PackageAccess } from '../access/resolver.js'
 import type { AuditSink } from '../audit/log.js'
 import { BACKGROUND_BUILTINS, BUILTIN_SERVER, builtinServer, PROVIDED } from '../builtins/server.js'
 import type { BackgroundTasks } from '../background/service.js'
@@ -24,7 +24,8 @@ import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
-import { type PackageServers, serverAccess } from '../plugins/packages/mcp.js'
+import { collidingServerNames, type PackageServers, serverAccess } from '../plugins/packages/mcp.js'
+import { builtinAccessOf, builtinsOffOf, packageOmitted } from '../plugins/packages/derived.js'
 import { pluginTierResolver } from '../plugins/registry.js'
 import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
 import type { SessionFiles } from '../workspace/store.js'
@@ -98,8 +99,11 @@ export async function sweepTurnDirs(root: string, sql: Sql, now = Date.now()): P
 export type TurnServerDeps = {
   /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`). */
   remotePlugins?: (() => Promise<PluginsForRun>) | undefined
-  /** Tool access (#2171, ai_access): http_request's switch and tier, and each package server's switch. Defaults without it. */
-  access?: Pick<AccessResolver, 'entry' | 'enabled' | 'pluginSources'> | undefined
+  /**
+   * Tool access (#2171, ai_access): http_request's switch and tier, each package server's
+   * switch, and what each package has off (#4757). Defaults without it.
+   */
+  access?: Pick<AccessResolver, 'entry' | 'enabled' | 'pluginSources' | 'packageAccess'> | undefined
   /**
    * The headless browser's lists and the sessions' approved origins (#982,
    * browser/store.ts): the remote plugins' browser_* calls are judged by them, as a
@@ -306,6 +310,15 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       let offered = loaded.loaded
       // One binding for both branches: the listing and a call decide on the same root (#3523).
       const { root, localRoot } = deps.packages!
+      // What each package has off and each server's switch and stored tools, in one read
+      // each per listing or call (#4757): what the shared copies leave out, the built-ins
+      // offered and their tiers, as a classic turn reads them.
+      const itemAccess: ReadonlyMap<string, PackageAccess> = deps.access
+        ? await deps.access.packageAccess(loaded.loaded.map((p) => packageSource(p.name)))
+        : new Map()
+      const switches = await serverAccess(loaded.loaded, deps.access)
+      const colliding = collidingServerNames(loaded.loaded)
+      const builtinsOff = builtinsOffOf(loaded.loaded, itemAccess)
       if (context.listing) {
         shared = []
         const failed = new Set<string>()
@@ -318,7 +331,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
             continue
           }
           try {
-            const turnPackage = await sharePackage(pkg, root, localRoot)
+            const turnPackage = await sharePackage(pkg, root, localRoot, packageOmitted(pkg.name, itemAccess, switches, colliding), builtinsOff)
             const dark = unparkableBuiltins(turnPackage, provided)
             if (dark.length) {
               problems.push(
@@ -342,10 +355,10 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       // Otherwise a call (not a listing) builds every loaded package's servers: a share
       // that threw is known only by sharing again, so for that one the listing is the
       // guard, since a call can only name a tool the listing offered (#2620).
-      // Every server's switch and stored tools, in one read (#4757).
-      const switches = await serverAccess(offered, deps.access)
       servers.push(...localPackageServers(offered, problems, switches))
-      const named = [...new Set(offered.filter((p) => p.allowed).flatMap((p) => p.builtinTools))].filter((n) => provided.has(n)).sort()
+      const named = [...new Set(offered.filter((p) => p.allowed).flatMap((p) => p.builtinTools))]
+        .filter((n) => provided.has(n) && !builtinsOff.has(n))
+        .sort()
       const builtins = deps.builtins
       if (named.length && builtins) {
         const files = { files: builtins.files, ws: { kind: 'session' as const, sessionId: context.session } }
@@ -374,8 +387,12 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         servers.push({
           name: BUILTIN_SERVER,
           connect: () => connectInProcess(() => builtinServer(named, () => ({ files, web, background }))),
-          // Every package built-in is outward, as in a classic turn (run.ts `builtinTools`).
-          tierOf: () => 'outward',
+          // Each by its access across the packages naming it, as a classic turn's seam reads it
+          // (resolver.ts `builtin`); one that is off is not offered (`named`).
+          tierOf: (harnessName) => {
+            const access = builtinAccessOf(harnessName.slice(`mcp__${BUILTIN_SERVER}__`.length), offered, itemAccess)
+            return access === 'off' ? 'outward' : access
+          },
           mayPark: () => true,
           callIds: true,
         })

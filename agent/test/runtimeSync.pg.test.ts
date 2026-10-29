@@ -85,7 +85,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL 
         credentialId,
         credentialUpdatedAt: '1',
         model: null,
-        ownPlugin: false,
+        ownPlugin: null,
         plugins: [],
         packageHashes: [],
         allowedPackageHashes: [],

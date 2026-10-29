@@ -22,7 +22,6 @@ import {
   validateHeaderName,
   validateSecret,
 } from '../registry.js'
-import { derivedPackage, NOTHING_OMITTED } from './derived.js'
 import type { LoadedPackage } from './install.js'
 import { packageLedgerId } from '../pluginSessions.js'
 
@@ -112,6 +111,22 @@ export function collidingServerNames(loaded: readonly LoadedPackage[]): Map<stri
     owners.set(name, list)
   }
   return new Map([...owners].filter(([, list]) => list.length > 1))
+}
+
+/**
+ * The local (stdio) servers Claude Code starts for a classic turn's allowed packages, with
+ * the names their tools carry, leaving out those whose names another package server
+ * carries (they are left out of the copies too, #4757).
+ */
+export function localServers(loaded: readonly LoadedPackage[]): { name: string; pkg: string; server: string }[] {
+  const colliding = collidingServerNames(loaded)
+  const out: { name: string; pkg: string; server: string }[] = []
+  for (const { pkg, server, local } of offeredServers(loaded)) {
+    const name = packageServerName(pkg.name, server)
+    if (!local || colliding.has(name) || name.includes('__') || out.some((s) => s.name === name)) continue
+    out.push({ name, pkg: pkg.name, server })
+  }
+  return out
 }
 
 /** Why a server named like another is not offered, or undefined when its name is its own. */
@@ -261,14 +276,5 @@ export async function forwardPackageServers(
   }
 }
 
-// Moved to derived.ts, which mcp.ts imports and which imports nothing of mcp.ts.
+// Moved to derived.ts, which imports nothing of mcp.ts.
 export { declaresRemoteServers, isRemoteEntry, touch } from './derived.js'
-
-/**
- * The package without its own http MCP servers: derived.ts `derivedPackage` leaving
- * nothing else out, at `root/<hex>/<package name>`. Goes once its callers take
- * `derivedPackage` (#4757).
- */
-export async function withoutRemoteServers(dir: string, contentHash: string, root: string, name: string): Promise<string> {
-  return (await derivedPackage(dir, contentHash, root, NOTHING_OMITTED, name)).dir
-}

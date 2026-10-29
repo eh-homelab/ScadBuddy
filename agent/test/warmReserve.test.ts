@@ -27,7 +27,7 @@ function assembly(): AssembledTurn {
       model: null,
       effort: null,
       agentType: null,
-      ownPlugin: false,
+      ownPlugin: null,
       plugins: [],
       packageHashes: [],
       allowedPackageHashes: [],

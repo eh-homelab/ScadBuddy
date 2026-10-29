@@ -120,6 +120,11 @@ export class AccessResolver {
     return strictest(each) ?? 'outward'
   }
 
+  /** Every row of the given sources, in one read (the call rule's, items.ts `offCallItem`); none without a reader. */
+  async rows(sources: readonly string[]): Promise<AccessRow[]> {
+    return this.reader && sources.length > 0 ? this.reader.rows(sources) : []
+  }
+
   /** Every given source's switched-off items and built-in tiers, in one read. */
   async packageAccess(sources: readonly string[]): Promise<Map<string, PackageAccess>> {
     const rows = this.reader && sources.length > 0 ? await this.reader.rows(sources) : []

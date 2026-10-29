@@ -1,4 +1,5 @@
 import type { BackgroundTasks } from '../src/background/service.js'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -12,12 +13,11 @@ import {
   forwardPackageServers,
   type PackageServers,
   serverAccess,
-  withoutRemoteServers,
 } from '../src/plugins/packages/mcp.js'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { z } from 'zod'
-import { packageServerSource, type AccessRow } from '../src/access/model.js'
+import { packageServerSource, packageSource, type AccessRow } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { memoryAccess } from './support/memoryAccess.js'
 import { buildHarnessOptions } from '../src/harness/run.js'
@@ -25,6 +25,7 @@ import { PluginRefusedError } from '../src/harness/plugins.js'
 import { localPackageServers, PACKAGE_COPY_KEPT_MS, sharePackage, sharedName, sweepPackageCopies } from '../src/temporal/turnPackages.js'
 import { builtinNote, turnServers } from '../src/temporal/turnServers.js'
 import { BUILTIN_SERVER } from '../src/builtins/server.js'
+import { builtinsOffOf, derivedPackage, NOTHING_OMITTED } from '../src/plugins/packages/derived.js'
 import type { SessionFiles } from '../src/workspace/store.js'
 import {
   connectHttp,
@@ -377,7 +378,7 @@ describe('plugin packages in a durable turn', () => {
     const base = { paths, credential: { kind: 'anthropic_api_key' as const, secret: 'sk-ant-test-0000' }, prompt: 'hi' }
     // strictMcpConfig is off with an allowed package: the original would be started by Claude Code.
     expect(() => buildHarnessOptions({ ...base, allowedPluginPaths: [pkg.dir] })).toThrow(PluginRefusedError)
-    const copy = await withoutRemoteServers(pkg.dir, pkg.contentHash, path.join(paths.stateDir, 'plugins-local'), pkg.name)
+    const { dir: copy } = await derivedPackage(pkg.dir, pkg.contentHash, path.join(paths.stateDir, 'plugins-local'), NOTHING_OMITTED, pkg.name)
     const servers = await forwardPackageServers([pkg], forwarder, async () => ['203.0.113.7'])
     expect(servers.problems.join('\n')).toMatch(/metadata|link-local/)
     const ok = await forwardPackageServers(
@@ -545,3 +546,100 @@ describe("a package's MCP servers: their switch and their names (#4757)", () => 
     expect(calls).toEqual(['look'])
   })
 })
+
+describe("a package's items in a durable turn (#4757)", () => {
+  const BY = 'browser:b'
+  const row = (source: string, item: string, access: string): AccessRow => ({ source, item, access, updated_by: BY })
+
+  /** A second allowed package that names `builtins`. */
+  async function namer(name: string, builtins: string[]): Promise<LoadedPackage> {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'turn-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name }))
+    await mkdir(path.join(dir, 'skills', 'go'), { recursive: true })
+    await writeFile(path.join(dir, 'skills', 'go', 'SKILL.md'), `---\nname: go\ndescription: goes\nallowed-tools: ${builtins.join(', ')}\n---\nGo.\n`)
+    return { name, contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: builtins }
+  }
+
+  function listingOver(loaded: LoadedPackage[], rows: AccessRow[], root: string, extra: Partial<Parameters<typeof turnServers>[0]> = {}) {
+    const load = async (): Promise<PackagesForRun> => ({
+      paths: [],
+      allowedPaths: loaded.filter((p) => p.allowed).map((p) => p.dir),
+      builtinTools: [...new Set(loaded.flatMap((p) => p.builtinTools))],
+      loaded,
+      problems: [],
+      release: () => {},
+    })
+    const servers = turnServers({ access: new AccessResolver(memoryAccess(rows).access), packages: { load, root, localRoot: root, forward: none }, ...extra })
+    return servers({ session: 's', owner: OWNER, signal: new AbortController().signal, listing: true })
+  }
+
+  it('shares the filtered copy under its own hash, with that hash', async () => {
+    const pkg = await fakePackage(undefined)
+    await mkdir(path.join(pkg.dir, 'skills', 'wipe'), { recursive: true })
+    await writeFile(path.join(pkg.dir, 'skills', 'wipe', 'SKILL.md'), '---\nname: wipe\ndescription: wipes\n---\nWipe.\n')
+    const loaded = { ...pkg, contentHash: (await hashTree(pkg.dir)).hash }
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const listing = await listingOver([loaded], [row(packageSource('notes'), 'skill:wipe', 'off')], root)
+    const [shared] = listing.packages!
+    const dir = path.join(root, shared!.dir)
+    expect(shared!.content_hash).not.toBe(loaded.contentHash)
+    expect(shared!.content_hash).toBe((await hashTree(dir)).hash)
+    expect(shared!.dir).toBe(`${sharedName(shared!.content_hash)}/notes`)
+    expect(existsSync(path.join(dir, 'skills', 'wipe'))).toBe(false)
+    expect(existsSync(path.join(dir, 'skills', 'jot', 'SKILL.md'))).toBe(true)
+    // With nothing off, the pin as it is.
+    const plain = await listingOver([loaded], [], root)
+    expect(plain.packages![0]!.content_hash).toBe(loaded.contentHash)
+    // sharePackage itself, with the same Omitted, shares the same copy.
+    const again = await sharePackage(loaded, root, root, { ...NOTHING_OMITTED, skills: new Set(['wipe']) })
+    expect(again.content_hash).toBe(shared!.content_hash)
+  })
+
+  it('one package off, one write: Bash offered in neither runtime', async () => {
+    const a = await namer('a', ['Bash', 'Grep'])
+    const b = await namer('b', ['Bash'])
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const listing = await listingOver([a, b], [row(packageSource('a'), 'builtin:Bash', 'write'), row(packageSource('b'), 'builtin:Bash', 'off')], root)
+    expect(listing.packages!.map((p) => [p.name, p.builtin_tools])).toEqual([
+      ['a', []],
+      ['b', []],
+    ])
+    // The classic half: turnRunner.packages.test.ts, over the same rows.
+    expect(builtinsOffOf([a, b], await new AccessResolver(memoryAccess([row(packageSource('a'), 'builtin:Bash', 'write'), row(packageSource('b'), 'builtin:Bash', 'off')]).access).packageAccess(['package:a', 'package:b']))).toEqual(new Set(['Bash']))
+    // Only Grep's provided turn tool remains of what a names; Bash is not the engine's to run either.
+    const nested = { ask: async () => '', search: async () => ({ text: '' }) }
+    const provided = await listingOver([a, b], [row(packageSource('a'), 'builtin:Bash', 'write'), row(packageSource('b'), 'builtin:Bash', 'off')], root, {
+      builtins: { files: {} as SessionFiles, nested: () => nested },
+    })
+    expect(provided.packages!.flatMap((p) => p.builtin_tools)).not.toContain('Bash')
+    // Unset in both: offered, and outward.
+    const unset = await listingOver([a, b], [], root)
+    expect(unset.packages!.map((p) => p.builtin_tools)).toEqual([['Bash'], ['Bash']])
+  })
+
+  it('the builtin turn tools take each tool\'s access', async () => {
+    const a = await namer('a', ['Grep', 'Read', 'WebFetch'])
+    const b = await namer('b', ['Read'])
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const nested = { ask: async () => '', search: async () => ({ text: '' }) }
+    const rows = [
+      row(packageSource('a'), 'builtin:Grep', 'read'),
+      row(packageSource('a'), 'builtin:Read', 'read'),
+      row(packageSource('b'), 'builtin:Read', 'write'),
+      row(packageSource('a'), 'builtin:WebFetch', 'off'),
+    ]
+    const listing = await listingOver([a, b], rows, root, { builtins: { files: {} as SessionFiles, nested: () => nested } })
+    const server = listing.servers.find((s) => s.name === BUILTIN_SERVER)!
+    expect(server.tierOf('mcp__builtin__Grep', {})).toBe('read')
+    // The stricter of the two packages that name it.
+    expect(server.tierOf('mcp__builtin__Read', {})).toBe('write')
+    const client = await server.connect()
+    // An off built-in is not offered.
+    expect((await client.listTools()).tools.map((t) => t.name)).toEqual(['Grep', 'Read'])
+    await client.close()
+    expect(listing.notes).toEqual([builtinNote(['Grep', 'Read'])])
+    await listing.release()
+  })
+})
+

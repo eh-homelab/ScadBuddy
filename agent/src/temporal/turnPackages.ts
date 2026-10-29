@@ -14,7 +14,7 @@ import {
   packageServerName,
   type ServerAccess,
 } from '../plugins/packages/mcp.js'
-import { copyPath, derivedPackage, NOTHING_OMITTED, placeCopy, touch } from '../plugins/packages/derived.js'
+import { copyPath, derivedPackage, NOTHING_OMITTED, type Omitted, placeCopy, touch } from '../plugins/packages/derived.js'
 import { pluginTierResolver } from '../plugins/registry.js'
 import { type TurnPackage, type TurnServer } from './turnTools.js'
 
@@ -62,11 +62,20 @@ export function sharedName(contentHash: string): string {
  * aside whole and replaced (`placeCopy`): the volume is shared, so it is checked, never
  * trusted. The source is `derivedPackage`'s, made under `localRoot`: without the package's
  * http MCP servers, which Claude Code in agent-durable would reach itself, past the
- * forwarder (the segment runner refuses a copy that declares one), named by that copy's
- * own hash.
+ * forwarder (the segment runner refuses a copy that declares one), and without what
+ * `omitted` names (#4757: the turn's switched-off skills, subagents, hooks and servers, as a
+ * classic turn's copy leaves them out), named by that copy's own hash, the `content_hash`
+ * listed. Its `builtin_tools` leave out `builtinsOff`, the turn's built-ins switched off
+ * (derived.ts `builtinsOffOf`).
  */
-export async function sharePackage(pkg: LoadedPackage, root: string, localRoot: string): Promise<TurnPackage> {
-  const source = await derivedPackage(pkg.dir, pkg.contentHash, localRoot, NOTHING_OMITTED, pkg.name)
+export async function sharePackage(
+  pkg: LoadedPackage,
+  root: string,
+  localRoot: string,
+  omitted: Omitted = NOTHING_OMITTED,
+  builtinsOff: ReadonlySet<string> = new Set(),
+): Promise<TurnPackage> {
+  const source = await derivedPackage(pkg.dir, pkg.contentHash, localRoot, omitted, pkg.name)
   const contentHash = source.contentHash ?? pkg.contentHash
   const name = sharedName(contentHash)
   const target = copyPath(root, contentHash, pkg.name)
@@ -84,7 +93,13 @@ export async function sharePackage(pkg: LoadedPackage, root: string, localRoot: 
       await rm(tmp, { recursive: true, force: true })
     }
   }
-  return { name: pkg.name, dir: `${name}/${pkg.name}`, content_hash: contentHash, allowed: pkg.allowed, builtin_tools: [...pkg.builtinTools] }
+  return {
+    name: pkg.name,
+    dir: `${name}/${pkg.name}`,
+    content_hash: contentHash,
+    allowed: pkg.allowed,
+    builtin_tools: pkg.builtinTools.filter((t) => !builtinsOff.has(t)),
+  }
 }
 
 /** A copy is kept this long after the last turn that shared it (#2395). */

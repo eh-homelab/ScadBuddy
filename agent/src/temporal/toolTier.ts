@@ -1,6 +1,8 @@
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure } from '@temporalio/common'
 import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
+import type { ToolAccess } from '../access/model.js'
+import type { AccessResolver } from '../access/resolver.js'
 import { effectiveTool, type Risk, type Tool, type ToolServices } from '../tools/registry.js'
 import { sessionOf } from './toolActivities.js'
 
@@ -30,5 +32,24 @@ export function toolTierActivity(
     }
     const { risk, disabled } = await effectiveTool(tool, services)
     return { tier: risk, disabled }
+  }
+}
+
+/**
+ * `builtin_tier` (#4757): a durable session asks, before an engine-parked built-in's call
+ * (Bash, PowerShell), its access across `packages`, the listing's packages that name it, as
+ * a classic turn's seam reads it per call (access/live.ts): resolver.ts `builtin`, the
+ * strictest of each package's `builtin:<tool>`, an unset one `outward`. The caller names
+ * the packages, so both runtimes ask about the same set. Without a resolver, `outward`.
+ */
+export const BUILTIN_TIER_ACTIVITY = 'builtin_tier'
+
+export function builtinTier(deps: { access?: Pick<AccessResolver, 'builtin'> | undefined }): (args: { tool: string; packages: string[] }) => Promise<{ tier: ToolAccess }> {
+  return async (args) => {
+    const { tool, packages } = (args ?? {}) as { tool?: unknown; packages?: unknown }
+    if (typeof tool !== 'string' || !Array.isArray(packages) || !packages.every((p): p is string => typeof p === 'string')) {
+      throw ApplicationFailure.nonRetryable(`${BUILTIN_TIER_ACTIVITY} takes {tool: string, packages: string[]}`, 'ToolError')
+    }
+    return { tier: deps.access ? await deps.access.builtin(tool, packages) : 'outward' }
   }
 }

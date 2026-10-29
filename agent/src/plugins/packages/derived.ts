@@ -5,6 +5,10 @@ import path from 'node:path'
 import { declaredConfigs, hookEvents, noCommand } from '../../harness/plugins.js'
 import { hashTree, PackageContentError } from './hash.js'
 import { hookId, inlineCommandAt, packageItems, type PackageItems, SAFE_NAME_RE } from './vet.js'
+import { packageSource, type ToolAccess } from '../../access/model.js'
+import { strictest } from '../../access/items.js'
+import type { PackageAccess } from '../../access/resolver.js'
+import type { LoadedPackage } from './install.js'
 
 // The copy of a package (or of the own plugin) that a turn loads (#4757): without its http
 // MCP servers, which reach the turn through the forwarder (mcp.ts `forwardPackageServers`;
@@ -35,6 +39,72 @@ export type Omitted = {
 }
 
 export const NOTHING_OMITTED: Omitted = { skills: new Set(), subagents: new Set(), hooks: new Set(), servers: new Set() }
+
+/**
+ * What a package's copy leaves out (#4757): its skills, subagents and hooks switched off in
+ * `access` (a hook's row is `hook:<event>:<id>`, so its id is what follows the last `:`), and
+ * its servers whose switch is off in `servers`, keyed by the package's own server name (the
+ * caller adds the ones whose names another package's server carries, mcp.ts
+ * `collidingServerNames`). Nothing without either.
+ */
+export function omittedOf(access: PackageAccess | undefined, servers: ReadonlyMap<string, { enabled: boolean }>): Omitted {
+  return {
+    skills: new Set(access?.off.skills ?? []),
+    subagents: new Set(access?.off.subagents ?? []),
+    hooks: new Set([...(access?.off.hooks ?? [])].map((hook) => hook.slice(hook.lastIndexOf(':') + 1))),
+    servers: new Set([...servers].filter(([, s]) => !s.enabled).map(([name]) => name)),
+  }
+}
+
+/**
+ * What package `pkg`'s copy leaves out in a turn, classic and durable alike: `omittedOf` its
+ * items' access and its own servers' switches (`switches`, by `packageServerSource`, mcp.ts
+ * `serverAccess`), and its servers whose names another package's server carries
+ * (`colliding`, mcp.ts `collidingServerNames`).
+ */
+export function packageOmitted(
+  pkg: string,
+  access: ReadonlyMap<string, PackageAccess>,
+  switches: ReadonlyMap<string, { enabled: boolean }>,
+  colliding: ReadonlyMap<string, readonly { pkg: string; server: string }[]>,
+): Omitted {
+  const prefix = `${packageSource(pkg)}/mcp:`
+  const own = new Map([...switches].flatMap(([source, at]) => (source.startsWith(prefix) ? [[source.slice(prefix.length), at] as const] : [])))
+  const omitted = omittedOf(access.get(packageSource(pkg)), own)
+  const named = [...colliding.values()].flat().filter((o) => o.pkg === pkg).map((o) => o.server)
+  return { ...omitted, servers: new Set([...omitted.servers, ...named]) }
+}
+
+/** Whether `omitted` leaves anything out. */
+export function omitsAny(omitted: Omitted): boolean {
+  return omitted.skills.size + omitted.subagents.size + omitted.hooks.size + omitted.servers.size > 0
+}
+
+/**
+ * One built-in's access across the allowed packages of `loaded` that name it, as
+ * resolver.ts `builtin` reads it: each one's `builtin:<name>` (`off`, or its tier), `outward`
+ * where it has none, the strictest winning; `outward` when none names it.
+ */
+export function builtinAccessOf(name: string, loaded: readonly LoadedPackage[], access: ReadonlyMap<string, PackageAccess>): ToolAccess {
+  const each = loaded
+    .filter((p) => p.allowed && p.builtinTools.includes(name))
+    .map((p): ToolAccess => {
+      const stored = access.get(packageSource(p.name))
+      return stored?.off.builtins.has(name) ? 'off' : (stored?.builtinTiers.get(name) ?? 'outward')
+    })
+  return strictest(each) ?? 'outward'
+}
+
+/**
+ * The built-ins a turn offers none of (#4757): those whose access across the allowed
+ * packages naming them (`builtinAccessOf`, an unset package counting `outward`) is `off`. One
+ * set for the turn: a classic turn leaves them out of its `builtinTools`, a durable one out
+ * of every package it shares (temporal/turnPackages.ts `sharePackage`).
+ */
+export function builtinsOffOf(loaded: readonly LoadedPackage[], access: ReadonlyMap<string, PackageAccess>): Set<string> {
+  const named = new Set(loaded.filter((p) => p.allowed).flatMap((p) => p.builtinTools))
+  return new Set([...named].filter((name) => builtinAccessOf(name, loaded, access) === 'off'))
+}
 
 /** Removing one item can show another of the same name that the first hid; this many rounds at most. */
 const PASSES = 4

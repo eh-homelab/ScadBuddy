@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { type AccessRow, MIGRATED_BY, registrySource, type StoredOverrides, TOOL_ACCESS } from '../src/access/model.js'
-import { type ItemKind, itemKindIn } from '../src/access/items.js'
+import { type CallPlugin, type ItemKind, itemKindIn, offCallItem } from '../src/access/items.js'
 import { registryOverrides, sourceEnabled } from '../src/access/resolve.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import type { AccessReader } from '../src/access/store.js'
@@ -16,6 +16,8 @@ type VectorTool = { name: string; risk: RiskTier | '?'; hitl: 'approval' | 'answ
 type RegistryVector = { name: string; durable_only?: true; tools: VectorTool[]; rows: AccessRow[]; expect: StoredOverrides }
 type SourceVector = { name: string; source: string; rows: AccessRow[]; expect: boolean }
 type ItemKindVector = { source: string; item: string; expect: ItemKind }
+/** One Skill, Agent or Task call (#4757): the item it names that is off, or null. */
+type CallVector = { name: string; tool: string; input: unknown; plugins: CallPlugin[]; rows: AccessRow[]; expect: string | null }
 type Vectors = {
   tool_access: string[]
   item_kinds: ItemKindVector[]
@@ -23,6 +25,7 @@ type Vectors = {
   registry_source: Record<string, string>
   registry: RegistryVector[]
   sources: SourceVector[]
+  calls: CallVector[]
 }
 
 const S = 'builtin:scadbuddy'
@@ -36,6 +39,16 @@ const TOOLS = [GET_MODEL, SEND, CLICK]
 
 const row = (source: string, item: string, access: string, updated_by = BY): AccessRow => ({ source, item, access, updated_by })
 const none: StoredOverrides = { tool_tiers: {}, disabled_tools: [] }
+
+const PA = 'package:pa'
+const PB = 'package:pb'
+const OWN = 'builtin:own-plugin'
+/** Two packages and the own plugin; `pa`'s `agents/review/deep.md` declares `name: deep-review`, two skills declare `name: tidy`. */
+const PLUGINS: CallPlugin[] = [
+  { name: 'pa', source: PA, aliases: { 'subagent:deep-review': ['subagent:review:deep'], 'skill:tidy': ['skill:sweep', 'skill:dust'] } },
+  { name: 'pb', source: PB, aliases: {} },
+  { name: 'scadbuddy', source: OWN, aliases: {} },
+]
 
 function build(): Vectors {
   return {
@@ -136,6 +149,45 @@ function build(): Vectors {
       { name: 'a package is off by default', source: 'package:pk', rows: [], expect: false },
       { name: 'a source with a newline is no package server', source: 'package:pk\n/mcp:srv', rows: [], expect: false },
     ],
+    calls: [
+      { name: 'a qualified skill off', tool: 'Skill', input: { skill: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: 'skill:jot' },
+      { name: 'a qualified skill of another plugin', tool: 'Skill', input: { skill: 'pb:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: null },
+      { name: 'an unqualified skill off in one plugin', tool: 'Skill', input: { skill: 'jot' }, plugins: PLUGINS, rows: [row(PB, 'skill:jot', 'off')], expect: 'skill:jot' },
+      {
+        name: 'an unqualified subagent off in one plugin',
+        tool: 'Agent',
+        input: { subagent_type: 'reviewer', prompt: 'p' },
+        plugins: PLUGINS,
+        rows: [row(PB, 'subagent:reviewer', 'off')],
+        expect: 'subagent:reviewer',
+      },
+      {
+        name: 'a subagent by its frontmatter name',
+        tool: 'Agent',
+        input: { subagent_type: 'pa:deep-review' },
+        plugins: PLUGINS,
+        rows: [row(PA, 'subagent:review:deep', 'off')],
+        expect: 'subagent:review:deep',
+      },
+      {
+        name: 'a nested subagent named without its plugin',
+        tool: 'Agent',
+        input: { subagent_type: 'review:deep' },
+        plugins: PLUGINS,
+        rows: [row(PA, 'subagent:review:deep', 'off')],
+        expect: 'subagent:review:deep',
+      },
+      { name: 'Task as Agent', tool: 'Task', input: { subagent_type: 'pa:reviewer' }, plugins: PLUGINS, rows: [row(PA, 'subagent:reviewer', 'off')], expect: 'subagent:reviewer' },
+      { name: 'an alias with several targets, one off', tool: 'Skill', input: { skill: 'pa:tidy' }, plugins: PLUGINS, rows: [row(PA, 'skill:dust', 'off')], expect: 'skill:dust' },
+      { name: "an alias is its own plugin's only", tool: 'Skill', input: { skill: 'pb:tidy' }, plugins: PLUGINS, rows: [row(PB, 'skill:dust', 'off')], expect: null },
+      { name: "the own plugin's skill off", tool: 'Skill', input: { skill: 'scadbuddy:print' }, plugins: PLUGINS, rows: [row(OWN, 'skill:print', 'off')], expect: 'skill:print' },
+      { name: 'an on row refuses nothing', tool: 'Skill', input: { skill: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'on')], expect: null },
+      { name: 'a skill row does not refuse a subagent', tool: 'Agent', input: { subagent_type: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: null },
+      { name: 'a row of an unloaded source refuses nothing', tool: 'Skill', input: { skill: 'pc:jot' }, plugins: PLUGINS, rows: [row('package:pc', 'skill:jot', 'off')], expect: null },
+      { name: 'a tool that is not Skill, Agent or Task', tool: 'Bash', input: { skill: 'pa:jot', subagent_type: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off'), row(PA, 'subagent:jot', 'off')], expect: null },
+      { name: 'an input without the field', tool: 'Skill', input: { subagent_type: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: null },
+      { name: 'an input that is not an object', tool: 'Agent', input: 'pa:reviewer', plugins: PLUGINS, rows: [row(PA, 'subagent:reviewer', 'off')], expect: null },
+    ],
   }
 }
 
@@ -179,6 +231,8 @@ describe('access vectors', () => {
   it.each(built.item_kinds)('item kind: $item in $source', (v) => expect(itemKindIn(v.source, v.item)).toBe(v.expect))
 
   it.each(built.sources)('source: $name', (v) => expect(sourceEnabled(v.source, v.rows)).toBe(v.expect))
+
+  it.each(built.calls)('call: $name', (v) => expect(offCallItem(v.tool, v.input, v.plugins, v.rows) ?? null).toBe(v.expect))
 
   it("names each tool's registry source", () => {
     for (const [tool, source] of Object.entries(built.registry_source)) expect(registrySource(tool)).toBe(source)

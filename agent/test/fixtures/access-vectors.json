@@ -783,5 +783,669 @@
       "rows": [],
       "expect": false
     }
+  ],
+  "calls": [
+    {
+      "name": "a qualified skill off",
+      "tool": "Skill",
+      "input": {
+        "skill": "pa:jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "skill:jot"
+    },
+    {
+      "name": "a qualified skill of another plugin",
+      "tool": "Skill",
+      "input": {
+        "skill": "pb:jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "an unqualified skill off in one plugin",
+      "tool": "Skill",
+      "input": {
+        "skill": "jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pb",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "skill:jot"
+    },
+    {
+      "name": "an unqualified subagent off in one plugin",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "reviewer",
+        "prompt": "p"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pb",
+          "item": "subagent:reviewer",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "subagent:reviewer"
+    },
+    {
+      "name": "a subagent by its frontmatter name",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "pa:deep-review"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:review:deep",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "subagent:review:deep"
+    },
+    {
+      "name": "a nested subagent named without its plugin",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "review:deep"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:review:deep",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "subagent:review:deep"
+    },
+    {
+      "name": "Task as Agent",
+      "tool": "Task",
+      "input": {
+        "subagent_type": "pa:reviewer"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:reviewer",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "subagent:reviewer"
+    },
+    {
+      "name": "an alias with several targets, one off",
+      "tool": "Skill",
+      "input": {
+        "skill": "pa:tidy"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:dust",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "skill:dust"
+    },
+    {
+      "name": "an alias is its own plugin's only",
+      "tool": "Skill",
+      "input": {
+        "skill": "pb:tidy"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pb",
+          "item": "skill:dust",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "the own plugin's skill off",
+      "tool": "Skill",
+      "input": {
+        "skill": "scadbuddy:print"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:own-plugin",
+          "item": "skill:print",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "skill:print"
+    },
+    {
+      "name": "an on row refuses nothing",
+      "tool": "Skill",
+      "input": {
+        "skill": "pa:jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "on",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "a skill row does not refuse a subagent",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "pa:jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "a row of an unloaded source refuses nothing",
+      "tool": "Skill",
+      "input": {
+        "skill": "pc:jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pc",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "a tool that is not Skill, Agent or Task",
+      "tool": "Bash",
+      "input": {
+        "skill": "pa:jot",
+        "subagent_type": "pa:jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "package:pa",
+          "item": "subagent:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "an input without the field",
+      "tool": "Skill",
+      "input": {
+        "subagent_type": "pa:jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "an input that is not an object",
+      "tool": "Agent",
+      "input": "pa:reviewer",
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:reviewer",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    }
   ]
 }
