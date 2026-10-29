@@ -249,8 +249,8 @@ export function setRemotePluginAccess(
 const BUILT_IN_SETS = new Set(['scadbuddy'])
 
 export const aiPluginHandlers = [
-  // ---- remote MCP endpoints. A name that is no remote plugin falls through to
-  // features/builtInToolSets.ts, which answers for the built-ins and 404s the rest.
+  // ---- remote MCP endpoints. A delete or test of a name that is no remote plugin falls
+  // through to features/builtInToolSets.ts, which answers for the built-ins and 404s the rest.
 
   http.post(`${base}/plugins`, async ({ request }) => {
     const body = (await request.json()) as RemotePluginCreate

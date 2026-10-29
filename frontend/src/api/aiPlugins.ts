@@ -31,7 +31,7 @@ export interface RemotePlugin {
   updated_at: string
 }
 
-/** One tool of a built-in set, with the tier ScadBuddy's code gives it: the least it can be set to. */
+/** One tool of a built-in set, with the tier ScadBuddy's code gives it (its default). */
 export interface BuiltInTool {
   name: string
   harness_name: string
@@ -40,9 +40,8 @@ export interface BuiltInTool {
 
 /**
  * ScadBuddy's own tool sets (#1953, agent/src/plugins/builtInTools.ts `BuiltInPluginView`), listed
- * first in `/plugins`: a tier per tool that can only be raised, and disabled tools. They are never
- * added, removed or tested (409 with `built_in: true`); `enabled` changes only where the set has a
- * switch (`switchable`).
+ * first in `/plugins`. Kept only so a `/plugins` read can tell them from remote plugins: their
+ * tools' access is edited through the capabilities routes (`./capabilities.ts`, #2171).
  */
 export interface BuiltInToolSet {
   name: string
@@ -52,18 +51,11 @@ export interface BuiltInToolSet {
   switchable: boolean
   tool_prefix: string
   tools: BuiltInTool[]
-  /** Raised tiers only. */
   tool_tiers: Record<string, RiskTier>
   disabled_tools: string[]
 }
 
 export type ListedPlugin = BuiltInToolSet | RemotePlugin
-
-export interface BuiltInToolSetPatch {
-  enabled?: boolean
-  tool_tiers?: Record<string, RiskTier>
-  disabled_tools?: string[]
-}
 
 export interface RemotePluginCreate {
   name: string
@@ -274,8 +266,6 @@ const json = (method: string, body: unknown): RequestInit => ({ method, body: JS
 
 export const aiPlugins = {
   listPlugins: () => request<ListedPlugin[]>('/plugins'),
-  updateBuiltIn: (name: string, body: BuiltInToolSetPatch) =>
-    request<BuiltInToolSet>(`/plugins/${seg(name)}`, json('PATCH', body)),
   createRemote: (body: RemotePluginCreate) => request<RemotePlugin>('/plugins', json('POST', body)),
   updateRemote: (name: string, body: RemotePluginPatch) =>
     request<RemotePlugin>(`/plugins/${seg(name)}`, json('PATCH', body)),
