@@ -668,6 +668,29 @@ async def test_a_drain_mark_prunes_the_stale_marks_in_the_same_write(read_fails:
     assert list(update.remove_entries) == ([] if read_fails else [f"{DRAINING_MARK}gone@pod-x"])
 
 
+async def test_a_drain_mark_prunes_the_unparsable_marks_of_other_workers() -> None:
+    """#4948 review: a reader dates an unparsable mark now, so it never grows stale and
+    only this prune removes it. This worker's own is written over, not removed."""
+    updates: list[UpdateWorkerDeploymentVersionMetadataRequest] = []
+    client = _described(
+        marks={"other@pod-b": 5},
+        raw={f"{DRAINING_MARK}odd@pod-q": b"nope", f"{DRAINING_MARK}me@pod-a": b"nope"},
+        updates=updates,
+    )
+    since = datetime.now(UTC)
+    await mark_draining(
+        client,
+        deployment_name=DEPLOYMENT_NAME,
+        build_id="b1",
+        identities={"me@pod-a"},
+        since=since,
+        prune_within=MARKED_WITHIN,
+    )
+    [update] = updates
+    assert update.upsert_entries[f"{DRAINING_MARK}me@pod-a"] == drain_mark(since)
+    assert list(update.remove_entries) == [f"{DRAINING_MARK}odd@pod-q"]
+
+
 async def test_an_unparsable_mark_counts_as_draining_and_is_logged_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

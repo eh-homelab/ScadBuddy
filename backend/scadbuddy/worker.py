@@ -582,10 +582,8 @@ async def _serve_versioned(
     # Set once this worker's drain mark is written (#4948): until then a stopping peer
     # cannot tell this worker from one that serves, so this one trusts no peer either.
     marked = asyncio.Event()
-    # A peer's mark younger than this may be a drain still going, and an older one is
-    # pruned: a pod of one build drains as long as this one.
-    marked_within = (drain_timeout or 0) + POLLER_SEEN_WITHIN + DRAIN_MARK_SLACK
-    drain_began = datetime.now(UTC)  # set again when the drain begins
+    # `mark` and `still_current` read `drain_began` and `marked_within`, which are set
+    # when the drain begins, before either runs.
 
     async def mark() -> None:
         await mark_draining(
@@ -621,7 +619,11 @@ async def _serve_versioned(
                 return False
             # The start's clear, cancelled at stop, may still land after the mark and
             # remove it; a stopping peer would then count this worker. So trust only a
-            # mark that is still there, and write it again when it is gone.
+            # mark that is still there, and write it again when it is gone. This narrows
+            # the race but does not close it: a cancelled clear can still land after this
+            # read and before the peer's own check. That residual race is accepted: it
+            # needs a clear held in flight past the grace, and its worst case is the one
+            # #4948 fixed, never a worse one.
             marks = await draining_marks(client, deployment_name=deployment_name, build_id=build_id)
             if all(identity in marks for identity in identities):
                 return True
@@ -702,6 +704,9 @@ async def _serve_versioned(
             extra={"build_id": build_id, "timeout_s": drain_timeout},
         )
         drain_began = datetime.now(UTC)
+        # A peer's mark younger than this may be a drain still going, and an older one is
+        # pruned: a pod of one build drains as long as this one.
+        marked_within = drain_timeout + POLLER_SEEN_WITHIN + DRAIN_MARK_SLACK
         marking = asyncio.create_task(
             _until_written(mark, "could not mark this worker draining yet")
         )

@@ -363,11 +363,15 @@ async def mark_draining(
     """Mark ``identities`` (one worker's) draining since ``since`` in the version's
     metadata (#4948), and remove, in the same write, every other mark older than
     ``prune_within`` seconds: pod churn would otherwise add a key per stopped pod for the
-    build's whole life. A failed read of the marks only skips that pruning. The version
-    exists only once a worker of it has polled: until then Temporal refuses the write."""
+    build's whole life. Every other mark that does not parse goes too, since a reader
+    dates it now and so it never grows old. A failed read of the marks only skips that
+    pruning. The version exists only once a worker of it has polled: until then Temporal
+    refuses the write."""
     stale: list[str] = []
     try:
-        marks = await draining_marks(client, deployment_name=deployment_name, build_id=build_id)
+        marks, unparsable = await _read_marks(
+            client, deployment_name=deployment_name, build_id=build_id
+        )
     except RPCError:
         logger.warning("could not read this build's drain marks to prune them", exc_info=True)
     else:
@@ -375,7 +379,7 @@ async def mark_draining(
         stale = [
             f"{DRAINING_MARK}{identity}"
             for identity, marked in marks.items()
-            if identity not in identities and marked < before
+            if identity not in identities and (marked < before or identity in unparsable)
         ]
     await client.workflow_service.update_worker_deployment_version_metadata(
         UpdateWorkerDeploymentVersionMetadataRequest(
@@ -415,6 +419,14 @@ async def draining_marks(
     """Each marked identity and when its drain began. A mark that does not parse counts
     as new: it is then skipped, and the reader drains in full. That is logged once per
     key and process, since a stopping worker reads the marks on every drain poll."""
+    marks, _ = await _read_marks(client, deployment_name=deployment_name, build_id=build_id)
+    return marks
+
+
+async def _read_marks(
+    client: Client, *, deployment_name: str, build_id: str
+) -> tuple[dict[str, datetime], set[str]]:
+    """`draining_marks`, and the identities whose marks do not parse."""
     described = await client.workflow_service.describe_worker_deployment_version(
         DescribeWorkerDeploymentVersionRequest(
             namespace=client.namespace,
@@ -425,6 +437,7 @@ async def draining_marks(
         timeout=RPC_TIMEOUT,
     )
     marks: dict[str, datetime] = {}
+    unparsable: set[str] = set()
     for key, value in described.worker_deployment_version_info.metadata.entries.items():
         if not key.startswith(DRAINING_MARK):
             continue
@@ -432,6 +445,7 @@ async def draining_marks(
             since = datetime.fromtimestamp(float(json.loads(value.data)), UTC)
         except (ValueError, TypeError, OverflowError):
             since = datetime.now(UTC)
+            unparsable.add(key.removeprefix(DRAINING_MARK))
             if key not in _unparsable_marks:
                 _unparsable_marks.add(key)
                 logger.warning(
@@ -439,7 +453,7 @@ async def draining_marks(
                     extra={"identity": key.removeprefix(DRAINING_MARK), "build_id": build_id},
                 )
         marks[key.removeprefix(DRAINING_MARK)] = since
-    return marks
+    return marks, unparsable
 
 
 async def polled_elsewhere(
