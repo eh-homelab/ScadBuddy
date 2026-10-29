@@ -100,7 +100,7 @@ async def test_a_rack_print_uses_the_hotends_sent(printer: dict[str, str]) -> No
     )
     # Read again after the upload: the last report before the command is the baseline.
     baseline = await lan.probe()
-    problem = idle_problem(baseline.print, name)
+    problem = idle_problem(baseline.print, name) or fetch_problem(baseline.print, sent)
     assert problem is None, f"not started: {problem}"
     probe = RackProbe(name=name, baseline=baseline.print, sent=sent)
     try:
