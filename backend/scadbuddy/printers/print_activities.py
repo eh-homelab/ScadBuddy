@@ -99,8 +99,11 @@ logger = logging.getLogger(__name__)
 
 #: A spooled download stays in memory up to this, then goes to a temporary file.
 SPOOL_IN_MEMORY = 8 * 1024 * 1024
-#: The states a report shows for a plate the printer took (OpenBambuAPI ``mqtt.md``).
-STARTED_STATES = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE", "FINISH"})
+#: The states that show the printer running a plate it took (OpenBambuAPI ``mqtt.md``).
+#: ``FINISH`` is not one (#4935): the printer may name a new job's ``subtask_name`` while
+#: it still says the last job's ``FINISH`` (and its ``layer_num``, #4933), so only a move
+#: into one of these, seen after the command, is the start.
+TAKEN_STATES = frozenset({"PREPARE", "SLICING", "RUNNING", "PAUSE"})
 #: The most of ``project_settings.config`` read for the project's filament count.
 MAX_SETTINGS_BYTES = 4 * 1024 * 1024
 
@@ -286,24 +289,47 @@ class LanActivities:
             # tables key on (#836): whatever the plate prints from, as prepare_run does.
             await record_seen(self.d.rack, row.bambuddy_printer_id, printer)
         before = first.print
+        error_before = _int(before.get("print_error"))
         if before.get("subtask_name") == input.subtask_name:
             # An earlier attempt's start was taken: never sent twice.
-            if before.get("gcode_state") == "FAILED":
+            state = before.get("gcode_state")
+            if state == "FAILED":
                 code = _int(before.get("print_error"))
                 if code != 0:
                     raise self._print_error(row, code)
                 raise _failed(f"{row.name} reports this print stopped.")
-            if before.get("gcode_state") in STARTED_STATES:
+            if state in TAKEN_STATES:
                 return LanStarted(subtask_name=input.subtask_name, started_at=datetime.now(UTC))
+            if state == "FINISH":
+                # Its print ended, or the printer names it over the last job's FINISH and
+                # has not moved on yet (#4935): the reports that follow tell which.
+                finished = LanStarted(subtask_name=input.subtask_name, started_at=first.received_at)
+                return await self._taken(row, lan, input, None, error_before, finished)
         command, warnings = await self._command(row, printer, input)
-        error_before = _int(before.get("print_error"))
+        started = await self._taken(row, lan, input, command, error_before, None)
+        return started.model_copy(update={"warnings": warnings})
+
+    async def _taken(
+        self,
+        row: PrinterRow,
+        lan: LanPrinter,
+        input: LanPrintInput,
+        command: dict[str, Any] | None,
+        error_before: int,
+        finished: LanStarted | None,
+    ) -> LanStarted:
+        """The start, from the reports after ``command`` (``None`` sends none), within
+        `LanDeps.start_wait`. With no start seen by then, ``finished`` (a print that had
+        ended) or ``LAN_UNSURE``."""
         try:
             async with asyncio.timeout(self.d.start_wait):
                 async for report in lan.reports(command=command):
                     started = self._started(row, report, input, error_before)
                     if started is not None:
-                        return started.model_copy(update={"warnings": warnings})
+                        return started
         except TimeoutError:
+            if finished is not None:
+                return finished
             raise _unsure(
                 f"{row.name} did not report the print within {self.d.start_wait:.0f} s."
             ) from None
@@ -427,9 +453,13 @@ class LanActivities:
             raise _failed(f"{detail}: {reason}." if isinstance(reason, str) else f"{detail}.")
         ours = data.get("subtask_name") == input.subtask_name
         code = _int(data.get("print_error"))
-        if code != 0 and (ours or code != error_before):
+        # The baseline's error is the last job's, which a printer left in FAILED may still
+        # report over this job's name (#4935); any other is this start's.
+        if code != 0 and code != error_before:
             raise self._print_error(row, code)
-        if ours and data.get("gcode_state") in STARTED_STATES:
+        if ours and data.get("gcode_state") in TAKEN_STATES:
+            # When the printer moved into it: a report of the last job's state under this
+            # name came before, so `progress.from_lan_report` never reads it as this one's.
             return LanStarted(subtask_name=input.subtask_name, started_at=report.received_at)
         return None
 
