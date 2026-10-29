@@ -53,6 +53,7 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import Event, PrintRunEvent
 from scadbuddy.core.problems import DATABASE_ERRORS
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.printers.lan_models import LanStopped
 
 logger = logging.getLogger(__name__)
 
@@ -260,6 +261,13 @@ class PrintRunStore:
             return {}
         return await asyncio.to_thread(self._lan_waiting, printers)
 
+    async def record_lan_stopped(self, run_id: str, stopped: LanStopped) -> PrintRun | None:
+        """Record ``stopped`` on a succeeded native run whose prints still to start no
+        sequence will start (its ``PrintLanSequence`` closed without recording its end,
+        #4942 review), and announce it as the sequence would have. A run that has none
+        left, or records a stop already, is left as it is. ``None`` for no such run."""
+        return await asyncio.to_thread(self._record_lan_stopped, run_id, stopped)
+
     async def running_for(self, output_id: str) -> list[PrintRun]:
         """The output's runs still ``running``, newest first: what may still read a
         slice of it (#4312 re-review I-a)."""
@@ -403,6 +411,33 @@ class PrintRunStore:
             ).fetchall()
         runs = [PrintRun.model_validate(row) for row in rows]
         return {run.printer: run for run in runs if run.printer is not None}
+
+    def _record_lan_stopped(self, run_id: str, stopped: LanStopped) -> PrintRun | None:
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                f"SELECT {_COLUMNS}, slug FROM print_runs WHERE id = %s FOR UPDATE", (run_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            slug = row.pop("slug") or ""
+            run = PrintRun.model_validate(row)
+            result = run.result
+            if (
+                run.status != "succeeded"
+                or result is None
+                or not result.lan_waiting
+                or result.lan_stopped is not None
+            ):
+                return run
+            value = result.model_copy(update={"lan_stopped": stopped, "lan_awaiting_clear": False})
+            updated = conn.execute(
+                f"UPDATE print_runs SET result = %s WHERE id = %s RETURNING {_COLUMNS}",
+                (Jsonb(value.model_dump(mode="json")), run_id),
+            ).fetchone()
+            assert updated is not None  # the row is locked
+            run = PrintRun.model_validate(updated)
+            self._announce(conn, run, slug, updated)
+            return run
 
     def _running_for(self, output_id: str) -> list[PrintRun]:
         with self._pool.connection() as conn:

@@ -12,6 +12,7 @@ from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import PlannedRun, PlatePlan
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.workflows.print_activities import plate_clear_of
+from scadbuddy.workflows.printing import _ClearTimeoutError, _lan_failed
 
 
 def planned(*, lan_start: bool = True, copies: int = 2, plates: int = 1) -> PlannedRun:
@@ -45,6 +46,14 @@ def test_a_native_run_of_several_prints_keeps_the_setting(copies: int, plates: i
     assert not plate_clear_of(
         planned(copies=copies, plates=plates), cast(SettingsStore, Store(False))
     ).plate_clear
+
+
+def test_only_the_gates_own_timeout_reads_as_nobody_saying_the_plate_is_clear() -> None:
+    """#4990 review: a `TimeoutError` from another step keeps that step's words."""
+    gate = _lan_failed(_ClearTimeoutError(), "clear", 1, 2)
+    assert gate.stage == "failed" and gate.message.startswith("Nobody said the plate was clear")
+    other = _lan_failed(TimeoutError("slow"), "start", 1, 2)
+    assert other.message.startswith("Plate 2 was not started")
 
 
 def test_one_print_or_a_bambuddy_run_never_reads_it() -> None:

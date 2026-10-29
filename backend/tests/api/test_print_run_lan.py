@@ -153,19 +153,28 @@ def test_stop_of_an_unknown_run_is_a_404(client: TestClient) -> None:
     assert client.post(f"/api/v1/print/runs/{uuid.uuid4().hex}/stop").status_code == 404
 
 
-def test_a_sequence_that_closed_is_a_409_that_says_so(
+def test_a_sequence_that_closed_records_the_rest_stopped(
     client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
 ) -> None:
-    """A sequence that ended without recording it (terminated, say), or none at all."""
+    """A sequence that ended without recording it (terminated, say), or none at all:
+    nothing will start the rest, so the run records them stopped (#4990 review), and its
+    controls go. A stop is then done; a plate-cleared is the 409 that says why."""
     awaiting = WAITING.model_copy(update={"lan_awaiting_clear": True})
     run_id = _run(client, workflow_reaper, awaiting)
     handle = _sequence(workflow_reaper, run_id, sequences)
     workflow_reaper.run(handle.terminate())
-    unstarted = _run(client, workflow_reaper, awaiting)
-    for run, action in [(run_id, "stop"), (run_id, "plate-cleared"), (unstarted, "stop")]:
-        response = client.post(f"/api/v1/print/runs/{run}/{action}")
-        assert response.status_code == 409, response.text
-        assert response.json()["detail"] == printing_api.SEQUENCE_GONE
+    response = client.post(f"/api/v1/print/runs/{run_id}/plate-cleared")
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"] == printing_api.SEQUENCE_GONE
+    recorded = client.get(f"/api/v1/print/runs/{run_id}").json()["result"]
+    assert recorded["lan_stopped"] == printing_api.SEQUENCE_GONE_STOP.model_dump()
+    assert recorded["lan_awaiting_clear"] is False
+    assert client.post(f"/api/v1/print/runs/{run_id}/stop").status_code == 409
+
+    unstarted = _run(client, workflow_reaper, WAITING)
+    response = client.post(f"/api/v1/print/runs/{unstarted}/stop")
+    assert response.status_code == 202, response.text
+    assert response.json()["result"]["lan_stopped"] == printing_api.SEQUENCE_GONE_STOP.model_dump()
 
 
 def test_plate_cleared_signals_how_many_prints_had_started(

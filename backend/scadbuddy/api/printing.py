@@ -147,6 +147,7 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import Printers, PrintersDep
+from scadbuddy.printers.lan_models import LanStopped
 from scadbuddy.printers.progress import LanProgress, lan_control
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
@@ -1074,8 +1075,15 @@ NOTHING_WAITING = (
 )
 NOT_AWAITING_CLEAR = "This run is not waiting for the plate to be cleared."
 SEQUENCE_GONE = (
-    "This run's later prints are no longer running in ScadBuddy's background service,"
-    " so there is nothing to stop or start."
+    "This run's later prints are no longer running in ScadBuddy's background service, so"
+    " they will never start; the run now records them as stopped."
+)
+#: What a run whose sequence closed without recording its end records: its controls
+#: would otherwise stand for good, each answering `SEQUENCE_GONE`.
+SEQUENCE_GONE_STOP = LanStopped(
+    stage="cancelled",
+    message="The run's later prints stopped running in ScadBuddy's background service,"
+    " so the plates still to print were not started.",
 )
 #: What both routes answer beside the 202.
 LAN_CONTROL_RESPONSES: dict[int | str, dict[str, Any]] = {
@@ -1095,40 +1103,36 @@ async def _waiting_run(runs: PrintCommands, run_id: str) -> PrintRun:
     run = await runs.store.get(run_id)
     if run is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"there is no print run {run_id}")
-    result = run.result
-    if (
-        run.status != "succeeded"
-        or result is None
-        or result.path != "native"
-        or not result.lan_waiting
-        or result.lan_stopped is not None
-    ):
+    if lan_control(run) is None:
         raise ApiError(status.HTTP_409_CONFLICT, NOTHING_WAITING)
     return run
 
 
 async def _to_sequence(
     runs: PrintCommands, run_id: str, send: Callable[[WorkflowHandle[Any, Any]], Awaitable[None]]
-) -> None:
-    """``send`` to the run's ``PrintLanSequence``: a closed one, or none, is the 409 that
-    says so. Asked first, since Temporal takes a cancel of a closed execution as done."""
+) -> PrintRun | None:
+    """``send`` to the run's ``PrintLanSequence``; ``None`` once it is sent. A sequence
+    that closed, or never started, without recording its end is the run with its prints
+    still to start recorded stopped (`SEQUENCE_GONE_STOP`): nothing will start them. The
+    sequence is asked first, since Temporal takes a cancel of a closed one as done."""
     handle = runs.client.get_workflow_handle(lan_sequence_id(run_id))
     try:
         described = await handle.describe()
-        if described.status != WorkflowExecutionStatus.RUNNING:
-            raise ApiError(status.HTTP_409_CONFLICT, SEQUENCE_GONE)
-        await send(handle)
-    except ApiError:
-        raise
+        running = described.status == WorkflowExecutionStatus.RUNNING
+        if running:
+            await send(handle)
     except Exception as error:
-        if isinstance(error, RPCError) and execution_gone(error):
-            raise ApiError(status.HTTP_409_CONFLICT, SEQUENCE_GONE) from None
-        failure = temporal_failure(error, handle.id)
-        if isinstance(failure, TemporalUnavailableError):
-            raise temporal_unavailable(
-                "a native run's later prints", TEMPORAL_DOWN_DETAIL, may_have_started=None
-            ) from None
-        raise
+        if not (isinstance(error, RPCError) and execution_gone(error)):
+            failure = temporal_failure(error, handle.id)
+            if isinstance(failure, TemporalUnavailableError):
+                raise temporal_unavailable(
+                    "a native run's later prints", TEMPORAL_DOWN_DETAIL, may_have_started=None
+                ) from None
+            raise
+        running = False
+    if running:
+        return None
+    return await runs.store.record_lan_stopped(run_id, SEQUENCE_GONE_STOP)
 
 
 @router.post(
@@ -1144,10 +1148,11 @@ async def post_stop_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
     the run's ``PrintLanSequence``, which records the stop on the run (``lan_stopped``),
     and the progress shows them cancelled. The print on the printer carries on; one
     being started as the stop arrives still starts. Answers **202** with the run as it
-    was read; follow it, or the output's progress, for the stop."""
+    was read; follow it, or the output's progress, for the stop. A sequence that is no
+    longer running had stopped them already: the run records so and is the answer."""
     run = await _waiting_run(runs, run_id)
-    await _to_sequence(runs, run_id, lambda handle: handle.cancel())
-    return run
+    stopped = await _to_sequence(runs, run_id, lambda handle: handle.cancel())
+    return stopped or run
 
 
 @router.post(
@@ -1163,14 +1168,19 @@ async def post_plate_cleared(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
     queue does with its ``require_plate_clear``. While it waits its result says so
     (``lan_awaiting_clear``). This tells it the plate is clear, and it starts the next
     print. Answers **202** with the run as it was read; 409 when the run is not waiting
-    for a clear."""
+    for a clear, or its sequence is no longer running (the run then records its prints
+    still to start as stopped)."""
     run = await _waiting_run(runs, run_id)
     assert run.result is not None  # `_waiting_run` answers a run with a result
     if not run.result.lan_awaiting_clear:
         raise ApiError(status.HTTP_409_CONFLICT, NOT_AWAITING_CLEAR)
     # The prints started when the person saw it, so a late one never clears a later wait.
     starts = len(run.result.lan)
-    await _to_sequence(runs, run_id, lambda handle: handle.signal(PLATE_CLEARED_SIGNAL, starts))
+    gone = await _to_sequence(
+        runs, run_id, lambda handle: handle.signal(PLATE_CLEARED_SIGNAL, starts)
+    )
+    if gone is not None:
+        raise ApiError(status.HTTP_409_CONFLICT, SEQUENCE_GONE)
     return run
 
 

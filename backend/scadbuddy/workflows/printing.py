@@ -194,6 +194,11 @@ _LAN_CANCELLED = LanStopped(
 LanStep = Literal["wait", "clear", "start", "record"]
 
 
+class _ClearTimeoutError(Exception):
+    """Nobody said the plate was clear within `LAN_WAIT_BOUND` (#4939): the gate's own
+    timeout, so no other step's `TimeoutError` is read as it."""
+
+
 def _lan_failed(error: BaseException, step: LanStep, plate_id: int, next_id: int) -> LanStopped:
     """Why a LAN run started none of its later plate copies (#4541): the step that failed
     on ``plate_id``, in its own words, and ``next_id`` the first plate it did not start."""
@@ -208,7 +213,7 @@ def _lan_failed(error: BaseException, step: LanStep, plate_id: int, next_id: int
             f" {LAN_WAIT_BOUND.days} days, so it and the plates after it were not started."
         )
         return LanStopped(stage="failed", message=detail)
-    if step == "clear" and isinstance(error, TimeoutError):
+    if isinstance(error, _ClearTimeoutError):
         detail = (
             f"Nobody said the plate was clear within {LAN_WAIT_BOUND.days} days, so plate"
             f" {next_id} and the plates after it were not started."
@@ -1154,9 +1159,12 @@ class LanSequenceWorkflow(_PlateStarts):
                 self._stop_if_cancelled()
                 if gate:
                     step = "clear"
-                    await workflow.wait_condition(
-                        partial(self._cleared_after, len(result.lan)), timeout=LAN_WAIT_BOUND
-                    )
+                    try:
+                        await workflow.wait_condition(
+                            partial(self._cleared_after, len(result.lan)), timeout=LAN_WAIT_BOUND
+                        )
+                    except TimeoutError:
+                        raise _ClearTimeoutError from None
                     # Recorded with the next start, which follows at once.
                     result = result.model_copy(update={"lan_awaiting_clear": False})
                 step = "start"
@@ -1208,7 +1216,12 @@ class LanSequenceWorkflow(_PlateStarts):
                         lan=taken,
                     )
                     sent = await self._record_plate(accepted, planned, plate, outcome, sent, 0, 0)
-        except (ActivityError, ApplicationError, asyncio.CancelledError, TimeoutError) as error:
+        except (
+            ActivityError,
+            ApplicationError,
+            asyncio.CancelledError,
+            _ClearTimeoutError,
+        ) as error:
             cancelled = is_cancelled_exception(error)
             if cancelled:
                 self.cancel_absorbed = True
