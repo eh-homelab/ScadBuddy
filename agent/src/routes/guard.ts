@@ -11,11 +11,12 @@ import {
   requestOrigin,
 } from '../http/origins.js'
 
-// Interim gate for OUTWARD-tier writes from Settings (spec §8.1: "outward (send,
+// Gate for OUTWARD-tier writes from Settings (spec §8.1: "outward (send,
 // print, delete, settings or credential writes)"). Spec §8.2 wants every
-// outward action approved by a human in the ScadBuddy UI; that approval flow is
-// #258. Until it lands, credential writes are accepted only when the request
-// looks like it came from the UI through the ingress (spec §4.2):
+// outward action approved by a human in the ScadBuddy UI; #258's approvals park
+// the agent's tool calls, not these routes, which a person sends from the UI
+// already. They are accepted only when the request looks like it came from the UI
+// through the ingress (spec §4.2):
 //
 //   1. Transport (spec §8.4): a TRUSTED proxy peer (SCADBUDDY_AGENT_TRUSTED_PROXIES)
 //      says `X-Forwarded-Proto: https`, or the peer is loopback and no proxy is

@@ -12,7 +12,7 @@ export type ArrangeGoal = NonNullable<ArrangeRequest['goal']>
 /**
  * #1864 — what one arrange is built from, in any mix: a saved output of any template, or
  * a Bambuddy library file. A file ScadBuddy uploaded arranges through its `output_id`;
- * any other is not arrangeable until #1863 reads objects from the 3MF itself.
+ * any other through its `library_file_id`, its objects read from the 3MF itself (#1863).
  */
 export type ArrangeSource = { kind: 'output'; output: Output } | { kind: 'library'; file: LibraryEntry }
 

@@ -6,9 +6,9 @@ import type { Owner } from '../sessions/protocol.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
-// /api/v1/ai/approvals (#258): the panel's and the tests' way to see and decide
-// approvals of outward tool calls until #266's socket carries the panel's
-// `approval.decision` (which calls ApprovalService.decision directly).
+// /api/v1/ai/approvals (#258): the tests' and HTTP clients' way to see and decide
+// approvals of outward tool calls; the panel decides over #266's socket instead
+// (`approval.decision`, routes/chat.ts, which calls ApprovalService.decision directly).
 //
 //   GET  /api/v1/ai/approvals?session=<id>[&pending=true]  a session's approvals
 //   GET  /api/v1/ai/approvals                              every pending one (browser view)
