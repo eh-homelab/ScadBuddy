@@ -18,7 +18,7 @@ afterEach(async () => {
 })
 
 /** An upstream that issues session `s-1` to a POST and records every request; `hang` never answers a DELETE. */
-async function upstream(options: { hang?: boolean } = {}) {
+async function upstream(options: { hang?: boolean; body?: string } = {}) {
   const seen: Seen[] = []
   const server = createServer((req, res) => {
     seen.push({ method: req.method ?? '', headers: req.headers })
@@ -29,7 +29,7 @@ async function upstream(options: { hang?: boolean } = {}) {
     req.resume()
     req.on('end', () => {
       res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 's-1' })
-      res.end(JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }))
+      res.end(options.body ?? JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }))
     })
   })
   servers.push(server)
@@ -145,4 +145,19 @@ describe('Registration.terminate', () => {
     expect(logs.join('\n')).not.toContain('plugin-secret-1')
     expect(forwarder.size).toBe(0)
   }, 15_000)
+})
+
+describe('the response cap (#2171 review M6)', () => {
+  it('a registration with maxResponseBytes refuses a larger answer with 502', async () => {
+    const big = JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'x', description: 'd'.repeat(5000) }] } })
+    const { plugin } = await upstream({ body: big })
+    const forwarder = await PluginForwarder.start()
+    forwarders.push(forwarder)
+    const capped = forwarder.register(plugin, '127.0.0.1', { maxResponseBytes: 1000 })
+    const res = await post(capped.url)
+    expect(res.status).toBe(502)
+    expect(((await res.json()) as { error: string }).error).toMatch(/too large/)
+    const open = forwarder.register(plugin, '127.0.0.1')
+    expect(await (await post(open.url)).text()).toBe(big)
+  })
 })

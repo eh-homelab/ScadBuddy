@@ -37,6 +37,38 @@ describe('toStoredTools', () => {
     }
   })
 
+  it('caps name, title and annotations per entry (#2171 review I2)', () => {
+    const tools = toStoredTools([
+      { name: 'big', title: 't'.repeat(2_100_000), annotations: { x: 'a'.repeat(20_000) } },
+      { name: 'n'.repeat(129) },
+      { name: 'ok', title: 'Fine' },
+    ])
+    expect(tools.map((t) => t.raw.name)).toEqual(['big', 'ok'])
+    expect((tools[0]!.raw.title as string).length).toBe(LISTING_CAPS.title)
+    expect(tools[0]!.raw).not.toHaveProperty('annotations')
+    expect(tools[0]!.omitted).toEqual(['title', 'annotations'])
+    expect(tools[1]).toEqual({ raw: { name: 'ok', title: 'Fine' }, omitted: [] })
+  })
+
+  it('past the schemas, drops annotations, then descriptions, then cuts the last tools to their names', () => {
+    // 512 tools of 1,024 escaped title characters (6 each in JSON) and big descriptions: over the total even bare.
+    const tools = toStoredTools(
+      Array.from({ length: 512 }, (_, i) => ({
+        name: `t${i}`,
+        title: '\u0001'.repeat(LISTING_CAPS.title),
+        description: '\u0001'.repeat(LISTING_CAPS.description),
+        annotations: { readOnlyHint: true, x: 'a'.repeat(15_000) },
+      })),
+    )
+    expect(JSON.stringify(tools).length).toBeLessThanOrEqual(LISTING_CAPS.total)
+    expect(tools).toHaveLength(512)
+    expect(tools[0]!.omitted).toEqual(['annotations', 'description'])
+    expect(tools[0]!.raw.title).toBeDefined()
+    const last = tools.at(-1)!
+    expect(last.raw).toEqual({ name: 't511' })
+    expect(last.omitted).toEqual(['annotations', 'description', 'title'])
+  })
+
   it('drops an entry without a name', () => {
     expect(toStoredTools([{ title: 'no name' }, { name: 7 }, { name: 'ok' }]).map((t) => t.raw.name)).toEqual(['ok'])
   })
@@ -90,6 +122,23 @@ describe.skipIf(!TEST_DATABASE_URL)(`ToolListings${TEST_DATABASE_URL ? '' : ` (s
       raw: { x_new: 1 },
       omitted: [],
     })
+  })
+
+  it('stores a description cut inside a surrogate pair, and NULs in any string or key (#2171 review I1)', async () => {
+    const cut = `${'a'.repeat(LISTING_CAPS.description - 1)}😀`
+    await listings.put(
+      SRC,
+      toStoredTools([
+        { name: 'emoji', description: cut },
+        { name: 'nul', description: 'a\u0000b', inputSchema: { type: 'object', default: 'x\u0000' }, 'k\u0000': 1 },
+      ]),
+    )
+    const got = (await listings.get(SRC))!.tools
+    expect(got[0]!.description).toHaveLength(LISTING_CAPS.description)
+    expect(got[0]!.description!.isWellFormed()).toBe(true)
+    expect(got[1]!.description).toBe('a\uFFFDb')
+    expect(got[1]!.input_schema).toEqual({ type: 'object', default: 'x\uFFFD' })
+    expect(got[1]!.raw['k\uFFFD']).toBe(1)
   })
 
   it('reads a row whose tools do not parse as no listing', async () => {

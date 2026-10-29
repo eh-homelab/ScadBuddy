@@ -31,10 +31,14 @@ import { harnessToolName, headerSecretVariants, type RemotePlugin, toolPrefix } 
 // SDK's `ToolSchema` is a plain `z.object` (@modelcontextprotocol/sdk 1.32,
 // dist/esm/types.js), which strips every field it does not know, an unknown annotation
 // key included, and the stored listing keeps the server's entry as sent (#2171, #778).
+// An entry without a name is `toStoredTools`'s to drop, not a reason to fail the test.
 const ListedPage = z.looseObject({
-  tools: z.array(z.looseObject({ name: z.string() })),
+  tools: z.array(z.unknown()),
   nextCursor: z.string().optional(),
 })
+
+/** The largest response the test reads (forwarder `maxResponseBytes`): the caps bound what is stored, this what is read. */
+export const MAX_LIST_RESPONSE_BYTES = 16 * 1024 * 1024
 
 export type PluginToolView = {
   /** As the server names it. */
@@ -74,7 +78,7 @@ export type PluginTest = {
   duration_ms: number
   server: { name: string; version: string } | null
   tools: PluginToolView[]
-  /** The server has more tools than one tools/list page returned. */
+  /** Not every tool the server has is here: a `nextCursor`, or entries dropped (nameless, past the cap). */
   truncated: boolean
   /** The listing as stored in ai_tool_listings (empty when the test failed); the routes never send it. */
   stored: StoredTool[]
@@ -158,7 +162,7 @@ export async function testPlugin(
     stored,
   })
 
-  const registration = forwarder.register(plugin, address, { filterTools: false })
+  const registration = forwarder.register(plugin, address, { filterTools: false, maxResponseBytes: MAX_LIST_RESPONSE_BYTES })
   const transport = new StreamableHTTPClientTransport(new URL(registration.url), {
     ...(options.fetch ? { fetch: options.fetch } : {}),
     // One attempt: a test answers now rather than retrying in the background.
@@ -177,7 +181,8 @@ export async function testPlugin(
     const listed = await Promise.race([client.request({ method: 'tools/list' }, ListedPage, requestOptions), timedOut])
     const stored = toStoredTools(listed.tools)
     const tools = describeTools(plugin, stored.map(listedTool))
-    return done(true, `connected; ${tools.length} tool(s)`, tools, listed.nextCursor !== undefined, stored)
+    const truncated = listed.nextCursor !== undefined || stored.length < listed.tools.length
+    return done(true, `connected; ${tools.length} tool(s)`, tools, truncated, stored)
   } catch (err) {
     if (controller.signal.aborted) return done(false, `timed out after ${timeoutMs} ms waiting for the MCP endpoint`)
     if (err instanceof StreamableHTTPError && err.code !== undefined) {

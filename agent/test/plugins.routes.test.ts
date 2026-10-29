@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { originPolicy } from '../src/http/origins.js'
+import { testAndList } from '../src/routes/plugins.js'
 import type { StoredTool, ToolListings } from '../src/access/listings.js'
 import type { PluginRepo, RemotePlugin } from '../src/plugins/registry.js'
 import type { PluginTest } from '../src/plugins/testConnection.js'
@@ -193,11 +194,11 @@ describe('the connection test stores its listing (#2171)', () => {
     truncated: false,
     stored: ok ? stored : [],
   })
-  function setup(testPlugin: AppDeps['testPlugin']) {
+  function setup(testPlugin: AppDeps['testPlugin'], overrides: Partial<AppDeps> = {}) {
     const repo = { ...untouchable(), reveal: vi.fn(() => Promise.resolve(plugin)) }
     const put = vi.fn((_source: string, _tools: readonly StoredTool[]) => Promise.resolve())
     const listings = { put } as unknown as ToolListings
-    return { put, a: app(repo, { testPlugin, listings }) }
+    return { put, repo, listings, a: app(repo, { testPlugin, listings, ...overrides }) }
   }
   const test = (a: ReturnType<typeof app>) => a.request('/api/v1/ai/plugins/mem/test', { method: 'POST', headers: UI })
 
@@ -230,5 +231,17 @@ describe('the connection test stores its listing (#2171)', () => {
     finish!(result(true))
     expect((await first).status).toBe(200)
     expect((await test(a)).status).toBe(200)
+  })
+
+  it('one test at a time per plugin, whichever caller started it (#2171 review M3)', async () => {
+    let finish: ((t: PluginTest) => void) | undefined
+    const testPlugin = vi.fn(() => new Promise<PluginTest>((resolve) => (finish = resolve)))
+    const { a, repo, listings } = setup(testPlugin)
+    const first = test(a)
+    await vi.waitFor(() => expect(finish).toBeDefined())
+    const direct = await testAndList({ plugins: repo, kek: { ok: true, kek }, testPlugin, listings, ready: () => Promise.resolve(true) }, 'mem')
+    expect(direct.status).toBe(429)
+    finish!(result(true))
+    expect((await first).status).toBe(200)
   })
 })

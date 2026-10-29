@@ -313,7 +313,8 @@ export async function testAndList(
       // The forwarder connects to exactly the address checked here.
       ;[address] = await assertEndpointAllowed(plugin.url, deps.resolveHost ?? systemResolver)
     } catch (err) {
-      if (err instanceof EgressError || err instanceof PluginError) return { status: 400, body: { detail: err.message } }
+      // assertEndpointAllowed throws EgressError only (a resolver's failure included).
+      if (err instanceof EgressError) return { status: 400, body: { detail: err.message } }
       throw err
     }
     if (address === undefined) return { status: 400, body: { detail: 'url host resolves to no address' } }
