@@ -64,7 +64,7 @@ function serve(answer: Details) {
 describe('ItemDetails', () => {
   it('loads details on first open and lists parameters', async () => {
     const reads = serve(details())
-    const { user } = renderPage(<ItemDetails source="remote:hindsight" item={item()} />)
+    const { user } = renderPage(<ItemDetails source="remote:hindsight" item={item()} claims />)
     expect(reads).not.toHaveBeenCalled()
     await user.click(screen.getByRole('button', { name: 'Details of recall' }))
     const input = await screen.findByRole('table', { name: 'Parameters of recall' })
@@ -78,7 +78,7 @@ describe('ItemDetails', () => {
     const output = screen.getByRole('table', { name: 'Output of recall' })
     expect(output).toHaveTextContent('memories')
     expect(screen.getByText('readOnlyHint: true')).toBeInTheDocument()
-    expect(screen.getByText('title: "Recall"')).toBeInTheDocument()
+    expect(screen.getByText('title: Recall')).toBeInTheDocument()
     expect(screen.getByText('Claims made by the server, not checked by ScadBuddy.')).toBeInTheDocument()
     expect(screen.getByText('The recall tool.')).toHaveClass('whitespace-pre-wrap')
 
@@ -90,7 +90,7 @@ describe('ItemDetails', () => {
 
   it("does not label a built-in tool's annotations as a server's claims", async () => {
     serve(details())
-    const { user } = renderPage(<ItemDetails source="builtin:scadbuddy" item={item()} />)
+    const { user } = renderPage(<ItemDetails source="builtin:scadbuddy" item={item()} claims={false} />)
     await user.click(screen.getByRole('button', { name: 'Details of recall' }))
     await screen.findByText('readOnlyHint: true')
     expect(screen.queryByText('Claims made by the server, not checked by ScadBuddy.')).toBeNull()
@@ -99,7 +99,7 @@ describe('ItemDetails', () => {
   it('View JSON shows the raw entry unmodified', async () => {
     const answer = details()
     serve(answer)
-    const { user } = renderPage(<ItemDetails source="remote:hindsight" item={item()} />)
+    const { user } = renderPage(<ItemDetails source="remote:hindsight" item={item()} claims />)
     await user.click(screen.getByRole('button', { name: 'Details of recall' }))
     const view = await screen.findByRole('button', { name: 'View JSON' })
     expect(screen.queryByTestId('raw-json')).toBeNull()
@@ -113,7 +113,7 @@ describe('ItemDetails', () => {
   it('renders a description with markup as text', async () => {
     const markup = '<img src=x onerror=alert(1)> **bold** [link](https://x.example)'
     serve(details({ item: item({ description: markup }), input_schema: { type: 'object', properties: { q: { type: 'string', description: markup } } } }))
-    const { user, container } = renderPage(<ItemDetails source="remote:hindsight" item={item({ description: markup })} />)
+    const { user, container } = renderPage(<ItemDetails source="remote:hindsight" item={item({ description: markup })} claims />)
     await user.click(screen.getByRole('button', { name: 'Details of recall' }))
     await screen.findByRole('table', { name: 'Parameters of recall' })
     expect(screen.getAllByText(markup).length).toBeGreaterThanOrEqual(2)
@@ -123,7 +123,7 @@ describe('ItemDetails', () => {
 
   it('names an omitted part', async () => {
     serve(details({ input_schema: null, omitted: ['inputSchema', 'annotations'] }))
-    const { user } = renderPage(<ItemDetails source="remote:hindsight" item={item()} />)
+    const { user } = renderPage(<ItemDetails source="remote:hindsight" item={item()} claims />)
     await user.click(screen.getByRole('button', { name: 'Details of recall' }))
     expect(await screen.findByText('Input schema: too large to keep')).toBeInTheDocument()
     expect(screen.getByText('Annotations: too large to keep')).toBeInTheDocument()
@@ -131,7 +131,7 @@ describe('ItemDetails', () => {
 
   it('says why the details did not load', async () => {
     server.use(http.get(`${BASE}/:source/items/:item`, () => HttpResponse.json({ detail: 'no item "recall"' }, { status: 404 })))
-    const { user } = renderPage(<ItemDetails source="remote:hindsight" item={item()} />)
+    const { user } = renderPage(<ItemDetails source="remote:hindsight" item={item()} claims />)
     await user.click(screen.getByRole('button', { name: 'Details of recall' }))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('no item "recall"'))
   })

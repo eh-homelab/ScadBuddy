@@ -68,6 +68,7 @@ describe('SourceCard', () => {
     const toggle = screen.getByRole('switch', { name: 'Enabled' })
     expect(toggle).toBeChecked()
     expect(isUserOnly(toggle)).toBe(false)
+    expect(toggle).toHaveAccessibleDescription('Enable HTTP requests')
     await user.click(toggle)
     await waitFor(() => expect(screen.getByRole('switch', { name: 'Enabled' })).not.toBeChecked())
 
@@ -115,6 +116,26 @@ describe('SourceCard', () => {
     await user.click(screen.getByRole('button', { name: 'ScadBuddy tools' }))
     const nested = within(card('ScadBuddy tools')).getByRole('region', { name: 'Source Child server' })
     expect(within(nested).getByText('2 tools, 1 changed')).toBeInTheDocument()
+  })
+
+  it("labels a non-built-in source's annotations as the server's claims, by its kind", async () => {
+    const remote = source({ id: 'builtin:looks-built-in', kind: 'remote', title: 'Remote' }, 1)
+    server.use(
+      http.get('/api/v1/ai/capabilities/:source/items/:item', () =>
+        HttpResponse.json({
+          item: remote.items[0],
+          input_schema: null,
+          output_schema: null,
+          annotations: { readOnlyHint: true },
+          raw: null,
+          omitted: [],
+        }),
+      ),
+    )
+    const { user } = renderPage(<Harness start={remote} />)
+    await user.click(screen.getByRole('button', { name: 'Remote' }))
+    await user.click(screen.getByRole('button', { name: 'Details of tool_1' }))
+    expect(await screen.findByText('Claims made by the server, not checked by ScadBuddy.')).toBeInTheDocument()
   })
 
   it('shows its header extra and its children', async () => {

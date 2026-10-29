@@ -22,7 +22,16 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
  * An item's full entry (#2171), read on first open: everything in it but `item` is untrusted
  * server text, so every value is a text node; nothing is parsed as HTML or markdown.
  */
-export function ItemDetails({ source, item }: { source: string; item: ItemView }) {
+export function ItemDetails({
+  source,
+  item,
+  claims,
+}: {
+  source: string
+  item: ItemView
+  /** Label the annotations as the server's claims (a source that is not built in). */
+  claims: boolean
+}) {
   const [details, setDetails] = useState<Details | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -53,7 +62,7 @@ export function ItemDetails({ source, item }: { source: string; item: ItemView }
             {error}
           </p>
         )}
-        {details !== null && <Body details={details} name={item.name} claims={!source.startsWith('builtin:')} />}
+        {details !== null && <Body details={details} name={item.name} claims={claims} />}
       </CollapsibleContent>
     </Collapsible>
   )
@@ -79,7 +88,7 @@ function Body({ details, name, claims }: { details: Details; name: string; claim
           {claims && <p className="text-muted-foreground">Claims made by the server, not checked by ScadBuddy.</p>}
           <ul className="sb-num">
             {annotations.map(([key, value]) => (
-              <li key={key}>{`${key}: ${JSON.stringify(value)}`}</li>
+              <li key={key}>{`${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`}</li>
             ))}
           </ul>
         </div>

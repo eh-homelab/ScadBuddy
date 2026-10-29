@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { aiCapabilities, type Access, type ItemView, type SourceView } from '../../api/capabilities'
 import { ChoiceSelect } from '../settings/form'
 import { Button } from '@/components/ui/button'
@@ -14,17 +14,34 @@ const message = (error: unknown) => (error instanceof Error ? error.message : St
  * marked, Reset when a stored access takes effect, and the confirmation a lowering opens.
  * Every control is the agent's too (#4208): nothing here is user-only.
  */
-export function ItemRow({ source, item, onSaved }: { source: string; item: ItemView; onSaved: (source: SourceView) => void }) {
+export function ItemRow({
+  source,
+  item,
+  onSaved,
+  claims = true,
+}: {
+  source: string
+  item: ItemView
+  onSaved: (source: SourceView) => void
+  /** Label the details' annotations as the server's claims: every source but a built-in one. */
+  claims?: boolean
+}) {
+  const selectId = useId()
   const [pending, setPending] = useState<Access | null>(null)
+  /** The last lowering asked about, kept while the dialog closes. */
+  const [asked, setAsked] = useState<Access>('off')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const shown = shownAccess(item)
 
-  async function save(write: () => Promise<SourceView>) {
+  const focusSelect = () => document.getElementById(selectId)?.focus()
+
+  async function save(write: () => Promise<SourceView>, after?: () => void) {
     setBusy(true)
     setError(null)
     try {
       onSaved(await write())
+      after?.()
     } catch (caught) {
       setError(message(caught))
     } finally {
@@ -32,14 +49,19 @@ export function ItemRow({ source, item, onSaved }: { source: string; item: ItemV
     }
   }
 
-  const reset = () => void save(() => aiCapabilities.resetItem(source, item.id))
+  // Reset unmounts once it succeeds, so focus moves to the select.
+  const reset = () => void save(() => aiCapabilities.resetItem(source, item.id), focusSelect)
   const apply = (access: Access) => void save(() => aiCapabilities.setItem(source, item.id, access))
 
   function choose(value: string) {
-    if (value === shown) return
+    // The select stays focusable while a write runs (so focus can come back to it); it ignores choices.
+    if (busy || value === shown) return
     if (value === 'default' || value === item.default) return reset()
     const next = value as Access
-    if (lowers(item, next)) setPending(next)
+    if (lowers(item, next)) {
+      setAsked(next)
+      setPending(next)
+    }
     else apply(next)
   }
 
@@ -58,11 +80,12 @@ export function ItemRow({ source, item, onSaved }: { source: string; item: ItemV
           <ChoiceSelect
             size="sm"
             className="w-48"
+            id={selectId}
             aria-label={`Access of ${item.name}`}
             value={shown}
             onValueChange={choose}
             choices={choicesOf(item)}
-            disabled={item.fixed !== null || busy}
+            disabled={item.fixed !== null}
           />
           {item.overridden && item.fixed === null && (
             <Button size="sm" variant="ghost" aria-label={`Reset ${item.name}`} onClick={reset} disabled={busy}>
@@ -82,22 +105,20 @@ export function ItemRow({ source, item, onSaved }: { source: string; item: ItemV
           {error}
         </p>
       )}
-      {!item.missing && <ItemDetails source={source} item={item} />}
-      {pending !== null && (
-        <LowerConfirm
-          open
-          label={item.label}
-          defaultAccess={item.default}
-          from={shown}
-          to={pending}
-          onCancel={() => setPending(null)}
-          onConfirm={() => {
-            const next = pending
-            setPending(null)
-            apply(next)
-          }}
-        />
-      )}
+      {!item.missing && <ItemDetails source={source} item={item} claims={claims} />}
+      <LowerConfirm
+        open={pending !== null}
+        label={item.label}
+        defaultAccess={item.default}
+        from={shown}
+        to={asked}
+        onCancel={() => setPending(null)}
+        onConfirm={() => {
+          setPending(null)
+          apply(asked)
+        }}
+        returnFocus={focusSelect}
+      />
     </div>
   )
 }

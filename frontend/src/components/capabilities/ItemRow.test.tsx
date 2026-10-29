@@ -115,6 +115,12 @@ describe('ItemRow', () => {
     ['write from read', item({ access: 'read', overridden: true }), 'write', 'It will be able to change things without asking first.'],
     ['read from outward', item(), 'read', 'It will run without asking first.'],
     [
+      'write from read with a by-call default',
+      item({ id: 'http_request', name: 'http_request', label: 'Make an HTTP request', default: null, access: 'read', overridden: true }),
+      'write',
+      'It will be able to change things without asking first.',
+    ],
+    [
       'read from a write default',
       item({ id: 'save_model', name: 'save_model', label: 'Save a model', default: 'write', access: 'write' }),
       'read',
@@ -144,6 +150,41 @@ describe('ItemRow', () => {
     expect(sent).toEqual([])
   })
 
+  it('returns focus to the select after a confirmed lowering, a cancel and Escape, and ignores a choice while saving', async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let puts = 0
+    serve(item())
+    server.use(
+      http.put(`${BASE}/:source/items/:item`, async () => {
+        puts += 1
+        await held
+        return HttpResponse.json({ detail: 'held' }, { status: 409 })
+      }),
+    )
+    const { user } = renderPage(<Harness start={item()} />)
+    await choose(user, select('send_to_printer'), 'off')
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(select('send_to_printer')).toHaveFocus())
+
+    await choose(user, select('send_to_printer'), 'off')
+    await screen.findByRole('alertdialog')
+    await user.keyboard('{Escape}')
+    await waitFor(() => expect(select('send_to_printer')).toHaveFocus())
+
+    await choose(user, select('send_to_printer'), 'read')
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Lower to read' }))
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    // The save is still running: the select keeps focus while it does.
+    await waitFor(() => expect(select('send_to_printer')).toHaveFocus())
+    // A choice while the save runs is ignored.
+    await choose(user, select('send_to_printer'), 'write')
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(puts).toBe(1)
+    release()
+    expect(await screen.findByRole('alert')).toHaveTextContent('held')
+  })
+
   it('choosing the default resets the item', async () => {
     const start = item({ access: 'write', overridden: true })
     const sent = serve(start)
@@ -160,6 +201,7 @@ describe('ItemRow', () => {
     await user.click(screen.getByRole('button', { name: 'Reset send_to_printer' }))
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Reset send_to_printer' })).toBeNull())
     expect(select('send_to_printer')).toHaveTextContent('outward (asks first) (default)')
+    expect(select('send_to_printer')).toHaveFocus()
     expect(sent).toEqual([{ method: 'DELETE' }])
   })
 

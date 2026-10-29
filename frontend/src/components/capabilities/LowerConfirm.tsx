@@ -13,7 +13,8 @@ import { lowerLine } from './access'
 
 /**
  * Confirms choosing an access below the item's default: the whole guard on a lowering.
- * Cancel, Escape or a click outside calls `onCancel`, and nothing is sent.
+ * Cancel, Escape or a click outside calls `onCancel`, and nothing is sent. Keep it mounted
+ * and drive `open`, so Radix's close (and `returnFocus`) runs.
  */
 export function LowerConfirm({
   open,
@@ -23,6 +24,7 @@ export function LowerConfirm({
   to,
   onConfirm,
   onCancel,
+  returnFocus,
 }: {
   open: boolean
   label: string
@@ -33,11 +35,19 @@ export function LowerConfirm({
   to: Access
   onConfirm: () => void
   onCancel: () => void
+  /** Where focus goes once the dialog has closed, either way (the row's select). */
+  returnFocus?: () => void
 }) {
   const line = lowerLine(defaultAccess, from, to)
   return (
     <AlertDialog open={open} onOpenChange={(next) => !next && onCancel()}>
-      <AlertDialogContent>
+      <AlertDialogContent
+        onCloseAutoFocus={(event) => {
+          if (!returnFocus) return
+          event.preventDefault()
+          returnFocus()
+        }}
+      >
         <AlertDialogHeader>
           <AlertDialogTitle>{`Lower ${label}?`}</AlertDialogTitle>
           {line !== null && <AlertDialogDescription>{line}</AlertDialogDescription>}

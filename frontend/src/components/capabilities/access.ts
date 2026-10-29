@@ -57,7 +57,7 @@ export function matches(item: ItemView, filter: string): boolean {
 export function lowerLine(defaultAccess: Access | null, from: Access | 'default', to: Access): string | null {
   const asksFirst = defaultAccess === 'outward' || defaultAccess === null
   if (to === 'off') return 'The assistant will not be able to use it.'
-  if (to === 'write' && defaultAccess === 'outward' && (from === 'read' || from === 'off')) {
+  if (to === 'write' && asksFirst && (from === 'read' || from === 'off')) {
     return 'It will be able to change things without asking first.'
   }
   if ((to === 'read' || to === 'write') && asksFirst) return 'It will run without asking first.'

@@ -1,5 +1,5 @@
 import { ChevronRight } from 'lucide-react'
-import { useState, type ReactNode } from 'react'
+import { useId, useState, type ReactNode } from 'react'
 import { aiCapabilities, type SourceView } from '../../api/capabilities'
 import { SwitchField } from '../settings/form'
 import { Button } from '@/components/ui/button'
@@ -25,10 +25,12 @@ export function SourceCard({
   children,
 }: {
   source: SourceView
+  /** A source after a write: this card's or a nested one's, so replace it by id (`useCapabilities.replace`). */
   onChange: (source: SourceView) => void
   headerExtra?: ReactNode
   children?: ReactNode
 }) {
+  const switchNote = useId()
   const [open, setOpen] = useState(false)
   const [filter, setFilter] = useState('')
   const [busy, setBusy] = useState(false)
@@ -66,8 +68,12 @@ export function SourceCard({
                 onCheckedChange={(on) => void setEnabled(on)}
                 disabled={busy}
                 busy={busy}
+                describedBy={switchNote}
                 userOnly={false}
               />
+            )}
+            {source.switchable && (
+              <span id={switchNote} className="sr-only">{`Enable ${source.title}`}</span>
             )}
           </div>
         </div>
@@ -89,7 +95,7 @@ export function SourceCard({
           )}
           <div className="divide-y divide-border">
             {rows.map((item) => (
-              <ItemRow key={item.id} source={source.id} item={item} onSaved={onChange} />
+              <ItemRow key={item.id} source={source.id} item={item} onSaved={onChange} claims={source.kind !== 'builtin'} />
             ))}
           </div>
           {children}
