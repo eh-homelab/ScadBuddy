@@ -323,6 +323,10 @@ def catalogue_refresh_claim(conninfo: str) -> RefreshClaim:
             yield True
             return
         try:
+            # Keyed by the file's name alone, which holds while every replica shares
+            # one cache volume (#2978). Replicas with caches of their own would skip a
+            # refresh while another replica refreshed its own copy, so the key would
+            # then need the volume too.
             cursor = await conn.execute(
                 "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
                 (f"{REFRESH_LOCK_PREFIX}{path.name}",),

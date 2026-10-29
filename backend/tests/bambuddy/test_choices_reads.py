@@ -333,12 +333,15 @@ async def test_a_claimed_refresh_reads_and_keeps_the_catalogue(
     await cached_catalogue(bambuddy, tmp_path)
     _expire(tmp_path)
     (kept,) = (tmp_path / catalogue.CATALOGUE_DIRNAME).iterdir()
+    inode = kept.stat().st_ino
 
     await cached_catalogue(bambuddy, tmp_path, refresh_claim=_Claim(True))
     await _refreshes_done()
 
     assert presets.call_count == 2
-    assert kept.stat().st_mtime > 0  # rewritten
+    # Renamed in by the refresh, not only touched: a new file under the old name.
+    assert kept.stat().st_ino != inode
+    assert kept.stat().st_mtime > 0
 
 
 async def test_a_refresh_claim_that_cannot_reach_postgres_lets_the_replica_refresh(
