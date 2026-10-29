@@ -1,5 +1,6 @@
 import type { Sql } from 'postgres'
 import { z } from 'zod'
+import { remoteSource } from './model.js'
 
 // The tools a remote source listed (#2171, #778), kept in `ai_tool_listings`: each
 // `tools/list` entry once, as the server sent it, with only what a cap removed taken
@@ -216,9 +217,56 @@ export class ToolListings {
 
   /** `truncated`: the listing is not every tool the source has (a `nextCursor`, or entries dropped). */
   async put(source: string, tools: readonly StoredTool[], options: { truncated?: boolean } = {}): Promise<void> {
-    await this.#sql`
-      INSERT INTO ai_tool_listings (source, tools, truncated)
-      VALUES (${source}, ${this.#sql.json(tools as never)}, ${options.truncated ?? false})
-      ON CONFLICT (source) DO UPDATE SET tools = EXCLUDED.tools, truncated = EXCLUDED.truncated, listed_at = now()`
+    await upsert(this.#sql, source, tools, options.truncated ?? false)
+  }
+
+  /**
+   * Runs `fn` holding remote plugin `name`'s test lock, a session advisory lock, so one test
+   * runs at a time across replicas (#4994); `undefined` when another session holds it. The
+   * lock's connection is reserved for `fn`, and `fn`'s `put` runs on it: a test never waits
+   * for a second pool connection while it holds one.
+   */
+  async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | undefined> {
+    const conn = await this.#sql.reserve()
+    try {
+      const key = `scadbuddy:ai_tool_listings:test:${name}`
+      const [row] = await conn<{ held: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS held`
+      if (!row?.held) return undefined
+      try {
+        return { value: await fn((url, tools, options) => putIfCurrent(conn, name, url, tools, options.truncated ?? false)) }
+      } finally {
+        await conn`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`
+      }
+    } finally {
+      conn.release()
+    }
+  }
+}
+
+/**
+ * Stores remote plugin `name`'s listing only while it still exists at `url`, the one tested
+ * (#4994): under its ai_plugins row lock, so a delete or a URL change after the test wins.
+ * False: nothing stored.
+ */
+export type PluginListingPut = (url: string, tools: readonly StoredTool[], options: { truncated?: boolean }) => Promise<boolean>
+
+async function upsert(sql: Sql, source: string, tools: readonly StoredTool[], truncated: boolean): Promise<void> {
+  await sql`
+    INSERT INTO ai_tool_listings (source, tools, truncated)
+    VALUES (${source}, ${sql.json(tools as never)}, ${truncated})
+    ON CONFLICT (source) DO UPDATE SET tools = EXCLUDED.tools, truncated = EXCLUDED.truncated, listed_at = now()`
+}
+
+// A transaction by hand: `conn` is a reserved connection, which postgres.js allows one on.
+async function putIfCurrent(conn: Sql, name: string, url: string, tools: readonly StoredTool[], truncated: boolean): Promise<boolean> {
+  await conn`BEGIN`
+  try {
+    const [plugin] = await conn`SELECT 1 FROM ai_plugins WHERE name = ${name} AND url = ${url} FOR UPDATE`
+    if (plugin) await upsert(conn, remoteSource(name), tools, truncated)
+    await conn`COMMIT`
+    return plugin !== undefined
+  } catch (err) {
+    await conn`ROLLBACK`.catch(() => undefined)
+    throw err
   }
 }

@@ -639,6 +639,8 @@ export class PluginStore implements PluginRepo {
           dek_sealed = ${secretColumns.dek_sealed}, kek_id = ${secretColumns.kek_id},
           last4 = ${secretColumns.last4}, updated_at = now()
         WHERE name = ${name}`
+      // The last listing was the old server's (#4994): the page lists none until the next test.
+      if (url !== current.url) await tx`DELETE FROM ai_tool_listings WHERE source = ${remoteSource(name)}`
       await this.writeAccess(tx, name, { tiers, disabled, enabled }, updatedBy(context), {
         enabled: patch.enabled !== undefined,
         tools: patch.tool_tiers !== undefined || patch.disabled_tools !== undefined,

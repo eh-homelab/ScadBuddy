@@ -1,7 +1,6 @@
 import type { Context, Hono } from 'hono'
 import { z } from 'zod'
-import type { ToolListings } from '../access/listings.js'
-import { remoteSource } from '../access/model.js'
+import type { PluginListingPut, ToolListings } from '../access/listings.js'
 import type { AppDeps } from '../app.js'
 import { RISK_TIERS } from '../harness/permissions.js'
 import { EgressError, type Resolver, systemResolver } from '../http/egress.js'
@@ -279,8 +278,11 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
 }
 
 // One test (or listing refresh) per plugin at a time, whichever route started it: each
-// one opens a connection to the endpoint.
+// one opens a connection to the endpoint. This set answers a second caller in this process
+// without a database round trip; ToolListings.exclusive holds it across replicas (#4994).
 const testing = new Set<string>()
+
+const BUSY = { status: 429, body: { detail: 'a connection test for this plugin is already running' } } as const
 
 type TestDeps = ReturnType<typeof pluginTestDeps> & { ready: () => Promise<boolean> }
 
@@ -292,7 +294,7 @@ export async function testAndList(
   deps: TestDeps,
   name: string,
 ): Promise<{ status: 200 | 400 | 404 | 409 | 429 | 503; body: PluginTest | { detail: string } }> {
-  if (testing.has(name)) return { status: 429, body: { detail: 'a connection test for this plugin is already running' } }
+  if (testing.has(name)) return BUSY
   testing.add(name)
   try {
     if (!deps.plugins) return { status: 503, body: { detail: NO_DATABASE } }
@@ -318,9 +320,17 @@ export async function testAndList(
       throw err
     }
     if (address === undefined) return { status: 400, body: { detail: 'url host resolves to no address' } }
-    const test = await deps.testPlugin(plugin, address)
-    if (test.ok) await deps.listings?.put(remoteSource(name), test.stored, { truncated: test.truncated })
-    return { status: 200, body: test }
+    const tested = plugin
+    const run = async (put?: PluginListingPut): Promise<PluginTest> => {
+      const test = await deps.testPlugin(tested, address)
+      // Only while the plugin still stands at the URL tested: a delete or a URL change since wins.
+      if (test.ok) await put?.(tested.url, test.stored, { truncated: test.truncated })
+      return test
+    }
+    if (!deps.listings) return { status: 200, body: await run() }
+    const held = await deps.listings.exclusive(name, run)
+    if (!held) return BUSY
+    return { status: 200, body: held.value }
   } finally {
     testing.delete(name)
   }

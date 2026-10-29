@@ -163,6 +163,71 @@ describe.skipIf(!TEST_DATABASE_URL)(`ToolListings${TEST_DATABASE_URL ? '' : ` (s
     expect(await listings.get(SRC)).toBeUndefined()
   })
 
+  describe("a plugin's connection test (#4994)", () => {
+    const URL_A = 'https://hs.example/mcp'
+    const plugin = (url = URL_A) => db.sql`INSERT INTO ai_plugins (name, kind, url) VALUES ('memory', 'remote_mcp', ${url})`
+    const stored = () => listings.get(SRC)
+
+    it("stores the listing while the plugin stands at the URL tested", async () => {
+      await plugin()
+      const held = await listings.exclusive('memory', (put) => put(URL_A, toStoredTools([{ name: 'a' }]), { truncated: true }))
+      expect(held).toEqual({ value: true })
+      expect((await stored())!.tools.map((t) => t.name)).toEqual(['a'])
+      expect((await stored())!.truncated).toBe(true)
+    })
+
+    it('stores nothing once the plugin is deleted or its URL changed', async () => {
+      expect(await listings.exclusive('memory', (put) => put(URL_A, toStoredTools([{ name: 'a' }]), {}))).toEqual({ value: false })
+      await plugin('https://new.example/mcp')
+      expect(await listings.exclusive('memory', (put) => put(URL_A, toStoredTools([{ name: 'a' }]), {}))).toEqual({ value: false })
+      expect(await stored()).toBeUndefined()
+    })
+
+    it('waits for a URL change that holds the row, then stores nothing', async () => {
+      await plugin()
+      let release!: () => void
+      const locked = new Promise<void>((resolve) => (release = resolve))
+      let ready!: () => void
+      const holding = new Promise<void>((resolve) => (ready = resolve))
+      const change = db.sql.begin(async (tx) => {
+        await tx`SELECT 1 FROM ai_plugins WHERE name = 'memory' FOR UPDATE`
+        ready()
+        await locked
+        await tx`UPDATE ai_plugins SET url = 'https://new.example/mcp' WHERE name = 'memory'`
+      })
+      await holding
+      const put = listings.exclusive('memory', (p) => p(URL_A, toStoredTools([{ name: 'a' }]), {}))
+      release()
+      await change
+      expect(await put).toEqual({ value: false })
+      expect(await stored()).toBeUndefined()
+    })
+
+    it("holds one test per plugin across connections, as two replicas' would be", async () => {
+      const other = new ToolListings(db.sql)
+      let finish!: () => void
+      const running = new Promise<void>((resolve) => (finish = resolve))
+      let started!: () => void
+      const holding = new Promise<void>((resolve) => (started = resolve))
+      const first = listings.exclusive('memory', async () => {
+        started()
+        await running
+        return 'first'
+      })
+      await holding
+      expect(await other.exclusive('memory', async () => 'second')).toBeUndefined()
+      expect(await other.exclusive('another', async () => 'another')).toEqual({ value: 'another' })
+      finish()
+      expect(await first).toEqual({ value: 'first' })
+      expect(await other.exclusive('memory', async () => 'again')).toEqual({ value: 'again' })
+    })
+
+    it('frees the lock when the test throws', async () => {
+      await expect(listings.exclusive('memory', () => Promise.reject(new Error('boom')))).rejects.toThrow('boom')
+      expect(await new ToolListings(db.sql).exclusive('memory', async () => 1)).toEqual({ value: 1 })
+    })
+  })
+
   it('getMany reads several sources in one query', async () => {
     await listings.put('remote:a', toStoredTools([{ name: 'x' }]))
     await listings.put('remote:b', toStoredTools([{ name: 'y' }]))

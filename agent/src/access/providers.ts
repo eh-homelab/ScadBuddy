@@ -35,7 +35,8 @@ const rowOf = (rows: readonly AccessRow[], source: string, item: string): Access
 
 function registryItem(tool: Tool, rows: readonly AccessRow[]): ItemView {
   // The item's own access: a source `*` switch (builtin:browser's, #4757) is not folded in.
-  const access = toolAccess(tool.risk, rowOf(rows, registrySource(tool.name), tool.name), true)
+  const row = rowOf(rows, registrySource(tool.name), tool.name)
+  const access = toolAccess(tool.risk, row, true)
   return {
     id: tool.name,
     kind: 'tool',
@@ -47,7 +48,9 @@ function registryItem(tool: Tool, rows: readonly AccessRow[]): ItemView {
     default_note: null,
     suggested: null,
     access,
-    overridden: access !== tool.risk,
+    // Any stored row, so Reset can remove it (#4994): a migrated row at or below the tier is
+    // inert now (resolve.ts `toolAccess`), but takes effect if the tool's tier drops below it.
+    overridden: row !== undefined,
     missing: false,
     allowed: null,
     fixed: null,
@@ -289,11 +292,6 @@ export function remoteProvider(deps: {
   const get = async (source: string): Promise<SourceView | undefined> => {
     const [plugin, listing] = await Promise.all([deps.plugins.get(nameOf(source)), deps.listings.get(source)])
     return plugin && remoteView(plugin, listing)
-  }
-
-  const toolWrite = (access: Access): Exclude<Access, 'on'> => {
-    if (access === 'on') throw new CapabilityError('a tool takes off, read, write or outward, not "on"', 400)
-    return access
   }
 
   return {

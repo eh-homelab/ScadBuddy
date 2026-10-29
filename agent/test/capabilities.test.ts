@@ -111,9 +111,17 @@ describe('the capabilities tree', () => {
 
   it('shows a migrated row that lowers as the default, and choosing the default deletes it', async () => {
     const { caps, rows } = setup([{ source: BUILTIN_SOURCES.scadbuddy, item: 'send_x', access: 'write', updated_by: MIGRATED_BY }])
-    expect(item(await caps.source(BUILTIN_SOURCES.scadbuddy), 'send_x')).toMatchObject({ access: 'outward', overridden: false })
+    expect(item(await caps.source(BUILTIN_SOURCES.scadbuddy), 'send_x')).toMatchObject({ access: 'outward', overridden: true })
     await caps.setItem(BUILTIN_SOURCES.scadbuddy, 'send_x', 'outward', ctx)
     expect(rows).toEqual([])
+  })
+
+  it('a migrated row equal to the tier is overridden, so Reset can remove it (#4994)', async () => {
+    const { caps, rows } = setup([{ source: BUILTIN_SOURCES.scadbuddy, item: 'put_x', access: 'write', updated_by: MIGRATED_BY }])
+    expect(item(await caps.source(BUILTIN_SOURCES.scadbuddy), 'put_x')).toMatchObject({ access: 'write', default: 'write', overridden: true })
+    const source = await caps.resetItem(BUILTIN_SOURCES.scadbuddy, 'put_x', ctx)
+    expect(rows).toEqual([])
+    expect(item(source, 'put_x')).toMatchObject({ access: 'write', overridden: false })
   })
 
   it('browser tools live in builtin:browser, with the origins route', async () => {
