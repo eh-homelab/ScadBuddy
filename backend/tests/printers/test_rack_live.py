@@ -9,17 +9,24 @@ that completed (`printers/nozzle_mapping.py`'s docstring,
 ``SCADBUDDY_TEST_PRINTER_FILE`` names (a sliced rack plate the printer already holds,
 e.g. ``/cache/x.gcode.3mf``), its rack plan read from the file, the rack ranked from the
 printer's own report, started with ``SCADBUDDY_TEST_PRINTER_AMS`` (comma-separated tray
-ids) as its ``ams_mapping`` and the pick as its ``nozzle_mapping``. It waits for the
-printer to run it, failing on a ``print_error`` or on a rack hotend fetched
-(``device.nozzle.tar_id``) that the mapping does not name, then stops it. Whoever runs it
-watches the screen: the hotends it picks up are the ones printed (``-s`` shows the
-mapping sent).
+ids) as its ``ams_mapping`` and the pick as its ``nozzle_mapping``. It waits up to
+`START_WAIT` for the printer to fetch a rack hotend and print layer 1 of *this* job,
+failing on a ``print_error`` or on a rack hotend fetched (``device.nozzle.tar_id``) that
+the mapping does not name, then stops it. What counts as this job's is
+`tests.printers.rack_probe` (#4933: the first live run passed on the previous job's
+``tar_id`` and ``layer_num``). It refuses to start unless the printer is idle
+(`rack_probe.idle_problem`): ``IDLE``, ``FINISH`` or ``FAILED``, and no ``print_error``
+outside a failed job. The printer reports no empty-bed flag, so
+``SCADBUDDY_TEST_PRINTER_PRINT=1`` is the runner's word that the bed is clear. Whoever
+runs it watches the screen: the hotends it picks up are the ones printed (``-s`` shows
+the mapping sent, each fetch and each layer).
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import time
 from io import BytesIO
 
 import pytest
@@ -35,13 +42,13 @@ from scadbuddy.printers.lan_models import ProjectFile
 from scadbuddy.printers.nozzle_mapping import FIXED_NOZZLE_ID, choose_nozzles, read_rack_plan
 from scadbuddy.printers.status import status_from_report
 from tests.conftest import printer_env
+from tests.printers.rack_probe import RackProbe, idle_problem
 from tests.printers.test_status import row
 
 pytestmark = pytest.mark.requires_printer
 
-NAME = "scadbuddy-rack-probe"
-#: How long the printer may take to fetch its hotends and start printing.
-START_WAIT = 300
+#: How long the printer may take to heat, fetch a rack hotend and print layer 1.
+START_WAIT = 1200
 
 
 @pytest.fixture
@@ -59,23 +66,27 @@ def printer() -> dict[str, str]:
 )
 async def test_a_rack_print_uses_the_hotends_sent(printer: dict[str, str]) -> None:
     lan = LanPrinter(**printer, cert_sha256=fetch_cert_sha256(printer["host"]))
+    # Unique per run, so no earlier job (an earlier probe's among them) carries it.
+    name = f"scadbuddy-rack-probe-{int(time.time())}"
     sliced = await lan.download(os.environ["SCADBUDDY_TEST_PRINTER_FILE"])
     plan = read_rack_plan(BytesIO(sliced), 1)
     assert plan is not None and plan.on_rack, "the file is no rack plate"
     first = await lan.probe()
+    problem = idle_problem(first.print, name)
+    assert problem is None, f"not started: {problem}"
     status = status_from_report(row(serial=printer["serial"]), first, now=first.received_at)
     chosen = choose_nozzles(
         plan, status, algorithm="least_used", manual_position=None, usage={}, spools={}
     )
     assert chosen.mapping is not None, f"no pick: {[w.message for w in chosen.warnings]}"
     print(f"slot groups {plan.slot_groups}; nozzle_mapping {chosen.mapping}")
-    sent = {nozzle for nozzle in chosen.mapping if nozzle not in (-1, FIXED_NOZZLE_ID)}
-    md5 = await lan.upload(BytesIO(sliced), f"{UPLOAD_DIR}{NAME}.3mf")
+    sent = frozenset(n for n in chosen.mapping if n not in (-1, FIXED_NOZZLE_ID))
+    md5 = await lan.upload(BytesIO(sliced), f"{UPLOAD_DIR}{name}.3mf")
     command = project_file_command(
         ProjectFile(
-            url=file_url(f"{NAME}.3mf"),
+            url=file_url(f"{name}.3mf"),
             param="Metadata/plate_1.gcode",
-            subtask_name=NAME,
+            subtask_name=name,
             use_ams=True,
             ams_mapping=[int(t) for t in os.environ["SCADBUDDY_TEST_PRINTER_AMS"].split(",")],
             nozzle_mapping=chosen.mapping,
@@ -84,27 +95,24 @@ async def test_a_rack_print_uses_the_hotends_sent(printer: dict[str, str]) -> No
         ),
         "20011",
     )
-    ours = False
-    fetched: list[int] = []
+    # Read again after the upload: the last report before the command is the baseline.
+    baseline = await lan.probe()
+    problem = idle_problem(baseline.print, name)
+    assert problem is None, f"not started: {problem}"
+    probe = RackProbe(name=name, baseline=baseline.print, sent=sent)
     try:
-        await lan.publish(command)
+        # The command goes out on the reading connection, so no report after it is missed.
         async with asyncio.timeout(START_WAIT):
-            async for report in lan.reports():
-                data = report.print
-                if data.get("subtask_name") != NAME:
-                    continue
-                ours = True
-                assert data.get("print_error", 0) == 0
-                nozzle = (data.get("device") or {}).get("nozzle") or {}
-                target = nozzle.get("tar_id")
-                if isinstance(target, int) and target >= 16 and target not in fetched:
-                    fetched.append(target)
-                    print(f"fetching rack hotend {target}")
-                    assert target in sent, f"fetched {target}, sent {sorted(sent)}"
-                if data.get("gcode_state") == "RUNNING" and (data.get("layer_num") or 0) >= 1:
+            async for report in lan.reports(command=command):
+                for line in probe.feed(report.print):
+                    print(line)
+                if probe.done:
                     break
+    except TimeoutError:
+        pytest.fail(f"not verified within {START_WAIT} s: {probe.missing()}")
     finally:
         # Only the probe's own job: a refused start leaves whatever ran before untouched.
-        if ours:
+        if probe.taken:
             await lan.publish({"print": {"command": "stop", "sequence_id": "20012"}})
-    print(f"rack hotends fetched: {fetched}")
+    assert probe.done, f"the connection closed first: {probe.missing()}"
+    print(f"rack hotends fetched: {probe.fetched}; layer {probe.layer}")
