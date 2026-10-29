@@ -600,39 +600,39 @@ async def _serve_versioned(
         if not marked.is_set():
             return False
         try:
-            if not (
-                await is_current(
-                    client,
-                    namespace=client.namespace,
-                    build_id=build_id,
-                    deployment_name=deployment_name,
-                )
-                and await polled_elsewhere(
-                    client,
-                    task_queue,
-                    deployment_name=deployment_name,
-                    build_id=build_id,
-                    identities=identities,
-                    marked_within=marked_within,
-                )
+            if not await is_current(
+                client,
+                namespace=client.namespace,
+                build_id=build_id,
+                deployment_name=deployment_name,
             ):
                 return False
-            # The start's clear, cancelled at stop, may still land after the mark and
-            # remove it; a stopping peer would then count this worker. So trust only a
-            # mark that is still there, and write it again when it is gone. This narrows
-            # the race but does not close it: a cancelled clear can still land after this
-            # read and before the peer's own check. That residual race is accepted: it
-            # needs a clear held in flight past the grace, and its worst case is the one
-            # #4948 fixed, never a worse one.
+            # One read of the marks serves both checks below (#4996), so they never
+            # disagree. The start's clear, cancelled at stop, may still land after the
+            # mark and remove it; a stopping peer would then count this worker. So trust
+            # only a mark that is still there, and write it again when it is gone. This
+            # narrows the race but does not close it: a cancelled clear can still land
+            # after this read and before the peer's own check. That residual race is
+            # accepted: it needs a clear held in flight past the grace, and its worst case
+            # is the one #4948 fixed, never a worse one.
             marks = await draining_marks(client, deployment_name=deployment_name, build_id=build_id)
-            if all(identity in marks for identity in identities):
-                return True
-            logger.warning("this worker's drain mark is gone; writing it again")
-            await mark()
-            return False
+            if not all(identity in marks for identity in identities):
+                logger.warning("this worker's drain mark is gone; writing it again")
+                await mark()
+                return False
+            return await polled_elsewhere(
+                client,
+                task_queue,
+                deployment_name=deployment_name,
+                build_id=build_id,
+                identities=identities,
+                marked_within=marked_within,
+                marks=marks,
+            )
         except RPCError:
             logger.warning(
-                "could not read the deployment's current build or the queue's pollers",
+                "could not read the deployment's current build, the drain marks or the"
+                " queue's pollers",
                 exc_info=True,
             )
             return False

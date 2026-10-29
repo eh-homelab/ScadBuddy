@@ -396,6 +396,9 @@ async def mark_draining(
         ),
         timeout=RPC_TIMEOUT,
     )
+    # A pruned mark is gone, so it is no longer one already logged (#4996): the set would
+    # otherwise only grow for the life of the process.
+    _unparsable_marks.difference_update(stale)
 
 
 async def clear_draining(
@@ -467,6 +470,7 @@ async def polled_elsewhere(
     identities: Collection[str],
     marked_within: float,
     within: float = POLLER_SEEN_WITHIN,
+    marks: Mapping[str, datetime] | None = None,
 ) -> bool:
     """Whether a worker of ``build_id`` other than ``identities`` (the asking
     worker's own) polled ``task_queue``'s workflow tasks in the last ``within`` seconds:
@@ -477,7 +481,8 @@ async def polled_elsewhere(
 
     A poller marked draining in the last ``marked_within`` seconds (`mark_draining`) does
     not count (#4948): two pods of one build that stop together would each count the
-    other. When the marks cannot be read, the answer is False."""
+    other. ``marks`` are the caller's own read of `draining_marks`, read here when None
+    (#4996). When the marks cannot be read, the answer is False."""
     described = await client.workflow_service.describe_task_queue(
         DescribeTaskQueueRequest(
             namespace=client.namespace,
@@ -498,11 +503,12 @@ async def polled_elsewhere(
     }
     if not others:
         return False
-    try:
-        marks = await draining_marks(client, deployment_name=deployment_name, build_id=build_id)
-    except RPCError:
-        logger.warning("could not read this build's drain marks", exc_info=True)
-        return False
+    if marks is None:
+        try:
+            marks = await draining_marks(client, deployment_name=deployment_name, build_id=build_id)
+        except RPCError:
+            logger.warning("could not read this build's drain marks", exc_info=True)
+            return False
     marked_since = now - timedelta(seconds=marked_within)
     return any(identity not in marks or marks[identity] < marked_since for identity in others)
 
