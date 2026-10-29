@@ -26,6 +26,8 @@ function item(over: Partial<ItemView> = {}): ItemView {
     default_note: null,
     suggested: null,
     access: 'outward',
+    // The item's own access follows `access` unless a test sets it.
+    own_access: over.access === undefined ? 'outward' : over.access,
     overridden: false,
     missing: false,
     allowed: null,
@@ -57,12 +59,12 @@ function serve(start: ItemView, source = 'builtin:scadbuddy'): Sent[] {
     http.put(`${BASE}/:source/items/:item`, async ({ request }) => {
       const { access } = (await request.json()) as { access: Access }
       sent.push({ method: 'PUT', access })
-      current = { ...current, access, overridden: access !== current.default }
+      current = { ...current, access, own_access: access, overridden: access !== current.default }
       return HttpResponse.json(view())
     }),
     http.delete(`${BASE}/:source/items/:item`, () => {
       sent.push({ method: 'DELETE' })
-      current = { ...current, access: current.default, overridden: false }
+      current = { ...current, access: current.default, own_access: current.default, overridden: false }
       return HttpResponse.json(view())
     }),
   )
@@ -245,9 +247,9 @@ describe('ItemRow', () => {
   })
 
   it.each([
-    ['the item becomes fixed', (i: ItemView) => ({ ...i, access: 'off' as const, fixed: { access: 'off' as const, reason: 'collides' } })],
-    ['the shown access changes', (i: ItemView) => ({ ...i, access: 'write' as const, overridden: true })],
-    ['the choice no longer lowers', (i: ItemView) => ({ ...i, default: 'read' as const, access: 'outward' as const, overridden: true })],
+    ['the item becomes fixed', (i: ItemView) => ({ ...i, access: 'off' as const, own_access: 'off' as const, fixed: { access: 'off' as const, reason: 'collides' } })],
+    ['the shown access changes', (i: ItemView) => ({ ...i, access: 'write' as const, own_access: 'write' as const, overridden: true })],
+    ['the choice no longer lowers', (i: ItemView) => ({ ...i, default: 'read' as const, access: 'outward' as const, own_access: 'outward' as const, overridden: true })],
   ])('closes an open lowering when a refresh means %s, and sends nothing', async (_, refreshed) => {
     const sent = serve(item())
     const props = { source: 'builtin:scadbuddy', onSaved: () => {} }

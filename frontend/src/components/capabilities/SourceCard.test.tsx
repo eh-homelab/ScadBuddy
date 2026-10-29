@@ -22,6 +22,8 @@ function tool(n: number, over: Partial<ItemView> = {}): ItemView {
     default_note: null,
     suggested: null,
     access: 'read',
+    // The item's own access follows `access` unless a test sets it.
+    own_access: over.access === undefined ? 'read' : over.access,
     overridden: false,
     missing: false,
     allowed: null,

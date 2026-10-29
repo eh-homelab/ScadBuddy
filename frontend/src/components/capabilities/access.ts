@@ -19,10 +19,13 @@ export function choicesOf(item: ItemView): { value: Access | 'default'; label: s
   return item.default === null ? [{ value: 'default', label: 'By call (default)' }, ...choices] : choices
 }
 
-/** What the item's select shows: a forced access, a stored one that takes effect, else the default. */
+/**
+ * What the item's select shows: a forced access, its own stored one that takes effect, else the
+ * default. Its own access, not the effective one: a source switched off leaves the select alone.
+ */
 export function shownAccess(item: ItemView): Access | 'default' {
   if (item.fixed) return item.fixed.access
-  if (item.overridden && item.access !== null) return item.access
+  if (item.overridden && item.own_access !== null) return item.own_access
   return item.default ?? 'default'
 }
 

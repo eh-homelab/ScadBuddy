@@ -4,24 +4,26 @@ import { BROWSER_ORIGINS_PATH } from '../routes/browserOrigins.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import { listExternal } from '../tools/manifest.js'
 import type { Tool } from '../tools/registry.js'
+import { BUILT_INS, reviewOf } from '../plugins/packages/builtins.js'
+import { OWN_PLUGIN_NAME } from '../plugins/packages/vet.js'
 import { harnessToolName, PluginError, type PluginRepo, type PluginSummary, toolPrefix } from '../plugins/registry.js'
 import { describeTools, type PluginTest, type PluginToolView } from '../plugins/testConnection.js'
 import { type Access, CapabilityError, type CapabilityProvider, type ItemDetails, type ItemView, type SourceView } from './capabilities.js'
+import { skillItem, subagentItem } from './items.js'
 import type { ListedTool, ToolListings } from './listings.js'
-import { type AccessRow, BUILTIN_SOURCES, isToolAccess, registrySource, remoteSource } from './model.js'
+import { type AccessRow, BUILTIN_SOURCES, isToolAccess, registrySource, remoteSource, type ToolAccess } from './model.js'
 import { isRegistrySource, sourceEnabled, toolAccess } from './resolve.js'
 import { AccessError, type AccessReader, type AccessWriter } from './store.js'
 
 // The four built-in sources of the capabilities tree (#2171, Task 3), over ai_access through
 // AccessStore. The registry's tools are their sources' items; http_request is builtin:http's
-// one item; the own plugin's skills and subagents come with #4757.
+// one item; the own plugin's skills and subagents are its review's (#4757).
 
 type Spec = { id: string; title: string; switchable: boolean; options_route: string | null }
 
 const SPECS: readonly Spec[] = [
   { id: BUILTIN_SOURCES.scadbuddy, title: 'ScadBuddy tools', switchable: false, options_route: null },
-  // Its `*` switch is #4757's.
-  { id: BUILTIN_SOURCES.browser, title: 'Your browser tab', switchable: false, options_route: BROWSER_ORIGINS_PATH },
+  { id: BUILTIN_SOURCES.browser, title: 'Your browser tab', switchable: true, options_route: BROWSER_ORIGINS_PATH },
   { id: BUILTIN_SOURCES.http, title: 'HTTP requests', switchable: true, options_route: null },
   { id: BUILTIN_SOURCES.ownPlugin, title: 'ScadBuddy skills and subagents', switchable: true, options_route: null },
 ]
@@ -48,6 +50,7 @@ function registryItem(tool: Tool, rows: readonly AccessRow[]): ItemView {
     default_note: null,
     suggested: null,
     access,
+    own_access: access,
     // Any stored row, so Reset can remove it (#4994): a migrated row at or below the tier is
     // inert now (resolve.ts `toolAccess`), but takes effect if the tool's tier drops below it.
     overridden: row !== undefined,
@@ -72,6 +75,7 @@ function httpItem(rows: readonly AccessRow[]): ItemView {
     default_note: HTTP_DEFAULT_NOTE,
     suggested: null,
     access,
+    own_access: access,
     overridden: access !== null,
     missing: false,
     allowed: null,
@@ -80,11 +84,40 @@ function httpItem(rows: readonly AccessRow[]): ItemView {
   }
 }
 
-// Every built-in item is a tool until #4757: builtin:own-plugin's skills and subagents take on/off,
-// and #4757 replaces this with a write per item kind.
-function toolWrite(access: Access): Exclude<Access, 'on'> {
-  if (access === 'on') throw new CapabilityError('a tool takes off, read, write or outward, not "on"', 400)
-  return access
+const OWN_PLUGIN = BUILT_INS.find((b) => b.name === OWN_PLUGIN_NAME)!
+
+/**
+ * The own plugin's items (#4757): one per skill and subagent its review lists (as the
+ * harness names them, `scadbuddy:<name>`), on by default, `off` with its row.
+ */
+function ownPluginItems(rows: readonly AccessRow[]): ItemView[] {
+  const review = reviewOf(OWN_PLUGIN)
+  const prefix = `${OWN_PLUGIN_NAME}:`
+  const of = (kind: 'skill' | 'subagent', harnessName: string): ItemView => {
+    const name = harnessName.startsWith(prefix) ? harnessName.slice(prefix.length) : harnessName
+    const id = kind === 'skill' ? skillItem(name) : subagentItem(name)
+    const row = rowOf(rows, BUILTIN_SOURCES.ownPlugin, id)
+    const access: Access = row?.access === 'off' ? 'off' : 'on'
+    return {
+      id,
+      kind,
+      name,
+      harness_name: harnessName,
+      label: name,
+      description: review.described?.[id] ?? null,
+      default: 'on',
+      default_note: null,
+      suggested: null,
+      access,
+      own_access: access,
+      overridden: row !== undefined,
+      missing: false,
+      allowed: null,
+      fixed: null,
+      reason: null,
+    }
+  }
+  return [...review.skills.map((s) => of('skill', s)), ...review.agents.map((a) => of('subagent', a))]
 }
 
 /** AccessError (the store refused the write) as a 400. */
@@ -105,6 +138,7 @@ export function builtInProviders(deps: { access: AccessReader & AccessWriter; to
     let items: ItemView[] = []
     if (isRegistrySource(spec.id)) items = tools.filter((t) => registrySource(t.name) === spec.id).map((t) => registryItem(t, rows))
     else if (spec.id === BUILTIN_SOURCES.http) items = [httpItem(rows)]
+    else if (spec.id === BUILTIN_SOURCES.ownPlugin) items = ownPluginItems(rows)
     return {
       id: spec.id,
       kind: 'builtin',
@@ -135,7 +169,8 @@ export function builtInProviders(deps: { access: AccessReader & AccessWriter; to
       await stored(access.setEnabled(source, enabled, context))
     },
     async setItem(source, item, value, context) {
-      await stored(access.setItem(source, item, toolWrite(value), context))
+      // The store checks the access against the item's kind (Task 1 `checkItem`).
+      await stored(access.setItem(source, item, value, context))
     },
     async resetItem(source, item, context) {
       await stored(access.resetItem(source, item, context))
@@ -217,6 +252,7 @@ function remoteItem(plugin: PluginSummary, view: PluginToolView, listed: ListedT
     default_note: null,
     suggested: view.suggested_tier,
     access: collision ? 'off' : (row ?? 'outward'),
+    own_access: collision ? 'off' : (row ?? 'outward'),
     overridden: row !== undefined,
     missing: false,
     allowed: renamed ? ['off', 'outward'] : null,
@@ -245,6 +281,7 @@ function missingItem(plugin: PluginSummary, tool: string): ItemView {
     default_note: null,
     suggested: null,
     access,
+    own_access: access,
     overridden: true,
     missing: true,
     allowed: renamed ? ['off', 'outward'] : null,
@@ -307,7 +344,8 @@ export function remoteProvider(deps: {
       await registry(deps.plugins.update(nameOf(source), { enabled }, undefined, context))
     },
     async setItem(source, item, access, context) {
-      await registry(deps.plugins.setToolAccess(nameOf(source), item, toolWrite(access), context))
+      // Every item here is a tool: Capabilities refused `on` (ITEM_ACCESS).
+      await registry(deps.plugins.setToolAccess(nameOf(source), item, access as ToolAccess, context))
     },
     async resetItem(source, item, context) {
       await registry(deps.plugins.setToolAccess(nameOf(source), item, null, context))

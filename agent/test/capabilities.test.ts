@@ -7,6 +7,7 @@ import { Capabilities, CapabilityError, type CapabilityProvider, type ItemView, 
 import { BUILTIN_SOURCES, MIGRATED_BY } from '../src/access/model.js'
 import { builtInProviders } from '../src/access/providers.js'
 import { HTTP_TOOL_DESCRIPTION } from '../src/harness/httpRequest.js'
+import { BUILT_INS, reviewOf } from '../src/plugins/packages/builtins.js'
 import { BROWSER_ORIGINS_PATH } from '../src/routes/browserOrigins.js'
 import { listExternal } from '../src/tools/manifest.js'
 import { createExternalServer } from '../src/tools/projections.js'
@@ -51,7 +52,7 @@ describe('the capabilities tree', () => {
     const tree = await caps.tree()
     expect(tree.map((s) => s.id)).toEqual([BUILTIN_SOURCES.scadbuddy, BUILTIN_SOURCES.browser, BUILTIN_SOURCES.http, BUILTIN_SOURCES.ownPlugin])
     expect(tree.map((s) => s.title)).toEqual(['ScadBuddy tools', 'Your browser tab', 'HTTP requests', 'ScadBuddy skills and subagents'])
-    expect(tree.map((s) => s.switchable)).toEqual([false, false, true, true])
+    expect(tree.map((s) => s.switchable)).toEqual([false, true, true, true])
     expect(tree.every((s) => s.enabled && s.kind === 'builtin' && s.children.length === 0)).toBe(true)
     const own = tree[0]!
     expect(own.items.map((i) => [i.id, i.default, i.access, i.overridden])).toEqual([
@@ -70,7 +71,14 @@ describe('the capabilities tree', () => {
       allowed: null,
       fixed: null,
     })
-    expect(tree[3]!.items).toEqual([])
+    expect(tree[3]!.items.map((i) => i.id)).toEqual([
+      'skill:authoring',
+      'skill:customize',
+      'skill:print',
+      'subagent:model-author',
+      'subagent:print-analyst',
+    ])
+    expect(tree.flatMap((s) => s.items).every((i) => i.own_access === i.access)).toBe(true)
   })
 
   it('a lowered outward tool reads back lowered, overridden', async () => {
@@ -163,6 +171,92 @@ describe('the capabilities tree', () => {
     expect((await caps.setEnabled(BUILTIN_SOURCES.http, true, ctx)).enabled).toBe(true)
   })
 
+  it('a browser tool reads off while builtin:browser is switched off, keeping its own access', async () => {
+    const { caps, rows } = setup([{ source: BUILTIN_SOURCES.browser, item: 'browser_click', access: 'read', updated_by: 'browser:browser' }])
+    const off = await caps.setEnabled(BUILTIN_SOURCES.browser, false, ctx)
+    expect(off.enabled).toBe(false)
+    expect(item(off, 'browser_click')).toMatchObject({
+      access: 'off',
+      own_access: 'read',
+      overridden: true,
+      reason: 'Off while "Your browser tab" is switched off',
+    })
+    const [tree] = (await caps.tree()).filter((s) => s.id === BUILTIN_SOURCES.browser)
+    expect(item(tree!, 'browser_click')).toMatchObject({ access: 'off', own_access: 'read' })
+    // A write answers the source as the tree does.
+    const set = await caps.setItem(BUILTIN_SOURCES.browser, 'browser_click', 'outward', ctx)
+    expect(item(set, 'browser_click')).toMatchObject({ access: 'off', own_access: 'outward' })
+    expect(rows.filter((r) => r.item !== '*').map((r) => r.access)).toEqual(['outward'])
+  })
+
+  it('switches builtin:browser off and on', async () => {
+    const { caps, rows } = setup()
+    const off = await caps.setEnabled(BUILTIN_SOURCES.browser, false, ctx)
+    expect(off.enabled).toBe(false)
+    // The switch is the `*` row alone: no per-tool off rows.
+    expect(rows).toEqual([{ source: BUILTIN_SOURCES.browser, item: '*', access: 'off', updated_by: 'browser:browser' }])
+    const on = await caps.setEnabled(BUILTIN_SOURCES.browser, true, ctx)
+    expect(on.enabled).toBe(true)
+    expect(item(on, 'browser_click')).toMatchObject({ access: 'write', own_access: 'write', reason: null })
+  })
+
+  it("lists the own plugin's skills and subagents with their descriptions", async () => {
+    const { caps } = setup()
+    const own = await caps.source(BUILTIN_SOURCES.ownPlugin)
+    const review = reviewOf(BUILT_INS[0]!)
+    expect(item(own, 'skill:authoring')).toEqual({
+      id: 'skill:authoring',
+      kind: 'skill',
+      name: 'authoring',
+      harness_name: 'scadbuddy:authoring',
+      label: 'authoring',
+      description: review.described!['skill:authoring'],
+      default: 'on',
+      default_note: null,
+      suggested: null,
+      access: 'on',
+      own_access: 'on',
+      overridden: false,
+      missing: false,
+      allowed: null,
+      fixed: null,
+      reason: null,
+    })
+    expect(item(own, 'subagent:model-author')).toMatchObject({
+      kind: 'subagent',
+      name: 'model-author',
+      harness_name: 'scadbuddy:model-author',
+      description: expect.stringContaining('OpenSCAD templates'),
+      default: 'on',
+      access: 'on',
+    })
+  })
+
+  it('switches an own-plugin skill off and back to its default (the row goes)', async () => {
+    const { caps, rows } = setup()
+    const off = await caps.setItem(BUILTIN_SOURCES.ownPlugin, 'skill:print', 'off', ctx)
+    expect(item(off, 'skill:print')).toMatchObject({ access: 'off', own_access: 'off', overridden: true })
+    expect(rows).toEqual([{ source: BUILTIN_SOURCES.ownPlugin, item: 'skill:print', access: 'off', updated_by: 'browser:browser' }])
+    const on = await caps.setItem(BUILTIN_SOURCES.ownPlugin, 'skill:print', 'on', ctx)
+    expect(rows).toEqual([])
+    expect(item(on, 'skill:print')).toMatchObject({ access: 'on', overridden: false })
+    // The plugin's switch shows on every item, each keeping its own access.
+    const plugin = await caps.setEnabled(BUILTIN_SOURCES.ownPlugin, false, ctx)
+    expect(item(plugin, 'subagent:print-analyst')).toMatchObject({
+      access: 'off',
+      own_access: 'on',
+      reason: 'Off while "ScadBuddy skills and subagents" is switched off',
+    })
+  })
+
+  it('refuses a tier for a skill and on for a tool (400)', async () => {
+    const { caps, rows } = setup()
+    expect(await status(caps.setItem(BUILTIN_SOURCES.ownPlugin, 'skill:print', 'read', ctx))).toBe(400)
+    expect(await status(caps.setItem(BUILTIN_SOURCES.ownPlugin, 'subagent:model-author', 'outward', ctx))).toBe(400)
+    expect(await status(caps.setItem(BUILTIN_SOURCES.browser, 'browser_click', 'on', ctx))).toBe(400)
+    expect(rows).toEqual([])
+  })
+
   it('refuses to switch builtin:scadbuddy (409)', async () => {
     const { caps, rows } = setup()
     expect(await status(caps.setEnabled(BUILTIN_SOURCES.scadbuddy, false, ctx))).toBe(409)
@@ -222,6 +316,7 @@ describe('the capabilities tree', () => {
       default_note: null,
       suggested: null,
       access: 'outward',
+      own_access: 'outward',
       overridden: false,
       missing: false,
     }

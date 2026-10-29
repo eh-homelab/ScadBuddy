@@ -14,6 +14,8 @@ function item(over: Partial<ItemView> = {}): ItemView {
     default_note: null,
     suggested: null,
     access: 'read',
+    // The item's own access follows `access` unless a test sets it.
+    own_access: over.access === undefined ? 'read' : over.access,
     overridden: false,
     missing: false,
     allowed: null,
@@ -63,7 +65,7 @@ describe('access rules', () => {
       { value: 'outward', label: 'outward (asks first)' },
     ])
     expect(shownAccess(http)).toBe('default')
-    expect(shownAccess({ ...http, access: 'write', overridden: true })).toBe('write')
+    expect(shownAccess({ ...http, access: 'write', own_access: 'write', overridden: true })).toBe('write')
   })
 
   it('offers only the allowed accesses of a renamed tool', () => {
@@ -96,6 +98,15 @@ describe('access rules', () => {
     expect(lowers(fixed, 'off')).toBe(false)
     // A stored row the rule ignores: the default is shown.
     expect(shownAccess(item({ default: 'write', access: 'read', overridden: false }))).toBe('write')
+  })
+
+  it("shows the item's own access while its source is off", () => {
+    const off = item({ default: 'outward', access: 'off', own_access: 'write', overridden: true, reason: 'Off while "hs" is switched off' })
+    expect(shownAccess(off)).toBe('write')
+    expect(lowers(off, 'write')).toBe(false)
+    expect(lowers(off, 'off')).toBe(true)
+    // No row of its own: the default, whatever the switch makes it.
+    expect(shownAccess(item({ default: 'outward', access: 'off', own_access: 'outward', overridden: false }))).toBe('outward')
   })
 
   it('summarizes changed items', () => {

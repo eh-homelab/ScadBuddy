@@ -20,6 +20,8 @@ function item(over: Partial<ItemView> = {}): ItemView {
     default_note: null,
     suggested: 'read',
     access: 'outward',
+    // The item's own access follows `access` unless a test sets it.
+    own_access: over.access === undefined ? 'outward' : over.access,
     overridden: false,
     missing: false,
     allowed: null,

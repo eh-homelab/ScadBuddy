@@ -36,9 +36,14 @@ export interface ItemView {
   default: Access | null
   default_note: string | null
   suggested: Access | null
-  /** The effective access; `null` only when `default` is `null` and no row takes effect. */
+  /**
+   * The effective access: `off` while the item's source, or the source above it, is switched
+   * off; `null` only when `default` is `null` and no row takes effect.
+   */
   access: Access | null
-  /** A stored row takes effect. */
+  /** The item's own access, its source's switch not folded in: what its select shows and edits, and Reset resets. */
+  own_access: Access | null
+  /** The item's own stored row takes effect. */
   overridden: boolean
   /** Stored access for a tool the last listing does not name. */
   missing: boolean

@@ -30,9 +30,14 @@ export type ItemView = {
   default: Access | null
   default_note: string | null
   suggested: Access | null
-  /** The effective access; `null` only when `default` is `null` and no row takes effect. */
+  /**
+   * The effective access: `off` while the item's source, or the source it is a child of, is
+   * switched off (#4757); `null` only when `default` is `null` and no row takes effect.
+   */
   access: Access | null
-  /** A stored row takes effect (a migrated row the registry rule ignores does not). */
+  /** The item's own access, its source's switch not folded in: what its select shows and edits, and Reset resets. */
+  own_access: Access | null
+  /** The item's own stored row takes effect (a migrated row the registry rule ignores does not). */
   overridden: boolean
   missing: boolean
   /** Narrows `ITEM_ACCESS[kind]` where something is technically forced (`reason` says why); `null` is the whole kind. */
@@ -78,6 +83,7 @@ export class CapabilityError extends Error {
   }
 }
 
+/** A provider answers each item's own access in both `access` and `own_access`; Capabilities folds the switches in. */
 export interface CapabilityProvider {
   owns(source: string): boolean
   list(): Promise<SourceView[]>
@@ -91,6 +97,21 @@ export interface CapabilityProvider {
 
 const ACCESS_WORDS = (kind: ItemKind): string => ITEM_ACCESS[kind].join(', ')
 
+/**
+ * `view` with its source's switch on its items (#4757): while it, or the source above it
+ * (`offBy`), is switched off, every item reads `off`, saying why unless the item has a reason
+ * of its own (a renamed tool's, one off through another entry's row), which stays.
+ * `own_access` keeps what the item's row gives.
+ */
+function switched(view: SourceView, offBy?: SourceView): SourceView {
+  const off = offBy ?? (view.enabled ? undefined : view)
+  const items =
+    off === undefined
+      ? view.items
+      : view.items.map((item) => ({ ...item, access: 'off' as const, reason: item.reason ?? `Off while "${off.title}" is switched off` }))
+  return { ...view, items, children: view.children.map((child) => switched(child, off)) }
+}
+
 export class Capabilities {
   private readonly providers: readonly CapabilityProvider[]
 
@@ -100,7 +121,7 @@ export class Capabilities {
 
   async tree(): Promise<SourceView[]> {
     const lists = await Promise.all(this.providers.map((p) => p.list()))
-    return lists.flat()
+    return lists.flat().map((view) => switched(view))
   }
 
   async source(id: string): Promise<SourceView> {
@@ -144,7 +165,9 @@ export class Capabilities {
       await this.found(id)
       throw new CapabilityError(`no item "${item}" in "${id}"`, 404)
     }
-    return details
+    // The item as the tree shows it, its source's switch on it.
+    const shown = (await this.found(id)).source.items.find((i) => i.id === item)
+    return shown === undefined ? details : { ...details, item: shown }
   }
 
   async refresh(id: string): Promise<{ test: PluginTest; source: SourceView }> {
@@ -163,7 +186,7 @@ export class Capabilities {
     const provider = this.provider(id)
     const source = await provider.get(id)
     if (source === undefined) throw new CapabilityError(`no source "${id}"`, 404)
-    return { provider, source }
+    return { provider, source: switched(source) }
   }
 
   private item(source: SourceView, item: string): ItemView {

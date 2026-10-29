@@ -61,7 +61,7 @@ export type BuiltInPackageView = {
 const reviews = new Map<string, PackageReview>()
 
 /** Its files' review, once per process; the vetting rules' refusals do not apply to it. */
-function reviewOf(b: BuiltIn): PackageReview {
+export function reviewOf(b: BuiltIn): PackageReview {
   let review = reviews.get(b.name)
   if (!review) {
     const vetting = vetPackage(b.dir, b.name)
