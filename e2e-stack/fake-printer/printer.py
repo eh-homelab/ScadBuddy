@@ -286,7 +286,17 @@ def _ftp_server(config: Config, cert: Path, key: Path, received: Received) -> FT
     ImplicitTlsHandler.banner = "fake Bambu printer ready"
     if config.passive_ports is not None:
         ImplicitTlsHandler.passive_ports = list(config.passive_ports)
-    return FTPServer((config.host, config.ftps_port), ImplicitTlsHandler)
+    try:
+        return FTPServer((config.host, config.ftps_port), ImplicitTlsHandler)
+    except OSError as error:
+        # pyftpdlib re-raises a failed bind as ``OSError(<the bind's OSError>)``, which has
+        # no ``errno``: raise the bind's own, so a taken port reads as EADDRINUSE (#4944).
+        # Measured on pyftpdlib 2.2.0 (``ioloop.py`` ``bind_af_unspecified``); a bump that
+        # changes the shape fails ``test_a_taken_ftps_port_fails_the_start_with_its_bind_error``.
+        cause = error.args[0] if len(error.args) == 1 else None
+        if isinstance(cause, OSError):
+            raise cause from error
+        raise
 
 
 def _control_server(config: Config, received: Received) -> ThreadingHTTPServer:
