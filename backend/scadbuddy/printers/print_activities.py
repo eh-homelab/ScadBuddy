@@ -71,7 +71,7 @@ from scadbuddy.printers.lan import (
 from scadbuddy.printers.lan_models import LanReport, LanStarted, ProjectFile
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.nozzle_mapping import choose_nozzles, read_rack_plan
-from scadbuddy.printers.progress import lan_ended
+from scadbuddy.printers.progress import lan_ended, shows
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.status import print_error_text, status_from_report
 from scadbuddy.printers.store import KekMissingError, NoAccessCodeError, PrinterStore
@@ -323,11 +323,17 @@ class LanActivities:
                 " print ends and start the next.",
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
+        # Whether a report has named this print (`lan_ended`'s ``seen``), kept across a
+        # retry in the heartbeat's details.
+        details = activity.info().heartbeat_details
+        seen = bool(details and details[0])
         while True:
-            ended = lan_ended(await asyncio.to_thread(reports.get, input.printer), input.started)
+            report = await asyncio.to_thread(reports.get, input.printer)
+            seen = seen or shows(report, input.started)
+            ended = lan_ended(report, input.started, seen=seen)
             if ended is not None:
                 return ended
-            activity.heartbeat()
+            activity.heartbeat(seen)
             await asyncio.sleep(self.d.wait_poll)
 
     async def _nozzle_mapping(
