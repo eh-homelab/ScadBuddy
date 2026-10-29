@@ -243,7 +243,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     describe('the routes', () => {
-      function app(testPlugin = vi.fn((): Promise<PluginTest> => Promise.resolve({ ok: true, detail: 'connected', duration_ms: 1, server: null, tools: [], truncated: false }))) {
+      function app(testPlugin = vi.fn((): Promise<PluginTest> => Promise.resolve({ ok: true, detail: 'connected', duration_ms: 1, server: null, tools: [], truncated: false, stored: [] }))) {
         return {
           testPlugin,
           app: createApp({

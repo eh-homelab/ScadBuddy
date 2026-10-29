@@ -1,5 +1,8 @@
 import type { Context, Hono } from 'hono'
 import { z } from 'zod'
+import type { ToolListings } from '../access/listings.js'
+import { remoteSource } from '../access/model.js'
+import type { AppDeps } from '../app.js'
 import { RISK_TIERS } from '../harness/permissions.js'
 import { EgressError, type Resolver, systemResolver } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
@@ -58,6 +61,8 @@ export type PluginRouteDeps = {
   builtIns: BuiltInTools
   /** The sets' switches (plugins/packages/builtins.ts); undefined without a database. */
   switches: BuiltInPackages | undefined
+  /** Where a good connection test's tools/list is stored (#2171); undefined without a database. */
+  listings?: ToolListings
 }
 
 export type PluginView = {
@@ -263,41 +268,87 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     return c.body(null, 204)
   })
 
-  // One test per plugin at a time: each one opens a connection to the endpoint.
-  const testing = new Set<string>()
-
   app.post(`${base}/:name/test`, async (c) => {
     const name = c.req.param('name')
     if (builtIn(name)) return isBuiltIn(c, name, 'tested: it has no endpoint; its tools are listed with it')
-    if (testing.has(name)) return c.json({ detail: 'a connection test for this plugin is already running' }, 429)
-    testing.add(name)
-    try {
-      const repo = await store()
-      if (typeof repo === 'string') return c.json({ detail: repo }, 503)
-      let plugin: RemotePlugin | undefined
-      try {
-        plugin = await repo.reveal(name, kek())
-      } catch (err) {
-        if (err instanceof SealError) {
-          return c.json({ detail: `the plugin secret cannot be decrypted: ${err.message}; save it again` }, 409)
-        }
-        throw err
-      }
-      if (!plugin) return c.json({ detail: `no plugin named "${name}"` }, 404)
-      let address: string | undefined
-      try {
-        // Again at test time: the name may resolve differently than at save.
-        // The forwarder connects to exactly the address checked here.
-        ;[address] = await assertEndpointAllowed(plugin.url, resolveHost)
-      } catch (err) {
-        return refusal(c, err)
-      }
-      if (address === undefined) return c.json({ detail: 'url host resolves to no address' }, 400)
-      return c.json(await deps.testPlugin(plugin, address))
-    } finally {
-      testing.delete(name)
-    }
+    const { status, body } = await testAndList(deps, name)
+    if (!('ok' in body)) return c.json(body, status)
+    const { stored: _stored, ...sent } = body
+    return c.json(sent, status)
   })
+}
+
+// One test (or listing refresh) per plugin at a time, whichever route started it: each
+// one opens a connection to the endpoint.
+const testing = new Set<string>()
+
+type TestDeps = ReturnType<typeof pluginTestDeps> & { ready: () => Promise<boolean> }
+
+/**
+ * Tests the remote plugin `name` against the address its endpoint resolves to now, and
+ * stores the listing of a good test in ai_tool_listings (#2171); a failed one stores nothing.
+ */
+export async function testAndList(
+  deps: TestDeps,
+  name: string,
+): Promise<{ status: 200 | 400 | 404 | 409 | 429 | 503; body: PluginTest | { detail: string } }> {
+  if (testing.has(name)) return { status: 429, body: { detail: 'a connection test for this plugin is already running' } }
+  testing.add(name)
+  try {
+    if (!deps.plugins) return { status: 503, body: { detail: NO_DATABASE } }
+    if (!(await deps.ready())) return { status: 503, body: { detail: NOT_READY } }
+    let plugin: RemotePlugin | undefined
+    try {
+      plugin = await deps.plugins.reveal(name, deps.kek.ok ? deps.kek.kek : undefined)
+    } catch (err) {
+      if (err instanceof SealError) {
+        return { status: 409, body: { detail: `the plugin secret cannot be decrypted: ${err.message}; save it again` } }
+      }
+      throw err
+    }
+    if (!plugin) return { status: 404, body: { detail: `no plugin named "${name}"` } }
+    let address: string | undefined
+    try {
+      // Again at test time: the name may resolve differently than at save.
+      // The forwarder connects to exactly the address checked here.
+      ;[address] = await assertEndpointAllowed(plugin.url, deps.resolveHost ?? systemResolver)
+    } catch (err) {
+      if (err instanceof EgressError || err instanceof PluginError) return { status: 400, body: { detail: err.message } }
+      throw err
+    }
+    if (address === undefined) return { status: 400, body: { detail: 'url host resolves to no address' } }
+    const test = await deps.testPlugin(plugin, address)
+    if (test.ok) await deps.listings?.put(remoteSource(name), test.stored)
+    return { status: 200, body: test }
+  } finally {
+    testing.delete(name)
+  }
+}
+
+/** What the connection test needs from the app's deps: the default test goes through the forwarder. */
+export function pluginTestDeps(
+  deps: AppDeps,
+): Pick<PluginRouteDeps, 'plugins' | 'kek' | 'testPlugin' | 'resolveHost'> & { listings?: ToolListings } {
+  return {
+    plugins: deps.plugins,
+    kek: deps.kek,
+    testPlugin:
+      deps.testPlugin ??
+      ((plugin, address) =>
+        deps.pluginForwarder
+          ? testPlugin(plugin, address, deps.pluginForwarder)
+          : Promise.resolve({
+              ok: false,
+              detail: 'the plugin forwarder is not running',
+              duration_ms: 0,
+              server: null,
+              tools: [],
+              truncated: false,
+              stored: [],
+            })),
+    ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
+    ...(deps.listings === undefined ? {} : { listings: deps.listings }),
+  }
 }
 
 declare module '../app.js' {
@@ -308,6 +359,8 @@ declare module '../app.js' {
     testPlugin?: (plugin: RemotePlugin, address: string) => Promise<PluginTest>
     /** The loopback forwarder plugin traffic goes through (plugins/forwarder.ts); needed by the default test. */
     pluginForwarder?: PluginForwarder
+    /** The tools each remote or package source last listed (#2171); undefined without a database. */
+    listings?: ToolListings
   }
 }
 
@@ -315,27 +368,12 @@ declare module '../app.js' {
 export const route: RouteModule = {
   register(app, deps) {
     registerPluginRoutes(app, {
-      plugins: deps.plugins,
       ready: ready(deps),
-      kek: deps.kek,
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
       builtIns: new BuiltInTools(deps.access),
       switches: deps.access ? new BuiltInPackages(deps.access) : undefined,
-      testPlugin:
-        deps.testPlugin ??
-        ((plugin, address) =>
-          deps.pluginForwarder
-            ? testPlugin(plugin, address, deps.pluginForwarder)
-            : Promise.resolve({
-                ok: false,
-                detail: 'the plugin forwarder is not running',
-                duration_ms: 0,
-                server: null,
-                tools: [],
-                truncated: false,
-              })),
-      ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
+      ...pluginTestDeps(deps),
     })
   },
 }

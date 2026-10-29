@@ -6,6 +6,7 @@ import { event } from './sessions/protocol.js'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { AccessResolver } from './access/resolver.js'
+import { ToolListings } from './access/listings.js'
 import { AccessStore } from './access/store.js'
 import { createApp } from './app.js'
 import { mcpAuthSettings } from './auth/authenticate.js'
@@ -232,6 +233,8 @@ const oidcRepo = settings
 const oidcProvider = new OidcProvider()
 // The registry's tools let it keep the old ai_settings keys for older replicas (access/legacy.ts, #4828).
 const access = database ? new AccessStore(database.sql, audit, ALL_TOOLS) : undefined
+// What each remote source last listed (#2171): a good connection test stores it.
+const listings = database ? new ToolListings(database.sql) : undefined
 // Each item's effective access, read at each call (#2171): the turns' http_request and own-plugin switches.
 const accessResolver = new AccessResolver(access)
 const plugins = database ? new PluginStore(database.sql) : undefined
@@ -1006,6 +1009,7 @@ const app = createApp({
   access,
   plugins,
   pluginForwarder,
+  listings,
   pluginPackages,
   packageInstaller,
   settings,

@@ -42,6 +42,8 @@ export type FakeMcpOptions = {
   browser?: { redirects?: Record<string, string>; fails?: readonly string[] }
   /** Stateful: `initialize` issues an `mcp-session-id` (sessionIdGenerator: randomUUID) and a `DELETE` ends it. */
   sessions?: boolean
+  /** Fields merged into a tool's `tools/list` entry, by tool name: ones the MCP SDK's schema does not know. */
+  listExtras?: Record<string, Record<string, unknown>>
 }
 
 /** What the fake browser shows of a page. */
@@ -49,10 +51,23 @@ export function fakePage(url: string): string {
   return `### Page\n- Page URL: ${url}\n- Page Title: Page at ${url}\n\n### Snapshot\nThe text of ${url}`
 }
 
+type ListHandler = (request: unknown, extra: unknown) => Promise<{ tools: Record<string, unknown>[] }>
+
+/** Wraps the McpServer's own `tools/list` handler (Protocol's `_requestHandlers`, SDK 1.32) to add `extras`. */
+function addListExtras(server: McpServer, extras: Record<string, Record<string, unknown>>): void {
+  const handlers = (server.server as unknown as { _requestHandlers: Map<string, ListHandler> })._requestHandlers
+  const list = handlers.get('tools/list')!
+  handlers.set('tools/list', async (request, extra) => {
+    const result = await list(request, extra)
+    return { ...result, tools: result.tools.map((t) => ({ ...t, ...extras[t.name as string] })) }
+  })
+}
+
 function buildServer(
   calls: string[],
   extraTools: readonly string[],
   browser?: { redirects?: Record<string, string>; fails?: readonly string[]; page: { url: string } },
+  listExtras?: Record<string, Record<string, unknown>>,
 ): McpServer {
   const server = new McpServer({ name: 'fake-memory', version: '0.0.1' })
   if (browser) {
@@ -99,6 +114,7 @@ function buildServer(
       return { content: [{ type: 'text', text: 'deleted' }] }
     },
   )
+  if (listExtras) addListExtras(server, listExtras)
   return server
 }
 
@@ -132,7 +148,7 @@ export async function startFakeMcp(options: FakeMcpOptions = {}): Promise<FakeMc
         res.writeHead(sessionId === undefined ? 400 : 404).end()
         return
       }
-      const server = buildServer(calls, options.extraTools ?? [], browser)
+      const server = buildServer(calls, options.extraTools ?? [], browser, options.listExtras)
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: randomUUID,
         onsessioninitialized: (id) => {
@@ -156,7 +172,7 @@ export async function startFakeMcp(options: FakeMcpOptions = {}): Promise<FakeMc
       res.writeHead(405, { allow: 'POST' }).end()
       return
     }
-    const server = buildServer(calls, options.extraTools ?? [], browser)
+    const server = buildServer(calls, options.extraTools ?? [], browser, options.listExtras)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
       void transport.close()

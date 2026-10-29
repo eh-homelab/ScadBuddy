@@ -92,6 +92,17 @@ describe('plugin connection test, through the forwarder', () => {
     expect(forwarder.size).toBe(0) // released
   })
 
+  it('a connection test keeps fields the MCP SDK does not know', async () => {
+    mcp = await startFakeMcp({ listExtras: { recall: { x_new: 1, annotations: { readOnlyHint: true, x_hint: true } } } })
+    const result = await testPlugin(plugin(mcp.url), '127.0.0.1', forwarder, { timeoutMs: 5000 })
+    expect(result.ok).toBe(true)
+    const recall = result.tools.find((t) => t.name === 'recall')!
+    expect(recall.raw.x_new).toBe(1)
+    expect((recall.raw.annotations as Record<string, unknown>).x_hint).toBe(true)
+    expect(recall.input_schema).toMatchObject({ type: 'object', properties: { query: { type: 'string' } } })
+    expect(result.stored.find((t) => t.raw.name === 'recall')!.raw.x_new).toBe(1)
+  })
+
   it('connects to the checked address, not to whatever the name resolves to', async () => {
     mcp = await startFakeMcp()
     const port = new URL(mcp.url).port

@@ -1,6 +1,8 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { z } from 'zod'
+import { type ListedTool, listedTool, type Omitted, type StoredTool, toStoredTools } from '../access/listings.js'
 import type { RiskTier } from '../harness/permissions.js'
 import { redact } from '../secrets.js'
 import type { PluginForwarder } from './forwarder.js'
@@ -24,14 +26,30 @@ import { harnessToolName, headerSecretVariants, type RemotePlugin, toolPrefix } 
 // to be untrusted unless they come from trusted servers",
 // https://modelcontextprotocol.io/specification/2025-06-18/server/tools).
 // One `tools/list` page only: a `nextCursor` is reported as `truncated`.
+//
+// The page is read through a loose schema (`ListedPage`), not `client.listTools()`: the
+// SDK's `ToolSchema` is a plain `z.object` (@modelcontextprotocol/sdk 1.32,
+// dist/esm/types.js), which strips every field it does not know, an unknown annotation
+// key included, and the stored listing keeps the server's entry as sent (#2171, #778).
+const ListedPage = z.looseObject({
+  tools: z.array(z.looseObject({ name: z.string() })),
+  nextCursor: z.string().optional(),
+})
 
 export type PluginToolView = {
   /** As the server names it. */
   name: string
   /** As the model sees it: `mcp__<plugin>__<tool>`, after Claude Code's renaming (registry.ts `harnessToolName`). */
   harness_name: string
+  title: string | null
   description: string | null
   annotations: Record<string, unknown> | null
+  input_schema: Record<string, unknown> | null
+  output_schema: Record<string, unknown> | null
+  /** The server's entry as listed, minus what a cap removed (access/listings.ts). */
+  raw: Record<string, unknown>
+  /** What a cap removed from `raw`. */
+  omitted: Omitted[]
   /** The tier the harness applies. */
   tier: RiskTier
   /**
@@ -58,6 +76,8 @@ export type PluginTest = {
   tools: PluginToolView[]
   /** The server has more tools than one tools/list page returned. */
   truncated: boolean
+  /** The listing as stored in ai_tool_listings (empty when the test failed); the routes never send it. */
+  stored: StoredTool[]
 }
 
 export type PluginTestOptions = {
@@ -70,7 +90,7 @@ export const DEFAULT_PLUGIN_TEST_TIMEOUT_MS = 10_000
 
 export function describeTools(
   plugin: Pick<RemotePlugin, 'name' | 'toolTiers' | 'disabledTools'>,
-  tools: readonly { name: string; description?: string | undefined; annotations?: object | undefined }[],
+  tools: readonly ListedTool[],
 ): PluginToolView[] {
   const disabled = new Set(plugin.disabledTools.map(harnessToolName))
   const byName = new Map<string, string[]>()
@@ -81,7 +101,7 @@ export function describeTools(
   return tools.map((tool) => {
     const name = harnessToolName(tool.name)
     const others = (byName.get(name) ?? []).filter((n) => n !== tool.name)
-    const annotations = (tool.annotations ?? null) as Record<string, unknown> | null
+    const annotations = tool.annotations
     let tier: RiskTier = 'outward'
     let source: PluginToolView['tier_source'] = 'default'
     if (others.length > 0) source = 'collision'
@@ -93,8 +113,13 @@ export function describeTools(
     return {
       name: tool.name,
       harness_name: `${toolPrefix(plugin.name)}${name}`,
-      description: tool.description ?? null,
+      title: tool.title,
+      description: tool.description,
       annotations,
+      input_schema: tool.input_schema,
+      output_schema: tool.output_schema,
+      raw: tool.raw,
+      omitted: tool.omitted,
       tier,
       tier_source: source,
       collides_with: others,
@@ -117,13 +142,20 @@ export async function testPlugin(
   const timer = setTimeout(() => controller.abort(new Error('timed out')), timeoutMs)
   const secrets = plugin.header ? headerSecretVariants(plugin.header.value) : []
   let server: PluginTest['server'] = null
-  const done = (ok: boolean, detail: string, tools: PluginToolView[] = [], truncated = false): PluginTest => ({
+  const done = (
+    ok: boolean,
+    detail: string,
+    tools: PluginToolView[] = [],
+    truncated = false,
+    stored: StoredTool[] = [],
+  ): PluginTest => ({
     ok,
     detail: redact(detail, secrets),
     duration_ms: performance.now() - started,
     server,
     tools,
     truncated,
+    stored,
   })
 
   const registration = forwarder.register(plugin, address, { filterTools: false })
@@ -142,9 +174,10 @@ export async function testPlugin(
     await Promise.race([client.connect(transport, requestOptions), timedOut])
     const info = client.getServerVersion()
     server = info ? { name: info.name, version: info.version } : null
-    const listed = await Promise.race([client.listTools(undefined, requestOptions), timedOut])
-    const tools = describeTools(plugin, listed.tools)
-    return done(true, `connected; ${tools.length} tool(s)`, tools, listed.nextCursor !== undefined)
+    const listed = await Promise.race([client.request({ method: 'tools/list' }, ListedPage, requestOptions), timedOut])
+    const stored = toStoredTools(listed.tools)
+    const tools = describeTools(plugin, stored.map(listedTool))
+    return done(true, `connected; ${tools.length} tool(s)`, tools, listed.nextCursor !== undefined, stored)
   } catch (err) {
     if (controller.signal.aborted) return done(false, `timed out after ${timeoutMs} ms waiting for the MCP endpoint`)
     if (err instanceof StreamableHTTPError && err.code !== undefined) {
