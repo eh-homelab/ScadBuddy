@@ -75,7 +75,7 @@ describe('Built-in (#2171)', () => {
     const { user } = renderSettingsSection(<BuiltIn />, { route })
     const scadbuddy = await card('ScadBuddy tools')
     await user.click(screen.getByRole('button', { name: 'ScadBuddy tools' }))
-    expect(within(scadbuddy).getByText(/Set Printer camera to off/)).toBeVisible()
+    expect(within(scadbuddy).getByText(/Set “See a printer’s camera” to off/)).toBeVisible()
   })
 
   it('says it is loading until the tools are read', async () => {
@@ -107,7 +107,7 @@ describe('Built-in (#2171)', () => {
     await card('ScadBuddy tools')
     await user.click(screen.getByRole('button', { name: 'ScadBuddy tools' }))
     await choose(user, select('get_printer_camera'), 'off')
-    const dialog = await screen.findByRole('alertdialog', { name: 'Lower Printer camera?' })
+    const dialog = await screen.findByRole('alertdialog', { name: "Lower See a printer's camera?" })
     await user.click(within(dialog).getByRole('button', { name: 'Lower to off' }))
     await waitFor(() => expect(select('get_printer_camera')).toHaveTextContent('off'))
     expect(await itemAccess('builtin:scadbuddy', 'get_printer_camera')).toBe('off')

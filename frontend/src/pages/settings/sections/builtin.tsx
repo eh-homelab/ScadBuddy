@@ -65,7 +65,7 @@ function BuiltInSources() {
           <SourceCard key={source.id} source={source} onChange={replace}>
             {source.id === 'builtin:scadbuddy' && (
               <p className="text-xs text-muted-foreground">
-                A camera frame shows whatever is in view of the printer, not only the print. Set Printer camera to off
+                A camera frame shows whatever is in view of the printer, not only the print. Set &ldquo;See a printer&rsquo;s camera&rdquo; to off
                 to keep it from the assistant and from MCP clients; they are then told the camera is turned off here.
               </p>
             )}

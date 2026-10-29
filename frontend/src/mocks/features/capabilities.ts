@@ -46,7 +46,7 @@ const TOOLS: Record<string, readonly BuiltInTool[]> = {
     { name: 'render_model', label: 'Render a model', description: 'Renders a model with the given parameters.', risk: 'write' },
     { name: 'send_to_printer', label: 'Send to printer', description: 'Sends an output to a printer and starts the print.', risk: 'outward' },
     { name: 'delete_model', label: 'Delete a model', description: 'Deletes a model and its history.', risk: 'outward' },
-    { name: 'get_printer_camera', label: 'Printer camera', description: "Takes a picture from a printer's camera.", risk: 'read' },
+    { name: 'get_printer_camera', label: "See a printer's camera", description: "Takes a picture from a printer's camera.", risk: 'read' },
   ],
   'builtin:browser': [
     { name: 'browser_click', label: 'Click in your tab', description: 'Clicks an element on the page you have open.', risk: 'write' },
