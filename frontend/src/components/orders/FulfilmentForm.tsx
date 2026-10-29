@@ -87,10 +87,12 @@ export function FulfilmentForm({
             disabled={busy}
             onClick={() =>
               void run(async () => {
-                // An attempt already recorded and not accepted is the one to accept: a
-                // retry after a refused accept never records a second one.
-                const open = attempts.find((a) => !a.accepted_at && a.outcome !== 'failed')
-                const attempt = open ?? (await api.recordFulfilment(orderId, itemId, { quantity: quantity - made, outcome: 'succeeded', notes: 'Marked done' }))
+                // The attempt Mark done recorded before (for what is left), not accepted: a
+                // retry after a refused accept never records a second one. A partial attempt
+                // recorded by hand is left for its own Accept.
+                const left = quantity - made
+                const open = attempts.find((a) => !a.accepted_at && a.outcome !== 'failed' && (a.quantity === left || a.notes === 'Marked done'))
+                const attempt = open ?? (await api.recordFulfilment(orderId, itemId, { quantity: left, outcome: 'succeeded', notes: 'Marked done' }))
                 await api.acceptFulfilment(orderId, itemId, attempt.id)
               })
             }

@@ -134,6 +134,23 @@ describe('custom line items', () => {
     expect(state.fulfilments.filter((f) => f.order_item_id === item.id).map((f) => f.id)).toEqual([open.id])
   })
 
+  it('leaves a partial attempt recorded by hand for its own Accept', async () => {
+    const order = await api.createOrder({ customer_id: state.orders[0]!.customer_id })
+    const item = await api.addOrderItem(order.id, { kind: 'custom', title: 'Design work', quantity: 3, unit_price_minor: 1000 })
+    await api.acceptOrder(order.id)
+    const partial = await api.recordFulfilment(order.id, item.id, { quantity: 1, outcome: 'partial' })
+    const { user } = render(order.id)
+    await user.click(await screen.findByRole('button', { name: 'Design work' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Mark done' }))
+    await waitFor(() => expect(state.items.find((i) => i.id === item.id)?.status).toBe('fulfilled'))
+    const attempts = state.fulfilments.filter((f) => f.order_item_id === item.id)
+    expect(attempts.map((f) => [f.quantity, f.notes, Boolean(f.accepted_at)])).toEqual([
+      [1, '', false],
+      [3, 'Marked done', true],
+    ])
+    expect(attempts[0]!.id).toBe(partial.id)
+  })
+
   it("leaves an agent's price quoted (accept: false), and refuses a typed quote of its own", async () => {
     const item = await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Fee', quantity: 2, unit_price_minor: 100, accept: false })
     expect(item.status).toBe('quoted')
