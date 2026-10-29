@@ -42,12 +42,10 @@ from scadbuddy.bambuddy.print_run import (
     NATIVE_SLICER_UNAVAILABLE,
     PlannedRun,
     PreparedPlates,
-    PrintRunRequest,
     PrintRunResult,
     QueuedPlate,
     ResolvedProject,
     RunPath,
-    RunRefusalError,
     ensured_route,
     finish_run,
     plan_run,
@@ -86,6 +84,7 @@ from scadbuddy.spools.overlay import labels as spool_labels
 from scadbuddy.spools.overlay import printer_overlay
 from scadbuddy.workflows.print_models import (
     FAILED,
+    PRINT_LAN_UPDATE_ACTIVITY,
     REFUSED,
     SLICE_GONE,
     SLICE_LOST,
@@ -95,6 +94,7 @@ from scadbuddy.workflows.print_models import (
     FailInput,
     FinishInput,
     InsertInput,
+    LanUpdateInput,
     PlanInput,
     RecordInput,
     SliceStartInput,
@@ -139,20 +139,6 @@ async def _reused_slice_gone(client: BambuddyClient, input: EnqueueInput, error:
         extra={"library_file_id": input.sliced, "status": code},
     )
     return False
-
-
-#: Why a LAN run prints one plate once (plan 2026-10-16 Task 9).
-ONE_LAN_PRINT = (
-    "A print over the LAN starts one plate, once: the printer has no queue to hold the"
-    " rest. Print one plate with one copy, or set the printer's path to Bambuddy."
-)
-
-
-def _one_lan_print(plate_ids: list[int], request: PrintRunRequest) -> None:
-    """Refuse what a LAN start cannot do: a second ``project_file`` replaces the print
-    running, and nothing queues behind it."""
-    if len(plate_ids) > 1 or (request.copies or 1) > 1:
-        raise RunRefusalError(ONE_LAN_PRINT)
 
 
 @dataclass
@@ -376,7 +362,8 @@ class PrintActivities:
                     # hot path's (D2): it prints through Bambuddy, as before Task 9.
                     checked = checked.model_copy(update={"path": "bambuddy"})
                 if checked.path == "native":
-                    _one_lan_print(checked.plate_ids, request)
+                    # Every plate and copy: the run starts each once the printer has
+                    # finished the one before (#4541).
                     checked = checked.model_copy(update={"lan_start": True})
         except ApiError as error:
             raise raised_as(error, REFUSED) from None
@@ -423,7 +410,7 @@ class PrintActivities:
             async with maybe_client(settings, native=native) as client:
                 source = await self._source(client, input.accepted.source, settings)
                 overlay, labels = await self._overlay(input.accepted.prepared)
-                planned = await heartbeating(
+                return await heartbeating(
                     plan_run(
                         client,
                         source,
@@ -436,10 +423,6 @@ class PrintActivities:
                         provider_labels=labels,
                     )
                 )
-                if planned.lan_start and planned.copies > 1:
-                    # The remembered quantity, which the check could not see.
-                    raise RunRefusalError(ONE_LAN_PRINT)
-                return planned
         except ApiError as error:
             raise raised_as(error, FAILED) from None
 
@@ -693,6 +676,12 @@ class PrintActivities:
             self.d.observer.started_subject(subject.run_subject, library_slug(subject))
         return run
 
+    @activity.defn(name=PRINT_LAN_UPDATE_ACTIVITY)
+    async def lan_update(self, input: LanUpdateInput) -> PrintRun:
+        """A succeeded LAN run's result as its later starts are made (#4541): retried
+        without limit, as ``print_succeed`` is, since the plates it names are printing."""
+        return await self.d.store.update_result(input.run_id, input.slug, input.result)
+
     @activity.defn(name="print_fail")
     async def fail(self, input: FailInput) -> PrintRun:
         return await self.d.store.fail(
@@ -711,5 +700,6 @@ class PrintActivities:
             self.record,
             self.finish,
             self.succeed,
+            self.lan_update,
             self.fail,
         ]

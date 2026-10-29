@@ -25,10 +25,21 @@ from scadbuddy.bambuddy.print_run import (
 )
 from scadbuddy.bambuddy.runs import PrintRun, PrintRunError
 from scadbuddy.library.outputs import PlateSend
+from scadbuddy.printers.lan_models import LanStarted
 from scadbuddy.printers.nozzle_mapping import SlicedRack
 
 #: The workflow type every print route starts.
 PRINT_RUN_WORKFLOW = "PrintRun"
+#: A LAN run's later plate copies (#4541), started by its ``PrintRun`` once the first
+#: is printing, and left to run past it (`lan_sequence_id`).
+LAN_SEQUENCE_WORKFLOW = "PrintLanSequence"
+
+
+def lan_sequence_id(run_id: str) -> str:
+    """The one ``PrintLanSequence`` of a run."""
+    return f"print-lan-{run_id}"
+
+
 #: The Update the route waits on: the record, or the refusal (§5.1).
 ACCEPTED_UPDATE = "accepted"
 #: An activity's `ApplicationError.type` for a refusal before the record exists: the
@@ -220,6 +231,14 @@ LAN_PROBE_TIMEOUT = 15.0
 #: How long ``lan_print`` waits for the printer to report the plate it sent: it was
 #: ``RUNNING`` 1.8 s after the start on the H2C (Task 7).
 LAN_START_WAIT = 30.0
+#: Until the printer has finished a LAN start (#4541): the next plate copy of the run
+#: waits for it, as Bambuddy's queue waits for an idle printer.
+LAN_WAIT_ACTIVITY = "lan_wait"
+#: Seconds between its reads of the printer's report: the watch writes one at most a
+#: second, and a plate's next start a few seconds late costs nothing.
+LAN_WAIT_POLL = 10.0
+#: A succeeded run's result rewritten as its later LAN starts are made (#4541).
+PRINT_LAN_UPDATE_ACTIVITY = "print_lan_update"
 
 
 class SlicedSource(BaseModel):
@@ -279,3 +298,45 @@ class LanPrintInput(BaseModel):
     rack_algorithm: RackAlgorithm = DEFAULT_ALGORITHM
     rack_position: int | None = None
     spools: dict[int, SpoolOption] = Field(default_factory=dict)
+
+
+class LanWaitInput(BaseModel):
+    """``lan_wait``: the registry row, and the start whose print it waits out."""
+
+    printer: str
+    started: LanStarted
+
+
+class LanStart(BaseModel):
+    """One plate copy a LAN run starts later (#4541): its plate, the sliced file and how
+    it was sliced (the plate's record names them), and which copy it is."""
+
+    plate: PlatePlan
+    sliced: int
+    slice_job_id: int | None = None
+    preset_key: str | None = None
+    native: NativeSliced | None = None
+    #: Which copy of the plate it is, from 1.
+    copy_number: int
+
+
+class LanSequenceInput(BaseModel):
+    """``PrintLanSequence``: the run, its plan, the starts still to make in order, its
+    result as it succeeded, and what its plates' records hold so far."""
+
+    input: PrintRunInput
+    accepted: Accepted
+    planned: PlannedRun
+    starts: list[LanStart]
+    result: PrintRunResult
+    #: The plates already recorded: a plate is recorded once, by its first copy.
+    recorded: list[int] = Field(default_factory=list)
+    sent: list[PlateSend] = Field(default_factory=list)
+
+
+class LanUpdateInput(BaseModel):
+    """``print_lan_update``: the run's whole result as it stands now."""
+
+    run_id: str
+    slug: str
+    result: PrintRunResult

@@ -7,11 +7,13 @@ does (Task 7)."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import uuid
 import zipfile
-from collections.abc import AsyncGenerator, AsyncIterator, Iterable
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -19,16 +21,18 @@ import pytest
 from temporalio import activity
 from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.filaments import FilamentPlan
 from scadbuddy.bambuddy.models import RackAlgorithm, SlotChoice
 from scadbuddy.bambuddy.options import PrintOptions
-from scadbuddy.bambuddy.print_run import PlannedRun, PlatePlan, PrintRunRequest
+from scadbuddy.bambuddy.print_run import PlannedRun, PlatePlan, PrintRunRequest, PrintRunResult
 from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
 from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.bambuddy.trays import tray_spool_id
+from scadbuddy.library.outputs import PlateSend
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.printers.models import LanLink, PrinterCreate
@@ -38,18 +42,23 @@ from scadbuddy.workflows.follow import FollowPrint, follow_queue
 from scadbuddy.workflows.print_models import (
     LAN_PRINT_ACTIVITY,
     LAN_UNSURE,
+    PRINT_LAN_UPDATE_ACTIVITY,
     SLICE_RUN_ACTIVITY,
     SLICED_UPLOAD_ACTIVITY,
+    FinishInput,
     LanPrintInput,
+    LanUpdateInput,
     LanUploaded,
     NativeSliced,
     PlanInput,
     PrintRunInput,
+    RecordInput,
     SlicedUploadInput,
     SliceRunInput,
     SourceSpec,
+    lan_sequence_id,
 )
-from scadbuddy.workflows.printing import PrintRunWorkflow
+from scadbuddy.workflows.printing import LanSequenceWorkflow, PrintRunWorkflow
 from tests.conftest import PgPool
 from tests.printers.conftest import KEK
 from tests.support.fake_lan import FakeLan, needs_fake_lan, running_fake_lan
@@ -196,6 +205,20 @@ class NativeFake(Fake):
         self.unsure_after_start = 0
         self.rack_position: int | None = None
         self.rack_algorithm: RackAlgorithm = "least_used"
+        self.copies = 1
+        #: Each result `print_lan_update` recorded, in order (#4541).
+        self.updates: list[PrintRunResult] = []
+        #: The plates whose `print_record` fails every attempt.
+        self.unrecorded: set[int] = set()
+        #: The blob each `slice_run` answers, in turn; `BLOB` once they run out.
+        self.slice_keys: list[str] = []
+
+    @activity.defn(name="print_record")
+    async def record(self, input: RecordInput) -> list[PlateSend]:
+        if input.plate_id in self.unrecorded:
+            self.calls.append("record:failed")
+            raise RuntimeError("the database is gone")
+        return await super().record(input)
 
     @activity.defn(name="print_plan")
     async def plan(self, input: PlanInput) -> PlannedRun:
@@ -204,9 +227,9 @@ class NativeFake(Fake):
             library_file_id=41,
             printer_id=1,
             nozzle_size="0.4",
-            copies=1,
+            copies=self.copies,
             options=PrintOptions(),
-            plates=[PlatePlan(plate_id=1, plan=PLAN)],
+            plates=[PlatePlan(plate_id=plate, plan=PLAN) for plate in self.plates],
             slicer="native" if self.native_slicer else "bambuddy",
             library_queue=self.queue,
             printer=self.printer,
@@ -219,8 +242,23 @@ class NativeFake(Fake):
 
     @activity.defn(name=SLICE_RUN_ACTIVITY)
     async def slice_run(self, input: SliceRunInput) -> NativeSliced:
-        self.calls.append("slice_run")
-        return NativeSliced(slice_id=5, preset_key="k", sliced_blob_key=BLOB)
+        self.calls.append(f"slice_run:{input.plate_id}")
+        # A slice swept since the last `slice_run` is sliced again, into a new blob.
+        key = self.slice_keys.pop(0) if self.slice_keys else BLOB
+        return NativeSliced(slice_id=5, preset_key="k", sliced_blob_key=key)
+
+    @activity.defn(name="print_finish")
+    async def finish(self, input: FinishInput) -> PrintRunResult:
+        # As `finish_run` reports a LAN run: its starts, and no Bambuddy link.
+        self.calls.append("finish")
+        lan = [outcome.lan for outcome in input.outcomes if outcome.lan is not None]
+        return PrintRunResult(library_file_id=41, copies=self.copies, path="native", lan=lan)
+
+    @activity.defn(name=PRINT_LAN_UPDATE_ACTIVITY)
+    async def lan_update(self, input: LanUpdateInput) -> PrintRun:
+        self.calls.append("lan_update")
+        self.updates.append(input.result)
+        return self._run("succeeded", result=input.result)
 
     @activity.defn(name=SLICED_UPLOAD_ACTIVITY)
     async def sliced_upload(self, input: SlicedUploadInput) -> int:
@@ -233,7 +271,7 @@ class NativeFake(Fake):
         return NATIVE_SLICED
 
     def all(self) -> list:  # type: ignore[type-arg]
-        return [*super().all(), self.slice_run, self.sliced_upload]
+        return [*super().all(), self.slice_run, self.sliced_upload, self.lan_update]
 
 
 @pytest.fixture
@@ -259,6 +297,17 @@ def registry_native(pg_pool: PgPool, fake_lan: FakeLan) -> str:
         cert_sha256=fake_lan.cert_sha256,
     )
     return row.id
+
+
+class FakeReports:
+    """The printer's latest report as its `PrinterWatch` keeps it: the fake printer's
+    state, seen now."""
+
+    def __init__(self, fake_lan: FakeLan) -> None:
+        self.fake_lan = fake_lan
+
+    def get(self, printer_id: str) -> tuple[dict[str, Any], datetime]:
+        return dict(self.fake_lan.printer.state), datetime.now(UTC)
 
 
 class Unsure(LanActivities):
@@ -293,9 +342,21 @@ async def _run(
     rack: Usage | None = None,
     rack_position: int | None = None,
     rack_algorithm: RackAlgorithm = "least_used",
+    plates: list[int] | None = None,
+    copies: int = 1,
+    unrecorded: set[int] | None = None,
+    reports: FakeReports | None = None,
+    during: Callable[[Client, PrintRunInput, NativeFake], Awaitable[None]] | None = None,
+    gates: dict[str, asyncio.Event] | None = None,
+    slice_keys: list[str] | None = None,
 ) -> tuple[NativeFake, PrintRun]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
     fake = NativeFake(printer, queue)
+    fake.gates = gates or {}
+    fake.slice_keys = list(slice_keys or [])
+    fake.plates = plates or [1]
+    fake.copies = copies
+    fake.unrecorded = unrecorded or set()
     fake.native_slicer = native_slicer
     fake.lan_start = lan_start
     fake.rack_position = rack_position
@@ -308,6 +369,8 @@ async def _run(
         blobs=blobs,
         start_wait=10.0,
         rack=rack,  # type: ignore[arg-type]
+        reports=reports,  # type: ignore[arg-type]
+        wait_poll=0.2,
     )
     lan = Unsure(deps, unsure)
     arg = PrintRunInput(
@@ -324,13 +387,21 @@ async def _run(
         Worker(
             client,
             task_queue=queue,
-            workflows=[PrintRunWorkflow, FollowPrint],
-            activities=[*fake.all(), lan.lan_upload, lan.lan_print],
+            workflows=[PrintRunWorkflow, FollowPrint, LanSequenceWorkflow],
+            activities=[*fake.all(), lan.lan_upload, lan.lan_print, lan.lan_wait],
         ),
         Worker(client, task_queue=follow_queue(queue), activities=[fake.follow_print]),
     ):
         await start(client, queue, arg)
+        if during is not None:
+            await during(client, arg, fake)
         run = await ended(client, arg)
+        stopped = run.result is not None and run.result.lan_stopped is not None
+        if len(fake.plates) * copies > 1 and run.status == "succeeded" and not stopped:
+            # The later copies are the run's `PrintLanSequence`, which outlives it: its
+            # last row is the run's as it ends.
+            sequence = client.get_workflow_handle(lan_sequence_id(run.id), result_type=PrintRun)
+            run = await sequence.result()
     return fake, run
 
 
@@ -585,3 +656,191 @@ async def test_the_rack_is_recorded_seen_once_per_report_read(
     _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), rack=usage)
     assert run.status == "succeeded"
     assert usage.seen_by == [9] and usage.asked == []
+
+
+async def test_copies_start_one_after_another(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#4541: the printer has no queue, so the run is one. The second copy starts once
+    the printer has finished the first, under a name of its own; the run succeeds at the
+    first start, and its result is rewritten as the second is made."""
+    fake, run = await _run(
+        client, pg_pool, registry_native, blobs=Blobs(), copies=2, reports=FakeReports(fake_lan)
+    )
+    assert run.status == "succeeded"
+    stem = "scadbuddy-run-1-p1"
+    assert [sent["subtask_name"] for sent in fake_lan.project_files()] == [stem, f"{stem}-c2"]
+    names = [entry["name"] for entry in fake_lan.received()["ftps"]]
+    assert names == [f"/{stem}.3mf", f"/{stem}-c2.3mf"]
+    # Succeeded with the second copy still to come, then each step recorded.
+    assert fake.calls.index("succeed") < fake.calls.index("lan_update")
+    first, second = fake.updates[0], fake.updates[-1]
+    assert first.lan_waiting == [1] and first.lan[0].ended == "done"
+    assert [start.subtask_name for start in second.lan] == [stem, f"{stem}-c2"]
+    assert [start.plate_id for start in second.lan] == [1, 1]
+    assert second.lan_waiting == [] and second.lan_stopped is None
+    assert run.result == second
+    # One plate, recorded once, as Bambuddy's one queue item stands for its copies.
+    assert len(fake.outcomes) == 1
+
+
+async def test_a_later_copy_whose_slice_was_swept_is_sliced_again(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """Review of #4940: days may pass before a later copy, and the slice's row (with its
+    hold on the blob) is swept hours after it finished. Each later copy joins its plate's
+    slice again, which slices it again once it is gone, and uploads that blob."""
+    swept = "slice-" + "b" * 64
+    blobs = Blobs()
+    fake, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=blobs,
+        copies=2,
+        reports=FakeReports(fake_lan),
+        slice_keys=[BLOB, swept],
+    )
+    assert run.status == "succeeded"
+    result = run.result
+    assert result is not None and result.lan_stopped is None and len(result.lan) == 2
+    assert fake.calls.count("slice_run:1") == 2
+    assert blobs.read[-1] == swept
+    assert len(fake_lan.project_files()) == 2
+
+
+async def test_every_plate_is_sliced_before_the_first_starts(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    fake, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(),
+        plates=[1, 2],
+        reports=FakeReports(fake_lan),
+    )
+    assert run.status == "succeeded"
+    assert fake.calls.index("slice_run:2") < fake.calls.index("record")
+    params = [sent["param"] for sent in fake_lan.project_files()]
+    assert params == ["Metadata/plate_1.gcode", "Metadata/plate_2.gcode"]
+    assert [outcome.lan.subtask_name for outcome in fake.outcomes if outcome.lan] == [
+        "scadbuddy-run-1-p1",
+        "scadbuddy-run-1-p2",
+    ]
+    assert run.result is not None and [s.plate_id for s in run.result.lan] == [1, 2]
+
+
+async def test_a_later_start_that_fails_stops_the_rest(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """The run has succeeded by then, so it stays so; the starts it never made say why."""
+    printer = fake_lan.printer
+    missing = printer._missing
+    printer._missing = lambda path: "the file is gone" if "-c2" in str(path) else missing(path)
+    _, run = await _run(
+        client, pg_pool, registry_native, blobs=Blobs(), copies=3, reports=FakeReports(fake_lan)
+    )
+    assert run.status == "succeeded"
+    assert len(fake_lan.project_files()) == 2
+    result = run.result
+    assert result is not None and result.lan_waiting == [1, 1]
+    stopped = result.lan_stopped
+    assert stopped is not None and stopped.stage == "failed"
+    assert stopped.message.startswith("Plate 1 was not started, nor the plates after it:")
+    assert "refused the print" in stopped.message
+
+
+async def _cancel_while_it_waits(client: Client, arg: PrintRunInput, fake: NativeFake) -> None:
+    while "succeed" not in fake.calls:
+        await asyncio.sleep(0.1)
+    await asyncio.sleep(1.0)
+    await client.get_workflow_handle(lan_sequence_id("run-1")).cancel()
+
+
+async def test_a_cancel_while_it_waits_stops_the_rest(
+    client: Client, pg_pool: PgPool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with running_fake_lan(tmp_path, monkeypatch, print_seconds=60.0) as slow:
+        printers = PrinterStore(pg_pool, KEK)
+        row = printers.create(PrinterCreate(serial=slow.serial, name="Fake H2C", model="H2C"))
+        printers.link_lan(
+            row.id,
+            LanLink(host=slow.host, access_code=slow.access_code),
+            cert_sha256=slow.cert_sha256,
+        )
+        _, run = await _run(
+            client,
+            pg_pool,
+            row.id,
+            blobs=Blobs(),
+            copies=2,
+            reports=FakeReports(slow),
+            during=_cancel_while_it_waits,
+        )
+        assert len(slow.project_files()) == 1
+    assert run.status == "succeeded"
+    result = run.result
+    assert result is not None and result.lan_waiting == [1]
+    assert result.lan_stopped is not None and result.lan_stopped.stage == "cancelled"
+
+
+async def test_a_cancel_while_it_succeeds_stops_the_rest(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """Review of #4940: a cancel ``print_succeed`` absorbs starts no sequence, and the
+    run's result says the waiting copies were stopped, so they never read as queued."""
+    gate = asyncio.Event()
+
+    async def cancel_while_it_succeeds(
+        client: Client, arg: PrintRunInput, fake: NativeFake
+    ) -> None:
+        while "succeed" not in fake.calls:
+            await asyncio.sleep(0.1)
+        await client.get_workflow_handle(f"print-{arg.key}").cancel()
+        await asyncio.sleep(1.0)
+        gate.set()
+
+    fake, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(),
+        copies=2,
+        reports=FakeReports(fake_lan),
+        during=cancel_while_it_succeeds,
+        gates={"succeed": gate},
+    )
+    assert run.status == "succeeded" and len(fake_lan.project_files()) == 1
+    result = run.result
+    assert result is not None and result.lan_waiting == [1]
+    assert result.lan_stopped is not None and result.lan_stopped.stage == "cancelled"
+    assert fake.updates[-1].lan_stopped == result.lan_stopped
+    with pytest.raises(RPCError):
+        await client.get_workflow_handle(lan_sequence_id(run.id)).describe()
+
+
+async def test_a_started_copy_whose_record_fails_is_still_followed(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """Review of #4940: the start is on the run before its record, so a record that fails
+    stops only the plates after it, and the one printing is still read as printing."""
+    fake, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(),
+        plates=[1, 2, 3],
+        unrecorded={2},
+        reports=FakeReports(fake_lan),
+    )
+    assert run.status == "succeeded" and "record:failed" in fake.calls
+    result = run.result
+    assert result is not None
+    assert [start.plate_id for start in result.lan] == [1, 2] and result.lan_waiting == [3]
+    stopped = result.lan_stopped
+    assert stopped is not None and stopped.stage == "failed"
+    assert stopped.message.startswith(
+        "Plate 2 is printing, but it could not be recorded, so plate 3 and the plates after"
+    )
+    assert len(fake_lan.project_files()) == 2

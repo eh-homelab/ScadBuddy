@@ -21,6 +21,11 @@ export function QueuedPanel({ result, printerName, progress, polling, plates = [
   /** #836 — the rack position each sliced group went out with; positions only, never a serial. */
   const picks = result.rack_picks ?? []
   const manyPlates = new Set(picks.map((pick) => pick.plate_id)).size > 1
+  /** #4541 — the plate copies a LAN run starts later, one at a time. */
+  const stopped = native ? (result.lan_stopped ?? null) : null
+  const waiting = native && stopped === null ? (result.lan_waiting ?? []).length : 0
+  /** Every print the run makes: each plate's copies, where `copies` is per plate. */
+  const prints = (result.lan ?? []).length + waiting
   return (
     <div className="space-y-2 text-[13px] text-foreground">
       <div data-testid="queued-items">
@@ -28,6 +33,18 @@ export function QueuedPanel({ result, printerName, progress, polling, plates = [
           <p>
             Sliced and sent to {printerName ?? 'the printer you chose'} over the LAN —{' '}
             <span className="sb-num">{result.copies}</span> {result.copies === 1 ? 'copy' : 'copies'}.
+            {waiting > 0 && (
+              <span data-testid="lan-waiting" className="block text-[12px] text-muted-foreground">
+                The printer has no queue: ScadBuddy starts the other <span className="sb-num">{waiting}</span> of{' '}
+                <span className="sb-num">{prints}</span> prints one at a time, each once the printer has finished
+                the one before.
+              </span>
+            )}
+            {stopped !== null && (
+              <span data-testid="lan-stopped" className="block text-[12px] text-muted-foreground">
+                {stopped.message}
+              </span>
+            )}
           </p>
         ) : (
         <p>

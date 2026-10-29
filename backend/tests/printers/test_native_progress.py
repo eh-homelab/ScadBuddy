@@ -15,8 +15,17 @@ from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, finish_run
 from scadbuddy.bambuddy.runs import PrintRun, RecentRuns, given_run, newest_failure
 from scadbuddy.core.events import PrintEvent, PrintRunEvent
-from scadbuddy.printers.lan_models import LanStarted
-from scadbuddy.printers.progress import MOVED_ON, NOT_HEARD, PAUSED, LanProgress, from_lan_report
+from scadbuddy.printers.lan_models import LanStarted, LanStopped
+from scadbuddy.printers.progress import (
+    IDLE_SINCE,
+    MOVED_ON,
+    NOT_HEARD,
+    PAUSED,
+    WAITING,
+    LanProgress,
+    from_lan_report,
+    lan_ended,
+)
 from scadbuddy.printers.status import print_error_text
 
 STARTED_AT = datetime(2026, 10, 24, 12, tzinfo=UTC)
@@ -318,25 +327,101 @@ def test_a_lan_starts_warnings_are_the_runs() -> None:
     assert finish_run(None, planned, outcomes).warnings == [left]
 
 
-@pytest.mark.parametrize(
-    ("plates", "copies", "refused"),
-    [([1], None, False), ([1], 1, False), ([1, 2], None, True), ([1], 2, True)],
-)
-def test_a_lan_run_prints_one_plate_once(
-    plates: list[int], copies: int | None, refused: bool
-) -> None:
-    from scadbuddy.bambuddy.filaments import FilamentPlan
-    from scadbuddy.bambuddy.print_run import PrintRunRequest, RunRefusalError
-    from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices
-    from scadbuddy.workflows.print_activities import _one_lan_print
+SECOND = LanStarted(subtask_name="scadbuddy-abcd1234-p1-c2", started_at=at(hours=2), plate_id=1)
 
-    request = PrintRunRequest(
-        filament_plan=FilamentPlan(slots=[]),
-        choices=PrintChoices(nozzles=[NozzleChoice(size="0.4")]),
-        copies=copies,
+
+@pytest.mark.parametrize(
+    ("data", "stage", "message"),
+    [
+        ({"gcode_state": "FINISH"}, "done", None),
+        ({"gcode_state": "FAILED", "print_error": 0x0500C010}, "failed", "0500_C010"),
+        ({"gcode_state": "FAILED"}, "failed", "stopped on the printer"),
+        # Another print's end: this one's is not known, and the printer is free.
+        ({"gcode_state": "FINISH", "subtask_name": "theirs"}, "unknown", MOVED_ON),
+        ({"gcode_state": "IDLE"}, "unknown", IDLE_SINCE),
+    ],
+)
+def test_a_start_ends_when_the_printer_stops_printing(
+    data: dict[str, Any], stage: str, message: str | None
+) -> None:
+    """#4541: the next copy of a run waits for this."""
+    ended = lan_ended(report(**data), OURS)
+    assert ended is not None and ended.ended == stage
+    assert (ended.ended_message is None) == (message is None)
+    assert message is None or message in (ended.ended_message or "")
+    assert ended.subtask_name == OURS.subtask_name
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        report(gcode_state="RUNNING"),
+        report(gcode_state="PAUSE"),
+        # Another print started since, still running: the printer is not free.
+        report(gcode_state="RUNNING", subtask_name="theirs"),
+        # The report the start was seen in, and one from before it.
+        report(seconds=0, gcode_state="FINISH"),
+        report(seconds=-60, gcode_state="FINISH"),
+    ],
+    ids=["no report", "running", "paused", "another running", "at the start", "before"],
+)
+def test_a_start_has_not_ended_while_the_printer_prints(
+    value: tuple[dict[str, Any], datetime] | None,
+) -> None:
+    assert lan_ended(value, OURS) is None
+
+
+async def test_a_sequenced_run_reads_each_start_and_the_ones_to_come() -> None:
+    """#4541: the first copy as the run recorded its end, the second from the report, and
+    the third still queued; nothing is settled until the last has printed."""
+    done = OURS.model_copy(update={"plate_id": 1, "ended": "done"})
+    result = PrintRunResult(
+        library_file_id=41, copies=3, path="native", lan=[done, SECOND], lan_waiting=[1]
     )
-    if refused:
-        with pytest.raises(RunRefusalError):
-            _one_lan_print(plates, request)
-    else:
-        _one_lan_print(plates, request)
+    value = (
+        {"subtask_name": SECOND.subtask_name, "gcode_state": "RUNNING"},
+        at(hours=2, seconds=10),
+    )
+    progress = await _lan(_run(result), value).read("o" * 32)
+    assert progress is not None and progress.route == "lan"
+    assert (progress.stage, progress.settled) == ("running", False)
+    assert (progress.copies, progress.copies_completed, progress.copies_in_progress) == (3, 1, 1)
+    assert [copy.stage for copy in progress.copies_detail] == ["done", "running", "queued"]
+    assert progress.copies_detail[2].waiting_reason == WAITING
+    assert [copy.plate_id for copy in progress.copies_detail] == [1, 1, 1]
+
+
+async def test_a_sequenced_run_settles_with_its_last_start() -> None:
+    done = OURS.model_copy(update={"plate_id": 1, "ended": "done"})
+    result = PrintRunResult(library_file_id=41, copies=2, path="native", lan=[done, SECOND])
+    value = ({"subtask_name": SECOND.subtask_name, "gcode_state": "FINISH"}, at(hours=3))
+    progress = await _lan(_run(result), value).read("o" * 32)
+    assert progress is not None
+    assert (progress.stage, progress.settled, progress.copies_completed) == ("done", True, 2)
+
+
+@pytest.mark.parametrize(
+    ("stopped", "stage"),
+    [
+        (LanStopped(stage="failed", message="Plate 2 was not started: gone."), "failed"),
+        (LanStopped(stage="cancelled", message="The print was cancelled."), "cancelled"),
+    ],
+)
+async def test_a_stopped_run_settles_the_starts_it_never_made(
+    stopped: LanStopped, stage: str
+) -> None:
+    result = PrintRunResult(
+        library_file_id=41,
+        copies=1,
+        path="native",
+        lan=[OURS.model_copy(update={"plate_id": 1})],
+        lan_waiting=[2],
+        lan_stopped=stopped,
+    )
+    progress = await _lan(_run(result), report(gcode_state="FINISH")).read("o" * 32)
+    assert progress is not None
+    assert (progress.stage, progress.settled) == (stage, True)
+    assert progress.copies_detail[1].message == stopped.message
+    assert progress.copies_detail[1].plate_id == 2
+    assert progress.error_message == (stopped.message if stage == "failed" else None)

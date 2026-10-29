@@ -298,6 +298,13 @@ class PrintRunStore:
             self._finish, run_id, slug, "succeeded", "result", result.model_dump(mode="json")
         )
 
+    async def update_result(self, run_id: str, slug: str, result: PrintRunResult) -> PrintRun:
+        """Rewrite a succeeded run's result: a LAN run's later starts, each made once the
+        printer has finished the one before (#4541). Only a ``succeeded`` run changes."""
+        return await asyncio.to_thread(
+            self._update_result, run_id, slug, result.model_dump(mode="json")
+        )
+
     async def fail(
         self, run_id: str, slug: str, error: PrintRunError, *, unqueued: bool = False
     ) -> PrintRun:
@@ -515,6 +522,24 @@ class PrintRunStore:
                 (PRE_1052_LOST_AFTER, PRE_1052_LOST_AFTER),
             ).fetchall()
         return [row["id"] for row in rows]
+
+    def _update_result(self, run_id: str, slug: str, value: dict[str, Any]) -> PrintRun:
+        with self._pool.connection() as conn, conn.transaction():
+            row = conn.execute(
+                "UPDATE print_runs SET result = %s WHERE id = %s AND status = 'succeeded'"
+                f" RETURNING {_COLUMNS}",
+                (Jsonb(value), run_id),
+            ).fetchone()
+            if row is not None:
+                run = PrintRun.model_validate(row)
+                self._announce(conn, run, slug, row)
+                return run
+            current = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs WHERE id = %s", (run_id,)
+            ).fetchone()
+        if current is None:
+            raise LookupError(f"there is no print run {run_id}")
+        return PrintRun.model_validate(current)
 
     def _start_enqueue(self, run_id: str) -> None:
         with self._pool.connection() as conn:

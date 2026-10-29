@@ -12,6 +12,12 @@ A report that stops (the printer off, its Wi-Fi gone) leaves the last one standi
 the progress stays what it said until it is `MAX_AGE` old, then settles as ``unknown``
 (Review Focus 5). A report that names another ``subtask_name`` after the start says the
 printer has moved on to another print, so this one settles as ``unknown`` too.
+
+A run of several plates or copies (#4541) starts one at a time, each once the printer has
+finished the one before (`lan_ended`, which the run's ``lan_wait`` polls): a start the
+run waited out carries how it ended (`LanStarted.ended`), since the printer reports the
+next one by then, and each start still to come (`PrintRunResult.lan_waiting`) is a copy
+``queued``, as one waiting in Bambuddy's queue is, until the run stops (``lan_stopped``).
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ from scadbuddy.bambuddy.progress import CopyProgress, PrintProgress, from_plates
 from scadbuddy.bambuddy.runs import LatestRun, read_latest
 from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.core.problems import DATABASE_ERRORS
-from scadbuddy.printers.lan_models import LanStarted
+from scadbuddy.printers.lan_models import LanStarted, LanStopped
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.status import print_error_text
 from scadbuddy.printers.store import PrinterStore
@@ -99,6 +105,80 @@ def from_lan_report(
     )
 
 
+#: The last report of a start the printer went idle after without saying how it ended:
+#: restarted, say, which clears ``FINISH`` (`lan_ended`).
+IDLE_SINCE = "The printer has been idle since, so how this print ended is not known."
+
+
+def lan_ended(
+    report: tuple[dict[str, Any], datetime] | None, started: LanStarted
+) -> LanStarted | None:
+    """``started`` with how it ended (`LanStarted.ended`), once a report seen after the
+    start shows the printer no longer printing: its own ``FINISH`` or ``FAILED``, or
+    another print's end, or ``IDLE``. ``None`` while it, or a print started since, runs,
+    and while no report has been seen since the start. A report that stops is waited
+    out, never read as an end: the next start needs the printer to answer anyway.
+
+    Another ``subtask_name`` is read as an end (``MOVED_ON``). That holds because the
+    report is whole: `PrinterWatch` asks for a ``pushall`` on every connect
+    (`lan.LanPrinter.reports`) and merges each delta over it, so a report that names
+    no ``subtask_name`` yet never reaches this."""
+    if report is None or report[1] <= started.started_at:
+        return None
+    data, seen_at = report
+    state = data.get("gcode_state")
+    if state in _RUNNING:
+        return None
+    progress = from_lan_report(report, started, printer_name=None, now=seen_at)
+    if progress.settled:
+        detail = progress.copies_detail
+        message = detail[0].message if detail else progress.error_message
+        return started.model_copy(update={"ended": progress.stage, "ended_message": message})
+    if state == "IDLE":
+        return started.model_copy(update={"ended": "unknown", "ended_message": IDLE_SINCE})
+    return None
+
+
+def _ended(started: LanStarted, printer_name: str | None) -> PrintProgress:
+    """A start the run waited out: how it ended, as its run recorded it."""
+    stage = started.ended or "unknown"
+    copy = CopyProgress(printer_name=printer_name, stage=stage, message=started.ended_message)
+    return PrintProgress(
+        route="lan",
+        stage=stage,
+        settled=True,
+        copies_completed=1 if stage == "done" else 0,
+        copies_failed=1 if stage == "failed" else 0,
+        error_message=started.ended_message if stage == "failed" else None,
+        copies_detail=[copy],
+        bambuddy_url="",
+    )
+
+
+#: A copy still to start, while the printer prints the one before (#4541).
+WAITING = "Waiting for the printer to finish the print before it."
+
+
+def _waiting(printer_name: str | None, stopped: LanStopped | None) -> PrintProgress:
+    """A start still to come: ``queued`` as one in Bambuddy's queue, or, once the run has
+    stopped, never to start."""
+    if stopped is None:
+        copy = CopyProgress(printer_name=printer_name, stage="queued", waiting_reason=WAITING)
+        return PrintProgress(route="lan", stage="queued", copies_detail=[copy], bambuddy_url="")
+    copy = CopyProgress(printer_name=printer_name, stage=stopped.stage, message=stopped.message)
+    failed = stopped.stage == "failed"
+    return PrintProgress(
+        route="lan",
+        stage=stopped.stage,
+        settled=True,
+        copies_failed=1 if failed else 0,
+        copies_cancelled=0 if failed else 1,
+        error_message=stopped.message if failed else None,
+        copies_detail=[copy],
+        bambuddy_url="",
+    )
+
+
 class LanProgress:
     """`bambuddy.progress.LanReads`: a subject's print, when its newest run printed over
     the LAN; ``None`` otherwise, and the Bambuddy route is read as before. ``latest``
@@ -138,15 +218,22 @@ class LanProgress:
             return None
         name = row.name if row is not None else None
         now = self.now()
+        result = run.result
         plates = [
-            from_lan_report(report, plate, printer_name=name, now=now, max_age=self.max_age)
+            _ended(plate, name)
+            if plate.ended is not None
+            else from_lan_report(report, plate, printer_name=name, now=now, max_age=self.max_age)
             for plate in started
         ]
+        plates += [_waiting(name, result.lan_stopped) for _ in result.lan_waiting]
         if len(plates) == 1:
             return plates[0]
         merged = from_plates(
             plates,
-            list(range(1, len(plates) + 1)),
+            [
+                *(plate.plate_id or index for index, plate in enumerate(started, start=1)),
+                *result.lan_waiting,
+            ],
             slice_job_id=None,
             queue_item_id=None,
             bambuddy_url="",

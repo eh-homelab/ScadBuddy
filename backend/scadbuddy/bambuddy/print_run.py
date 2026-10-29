@@ -147,7 +147,7 @@ from scadbuddy.print_library.copies import (
 )
 from scadbuddy.print_library.reads import LibraryReads, NativeCopies
 from scadbuddy.printers.hot_path import hot_path_native, native_backends
-from scadbuddy.printers.lan_models import LanReport, LanStarted
+from scadbuddy.printers.lan_models import LanReport, LanStarted, LanStopped
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import is_fresh, status_from_report
 from scadbuddy.rack.rank import (
@@ -435,6 +435,12 @@ class PrintRunResult(BaseModel):
     #: Each plate the printer took over the LAN, by the ``subtask_name`` the native
     #: follow reads its progress by (`printers/progress.py`).
     lan: list[LanStarted] = Field(default_factory=list)
+    #: The plate of each LAN start still to come, in order (#4541): the printer has no
+    #: queue, so the run starts one plate copy at a time, each once the printer has
+    #: finished the one before, as Bambuddy's queue does. Empty once every one started.
+    lan_waiting: list[int] = Field(default_factory=list)
+    #: Why the run started none of ``lan_waiting``: set, they never will be.
+    lan_stopped: LanStopped | None = None
 
 
 async def known_slots(
