@@ -3,7 +3,6 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { toStoredTools, ToolListings } from '../src/access/listings.js'
-import { remoteSource } from '../src/access/model.js'
 import { AccessStore } from '../src/access/store.js'
 import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
@@ -44,9 +43,9 @@ describe.skipIf(skip !== '')(`remote access set through the capabilities routes$
 
   async function rig() {
     const store = new PluginStore(db.sql)
-    const listings = new ToolListings(db.sql)
-    await store.create({ name: 'hs', url: mcp.url }, kek)
-    await listings.put(remoteSource('hs'), toStoredTools([{ name: 'a' }, { name: 'b' }]))
+    const listings = new ToolListings(db.sql, db.lockClient)
+    const { url } = await store.create({ name: 'hs', url: mcp.url }, kek)
+    await listings.exclusive('hs', (put) => put(url, toStoredTools([{ name: 'a' }, { name: 'b' }]), {}))
     const app = createApp({
       access: new AccessStore(db.sql),
       database: { ping: () => Promise.resolve(true), ready: () => db.ready() },

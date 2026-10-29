@@ -1,4 +1,5 @@
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
+import { TEST_LOCK_CONNECTIONS } from '../db.js'
 import { z } from 'zod'
 import { remoteSource } from './model.js'
 
@@ -192,9 +193,13 @@ function parseRow(row: Row): Listing | undefined {
 
 export class ToolListings {
   readonly #sql: Sql
+  readonly #locks: () => Sql
+  #held = 0
 
-  constructor(sql: Sql) {
+  /** `locks`: the lock client (db.ts `Database.lockClient`), asked for on the first test. */
+  constructor(sql: Sql, locks: () => Sql) {
     this.#sql = sql
+    this.#locks = locks
   }
 
   async get(source: string): Promise<Listing | undefined> {
@@ -215,58 +220,56 @@ export class ToolListings {
     return out
   }
 
-  /** `truncated`: the listing is not every tool the source has (a `nextCursor`, or entries dropped). */
-  async put(source: string, tools: readonly StoredTool[], options: { truncated?: boolean } = {}): Promise<void> {
-    await upsert(this.#sql, source, tools, options.truncated ?? false)
-  }
-
   /**
    * Runs `fn` holding remote plugin `name`'s test lock, a session advisory lock, so one test
-   * runs at a time across replicas (#4994); `undefined` when another session holds it. The
-   * lock's connection is reserved for `fn`, and `fn`'s `put` runs on it: a test never waits
-   * for a second pool connection while it holds one.
+   * runs at a time across replicas (#4994). `busy`: another session holds it; `full`: this
+   * replica already runs TEST_LOCK_CONNECTIONS tests. The lock is held on the lock client
+   * (db.ts `lockClient`), never on the shared pool, which a test therefore never waits on.
    */
-  async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | undefined> {
-    const conn = await this.#sql.reserve()
+  async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | 'busy' | 'full'> {
+    // Every reserve below is counted here, so none waits for another test's connection.
+    if (this.#held >= TEST_LOCK_CONNECTIONS) return 'full'
+    this.#held++
     try {
-      const key = `scadbuddy:ai_tool_listings:test:${name}`
-      const [row] = await conn<{ held: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS held`
-      if (!row?.held) return undefined
+      const conn = await this.#locks().reserve()
       try {
-        return { value: await fn((url, tools, options) => putIfCurrent(conn, name, url, tools, options.truncated ?? false)) }
+        const key = `scadbuddy:ai_tool_listings:test:${name}`
+        const [row] = await conn<{ held: boolean }[]>`SELECT pg_try_advisory_lock(hashtextextended(${key}, 0)) AS held`
+        if (!row?.held) return 'busy'
+        try {
+          return { value: await fn((url, tools, options) => this.#putIfCurrent(name, url, tools, options.truncated ?? false)) }
+        } finally {
+          await conn`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`
+        }
       } finally {
-        await conn`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`
+        conn.release()
       }
     } finally {
-      conn.release()
+      this.#held--
     }
+  }
+
+  // One short transaction on the shared pool, after the test and still under its lock.
+  async #putIfCurrent(name: string, url: string, tools: readonly StoredTool[], truncated: boolean): Promise<boolean> {
+    return this.#sql.begin(async (tx) => {
+      const [plugin] = await tx`SELECT 1 FROM ai_plugins WHERE name = ${name} AND url = ${url} FOR UPDATE`
+      if (!plugin) return false
+      await upsert(tx, remoteSource(name), tools, truncated)
+      return true
+    })
   }
 }
 
 /**
  * Stores remote plugin `name`'s listing only while it still exists at `url`, the one tested
  * (#4994): under its ai_plugins row lock, so a delete or a URL change after the test wins.
- * False: nothing stored.
+ * False: nothing stored. `truncated`: not every tool the source has (a `nextCursor`, or entries dropped).
  */
 export type PluginListingPut = (url: string, tools: readonly StoredTool[], options: { truncated?: boolean }) => Promise<boolean>
 
-async function upsert(sql: Sql, source: string, tools: readonly StoredTool[], truncated: boolean): Promise<void> {
+async function upsert(sql: TransactionSql, source: string, tools: readonly StoredTool[], truncated: boolean): Promise<void> {
   await sql`
     INSERT INTO ai_tool_listings (source, tools, truncated)
     VALUES (${source}, ${sql.json(tools as never)}, ${truncated})
     ON CONFLICT (source) DO UPDATE SET tools = EXCLUDED.tools, truncated = EXCLUDED.truncated, listed_at = now()`
-}
-
-// A transaction by hand: `conn` is a reserved connection, which postgres.js allows one on.
-async function putIfCurrent(conn: Sql, name: string, url: string, tools: readonly StoredTool[], truncated: boolean): Promise<boolean> {
-  await conn`BEGIN`
-  try {
-    const [plugin] = await conn`SELECT 1 FROM ai_plugins WHERE name = ${name} AND url = ${url} FOR UPDATE`
-    if (plugin) await upsert(conn, remoteSource(name), tools, truncated)
-    await conn`COMMIT`
-    return plugin !== undefined
-  } catch (err) {
-    await conn`ROLLBACK`.catch(() => undefined)
-    throw err
-  }
 }

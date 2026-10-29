@@ -18,8 +18,17 @@ export type Database = {
    * call. Never throws.
    */
   ready(): Promise<boolean>
+  /**
+   * A client of its own for session advisory locks held across slow work (a plugin's connection
+   * test, #4994), so a held lock never takes one of `sql`'s connections. Made on first call, at
+   * most TEST_LOCK_CONNECTIONS connections; `close` ends it.
+   */
+  lockClient(): Sql
   close(): Promise<void>
 }
+
+/** The lock client's connections: also how many plugin tests one replica runs at once. */
+export const TEST_LOCK_CONNECTIONS = 4
 
 /** The slice of a postgres.js PendingQuery the ping needs (types/index.d.ts: `cancel(): void`). */
 export type CancellableQuery = PromiseLike<unknown> & { cancel(): void }
@@ -97,16 +106,19 @@ export function makeReady(attempt: () => Promise<unknown>, onError?: (err: unkno
 }
 
 export function connectDatabase(url: string, options: ConnectOptions = {}): Database {
-  const sql = postgres(url, {
-    // Small on purpose: health pings hold at most one connection (makePing),
-    // and the credential and settings stores issue short single queries.
-    max: 4,
-    // Lazily connects on first query, so a database that is down at start-up
-    // shows as unreachable in /healthz instead of crashing the process.
-    connect_timeout: 5,
-    onnotice: () => {},
-    ...(options.searchPath === undefined ? {} : { connection: { search_path: options.searchPath } }),
-  })
+  const client = (max: number): Sql =>
+    postgres(url, {
+      max,
+      // Lazily connects on first query, so a database that is down at start-up
+      // shows as unreachable in /healthz instead of crashing the process.
+      connect_timeout: 5,
+      onnotice: () => {},
+      ...(options.searchPath === undefined ? {} : { connection: { search_path: options.searchPath } }),
+    })
+  // Small on purpose: health pings hold at most one connection (makePing),
+  // and the credential and settings stores issue short single queries.
+  const sql = client(4)
+  let locks: Sql | undefined
   const ping = makePing(() => {
     const query = sql`select 1`
     // A cancelled query rejects; the race above has already settled by then,
@@ -121,8 +133,12 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
       await migrate(sql, MIGRATIONS, options.migrate)
       await options.afterMigrate?.(sql)
     }, options.onMigrationError),
+    lockClient() {
+      locks ??= client(TEST_LOCK_CONNECTIONS)
+      return locks
+    },
     async close() {
-      await sql.end({ timeout: 5 })
+      await Promise.all([sql.end({ timeout: 5 }), locks?.end({ timeout: 5 })])
     },
   }
 }

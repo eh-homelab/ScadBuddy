@@ -244,11 +244,21 @@ describe('the connection test stores its listing (#2171)', () => {
   it("a test while another replica holds the plugin's test lock answers 429 and connects nowhere (#4994)", async () => {
     const testPlugin = vi.fn(() => Promise.resolve(result(true)))
     const { a, listings } = setup(testPlugin)
-    vi.mocked(listings.exclusive).mockResolvedValueOnce(undefined)
+    vi.mocked(listings.exclusive).mockResolvedValueOnce('busy')
     const res = await test(a)
     expect(res.status).toBe(429)
     expect(testPlugin).not.toHaveBeenCalled()
     expect((await test(a)).status).toBe(200)
+  })
+
+  it('a test while this replica runs its cap of tests answers 429 (#4994)', async () => {
+    const testPlugin = vi.fn(() => Promise.resolve(result(true)))
+    const { a, listings } = setup(testPlugin)
+    vi.mocked(listings.exclusive).mockResolvedValueOnce('full')
+    const res = await test(a)
+    expect(res.status).toBe(429)
+    expect(((await res.json()) as { detail: string }).detail).toMatch(/too many connection tests/)
+    expect(testPlugin).not.toHaveBeenCalled()
   })
 
   it('one test at a time per plugin, whichever caller started it (#2171 review M3)', async () => {

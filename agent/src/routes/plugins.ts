@@ -329,7 +329,8 @@ export async function testAndList(
     }
     if (!deps.listings) return { status: 200, body: await run() }
     const held = await deps.listings.exclusive(name, run)
-    if (!held) return BUSY
+    if (held === 'busy') return BUSY
+    if (held === 'full') return { status: 429, body: { detail: 'too many connection tests are running; try again shortly' } }
     return { status: 200, body: held.value }
   } finally {
     testing.delete(name)

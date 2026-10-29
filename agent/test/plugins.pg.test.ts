@@ -329,7 +329,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       it("a source switch through the tree records the UI's actor", async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
         const caps = new Capabilities([
-          remoteProvider({ plugins: store, listings: new ToolListings(db.sql), refresh: () => Promise.reject(new Error('not called')) }),
+          remoteProvider({ plugins: store, listings: new ToolListings(db.sql, db.lockClient), refresh: () => Promise.reject(new Error('not called')) }),
         ])
         expect((await caps.setEnabled('remote:mem', true, UI_CONTEXT)).enabled).toBe(true)
         expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'on', updated_by: 'browser:browser' }])

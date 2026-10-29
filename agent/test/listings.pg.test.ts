@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { LISTING_CAPS, listedTool, toStoredTools, ToolListings } from '../src/access/listings.js'
+import { LISTING_CAPS, listedTool, type StoredTool, toStoredTools, ToolListings } from '../src/access/listings.js'
+import { TEST_LOCK_CONNECTIONS } from '../src/db.js'
 import type { Database } from '../src/db.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
@@ -95,15 +96,23 @@ describe.skipIf(!TEST_DATABASE_URL)(`ToolListings${TEST_DATABASE_URL ? '' : ` (s
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    listings = new ToolListings(db.sql)
+    listings = new ToolListings(db.sql, db.lockClient)
   })
   afterEach(async () => {
     await drop()
   })
 
+  /** A good test's write: the plugin `source` names, stood up at a URL, and its listing stored. */
+  async function put(source: string, tools: readonly StoredTool[], options: { truncated?: boolean } = {}): Promise<void> {
+    const name = source.slice('remote:'.length)
+    const url = `https://${name}.example/mcp`
+    await db.sql`INSERT INTO ai_plugins (name, kind, url) VALUES (${name}, 'remote_mcp', ${url}) ON CONFLICT (name) DO NOTHING`
+    expect(await listings.exclusive(name, (p) => p(url, tools, options))).toEqual({ value: true })
+  }
+
   it('stores a listing and reads it back with listed_at', async () => {
     expect(await listings.get(SRC)).toBeUndefined()
-    await listings.put(SRC, toStoredTools([{ name: 'recall', description: 'Search' }]))
+    await put(SRC, toStoredTools([{ name: 'recall', description: 'Search' }]))
     const got = await listings.get(SRC)
     expect(got!.tools.map((t) => [t.name, t.description])).toEqual([['recall', 'Search']])
     expect(Number.isNaN(Date.parse(got!.listed_at))).toBe(false)
@@ -111,21 +120,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`ToolListings${TEST_DATABASE_URL ? '' : ` (s
   })
 
   it('stores whether the listing is incomplete (#2171 re-review N1)', async () => {
-    await listings.put(SRC, toStoredTools([{ name: 'a' }]), { truncated: true })
+    await put(SRC, toStoredTools([{ name: 'a' }]), { truncated: true })
     expect((await listings.get(SRC))!.truncated).toBe(true)
     expect((await listings.getMany([SRC])).get(SRC)!.truncated).toBe(true)
-    await listings.put(SRC, toStoredTools([{ name: 'a' }]))
+    await put(SRC, toStoredTools([{ name: 'a' }]))
     expect((await listings.get(SRC))!.truncated).toBe(false)
   })
 
   it('put replaces the last listing', async () => {
-    await listings.put(SRC, toStoredTools([{ name: 'a' }]))
-    await listings.put(SRC, toStoredTools([{ name: 'b' }, { name: 'c' }]))
+    await put(SRC, toStoredTools([{ name: 'a' }]))
+    await put(SRC, toStoredTools([{ name: 'b' }, { name: 'c' }]))
     expect((await listings.get(SRC))!.tools.map((t) => t.name)).toEqual(['b', 'c'])
   })
 
   it('stores each entry once and derives its parts', async () => {
-    await listings.put(
+    await put(
       SRC,
       toStoredTools([{ name: 'recall', title: 'Recall', description: 'Search', inputSchema: { type: 'object' }, x_new: 1 }]),
     )
@@ -143,7 +152,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`ToolListings${TEST_DATABASE_URL ? '' : ` (s
 
   it('stores a description cut inside a surrogate pair, and NULs in any string or key (#2171 review I1)', async () => {
     const cut = `${'a'.repeat(LISTING_CAPS.description - 1)}😀`
-    await listings.put(
+    await put(
       SRC,
       toStoredTools([
         { name: 'emoji', description: cut },
@@ -204,7 +213,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`ToolListings${TEST_DATABASE_URL ? '' : ` (s
     })
 
     it("holds one test per plugin across connections, as two replicas' would be", async () => {
-      const other = new ToolListings(db.sql)
+      const other = new ToolListings(db.sql, db.lockClient)
       let finish!: () => void
       const running = new Promise<void>((resolve) => (finish = resolve))
       let started!: () => void
@@ -215,25 +224,49 @@ describe.skipIf(!TEST_DATABASE_URL)(`ToolListings${TEST_DATABASE_URL ? '' : ` (s
         return 'first'
       })
       await holding
-      expect(await other.exclusive('memory', async () => 'second')).toBeUndefined()
+      expect(await other.exclusive('memory', async () => 'second')).toBe('busy')
       expect(await other.exclusive('another', async () => 'another')).toEqual({ value: 'another' })
       finish()
       expect(await first).toEqual({ value: 'first' })
       expect(await other.exclusive('memory', async () => 'again')).toEqual({ value: 'again' })
     })
 
+    it("holds no shared-pool connection while tests run, and answers full past this replica's cap", async () => {
+      let finish!: () => void
+      const running = new Promise<void>((resolve) => (finish = resolve))
+      let count = 0
+      let all!: () => void
+      const holding = new Promise<void>((resolve) => (all = resolve))
+      const tests = Array.from({ length: TEST_LOCK_CONNECTIONS }, (_, i) =>
+        listings.exclusive(`p${i}`, async () => {
+          if (++count === TEST_LOCK_CONNECTIONS) all()
+          await running
+          return i
+        }),
+      )
+      await holding
+      expect(await listings.exclusive('one-more', async () => 'x')).toBe('full')
+      // Every connection of the shared pool at once, while every test holds its lock.
+      const reserved = await Promise.all(Array.from({ length: 4 }, () => db.sql.reserve()))
+      expect((await Promise.all(reserved.map((c) => c`SELECT 1 AS one`))).map(([r]) => r!.one)).toEqual([1, 1, 1, 1])
+      for (const c of reserved) c.release()
+      finish()
+      expect(await Promise.all(tests)).toEqual([0, 1, 2, 3].map((value) => ({ value })))
+      expect(await listings.exclusive('one-more', async () => 'x')).toEqual({ value: 'x' })
+    })
+
     it('frees the lock when the test throws', async () => {
       await expect(listings.exclusive('memory', () => Promise.reject(new Error('boom')))).rejects.toThrow('boom')
-      expect(await new ToolListings(db.sql).exclusive('memory', async () => 1)).toEqual({ value: 1 })
+      expect(await new ToolListings(db.sql, db.lockClient).exclusive('memory', async () => 1)).toEqual({ value: 1 })
     })
   })
 
   it('getMany reads several sources in one query', async () => {
-    await listings.put('remote:a', toStoredTools([{ name: 'x' }]))
-    await listings.put('remote:b', toStoredTools([{ name: 'y' }]))
-    const many = await listings.getMany(['remote:a', 'remote:b', 'remote:none'])
-    expect([...many.keys()].sort()).toEqual(['remote:a', 'remote:b'])
-    expect(many.get('remote:b')!.tools[0]!.name).toBe('y')
+    await put('remote:aa', toStoredTools([{ name: 'x' }]))
+    await put('remote:bb', toStoredTools([{ name: 'y' }]))
+    const many = await listings.getMany(['remote:aa', 'remote:bb', 'remote:none'])
+    expect([...many.keys()].sort()).toEqual(['remote:aa', 'remote:bb'])
+    expect(many.get('remote:bb')!.tools[0]!.name).toBe('y')
     expect((await listings.getMany([])).size).toBe(0)
   })
 })
