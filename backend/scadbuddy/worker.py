@@ -15,7 +15,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -110,15 +110,19 @@ from scadbuddy.store.geometry import GeometryIndex
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
+    POLLER_SEEN_WITHIN,
     PRINT_DEPLOYMENT_NAME,
     PROJECTS_DEPLOYMENT_NAME,
     bambuddy_worker,
+    clear_draining,
     connect,
     current_routing,
     drained,
+    draining_marks,
     follow_worker,
     is_current,
     make_current,
+    mark_draining,
     polled_elsewhere,
     projects_deployment,
     render_worker,
@@ -146,6 +150,11 @@ DRAIN_POLL = 5.0
 #: How long a stopping worker whose build is still current, and polled by another
 #: worker of the build, keeps serving its pinned runs before leaving them to that one.
 DRAIN_CURRENT_GRACE = 30.0
+#: How long past a peer's drain bound and `POLLER_SEEN_WITHIN` its drain mark still
+#: counts (#4948): room for the pods' clocks to differ. A pod of one build has the same
+#: drain bound as this one, and its last poll looks recent for `POLLER_SEEN_WITHIN` after
+#: its drain ends, so a mark younger than the sum may be a peer still draining.
+DRAIN_MARK_SLACK = 60.0
 #: Making the build current, retried once the worker polls: Temporal 1.28 ignores
 #: `allow_no_pollers` and answers NOT_FOUND until the build's first poll reaches it.
 #: The waits between attempts, then every `MAKE_CURRENT_EVERY` until it takes or the
@@ -515,6 +524,27 @@ async def _poll(
     )
 
 
+async def _until_written(write: Callable[[], Awaitable[None]], failed: str) -> None:
+    """Retry ``write`` on an `RPCError` (`MAKE_CURRENT_BACKOFF`, then every
+    `MAKE_CURRENT_EVERY`) until it takes; cancel it to stop. A build version exists only
+    once a worker of it has polled, so a metadata write just after start may be refused."""
+    attempt = 0
+    while True:
+        try:
+            await write()
+        except RPCError as error:
+            logger.warning(failed, extra={"attempt": attempt + 1, "error": str(error)})
+            delay = (
+                MAKE_CURRENT_BACKOFF[attempt]
+                if attempt < len(MAKE_CURRENT_BACKOFF)
+                else MAKE_CURRENT_EVERY
+            )
+            attempt += 1
+            await asyncio.sleep(delay)
+        else:
+            return
+
+
 async def _serve_versioned(
     client: Client,
     workers: Sequence[Worker],
@@ -529,10 +559,10 @@ async def _serve_versioned(
 ) -> None:
     """Run ``workers`` (one deployment version) until ``stop``, making the build current
     beside them; then, unless ``drain_timeout`` is None, drain the build's pinned runs,
-    which only another worker of the build polling ``task_queue`` ends early (#4869).
-    ``stop_now`` cuts the drain short (#605). With ``ready`` (a task queue and an
-    event), the event is set once that queue routes to this build (`wait_until_routed`),
-    for `/readyz` (#4146)."""
+    which only another worker of the build polling ``task_queue`` ends early (#4869),
+    and not one marked draining itself (#4948). ``stop_now`` cuts the drain short (#605).
+    With ``ready`` (a task queue and an event), the event is set once that queue routes to
+    this build (`wait_until_routed`), for `/readyz` (#4146)."""
 
     async def is_drained() -> bool:
         try:
@@ -549,20 +579,57 @@ async def _serve_versioned(
     # This worker's own polls, told apart from another pod's of the same build.
     identities = {worker.config().get("identity") or client.identity for worker in workers}
 
+    # Set once this worker's drain mark is written (#4948): until then a stopping peer
+    # cannot tell this worker from one that serves, so this one trusts no peer either.
+    marked = asyncio.Event()
+    # `mark` and `still_current` read `drain_began` and `marked_within`, which are set
+    # when the drain begins, before either runs.
+
+    async def mark() -> None:
+        await mark_draining(
+            client,
+            deployment_name=deployment_name,
+            build_id=build_id,
+            identities=identities,
+            since=drain_began,
+            prune_within=marked_within,
+        )
+        marked.set()
+
     async def still_current() -> bool:
+        if not marked.is_set():
+            return False
         try:
-            return await is_current(
-                client,
-                namespace=client.namespace,
-                build_id=build_id,
-                deployment_name=deployment_name,
-            ) and await polled_elsewhere(
-                client,
-                task_queue,
-                deployment_name=deployment_name,
-                build_id=build_id,
-                identities=identities,
-            )
+            if not (
+                await is_current(
+                    client,
+                    namespace=client.namespace,
+                    build_id=build_id,
+                    deployment_name=deployment_name,
+                )
+                and await polled_elsewhere(
+                    client,
+                    task_queue,
+                    deployment_name=deployment_name,
+                    build_id=build_id,
+                    identities=identities,
+                    marked_within=marked_within,
+                )
+            ):
+                return False
+            # The start's clear, cancelled at stop, may still land after the mark and
+            # remove it; a stopping peer would then count this worker. So trust only a
+            # mark that is still there, and write it again when it is gone. This narrows
+            # the race but does not close it: a cancelled clear can still land after this
+            # read and before the peer's own check. That residual race is accepted: it
+            # needs a clear held in flight past the grace, and its worst case is the one
+            # #4948 fixed, never a worse one.
+            marks = await draining_marks(client, deployment_name=deployment_name, build_id=build_id)
+            if all(identity in marks for identity in identities):
+                return True
+            logger.warning("this worker's drain mark is gone; writing it again")
+            await mark()
+            return False
         except RPCError:
             logger.warning(
                 "could not read the deployment's current build or the queue's pollers",
@@ -596,6 +663,21 @@ async def _serve_versioned(
 
         current = asyncio.create_task(make_current_then_routed())
         stopped = asyncio.create_task(stop.wait())
+        # A container restarted in its pod keeps its identity: its last life's drain mark
+        # must not make a stopping peer skip it (#4948). Only a worker that drains marks.
+        clearing = asyncio.create_task(
+            _until_written(
+                lambda: clear_draining(
+                    client,
+                    deployment_name=deployment_name,
+                    build_id=build_id,
+                    identities=identities,
+                ),
+                "could not clear this worker's drain mark yet",
+            )
+            if drain_timeout is not None
+            else asyncio.sleep(0)
+        )
         try:
             done, _ = await asyncio.wait({current, stopped}, return_when=asyncio.FIRST_COMPLETED)
             if current in done:
@@ -604,7 +686,8 @@ async def _serve_versioned(
         finally:
             current.cancel()
             stopped.cancel()
-            await asyncio.wait({current, stopped})
+            clearing.cancel()
+            await asyncio.wait({current, stopped, clearing})
         if drain_timeout is None:
             return
 
@@ -613,19 +696,32 @@ async def _serve_versioned(
         # unless this build is still current and another worker of it polls: a restart
         # of the same build (a manifest change, a node drain) leaves its runs to the next
         # pod of that build. Current alone is not enough: in a rollout the new pods run
-        # the next build, not yet current, and serve none of these runs (#4869).
+        # the next build, not yet current, and serve none of these runs (#4869). Nor is a
+        # poll enough: a draining worker keeps polling, so this one marks itself first,
+        # and two pods of the build that stop together each skip the other (#4948).
         logger.info(
             "stopping: draining this build's workflows",
             extra={"build_id": build_id, "timeout_s": drain_timeout},
         )
-        outcome = await _drain(
-            still_current,
-            is_drained,
-            timeout=drain_timeout,
-            poll=DRAIN_POLL,
-            grace=min(DRAIN_CURRENT_GRACE, drain_timeout),
-            stop_now=stop_now,
+        drain_began = datetime.now(UTC)
+        # A peer's mark younger than this may be a drain still going, and an older one is
+        # pruned: a pod of one build drains as long as this one.
+        marked_within = drain_timeout + POLLER_SEEN_WITHIN + DRAIN_MARK_SLACK
+        marking = asyncio.create_task(
+            _until_written(mark, "could not mark this worker draining yet")
         )
+        try:
+            outcome = await _drain(
+                still_current,
+                is_drained,
+                timeout=drain_timeout,
+                poll=DRAIN_POLL,
+                grace=min(DRAIN_CURRENT_GRACE, drain_timeout),
+                stop_now=stop_now,
+            )
+        finally:
+            marking.cancel()
+            await asyncio.wait({marking})
         if outcome == "drained":
             logger.info("drained", extra={"build_id": build_id})
         elif outcome == "current":
