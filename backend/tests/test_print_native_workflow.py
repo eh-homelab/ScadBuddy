@@ -210,6 +210,8 @@ class NativeFake(Fake):
         self.updates: list[PrintRunResult] = []
         #: The plates whose `print_record` fails every attempt.
         self.unrecorded: set[int] = set()
+        #: The blob each `slice_run` answers, in turn; `BLOB` once they run out.
+        self.slice_keys: list[str] = []
 
     @activity.defn(name="print_record")
     async def record(self, input: RecordInput) -> list[PlateSend]:
@@ -241,7 +243,9 @@ class NativeFake(Fake):
     @activity.defn(name=SLICE_RUN_ACTIVITY)
     async def slice_run(self, input: SliceRunInput) -> NativeSliced:
         self.calls.append(f"slice_run:{input.plate_id}")
-        return NativeSliced(slice_id=5, preset_key="k", sliced_blob_key=BLOB)
+        # A slice swept since the last `slice_run` is sliced again, into a new blob.
+        key = self.slice_keys.pop(0) if self.slice_keys else BLOB
+        return NativeSliced(slice_id=5, preset_key="k", sliced_blob_key=key)
 
     @activity.defn(name="print_finish")
     async def finish(self, input: FinishInput) -> PrintRunResult:
@@ -344,10 +348,12 @@ async def _run(
     reports: FakeReports | None = None,
     during: Callable[[Client, PrintRunInput, NativeFake], Awaitable[None]] | None = None,
     gates: dict[str, asyncio.Event] | None = None,
+    slice_keys: list[str] | None = None,
 ) -> tuple[NativeFake, PrintRun]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
     fake = NativeFake(printer, queue)
     fake.gates = gates or {}
+    fake.slice_keys = list(slice_keys or [])
     fake.plates = plates or [1]
     fake.copies = copies
     fake.unrecorded = unrecorded or set()
@@ -676,6 +682,31 @@ async def test_copies_start_one_after_another(
     assert run.result == second
     # One plate, recorded once, as Bambuddy's one queue item stands for its copies.
     assert len(fake.outcomes) == 1
+
+
+async def test_a_later_copy_whose_slice_was_swept_is_sliced_again(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """Review of #4940: days may pass before a later copy, and the slice's row (with its
+    hold on the blob) is swept hours after it finished. Each later copy joins its plate's
+    slice again, which slices it again once it is gone, and uploads that blob."""
+    swept = "slice-" + "b" * 64
+    blobs = Blobs()
+    fake, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=blobs,
+        copies=2,
+        reports=FakeReports(fake_lan),
+        slice_keys=[BLOB, swept],
+    )
+    assert run.status == "succeeded"
+    result = run.result
+    assert result is not None and result.lan_stopped is None and len(result.lan) == 2
+    assert fake.calls.count("slice_run:1") == 2
+    assert blobs.read[-1] == swept
+    assert len(fake_lan.project_files()) == 2
 
 
 async def test_every_plate_is_sliced_before_the_first_starts(

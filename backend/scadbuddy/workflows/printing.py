@@ -306,7 +306,9 @@ LAN_PRINT_TIMEOUT = timedelta(seconds=LAN_PROBE_TIMEOUT + LAN_START_WAIT + 45)
 #: it starts the next (#4541): a print of days, and the printer off a while between.
 #: Past it the run starts none of the rest, and says so.
 LAN_WAIT_BOUND = timedelta(days=7)
-#: ``lan_wait`` only reads, so it is taken up again whenever it stops, within the bound.
+#: ``lan_wait`` only reads, so it is taken up again whenever it stops, within the bound:
+#: a heartbeat timeout (a worker that died) is retried too, and only the bound ends the
+#: wait (`_lan_failed`'s wait text).
 LAN_WAIT_RETRY = RetryPolicy(
     maximum_attempts=0,
     initial_interval=timedelta(seconds=5),
@@ -368,6 +370,77 @@ class _PlateStarts:
             )
         )
         return row
+
+    async def _slice_run(self, planned: PlannedRun, plate: PlatePlan, subject: str) -> NativeSliced:
+        """The plate's native slice: the shared `SliceWorkflow` started or joined and
+        waited for by ``slice_run`` (re-attaching is idempotent). A finished slice whose
+        row still stands is joined, so its blob is held; one swept since is sliced again."""
+        assert plate.plan is not None
+        try:
+            sliced: NativeSliced = await workflow.execute_activity(
+                SLICE_RUN_ACTIVITY,
+                SliceRunInput(
+                    library_file_id=planned.library_file_id,
+                    plan=plate.plan,
+                    plate_id=plate.plate_id,
+                    subject=subject,
+                ),
+                result_type=NativeSliced,
+                task_queue=planned.library_queue,
+                schedule_to_close_timeout=SLICE_RUN_BOUND,
+                start_to_close_timeout=SLICE_RUN_TIMEOUT,
+                heartbeat_timeout=HEARTBEAT,
+                retry_policy=SLICE_RUN_RETRY,
+            )
+        except ActivityError as error:
+            outlived = outlived_slice(error)
+            if outlived is None:
+                raise
+            raise outlived from None
+        return sliced
+
+    async def _follow_run(self, input: PrintRunInput) -> None:
+        """Follow what the run printed, an output's or a library file's."""
+        # Patched: a run started on a build without the follow replays without it
+        # (review #1061); `PrintRun` runs in the wild since #1061 merged.
+        if workflow.patched(FOLLOW_PATCH):
+            source = input.source
+            if source.kind == "output" and source.output_id is not None:
+                await self._follow(source.output_id)
+            elif (
+                source.kind == "library"
+                and source.file_id is not None
+                and workflow.patched(LIBRARY_FOLLOW_PATCH)
+            ):
+                await self._follow(PrintSubject.library(source.file_id).run_subject)
+
+    async def _follow(self, output_id: str) -> None:
+        """Follow the print it queued (§4.4): `FollowPrint`, abandoned so it outlives
+        this run, or a poke to the one already following the subject (a child start has
+        no id-conflict policy). A poke that finds it closed in between starts it once more.
+        ``output_id`` is the run subject: an output's id, or ``library:<file id>``."""
+        for _ in range(2):
+            try:
+                await workflow.start_child_workflow(
+                    FOLLOW_WORKFLOW,
+                    output_id,
+                    id=follow_id(output_id),
+                    parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+                    cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
+                )
+                return
+            except WorkflowAlreadyStartedError:
+                pass
+            try:
+                await workflow.get_external_workflow_handle(follow_id(output_id)).signal(
+                    POKE_SIGNAL
+                )
+                return
+            except FailureError:
+                continue
+        # Only a log, so no command: no `patched` (review #1091 3). The progress route
+        # starts the follow again once someone opens the output.
+        workflow.logger.warning("could not follow the print", extra={"output_id": output_id})
 
     async def _record_plate(
         self,
@@ -672,28 +745,7 @@ class PrintRunWorkflow(_PlateStarts):
     ) -> tuple[NativeSliced, int]:
         """The shared `SliceWorkflow`, started or joined and waited for by ``slice_run``
         (re-attaching is idempotent), then its file uploaded beside the copy."""
-        assert plate.plan is not None
-        try:
-            native = await workflow.execute_activity(
-                SLICE_RUN_ACTIVITY,
-                SliceRunInput(
-                    library_file_id=planned.library_file_id,
-                    plan=plate.plan,
-                    plate_id=plate.plate_id,
-                    subject=subject,
-                ),
-                result_type=NativeSliced,
-                task_queue=planned.library_queue,
-                schedule_to_close_timeout=SLICE_RUN_BOUND,
-                start_to_close_timeout=SLICE_RUN_TIMEOUT,
-                heartbeat_timeout=HEARTBEAT,
-                retry_policy=SLICE_RUN_RETRY,
-            )
-        except ActivityError as error:
-            outlived = outlived_slice(error)
-            if outlived is None:
-                raise
-            raise outlived from None
+        native = await self._slice_run(planned, plate, subject)
         # An upload's budget, beating (review I1): a sliced 3MF carries its G-code.
         uploaded = await workflow.execute_activity(
             SLICED_UPLOAD_ACTIVITY,
@@ -848,21 +900,6 @@ class PrintRunWorkflow(_PlateStarts):
         )
         await self._follow_run(input)
         return finished
-
-    async def _follow_run(self, input: PrintRunInput) -> None:
-        """Follow what the run printed, an output's or a library file's."""
-        # Patched: a run started on a build without the follow replays without it
-        # (review #1061); `PrintRun` runs in the wild since #1061 merged.
-        if workflow.patched(FOLLOW_PATCH):
-            source = input.source
-            if source.kind == "output" and source.output_id is not None:
-                await self._follow(source.output_id)
-            elif (
-                source.kind == "library"
-                and source.file_id is not None
-                and workflow.patched(LIBRARY_FOLLOW_PATCH)
-            ):
-                await self._follow(PrintSubject.library(source.file_id).run_subject)
 
     async def _start_enqueue(self, accepted: Accepted) -> None:
         """Before the first POST /queue/ (or LAN start): from here a failure may have
@@ -1023,34 +1060,6 @@ class PrintRunWorkflow(_PlateStarts):
         )
         return self.row
 
-    async def _follow(self, output_id: str) -> None:
-        """Follow the print it queued (§4.4): `FollowPrint`, abandoned so it outlives
-        this run, or a poke to the one already following the subject (a child start has
-        no id-conflict policy). A poke that finds it closed in between starts it once more.
-        ``output_id`` is the run subject: an output's id, or ``library:<file id>``."""
-        for _ in range(2):
-            try:
-                await workflow.start_child_workflow(
-                    FOLLOW_WORKFLOW,
-                    output_id,
-                    id=follow_id(output_id),
-                    parent_close_policy=workflow.ParentClosePolicy.ABANDON,
-                    cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
-                )
-                return
-            except WorkflowAlreadyStartedError:
-                pass
-            try:
-                await workflow.get_external_workflow_handle(follow_id(output_id)).signal(
-                    POKE_SIGNAL
-                )
-                return
-            except FailureError:
-                continue
-        # Only a log, so no command: no `patched` (review #1091 3). The progress route
-        # starts the follow again once someone opens the output.
-        workflow.logger.warning("could not follow the print", extra={"output_id": output_id})
-
     def _upsert(
         self,
         *,
@@ -1110,6 +1119,11 @@ class LanSequenceWorkflow(_PlateStarts):
                 row = await self._lan_update(input, accepted, result)
                 self._stop_if_cancelled()
                 step = "start"
+                if native is not None and plate.plan is not None:
+                    # Days may have passed: the slice's row, and its hold on the blob, is
+                    # swept `PREVIEW_GRACE` after it finished, and the blob a day later.
+                    # Joining it again keeps the blob, or slices the plate again.
+                    native = await self._slice_run(planned, plate, input.subject)
                 taken = await self._start_lan(
                     input,
                     accepted,
@@ -1134,6 +1148,9 @@ class LanSequenceWorkflow(_PlateStarts):
                     }
                 )
                 row = await self._lan_update(input, accepted, result)
+                # `FollowPrint` ends a day after nothing changed: a poke, or a new one,
+                # follows this copy too.
+                await self._follow_run(input)
                 if plate_id not in recorded:
                     # A plate is recorded once, by its first copy, as Bambuddy's one
                     # queue item stands for all of a plate's copies.
