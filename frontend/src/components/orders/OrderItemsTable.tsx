@@ -4,6 +4,7 @@ import { api } from '../../api/client'
 import type { OrderAttachment, OrderItemDetail, OrderStatus, Shipment } from '../../api/types'
 import { formatMoney, toMajor } from '../../lib/money'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { CELL, DataTable, ROW, type Column } from '../records/DataTable'
@@ -311,7 +312,7 @@ function CustomItemRow({ orderId, currency, exponent, actions, onChanged }: { or
       </td>
       <td className={CELL}>
         <label className="flex items-center gap-1 text-[11px] whitespace-nowrap text-muted-foreground">
-          <input type="checkbox" checked={draft.printing} onKeyDown={enter} onChange={(event) => set({ printing: event.target.checked })} />
+          <Checkbox checked={draft.printing} onKeyDown={enter} onCheckedChange={(next) => set({ printing: next === true })} />
           Requires printing
         </label>
       </td>

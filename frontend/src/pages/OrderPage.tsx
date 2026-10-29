@@ -21,6 +21,7 @@ import { useSliceQuotes } from '../components/orders/useSliceQuotes'
 import { RecordDrawer } from '../components/records/RecordDrawer'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
@@ -610,7 +611,7 @@ function ItemDrawer({
         </div>
         {custom && (
           <label className="flex items-center gap-2 text-[13px]">
-            <input type="checkbox" checked={printing} disabled={settled || ENDED.has(order.status)} onChange={(e) => setPrinting(e.target.checked)} />
+            <Checkbox checked={printing} disabled={settled || ENDED.has(order.status)} onCheckedChange={(next) => setPrinting(next === true)} />
             Requires printing
           </label>
         )}
