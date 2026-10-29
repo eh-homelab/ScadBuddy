@@ -172,7 +172,11 @@ packaging, a part made elsewhere). For a `custom` item the reference columns and
 notes?, sku?, requires_printing?}`; the price is a `manual` quote (§3.4), accepted in the
 same transaction, so the item is `approved` at once and `OrderTotals` counts it as any
 accepted quote. Accepting a quote advances the order, so a hold refuses the add
-(`order_on_hold`). While the order is `draft` or `quoted`, `PATCH` takes a new
+(`order_on_hold`). `accept: false` (what the agent's `write` tools send, since an
+accept is `outward`'s) records the quote unaccepted and leaves the item `quoted` for
+`order_item_accept_quote`. A typed quote of its own (`POST …/quotes`) is refused,
+409 `item_custom`: its price is its own field. A quantity sent alone keeps the price
+it has (its accepted quote's, else its newest's). While the order is `draft` or `quoted`, `PATCH` takes a new
 `quantity` or `unit_price_minor` and prices it again at once (a new accepted `manual`
 quote); a model item refuses `unit_price_minor` and `requires_printing` (422). A
 `reference` or `output_id` sent to a custom item makes it a `model` item on the normal

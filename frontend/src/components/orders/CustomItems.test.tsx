@@ -120,6 +120,31 @@ describe('custom line items', () => {
     expect(state.fulfilments.filter((f) => f.order_item_id === item.id).map((f) => [f.quantity, Boolean(f.accepted_at)])).toEqual([[2, true]])
   })
 
+  it('marks done by accepting the attempt already recorded, never a second one', async () => {
+    const order = await api.createOrder({ customer_id: state.orders[0]!.customer_id })
+    const item = await api.addOrderItem(order.id, { kind: 'custom', title: 'Design work', quantity: 1, unit_price_minor: 1000 })
+    await api.acceptOrder(order.id)
+    const open = await api.recordFulfilment(order.id, item.id, { quantity: 1, outcome: 'succeeded' })
+    const recorded = vi.spyOn(api, 'recordFulfilment')
+    const { user } = render(order.id)
+    await user.click(await screen.findByRole('button', { name: 'Design work' }))
+    await user.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Mark done' }))
+    await waitFor(() => expect(state.items.find((i) => i.id === item.id)?.status).toBe('fulfilled'))
+    expect(recorded).not.toHaveBeenCalled()
+    expect(state.fulfilments.filter((f) => f.order_item_id === item.id).map((f) => f.id)).toEqual([open.id])
+  })
+
+  it("leaves an agent's price quoted (accept: false), and refuses a typed quote of its own", async () => {
+    const item = await api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'Fee', quantity: 2, unit_price_minor: 100, accept: false })
+    expect(item.status).toBe('quoted')
+    const again = await api.updateOrderItem(ORDER_DRAFT, item.id, { quantity: 3, accept: false })
+    expect(again.status).toBe('quoted')
+    const newest = state.quotes.filter((q) => q.order_item_id === item.id).at(-1)
+    expect([newest?.accepted, newest?.total_minor]).toEqual([false, 300])
+    const typed = await failure(api.quoteOrderItem(ORDER_DRAFT, item.id, { unit_price_minor: 1 }))
+    expect(typed?.problem.type).toBe(`${PROBLEMS}item_custom`)
+  })
+
   it('answers the shapes the backend refuses', async () => {
     const shape = await failure(api.addOrderItem(ORDER_DRAFT, { kind: 'custom', title: 'X', quantity: 1, unit_price_minor: 1, slug: 'name-keychain' }))
     expect(shape?.status).toBe(422)

@@ -803,15 +803,19 @@ class Lifecycle:
         notes: str = "",
         sku: str | None = None,
         requires_printing: bool = False,
+        accept: bool = True,
     ) -> OrderItem:
         """A custom item (#4954): a title, a quantity and a typed price, with no template
-        behind it. Its price is a `manual` quote, accepted as it is saved, so the item is
-        `approved` at once. Accepting a quote advances the order, so a hold refuses it."""
+        behind it. Its price is a `manual` quote. With ``accept`` (the browser's) it is
+        accepted as it is saved, so the item is `approved` at once, and a hold refuses it
+        (accepting a quote advances the order). Without (the agent's, whose `write` tier
+        accepts nothing) the item is `quoted`, for `accept_quote` to pin."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
             self._open_for_items(order, "the list of items")
-            self._not_on_hold(order)
+            if accept:
+                self._not_on_hold(order)
             item = self.store.insert_custom_item(
                 conn,
                 order.id,
@@ -821,18 +825,24 @@ class Lifecycle:
                 sku=sku,
                 requires_printing=requires_printing,
             )
-            item, quote = self._custom_price(conn, item, unit_price_minor, by)
             self._event(conn, order, by, "item.added", item_id=item.id, item_kind="custom")
-            self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
+            item = self._custom_price(conn, order, item, unit_price_minor, by, accept=accept)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return item
 
     def _custom_price(
-        self, conn: Conn, item: OrderItem, unit_price_minor: int, by: Actor
-    ) -> tuple[OrderItem, Quote]:
-        """A custom item's typed price as its accepted `manual` quote, at its quantity
-        now; the item `approved`."""
+        self,
+        conn: Conn,
+        order: Order,
+        item: OrderItem,
+        unit_price_minor: int,
+        by: Actor,
+        *,
+        accept: bool,
+    ) -> OrderItem:
+        """A custom item's typed price as a `manual` quote at its quantity now, on the
+        audit line: accepted and the item `approved`, or else the item `quoted`."""
         line = QuoteLine(
             kind="manual",
             label="Custom item",
@@ -850,8 +860,12 @@ class Lifecycle:
             quantity=item.quantity,
             created_by=by,
         )
+        if not accept:
+            self._event(conn, order, by, "quote.recorded", item_id=item.id, quote_id=quote.id)
+            return self.store.update_item(conn, item.id, status="quoted")
         self.store.accept_quote(conn, item.id, quote.id)
-        return self.store.update_item(conn, item.id, status="approved"), quote
+        self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
+        return self.store.update_item(conn, item.id, status="approved")
 
     def update_item(
         self,
@@ -869,6 +883,7 @@ class Lifecycle:
         unit_price_minor: int | None = None,
         sku: str | UnsetType | None = UNSET,
         requires_printing: bool | None = None,
+        accept: bool = True,
     ) -> OrderItem:
         """The reference (replaced whole), the quantity and the slots' filaments while
         `draft` or `quoted`, each dropping the accepted quote (Ruling 1; #4250 Ruling 6:
@@ -885,9 +900,11 @@ class Lifecycle:
 
         A custom item (#4954) takes ``unit_price_minor`` and ``requires_printing``, which
         a model item refuses (422). A new quantity or price on it is priced at once: a
-        new `manual` quote, accepted, so it stays `approved` (refused on hold, as an
-        accepted quote is). A ``reference`` given to it makes it a model item, on the
-        normal flow: its quote is dropped as any reference change drops one."""
+        new `manual` quote at the price sent, else at the price it has (its accepted
+        quote's, or its newest's). With ``accept`` that quote is accepted and the item
+        stays `approved` (refused on hold, as an accepted quote is); without (the
+        agent's) the item is `quoted`. A ``reference`` given to it makes it a model item,
+        on the normal flow: its quote is dropped as any reference change drops one."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -906,11 +923,15 @@ class Lifecycle:
             price = None
             if custom:
                 quotes = self.store.quotes(item.id, conn=conn)
-                current = next((q.unit_price_minor for q in quotes if q.accepted), None)
+                accepted = next((q for q in quotes if q.accepted), None)
+                newest = accepted or max(quotes, key=lambda q: (q.created_at, q.id), default=None)
+                current = None if newest is None else newest.unit_price_minor
                 wanted = current if unit_price_minor is None else unit_price_minor
                 if quantity == item.quantity:
                     quantity = None
-                if wanted is not None and (quantity is not None or wanted != current):
+                # A price sent to be accepted when none is: the same amount, accepted now.
+                unpinned = accept and accepted is None and unit_price_minor is not None
+                if wanted is not None and (quantity is not None or wanted != current or unpinned):
                     price = wanted
             base = list(reference.colours if reference is not None else item.colours)
             slots = base if base or colours is None else list(colours)
@@ -924,7 +945,7 @@ class Lifecycle:
             repins = reference is not None or quantity is not None or refiled or price is not None
             if repins:
                 self._open_for_items(order, "an item's reference, quantity and filaments")
-            if price is not None:
+            if price is not None and accept:
                 self._not_on_hold(order)
             fields: dict[str, Any] = {}
             if reference is not None:
@@ -953,8 +974,7 @@ class Lifecycle:
                 fields["status"] = "draft"
             item = self.store.update_item(conn, item.id, **fields)
             if price is not None:
-                item, quote = self._custom_price(conn, item, price, by)
-                self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
+                item = self._custom_price(conn, order, item, price, by, accept=accept)
             self._event(conn, order, by, "item.updated", item_id=item.id, repinned=repins)
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
@@ -1050,7 +1070,8 @@ class Lifecycle:
         self, order_id: str, item_id: str, body: ManualQuoteInput, by: Actor
     ) -> Quote:
         """A typed price (Ruling 1): one `manual` line, cost = price, quantity the
-        item's now; the item is `quoted` (unless already approved on another quote)."""
+        item's now; the item is `quoted` (unless already approved on another quote). A
+        custom item's price is its own field (#4954): ``item_custom``."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -1058,6 +1079,13 @@ class Lifecycle:
             item = self._item_of(conn, order, item_id)
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            if item.kind == "custom":
+                raise LifecycleError(
+                    "item_custom",
+                    f"item {item_id} is a custom item: its price is its own field"
+                    " (PATCH the item's unit_price_minor)",
+                    items=[item.id],
+                )
             line = QuoteLine(
                 kind="manual",
                 label=body.label,

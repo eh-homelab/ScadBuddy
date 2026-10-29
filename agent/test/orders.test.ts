@@ -188,9 +188,10 @@ describe('order tools (#4249)', () => {
     expect(sent).toEqual([
       { output_id: 'out1', quantity: 2, notes: '' },
       { slug: 'demo', commit: 'a'.repeat(40), inputs: { params: { width: 7 } }, quantity: 1, notes: '' },
-      { kind: 'custom', title: 'Rush fee', unit_price_minor: 750, sku: 'RUSH', quantity: 1, notes: '' },
-      { quantity: 3 },
-      { unit_price_minor: 500, requires_printing: true, sku: null },
+      // An accept is outward (order_item_accept_quote): the write tools record a custom price, never accept it.
+      { kind: 'custom', title: 'Rush fee', unit_price_minor: 750, sku: 'RUSH', quantity: 1, notes: '', accept: false },
+      { quantity: 3, accept: false },
+      { unit_price_minor: 500, requires_printing: true, sku: null, accept: false },
     ])
     expect(tool('order_item_add').summarize({ order_id: ORDER, kind: 'custom', title: 'Rush fee' })).toContain(
       'Rush fee',

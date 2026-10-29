@@ -10,7 +10,12 @@ import psycopg
 import pytest
 
 from scadbuddy.core.events import OrderItemChanged
-from scadbuddy.orders.lifecycle import FulfilmentInput, LifecycleError, ShipmentInput
+from scadbuddy.orders.lifecycle import (
+    FulfilmentInput,
+    LifecycleError,
+    ManualQuoteInput,
+    ShipmentInput,
+)
 from scadbuddy.orders.models import Order, OrderItem, ShipmentItem
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
@@ -171,3 +176,45 @@ def test_the_table_keeps_each_kind_whole(shop: Shop, pool: PgPool) -> None:
         ):
             with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
                 conn.execute(sql, (row,))
+
+
+def test_a_price_not_accepted_leaves_the_item_quoted(shop: Shop) -> None:
+    """The agent's `write` tier accepts nothing: its custom item waits, `quoted`, for
+    `accept_quote` (an `outward` call), and a hold does not refuse it."""
+    order = shop.order()
+    shop.lifecycle.hold(order.id, BY)
+    item = custom(shop, order, accept=False)
+    [quote] = shop.rows.quotes(item.id)
+    assert (item.status, quote.accepted, quote.total_minor) == ("quoted", False, 5000)
+    assert shop.get(order).status == "draft"
+    item = shop.lifecycle.update_item(order.id, item.id, BY, unit_price_minor=900, accept=False)
+    assert item.status == "quoted"
+    assert not any(q.accepted for q in shop.rows.quotes(item.id))
+    shop.lifecycle.release(order.id, BY)
+    newest = max(shop.rows.quotes(item.id), key=lambda q: (q.created_at, q.id))
+    assert shop.lifecycle.accept_quote(order.id, item.id, newest.id, BY).status == "approved"
+    assert shop.get(order).status == "quoted"
+
+
+def test_a_quantity_alone_keeps_the_price_it_has(shop: Shop) -> None:
+    """With no accepted quote, a new quantity is priced at the newest quote's price."""
+    order = shop.order()
+    item = custom(shop, order, accept=False)
+    item = shop.lifecycle.update_item(order.id, item.id, BY, quantity=4)
+    accepted = [q for q in shop.rows.quotes(item.id) if q.accepted]
+    assert item.status == "approved"
+    assert [(q.unit_price_minor, q.quantity, q.total_minor) for q in accepted] == [(2500, 4, 10000)]
+    # The same price sent to be accepted, when none is, is accepted.
+    other = custom(shop, order, accept=False)
+    other = shop.lifecycle.update_item(order.id, other.id, BY, unit_price_minor=2500)
+    assert other.status == "approved"
+
+
+def test_a_typed_quote_is_refused_for_a_custom_item(shop: Shop) -> None:
+    order = shop.order()
+    item = custom(shop, order)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.record_manual_quote(
+            order.id, item.id, ManualQuoteInput(unit_price_minor=1), BY
+        )
+    assert (refused.value.slug, refused.value.items) == ("item_custom", [item.id])

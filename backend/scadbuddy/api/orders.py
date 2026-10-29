@@ -164,6 +164,10 @@ class ItemCreate(ReferenceBody):
     unit_price_minor: Money | None = Field(default=None, ge=0)
     #: A custom item's: False (the default) skips the print path.
     requires_printing: bool | None = None
+    #: Whether that price is accepted as it is saved: true (the browser's) leaves the item
+    #: `approved`; false (the agent's `write` tools) leaves it `quoted`, for an `outward`
+    #: accept. A custom item's only.
+    accept: bool | None = None
 
     @model_validator(mode="after")
     def _shape(self) -> Self:
@@ -182,7 +186,7 @@ class ItemCreate(ReferenceBody):
         else:
             named = [
                 name
-                for name in ("unit_price_minor", "requires_printing")
+                for name in ("unit_price_minor", "requires_printing", "accept")
                 if getattr(self, name) is not None
             ]
             if named:
@@ -207,9 +211,12 @@ class ItemPatch(BaseModel):
     filaments: dict[int, str | None] | None = None
     #: ``null`` clears it.
     sku: str | None = Field(default=None, max_length=100)
-    #: A custom item's new price per unit (#4954), accepted at once, as is its quantity.
+    #: A custom item's new price per unit (#4954), priced at once, as is its quantity.
     unit_price_minor: Money | None = Field(default=None, ge=0)
     requires_printing: bool | None = None
+    #: Whether a custom item's new price is accepted (true, the default) or left
+    #: `quoted` for an `outward` accept (false, the agent's); nothing else reads it.
+    accept: bool = True
 
 
 class PaymentCreate(BaseModel):
@@ -781,8 +788,9 @@ async def add_item(
     """From an output (``output_id``: its commit, inputs, libraries and colours), or by
     hand (``slug``, ``commit``, ``inputs``); either way the reference is checked
     against the catalogue and the commit's schema (Ruling 6). A ``custom`` item (#4954)
-    is a title, a quantity and a price: it is `approved` as it is saved, its price an
-    accepted `manual` quote (409 ``order_on_hold`` on hold)."""
+    is a title, a quantity and a price, its price a `manual` quote: accepted as it is
+    saved, so the item is `approved` (409 ``order_on_hold`` on hold), unless ``accept`` is
+    false (the agent's), which leaves it `quoted`."""
     _path(order_id)
     if await asyncio.to_thread(orders.store.order, order_id) is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
@@ -800,6 +808,7 @@ async def add_item(
                 notes=body.notes,
                 sku=body.sku,
                 requires_printing=bool(body.requires_printing),
+                accept=body.accept is not False,
             )
         )
     resolved = await _resolved(
@@ -869,6 +878,7 @@ async def patch_item(
             unit_price_minor=body.unit_price_minor,
             sku=body.sku if "sku" in given else UNSET,
             requires_printing=body.requires_printing,
+            accept=body.accept,
         )
     )
 

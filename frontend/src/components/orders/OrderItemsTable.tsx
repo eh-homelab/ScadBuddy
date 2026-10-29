@@ -275,7 +275,7 @@ function CustomItemRow({ orderId, currency, exponent, actions, onChanged }: { or
   }
 
   // A row of a table holds no form, so Enter in any field saves the row.
-  function enter(event: KeyboardEvent<HTMLInputElement>) {
+  function enter(event: KeyboardEvent<HTMLElement>) {
     if (event.key !== 'Enter') return
     event.preventDefault()
     if (!busy) void submit()

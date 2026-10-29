@@ -57,6 +57,27 @@ def test_a_custom_item_is_saved_priced_and_counted(client: TestClient) -> None:
     assert client.post(f"/api/v1/orders/{order['id']}/close").json()["status"] == "closed"
 
 
+def test_accept_false_leaves_a_custom_item_quoted(client: TestClient) -> None:
+    """The agent's `write` tools send `accept: false`: the price waits for an accept."""
+    order = an_order(client)
+    item = add_item(client, order["id"], **CUSTOM, accept=False)
+    assert item["status"] == "quoted"
+    url = f"/api/v1/orders/{order['id']}/items/{item['id']}"
+    patched = client.patch(url, json={"unit_price_minor": 900, "accept": False})
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["status"] == "quoted"
+    detail = client.get(f"/api/v1/orders/{order['id']}").json()
+    assert detail["totals"]["pending_minor"] == 1800
+    problem(client.post(f"/api/v1/orders/{order['id']}/accept"), "items_not_quoted")
+    # A typed quote of its own is refused: its price is the item's field.
+    typed = client.post(f"{url}/quotes", json={"unit_price_minor": 1})
+    assert problem(typed, "item_custom")["items"] == [item["id"]]
+    # A model item takes no `accept` on create.
+    model = {"quantity": 1, "output_id": "o", "accept": False}
+    refused = client.post(f"/api/v1/orders/{order['id']}/items", json=model)
+    assert refused.status_code == 422
+
+
 def test_a_custom_item_needs_its_own_shape(client: TestClient) -> None:
     order = an_order(client)
     url = f"/api/v1/orders/{order['id']}/items"

@@ -350,7 +350,8 @@ export const orderTools: Tool[] = [
       'that is not a revision of the template, or an input the template does not take, is refused naming the field. ' +
       '`kind: "custom"` adds a custom item instead: a `title`, a `quantity` and a `unit_price_minor`, with no ' +
       'source (no `output_id`, `slug`, `commit` or `inputs`), for design work, a fee, packaging or a part made ' +
-      'elsewhere. Its price is accepted as it is saved, so it is approved at once; `requires_printing` (default ' +
+      'elsewhere. Its price is recorded, not accepted: the item is quoted until order_item_accept_quote accepts it. ' +
+      '`requires_printing` (default ' +
       'false) marks one that still has to be made. `sku` is the shop\'s stock code, on either kind.',
     input: z.object({
       order_id: orderId,
@@ -375,7 +376,11 @@ export const orderTools: Tool[] = [
     handler: async ({ order_id, ...body }, { backend }) =>
       json(
         await ok(
-          backend.POST('/api/v1/orders/{order_id}/items', { params: { path: { order_id } }, body: body as never }),
+          backend.POST('/api/v1/orders/{order_id}/items', {
+            params: { path: { order_id } },
+            // An accept is outward: this write tool leaves a custom item's price quoted.
+            body: (body.kind === 'custom' ? { ...body, accept: false } : body) as never,
+          }),
           `add an item to order ${order_id}`,
         ),
       ),
@@ -385,7 +390,8 @@ export const orderTools: Tool[] = [
     description:
       'Edit a line item: `reference` (replaced whole) and `quantity` while the order is draft or quoted, each dropping ' +
       'the accepted quote; `title`, `notes` and `sku` in any open state. A custom item takes `unit_price_minor` and ' +
-      '`requires_printing`: its new quantity or price is accepted at once, so it stays approved. A `reference` or ' +
+      '`requires_printing`: a new quantity or price records a new quote at it, not accepted (the item is quoted until ' +
+      'order_item_accept_quote). A `reference` or ' +
       '`output_id` given to a custom item makes it a model item, back on the quote flow. `delete: true` removes a ' +
       'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead).',
     input: z.object({
@@ -411,6 +417,9 @@ export const orderTools: Tool[] = [
         return deleted(item_id)
       }
       const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+      // An accept is outward: a custom item repriced here stays quoted (the backend reads
+      // `accept` only then).
+      if (body.quantity !== undefined || body.unit_price_minor !== undefined) body.accept = false
       return json(
         await ok(
           backend.PATCH('/api/v1/orders/{order_id}/items/{item_id}', { params: { path }, body: body as never }),

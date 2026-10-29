@@ -204,15 +204,18 @@ export function transition<T>(request: Request, run: () => T) {
 
 type Resolved = { reference: NonNullable<OrderItem['reference']>; colours: OrderItem['colours'] }
 
-/** `Lifecycle._custom_price` (#4954): a custom item's typed price, its accepted `manual` quote. */
-function customPrice(found: OrderItem, price: number): Quote {
+/**
+ * `Lifecycle._custom_price` (#4954): a custom item's typed price as a `manual` quote,
+ * accepted (the item `approved`) or, with `accept` false (the agent's), left `quoted`.
+ */
+function customPrice(order: Order, found: OrderItem, price: number, accept: boolean): Quote {
   for (const q of quotesOf(found.id)) q.accepted = false
   const quote: Quote = {
     id: newId('q'),
     order_item_id: found.id,
     created_at: now(),
     source: 'manual',
-    accepted: true,
+    accepted: accept,
     sliced_sha256: null,
     sliced_blob_key: null,
     plates: [],
@@ -224,7 +227,8 @@ function customPrice(found: OrderItem, price: number): Quote {
     created_by: BROWSER,
   }
   state.quotes.push(quote)
-  found.status = 'approved'
+  found.status = accept ? 'approved' : 'quoted'
+  event(order, accept ? 'quote.accepted' : 'quote.recorded', { item_id: found.id, quote_id: quote.id })
   return quote
 }
 
@@ -524,7 +528,7 @@ export const handlers = [
 
   http.post('/api/v1/orders/:id/items', async ({ request, params }) => {
     const body = (await request.json()) as OrderItemCreate & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['kind', 'slug', 'commit', 'inputs', 'output_id', 'quantity', 'title', 'notes', 'sku', 'unit_price_minor', 'requires_printing'])
+    const extra = unknownKeys(request, body, ['kind', 'slug', 'commit', 'inputs', 'output_id', 'quantity', 'title', 'notes', 'sku', 'unit_price_minor', 'requires_printing', 'accept'])
     if (extra) return extra
     if (!Number.isInteger(body.quantity) || (body.quantity as number) < 1) return fieldProblem(request, 'quantity', 'Input should be greater than or equal to 1')
     const order = state.orders.find((o) => o.id === params.id)
@@ -539,7 +543,7 @@ export const handlers = [
       try {
         notEnded(order)
         openForItems(order, 'the list of items')
-        notOnHold(order)
+        if (body.accept !== false) notOnHold(order)
         const at = now()
         const created: OrderItem = {
           id: newId('i'),
@@ -559,16 +563,15 @@ export const handlers = [
           updated_at: at,
         }
         state.items.push(created)
-        const quote = customPrice(created, price)
         event(order, 'item.added', { item_id: created.id, item_kind: 'custom' })
-        event(order, 'quote.accepted', { item_id: created.id, quote_id: quote.id })
+        customPrice(order, created, price, body.accept !== false)
         rederive(order)
         return HttpResponse.json(created, { status: 201 })
       } catch (error) {
         return refused(request, error)
       }
     }
-    if (body.unit_price_minor != null || body.requires_printing != null) return fieldProblem(request, 'body', 'only a custom item takes unit_price_minor or requires_printing')
+    if (body.unit_price_minor != null || body.requires_printing != null || body.accept != null) return fieldProblem(request, 'body', 'only a custom item takes unit_price_minor, requires_printing or accept')
     const resolved = resolveReference(body)
     if (Array.isArray(resolved)) return fieldProblem(request, resolved[0], resolved[1])
     try {
@@ -603,7 +606,7 @@ export const handlers = [
   }),
   http.patch('/api/v1/orders/:id/items/:item', async ({ request, params }) => {
     const body = (await request.json()) as OrderItemPatch & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['reference', 'output_id', 'quantity', 'title', 'notes', 'filaments', 'sku', 'unit_price_minor', 'requires_printing'])
+    const extra = unknownKeys(request, body, ['reference', 'output_id', 'quantity', 'title', 'notes', 'filaments', 'sku', 'unit_price_minor', 'requires_printing', 'accept'])
     if (extra) return extra
     let resolved: Resolved | undefined
     if (body.reference || body.output_id) {
@@ -621,17 +624,22 @@ export const handlers = [
       for (const name of ['unit_price_minor', 'requires_printing'] as const) {
         if (body[name] != null && !custom) throw new FieldRefused(name, `${name}: only a custom item takes one`)
       }
+      const accept = body.accept !== false
       let price: number | null = null
       if (custom) {
-        const current = quotesOf(found.id).find((q) => q.accepted)?.unit_price_minor ?? null
+        // The price it has: its accepted quote's, else its newest's.
+        const quotes = quotesOf(found.id)
+        const accepted = quotes.find((q) => q.accepted)
+        const current = (accepted ?? [...quotes].sort((a, b) => (a.created_at < b.created_at ? -1 : 1)).at(-1))?.unit_price_minor ?? null
         const wanted = body.unit_price_minor ?? current
         if (body.quantity === found.quantity) delete body.quantity
-        if (wanted !== null && (body.quantity != null || wanted !== current)) price = wanted
+        const unpinned = accept && !accepted && body.unit_price_minor != null
+        if (wanted !== null && (body.quantity != null || wanted !== current || unpinned)) price = wanted
       }
       const refiled = body.filaments ? withFilaments(found, body.filaments) : undefined
       const repins = resolved !== undefined || body.quantity != null || refiled?.changed === true || price !== null
       if (repins) openForItems(order, "an item's reference, quantity and filaments")
-      if (price !== null) notOnHold(order)
+      if (price !== null && accept) notOnHold(order)
       if (resolved) {
         found.reference = resolved.reference
         found.colours = resolved.colours
@@ -649,10 +657,7 @@ export const handlers = [
         for (const q of quotesOf(found.id)) q.accepted = false
         found.status = 'draft'
       }
-      if (price !== null) {
-        const quote = customPrice(found, price)
-        event(order, 'quote.accepted', { item_id: found.id, quote_id: quote.id })
-      }
+      if (price !== null) customPrice(order, found, price, accept)
       found.updated_at = now()
       event(order, 'item.updated', { item_id: found.id, repinned: repins })
       rederive(order)
@@ -723,6 +728,9 @@ export const handlers = [
       openForItems(order, "an item's price")
       const found = itemOf(order, String(params.item))
       if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      if (found.kind === 'custom') {
+        throw new Refused('item_custom', `item ${found.id} is a custom item: its price is its own field (PATCH the item's unit_price_minor)`, [found.id])
+      }
       const price = body.unit_price_minor as number
       const quote: Quote = {
         id: newId('q'),
