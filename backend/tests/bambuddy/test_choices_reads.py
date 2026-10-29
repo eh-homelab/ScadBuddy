@@ -363,7 +363,6 @@ async def test_a_claimed_refresh_reads_and_keeps_the_catalogue(
     assert presets.call_count == 2
     # Renamed in by the refresh, not only touched: a new file under the old name.
     assert kept.stat().st_ino != inode
-    assert kept.stat().st_mtime > 0
 
 
 async def test_a_refresh_claim_that_cannot_reach_postgres_lets_the_replica_refresh(
@@ -372,7 +371,7 @@ async def test_a_refresh_claim_that_cannot_reach_postgres_lets_the_replica_refre
     """A database that does not answer costs a double refresh, never a copy that is
     not refreshed at all; it is said by its type alone."""
     claim = catalogue.catalogue_refresh_claim(
-        "postgresql://nobody@127.0.0.1:1/none?connect_timeout=1"
+        "postgresql://nobody@127.0.0.1:1/none"  # refused at once
     )
 
     async with asyncio.timeout(10), claim(tmp_path / "v1-x.json") as granted:
