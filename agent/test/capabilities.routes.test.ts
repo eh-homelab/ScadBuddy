@@ -95,7 +95,7 @@ const listing = (entries: Record<string, unknown>[], truncated = false): Listing
 
 const okTest = (stored: StoredTool[] = []): PluginTest => ({ ok: true, detail: 'connected', duration_ms: 1, server: { name: 'hs', version: '1' }, tools: [], truncated: false, stored })
 
-function rig(opts: { access?: boolean; ready?: boolean; testPlugin?: () => Promise<PluginTest> } = {}) {
+function rig(opts: { access?: boolean; ready?: boolean; plugins?: boolean; testPlugin?: () => Promise<PluginTest> } = {}) {
   const mem = memoryAccess()
   const plugins = memoryPlugins(['hs', 'other'])
   const listings = memoryListings({
@@ -108,7 +108,7 @@ function rig(opts: { access?: boolean; ready?: boolean; testPlugin?: () => Promi
     backend: () => Promise.resolve(true),
     kek: { ok: true, kek },
     credentials: new MemoryCredentials(),
-    plugins: plugins.repo,
+    ...(opts.plugins === false ? {} : { plugins: plugins.repo }),
     listings: listings as never,
     testPlugin,
     testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
@@ -160,6 +160,21 @@ describe('/api/v1/ai/capabilities', () => {
     const down = rig({ ready: false }).app
     expect((await get(down, `/${enc(OWN)}`)).status).toBe(503)
     expect((await del(down, itemPath(OWN, outwardTool.name))).status).toBe(503)
+    // The database first, as the plugin routes do: a bad body is no reason to say 400.
+    expect((await put(none, itemPath(OWN, outwardTool.name), { access: 'none' })).status).toBe(503)
+    expect((await put(down, `/${enc(BUILTIN_SOURCES.http)}`, { enabled: 'no' })).status).toBe(503)
+  })
+
+  it('answers the built-in sources without the plugin registry, and no remote source', async () => {
+    const { app } = rig({ plugins: false })
+    const res = await get(app)
+    expect(res.status).toBe(200)
+    const { sources } = (await res.json()) as { sources: SourceView[] }
+    expect(sources.map((s) => s.id)).toEqual([BUILTIN_SOURCES.scadbuddy, BUILTIN_SOURCES.browser, BUILTIN_SOURCES.http, BUILTIN_SOURCES.ownPlugin])
+    const remote = await get(app, `/${enc('remote:hs')}`)
+    expect(remote.status).toBe(404)
+    expect(remote.headers.get('content-type')).toContain('application/json')
+    expect(await remote.json()).toEqual({ detail: 'no source "remote:hs"' })
   })
 
   it('refuses a write from another origin (403) and a non-JSON body (403)', async () => {
@@ -292,7 +307,7 @@ describe('/api/v1/ai/capabilities', () => {
     expect(body.source.items.map((i) => [i.id, i.missing])).toEqual([['fresh', false]])
   })
 
-  it('refuses a second refresh of the same plugin while one runs, but not of another plugin', async () => {
+  it('a running refresh refuses a second refresh and a connection test of the same plugin (429), but not another plugin', async () => {
     let release!: () => void
     const gate = new Promise<void>((r) => (release = r))
     const { app, testPlugin } = rig({
@@ -304,6 +319,8 @@ describe('/api/v1/ai/capabilities', () => {
     const first = refresh(app, 'remote:hs')
     await vi.waitFor(() => expect(testPlugin).toHaveBeenCalledTimes(1))
     expect((await refresh(app, 'remote:hs')).status).toBe(429)
+    // The other direction of the shared set: a running refresh holds the plugins route's test too.
+    expect((await app.request('/api/v1/ai/plugins/hs/test', { method: 'POST', headers: UI })).status).toBe(429)
     expect((await refresh(app, 'remote:other')).status).toBe(200)
     release()
     expect((await first).status).toBe(200)

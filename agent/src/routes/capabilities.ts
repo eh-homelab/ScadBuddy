@@ -76,14 +76,24 @@ export const route: RouteModule = {
 
     const context = (c: Context): AuditContext => ({ actor: UI_ACTOR, surface: 'http', clientIp: deps.remoteAddress(c) })
 
-    /** Answers `run`'s value, a refusal with its status, or 503 without the database. */
-    async function answer(c: Context, run: (caps: Capabilities) => Promise<unknown>) {
+    /**
+     * Answers `run`'s value, a refusal with its status, or 503 without the database. With
+     * `body`, the body is parsed after the database check (a bad one is 400) and passed to `run`.
+     */
+    async function answer<B = undefined>(c: Context, run: (caps: Capabilities, body: B) => Promise<unknown>, body?: z.ZodType<B>) {
       const caps = await capabilities()
       if (typeof caps === 'string') return c.json({ detail: caps }, 503)
+      let parsed = undefined as B
+      if (body !== undefined) {
+        const read = await parseBody(c, body)
+        if (typeof read === 'string') return c.json({ detail: read }, 400)
+        parsed = read
+      }
       try {
-        return c.json(await run(caps))
+        return c.json(await run(caps, parsed))
       } catch (err) {
         if (err instanceof CapabilityError) return c.json({ detail: err.message }, err.status)
+        // A backstop: the providers already turn these into CapabilityError (access/providers.ts).
         if (err instanceof AccessError) return c.json({ detail: err.message }, 400)
         if (err instanceof PluginError) return c.json({ detail: err.message }, err.status === 422 ? 400 : err.status)
         throw err
@@ -108,19 +118,13 @@ export const route: RouteModule = {
 
     app.get(one, (c) => answer(c, (caps) => caps.source(c.req.param('source'))))
 
-    app.put(one, async (c) => {
-      const body = await parseBody(c, SourceBody)
-      if (typeof body === 'string') return c.json({ detail: body }, 400)
-      return answer(c, (caps) => caps.setEnabled(c.req.param('source'), body.enabled, context(c)))
-    })
+    app.put(one, (c) => answer(c, (caps, body) => caps.setEnabled(c.req.param('source'), body.enabled, context(c)), SourceBody))
 
     app.get(item, (c) => answer(c, (caps) => caps.details(c.req.param('source'), c.req.param('item'))))
 
-    app.put(item, async (c) => {
-      const body = await parseBody(c, ItemBody)
-      if (typeof body === 'string') return c.json({ detail: body }, 400)
-      return answer(c, (caps) => caps.setItem(c.req.param('source'), c.req.param('item'), body.access, context(c)))
-    })
+    app.put(item, (c) =>
+      answer(c, (caps, body) => caps.setItem(c.req.param('source'), c.req.param('item'), body.access, context(c)), ItemBody),
+    )
 
     app.delete(item, (c) =>
       answer(c, (caps) => caps.resetItem(c.req.param('source'), c.req.param('item'), context(c))),
