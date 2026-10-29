@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 from scadbuddy.printers.lan import merge_report
-from tests.printers.rack_probe import ProbeError, RackProbe, idle_problem
+from tests.printers.rack_probe import ProbeError, RackProbe, fetch_problem, idle_problem
 
 NAME = "scadbuddy-rack-probe-1"
 SENT = frozenset({16, 17, 18, 19, 20})
@@ -75,6 +75,13 @@ def test_the_name_over_the_last_jobs_finish_is_not_a_start() -> None:
     watch = probe()
     watch.feed(report("FINISH", layer=54))
     assert watch.taken and not watch.started
+    assert "only over the last job's state" in watch.missing()
+
+
+def test_a_pick_of_only_the_mounted_hotend_is_refused() -> None:
+    # tar_id would never change, so the probe could never end (#4936 review).
+    assert fetch_problem(BASELINE, frozenset({20})) is not None
+    assert fetch_problem(BASELINE, frozenset({20, 16})) is None
 
 
 def test_a_real_start_passes_after_a_fetch_and_layer_1() -> None:

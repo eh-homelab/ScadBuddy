@@ -57,6 +57,15 @@ def tar_id(report: dict[str, Any]) -> int | None:
     return _int(nozzle.get("tar_id"))
 
 
+def fetch_problem(baseline: dict[str, Any], sent: frozenset[int]) -> str | None:
+    """Why the pick can show no fetch, or ``None``: every rack hotend it sends is the one
+    already on the toolhead, so ``tar_id`` never changes and `RackProbe` never ends."""
+    mounted = tar_id(baseline)
+    if not {n for n in sent if n >= RACK_FIRST_ID} - {mounted}:
+        return f"the pick {sorted(sent)} sends no rack hotend but the mounted {mounted}"
+    return None
+
+
 def idle_problem(baseline: dict[str, Any], name: str) -> str | None:
     """Why the printer must not be started now, or ``None``: it is printing (or paused),
     the probe's name is already on it, or it holds an error outside a failed job."""
@@ -136,7 +145,12 @@ class RackProbe:
     def missing(self) -> str:
         """What the probe has not seen yet, for a timeout's message."""
         if not self.started:
-            return f"no report named {self.name!r} in {sorted(STARTED_STATES)}"
+            seen = (
+                f"reports named {self.name!r} only over the last job's state"
+                if self.taken
+                else f"no report named {self.name!r}"
+            )
+            return f"{seen}, never in {sorted(STARTED_STATES)}"
         gaps = []
         if not self.fetched:
             gaps.append(f"no rack fetch (tar_id stayed {self._last_tar})")

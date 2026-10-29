@@ -16,7 +16,8 @@ the mapping does not name, then stops it. What counts as this job's is
 `tests.printers.rack_probe` (#4933: the first live run passed on the previous job's
 ``tar_id`` and ``layer_num``). It refuses to start unless the printer is idle
 (`rack_probe.idle_problem`): ``IDLE``, ``FINISH`` or ``FAILED``, and no ``print_error``
-outside a failed job. The printer reports no empty-bed flag, so
+outside a failed job, and a pick that sends a rack hotend other than the mounted one
+(`rack_probe.fetch_problem`). The printer reports no empty-bed flag, so
 ``SCADBUDDY_TEST_PRINTER_PRINT=1`` is the runner's word that the bed is clear. Whoever
 runs it watches the screen: the hotends it picks up are the ones printed (``-s`` shows
 the mapping sent, each fetch and each layer).
@@ -42,7 +43,7 @@ from scadbuddy.printers.lan_models import ProjectFile
 from scadbuddy.printers.nozzle_mapping import FIXED_NOZZLE_ID, choose_nozzles, read_rack_plan
 from scadbuddy.printers.status import status_from_report
 from tests.conftest import printer_env
-from tests.printers.rack_probe import RackProbe, idle_problem
+from tests.printers.rack_probe import RackProbe, fetch_problem, idle_problem
 from tests.printers.test_status import row
 
 pytestmark = pytest.mark.requires_printer
@@ -81,6 +82,8 @@ async def test_a_rack_print_uses_the_hotends_sent(printer: dict[str, str]) -> No
     assert chosen.mapping is not None, f"no pick: {[w.message for w in chosen.warnings]}"
     print(f"slot groups {plan.slot_groups}; nozzle_mapping {chosen.mapping}")
     sent = frozenset(n for n in chosen.mapping if n not in (-1, FIXED_NOZZLE_ID))
+    problem = fetch_problem(first.print, sent)
+    assert problem is None, f"not started: {problem}; pick a plate that swaps hotends"
     md5 = await lan.upload(BytesIO(sliced), f"{UPLOAD_DIR}{name}.3mf")
     command = project_file_command(
         ProjectFile(
