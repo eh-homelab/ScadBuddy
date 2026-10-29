@@ -141,6 +141,7 @@ const deleted = (what: string) => json({ deleted: what })
 export const orderTools: Tool[] = [
   defineTool({
     name: 'customer_list',
+    label: 'List customers',
     description:
       'List customers by name, at most `limit` (100 by default, 500 at most): search with `q` (name, company ' +
       'or any contact point) rather than scroll. Archived customers are left out unless asked for.',
@@ -155,6 +156,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'customer_get',
+    label: 'Read a customer',
     description: 'One customer with their contact points and addresses.',
     input: z.object({ customer_id: customerId }),
     risk: 'read',
@@ -169,6 +171,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'customer_upsert',
+    label: 'Create or edit a customer',
     description:
       'Make a customer (no `customer_id`), or edit one: each field given replaces theirs, and a `contacts` or ' +
       '`addresses` list replaces the rows whole, keeping any row it names by `id` (an address an open order ' +
@@ -242,6 +245,7 @@ export const orderTools: Tool[] = [
 
   defineTool({
     name: 'order_list',
+    label: 'List orders',
     description:
       'Orders, newest first, a page at a time (`limit` up to 100): pass `next_cursor` back as `cursor`. Filter by ' +
       '`status`, `customer_id`, `q` (number, notes, customer name) and a `from`/`to` window on when they were made.',
@@ -260,6 +264,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_get',
+    label: 'Read an order',
     description:
       'One order whole: its status, number and addresses, its line items with their quotes and fulfilment ' +
       'attempts, charges, payments, shipments and totals.',
@@ -271,6 +276,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_create',
+    label: 'Create an order',
     description:
       "A draft order for a customer, numbered, in the shop's currency setting; it points at the customer's " +
       'default addresses until accepted. Add its line items with order_item_add.',
@@ -282,6 +288,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_update',
+    label: 'Edit an order',
     description:
       "Edit an order: notes and due date in any open state; the address ids (the order's own customer's) and the " +
       'charges, replaced whole, while draft or quoted. `hold` puts it on hold or releases it (true/false): on hold, ' +
@@ -343,6 +350,7 @@ export const orderTools: Tool[] = [
 
   defineTool({
     name: 'order_item_add',
+    label: 'Add an order line item',
     description:
       'Add a line item: from an output (`output_id`: its commit, inputs, libraries and colours), or by hand (`slug`, ' +
       '`commit`, `inputs`). Beside `output_id`, leave the others out: one given must be the output\'s own (`inputs` ' +
@@ -387,6 +395,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_item_update',
+    label: 'Edit an order line item',
     description:
       'Edit a line item: `reference` (replaced whole) and `quantity` while the order is draft or quoted, each dropping ' +
       'the accepted quote; `title`, `notes` and `sku` in any open state. A custom item takes `unit_price_minor` and ' +
@@ -431,6 +440,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_item_quote',
+    label: 'Quote an order line item',
     description:
       'Quote a line item, in one of two modes. `manual`: a typed price (one line, cost = price, the quantity as ' +
       'it is now). `slice`: render the item if it has no matching output, slice every plate with the print ' +
@@ -473,6 +483,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_item_accept_quote',
+    label: "Accept a line item's quote",
     description:
       "Pin a quote as the item's price: the item becomes approved, and the order quoted once every open item is. " +
       'Commits the shop to that price.',
@@ -493,6 +504,7 @@ export const orderTools: Tool[] = [
 
   defineTool({
     name: 'order_accept',
+    label: 'Accept an order',
     description:
       'Accept an order: every open item must have an accepted quote (`items_not_quoted` names the rest). Copies ' +
       "the customer's addresses onto the order and pins every item; the shop is committed to the customer.",
@@ -505,6 +517,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_item_fulfil',
+    label: 'Record a fulfilment attempt',
     description:
       'Record a fulfilment attempt by hand (`attempt`: the quantity made and the outcome; a failed one fails the ' +
       'item, the next returns it to approved), edit one not yet accepted (`fulfilment_id` with `attempt`), or accept ' +
@@ -581,6 +594,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_ship',
+    label: 'Record a shipment',
     description:
       'Record a shipment of fulfilled items (or edit one with `shipment_id`): carrier, service, tracking, when, the ' +
       "address (the order's shipping address when none is given) and which items in what quantity. The order is " +
@@ -621,6 +635,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_close',
+    label: 'Close an order',
     description:
       'Close an order: refused with `order_not_closable` naming every item still open and every fulfilled item no ' +
       'shipment covers.',
@@ -633,6 +648,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_reopen',
+    label: 'Reopen an order',
     description:
       'Undo a close or a cancel. A closed order takes the status its items and shipments give it (`shipped` as ' +
       'it closed); a cancelled order goes back to the status it was cancelled from, with the items that cancel took. ' +
@@ -654,6 +670,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_cancel',
+    label: 'Cancel an order',
     description:
       'Cancel an order (from any state before shipped: its open items are cancelled, fulfilled ones keep their ' +
       'attempts), or one line item (`item_id`). Terminal: it commits the shop to the customer as an accept does.',
@@ -678,6 +695,7 @@ export const orderTools: Tool[] = [
 
   defineTool({
     name: 'price_book_get',
+    label: 'Read the price book',
     description:
       "The price book in force: the currency the next order copies (and its `minor_exponent`), the pricing policy " +
       '(machine rate per hour, setup fee per plate, labour per item, markup percent, rounding), the rough ' +
@@ -689,6 +707,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'price_book_set',
+    label: 'Edit the price book',
     description:
       'Keep the price book: `policy` (the fields given replace those in force, the rest stay), ' +
       "`rough_estimate_factor`, and `filament`: a new record (no `filament_id`; material, colour and cost_per_kg), " +
@@ -763,6 +782,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_estimate',
+    label: "Estimate an output's filament cost",
     description:
       "A rough estimate of an output's filament before anything is sliced: its parts' enclosed volumes over every " +
       "plate times the filament's density and the shop's factor, in grams and at the filament's price. Labelled " +

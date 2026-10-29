@@ -23,7 +23,7 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 
 const RUN = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
 const tool = (name: string, risk: 'read' | 'write' | 'outward'): Tool =>
-  defineTool({ name, description: name, input: z.object({}), risk, routes: [], handler: async () => json({ ran: name }) })
+  defineTool({ name, label: name, description: name, input: z.object({}), risk, routes: [], handler: async () => json({ ran: name }) })
 const TOOLS = [tool('look', 'read'), tool('change', 'write'), tool('send', 'outward'), tool('browser_click', 'write')]
 
 function rig() {

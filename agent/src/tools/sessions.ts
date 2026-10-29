@@ -279,6 +279,7 @@ function decideTool(approve: boolean): Tool {
   const verb = approve ? 'approve' : 'deny'
   return defineTool({
     name: `sessions_${verb}`,
+    label: approve ? 'Approve a pending action' : 'Deny a pending action',
     description:
       `${approve ? 'Approve' : 'Deny'} another agent's pending outward action (an approval.required in a session, ` +
       'or an outward call prepared over /mcp; any approval id pending_input_list gives, or a bare approval id). ' +
@@ -326,6 +327,7 @@ function decideTool(approve: boolean): Tool {
 export const sessionTools: Tool[] = [
   defineTool({
     name: 'sessions_list',
+    label: 'List agent sessions',
     description:
       'List the agent sessions this caller may see (its own, those it started, and those offered to it, flagged ' +
       'offered_to_you), newest first: id, title, origin, owner ("controlled by"), any pending handoff offer, ' +
@@ -366,6 +368,7 @@ export const sessionTools: Tool[] = [
 
   defineTool({
     name: 'sessions_start',
+    label: 'Start an agent session',
     description:
       "Start a ScadBuddy agent session owned by this caller, optionally with its first message. The session's " +
       "tools run with this caller's tiers; an outward action waits for a decision: a human's in the ScadBuddy UI, " +
@@ -442,6 +445,7 @@ export const sessionTools: Tool[] = [
 
   defineTool({
     name: 'sessions_send',
+    label: 'Send a message to a session',
     description:
       'Add a user message to a session this caller owns and start its turn. One turn at a time: while a turn ' +
       'is running this is refused; wait, or sessions_interrupt it. An outward action in the turn waits for a ' +
@@ -496,6 +500,7 @@ export const sessionTools: Tool[] = [
 
   defineTool({
     name: 'sessions_get',
+    label: 'Read an agent session',
     description:
       "A session this caller may see: its status and owner, its pending approvals, and its transcript after " +
       'after_seq (streamed text joined per message). Page with next_seq while more is true. The same as the ' +
@@ -528,6 +533,7 @@ export const sessionTools: Tool[] = [
 
   defineTool({
     name: 'sessions_resources',
+    label: 'List what a session touched',
     description:
       'What a session this caller may see touched: every model, revision, preset, asset, render job, output, ' +
       'print run and print (a Bambuddy queue item id) its tool calls created, changed or deleted, oldest first, with ' +
@@ -542,6 +548,7 @@ export const sessionTools: Tool[] = [
 
   defineTool({
     name: 'sessions_attach',
+    label: 'Watch a session live',
     description:
       "Watch a session live: waits up to wait_seconds for its next events after after_seq and returns them once " +
       'they pause (a notification per event while waiting). Call again with next_seq to keep following. Left ' +
@@ -587,6 +594,7 @@ export const sessionTools: Tool[] = [
 
   defineTool({
     name: 'sessions_fork',
+    label: 'Fork a session',
     description:
       'Branch a session this caller may see into a new one it owns, with the conversation so far, to try an ' +
       'alternative without changing the original. The fork spends from the same budget as the original: a turn in ' +
@@ -617,6 +625,7 @@ export const sessionTools: Tool[] = [
 
   defineTool({
     name: 'sessions_interrupt',
+    label: "Stop a session's running turn",
     description:
       "Stop a session's running turn, whichever replica runs it. Anyone who may see the session may interrupt " +
       'it. Its pending approvals are cancelled.',
@@ -632,6 +641,7 @@ export const sessionTools: Tool[] = [
 
   defineTool({
     name: 'sessions_handoff',
+    label: 'Hand a session on',
     description:
       'Hand a session this caller owns on. To "browser" (the user in the ScadBuddy UI) it moves at once. To an ' +
       'MCP principal ("token:<id>", "oidc:<issuer>#<sub>") it is only OFFERED: that principal becomes the owner ' +
@@ -660,6 +670,7 @@ export const sessionTools: Tool[] = [
 
   defineTool({
     name: 'sessions_accept_handoff',
+    label: 'Accept a session handoff',
     description:
       'Accept a session offered to this caller (sessions_list shows it with offered_to_you): it becomes the ' +
       "owner, and the only one who may send to it. Read it first with sessions_get; its transcript is another " +
@@ -678,6 +689,7 @@ export const sessionTools: Tool[] = [
 
   defineTool({
     name: 'sessions_cancel_handoff',
+    label: 'Cancel a session handoff',
     description:
       "End a session's pending handoff offer: its owner withdraws it, or the principal it is offered to declines " +
       'it. The owner keeps the session.',
@@ -694,6 +706,7 @@ export const sessionTools: Tool[] = [
 
   defineTool({
     name: 'sessions_list_approvals',
+    label: 'List pending approvals',
     description:
       'Pending approvals: those of one session this caller may see, or, for a token with the approval grant, ' +
       'every pending one. Each has the input_hash sessions_approve and sessions_deny can check.',
@@ -716,6 +729,7 @@ export const sessionTools: Tool[] = [
   // other than the browser user, under the approvals' visibility rules.
   defineTool({
     name: 'pending_input_list',
+    label: 'List calls waiting on a person',
     description:
       'Every tool call parked on a person that this caller may see, approvals and answers alike, across classic and ' +
       'durable sessions: every pending approval for a token with the approval grant, else those of its own sessions ' +
@@ -732,6 +746,7 @@ export const sessionTools: Tool[] = [
   }),
   defineTool({
     name: 'sessions_pending_input',
+    label: "List one session's waiting calls",
     description:
       "One session's parked tool calls, as pending_input_list shows them. A durable session's are read from its " +
       'workflow, the source of truth; this fails while its worker does not answer, and can be retried.',

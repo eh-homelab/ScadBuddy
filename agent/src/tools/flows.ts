@@ -70,6 +70,7 @@ export const approvalTimeout = z
 export const flowTools: Tool[] = [
   defineTool({
     name: 'register_flow',
+    label: 'Register a flow',
     description:
       'Register a flow: a Python script that runs durably, for as long as it needs, over the host functions ' +
       '`sleep(seconds)`, `wait_for_human(question, timeout_s)` (10 to 86400 s, default 3600; returns {answer}), ' +
@@ -112,6 +113,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'check_flow_script',
+    label: 'Check a flow script',
     description:
       'Type-check a flow script as register_flow would, without registering it: no version, no commit. ' +
       'Answers {problems}, each with its 1-based `line` (null for the whole script) and `message`; empty when ' +
@@ -126,6 +128,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'list_flows',
+    label: 'List flows',
     description:
       'The registered flows, each at its newest version (no script; get_flow has it). Archived and deleted ' +
       'flows only with `include_archived`, each with `archived_at`/`archived_by` or `deleted_at`/`deleted_by`.' +
@@ -145,6 +148,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'archive_flow',
+    label: 'Archive a flow',
     description:
       'Archive a flow, every version of it: it leaves the Flows list (list_flows shows it with ' +
       '`include_archived`) and no run of it starts until unarchive_flow. Runs already started keep running, ' +
@@ -163,6 +167,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'unarchive_flow',
+    label: 'Unarchive a flow',
     description: 'Unarchive a flow: it is listed again, and its versions start again.',
     input: z.object({ name: flowName }),
     risk: 'write',
@@ -178,6 +183,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'delete_flow',
+    label: 'Delete a flow',
     description:
       "Delete a flow: one commit removing its script from the flows' git history, which keeps every version. " +
       'Nothing new starts; runs in progress keep running the version they started, and finished runs still ' +
@@ -198,6 +204,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'get_flow',
+    label: 'Read a flow version',
     description: 'One flow version, with its script.',
     input: z.object({ definition_id: definitionId }),
     risk: 'read',
@@ -213,6 +220,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'list_flow_versions',
+    label: "List a flow's versions",
     description:
       "A flow's history, newest first, from git: each version's id, commit, version number, message and who " +
       'made it (a person, or an agent with its principal and session). Pass a version id to get_flow or ' +
@@ -234,6 +242,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'get_flow_version_source',
+    label: "Read a flow's script at a version",
     description: "A flow's script at one of its versions, by commit.",
     input: z.object({ name: flowName, commit: flowCommit }),
     risk: 'read',
@@ -252,6 +261,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'diff_flow_version',
+    label: 'Compare a flow version with the last',
     description:
       "The unified diff of a flow's script at a version against the version before it, or against `base` " +
       '(another of its versions) when given.',
@@ -271,6 +281,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'restore_flow_version',
+    label: 'Restore a flow version',
     description:
       "Restore a flow's script at one of its versions as its newest version: a new commit and version, " +
       'type-checked first, with that version\'s approval timeout (nothing is lost). Runs already started keep ' +
@@ -291,6 +302,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'start_flow_run',
+    label: 'Start a flow run',
     description:
       'Start a run of a flow version. Answered at once with the run id (status `starting`): follow it with ' +
       'get_flow_run. The script is checked again first (422 with `problems` if the host functions changed). ' +
@@ -334,6 +346,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'revoke_flow_grant',
+    label: "Revoke a flow run's grant",
     description:
       "Revoke a flow run's grant, for a run this principal started: final, and the run goes on, its next " +
       'outward call waiting for a decision. Revoking only takes authority away; approving a grant is the ' +
@@ -352,6 +365,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'list_flow_runs',
+    label: 'List flow runs',
     description:
       'Flow runs, newest first: each with its status (running, waiting, succeeded, failed, terminated), steps ' +
       '(one per host call) and result. Filter by flow version or by the agent session that started them; the ' +
@@ -373,6 +387,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'get_flow_run',
+    label: 'Read a flow run',
     description:
       'One flow run: its record, and `pending`, what it waits on now (a question for a person, or an approval). ' +
       'People answer and approve on the Workflows page, never through a tool. To go back to an earlier point, ' +
@@ -391,6 +406,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'preview_flow_reset',
+    label: 'Preview a flow run reset',
     description:
       'What resetting a flow run to an earlier point would send again: its outward calls (queue_print, arrange, an outward tool, an agent turn that made one) ' +
       'after `event_id`, a completed workflow task of the run\'s Temporal history after its script started ' +
@@ -412,6 +428,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'get_flow_reset_points',
+    label: "List a flow run's reset points",
     description:
       'Every point a Reset of a flow run takes (`event_id`s of its current execution, oldest first), each with ' +
       '`first_step`, the seq of the first step a Reset there runs again or reopens (null: none). Preview one ' +
@@ -430,6 +447,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'reset_flow_run',
+    label: 'Reset a flow run',
     description:
       'Reset a flow run to `event_id` (Temporal Reset): it continues from there on the current code, and every ' +
       'host call after the point runs again, its outward ones as new prints or arranges. Refused (409, with the ' +
@@ -458,6 +476,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'escalation_respond',
+    label: "Answer a flow run's escalation",
     description:
       "Answer a flow run's call that is outside the run's grant and waits for this session, because this session " +
       'started the run (#2482). `deny` stops it; `pass_up` sends it on to the person unchanged. Those two are ' +

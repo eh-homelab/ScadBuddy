@@ -199,6 +199,7 @@ describe('the classic seam reads access per call', () => {
     const prepare = vi.fn(async () => ({ input: {}, summary: 'sends' }))
     const send = defineTool({
       name: 'send_it',
+      label: 'send_it',
       description: 'sends',
       input: z.object({}),
       risk: 'outward',

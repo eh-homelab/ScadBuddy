@@ -58,6 +58,7 @@ type ArrangeProblem = { code?: string; output_ids?: string[]; library_file_ids?:
 export const arrangeTools: Tool[] = [
   defineTool({
     name: 'arrange',
+    label: 'Arrange objects on plates',
     description:
       'Lay objects out again on shared plates, with no re-render, and save the result as a new output. ' +
       'Sources mix freely: outputs of any template (`output_id`), and Bambuddy library files ' +

@@ -54,6 +54,7 @@ const standingGrant = z
 export const flowTriggerTools: Tool[] = [
   defineTool({
     name: 'list_flow_triggers',
+    label: 'List flow triggers',
     description:
       "Flow triggers, newest first, or one flow's: each with its pinned version, when it fires (`schedule`'s " +
       '`next_fires`, or `event`), whether it is paused and why, its standing grant, and its last fires with ' +
@@ -74,6 +75,7 @@ export const flowTriggerTools: Tool[] = [
 
   defineTool({
     name: 'get_flow_trigger',
+    label: 'Read a flow trigger',
     description: 'One flow trigger, with its next fires, standing grant and last fires.',
     input: z.object({ trigger_id: triggerId }),
     risk: 'read',
@@ -86,6 +88,7 @@ export const flowTriggerTools: Tool[] = [
 
   defineTool({
     name: 'create_flow_trigger',
+    label: 'Create a flow trigger',
     description:
       'Make a trigger that starts runs of one flow version, always that version, with these inputs: on a ' +
       '`schedule` (cron or interval, time zone, catch-up window) or on an `event` (a render finished, a ' +
@@ -110,6 +113,7 @@ export const flowTriggerTools: Tool[] = [
 
   defineTool({
     name: 'update_flow_trigger',
+    label: 'Edit a flow trigger',
     description:
       'Change a trigger this principal made: its version, inputs, schedule or event, overlap or approval ' +
       'timeout. Only what is sent changes. Any change returns its standing grant to requested: the user approves it again.',
@@ -136,6 +140,7 @@ export const flowTriggerTools: Tool[] = [
 
   defineTool({
     name: 'pause_flow_trigger',
+    label: 'Pause a flow trigger',
     description: 'Pause a trigger this principal made: it fires nothing until resumed. Runs already started go on.',
     input: z.object({ trigger_id: triggerId }),
     risk: 'write',
@@ -151,6 +156,7 @@ export const flowTriggerTools: Tool[] = [
 
   defineTool({
     name: 'resume_flow_trigger',
+    label: 'Resume a flow trigger',
     description: "Resume a paused trigger this principal made. Refused while its flow is archived or deleted.",
     input: z.object({ trigger_id: triggerId }),
     risk: 'outward',
@@ -167,6 +173,7 @@ export const flowTriggerTools: Tool[] = [
 
   defineTool({
     name: 'delete_flow_trigger',
+    label: 'Delete a flow trigger',
     description:
       'Delete a trigger this principal made, with its Schedule. Its standing grant is revoked, and so are the ' +
       'grants of the runs it started; those runs go on.',
@@ -184,6 +191,7 @@ export const flowTriggerTools: Tool[] = [
 
   defineTool({
     name: 'attach_flow_trigger_grant',
+    label: "Propose a trigger's standing grant",
     description:
       'Propose a standing grant for a trigger this principal made. It is requested only, and does nothing ' +
       "until the user approves it (maybe edited) on the flow's page. 409 while the trigger has a live one.",
@@ -202,6 +210,7 @@ export const flowTriggerTools: Tool[] = [
 
   defineTool({
     name: 'revoke_flow_trigger_grant',
+    label: "Revoke a trigger's standing grant",
     description:
       "Revoke the standing grant of a trigger this principal made: final, and the grants of the runs it " +
       'started are revoked with it, so their next outward calls wait. Approving one is the user\'s alone.',

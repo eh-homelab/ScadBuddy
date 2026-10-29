@@ -548,6 +548,7 @@ async function eachLimited<T, R>(items: readonly T[], limit: number, fn: (item: 
 export const fileTools: Tool[] = [
   defineTool({
     name: 'read_file',
+    label: 'Read a file in a model',
     description:
       "Read a text file in a model's directory (model.scad, a .scad beside it, README.md, model.json, " +
       'ui/ files; glob lists them), as `cat -n` prints it: numbered lines, up to 2000 from `offset`. Ends ' +
@@ -608,6 +609,7 @@ export const fileTools: Tool[] = [
 
   defineTool({
     name: 'edit_file',
+    label: "Replace text in a model's file",
     description:
       "Replace text in one of a model's .scad files or its README.md, as one revision in its history: " +
       '`old_string` must match exactly once (or set `replace_all`). Returns the new revision and its diff ' +
@@ -643,6 +645,7 @@ export const fileTools: Tool[] = [
 
   defineTool({
     name: 'multi_edit',
+    label: 'Make several text replacements in a model file',
     description:
       "Several edit_file replacements in one of a model's .scad files or its README.md, applied in order, " +
       'all or nothing, as ONE revision. Each edit sees the text the ones before it left. Pass `base`, as ' +
@@ -675,6 +678,7 @@ export const fileTools: Tool[] = [
 
   defineTool({
     name: 'write_file',
+    label: "Write a model's file",
     description:
       "Create or replace one of a model's .scad files or its README.md with `content`, as one revision. " +
       'Prefer edit_file for a change to part of a file. A .scad file beside model.scad comes back with ' +
@@ -712,6 +716,7 @@ export const fileTools: Tool[] = [
 
   defineTool({
     name: 'glob',
+    label: 'Find model files by name pattern',
     description:
       "The files in a model's directory whose paths, relative to it, match `pattern`: `*.scad` (the " +
       'files model.scad can include or use), `*.md`, `ui/**`, `images/*`, `{a,b}.scad`. `*` and `?` stop ' +
@@ -730,6 +735,7 @@ export const fileTools: Tool[] = [
 
   defineTool({
     name: 'grep',
+    label: 'Search model files for text',
     description:
       "Search model files with a regular expression (JavaScript syntax), in one model (`slug`) or across " +
       "every model in the catalogue. Searches the model's .scad files; `glob` searches every file in its " +

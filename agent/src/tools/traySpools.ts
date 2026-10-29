@@ -23,6 +23,7 @@ const SOURCE = "ScadBuddy's spool overlay: provider records copied from Bambuddy
 export const traySpoolTools: Tool[] = [
   defineTool({
     name: 'link_tray_spool',
+    label: 'Link a spool to a tray',
     description:
       'Say which spool is in an untagged tray of a LAN-linked printer, for a print on the native path: a ' +
       "physical spool (`physical_spool_id`) or one spool provider's record of it (`provider` and `record_id`, " +
@@ -57,6 +58,7 @@ export const traySpoolTools: Tool[] = [
 
   defineTool({
     name: 'unlink_tray_spool',
+    label: 'Unlink a spool from a tray',
     description:
       'Forget which spool is in a tray of a LAN-linked printer (the link link_tray_spool made). The spool and ' +
       "its providers' records stay. Writes ScadBuddy only.",

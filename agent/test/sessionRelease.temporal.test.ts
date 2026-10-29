@@ -119,6 +119,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
 
   const ship = defineTool({
     name: 'ship',
+    label: 'ship',
     description: 'Ships something out of ScadBuddy',
     input: z.object({ what: z.string() }),
     risk: 'outward',

@@ -95,6 +95,7 @@ function repin(ctx: ToolContext, slug: string, name: string, ref: string | undef
 export const libraryTools: Tool[] = [
   defineTool({
     name: 'list_libraries',
+    label: 'List the OpenSCAD library catalogue',
     description:
       'The OpenSCAD library catalogue (e.g. BOSL2, gridfinity-rebuilt-openscad): name, git URL, default ref, ' +
       'description and tags. `q` keeps the libraries whose name, description or tags hold every word of it ' +
@@ -136,6 +137,7 @@ export const libraryTools: Tool[] = [
   // public host it controls, so a human approves that fetch first (spec §8.2).
   defineTool({
     name: 'pin_library',
+    label: 'Pin a catalogue library to a model',
     description:
       'Add a catalogue library (see list_libraries) to a model, or re-pin it at another tag or branch, so ' +
       "`include <…>`/`use <…>` resolve. Uses the catalogue's repository; for any other git URL use " +
@@ -183,6 +185,7 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'pin_library_from_url',
+    label: 'Pin a library to a model from a git URL',
     description:
       'Pin a library to a model from an https git URL that is not the catalogue\'s. The backend clones that ' +
       'URL, so this needs a human approval. A non-catalogue URL needs a `ref`.',
@@ -212,6 +215,7 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'unpin_library',
+    label: 'Unpin a library from a model',
     description:
       'Remove a library from a model, as a revision in its history: every entry of that name, or with ' +
       "`index` only the invalid entry at that position (the model record's `invalid_libraries[].index`).",
@@ -247,6 +251,7 @@ export const libraryTools: Tool[] = [
   // an injected agent controls. SSRF is the backend's (see the pin tools above).
   defineTool({
     name: 'repin_library',
+    label: 'Re-pin a catalogue library',
     description:
       "Re-pin a model's catalogue library from the repository it already pins, at `ref` or at the ref " +
       'already pinned (moving a branch pin to the branch\'s current commit), as a revision in its history. ' +
@@ -263,6 +268,7 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'repin_library_from_pinned_url',
+    label: 'Re-pin a library from its pinned URL',
     description:
       "Re-pin a model's library from the non-catalogue URL its pin already records (a fork, another repo), " +
       'at `ref` or the ref already pinned. The backend clones that URL again, so this needs a human approval.',
@@ -280,6 +286,7 @@ export const libraryTools: Tool[] = [
   // model's pin records, exactly as a re-pin does, so it is tiered as the re-pin is.
   defineTool({
     name: 'list_library_users',
+    label: 'List the models that pin a library',
     description:
       "The models (yours and built-in) whose current model.json pins a library, with each one's URL, ref and " +
       'commit; nulls for an entry that is not a readable pin. Older revisions are not counted. The first step ' +
@@ -305,6 +312,7 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'check_library_candidate',
+    label: 'Test a catalogue library re-pin',
     description:
       "Dry-run a re-pin: clone a model's catalogue library at `ref` (the catalogue's ref when omitted) and " +
       "parse-check the model's saved source against it, with its other pins as they are. Records nothing: the " +
@@ -322,6 +330,7 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'check_library_candidate_from_pinned_url',
+    label: 'Test a re-pin from a pinned URL',
     description:
       "Dry-run a re-pin of a model's library pinned from a non-catalogue URL (a fork, another repo): clone that " +
       "URL at `ref` and parse-check the model's saved source against it. Records nothing. The backend clones " +
@@ -339,6 +348,7 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'list_installed_libraries',
+    label: 'List installed library checkouts',
     description: 'The library checkouts on the data volume, with the models whose live pins read them.' + PAGED,
     input: z.object({ ...pageInput }),
     risk: 'read',
@@ -358,6 +368,7 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'remove_library_checkout',
+    label: 'Remove a library checkout',
     description:
       "Delete a library's checkout at `commit`, or all of its checkouts, from the volume. Refused while a " +
       'model pins it or a render reads it. Irreversible (a later render of an old revision needs a re-pin), ' +
@@ -389,6 +400,7 @@ export const libraryTools: Tool[] = [
   // route is a POST only because it takes an unsaved source.
   defineTool({
     name: 'check_dependencies',
+    label: "Check a model's include and use targets",
     description:
       "Resolve a model's `include <…>`/`use <…>` targets against its own files and pinned libraries, as a " +
       'render would, without rendering or fetching anything. Each target is `resolved` (with the file and ' +
@@ -421,6 +433,7 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'list_fonts',
+    label: 'List installed fonts',
     description:
       'Font families installed for rendering. A `// font` value must name one of them (case and spaces do not ' +
       'matter): OpenSCAD itself would silently draw a missing family in DejaVu Sans with other geometry, so ' +
@@ -436,6 +449,7 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'search_fonts',
+    label: 'Search Google Fonts',
     description: 'Search the Google Fonts catalogue for families that can be installed.',
     input: z.object({
       q: z.string().optional(),
@@ -453,6 +467,7 @@ export const libraryTools: Tool[] = [
 
   defineTool({
     name: 'install_font',
+    label: 'Install a Google Fonts family',
     description:
       'Install a Google Fonts family onto the data volume so renders can use it. The backend then checks that ' +
       'fontconfig resolves the family where renders run, and answers an error if it does not (the files may ' +

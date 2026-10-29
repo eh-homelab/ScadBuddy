@@ -35,6 +35,7 @@ function seen(ctx: ToolContext) {
 
 const whoami = defineTool({
   name: 'whoami',
+  label: 'whoami',
   description: 'who runs this',
   input: z.object({ n: z.number().default(1) }),
   risk: 'read',
@@ -46,6 +47,7 @@ const whoami = defineTool({
 })
 const boom = defineTool({
   name: 'boom',
+  label: 'boom',
   description: 'fails',
   input: z.object({}),
   risk: 'read',
@@ -56,6 +58,7 @@ const boom = defineTool({
 })
 const send = defineTool({
   name: 'send',
+  label: 'send',
   description: 'outward',
   input: z.object({ to: z.string() }),
   risk: 'outward',
@@ -64,6 +67,7 @@ const send = defineTool({
 })
 const slow = defineTool({
   name: 'slow',
+  label: 'slow',
   description: 'waits for a cancel',
   input: z.object({}),
   risk: 'read',
@@ -222,6 +226,7 @@ describe('tool activities', () => {
     const PNG = 'iVBORw0KGgo='
     const pic = defineTool({
       name: 'pic',
+      label: 'pic',
       description: 'an image and words',
       input: z.object({}),
       risk: 'read',
@@ -452,6 +457,7 @@ describe('flow runs in tool activities', () => {
   const PNG_NAME = `${createHash('sha256').update(Buffer.from(PNG, 'base64')).digest('hex')}.png`
   const pic = defineTool({
     name: 'pic',
+    label: 'pic',
     description: 'an image and words',
     input: z.object({}),
     risk: 'read',
@@ -517,6 +523,7 @@ describe('flow runs in tool activities', () => {
     await flowBlobs.put(FLOW, [{ name: PNG_NAME, mediaType: 'image/png', bytes: Buffer.from(PNG, 'base64') }])
     const peek = defineTool({
       name: 'peek',
+      label: 'peek',
       description: 'reads a flow image',
       input: z.object({ name: z.string() }),
       risk: 'read',
@@ -600,6 +607,7 @@ describe("a call whose tool resolves what it names (#4442)", () => {
   /** print_output's printer resolution, alone: a registry `printer` and the Bambuddy id it links. */
   const aim = defineTool({
     name: 'aim',
+    label: 'aim',
     description: 'prints on a registry printer',
     input: z.object({ printer: z.string().optional(), printer_id: z.number().int().optional() }),
     risk: 'outward',
@@ -632,6 +640,7 @@ describe("a call whose tool resolves what it names (#4442)", () => {
   it('refuses and audits a call whose hook changed a supplied argument, at describe and at run', async () => {
     const bent = defineTool({
       name: 'bent',
+      label: 'bent',
       description: 'rewrites printer_id',
       input: z.object({ printer: z.string().optional(), printer_id: z.number().int().optional() }),
       risk: 'outward',
@@ -989,6 +998,7 @@ describe("decidedCalls: a released turn's approved call (unified runtime spec §
   const keys: (string | undefined)[] = []
   const ship = defineTool({
     name: 'ship',
+    label: 'ship',
     description: 'Ships something',
     input: z.object({ what: z.string() }),
     risk: 'outward',

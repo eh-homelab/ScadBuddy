@@ -114,6 +114,7 @@ describe('runTool marks handler output, not its own messages', () => {
   it('wraps what the handler returned, naming the declared source', async () => {
     const readme = defineTool({
       name: 'readme_stub',
+      label: 'readme_stub',
       description: 'stub',
       input: z.object({}),
       risk: 'read',
@@ -129,7 +130,7 @@ describe('runTool marks handler output, not its own messages', () => {
 
   it("wraps an upstream error's reason, and an unexpected error's message; keeps ScadBuddy's own errors bare", async () => {
     const stub = (handler: () => Promise<never>) =>
-      defineTool({ name: 'err_stub', description: 'stub', input: z.object({}), risk: 'read', routes: [], handler })
+      defineTool({ name: 'err_stub', label: 'err_stub', description: 'stub', input: z.object({}), risk: 'read', routes: [], handler })
     const envelopeAfter = (text: string, prefix: string) => {
       expect(text.startsWith(`${prefix}: `)).toBe(true)
       return JSON.parse(text.slice(prefix.length + 2)) as Record<string, { tool: string; source: string; content: unknown }>
@@ -167,6 +168,7 @@ describe('runTool marks handler output, not its own messages', () => {
     const stub = (name: string, handler: () => Promise<ReturnType<typeof text>>) =>
       defineTool({
         name,
+        label: name,
         description: 'stub',
         input: z.object({ copies: z.number().default(1) }),
         risk: 'outward',
@@ -211,6 +213,7 @@ describe('runTool marks handler output, not its own messages', () => {
     // confirm_action's, never replaces it.
     const reporting = defineTool({
       name: 'print_reporting',
+      label: 'print_reporting',
       description: 'stub',
       input: z.object({}),
       risk: 'outward',
@@ -230,6 +233,7 @@ describe('runTool marks handler output, not its own messages', () => {
     let ran = false
     const send = defineTool({
       name: 'send_stub',
+      label: 'send_stub',
       description: 'stub',
       input: z.object({ note: z.string() }),
       risk: 'outward',

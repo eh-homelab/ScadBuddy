@@ -643,6 +643,7 @@ describe('the harness projection', () => {
     // Stands in for confirm_action: reports the approved call it ran.
     const confirm = defineTool({
       name: 'confirm_action',
+      label: 'confirm_action',
       description: 'test',
       input: z.object({}),
       risk: 'outward',

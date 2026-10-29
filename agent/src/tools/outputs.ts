@@ -14,6 +14,7 @@ import { FROM_WORKSPACE_ONLY, uploadInit, withSent, workspaceFile, workspacePath
 export const outputTools: Tool[] = [
   defineTool({
     name: 'list_outputs',
+    label: "List a model's outputs",
     description: "A model's saved outputs (finished renders kept as 3MFs), newest first." + PAGED,
     input: z.object({ slug, ...pageInput }),
     risk: 'read',
@@ -30,6 +31,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'save_output',
+    label: 'Keep a render as an output',
     description: 'Keep a finished render job as an output. render_model does this itself with `save_output: true`.',
     input: z.object({ slug, job_id: z.string().min(1), name: z.string().optional() }),
     risk: 'write',
@@ -48,6 +50,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'get_output',
+    label: "Read an output's details",
     description: "One output's detail: parameters, model version, parts, colours, plates, and where it was sent or printed. " +
       '`layout_plates` lists each plate of an arranged or multi-plate output (index, bounding box, colours) ' +
       'without reading the 3MF; `plates` is what the last print queued.',
@@ -60,6 +63,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'get_output_edit_target',
+    label: 'See what re-opening an output loads',
     description: 'What re-opening an output in the customizer loads: its model, revision and parameters.',
     input: z.object({ output_id: outputId }),
     risk: 'read',
@@ -72,6 +76,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'delete_output',
+    label: 'Delete an output',
     description: 'Delete an output and its 3MF. Irreversible, so it needs a human approval.',
     input: z.object({ output_id: outputId }),
     risk: 'outward',
@@ -92,6 +97,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'rename_output',
+    label: 'Rename an output',
     description: "Give an output a name (History and downloads show it), or clear it with an empty name.",
     input: z.object({
       output_id: outputId,
@@ -110,6 +116,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'download_3mf',
+    label: "Download an output's 3MF",
     description:
       "An output's multi-colour 3MF (model/3mf), or a Bambuddy library file as the library holds it " +
       '(`library_file_id`: what a print of it slices, a 3MF or an STL), embedded as a base64 resource; when it ' +
@@ -144,6 +151,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'get_output_preview',
+    label: "Get an output's 3D preview",
     description:
       "An output's preview mesh, or with `plate` (from 1) one plate of its 3MF where the file places it; or " +
       'one plate of a Bambuddy library file (`library_file_id`) read from the 3MF a print of it slices. A binary ' +
@@ -198,6 +206,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'get_output_plates',
+    label: "List an output's plates",
     description:
       "The plates in an output's 3MF: objects, colours and slots per plate. For a Bambuddy library file " +
       '(`library_file_id`), the plates Bambuddy reads from it (index and name), what print_output takes as ' +
@@ -211,6 +220,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'get_output_view',
+    label: 'See an output from a named view',
     description:
       "A saved output's preview mesh drawn from a named view (iso, front, back, left, right, top, bottom) as " +
       'a shaded PNG. The camera arguments are get_render_view\'s.',
@@ -236,6 +246,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'get_output_image',
+    label: "See an output's picture",
     description:
       "An output's thumbnail, or with `plate` the cover image of that plate (1-based), as a PNG.",
     input: z.object({ output_id: outputId, plate: z.number().int().min(1).optional() }),
@@ -269,6 +280,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'set_output_thumbnail',
+    label: "Set an output's thumbnail",
     description:
       "Replace an output's thumbnail (the picture its card and the print dialog show) with a PNG, e.g. a render " +
       'view you saved with workspace_save or a screenshot.' +
@@ -298,6 +310,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'analyze_geometry',
+    label: "Measure an output's printability",
     description:
       "Printability measurements of an output's closed per-colour solids: open and non-manifold edges with " +
       'their locations, bounding box, bed contact, height-to-base ratio, overhang area by angle, and ' +
@@ -320,6 +333,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'list_plates',
+    label: 'List build plates',
     description: 'The build plates ScadBuddy knows, by printer model, and the configured default.' + PAGED,
     input: z.object({ ...pageInput }),
     risk: 'read',
@@ -333,6 +347,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'get_plate',
+    label: 'Read a build plate',
     description: "The build plate for a printer model (e.g. \"X1C\"), or the configured default's.",
     input: z.object({ model: z.string().optional() }),
     risk: 'read',
@@ -343,6 +358,7 @@ export const outputTools: Tool[] = [
 
   defineTool({
     name: 'check_plate_fit',
+    label: 'Check that a part fits a plate',
     description:
       'Whether a part of the given size in mm (e.g. a render\'s bbox_mm.size) fits a printer\'s plate, and by ' +
       'how much it overshoots if not.',

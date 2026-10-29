@@ -14,6 +14,7 @@ import { page, PAGED, pageInput } from './pagination.js'
 export const approvalTools: Tool[] = [
   defineTool({
     name: 'list_pending_actions',
+    label: 'List actions waiting for approval',
     description: 'Outward actions this caller has prepared and that are waiting for a human approval.' + PAGED,
     input: z.object({ ...pageInput }),
     risk: 'read',
@@ -36,6 +37,7 @@ export const approvalTools: Tool[] = [
 
   defineTool({
     name: 'confirm_action',
+    label: 'Confirm an approved action',
     description:
       'Complete an outward action prepared earlier (an outward tool answered pending_approval), once a human ' +
       'has approved it in the ScadBuddy UI. Pass the pending_action_id and exactly the same arguments the tool ' +

@@ -23,6 +23,7 @@ import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.j
 const SESSION = randomUUID()
 const echo = defineTool({
   name: 'echo',
+  label: 'echo',
   description: 'echoes',
   input: z.object({ say: z.string() }),
   risk: 'read',
@@ -129,6 +130,7 @@ describe.skipIf(!TEMPORAL_CLI)(`the agent-tools worker${TEMPORAL_SKIP}`, () => {
     const bytes = Buffer.from(PNG, 'base64')
     const pic = defineTool({
       name: 'pic',
+      label: 'pic',
       description: 'an image',
       input: z.object({}),
       risk: 'read',

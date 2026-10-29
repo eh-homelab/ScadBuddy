@@ -477,6 +477,7 @@ export const printTools: Tool[] = [
   // ── read: farm context and planning ─────────────────────────────────────
   defineTool({
     name: 'get_print_choices',
+    label: 'Read what the print dialog offers',
     description:
       'Everything the print dialog offers for an output, or a Bambuddy library file (`library_file_id`), in ' +
       'one read: printers (and the one chosen), the installed nozzles, quality tiers and Bambu processes per ' +
@@ -533,6 +534,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'get_print_filaments',
+    label: "Read the print dialog's filaments",
     description:
       "Bambuddy's spool inventory joined to where each spool is loaded and, with `printer_id`, the " +
       'remaining grams per slot and the mounted nozzles — plus what this output\'s (or library file\'s) plate ' +
@@ -559,6 +561,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'get_filament_profiles',
+    label: 'List filament profiles',
     description:
       'Filament profiles (#717): named process changes the print dialog suggests for a spool, e.g. Silk PLA\'s ' +
       'slower outer wall. Each lists which spools it is for (`match`: the material, and a word in the spool\'s ' +
@@ -574,6 +577,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'get_print_progress',
+    label: "Check a print's progress",
     description:
       'How the last print of an output, or of a Bambuddy library file (`library_file_id`), is going, per copy; ' +
       'null when it was never printed. Poll until `settled` is true. A run over the LAN with prints still to ' +
@@ -603,6 +607,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'get_printer_camera',
+    label: "See a printer's camera",
     description:
       "A printer's current camera frame as a JPEG: what is on the bed now, including prints ScadBuddy did " +
       'not start. printer_id is a Bambuddy printer id, as get_print_targets lists them.',
@@ -626,6 +631,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'get_print_run',
+    label: 'Check a print run',
     description:
       'A print run print_output started: `running` while it slices and queues, then `succeeded` with its ' +
       '`result` (warnings, queue item ids, the Bambuddy URL) or `failed` with the `error` that stopped it. ' +
@@ -687,6 +693,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'list_print_projects',
+    label: 'List print projects',
     description:
       "Bambuddy's projects, to file prints under, and the default project (`last_project_id`), which only " +
       'the user changes, in Settings; also `folders`, the library folders of no project a print or ' +
@@ -713,6 +720,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'get_default_print_project',
+    label: 'Read the default print project',
     description:
       'Where a print (or Arrange, or Generate) of some outputs and library files is filed by default: the one ' +
       'project they are all in already (`reason: "content"`), else the Settings default (`"settings"`), else ' +
@@ -740,6 +748,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'list_library',
+    label: 'Browse the Bambuddy library',
     description:
       "Bambuddy's library, one folder at a time: the folder tree, and the files of `folder_id` (the top level " +
       'without it). Without `all` only unsliced 3MFs, the files print_output takes as `library_file_id`; with ' +
@@ -763,6 +772,7 @@ export const printTools: Tool[] = [
   // #3630 — a file found by name, without walking the folders one at a time.
   defineTool({
     name: 'search_library',
+    label: 'Search the Bambuddy library',
     description:
       "Find files in Bambuddy's library by name, in every folder at once: each word of `query` must appear (as " +
       'a substring) in ' +
@@ -787,6 +797,7 @@ export const printTools: Tool[] = [
   // #2167 — Bambuddy's library writes: a delete to its trash, and the restore that undoes it.
   defineTool({
     name: 'delete_library_files',
+    label: 'Delete Bambuddy library files',
     description:
       "Delete files from Bambuddy's library (ids from list_library), moving them to Bambuddy's trash. A file " +
       'linked from an external folder (`is_external`) is removed for good. Bambuddy may skip a file its API ' +
@@ -808,6 +819,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'restore_library_files',
+    label: 'Restore Bambuddy library files',
     description:
       "Restore deleted files from Bambuddy's trash, under their own ids: a delete_library_files undone. A file " +
       'not in the trash (an external one, or one emptied from it) is listed in `skipped`.',
@@ -828,6 +840,7 @@ export const printTools: Tool[] = [
   // #2686: the writes the Bambuddy filesystem mount makes.
   defineTool({
     name: 'upload_library_file',
+    label: 'Upload a file to the Bambuddy library',
     description:
       "Upload a file from your workspace into Bambuddy's library, at the top level or in `folder_id`. Give " +
       '`workspace_path` with its `workspace_sha256`; save a file there first with workspace_save, http_request ' +
@@ -865,6 +878,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'update_library_file',
+    label: 'Rename or move a Bambuddy library file',
     description:
       "Rename a file in Bambuddy's library or move it to another folder (ids from list_library). Give " +
       '`filename`, `folder_id` or both; `folder_id` 0 moves it to the top level.',
@@ -891,6 +905,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'create_library_folder',
+    label: 'Create a Bambuddy library folder',
     description: "Make a folder in Bambuddy's library, at the top level or inside `parent_id`.",
     input: z.object({
       name: z.string().min(1),
@@ -910,6 +925,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'update_library_folder',
+    label: 'Rename or move a Bambuddy library folder',
     description:
       "Rename a folder in Bambuddy's library or move it under another folder. Give `name`, `parent_id` or both; " +
       '`parent_id` 0 moves it to the top level.',
@@ -936,6 +952,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'delete_library_folder',
+    label: 'Delete a Bambuddy library folder',
     description:
       "Delete a folder from Bambuddy's library along with its files and subfolders. Managed files go to " +
       "Bambuddy's trash (restore_library_files undoes that); a file linked from an external folder " +
@@ -963,6 +980,7 @@ export const printTools: Tool[] = [
   // #2670 — reorganising the library: a move and a rename keep each file's id; a copy is a new file.
   defineTool({
     name: 'move_library_file',
+    label: 'Move Bambuddy library files',
     description:
       "Move files in Bambuddy's library (ids from list_library) into a folder: `folder_id`, or `folder_path` " +
       "(folder names from the top, joined by '/'), or neither for the top level. Each keeps its id, so its " +
@@ -991,6 +1009,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'copy_library_file',
+    label: 'Copy Bambuddy library files',
     description:
       "Copy files in Bambuddy's library (ids from list_library) into a folder: `folder_id`, or `folder_path` " +
       "(folder names from the top, joined by '/'), or neither for the top level. Each copy is a new file with " +
@@ -1016,6 +1035,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'rename_library_file',
+    label: 'Rename a Bambuddy library file',
     description:
       "Rename a file in Bambuddy's library (an id from list_library), keeping its id. The new name keeps the " +
       "file's extension ('.3mf', or '.gcode.3mf' for a sliced file); Bambuddy refuses a name a printer's SD card " +
@@ -1036,6 +1056,7 @@ export const printTools: Tool[] = [
   // ── write: preferences the print dialog remembers (ScadBuddy-local, re-settable) ──
   defineTool({
     name: 'remember_model_print_choices',
+    label: "Remember a model's print choices",
     description:
       "Remember what a model's (or a Bambuddy library file's, `library_file_id`) print dialog opens on next " +
       'time: the printer, per-slot spools, nozzles, and the quality tier or named process. Replaces the ' +
@@ -1084,6 +1105,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'remember_printer_bed_type',
+    label: "Remember a printer's bed type",
     description: 'Remember which build plate type is on a printer (null to forget it).',
     input: z.object({ printer_id: z.number().int(), bed_type: z.string().max(64).nullable() }),
     risk: 'write',
@@ -1100,6 +1122,7 @@ export const printTools: Tool[] = [
   // ── outward: everything that uploads to, creates in or queues on Bambuddy ──
   defineTool({
     name: 'send_to_bambuddy',
+    label: 'Send to Bambuddy',
     description:
       "Upload an output's 3MF to Bambuddy's library folder. Nothing is sliced or queued: printing is " +
       'print_output.',
@@ -1125,6 +1148,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'print_output',
+    label: 'Print an output',
     description:
       'Print an output, or a file already in Bambuddy\'s library (`library_file_id`, from list_library): the ' +
       'same print, only the 3MF it slices comes from the library. Spool-first: slice with presets the backend ' +
@@ -1342,6 +1366,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'create_print_project',
+    label: 'Create a Bambuddy print project',
     description:
       'Create a Bambuddy project (with its library folder), or link an existing one by `project_id`. ' +
       '`parent_id` nests a new project under an existing one, and its folder under the parent\'s folder; ' +
@@ -1383,6 +1408,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'file_output_in_project_folder',
+    label: 'File an output in a project folder',
     description:
       "Upload an output's editable 3MF into a Bambuddy project's library folder, as Generate does with a " +
       'project chosen, or into a library folder of no project (`folder_id`, from list_print_projects\' ' +
@@ -1419,6 +1445,7 @@ export const printTools: Tool[] = [
 
   defineTool({
     name: 'file_output_under_project',
+    label: 'File an output under a project',
     description:
       "File an output's, or a Bambuddy library file's (`library_file_id`), queue entries (and any finished " +
       "prints' archives) under a Bambuddy project: the entries named, else those of its newest print.",

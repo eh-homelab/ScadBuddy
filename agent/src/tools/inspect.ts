@@ -21,6 +21,7 @@ function coloursOf(header: string | null): string[] {
 export const inspectTools: Tool[] = [
   defineTool({
     name: 'get_lsp_diagnostics',
+    label: 'Get editor diagnostics for source',
     description:
       "The editor's language server (openscad-lsp) on a source: parse errors with line and column ranges, " +
       "in milliseconds and without running OpenSCAD. Give `source` to check text you have not saved, or " +
@@ -54,6 +55,7 @@ export const inspectTools: Tool[] = [
 
   defineTool({
     name: 'get_render_colours',
+    label: 'See a render drawn once per colour',
     description:
       "A finished render drawn once per colour, as one PNG grid: on each tile that colour's parts are in " +
       'their colour and everything else is light grey, so you can see which colour goes where (a letter ' +

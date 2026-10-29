@@ -16,6 +16,7 @@ const printerId = z.number().int().describe('A Bambuddy printer id, as get_print
 export const farmTools: Tool[] = [
   defineTool({
     name: 'list_print_queue',
+    label: 'List the print queue',
     description:
       "Bambuddy's print queue, in its order: each item's status, printer (or the printer model it waits for), " +
       'file, times, estimated duration and filament, and why it is waiting or failed. Finished items stay in the ' +
@@ -40,6 +41,7 @@ export const farmTools: Tool[] = [
 
   defineTool({
     name: 'get_printers_now',
+    label: 'See what each printer is doing',
     description:
       "What each active printer is doing now, whoever started it (#977): its activity (printing, paused, idle, " +
       'finished, failed, offline or unknown), the job name, progress, layer and minutes left while it works, its ' +
@@ -60,6 +62,7 @@ export const farmTools: Tool[] = [
 
   defineTool({
     name: 'get_print_stats',
+    label: 'Read print statistics',
     description:
       "The farm's print statistics from Bambuddy: prints by outcome (successful, failed, cancelled), total print " +
       'hours, filament grams, cost and energy, prints by filament type and by printer, and how close the time ' +
@@ -80,6 +83,7 @@ export const farmTools: Tool[] = [
 
   defineTool({
     name: 'list_print_archives',
+    label: 'List archived prints',
     description:
       "Every print Bambuddy archived, ScadBuddy's or not (list_prints is ScadBuddy's own, with their parameters): " +
       'each with its status, printer, project, times, filament, cost, failure reason and run counts. Filter by ' +
@@ -111,6 +115,7 @@ export const farmTools: Tool[] = [
 
   defineTool({
     name: 'get_spool_inventory',
+    label: 'List spools',
     description:
       "Bambuddy's spool inventory: every spool with its material, colour, brand, label weight and what is left, " +
       'and where it is loaded; and every loaded slot of each active printer (AMS, tray, extruder) with the ' +
@@ -127,6 +132,7 @@ export const farmTools: Tool[] = [
 
   defineTool({
     name: 'get_spool_summary',
+    label: "Read one spool's stock and price",
     description:
       "One spool's stock and price (#785): its remaining grams, where it is loaded and Bambuddy's cost per kg, " +
       "what the filament left on it is worth, and the stock of every unarchived spool of the same filament " +

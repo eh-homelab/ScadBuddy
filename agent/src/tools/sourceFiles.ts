@@ -29,6 +29,7 @@ const SOURCE = "OpenSCAD source (code and comments) written by the model's autho
 export const sourceFileTools: Tool[] = [
   defineTool({
     name: 'list_source_files',
+    label: "List a model's .scad files",
     description:
       "A model's .scad files, model.scad first: the files it can `include <name.scad>` or `use <name.scad>`." + PAGED,
     input: z.object({ slug, ...pageInput }),
@@ -48,6 +49,7 @@ export const sourceFileTools: Tool[] = [
 
   defineTool({
     name: 'get_source_file',
+    label: "Read one of a model's .scad files",
     description: "One of a model's .scad files, model.scad included.",
     input: z.object({ slug, name: fileName }),
     risk: 'read',
@@ -65,6 +67,7 @@ export const sourceFileTools: Tool[] = [
 
   defineTool({
     name: 'write_source_file',
+    label: 'Write a .scad file beside a model',
     description:
       'Create or replace a .scad file beside model.scad (a module library it `use`s, a part it `include`s), ' +
       'as one revision in its history. Not model.scad itself: that is update_source or apply_patch. The file ' +
@@ -103,6 +106,7 @@ export const sourceFileTools: Tool[] = [
 
   defineTool({
     name: 'delete_source_file',
+    label: 'Delete a .scad file beside a model',
     description:
       'Remove a .scad file beside model.scad, as one revision (restore_version brings it back). Not model.scad.',
     input: z.object({ slug, name: fileName }),

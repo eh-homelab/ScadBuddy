@@ -250,6 +250,7 @@ function textPage(info: WorkspaceFileInfo, content: string, offset: number, limi
 export const workspaceTools: Tool[] = [
   defineTool({
     name: 'workspace_list',
+    label: 'List workspace files',
     description:
       "The files in your workspace: this session's files (or, outside a session, your own for 24 h), with each " +
       "one's media type, size, sha256 and where it came from, and how much of the workspace is used. `prefix` " +
@@ -274,6 +275,7 @@ export const workspaceTools: Tool[] = [
 
   defineTool({
     name: 'workspace_read',
+    label: 'Read a workspace file',
     description:
       'Read a workspace file. Text comes back as `cat -n` prints it (numbered lines, up to 2000 from `offset`), ' +
       'ending with its sha256: pass that to workspace_edit. An image (PNG, JPEG, GIF, WebP) comes back as an image ' +
@@ -314,6 +316,7 @@ export const workspaceTools: Tool[] = [
 
   defineTool({
     name: 'workspace_write',
+    label: 'Write a workspace file',
     description:
       'Create or replace a workspace text file with `content`. Give `expected_sha256` (from workspace_read or ' +
       'workspace_list) to replace only the file you read, or `null` to create a new file only. Prefer workspace_edit ' +
@@ -350,6 +353,7 @@ export const workspaceTools: Tool[] = [
 
   defineTool({
     name: 'workspace_edit',
+    label: 'Replace text in a workspace file',
     description:
       'Replace text in a workspace text file, as Edit does: `old_string` must match exactly once (or set ' +
       '`replace_all`). Made against the `sha256` you read the file at: if it has changed since, nothing is written.',
@@ -386,6 +390,7 @@ export const workspaceTools: Tool[] = [
 
   defineTool({
     name: 'workspace_delete',
+    label: 'Delete a workspace file',
     description: 'Delete a workspace file. With `expected_sha256`, only when it still has that sha256.',
     input: z.object({ path, expected_sha256: sha.optional() }),
     risk: 'write',
@@ -404,6 +409,7 @@ export const workspaceTools: Tool[] = [
 
   defineTool({
     name: 'workspace_save',
+    label: 'Save a ScadBuddy file to the workspace',
     description:
       'Save a ScadBuddy file into the workspace, without its bytes passing through you: `kind` output_3mf ' +
       '(`output_id`), library_file (a Bambuddy library file, `library_file_id`), model_file (`slug` and `file_path`: ' +

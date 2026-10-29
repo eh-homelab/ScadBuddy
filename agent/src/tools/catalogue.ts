@@ -32,6 +32,7 @@ function modelNameOf(path: string): string {
 export const catalogueTools: Tool[] = [
   defineTool({
     name: 'list_models',
+    label: 'List models',
     description:
       'List the models in the catalogue (bundled templates and user models) with name, slug, tags, ' +
       'version, origin and upstream state.' + PAGED,
@@ -53,6 +54,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'get_model',
+    label: "Read a model's details",
     description: "One model's metadata: name, description, tags, current version, libraries and upstream.",
     input: z.object({ slug }),
     risk: 'read',
@@ -66,6 +68,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'get_source',
+    label: "Read a model's source",
     description: "A model's current OpenSCAD source.",
     input: z.object({ slug }),
     risk: 'read',
@@ -83,6 +86,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'check_source',
+    label: 'Check OpenSCAD source for errors',
     description:
       'Parse-check OpenSCAD source without saving it. Pass `slug` to resolve include/use against that ' +
       "model's directory, as a render would.",
@@ -102,6 +106,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'create_model',
+    label: 'Create a model',
     description:
       'Add a new model from OpenSCAD source. The slug is derived from the name. Refused when the source ' +
       'fails the parse check unless `force` is true.' +
@@ -134,6 +139,7 @@ export const catalogueTools: Tool[] = [
   // public host it controls, so a human approves the fetch first (spec §8.2).
   defineTool({
     name: 'import_model',
+    label: 'Import a model from a URL',
     description:
       'Import a model from an https URL to its .scad source. The backend fetches the URL, so this needs a ' +
       'human approval. Or import a .scad file you already hold: `workspace_path` (with its `workspace_sha256`) ' +
@@ -171,6 +177,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'duplicate_model',
+    label: 'Duplicate a model',
     description: 'Duplicate a model (typically a bundled template) under a new name, keeping it linked as its upstream.',
     input: z.object({ slug, name: z.string().min(1) }),
     risk: 'write',
@@ -185,6 +192,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'update_model_details',
+    label: "Edit a model's name, description or tags",
     description: "Edit a model's name, description or tags. Omitted fields are unchanged.",
     input: z.object({
       slug,
@@ -208,6 +216,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'update_source',
+    label: "Replace a model's source",
     description:
       "Replace a model's OpenSCAD source as one revision in its history (undo with restore_version). " +
       'Refused when the parse check fails unless `force` is true. Pass `base` (the `version` you read ' +
@@ -246,6 +255,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'delete_model',
+    label: 'Delete a model',
     description: 'Delete a model and its outputs. Irreversible, so it needs a human approval.',
     input: z.object({ slug, force: z.boolean().default(false) }),
     risk: 'outward',
@@ -261,6 +271,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'get_readme',
+    label: "Read a model's README",
     description: "A model's README, as Markdown.",
     input: z.object({ slug }),
     risk: 'read',
@@ -278,6 +289,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'set_readme',
+    label: "Write a model's README",
     description: "Set a model's README (Markdown), as a revision in its history." + fromWorkspace('the `content`'),
     input: z.object({
       slug,
@@ -298,6 +310,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'delete_readme',
+    label: "Delete a model's README",
     description: "Remove a model's README, as a revision in its history.",
     input: z.object({ slug }),
     risk: 'write',
@@ -312,6 +325,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'get_model_thumbnail',
+    label: "See a model's thumbnail",
     description: "A model's thumbnail image (its own, or its first output's plate image).",
     input: z.object({ slug }),
     risk: 'read',
@@ -328,6 +342,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'set_model_thumbnail',
+    label: "Set a model's thumbnail",
     description: "Set a model's thumbnail from a PNG (at most 10 MiB), as a revision in its history." + FROM_WORKSPACE_ONLY,
     input: z
       .object({
@@ -353,6 +368,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'add_model_media',
+    label: 'Add an image or video to a model',
     description:
       "Add an image (PNG, JPEG or WebP, at most 10 MB) or a video (MP4 or WebM) to a model's media gallery, as its " +
       'last item and one revision; the type comes from the bytes. Answers the model, whose `media` lists the items.' +
@@ -385,6 +401,7 @@ export const catalogueTools: Tool[] = [
 
   defineTool({
     name: 'delete_model_thumbnail',
+    label: "Remove a model's thumbnail",
     description: "Remove a model's own thumbnail, as a revision in its history.",
     input: z.object({ slug }),
     risk: 'write',

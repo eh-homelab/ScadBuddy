@@ -36,6 +36,7 @@ export function staleBase(
 export const authoringTools: Tool[] = [
   defineTool({
     name: 'apply_patch',
+    label: "Patch part of a model's source",
     description:
       "Change part of a model's OpenSCAD source without resending all of it: a unified diff (`patch`, as " +
       '`diff -u` or `git diff` writes it) or search/replace `edits` (each search must occur exactly once). ' +
@@ -89,6 +90,7 @@ export const authoringTools: Tool[] = [
 
   defineTool({
     name: 'checkpoint',
+    label: "Mark a model's state before a risky change",
     description:
       'Mark where a model is now, before trying something that may not work out. Returns its current ' +
       'revision: every edit after it is a revision of its own, so restore_version with this commit abandons ' +

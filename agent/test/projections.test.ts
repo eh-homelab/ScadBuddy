@@ -35,7 +35,9 @@ describe('registry projections', () => {
     const external = await listVia(createExternalServer(ALL_TOOLS, svc))
 
     expect(inProcess.map((t) => t.name)).toEqual(ALL_TOOLS.map((t) => t.name).sort())
-    expect(inProcess).toEqual(external)
+    // The SDK's in-process tool has no top-level `title`; the label is in annotations.title on both.
+    expect(inProcess).toEqual(external.map(({ title: _title, ...rest }) => rest))
+    expect(external.map((t) => t.title)).toEqual(external.map((t) => ALL_TOOLS.find((x) => x.name === t.name)?.label))
     // A defaulted field lists its literal default on both sides, not just the
     // same thing (claude-review of #526, finding 1).
     for (const listing of [inProcess, external]) {

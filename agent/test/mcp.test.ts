@@ -5,6 +5,8 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { createHarnessServer } from '../src/tools/projections.js'
+import { tiersUpTo } from '../src/auth/principal.js'
 import { appFetch, BACKEND, baseDeps, connect, firstText, INGRESS, LOOPBACK, MCP_URL, services, testApp, UNTRUSTED } from './helpers/mcp.js'
 
 // /mcp end to end with the MCP SDK's own Streamable HTTP client (issue #251
@@ -48,6 +50,21 @@ describe('/mcp: tools over Streamable HTTP', () => {
     const listModels = tools.find((t) => t.name === 'list_models')
     expect(listModels?.annotations?.readOnlyHint).toBe(true)
     expect(tools.find((t) => t.name === 'print_output')?.annotations?.readOnlyHint).toBe(false)
+  })
+
+  it("the in-process server's tools carry their label as annotations.title", async () => {
+    const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js')
+    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
+    const principal = { id: 'browser', kind: 'browser' as const, tiers: tiersUpTo('outward') }
+    const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
+    await createHarnessServer(ALL_TOOLS, services(), principal).instance.connect(serverSide)
+    const client = new Client({ name: 'label-test', version: '0' })
+    await client.connect(clientSide)
+    const { tools } = await client.listTools()
+    await client.close()
+    const byName = new Map(ALL_TOOLS.map((t) => [t.name, t.label]))
+    expect(tools.length).toBe(ALL_TOOLS.length)
+    for (const t of tools) expect(t.annotations?.title, t.name).toBe(byName.get(t.name))
   })
 
   it('calls a read tool against the (mocked) backend', async () => {

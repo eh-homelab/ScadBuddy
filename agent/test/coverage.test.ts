@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AGENT_ROUTES, NOT_A_TOOL, PENDING_ROUTES } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import { DURABLE_TOOLS } from '../src/tools/manifest.js'
 import { connect, testApp } from './helpers/mcp.js'
 
 // The openapi coverage check (spec §5.1, issue #251): every /api/v1 operation
@@ -67,20 +68,32 @@ describe('openapi coverage over /mcp tools/list', () => {
     await Promise.all(closers.splice(0).map((close) => close()))
   })
 
-  async function listed(): Promise<string[]> {
+  async function listedTools() {
     const { app, tokens } = testApp()
     const { token } = await tokens.mint({ name: 'coverage', tier: 'outward' })
     const client = await connect(app, { headers: { authorization: `Bearer ${token}` } })
     closers.push(() => client.close())
-    const names: string[] = []
+    const tools = []
     let cursor: string | undefined
     do {
       const page = await client.listTools(cursor ? { cursor } : {})
-      names.push(...page.tools.map((t) => t.name))
+      tools.push(...page.tools)
       cursor = page.nextCursor
     } while (cursor)
-    return names
+    return tools
   }
+
+  async function listed(): Promise<string[]> {
+    return (await listedTools()).map((t) => t.name)
+  }
+
+  it("serves each label as the tool's title", async () => {
+    const byName = new Map(ALL_TOOLS.map((t) => [t.name, t.label]))
+    for (const t of await listedTools()) {
+      expect(t.title, t.name).toBe(byName.get(t.name))
+      expect(t.annotations?.title, t.name).toBe(byName.get(t.name))
+    }
+  })
 
   it('lists only registry tools, each once', async () => {
     const names = await listed()
@@ -116,5 +129,28 @@ describe('agent route coverage', () => {
       // Hono's not-found is a 404 in text; the routes answer JSON (403 off-origin, 503 with no database).
       expect(res.headers.get('content-type') ?? '', route).toContain('application/json')
     }
+  })
+})
+
+describe('tool labels', () => {
+  it('gives every tool a label', () => {
+    for (const t of DURABLE_TOOLS) {
+      const label = t.label
+      expect(typeof label, t.name).toBe('string')
+      expect(label.trim().length, t.name).toBeGreaterThan(0)
+      expect(label.length, t.name).toBeLessThanOrEqual(48)
+      expect(label.charAt(0), t.name).toBe(label.charAt(0).toUpperCase())
+      expect(label, t.name).not.toContain('_')
+      expect(label.endsWith('.'), t.name).toBe(false)
+      expect(label, t.name).not.toBe(t.name)
+      expect(t.annotations.title, t.name).toBe(label)
+    }
+  })
+
+  it('labels are unique', () => {
+    const labels = DURABLE_TOOLS.map((t) => t.label)
+    const dup = labels.filter((l, i) => labels.indexOf(l) !== i)
+    expect(dup).toEqual([])
+    expect(new Set(labels).size).toBe(DURABLE_TOOLS.length)
   })
 })

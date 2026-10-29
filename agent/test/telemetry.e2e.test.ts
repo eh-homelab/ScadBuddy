@@ -43,6 +43,7 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 /** An outward stand-in for a ScadBuddy tool that calls the backend. */
 const PING = defineTool({
   name: 'ping_backend',
+  label: 'ping_backend',
   description: 'Ping the backend (test only).',
   input: z.object({ job: z.string() }),
   risk: 'outward',
