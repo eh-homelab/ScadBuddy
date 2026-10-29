@@ -147,7 +147,9 @@ function builtInView(spec: Spec): SourceView {
 
 function listedItem(view: PluginToolView): ItemView {
   const renamed = view.tier_source === 'renamed'
-  const row = view.disabled ? 'off' : view.tier_source === 'explicit' ? view.tier : undefined
+  // The agent's `remoteProvider`: tools colliding on one harness name are fixed off, both.
+  const collision = view.tier_source === 'collision'
+  const row = collision ? undefined : view.disabled ? 'off' : view.tier_source === 'explicit' ? view.tier : undefined
   return {
     id: view.name,
     kind: 'tool',
@@ -158,11 +160,11 @@ function listedItem(view: PluginToolView): ItemView {
     default: 'outward',
     default_note: null,
     suggested: view.suggested_tier,
-    access: row ?? 'outward',
+    access: collision ? 'off' : (row ?? 'outward'),
     overridden: row !== undefined,
     missing: false,
     allowed: renamed ? ['off', 'outward'] : null,
-    fixed: null,
+    fixed: collision ? { access: 'off', reason: `Shares its name with ${view.collides_with.join(', ')}, so both are hidden` } : null,
     reason: renamed ? RENAMED_REASON : null,
   }
 }
@@ -320,7 +322,7 @@ function refresh(id: string): RefreshResult {
   state.listed.add(plugin.name)
   const test: PluginTest = {
     ok: true,
-    detail: 'connected; 3 tools',
+    detail: `connected; ${toolsFor(plugin).length} tools`,
     duration_ms: 42,
     server: { name: plugin.name, version: '0.4.1' },
     tools: toolsFor(plugin),

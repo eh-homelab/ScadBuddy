@@ -23,7 +23,7 @@ async function hindsight(): Promise<RemotePlugin> {
 /** Tests the card's connection and opens its source's rows. */
 async function tested(user: ReturnType<typeof renderPage>['user'], card: HTMLElement) {
   await user.click(within(card).getByRole('button', { name: 'Test connection' }))
-  await within(card).findByText(/connected; 3 tools/)
+  await within(card).findByText(/connected; 5 tools/)
   await user.click(within(card).getByRole('button', { name: 'hindsight' }))
 }
 
@@ -168,12 +168,12 @@ describe('RemotePluginsPanel', () => {
     const { user } = renderPage(<RemotePluginsPanel />)
     const card = await endpoint()
     await user.click(within(card).getByRole('button', { name: 'Test connection' }))
-    const status = await within(card).findByText('connected; 3 tools (hindsight 0.4.1)')
+    const status = await within(card).findByText('connected; 5 tools (hindsight 0.4.1)')
     expect(status).toHaveAttribute('role', 'status')
     // The rows stay folded under the source's summary until it is opened.
     const fold = within(card).getByRole('button', { name: 'hindsight' })
     expect(fold).toHaveAttribute('aria-expanded', 'false')
-    expect(within(card).getByText('3 tools, 1 changed')).toBeInTheDocument()
+    expect(within(card).getByText('5 tools, 1 changed')).toBeInTheDocument()
     expect(within(card).getByRole('combobox', { name: 'Access of retain', hidden: true })).not.toBeVisible()
     await user.click(fold)
     expect(within(card).getByRole('combobox', { name: 'Access of retain' })).toBeVisible()
@@ -181,7 +181,10 @@ describe('RemotePluginsPanel', () => {
     expect(status).toBeVisible()
   })
 
-  it('says a failed test as a warning line', async () => {
+  it('says a failed test as a warning line, and keeps the last listing', async () => {
+    const { user } = renderPage(<RemotePluginsPanel />)
+    const card = await endpoint()
+    await tested(user, card)
     server.use(
       http.post('/api/v1/ai/capabilities/:source/refresh', async () => {
         const source = await aiCapabilities.source('remote:hindsight')
@@ -189,10 +192,62 @@ describe('RemotePluginsPanel', () => {
         return HttpResponse.json({ test, source } satisfies RefreshResult)
       }),
     )
-    const { user } = renderPage(<RemotePluginsPanel />)
-    const card = await endpoint()
     await user.click(within(card).getByRole('button', { name: 'Test connection' }))
     expect(await within(card).findByText('connection refused')).toHaveAttribute('role', 'status')
+    expect(within(card).getByRole('combobox', { name: 'Access of retain' })).toBeVisible()
+  })
+
+  it('says a refused test as an alert, and keeps the last listing', async () => {
+    const { user } = renderPage(<RemotePluginsPanel />)
+    const card = await endpoint()
+    await tested(user, card)
+    server.use(
+      http.post('/api/v1/ai/capabilities/:source/refresh', () => HttpResponse.json({ detail: 'bad gateway' }, { status: 502 })),
+    )
+    await user.click(within(card).getByRole('button', { name: 'Test connection' }))
+    expect(await within(card).findByRole('alert')).toHaveTextContent('bad gateway')
+    expect(within(card).getByRole('combobox', { name: 'Access of retain' })).toBeVisible()
+  })
+
+  it('fixes both tools of a colliding pair off, with the reason', async () => {
+    const { user } = renderPage(<RemotePluginsPanel />)
+    const card = await endpoint()
+    await tested(user, card)
+    for (const [name, other] of [['notes.get', 'notes_get'], ['notes_get', 'notes.get']] as const) {
+      const select = within(card).getByRole('combobox', { name: `Access of ${name}` })
+      expect(select).toHaveTextContent('off')
+      expect(select).toBeDisabled()
+      expect(within(card).getByText(`Shares its name with ${other}, so both are hidden`)).toBeInTheDocument()
+    }
+  })
+
+  it("says why a plugin's tools could not be read", async () => {
+    server.use(
+      http.get('/api/v1/ai/capabilities/:source', () => HttpResponse.json({ detail: 'listing store down' }, { status: 500 })),
+    )
+    const { user } = renderPage(<RemotePluginsPanel />)
+    await endpoint()
+    await user.type(screen.getByLabelText('Name'), 'notes')
+    await user.type(screen.getByLabelText('MCP endpoint URL'), 'https://notes.example/mcp')
+    await user.click(screen.getByRole('button', { name: 'Add endpoint' }))
+    const card = await endpoint('notes')
+    expect(await within(card).findByRole('alert')).toHaveTextContent("Could not read the plugin’s tools: listing store down")
+    expect(within(card).getByRole('button', { name: 'Test connection' })).toBeInTheDocument()
+  })
+
+  it('removes an endpoint without reading the tree again', async () => {
+    const reads = { count: 0 }
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/ai/capabilities') reads.count++
+    })
+    const { user } = renderPage(<RemotePluginsPanel />)
+    const card = await endpoint()
+    await within(card).findByRole('region', { name: 'Source hindsight' })
+    await user.click(within(card).getByRole('button', { name: 'Remove' }))
+    await user.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Remove endpoint' }))
+    expect(await screen.findByText('No plugin endpoints.')).toBeInTheDocument()
+    expect(screen.queryByText(/Loading the plugins/)).toBeNull()
+    expect(reads.count).toBe(1)
   })
 
   it("keeps the endpoint's buttons when its tools cannot be read, and says why unless the agent has no database", async () => {
@@ -244,7 +299,7 @@ describe('RemotePluginsPanel', () => {
     await tested(user, card)
     expect(isUserOnly(within(card).getByRole('switch', { name: 'Enabled' }))).toBe(false)
     const selects = within(card).getAllByRole('combobox', { name: /^Access of / })
-    expect(selects).toHaveLength(3)
+    expect(selects).toHaveLength(5)
     for (const select of selects) expect(isUserOnly(select)).toBe(false)
     expect(isUserOnly(within(card).getByRole('button', { name: 'Reset recall' }))).toBe(false)
   })

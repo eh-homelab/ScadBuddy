@@ -187,11 +187,17 @@ export function seedStoredPackage(name: string): void {
   state.packages.set(name, { ...greeter, name, approved: true, approved_at: now(), enabled: true })
 }
 
-/** The tools a test lists for `plugin`: `recall` (suggested read), `retain`, and `files.list`, which Claude Code renames. */
+/**
+ * The tools a test lists for `plugin`: `recall` (suggested read), `retain`, `files.list`, which
+ * Claude Code renames, and `notes.get` and `notes_get`, which share one harness name (a collision).
+ */
 export function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
-  return ['recall', 'retain', 'files.list'].map((tool) => {
+  const names = ['recall', 'retain', 'files.list', 'notes.get', 'notes_get']
+  const harnessOf = (tool: string) => tool.replace(/[^A-Za-z0-9_-]/g, '_')
+  return names.map((tool) => {
     const renamed = tool.includes('.')
-    const harness = tool.replace(/[^A-Za-z0-9_-]/g, '_')
+    const harness = harnessOf(tool)
+    const collides_with = names.filter((other) => other !== tool && harnessOf(other) === harness)
     const explicit = !renamed && Object.hasOwn(plugin.tool_tiers, tool)
     const description = `The ${tool} tool.`
     const annotations = tool === 'recall' ? { readOnlyHint: true } : null
@@ -207,8 +213,8 @@ export function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
       raw: { name: tool, description, inputSchema: input_schema, ...(annotations ? { annotations } : {}) },
       omitted: [],
       tier: explicit ? plugin.tool_tiers[tool]! : 'outward',
-      tier_source: renamed ? 'renamed' : explicit ? 'explicit' : 'default',
-      collides_with: [],
+      tier_source: collides_with.length > 0 ? 'collision' : renamed ? 'renamed' : explicit ? 'explicit' : 'default',
+      collides_with,
       suggested_tier: tool === 'recall' ? 'read' : null,
       disabled: plugin.disabled_tools.includes(tool),
     }
@@ -306,7 +312,7 @@ export const aiPluginHandlers = [
     await delay(100)
     const result: PluginTest = {
       ok: true,
-      detail: 'connected; 3 tools',
+      detail: `connected; ${toolsFor(plugin).length} tools`,
       duration_ms: 42,
       server: { name: 'hindsight', version: '0.4.1' },
       tools: toolsFor(plugin),

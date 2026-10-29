@@ -149,12 +149,15 @@ function testSummary(test: PluginTest): string {
 function RemoteCard({
   plugin,
   source,
+  readError,
   onSource,
   onRemoved,
 }: {
   plugin: RemotePlugin
   /** The plugin's capabilities source, once read. */
   source: SourceView | undefined
+  /** Why the source could not be read. */
+  readError: string | undefined
   onSource: (source: SourceView) => void
   onRemoved: (name: string) => void
 }) {
@@ -244,6 +247,11 @@ function RemoteCard({
           {source?.truncated && (
             <p className="mt-1 text-xs text-warn">The server has more tools than one page listed: the list may be incomplete.</p>
           )}
+          {!source && readError && (
+            <p role="alert" className="mt-2 text-xs text-warn">
+              Could not read the plugin&rsquo;s tools: {readError}
+            </p>
+          )}
           {error && (
             <p role="alert" className="mt-2 text-xs text-warn">
               {error}
@@ -304,6 +312,8 @@ export function RemotePluginsPanel() {
    */
   const [own, setOwn] = useState<Record<string, SourceView>>({})
   const onSource = (source: SourceView) => setOwn((sources) => ({ ...sources, [source.id]: source }))
+  /** Why a plugin's own source read failed, by name; Test connection reads it again. */
+  const [readErrors, setReadErrors] = useState<Record<string, string>>({})
   const sourceOf = (name: string) => own[sourceId(name)] ?? caps.sources.find((s) => s.id === sourceId(name))
   const unread = caps.loading || caps.error ? [] : plugins.map((p) => p.name).filter((name) => sourceOf(name) === undefined)
   const unreadKey = unread.join('/')
@@ -311,13 +321,16 @@ export function RemotePluginsPanel() {
   useEffect(() => {
     if (unreadKey === '') return
     // Plugin names are lower-case letters, digits and hyphens, so "/" joins them safely.
-    for (const name of unreadKey.split('/')) aiCapabilities.source(sourceId(name)).then(onSource, () => {})
+    for (const name of unreadKey.split('/')) {
+      aiCapabilities.source(sourceId(name)).then(onSource, (caught: unknown) =>
+        setReadErrors((errors) => ({ ...errors, [name]: message(caught) })),
+      )
+    }
   }, [unreadKey])
 
   const onRemoved = (name: string) => {
     state.setData((state.data ?? []).filter((p) => p.name !== name))
     setOwn(({ [sourceId(name)]: _gone, ...rest }) => rest)
-    void caps.reload()
   }
 
   return (
@@ -351,6 +364,7 @@ export function RemotePluginsPanel() {
                 key={plugin.name}
                 plugin={plugin}
                 source={sourceOf(plugin.name)}
+                readError={readErrors[plugin.name]}
                 onSource={onSource}
                 onRemoved={onRemoved}
               />
