@@ -815,7 +815,7 @@ def own_call_plugin(plugin_dir: str, agents_dir: str | None) -> access.CallPlugi
     """The own plugin as the call rule sees it (agent turnRunner.ts ``callPlugin`` of
     ``itemsOfPlugin``): its skills by folder, its subagents by file stem (the image keeps
     them outside the plugin, ``agents_dir``), and each frontmatter ``name`` that differs as
-    an alias, bounded as the classic call rule has it (``access.bounded_aliases``)."""
+    an alias, whole, as the classic call rule has it (``PackageItems.declared``)."""
     items: list[str] = []
     aliases: dict[str, list[str]] = {}
 
@@ -835,7 +835,10 @@ def own_call_plugin(plugin_dir: str, agents_dir: str | None) -> access.CallPlugi
         if declared is not None and declared != stem:
             alias(f"subagent:{declared}", f"subagent:{stem}")
     return access.CallPlugin(
-        OWN_PLUGIN_NAME, access.OWN_PLUGIN_SOURCE, tuple(items), access.bounded_aliases(aliases)
+        OWN_PLUGIN_NAME,
+        access.OWN_PLUGIN_SOURCE,
+        tuple(items),
+        {k: tuple(v) for k, v in aliases.items()},
     )
 
 

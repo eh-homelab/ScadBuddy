@@ -116,8 +116,6 @@ async def read_rows(conn: psycopg.AsyncConnection[Any], sources: Sequence[str]) 
 
 # ---- the call rule (#4757, spec §4.4): agent/src/access/items.ts ``offCallItem`` ----
 
-#: A review's name cap (agent/src/access/listings.ts ``LISTING_CAPS.name``), in UTF-16 units.
-NAME_CAP = 128
 # The calls that name a plugin's item: the input field that names it, and the item kind.
 # ``Task`` is Agent's old name.
 _CALLS = {
@@ -163,55 +161,6 @@ def _js_trim(text: str) -> str:
     while end > start and trimmed(text[end - 1]):
         end -= 1
     return text[start:end]
-
-
-def _utf16_cut(text: str, cap: int) -> str:
-    """The first ``cap`` UTF-16 code units; half a pair at the end becomes U+FFFD, as
-    JavaScript's ``slice`` then ``toWellFormed`` leaves it."""
-    out: list[str] = []
-    units = 0
-    for c in text:
-        width = 2 if ord(c) > 0xFFFF else 1
-        if units + width > cap:
-            if units < cap:
-                out.append("\ufffd")
-            break
-        out.append(c)
-        units += width
-    return "".join(out)
-
-
-def _storable_cut(text: str, cap: int) -> str:
-    return "".join(
-        "\ufffd" if c == "\0" or 0xD800 <= ord(c) <= 0xDFFF else c for c in _utf16_cut(text, cap)
-    )
-
-
-def cut_name(text: str) -> str:
-    """A name as a package review stores it (items.ts ``cutName``): cut to ``NAME_CAP`` and
-    made storable (no lone surrogate, no NUL; each becomes U+FFFD)."""
-    return _storable_cut(text, NAME_CAP)
-
-
-#: The bound on an alias key's name (items.ts ``ALIAS_KEY_CAP``), in UTF-16 units: a longer
-#: frontmatter name is listed cut to it, a prefix key a call cut the same way reaches.
-ALIAS_KEY_CAP = 1024
-
-
-def alias_key_name(text: str) -> str:
-    """A frontmatter name as an alias key holds it (items.ts ``aliasKeyName``)."""
-    return _storable_cut(text, ALIAS_KEY_CAP)
-
-
-def bounded_aliases(aliases: Mapping[str, Sequence[str]]) -> dict[str, tuple[str, ...]]:
-    """Every key's name bounded by ``alias_key_name`` (items.ts ``boundedAliases``); keys that
-    become one share their targets."""
-    out: dict[str, list[str]] = {}
-    for key, targets in aliases.items():
-        at = key.find(":")
-        into = out.setdefault(f"{key[: at + 1]}{alias_key_name(key[at + 1 :])}", [])
-        into.extend(t for t in targets if t not in into)
-    return {k: tuple(v) for k, v in out.items()}
 
 
 def agent_type_form(name: str) -> str:
@@ -273,10 +222,11 @@ def off_call_item(
     """The item a Skill, Agent or Task call names that is off, or None: items.ts
     ``offCallItem``, the same rule, held to it by the ``calls`` access vectors. In each
     plugin the call's name reaches every item it names (whole, or as
-    ``<plugin>:<name>``), and every target of an alias it names (the key as it is, or
-    against the name cut), by the whole name or the rest once a ``<plugin>:`` naming that
-    plugin comes off. Of what it reaches, the first whose plugin is switched off, or whose
-    row is ``off``, answers (fail closed)."""
+    ``<plugin>:<name>``), and every target of an alias it names (the key, a whole frontmatter
+    name: the agent's vet refuses one longer than items.ts ``ALIAS_KEY_CAP``, so none is ever
+    cut), by the whole name or the rest once a ``<plugin>:`` naming that plugin comes off. Of
+    what it reaches, the first whose plugin is switched off, or whose row is ``off``, answers
+    (fail closed)."""
     call = _CALLS.get(tool)
     if call is None or not isinstance(tool_input, dict):
         return None
@@ -309,12 +259,7 @@ def off_call_item(
             )
 
         def alias_named(key: str, spellings: list[str] = spellings) -> bool:
-            return any(
-                _reaches(kind, s, key)
-                or _reaches(kind, cut_name(s), key)
-                or _reaches(kind, alias_key_name(s), key)
-                for s in spellings
-            )
+            return any(_reaches(kind, s, key) for s in spellings)
 
         direct = [i for i in plugin.items if i.startswith(prefix) and item_named(i[len(prefix) :])]
         aliased = [

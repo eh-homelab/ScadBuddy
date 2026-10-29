@@ -30,6 +30,7 @@ import { pluginTierResolver } from '../plugins/registry.js'
 import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
 import type { SessionFiles } from '../workspace/store.js'
 import { localPackageServers, sharePackage, unparkableBuiltins } from './turnPackages.js'
+import { LISTING_PACKAGES_BUDGET } from '../plugins/packages/vet.js'
 import { turnToolName } from './turnTools.js'
 import {
   connectHttp,
@@ -323,6 +324,9 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       if (context.listing) {
         shared = []
         const failed = new Set<string>()
+        // What the shared packages take of the listing, in UTF-8 bytes: one past the budget is
+        // left out, in the order they load (by name), so the listing stays one payload (R9).
+        let listed = 0
         for (const pkg of loaded.loaded) {
           if (root === undefined) {
             problems.push(
@@ -334,14 +338,20 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
           try {
             const turnPackage = await sharePackage(pkg, root, localRoot, packageOmitted(pkg.name, itemAccess, switches, colliding, unoffered), builtinsOff)
             const dark = unparkableBuiltins(turnPackage, provided)
+            // The ones provided as turn tools are not the engine's to run.
+            const entry = { ...turnPackage, builtin_tools: turnPackage.builtin_tools.filter((t) => !dark.includes(t) && !provided.has(t)) }
+            const size = Buffer.byteLength(JSON.stringify(entry))
+            if (listed + size > LISTING_PACKAGES_BUDGET) {
+              throw new Error(`the turn's packages would take more than ${LISTING_PACKAGES_BUDGET} bytes of its listing with it`)
+            }
             if (dark.length) {
               problems.push(
                 `plugin package ${pkg.name} names ${dark.join(', ')}: a durable session cannot ask you before ` +
                   'such a call runs, so they are not offered here; a classic session offers them',
               )
             }
-            // The ones provided as turn tools are not the engine's to run.
-            shared.push({ ...turnPackage, builtin_tools: turnPackage.builtin_tools.filter((t) => !dark.includes(t) && !provided.has(t)) })
+            listed += size
+            shared.push(entry)
           } catch (err) {
             problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
             failed.add(pkg.name)

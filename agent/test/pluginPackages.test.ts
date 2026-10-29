@@ -34,6 +34,7 @@ import { PluginError } from '../src/plugins/registry.js'
 import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
 import { LISTING_CAPS } from '../src/access/listings.js'
+import { ALIAS_KEY_CAP } from '../src/access/items.js'
 import { packageServerSource } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { harnessTierOf } from '../src/harness/run.js'
@@ -669,6 +670,26 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
 
     const allowed = await loadPackagesForRun({ enabledPins: () => Promise.resolve([{ ...pin, allowRefused: true }]) }, installer)
     expect(allowed).toMatchObject({ paths: [], allowedPaths: [installer.cacheDir(pin)], problems: [] })
+  })
+
+  it('never loads a pin approved before the name bound, allowed or not, and says so (Task 6 re-review R7)', async () => {
+    repos.greeter = gitRepo(GREETER)
+    const source = validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })
+    const base = pinOf(await installer.prepare(source))
+    const deep = `---\nname: ${'deep_'.repeat(220)}\ndescription: d\n---\nD.\n`
+    const commit = repos.greeter.commitFiles({ 'agents/deep.md': deep })
+    await expect(installer.prepare(source)).rejects.toThrow(`longer than ${ALIAS_KEY_CAP}`)
+    // The pin an older replica would have approved: the same files, hashed as they are.
+    const tree = mkdtempSync(path.join(os.tmpdir(), 'pkg-tree-'))
+    temps.push(tree)
+    for (const [rel, text] of Object.entries({ ...GREETER, 'agents/deep.md': deep })) {
+      mkdirSync(path.dirname(path.join(tree, rel)), { recursive: true })
+      writeFileSync(path.join(tree, rel), text)
+    }
+    const pin = { ...base, commit, contentHash: (await hashTree(tree)).hash, allowRefused: true }
+    const loaded = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, installer)
+    expect(loaded).toMatchObject({ paths: [], allowedPaths: [], loaded: [] })
+    expect(loaded.problems.join()).toMatch(new RegExp(`greeter was not loaded: .*longer than ${ALIAS_KEY_CAP}`))
   })
 
   it('refuses outright what no approval can allow', async () => {

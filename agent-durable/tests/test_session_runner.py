@@ -2022,12 +2022,6 @@ def test_own_call_plugin_keeps_a_frontmatter_name_over_the_cap_whole(tmp_path: P
     assert own_call_plugin(str(plugin), str(agents)).aliases == {
         f"subagent:{over}": ("subagent:deep",)
     }
-    # R1: past the alias bound a name is listed cut to it, never whole.
-    huge = "h" * 1500
-    (agents / "huge.md").write_text(f"---\nname: {huge}\ndescription: d\n---\nH.\n")
-    aliases = own_call_plugin(str(plugin), str(agents)).aliases
-    assert aliases[f"subagent:{huge[: access.ALIAS_KEY_CAP]}"] == ("subagent:huge",)
-    assert all(len(k) <= len("subagent:") + access.ALIAS_KEY_CAP for k in aliases)
 
 
 async def test_a_packages_builtin_skill_is_read_per_call(agent_db: Conn, connect: Connect) -> None:

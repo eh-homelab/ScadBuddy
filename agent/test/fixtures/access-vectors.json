@@ -6612,72 +6612,62 @@
       }
     },
     {
-      "name": "a name over the alias bound, called whole",
+      "name": "an agent type with an emoji is compared as it is",
       "tool": "Agent",
       "input": {
-        "subagent_type": "pa:hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh"
+        "subagent_type": "🤖"
       },
       "plugins": [
         {
           "name": "pa",
           "source": "package:pa",
           "items": [
-            "subagent:huge"
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
           ],
           "aliases": {
-            "subagent:hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh": [
-              "subagent:huge"
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
             ]
           }
-        }
-      ],
-      "rows": [
+        },
         {
-          "source": "package:pa",
-          "item": "subagent:huge",
-          "access": "off",
-          "updated_by": "browser:browser"
-        }
-      ],
-      "expect": {
-        "source": "package:pa",
-        "item": "subagent:huge",
-        "reason": "subagent \"huge\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
-      }
-    },
-    {
-      "name": "a name that differs from one over the alias bound only past it (fail closed)",
-      "tool": "Agent",
-      "input": {
-        "subagent_type": "pa:hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhzzz"
-      },
-      "plugins": [
-        {
-          "name": "pa",
-          "source": "package:pa",
+          "name": "pb",
+          "source": "package:pb",
           "items": [
-            "subagent:huge"
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
           ],
-          "aliases": {
-            "subagent:hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh": [
-              "subagent:huge"
-            ]
-          }
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
         }
       ],
       "rows": [
         {
           "source": "package:pa",
-          "item": "subagent:huge",
+          "item": "subagent:reviewer",
           "access": "off",
           "updated_by": "browser:browser"
         }
       ],
-      "expect": {
-        "source": "package:pa",
-        "item": "subagent:huge",
-        "reason": "subagent \"huge\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
-      }
+      "expect": null
     },
     {
       "name": "an agent type with a BMP code point new in Unicode 17 reaches every subagent",
@@ -6742,57 +6732,97 @@
       }
     },
     {
-      "name": "an agent type with an emoji is compared as it is",
+      "name": "a name at the alias bound called without its underscores",
       "tool": "Agent",
       "input": {
-        "subagent_type": "🤖"
+        "subagent_type": "deepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeepdeep"
       },
       "plugins": [
         {
           "name": "pa",
           "source": "package:pa",
           "items": [
-            "skill:jot",
-            "skill:wave",
-            "skill:sweep",
-            "skill:dust",
-            "subagent:reviewer",
-            "subagent:review:deep"
+            "subagent:deep"
           ],
           "aliases": {
-            "subagent:deep-review": [
-              "subagent:review:deep"
-            ],
-            "skill:tidy": [
-              "skill:sweep",
-              "skill:dust"
+            "subagent:deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep": [
+              "subagent:deep"
             ]
           }
-        },
-        {
-          "name": "pb",
-          "source": "package:pb",
-          "items": [
-            "skill:jot",
-            "skill:dust",
-            "subagent:reviewer"
-          ],
-          "aliases": {}
-        },
-        {
-          "name": "scadbuddy",
-          "source": "builtin:own-plugin",
-          "items": [
-            "skill:print",
-            "subagent:print-analyst"
-          ],
-          "aliases": {}
         }
       ],
       "rows": [
         {
           "source": "package:pa",
-          "item": "subagent:reviewer",
+          "item": "subagent:deep",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "subagent:deep",
+        "reason": "subagent \"deep\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "a name at the alias bound called qualified, upper case and dashed",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "pa:DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP-DEEP"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "subagent:deep"
+          ],
+          "aliases": {
+            "subagent:deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep": [
+              "subagent:deep"
+            ]
+          }
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:deep",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "subagent:deep",
+        "reason": "subagent \"deep\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "a name at the alias bound with one more letter is another name",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deepx"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "subagent:deep"
+          ],
+          "aliases": {
+            "subagent:deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep_deep": [
+              "subagent:deep"
+            ]
+          }
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:deep",
           "access": "off",
           "updated_by": "browser:browser"
         }
