@@ -572,6 +572,8 @@ class SettingsPatch(BaseModel):
     pricing_rounding: Literal["to_minor_unit", "to_major"] | None = None
     #: The rough estimate's factor over a part's volume (orders spec §5.3).
     rough_estimate_factor: str | None = None
+    #: Whether a fulfilled line item may be unfulfilled (#4953).
+    orders_allow_unfulfil: bool | None = None
     #: The S3 store (spec 2026-10-16 §4.2); the secret is write-only, ``""`` clears it.
     store_s3_endpoint: str | None = None
     store_s3_region: str | None = None

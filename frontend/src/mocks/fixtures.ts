@@ -973,6 +973,8 @@ export const settingsDefaults = {
   pricing_markup_percent: '0',
   pricing_rounding: 'to_minor_unit',
   rough_estimate_factor: '1.15',
+  // #4953 — whether a fulfilled line item may be unfulfilled.
+  orders_allow_unfulfil: true,
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,

@@ -537,7 +537,8 @@ export const orderTools: Tool[] = [
       'stays, and order_item_fulfil may edit or accept it again), and the item goes back to the status its latest ' +
       'attempt gives it (`approved`, or `failed`); the order follows (`ready` goes back to `in_production`). ' +
       'Refused with `item_not_fulfilled`, `order_item_shipped` (a shipment carries the item: its `shipments` name ' +
-      'them; take the item off them with order_ship first) and `order_on_hold`. Outward, as accepting the attempt is.',
+      'them; take the item off them with order_ship first), `order_on_hold`, and `unfulfil_disabled` while the shop turned ' +
+      'Unfulfil off in Settings (`orders_allow_unfulfil`). Outward, as accepting the attempt is.',
     input: z.object({ order_id: orderId, item_id: itemId }),
     risk: 'outward',
     routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/unfulfil'],

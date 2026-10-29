@@ -14,7 +14,8 @@ import { refusalText } from './refusal'
 import { itemAnchor } from './itemLink'
 import type { SliceQuoteRuns } from './useSliceQuotes'
 import { UnfulfilDialog } from './Unfulfil'
-import { offersUnfulfil, unfulfilBlock } from './unfulfilRules'
+import { offersUnfulfil, UNFULFIL_OFF, UNFULFIL_SETTING, unfulfilBlock } from './unfulfilRules'
+import { Link } from 'react-router'
 
 /**
  * An order's line items (§3.3): picture, title, status, quantity, unit price and line
@@ -37,6 +38,7 @@ export function OrderItemsTable({
   quoting,
   onHold = false,
   shipments = [],
+  unfulfilAllowed = true,
 }: {
   orderId: string
   /** The order's status: a unit price is typed only while it is draft or quoted. */
@@ -60,6 +62,8 @@ export function OrderItemsTable({
   onHold?: boolean
   /** The order's shipments: Unfulfil is refused for an item one carries. */
   shipments?: Shipment[]
+  /** #4953 — `orders_allow_unfulfil`: off, Unfulfil is disabled with a link to the setting. */
+  unfulfilAllowed?: boolean
 }) {
   const pricing = PRICED_WHILE.has(orderStatus)
   const columns: Column<OrderItemDetail>[] = [
@@ -150,7 +154,13 @@ export function OrderItemsTable({
       className: 'w-10 text-right',
       cell: (item) =>
         offersUnfulfil({ status: orderStatus }, item) ? (
-          <ItemMenu orderId={orderId} item={item} blocked={unfulfilBlock({ on_hold: onHold }, shipments, item)} onChanged={onChanged} />
+          <ItemMenu
+            orderId={orderId}
+            item={item}
+            blocked={unfulfilAllowed ? unfulfilBlock({ on_hold: onHold }, shipments, item) : UNFULFIL_OFF}
+            off={!unfulfilAllowed}
+            onChanged={onChanged}
+          />
         ) : null,
     })
   }
@@ -173,7 +183,20 @@ export function OrderItemsTable({
  * A fulfilled row's menu: Unfulfil, disabled with the reason when the backend would
  * refuse it. Named without the item's title, as the unit price's Accept is.
  */
-function ItemMenu({ orderId, item, blocked, onChanged }: { orderId: string; item: OrderItemDetail; blocked: string | null; onChanged: () => void }) {
+function ItemMenu({
+  orderId,
+  item,
+  blocked,
+  off,
+  onChanged,
+}: {
+  orderId: string
+  item: OrderItemDetail
+  blocked: string | null
+  /** The setting turned it off: the reason links to it. */
+  off: boolean
+  onChanged: () => void
+}) {
   const [confirming, setConfirming] = useState(false)
   return (
     <>
@@ -188,6 +211,11 @@ function ItemMenu({ orderId, item, blocked, onChanged }: { orderId: string; item
             Unfulfil…
           </DropdownMenuItem>
           {blocked && <DropdownMenuLabel className="max-w-56 text-xs font-normal whitespace-normal text-muted-foreground">{blocked}</DropdownMenuLabel>}
+          {off && (
+            <DropdownMenuItem asChild>
+              <Link to={UNFULFIL_SETTING}>Open Settings → Orders</Link>
+            </DropdownMenuItem>
+          )}
         </DropdownMenuContent>
       </DropdownMenu>
       <UnfulfilDialog orderId={orderId} item={item} open={confirming} onOpenChange={setConfirming} onChanged={onChanged} />

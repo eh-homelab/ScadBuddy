@@ -747,6 +747,10 @@ export const handlers = [
   // `Lifecycle.unfulfil_item` (#4952): the latest accepted attempt is no longer counted.
   http.post('/api/v1/orders/:id/items/:item/unfulfil', ({ request, params }) =>
     transition(request, () => {
+      // #4953 — the stored setting, checked before anything is read.
+      if (mockSettings().orders_allow_unfulfil === false) {
+        throw new Refused('unfulfil_disabled', 'unfulfilling a line item is turned off in Settings (orders_allow_unfulfil)')
+      }
       const order = lock(String(params.id))
       notEnded(order)
       if (!DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)

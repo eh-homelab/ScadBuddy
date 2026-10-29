@@ -1232,11 +1232,20 @@ class Lifecycle:
         self._told(_Change(order, changed))
         return attempt
 
-    def unfulfil_item(self, order_id: str, item_id: str, by: Actor) -> OrderItem:
+    def unfulfil_item(
+        self, order_id: str, item_id: str, by: Actor, *, allowed: bool = True
+    ) -> OrderItem:
         """Undo a fulfilment (#4952, §3.5 "Undo"): the item's latest accepted attempt
         is marked not accepted (the row stays), and the item takes the status its
         latest attempt gives it (`approved`, or `failed`). Refused for an item not
-        `fulfilled` and for one a shipment carries (take it off the shipment first)."""
+        `fulfilled` and for one a shipment carries (take it off the shipment first),
+        and with ``allowed`` false (``orders_allow_unfulfil`` off, #4953) before
+        anything is read."""
+        if not allowed:
+            raise LifecycleError(
+                "unfulfil_disabled",
+                "unfulfilling a line item is turned off in Settings (orders_allow_unfulfil)",
+            )
         with self.store.transaction() as conn:
             order, item = self._in_production(conn, order_id, item_id)
             if item.status != "fulfilled":

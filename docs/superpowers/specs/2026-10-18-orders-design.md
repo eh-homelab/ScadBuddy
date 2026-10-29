@@ -264,7 +264,10 @@ the body.
   attempt. It is refused for an item not `fulfilled` (`item_not_fulfilled`), for an
   item a shipment carries (`order_item_shipped`, naming the shipments: take the item off
   them first), on hold (`order_on_hold`, as every move of a fulfilment), and once the
-  order ended (`order_closed`/`order_cancelled`).
+  order ended (`order_closed`/`order_cancelled`). The stored setting
+  `orders_allow_unfulfil` (#4953, on by default, in the Settings page's Orders section)
+  turns it off: a shop that treats a fulfilment as final gets `unfulfil_disabled` for a
+  person and the agent alike. A change to the setting writes nothing to existing orders.
 - A cancel's or a close's release drops its holds after its commit, under the orders'
   row locks and only for quotes still released then (`OrderStore.drop_released_holds`),
   so a reopen racing it keeps the holds it took.
