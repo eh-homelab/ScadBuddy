@@ -478,9 +478,11 @@ async def test_the_start_moves_past_a_taken_ftps_port(
         # mqtt, ftps, control: the first start's FTPS port is the taken one.
         picks = iter([_free_port(), taken.getsockname()[1], _free_port()])
         monkeypatch.setattr(fake_lan, "free_port", lambda: next(picks, None) or _free_port())
-        _, task, ports = await start_fake_printer(
-            module,
-            lambda ports: module.Config(
+        starts: list[fake_lan.Ports] = []
+
+        def config_for(ports: fake_lan.Ports) -> Any:
+            starts.append(ports)
+            return module.Config(
                 serial=SERIAL,
                 access_code=ACCESS_CODE,
                 host="127.0.0.1",
@@ -490,10 +492,13 @@ async def test_the_start_moves_past_a_taken_ftps_port(
                 sdcard=tmp_path / "sdcard",
                 state=tmp_path / "state",
                 mosquitto=MOSQUITTO,
-            ),
-        )
+            )
+
+        _, task, ports = await start_fake_printer(module, config_for)
         try:
-            assert ports.ftps != taken.getsockname()[1]
+            # Two starts: the first on the taken FTPS port, the second on new ports.
+            assert [start.ftps == taken.getsockname()[1] for start in starts] == [True, False]
+            assert ports == starts[-1]
             lan = _Lan(ports.mqtt, ports.ftps, ports.control, cert=tmp_path / "state" / "cert.pem")
             assert (
                 lan.upload(b"G28\n", "probe.gcode")

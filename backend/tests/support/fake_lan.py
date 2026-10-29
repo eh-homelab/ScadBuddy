@@ -100,7 +100,8 @@ async def start_fake_printer(
     A port `free_port` picked can be taken by a parallel worker before the fake binds it
     ("Address already in use"): start again on new ports, up to ``attempts`` times. The
     MQTT port's clash is the broker's exit; the FTPS and control ports' is the bind's
-    EADDRINUSE (#4765, #4944)."""
+    EADDRINUSE (#4765, #4944). Only a clash is retried: any other error, or no ready
+    within 60 s, fails the start at once."""
     attempt = 0
     while True:
         attempt += 1
