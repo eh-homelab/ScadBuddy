@@ -145,7 +145,11 @@ Read on main at `90d8d3025`; paths relative to the repo root.
   - in durable turns nothing reads a tool call's input: the Temporal plugin's only gate
     is a PreToolUse hook whose `decide` reads `tool_name` and the call id, never
     `tool_input` (`_defer_hook.py:174-221`, at the pin in `agent-durable/pyproject.toml`),
-    and Skill/Agent take its "runs normally" branch.
+    and Skill/Agent take its "runs normally" branch. The segment runner's own
+    PreToolUse hook (`SegmentCalls`, `runner.py`, added by #4184 after this was
+    written) does read `tool_input`, and the plugin keeps its decision for every tool
+    but the durable prefix and `tool_activities` (`_guard_hooks`, `_runner.py` at the
+    `uv.lock` pin), so a deny there stands for Skill, Agent and Task.
 - `allow_refused` packages' built-ins (`Bash`, `WebFetch`, …) are one set per turn,
   merged across packages (`install.ts:489,504`, `turnServers.ts:309`), each `outward`.
 - No tool has a static friendly name: `defineTool` (`tools/registry.ts:216-319`) has a
@@ -266,7 +270,7 @@ on one name are hidden.
 | `builtin:own-plugin` | ScadBuddy's own skills and subagents | skills, subagents |
 | `webmcp` | this browser's built-in agent (WebMCP) | none; enabled only, kept in localStorage, labelled "this browser only" |
 | `remote:<name>` | a remote MCP plugin | tools; default `outward`, the server's `readOnlyHint` shown as a suggestion |
-| `package:<name>` | a plugin package | hooks (`hook:<event>#<n>`), skills, subagents, and its `allow_refused` built-ins (`builtin:<name>`) |
+| `package:<name>` | a plugin package | hooks (`hook:<event>:<id>`, below), skills, subagents, and its `allow_refused` built-ins (`builtin:<name>`) |
 | `package:<name>/mcp:<server>` | an MCP server a package adds | tools; defaults as a remote plugin |
 
 The printer camera becomes the access of `get_printer_camera` in `builtin:scadbuddy`
@@ -321,8 +325,11 @@ new pin no longer has are deleted with the re-pin.
   its own derived hash (fixing the overwrite in `mcp.ts:198-221`), hashed, and sent with
   that hash, so both runtimes' existing checks hold it to "derived only from a
   pin-verified source". In classic turns the PreToolUse seam also refuses a Skill or
-  Agent call naming a disabled one, as a backstop. Durable has no such hook (§2), so
-  there the copy is the only lever.
+  Agent call naming a disabled one, as a backstop; in durable turns the segment
+  runner's own PreToolUse hook does the same per call (§2), so a skill or subagent
+  switched off mid-turn is refused from its next call in both runtimes. Hooks
+  themselves change per turn in both: no SDK option drops one plugin hook from a
+  running query (§2).
 - Package MCP servers get their `toolTiers` / `disabledTools` from the resolver; the
   forwarder already enforces them. Their stdio servers (`allow_refused`) take the tier
   through `tierOf` (`turnPackages.ts:196`).
