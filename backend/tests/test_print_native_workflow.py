@@ -21,6 +21,7 @@ import pytest
 from temporalio import activity
 from temporalio.client import Client
 from temporalio.exceptions import ApplicationError
+from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 from scadbuddy.bambuddy.dispatch import QueueOutcome
@@ -342,9 +343,11 @@ async def _run(
     unrecorded: set[int] | None = None,
     reports: FakeReports | None = None,
     during: Callable[[Client, PrintRunInput, NativeFake], Awaitable[None]] | None = None,
+    gates: dict[str, asyncio.Event] | None = None,
 ) -> tuple[NativeFake, PrintRun]:
     queue = f"print-{uuid.uuid4().hex[:8]}"
     fake = NativeFake(printer, queue)
+    fake.gates = gates or {}
     fake.plates = plates or [1]
     fake.copies = copies
     fake.unrecorded = unrecorded or set()
@@ -387,7 +390,8 @@ async def _run(
         if during is not None:
             await during(client, arg, fake)
         run = await ended(client, arg)
-        if len(fake.plates) * copies > 1 and run.status == "succeeded":
+        stopped = run.result is not None and run.result.lan_stopped is not None
+        if len(fake.plates) * copies > 1 and run.status == "succeeded" and not stopped:
             # The later copies are the run's `PrintLanSequence`, which outlives it: its
             # last row is the run's as it ends.
             sequence = client.get_workflow_handle(lan_sequence_id(run.id), result_type=PrintRun)
@@ -748,6 +752,41 @@ async def test_a_cancel_while_it_waits_stops_the_rest(
     result = run.result
     assert result is not None and result.lan_waiting == [1]
     assert result.lan_stopped is not None and result.lan_stopped.stage == "cancelled"
+
+
+async def test_a_cancel_while_it_succeeds_stops_the_rest(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """Review of #4940: a cancel ``print_succeed`` absorbs starts no sequence, and the
+    run's result says the waiting copies were stopped, so they never read as queued."""
+    gate = asyncio.Event()
+
+    async def cancel_while_it_succeeds(
+        client: Client, arg: PrintRunInput, fake: NativeFake
+    ) -> None:
+        while "succeed" not in fake.calls:
+            await asyncio.sleep(0.1)
+        await client.get_workflow_handle(f"print-{arg.key}").cancel()
+        await asyncio.sleep(1.0)
+        gate.set()
+
+    fake, run = await _run(
+        client,
+        pg_pool,
+        registry_native,
+        blobs=Blobs(),
+        copies=2,
+        reports=FakeReports(fake_lan),
+        during=cancel_while_it_succeeds,
+        gates={"succeed": gate},
+    )
+    assert run.status == "succeeded" and len(fake_lan.project_files()) == 1
+    result = run.result
+    assert result is not None and result.lan_waiting == [1]
+    assert result.lan_stopped is not None and result.lan_stopped.stage == "cancelled"
+    assert fake.updates[-1].lan_stopped == result.lan_stopped
+    with pytest.raises(RPCError):
+        await client.get_workflow_handle(lan_sequence_id(run.id)).describe()
 
 
 async def test_a_started_copy_whose_record_fails_is_still_followed(

@@ -65,6 +65,16 @@ native asks, so no history above records the marker. Recorded by the patched one
 (``tests/api/test_print_run_native.py``): ``native_sliced`` (sliced, uploaded and
 queued) and ``native_slicer_refused`` (the slicer refuses the plate; the run is
 recorded failed with its stderr).
+
+``NATIVE_PATCH``'s LAN run of several plates or copies (#4541) starts the later ones in
+``PrintLanSequence``. Recorded by ``tests/test_print_native_workflow.py``:
+``lan_copies`` (two copies, both printed), ``lan_cancelled_while_waiting`` (the sequence
+is cancelled while it waits), ``lan_later_start_failed`` (the second start is refused)
+and ``lan_cancelled_during_succeed`` (a cancel while ``print_succeed`` runs: no sequence,
+the rest recorded stopped). The sequence's own histories of the first three are in
+``print_lan_sequence_histories/``. It is AUTO_UPGRADE on the print worker and may run
+for days, so a change to its commands goes behind ``workflow.patched`` as ``PrintRun``'s
+does.
 """
 
 from __future__ import annotations
@@ -87,9 +97,14 @@ from temporalio.worker import (
 )
 
 from scadbuddy.workflows.print_models import FailInput
-from scadbuddy.workflows.printing import CANCELLED_QUEUEING, PrintRunWorkflow
+from scadbuddy.workflows.printing import (
+    CANCELLED_QUEUEING,
+    LanSequenceWorkflow,
+    PrintRunWorkflow,
+)
 
 HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
+SEQUENCE_HISTORIES = Path(__file__).parent / "fixtures" / "print_lan_sequence_histories"
 
 
 @pytest.mark.parametrize(
@@ -119,11 +134,25 @@ HISTORIES = Path(__file__).parent / "fixtures" / "print_run_histories"
         "reused_slice_gone_then_sliced",
         "native_sliced",
         "native_slicer_refused",
+        "lan_copies",
+        "lan_cancelled_while_waiting",
+        "lan_later_start_failed",
+        "lan_cancelled_during_succeed",
     ],
 )
 async def test_print_run_replays_its_recorded_history(name: str) -> None:
     history = WorkflowHistory.from_json(f"print-{name}", (HISTORIES / f"{name}.json").read_text())
     replayer = Replayer(workflows=[PrintRunWorkflow], data_converter=pydantic_data_converter)
+    await replayer.replay_workflow(history)
+
+
+@pytest.mark.parametrize(
+    "name", ["lan_copies", "lan_cancelled_while_waiting", "lan_later_start_failed"]
+)
+async def test_lan_sequence_replays_its_recorded_history(name: str) -> None:
+    text = (SEQUENCE_HISTORIES / f"{name}.json").read_text()
+    history = WorkflowHistory.from_json(f"print-lan-{name}", text)
+    replayer = Replayer(workflows=[LanSequenceWorkflow], data_converter=pydantic_data_converter)
     await replayer.replay_workflow(history)
 
 

@@ -964,10 +964,15 @@ class PrintRunWorkflow(_PlateStarts):
         )
         # The row a repeat of the request is answered with, from here on.
         self.row = row
-        self._upsert(status=row.status)
-        await self._follow_run(input)
+        try:
+            await self._follow_run(input)
+        except asyncio.CancelledError:
+            # The progress route starts the follow again once someone opens the output.
+            self.cancel_absorbed = True
         if self.cancel_absorbed:
-            return row
+            # A cancel after `print_finish` (during `print_succeed` or the follow) stops
+            # the rest too, so the waiting copies never read as queued for good.
+            return await self._lan_stop(input, accepted, row, row.result or result)
         later = [
             LanStart(
                 plate=plate,
@@ -980,23 +985,43 @@ class PrintRunWorkflow(_PlateStarts):
             for (plate, sliced, job_id, preset_key, native), copy in starts[1:]
         ]
         # Left to run past this run, which closes after its repeat window as any run
-        # does: its next start may be days away (`LAN_WAIT_BOUND`).
-        await workflow.start_child_workflow(
-            LAN_SEQUENCE_WORKFLOW,
-            LanSequenceInput(
-                input=input,
-                accepted=accepted,
-                planned=planned,
-                starts=later,
-                result=row.result or result,
-                recorded=[first_plate],
-                sent=sent,
-            ),
-            id=lan_sequence_id(accepted.run.id),
-            parent_close_policy=workflow.ParentClosePolicy.ABANDON,
-            cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
+        # does: its next start may be days away (`LAN_WAIT_BOUND`). The start is waited
+        # for through a cancel, which the child is then sent: it records the stop itself.
+        start = asyncio.ensure_future(
+            workflow.start_child_workflow(
+                LAN_SEQUENCE_WORKFLOW,
+                LanSequenceInput(
+                    input=input,
+                    accepted=accepted,
+                    planned=planned,
+                    starts=later,
+                    result=row.result or result,
+                    recorded=[first_plate],
+                    sent=sent,
+                ),
+                id=lan_sequence_id(accepted.run.id),
+                parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+                cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
+            )
         )
+        try:
+            await asyncio.shield(start)
+        except asyncio.CancelledError:
+            self.cancel_absorbed = True
+            await start
+            await workflow.get_external_workflow_handle(lan_sequence_id(accepted.run.id)).cancel()
         return row
+
+    async def _lan_stop(
+        self, input: PrintRunInput, accepted: Accepted, row: PrintRun, result: PrintRunResult
+    ) -> PrintRun:
+        """``row``, the succeeded run, with its waiting copies stopped by a cancel."""
+        if result.lan_stopped is not None or not result.lan_waiting:
+            return row
+        self.row = await self._lan_update(
+            input, accepted, result.model_copy(update={"lan_stopped": _LAN_CANCELLED})
+        )
+        return self.row
 
     async def _follow(self, output_id: str) -> None:
         """Follow the print it queued (§4.4): `FollowPrint`, abandoned so it outlives

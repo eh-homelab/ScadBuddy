@@ -117,7 +117,12 @@ def lan_ended(
     start shows the printer no longer printing: its own ``FINISH`` or ``FAILED``, or
     another print's end, or ``IDLE``. ``None`` while it, or a print started since, runs,
     and while no report has been seen since the start. A report that stops is waited
-    out, never read as an end: the next start needs the printer to answer anyway."""
+    out, never read as an end: the next start needs the printer to answer anyway.
+
+    Another ``subtask_name`` is read as an end (``MOVED_ON``). That holds because the
+    report is whole: `PrinterWatch` asks for a ``pushall`` on every connect
+    (`lan.LanPrinter.reports`) and merges each delta over it, so a report that names
+    no ``subtask_name`` yet never reaches this."""
     if report is None or report[1] <= started.started_at:
         return None
     data, seen_at = report
