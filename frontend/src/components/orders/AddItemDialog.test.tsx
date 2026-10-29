@@ -42,7 +42,7 @@ describe('AddItemDialog (#4251)', () => {
     })
     const order = await api.order(ORDER_DRAFT)
     const added = order.items.find((i) => i.title === 'Maze for Ada')
-    expect(added?.reference.commit).toBe(model.version)
+    expect(added?.reference?.commit).toBe(model.version)
     expect(added?.quantity).toBe(2)
   })
 

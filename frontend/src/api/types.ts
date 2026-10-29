@@ -354,7 +354,10 @@ export type OrderEvent = Schemas['OrderEvent']
 export type AddressSnapshot = Schemas['AddressSnapshot']
 export type OrderCreate = Defaulted<Schemas['OrderCreate'], 'notes' | 'due_at'>
 export type OrderPatch = Partial<Schemas['OrderPatch']>
-export type OrderItemCreate = Defaulted<Schemas['ItemCreate'], 'notes' | 'title' | 'slug' | 'commit' | 'inputs' | 'output_id'>
+export type OrderItemCreate = Defaulted<
+  Schemas['ItemCreate'],
+  'notes' | 'title' | 'slug' | 'commit' | 'inputs' | 'output_id' | 'kind' | 'sku' | 'unit_price_minor' | 'requires_printing'
+>
 export type OrderItemPatch = Partial<Schemas['ItemPatch']>
 export type ManualQuoteInput = Defaulted<Schemas['ManualQuoteInput'], 'label'>
 export type FulfilmentInput = Defaulted<Schemas['FulfilmentInput'], 'notes' | 'failure_reason' | 'started_at' | 'finished_at'>

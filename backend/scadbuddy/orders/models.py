@@ -45,6 +45,9 @@ ContactKind = Literal[
 ]
 ChargeKind = Literal["shipping", "discount", "fee", "tax"]
 QuoteSource = Literal["slice", "manual"]
+#: What an item is (#4954): a ``model`` names a template render (its ``reference``); a
+#: ``custom`` item is a title, a quantity and a typed price with nothing behind it.
+ItemKind = Literal["model", "custom"]
 #: ``rounding`` is ``to_major``'s difference (#4250 Ruling 5), so the lines always add.
 QuoteLineKind = Literal[
     "filament", "machine_time", "setup", "labour", "markup", "rounding", "manual"
@@ -275,7 +278,14 @@ class OrderItem(BaseModel):
     quantity: int = Field(ge=1)
     title: str
     notes: str
-    reference: Reference
+    kind: ItemKind = "model"
+    #: What to make; None for a ``custom`` item, which names nothing (#4954).
+    reference: Reference | None
+    #: A ``custom`` item's own flag: False skips the print path (it is marked done by
+    #: hand). Always True for a ``model`` item.
+    requires_printing: bool = True
+    #: The shop's stock code, when it keeps one.
+    sku: str | None = None
     colours: list[ColourSlot]
     output_id: str | None
     #: The image attachment a person marked as what was actually delivered (§6.2), one

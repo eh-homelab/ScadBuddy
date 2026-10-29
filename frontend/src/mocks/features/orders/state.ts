@@ -182,6 +182,9 @@ export function item(id: string, orderId: string, status: OrderItem['status'], e
     quantity: 1,
     title: 'Name Keychain',
     notes: '',
+    kind: 'model',
+    requires_printing: true,
+    sku: null,
     reference: {
       slug: 'name-keychain',
       commit: versionIds.added,

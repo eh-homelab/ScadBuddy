@@ -12,7 +12,9 @@ const OUTCOMES: FulfilmentInput['outcome'][] = ['succeeded', 'partial', 'failed'
 /**
  * Fulfilment attempts by hand (§6.1, plan Ruling 3): the attempts so far, each accepted
  * once its quantity counts as made, and a form for the next one. `enabled` once the
- * order is accepted and the item open.
+ * order is accepted and the item open. With `markDone` (a custom item that needs no
+ * printing, #4954), "Mark done" accepts the open attempt, or records one for what is left
+ * and accepts it.
  */
 export function FulfilmentForm({
   orderId,
@@ -21,6 +23,7 @@ export function FulfilmentForm({
   attempts,
   enabled,
   onChanged,
+  markDone = false,
 }: {
   orderId: string
   itemId: string
@@ -28,6 +31,7 @@ export function FulfilmentForm({
   attempts: Fulfilment[]
   enabled: boolean
   onChanged: () => void
+  markDone?: boolean
 }) {
   const made = attempts.filter((a) => a.accepted_at).reduce((sum, a) => sum + a.quantity, 0)
   const [count, setCount] = useState(String(Math.max(1, quantity - made)))
@@ -75,6 +79,25 @@ export function FulfilmentForm({
             </li>
           ))}
         </ol>
+      )}
+      {enabled && markDone && made < quantity && (
+        <div>
+          <Button
+            size="sm"
+            disabled={busy}
+            onClick={() =>
+              void run(async () => {
+                // An attempt already recorded and not accepted is the one to accept: a
+                // retry after a refused accept never records a second one.
+                const open = attempts.find((a) => !a.accepted_at && a.outcome !== 'failed')
+                const attempt = open ?? (await api.recordFulfilment(orderId, itemId, { quantity: quantity - made, outcome: 'succeeded', notes: 'Marked done' }))
+                await api.acceptFulfilment(orderId, itemId, attempt.id)
+              })
+            }
+          >
+            Mark done
+          </Button>
+        </div>
       )}
       {enabled && (
         <form

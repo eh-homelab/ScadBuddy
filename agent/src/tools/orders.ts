@@ -347,22 +347,40 @@ export const orderTools: Tool[] = [
       'Add a line item: from an output (`output_id`: its commit, inputs, libraries and colours), or by hand (`slug`, ' +
       '`commit`, `inputs`). Beside `output_id`, leave the others out: one given must be the output\'s own (`inputs` ' +
       'whole, `v` included). The reference is checked against the catalogue and the commit\'s schema; a commit ' +
-      'that is not a revision of the template, or an input the template does not take, is refused naming the field.',
+      'that is not a revision of the template, or an input the template does not take, is refused naming the field. ' +
+      '`kind: "custom"` adds a custom item instead: a `title`, a `quantity` and a `unit_price_minor`, with no ' +
+      'source (no `output_id`, `slug`, `commit` or `inputs`), for design work, a fee, packaging or a part made ' +
+      'elsewhere. Its price is recorded, not accepted: the item is quoted until order_item_accept_quote accepts it. ' +
+      '`requires_printing` (default ' +
+      'false) marks one that still has to be made. `sku` is the shop\'s stock code, on either kind.',
     input: z.object({
       order_id: orderId,
+      kind: z.enum(['model', 'custom']).optional().describe('`model` (the default) or `custom`'),
       output_id: ID.optional(),
       ...reference.shape,
       quantity: z.number().int().min(1).default(1),
-      title: z.string().max(200).optional().describe("Defaults to the template's name"),
+      title: z
+        .string()
+        .max(200)
+        .optional()
+        .describe("Defaults to the template's name; a custom item needs one"),
       notes: z.string().default(''),
+      sku: z.string().max(100).optional(),
+      unit_price_minor: money.min(0).optional().describe('A custom item\'s price per unit'),
+      requires_printing: z.boolean().optional().describe('A custom item\'s only'),
     }),
     risk: 'write',
     routes: ['POST /api/v1/orders/{order_id}/items'],
-    title: ({ order_id, slug, output_id }) => `Add ${slug ?? output_id ?? 'an item'} to order ${order_id}`,
+    title: ({ order_id, slug, output_id, kind, title }) =>
+      `Add ${kind === 'custom' ? (title ?? 'a custom item') : (slug ?? output_id ?? 'an item')} to order ${order_id}`,
     handler: async ({ order_id, ...body }, { backend }) =>
       json(
         await ok(
-          backend.POST('/api/v1/orders/{order_id}/items', { params: { path: { order_id } }, body: body as never }),
+          backend.POST('/api/v1/orders/{order_id}/items', {
+            params: { path: { order_id } },
+            // An accept is outward: this write tool leaves a custom item's price quoted.
+            body: (body.kind === 'custom' ? { ...body, accept: false } : body) as never,
+          }),
           `add an item to order ${order_id}`,
         ),
       ),
@@ -371,8 +389,11 @@ export const orderTools: Tool[] = [
     name: 'order_item_update',
     description:
       'Edit a line item: `reference` (replaced whole) and `quantity` while the order is draft or quoted, each dropping ' +
-      'the accepted quote; `title` and `notes` in any open state. `delete: true` removes a draft item; a quoted one ' +
-      'is refused with `item_not_draft` (cancel it with order_cancel instead).',
+      'the accepted quote; `title`, `notes` and `sku` in any open state. A custom item takes `unit_price_minor` and ' +
+      '`requires_printing`: a new quantity or price records a new quote at it, not accepted (the item is quoted until ' +
+      'order_item_accept_quote). A `reference` or ' +
+      '`output_id` given to a custom item makes it a model item, back on the quote flow. `delete: true` removes a ' +
+      'draft item; a quoted one is refused with `item_not_draft` (cancel it with order_cancel instead).',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -381,6 +402,9 @@ export const orderTools: Tool[] = [
       quantity: z.number().int().min(1).optional(),
       title: z.string().max(200).optional(),
       notes: z.string().optional(),
+      sku: z.string().max(100).nullable().optional(),
+      unit_price_minor: money.min(0).optional().describe('A custom item\'s price per unit'),
+      requires_printing: z.boolean().optional(),
       delete: z.boolean().default(false),
     }),
     risk: 'write',
@@ -393,6 +417,9 @@ export const orderTools: Tool[] = [
         return deleted(item_id)
       }
       const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+      // An accept is outward: a custom item repriced here stays quoted (the backend reads
+      // `accept` only then).
+      if (body.quantity !== undefined || body.unit_price_minor !== undefined) body.accept = false
       return json(
         await ok(
           backend.PATCH('/api/v1/orders/{order_id}/items/{item_id}', { params: { path }, body: body as never }),

@@ -190,6 +190,10 @@ export const handlers = [
         throw new Refused('order_not_open', `order ${order.number} is ${order.status}: an item is quoted while it is draft or quoted`)
       }
       if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      // `quote.py` `reference_of` (#4954): a custom item has nothing to slice.
+      if (found.reference === null) {
+        throw new Refused('item_custom', `item ${found.id} is a custom item: it has no model to render or slice, so its price is typed (PATCH the item's unit_price_minor)`, [found.id])
+      }
       const { colours, changed } = withFilaments(found, body.filaments ?? {})
       const empty = colours.find((c) => !c.filament_id)
       if (empty) throw new FilamentsRefused(`colour slot ${empty.slot} has no filament to price it with`)

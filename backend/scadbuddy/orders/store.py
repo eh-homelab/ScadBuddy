@@ -112,9 +112,9 @@ _ORDER = (
     " closed_at, cancelled_at, created_at, updated_at, created_by"
 )
 _ITEM = (
-    "id, order_id, position, status, quantity, title, notes, slug, commit, inputs, libraries,"
-    " template_name, render_key, colours, output_id, delivered_attachment_id, created_at,"
-    " updated_at"
+    "id, order_id, position, status, quantity, title, notes, kind, requires_printing, sku,"
+    " slug, commit, inputs, libraries, template_name, render_key, colours, output_id,"
+    " delivered_attachment_id, created_at, updated_at"
 )
 _QUOTE = (
     "id, order_item_id, created_at, source, accepted, sliced_sha256, sliced_blob_key, plates,"
@@ -175,7 +175,13 @@ def _item_of(row: DictRow) -> OrderItem:
         quantity=row["quantity"],
         title=row["title"],
         notes=row["notes"],
-        reference=Reference(
+        kind=row["kind"],
+        requires_printing=row["requires_printing"],
+        sku=row["sku"],
+        # The table's check keeps a model item's reference columns whole (#4954).
+        reference=None
+        if row["kind"] == "custom"
+        else Reference(
             slug=row["slug"],
             commit=row["commit"],
             inputs=row["inputs"],
@@ -828,20 +834,22 @@ class OrderStore:
         quantity: int,
         title: str | None = None,
         notes: str = "",
+        sku: str | None = None,
     ) -> OrderItem:
         """Appended after the order's items; ``title`` defaults to the template's name."""
         row = conn.execute(
-            "INSERT INTO order_items (order_id, position, quantity, title, notes, slug, commit,"
-            " inputs, libraries, template_name, render_key, colours, output_id)"
+            "INSERT INTO order_items (order_id, position, quantity, title, notes, sku, slug,"
+            " commit, inputs, libraries, template_name, render_key, colours, output_id)"
             " VALUES (%s, (SELECT COALESCE(MAX(position) + 1, 0) FROM order_items"
             " WHERE order_id = %s),"
-            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
+            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
             (
                 order_id,
                 order_id,
                 quantity,
                 title or reference.template_name,
                 notes,
+                sku,
                 reference.slug,
                 reference.commit,
                 Jsonb(reference.inputs),
@@ -851,6 +859,29 @@ class OrderStore:
                 Jsonb(_dump(list(colours))),
                 output_id,
             ),
+        ).fetchone()
+        assert row is not None
+        return _item_of(row)
+
+    def insert_custom_item(
+        self,
+        conn: Conn,
+        order_id: str,
+        *,
+        title: str,
+        quantity: int,
+        notes: str = "",
+        sku: str | None = None,
+        requires_printing: bool = False,
+    ) -> OrderItem:
+        """A custom item (#4954), appended after the order's items: no reference, no
+        colours, no output."""
+        row = conn.execute(
+            "INSERT INTO order_items (order_id, position, kind, quantity, title, notes, sku,"
+            " requires_printing) VALUES (%s, (SELECT COALESCE(MAX(position) + 1, 0)"
+            " FROM order_items WHERE order_id = %s), 'custom', %s, %s, %s, %s, %s)"
+            f" RETURNING {_ITEM}",
+            (order_id, order_id, quantity, title, notes, sku, requires_printing),
         ).fetchone()
         assert row is not None
         return _item_of(row)
@@ -880,17 +911,25 @@ class OrderStore:
         title: str | UnsetType = UNSET,
         notes: str | UnsetType = UNSET,
         status: ItemStatus | UnsetType = UNSET,
+        sku: str | UnsetType | None = UNSET,
+        requires_printing: bool | UnsetType = UNSET,
     ) -> OrderItem:
+        """A ``reference`` makes the item a ``model`` item, a custom one too: a source
+        attached to it (#4954) puts it on the normal flow."""
         fields: dict[str, Any] = {
             "output_id": output_id,
             "quantity": quantity,
             "title": title,
             "notes": notes,
             "status": status,
+            "sku": sku,
+            "requires_printing": requires_printing,
             "colours": _jsonb(list(colours) if isinstance(colours, Sequence) else colours),
         }
         if isinstance(reference, Reference):
             fields.update(
+                kind="model",
+                requires_printing=True,
                 slug=reference.slug,
                 commit=reference.commit,
                 inputs=Jsonb(reference.inputs),
@@ -919,7 +958,10 @@ class OrderStore:
     def item_inputs(self) -> Iterator[dict[str, Any]]:
         """Every item's ``inputs``, for the asset scan (§3.3): the uploads they name stay."""
         with self._pool.connection() as c:
-            for row in c.execute("SELECT inputs FROM order_items ORDER BY created_at, id"):
+            # A custom item (#4954) names no inputs, and so no upload.
+            for row in c.execute(
+                "SELECT inputs FROM order_items WHERE inputs IS NOT NULL ORDER BY created_at, id"
+            ):
                 yield row["inputs"]
 
     # -- quotes (§3.4) ----------------------------------------------------------------

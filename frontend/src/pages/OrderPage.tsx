@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
-import type { OrderDetail, OrderItemDetail } from '../api/types'
+import type { OrderDetail, OrderItemDetail, OrderItemPatch } from '../api/types'
 import { AddItemDialog } from '../components/orders/AddItemDialog'
 import { ChargesEditor } from '../components/orders/ChargesEditor'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
-import { itemAnchor } from '../components/orders/itemLink'
+import { CUSTOM_ITEM_TITLE, itemAnchor } from '../components/orders/itemLink'
 import { OrderItemsTable } from '../components/orders/OrderItemsTable'
-import { itemPrice } from '../components/orders/price'
+import { itemPrice, parseUnitPrice, UNIT_PRICE_HINT, unitPrice } from '../components/orders/price'
 import { QUANTITY_HINT, parseQuantity } from '../components/orders/quantity'
 import { QuoteEditor } from '../components/orders/QuoteEditor'
 import { refusalItems, refusalText } from '../components/orders/refusal'
@@ -21,13 +21,14 @@ import { useSliceQuotes } from '../components/orders/useSliceQuotes'
 import { RecordDrawer } from '../components/records/RecordDrawer'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { dueAt, dueDay, timeAgo } from '../lib/format'
-import { formatMoney, toMinor } from '../lib/money'
+import { formatMoney, toMajor, toMinor } from '../lib/money'
 import { useAsync } from '../lib/useAsync'
 
 const OPEN_FOR_EDITS = new Set(['draft', 'quoted'])
@@ -182,6 +183,12 @@ export function OrderPage() {
             {editable && (
               <Button variant="outline" disabled={busy} onClick={() => setAdding(true)}>
                 Add item
+              </Button>
+            )}
+            {editable && (
+              // #4954 — the entry row under the items takes it.
+              <Button variant="outline" disabled={busy} onClick={() => document.getElementById(CUSTOM_ITEM_TITLE)?.focus()}>
+                Add custom item
               </Button>
             )}
             {order.status === 'shipped' && (
@@ -440,13 +447,50 @@ function ItemDrawer({
   const [error, setError] = useState<string | null>(null)
   const [unfulfilling, setUnfulfilling] = useState(false)
   const unfulfilBlocked = unfulfilAllowed ? unfulfilBlock(order, detail.shipments, item) : UNFULFIL_OFF
+  const custom = item.kind === 'custom'
+  const unit = unitPrice(item)
+  const unitText = unit ? toMajor(unit.minor, order.minor_exponent) : ''
   const [quantity, setQuantity] = useState(String(item.quantity))
   const [title, setTitle] = useState(item.title)
+  const [sku, setSku] = useState(item.sku ?? '')
+  const [notes, setNotes] = useState(item.notes)
+  const [typedPrice, setTypedPrice] = useState(unitText)
+  const [printing, setPrinting] = useState(item.requires_printing)
   useEffect(() => {
     setQuantity(String(item.quantity))
     setTitle(item.title)
-  }, [item.quantity, item.title])
+    setSku(item.sku ?? '')
+    setNotes(item.notes)
+    setTypedPrice(unitText)
+    setPrinting(item.requires_printing)
+  }, [item.quantity, item.title, item.sku, item.notes, unitText, item.requires_printing])
   const price = itemPrice(item)
+  const changed =
+    quantity !== String(item.quantity) ||
+    title !== item.title ||
+    sku !== (item.sku ?? '') ||
+    notes !== item.notes ||
+    (custom && (typedPrice !== unitText || printing !== item.requires_printing))
+
+  /** Only the fields that changed: a quantity or price sent again would reprice the item. */
+  function patch(): OrderItemPatch | string {
+    const count = parseQuantity(quantity)
+    if (count === null) return QUANTITY_HINT
+    const body: OrderItemPatch = {}
+    if (count !== item.quantity) body.quantity = count
+    if (title.trim() !== item.title) body.title = title.trim()
+    if (sku.trim() !== (item.sku ?? '')) body.sku = sku.trim() || null
+    if (notes !== item.notes) body.notes = notes
+    if (custom) {
+      if (typedPrice !== unitText) {
+        const minor = parseUnitPrice(typedPrice, order.minor_exponent)
+        if (minor === null) return UNIT_PRICE_HINT
+        body.unit_price_minor = minor
+      }
+      if (printing !== item.requires_printing) body.requires_printing = printing
+    }
+    return body
+  }
 
   async function run(action: () => Promise<unknown>, close = false) {
     setError(null)
@@ -466,10 +510,14 @@ function ItemDrawer({
       actions={
         <>
           <ItemStatusBadge status={item.status} />
-          <span className="text-xs text-muted-foreground">
-            {item.reference.slug} @ {item.reference.commit.slice(0, 7)}
-          </span>
-          {item.output_id && (
+          {item.reference ? (
+            <span className="text-xs text-muted-foreground">
+              {item.reference.slug} @ {item.reference.commit.slice(0, 7)}
+            </span>
+          ) : (
+            <span className="text-xs text-muted-foreground">Custom item{item.requires_printing ? ', requires printing' : ''}</span>
+          )}
+          {item.output_id && item.reference && (
             <Link to={`/m/${item.reference.slug}/history`} className="ml-auto text-xs text-primary underline-offset-4 hover:underline">
               From an output
             </Link>
@@ -531,12 +579,12 @@ function ItemDrawer({
         className="flex flex-wrap items-end gap-2"
         onSubmit={(event) => {
           event.preventDefault()
-          const count = parseQuantity(quantity)
-          if (count === null) {
-            setError(QUANTITY_HINT)
+          const body = patch()
+          if (typeof body === 'string') {
+            setError(body)
             return
           }
-          void run(() => api.updateOrderItem(order.id, item.id, { ...(count !== item.quantity ? { quantity: count } : {}), ...(title.trim() !== item.title ? { title: title.trim() } : {}) }))
+          void run(() => api.updateOrderItem(order.id, item.id, body))
         }}
       >
         <div className="flex flex-col gap-1">
@@ -547,7 +595,27 @@ function ItemDrawer({
           <Label htmlFor="item-quantity">Quantity</Label>
           <Input id="item-quantity" inputMode="numeric" className="w-20" disabled={!editable || settled} value={quantity} onChange={(e) => setQuantity(e.target.value)} />
         </div>
-        <Button type="submit" size="sm" variant="outline" disabled={settled || ENDED.has(order.status) || (quantity === String(item.quantity) && title === item.title)}>
+        {custom && (
+          <div className="flex flex-col gap-1">
+            <Label htmlFor="item-price">Price per unit ({order.currency})</Label>
+            <Input id="item-price" inputMode="decimal" className="w-28" disabled={!editable || settled} value={typedPrice} onChange={(e) => setTypedPrice(e.target.value)} />
+          </div>
+        )}
+        <div className="flex flex-col gap-1">
+          <Label htmlFor="item-sku">SKU</Label>
+          <Input id="item-sku" className="w-28" disabled={settled || ENDED.has(order.status)} value={sku} onChange={(e) => setSku(e.target.value)} />
+        </div>
+        <div className="flex w-full flex-col gap-1">
+          <Label htmlFor="item-notes">Notes</Label>
+          <Textarea id="item-notes" rows={2} disabled={settled || ENDED.has(order.status)} value={notes} onChange={(e) => setNotes(e.target.value)} />
+        </div>
+        {custom && (
+          <label className="flex items-center gap-2 text-[13px]">
+            <Checkbox checked={printing} disabled={settled || ENDED.has(order.status)} onCheckedChange={(next) => setPrinting(next === true)} />
+            Requires printing
+          </label>
+        )}
+        <Button type="submit" size="sm" variant="outline" disabled={settled || ENDED.has(order.status) || !changed}>
           Save item
         </Button>
       </form>
@@ -557,8 +625,12 @@ function ItemDrawer({
           {price === null ? 'Not priced' : formatMoney(price.amount, order.currency, order.minor_exponent)}
           {price && !price.accepted && <span className="ml-1 text-xs text-muted-foreground">(not accepted)</span>}
         </dd>
-        <dt className="text-muted-foreground">Inputs</dt>
-        <dd className="break-all font-mono text-xs">{JSON.stringify((item.reference.inputs as { params?: unknown }).params ?? {})}</dd>
+        {item.reference && (
+          <>
+            <dt className="text-muted-foreground">Inputs</dt>
+            <dd className="break-all font-mono text-xs">{JSON.stringify((item.reference.inputs as { params?: unknown }).params ?? {})}</dd>
+          </>
+        )}
         {item.colours.length > 0 && (
           <>
             <dt className="text-muted-foreground">Colours</dt>
@@ -573,8 +645,13 @@ function ItemDrawer({
           </>
         )}
       </dl>
-      <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
-      <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={item.fulfilments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} />
+      {custom ? (
+        // #4954 — a custom item's price is the field above: its quotes are shown only.
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={false} onChanged={onChanged} />
+      ) : (
+        <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
+      )}
+      <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={item.fulfilments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} markDone={custom && !item.requires_printing} />
       <OrderAttachments
         orderId={order.id}
         itemId={item.id}

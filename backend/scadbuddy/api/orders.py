@@ -22,11 +22,11 @@ import zipfile
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
 from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from scadbuddy.api.activity import BAD_CURSOR, _no_nul, _unknown
 from scadbuddy.api.deps import (
@@ -69,6 +69,7 @@ from scadbuddy.orders.models import (
     FilamentInput,
     FilamentPatch,
     Fulfilment,
+    ItemKind,
     Money,
     Order,
     OrderEvent,
@@ -149,10 +150,48 @@ class ReferenceBody(BaseModel):
 
 
 class ItemCreate(ReferenceBody):
+    """A ``model`` item (the default) names what to make: ``output_id``, or ``slug``,
+    ``commit`` and ``inputs``. A ``custom`` item (#4954) names nothing: it takes a
+    ``title`` and a ``unit_price_minor`` instead, and ``requires_printing``."""
+
+    kind: ItemKind = "model"
     output_id: str | None = None
     quantity: int = Field(ge=1, le=MAX_QUANTITY)
     title: str | None = Field(default=None, max_length=200)
     notes: str = ""
+    sku: str | None = Field(default=None, max_length=100)
+    #: A custom item's price per unit: its `manual` quote, accepted as it is saved.
+    unit_price_minor: Money | None = Field(default=None, ge=0)
+    #: A custom item's: False (the default) skips the print path.
+    requires_printing: bool | None = None
+    #: Whether that price is accepted as it is saved: true (the browser's) leaves the item
+    #: `approved`; false (the agent's `write` tools) leaves it `quoted`, for an `outward`
+    #: accept. A custom item's only.
+    accept: bool | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> Self:
+        if self.kind == "custom":
+            named = [
+                name
+                for name in ("slug", "commit", "inputs", "output_id")
+                if getattr(self, name) is not None
+            ]
+            if named:
+                raise ValueError(f"a custom item names no source: drop {', '.join(named)}")
+            if not (self.title or "").strip():
+                raise ValueError("a custom item needs a title")
+            if self.unit_price_minor is None:
+                raise ValueError("a custom item needs a unit_price_minor")
+        else:
+            named = [
+                name
+                for name in ("unit_price_minor", "requires_printing", "accept")
+                if getattr(self, name) is not None
+            ]
+            if named:
+                raise ValueError(f"only a custom item takes {', '.join(named)}")
+        return self
 
 
 class ItemPatch(BaseModel):
@@ -170,6 +209,14 @@ class ItemPatch(BaseModel):
     #: price-book filament each slot is priced with. A change drops the accepted quote,
     #: as a reference change does; the item's own filaments sent again change nothing.
     filaments: dict[int, str | None] | None = None
+    #: ``null`` clears it.
+    sku: str | None = Field(default=None, max_length=100)
+    #: A custom item's new price per unit (#4954), priced at once, as is its quantity.
+    unit_price_minor: Money | None = Field(default=None, ge=0)
+    requires_printing: bool | None = None
+    #: Whether a custom item's new price is accepted (true, the default) or left
+    #: `quoted` for an `outward` accept (false, the agent's); nothing else reads it.
+    accept: bool = True
 
 
 class PaymentCreate(BaseModel):
@@ -740,10 +787,30 @@ async def add_item(
 ) -> OrderItem:
     """From an output (``output_id``: its commit, inputs, libraries and colours), or by
     hand (``slug``, ``commit``, ``inputs``); either way the reference is checked
-    against the catalogue and the commit's schema (Ruling 6)."""
+    against the catalogue and the commit's schema (Ruling 6). A ``custom`` item (#4954)
+    is a title, a quantity and a price, its price a `manual` quote: accepted as it is
+    saved, so the item is `approved` (409 ``order_on_hold`` on hold), unless ``accept`` is
+    false (the agent's), which leaves it `quoted`."""
     _path(order_id)
     if await asyncio.to_thread(orders.store.order, order_id) is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    by = current_actor()
+    if body.kind == "custom":
+        assert body.title is not None and body.unit_price_minor is not None
+        title, price = body.title.strip(), body.unit_price_minor
+        return await _run(
+            lambda: orders.lifecycle.add_custom_item(
+                order_id,
+                by,
+                title=title,
+                quantity=body.quantity,
+                unit_price_minor=price,
+                notes=body.notes,
+                sku=body.sku,
+                requires_printing=bool(body.requires_printing),
+                accept=body.accept is not False,
+            )
+        )
     resolved = await _resolved(
         body,
         body.output_id,
@@ -754,7 +821,6 @@ async def add_item(
         config=config,
         fetcher=fetcher,
     )
-    by = current_actor()
     return await _run(
         lambda: orders.lifecycle.add_item(
             order_id,
@@ -764,6 +830,7 @@ async def add_item(
             quantity=body.quantity,
             title=body.title,
             notes=body.notes,
+            sku=body.sku,
         )
     )
 
@@ -808,6 +875,10 @@ async def patch_item(
             title=body.title,
             notes=body.notes,
             filaments=body.filaments,
+            unit_price_minor=body.unit_price_minor,
+            sku=body.sku if "sku" in given else UNSET,
+            requires_printing=body.requires_printing,
+            accept=body.accept,
         )
     )
 

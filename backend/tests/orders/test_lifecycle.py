@@ -361,7 +361,7 @@ def test_reference_change_drops_the_quote(shop: Shop) -> None:
     shop.quoted(order, item)
     assert shop.get(order).status == "quoted"
     item = shop.lifecycle.update_item(order.id, item.id, BY, reference=resolved("other"))
-    assert item.status == "draft" and item.reference.slug == "other"
+    assert item.status == "draft" and item.reference and item.reference.slug == "other"
     assert all(not q.accepted for q in shop.rows.quotes(item.id))
     assert shop.get(order).status == "draft"
 
