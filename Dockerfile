@@ -810,6 +810,23 @@ RUN case "$TARGETARCH" in \
     && temporal --version
 ENV SCADBUDDY_TEST_TEMPORAL_DEV_SERVER=/usr/local/bin/temporal
 
+# The fake LAN printer's broker (#4541): tests/support/fake_lan.py runs
+# e2e-stack/fake-printer/printer.py in-process, which starts a mosquitto 2, so the
+# native-run tests (tests/test_print_native_workflow.py, tests/api/test_hot_path_native.py,
+# tests/printers/test_fake_printer.py) run in every backend-pytest shard rather than skip.
+# Unpinned like the base stage's packages; named by path, since /usr/sbin is not on
+# every PATH a test runner sets.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends mosquitto \
+    && rm -rf /var/lib/apt/lists/* \
+    && test -x /usr/sbin/mosquitto
+ENV SCADBUDDY_TEST_MQTT=/usr/sbin/mosquitto
+# The fakes the tests load from the repo layout (fake_lan.py's PRINTER_PY,
+# test_bambuddy_recorder.py's RECORDER_PY), beside the backend.
+COPY e2e-stack/fake-printer /app/e2e-stack/fake-printer
+COPY e2e-stack/bambuddy-recorder /app/e2e-stack/bambuddy-recorder
+
 # The slice_plate vectors the Rust workers test against too (workers/rust/vectors,
 # #3821): tests/slicing reads them from the repo layout, so they sit beside the backend.
 COPY workers/rust/vectors /app/workers/rust/vectors

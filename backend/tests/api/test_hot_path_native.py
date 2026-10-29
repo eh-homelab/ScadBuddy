@@ -26,6 +26,7 @@ import trimesh
 from fastapi.testclient import TestClient
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from scadbuddy.bambuddy import print_run
 from scadbuddy.bambuddy.print_run import run_route
 from scadbuddy.bambuddy.trays import tray_spool_id
 from scadbuddy.core.paths import DataPaths
@@ -38,7 +39,8 @@ from scadbuddy.printers.models import LanLink, PrinterCreate, PrinterPatch
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.split import ColourPart
 from scadbuddy.spools.component import SPOOLS, Spools
-from scadbuddy.spools.models import SpoolSnapshot
+from scadbuddy.spools.models import Overlay, SpoolSnapshot
+from scadbuddy.workflows import print_activities
 from tests.api.conftest import follow_operation, set_fake_env
 from tests.api.test_library_native import _one_colour, _upload
 from tests.api.test_print_preview_native import _settings, _state, dialog_profiles
@@ -189,14 +191,14 @@ def lan_row(
     return row.id
 
 
-def overlay(client: TestClient, *, at: datetime | None = None) -> None:
+def overlay(client: TestClient, *, at: datetime | None = None, remaining_g: float = 640.0) -> None:
     """Bambuddy's record of the tagged spool, as the refresh writes it (outside AC1)."""
     snapshot = SpoolSnapshot(
         record_id="16",
         material="PLA",
         colour="#F5547C",
         brand="Bambu",
-        remaining_g=640.0,
+        remaining_g=remaining_g,
         tray_uuid=TAGGED_UUID,
     )
     _call(
@@ -380,6 +382,53 @@ def test_one_plate_of_several_slices_with_only_its_own_slots(
         run = accept_and_wait(native_app, output, body)
 
     assert run["status"] == "succeeded", run
+
+
+def test_a_native_runs_plan_lays_the_overlay_over_its_trays(
+    native_app: TestClient,
+    model: str,
+    spans: InMemorySpanExporter,
+    fake_lan: FakeLan,
+    slicer: FakeSlicer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4551: the run's plan reads its trays with the spool overlay the dialog lays over
+    them, so its low-filament warnings judge the provider's grams (`filaments.check`),
+    and it still asks Bambuddy nothing. The fake model's slots weigh nothing, so what is
+    checked is the overlay each plate's trays are gathered with."""
+    planning = False
+    gathered: list[Overlay | None] = []
+    plan = print_activities.plan_run
+    gather = print_run.gather_plate_options
+
+    async def plan_spy(*args: Any, **kwargs: Any) -> Any:
+        nonlocal planning
+        planning = True
+        try:
+            return await plan(*args, **kwargs)
+        finally:
+            planning = False
+
+    async def gather_spy(*args: Any, **kwargs: Any) -> Any:
+        if planning:
+            gathered.append(kwargs.get("overlay"))
+        return await gather(*args, **kwargs)
+
+    monkeypatch.setattr(print_activities, "plan_run", plan_spy)
+    monkeypatch.setattr(print_run, "gather_plate_options", gather_spy)
+    row = lan_row(native_app, fake_lan)
+    overlay(native_app, remaining_g=0.5)
+
+    with forbid_bambuddy(spans, BASE):
+        _, _, filaments, run = _dialog_and_run(native_app, model, row)
+
+    tagged = next(spool for spool in filaments["spools"] if spool["spool_id"] == TAGGED)
+    assert tagged["remaining_g"] == 0.5
+    assert run["status"] == "succeeded", run
+    (laid,) = gathered
+    assert laid is not None
+    records = [record for tray in laid.trays for record in tray.records.values()]
+    assert [(r.record_id, r.remaining_g) for r in records] == [("16", 0.5)]
 
 
 def test_a_stale_overlay_still_prints(

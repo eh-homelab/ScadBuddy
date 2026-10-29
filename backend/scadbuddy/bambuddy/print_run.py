@@ -14,7 +14,7 @@ import time
 import uuid
 import xml.etree.ElementTree as ET
 import zipfile
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
@@ -1759,16 +1759,23 @@ async def lan_printers(
 
 
 async def all_native(
-    settings: StoredSettings, printers: PrinterStore, reports: PrinterReportStore | None
+    settings: StoredSettings,
+    printers: PrinterStore,
+    reports: PrinterReportStore | None,
+    *,
+    native: Collection[str] | None = None,
 ) -> bool:
     """Whether every registry printer is one a run reaches natively (D2), so the
     printers strip asks Bambuddy nothing (D4): a printer on Bambuddy's path still reads
-    Bambuddy's status, and its listing finds a printer the registry has not seen yet."""
+    Bambuddy's status, and its listing finds a printer the registry has not seen yet.
+    ``native`` is :func:`lan_printers`' answer, when the caller has read it already."""
     if not native_backends(settings):
         return False
     # A virtual printer is not hardware (#4747): the strip never shows one.
     rows = [row for row in await asyncio.to_thread(printers.list) if row.kind == "physical"]
-    return bool(rows) and len(await lan_printers(settings, printers, reports)) == len(rows)
+    if native is None:
+        native = await lan_printers(settings, printers, reports)
+    return bool(rows) and len(native) == len(rows)
 
 
 @dataclass(frozen=True)
@@ -2536,6 +2543,8 @@ async def plan_run(
     reuse_slices: bool = True,
     native: NativeSliceStarter | None = None,
     title: str | None = None,
+    overlay: Overlay | None = None,
+    provider_labels: Mapping[str, str] | None = None,
 ) -> PlannedRun:
     """Upload, then resolve every plate, before anything is sliced (spec §4).
 
@@ -2565,6 +2574,8 @@ async def plan_run(
     nothing of Bambuddy, and ``client`` is ``None`` (D3): the presets are the image's
     (D5), the choices the report's trays (D1), and the copy goes into the native library
     (D6), in the request's folder or the ``title``'s template folder, never a project.
+    ``overlay`` is the spool providers' records over those trays (D1, a Postgres read),
+    as the dialog lays them, so a low-filament warning judges a provider's grams (#4551).
     """
     if source.is_sliced:
         return await _plan_sliced(bambuddy_client(client), source, settings, request, prepared)
@@ -2696,9 +2707,13 @@ async def plan_run(
         # model's, not the run's recoloured copy's, as the dialog showed them. Intended.
         known=await known_slots(source),
         native=source.native,
-        # A native run's choices are the report's trays (D1). The overlay adds only
-        # weights and names, not presets (`trays.loaded_trays`), so the plan reads none.
+        # A native run's choices are the report's trays (D1), with the overlay the
+        # dialog laid over them (#4551): it adds only weights and names, not presets
+        # (`trays.loaded_trays`), so the weights the low-filament warnings judge.
         trays_from=printer_status if native_run else None,
+        overlay=overlay if native_run else None,
+        provider_labels=provider_labels if native_run else None,
+        now=datetime.now(UTC) if native_run and overlay is not None else None,
     )
     if not native_run:
         per_plate = [with_trays(options, printer_status, printer_id) for options in per_plate]
