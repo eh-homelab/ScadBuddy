@@ -631,7 +631,11 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   native run's per-print copy is also written, #3818; neither in the OpenAPI schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
   `http://scadbuddy:8080`; never the ingress). Those routes are internal by path only:
   like the rest of the API they have no auth today, so whoever reaches the API reaches
-  them; once the API gains auth, they need a cluster-internal guard of their own. An output's last print is recorded in
+  them; once the API gains auth, they need a cluster-internal guard of their own. The
+  agent's workspace blob routes (`/api/v1/internal/workspace-blobs/…`, #4789) are the same:
+  `POST /uploads` is a write path, minting a token for one internal PUT of up to 128 MiB
+  with no workflow or row behind it, and is internal by path only; the same guard must
+  cover it. An output's last print is recorded in
   Postgres (`output_last_prints`); an older `meta.json`'s last print still reads for an
   output not printed since.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the stored settings, the Bambuddy key

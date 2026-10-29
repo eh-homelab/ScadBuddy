@@ -123,6 +123,14 @@ describe('GET /api/v1/ai/status', () => {
     })
   })
 
+  it('says where workspace files go, and why every write is refused when nowhere (#4789)', async () => {
+    const refused = { store: 'refused' as const, reason: 'the backend has no workspace blob routes: it is older than #4789; upgrade it' }
+    expect(await status(createApp(deps({ workspaceBytes: () => Promise.resolve(refused) })))).toMatchObject({ workspace_files: refused })
+    const blobs = { store: 'blobs' as const, backend: 's3' }
+    expect(await status(createApp(deps({ workspaceBytes: () => Promise.resolve(blobs) })))).toMatchObject({ workspace_files: blobs })
+    expect(await status(createApp(deps()))).not.toHaveProperty('workspace_files')
+  })
+
   it('is not available without the chat socket, even with AI enabled', async () => {
     const credentials = new MemoryCredentials()
     await credentials.put({ kind: 'anthropic_api_key', secret: 'sk-ant-status-test-0000' }, kek)

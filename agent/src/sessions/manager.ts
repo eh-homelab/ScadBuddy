@@ -15,7 +15,7 @@ import type { Context } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
 import type { Tier } from '../auth/principal.js'
 import type { Credential } from '../credentials.js'
-import type { PayloadKeys } from '../temporal/payloadCodec.js'
+import { payloadKeyLock, type PayloadKeys } from '../temporal/payloadCodec.js'
 import type { ProbeVerdict } from '../harness/credentialErrors.js'
 import type { CredentialSource } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
@@ -2142,6 +2142,23 @@ export class SessionManager {
    * through that reply and nothing after it (forkPoint.ts). With `audit`, the fork
    * is a `resource` row on the child (action `session_fork`).
    */
+  /**
+   * Removes a fork that failed before it was announced: its transcript copy (not keyed to
+   * it), its row (whose cascade takes the rest), and the payload key its transcript or its
+   * files were sealed under. No tombstone: no session takes that id again.
+   */
+  private async dropFailedFork(childId: string): Promise<void> {
+    await this.deps.sql`DELETE FROM ai_session_entries WHERE session_id = ${childId}`
+    await this.deps.sql.begin(async (tx) => {
+      // The lock a key's creation takes (payloadCodec.ts), held over the row's delete too: a
+      // creation that saw the row standing commits its key before this deletes it, and one
+      // after this commit sees no row and makes none.
+      await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(`session-${childId}`)}))`
+      await tx`DELETE FROM ai_sessions WHERE id = ${childId}`
+      await tx`DELETE FROM ai_payload_keys WHERE subject = ${`session-${childId}`}`
+    })
+  }
+
   async fork(
     id: string,
     principal: Owner,
@@ -2198,10 +2215,13 @@ export class SessionManager {
       // (only ever resumed inside each workflow's own segments, never shared).
       child = await this.insert(randomUUID(), principal, { ...fields, mode: 'durable' }, insertOptions)
       try {
+        // Its workspace files (#2329) before its workflow starts, so a copy that fails
+        // (copy() is all or nothing) leaves nothing of the child either.
+        await this.files.copy(id, child.id)
         await durable.turns.startFork(child, durable.agent)
       } catch (err) {
         // Nothing else of the child is written yet: it goes, rather than run empty.
-        await this.deps.sql`DELETE FROM ai_sessions WHERE id = ${child.id}`
+        await this.dropFailedFork(child.id)
         throw err
       }
     } else {
@@ -2213,14 +2233,20 @@ export class SessionManager {
       })
       // A classic fork copies the SDK transcript, which only a classic session has.
       child = await this.insert(forkedId, principal, { ...fields, mode: 'classic' }, insertOptions)
+      try {
+        // Its workspace files (#2329), so the fork carries on with what the parent had.
+        await this.files.copy(id, child.id)
+      } catch (err) {
+        // A fork whose files could not be copied goes whole (copy() wrote none).
+        await this.dropFailedFork(child.id)
+        throw err
+      }
     }
     const childId = child.id
     // The images the copied events name (#782, #2150), before the events that name them: the
     // parent's others (a later turn's, past `upTo`) stay the parent's, so a fork chain does not
     // copy every image of every ancestor.
     await this.blobs.copy(id, childId, blobNames(history))
-    // Its workspace files (#2329), so the fork carries on with what the parent had.
-    await this.files.copy(id, childId)
     await this.events.append(childId, [
       event({
         type: 'session.started',
