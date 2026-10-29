@@ -1,4 +1,5 @@
 import type { Sql, TransactionSql } from 'postgres'
+import type { AuditContext } from '../audit/log.js'
 import { type AccessRow, remoteSource, type ToolAccess } from '../access/model.js'
 import { pluginOverrides, sourceEnabled } from '../access/resolve.js'
 import { forgetSource, updatedBy, writeEnabled, writeTools } from '../access/store.js'
@@ -218,6 +219,11 @@ export type PluginRepo = {
   get(name: string): Promise<PluginSummary | undefined>
   create(input: PluginCreate, kek: Kek | undefined): Promise<PluginSummary>
   update(name: string, patch: PluginPatch, kek: Kek | undefined): Promise<PluginSummary>
+  /**
+   * One tool's access (#2171): `off` disables it, a tier sets it, `null` drops both.
+   * Recorded as `context`'s actor.
+   */
+  setToolAccess(name: string, tool: string, access: ToolAccess | null, context?: AuditContext): Promise<PluginSummary>
   delete(name: string): Promise<boolean>
   /** Opens one plugin's secret. Throws SealError on a wrong key or an altered row. */
   reveal(name: string, kek: Kek | undefined): Promise<RemotePlugin | undefined>
@@ -625,22 +631,62 @@ export class PluginStore implements PluginRepo {
           last4: current.last4,
         }
       }
-      // The old columns too, for one release (#2171): an older replica still reads them.
       await tx`
         UPDATE ai_plugins SET
-          url = ${url}, enabled = ${enabled}, tool_tiers = ${tx.json(tiers)}, disabled_tools = ${disabled},
-          auth_header = ${secretColumns.auth_header}, secret_sealed = ${secretColumns.secret_sealed},
+          url = ${url}, auth_header = ${secretColumns.auth_header}, secret_sealed = ${secretColumns.secret_sealed},
           dek_sealed = ${secretColumns.dek_sealed}, kek_id = ${secretColumns.kek_id},
           last4 = ${secretColumns.last4}, updated_at = now()
         WHERE name = ${name}`
-      const source = remoteSource(name)
-      if (patch.enabled !== undefined) await writeEnabled(tx, source, enabled, updatedBy())
-      if (patch.tool_tiers !== undefined || patch.disabled_tools !== undefined) {
-        await writeTools(tx, source, toolRows(tiers, disabled), updatedBy())
-      }
-      await notifyWarmEvict(tx, '*')
+      await this.writeAccess(tx, name, { tiers, disabled, enabled }, updatedBy(), {
+        enabled: patch.enabled !== undefined,
+        tools: patch.tool_tiers !== undefined || patch.disabled_tools !== undefined,
+      })
       return summary(await selectRow(tx, name))
     })
+  }
+
+  async setToolAccess(name: string, tool: string, value: ToolAccess | null, context?: AuditContext): Promise<PluginSummary> {
+    return this.sql.begin(async (tx) => {
+      const [locked] = await tx`SELECT name FROM ai_plugins WHERE name = ${name} FOR UPDATE`
+      if (!locked) throw new PluginError(`no plugin named "${name}"`, 404)
+      const stored = access(await selectRow(tx, name))
+      const tiers: Record<string, string> = { ...stored.toolTiers }
+      delete tiers[tool]
+      const disabled = stored.disabledTools.filter((t) => t !== tool)
+      if (value === 'off') disabled.push(tool)
+      else if (value !== null) tiers[tool] = value
+      await this.writeAccess(
+        tx,
+        name,
+        { tiers: validateToolTiers(tiers), disabled: validateDisabledTools(disabled), enabled: stored.enabled },
+        updatedBy(context),
+        { enabled: false, tools: true },
+      )
+      return summary(await selectRow(tx, name))
+    })
+  }
+
+  /**
+   * The plugin's access: the old columns first, for one release (#2171), since an older
+   * replica still reads them; their mirror trigger writes ai_access, and the rows written
+   * after it (`write` names which) win. Then the warm eviction.
+   */
+  private async writeAccess(
+    tx: TransactionSql,
+    name: string,
+    next: { tiers: Record<string, RiskTier>; disabled: string[]; enabled: boolean },
+    by: string,
+    write: { enabled: boolean; tools: boolean },
+  ): Promise<void> {
+    await tx`
+      UPDATE ai_plugins SET
+        enabled = ${next.enabled}, tool_tiers = ${tx.json(next.tiers)}, disabled_tools = ${next.disabled}, updated_at = now()
+      WHERE name = ${name}`
+    const source = remoteSource(name)
+    if (write.enabled) await writeEnabled(tx, source, next.enabled, by)
+    if (write.tools) await writeTools(tx, source, toolRows(next.tiers, next.disabled), by)
+    // A warm Claude Code was spawned with the plugins of its time (spec 2026-10-13 §5.3).
+    await notifyWarmEvict(tx, '*')
   }
 
   async delete(name: string): Promise<boolean> {

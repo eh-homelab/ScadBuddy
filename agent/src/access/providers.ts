@@ -4,8 +4,11 @@ import { BROWSER_ORIGINS_PATH } from '../routes/browserOrigins.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import { listExternal } from '../tools/manifest.js'
 import type { Tool } from '../tools/registry.js'
+import { harnessToolName, PluginError, type PluginRepo, type PluginSummary, toolPrefix } from '../plugins/registry.js'
+import { describeTools, type PluginTest, type PluginToolView } from '../plugins/testConnection.js'
 import { type Access, CapabilityError, type CapabilityProvider, type ItemDetails, type ItemView, type SourceView } from './capabilities.js'
-import { type AccessRow, BUILTIN_SOURCES, isToolAccess, registrySource } from './model.js'
+import type { ListedTool, ToolListings } from './listings.js'
+import { type AccessRow, BUILTIN_SOURCES, isToolAccess, registrySource, remoteSource } from './model.js'
 import { isRegistrySource, sourceEnabled, toolAccess } from './resolve.js'
 import { AccessError, type AccessReader, type AccessWriter } from './store.js'
 
@@ -151,6 +154,161 @@ export function builtInProviders(deps: { access: AccessReader & AccessWriter; to
         raw,
         omitted: [],
       }
+    },
+  }
+}
+
+// ------------------------------------------------------------------ remote plugins
+
+const REMOTE_PREFIX = remoteSource('')
+
+export const RENAMED_REASON = 'Claude Code renames this tool, so it cannot take a tier: it asks first, or is off'
+
+type Listing = Awaited<ReturnType<ToolListings['get']>>
+
+/** A refusal of the registry's, as the tree answers it; a status the tree has no word for is 400. */
+async function registry<T>(write: Promise<T>): Promise<T> {
+  try {
+    return await write
+  } catch (err) {
+    if (err instanceof PluginError) throw new CapabilityError(err.message, err.status === 422 ? 400 : err.status)
+    throw err
+  }
+}
+
+/** A stored tool's own access: off when disabled, else its tier; `undefined` without a row. */
+function storedAccess(plugin: PluginSummary, tool: string): Exclude<Access, 'on'> | undefined {
+  if (plugin.disabled_tools.includes(tool)) return 'off'
+  return Object.hasOwn(plugin.tool_tiers, tool) ? plugin.tool_tiers[tool] : undefined
+}
+
+function remoteItem(view: PluginToolView, listed: ListedTool): ItemView {
+  const collision = view.tier_source === 'collision'
+  const renamed = view.tier_source === 'renamed'
+  // The row takes effect unless the pair is hidden anyway; a renamed tool's tier never does.
+  const row = collision ? undefined : view.disabled ? 'off' : view.tier_source === 'explicit' ? view.tier : undefined
+  return {
+    id: view.name,
+    kind: 'tool',
+    name: view.name,
+    harness_name: view.harness_name,
+    label: listed.title ?? view.name,
+    description: view.description,
+    default: 'outward',
+    default_note: null,
+    suggested: view.suggested_tier,
+    access: collision ? 'off' : (row ?? 'outward'),
+    overridden: row !== undefined,
+    missing: false,
+    allowed: renamed ? ['off', 'outward'] : null,
+    fixed: collision ? { access: 'off', reason: `Shares its name with ${view.collides_with.join(', ')}, so both are hidden` } : null,
+    reason: renamed ? RENAMED_REASON : null,
+  }
+}
+
+/** A tool with stored access the listing does not name (or no listing at all). */
+function missingItem(plugin: PluginSummary, tool: string): ItemView {
+  const renamed = harnessToolName(tool) !== tool
+  const access = storedAccess(plugin, tool) ?? 'outward'
+  return {
+    id: tool,
+    kind: 'tool',
+    name: tool,
+    harness_name: `${toolPrefix(plugin.name)}${harnessToolName(tool)}`,
+    label: tool,
+    description: null,
+    default: 'outward',
+    default_note: null,
+    suggested: null,
+    access,
+    overridden: true,
+    missing: true,
+    allowed: renamed ? ['off', 'outward'] : null,
+    fixed: null,
+    reason: renamed ? RENAMED_REASON : null,
+  }
+}
+
+function remoteView(plugin: PluginSummary, listing: Listing): SourceView {
+  const tools = listing?.tools ?? []
+  const views = describeTools({ name: plugin.name, toolTiers: plugin.tool_tiers, disabledTools: plugin.disabled_tools }, tools)
+  const items = views.map((view, i) => remoteItem(view, tools[i]!))
+  const listed = new Set(tools.map((t) => t.name))
+  const stored = [...new Set([...Object.keys(plugin.tool_tiers), ...plugin.disabled_tools])].filter((t) => !listed.has(t)).sort()
+  return {
+    id: remoteSource(plugin.name),
+    kind: 'remote',
+    title: plugin.name,
+    enabled: plugin.enabled,
+    switchable: true,
+    options_route: null,
+    listed_at: listing?.listed_at ?? null,
+    items: [...items, ...stored.map((tool) => missingItem(plugin, tool))],
+    children: [],
+  }
+}
+
+const REFRESH_STATUSES: readonly number[] = [400, 404, 409, 429, 503]
+
+/** Every remote MCP plugin as a source `remote:<name>` (#2171, #778), over PluginRepo and the stored listings. */
+export function remoteProvider(deps: {
+  plugins: PluginRepo
+  listings: Pick<ToolListings, 'get' | 'getMany'>
+  refresh: (name: string) => Promise<{ status: number; body: PluginTest | { detail: string } }>
+}): CapabilityProvider {
+  const nameOf = (source: string): string => source.slice(REMOTE_PREFIX.length)
+
+  const get = async (source: string): Promise<SourceView | undefined> => {
+    const [plugin, listing] = await Promise.all([deps.plugins.get(nameOf(source)), deps.listings.get(source)])
+    return plugin && remoteView(plugin, listing)
+  }
+
+  const toolWrite = (access: Access): Exclude<Access, 'on'> => {
+    if (access === 'on') throw new CapabilityError('a tool takes off, read, write or outward, not "on"', 400)
+    return access
+  }
+
+  return {
+    owns: (source) => source.startsWith(REMOTE_PREFIX),
+    async list() {
+      const plugins = await deps.plugins.list()
+      const listings = await deps.listings.getMany(plugins.map((p) => remoteSource(p.name)))
+      return plugins.map((p) => remoteView(p, listings.get(remoteSource(p.name))))
+    },
+    get,
+    async setEnabled(source, enabled) {
+      // The secret is not touched, so no key is needed.
+      await registry(deps.plugins.update(nameOf(source), { enabled }, undefined))
+    },
+    async setItem(source, item, access, context) {
+      await registry(deps.plugins.setToolAccess(nameOf(source), item, toolWrite(access), context))
+    },
+    async resetItem(source, item, context) {
+      await registry(deps.plugins.setToolAccess(nameOf(source), item, null, context))
+    },
+    async details(source, item): Promise<ItemDetails | undefined> {
+      const [plugin, listing] = await Promise.all([deps.plugins.get(nameOf(source)), deps.listings.get(source)])
+      const found = plugin && remoteView(plugin, listing).items.find((i) => i.id === item)
+      if (found === undefined) return undefined
+      const listed = listing?.tools.find((t) => t.name === item)
+      return {
+        item: found,
+        input_schema: listed?.input_schema ?? null,
+        output_schema: listed?.output_schema ?? null,
+        annotations: listed?.annotations ?? null,
+        raw: listed?.raw ?? null,
+        omitted: listed?.omitted ?? [],
+      }
+    },
+    async refresh(source) {
+      const { status, body } = await deps.refresh(nameOf(source))
+      if (status !== 200 || !('ok' in body)) {
+        const code = REFRESH_STATUSES.includes(status) ? (status as 400 | 404 | 409 | 429 | 503) : 502
+        throw new CapabilityError(body.detail, code)
+      }
+      const view = await get(source)
+      if (view === undefined) throw new CapabilityError(`no source "${source}"`, 404)
+      return { test: body, source: view }
     },
   }
 }

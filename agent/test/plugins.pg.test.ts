@@ -234,6 +234,46 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(await db.sql`SELECT 1 FROM ai_tool_listings WHERE source = 'remote:mem'`).toHaveLength(0)
       })
 
+      const UI_CONTEXT = { actor: { kind: 'browser', id: 'browser', label: 'Browser' }, surface: 'http' } as const
+      const rowsBy = (name: string) =>
+        db.sql<{ item: string; access: string; updated_by: string }[]>`
+          SELECT item, access, updated_by FROM ai_access WHERE source = ${`remote:${name}`} ORDER BY item`
+      const oldColumns = async (name: string) => {
+        const [row] = await db.sql<{ enabled: boolean; tool_tiers: unknown; disabled_tools: string[] }[]>`
+          SELECT enabled, tool_tiers, disabled_tools FROM ai_plugins WHERE name = ${name}`
+        return row
+      }
+
+      it('setToolAccess writes ai_plugins and ai_access, so an older replica reads the same', async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
+        await store.setToolAccess('mem', 'b', 'off', UI_CONTEXT)
+        const summary = await store.setToolAccess('mem', 'a', 'read', UI_CONTEXT)
+        expect(summary).toMatchObject({ tool_tiers: { a: 'read' }, disabled_tools: ['b'], enabled: false })
+        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
+        expect(await rowsBy('mem')).toEqual([
+          { item: '*', access: 'off', updated_by: 'system' },
+          { item: 'a', access: 'read', updated_by: 'browser:browser' },
+          { item: 'b', access: 'off', updated_by: 'browser:browser' },
+        ])
+        // A tier over a disabled tool moves it out of disabled_tools.
+        await store.setToolAccess('mem', 'b', 'write', UI_CONTEXT)
+        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: { a: 'read', b: 'write' }, disabled_tools: [] })
+        await expect(store.setToolAccess('gone', 'a', 'off', UI_CONTEXT)).rejects.toMatchObject({ name: 'PluginError', status: 404 })
+        // A tier needs a name Claude Code keeps; off takes any.
+        await expect(store.setToolAccess('mem', 'files.list', 'read', UI_CONTEXT)).rejects.toMatchObject({ status: 400 })
+        await store.setToolAccess('mem', 'files.list', 'off', UI_CONTEXT)
+        expect((await oldColumns('mem'))?.disabled_tools).toEqual(['files.list'])
+      })
+
+      it('setToolAccess null removes the tool from both', async () => {
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
+        await store.setToolAccess('mem', 'a', null, UI_CONTEXT)
+        const summary = await store.setToolAccess('mem', 'b', null, UI_CONTEXT)
+        expect(summary).toMatchObject({ tool_tiers: {}, disabled_tools: [] })
+        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: {}, disabled_tools: [] })
+        expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'off', updated_by: 'system' }])
+      })
+
       it('registers plugins disabled: enabled: true is refused at create', async () => {
         await expect(
           store.create({ name: 'mem', url: 'https://hs.example/mcp', enabled: true }, kek),

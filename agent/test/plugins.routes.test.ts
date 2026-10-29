@@ -29,6 +29,7 @@ function untouchable(): PluginRepo & { calls: string[] } {
     get: fail('get'),
     create: fail('create'),
     update: fail('update'),
+    setToolAccess: fail('setToolAccess'),
     delete: fail('delete'),
     reveal: fail('reveal'),
   }

@@ -143,6 +143,7 @@ function remoteRepo(): PluginRepo {
     get: () => Promise.resolve(undefined),
     create: vi.fn(reject),
     update: vi.fn(reject),
+    setToolAccess: vi.fn(reject),
     delete: vi.fn(() => Promise.resolve(true)),
     reveal: reject,
   }
