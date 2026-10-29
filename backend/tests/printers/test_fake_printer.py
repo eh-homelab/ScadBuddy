@@ -19,11 +19,9 @@ import asyncio
 import errno
 import ftplib
 import hashlib
-import importlib.util
 import io
 import json
 import os
-import shutil
 import socket
 import ssl
 import sys
@@ -31,37 +29,26 @@ import urllib.request
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType
 from typing import Any, BinaryIO
 
 import aiomqtt
 import pytest
 
-PRINTER_PY = Path(__file__).resolve().parents[3] / "e2e-stack" / "fake-printer" / "printer.py"
-MOSQUITTO = os.environ.get("SCADBUDDY_TEST_MQTT") or shutil.which("mosquitto")
-SERIAL = "01P00FAKE000001"
-ACCESS_CODE = "12345678"
+from tests.support import fake_lan
+from tests.support.fake_lan import (
+    ACCESS_CODE,
+    MOSQUITTO,
+    PRINTER_PY,
+    SERIAL,
+    start_fake_printer,
+)
+from tests.support.fake_lan import free_port as _free_port
+from tests.support.fake_lan import load_fake_printer as _load
 
 pytestmark = [
     pytest.mark.skipif(MOSQUITTO is None, reason="needs mosquitto on PATH or SCADBUDDY_TEST_MQTT"),
     pytest.mark.skipif(not PRINTER_PY.is_file(), reason=f"{PRINTER_PY} is not in this tree"),
 ]
-
-
-def _load() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("fake_printer", PRINTER_PY)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["fake_printer"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        port: int = sock.getsockname()[1]
-        return port
 
 
 def _trusting(cert: Path) -> ssl.SSLContext:
@@ -173,43 +160,23 @@ class _Lan:
 @pytest.fixture
 async def lan(tmp_path: Path) -> AsyncIterator[_Lan]:
     module = _load()
-    # A port `_free_port` picked can be taken by a parallel worker before the fake binds
-    # it ("Address already in use"): start again on new ports, a few times.
-    for attempt in range(3):
-        lan = _Lan(_free_port(), _free_port(), _free_port(), cert=tmp_path / "state" / "cert.pem")
-        config = module.Config(
+    cert = tmp_path / "state" / "cert.pem"
+    _, task, ports = await start_fake_printer(
+        module,
+        lambda ports: module.Config(
             serial=SERIAL,
             access_code=ACCESS_CODE,
             print_seconds=1.0,
             host="127.0.0.1",
-            mqtt_port=lan.mqtt_port,
-            ftps_port=lan.ftps_port,
-            control_port=lan.control_port,
+            mqtt_port=ports.mqtt,
+            ftps_port=ports.ftps,
+            control_port=ports.control,
             sdcard=tmp_path / "sdcard",
             state=tmp_path / "state",
             mosquitto=MOSQUITTO,
-        )
-        printer = module.FakePrinter(config)
-        ready = asyncio.Event()
-        task = asyncio.create_task(printer.run(ready))
-        done, _ = await asyncio.wait(
-            [task, asyncio.create_task(ready.wait())],
-            timeout=60,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if task in done:
-            try:
-                task.result()  # the printer failed to start: raise its error
-            except (OSError, RuntimeError) as error:
-                # FTPS or control: EADDRINUSE; the broker: it exits ("mosquitto exited").
-                clash = getattr(error, "errno", None) == errno.EADDRINUSE or (
-                    "mosquitto exited" in str(error)
-                )
-                if not clash or attempt == 2:
-                    raise
-                continue
-        break
-    assert ready.is_set(), "the fake printer did not come up"
+        ),
+    )
+    lan = _Lan(ports.mqtt, ports.ftps, ports.control, cert=cert)
     try:
         yield lan
     finally:
@@ -471,3 +438,68 @@ async def test_a_taken_control_port_fails_the_start_with_its_bind_error(tmp_path
     # The FTPS server, whose thread never ran, was closed: its port binds again.
     with socket.socket() as again:
         again.bind(("127.0.0.1", ftps_port))
+
+
+async def test_a_taken_ftps_port_fails_the_start_with_its_bind_error(tmp_path: Path) -> None:
+    """pyftpdlib wraps a failed bind in an OSError with no errno; the fake raises the
+    bind's own, so the fixtures see EADDRINUSE and retry (#4944)."""
+    module = _load()
+    assert MOSQUITTO is not None
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        printer = module.FakePrinter(
+            module.Config(
+                serial=SERIAL,
+                access_code=ACCESS_CODE,
+                host="127.0.0.1",
+                mqtt_port=_free_port(),
+                ftps_port=taken.getsockname()[1],
+                control_port=_free_port(),
+                sdcard=tmp_path / "sdcard",
+                state=tmp_path / "state",
+                mosquitto=MOSQUITTO,
+            )
+        )
+        with pytest.raises(OSError) as raised:
+            await asyncio.wait_for(printer.run(), 60)
+    assert raised.value.errno == errno.EADDRINUSE
+
+
+async def test_the_start_moves_past_a_taken_ftps_port(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first FTPS port picked is taken by the time the fake binds it (#4944's CI
+    job): the start picks new ports and comes up."""
+    module = _load()
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        # mqtt, ftps, control: the first start's FTPS port is the taken one.
+        picks = iter([_free_port(), taken.getsockname()[1], _free_port()])
+        monkeypatch.setattr(fake_lan, "free_port", lambda: next(picks, None) or _free_port())
+        _, task, ports = await start_fake_printer(
+            module,
+            lambda ports: module.Config(
+                serial=SERIAL,
+                access_code=ACCESS_CODE,
+                host="127.0.0.1",
+                mqtt_port=ports.mqtt,
+                ftps_port=ports.ftps,
+                control_port=ports.control,
+                sdcard=tmp_path / "sdcard",
+                state=tmp_path / "state",
+                mosquitto=MOSQUITTO,
+            ),
+        )
+        try:
+            assert ports.ftps != taken.getsockname()[1]
+            lan = _Lan(ports.mqtt, ports.ftps, ports.control, cert=tmp_path / "state" / "cert.pem")
+            assert (
+                lan.upload(b"G28\n", "probe.gcode")
+                == hashlib.md5(b"G28\n", usedforsecurity=False).hexdigest()
+            )
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task

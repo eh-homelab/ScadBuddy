@@ -16,7 +16,7 @@ import shutil
 import socket
 import sys
 import urllib.request
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,6 +85,51 @@ async def _loopback(host: str) -> str:
     return host
 
 
+@dataclass(frozen=True)
+class Ports:
+    mqtt: int
+    ftps: int
+    control: int
+
+
+async def start_fake_printer(
+    module: ModuleType, config_for: Callable[[Ports], Any], *, attempts: int = 3
+) -> tuple[Any, asyncio.Task[None], Ports]:
+    """Start the fake printer on ports `free_port` picks, and wait until it is ready.
+
+    A port `free_port` picked can be taken by a parallel worker before the fake binds it
+    ("Address already in use"): start again on new ports, up to ``attempts`` times. The
+    MQTT port's clash is the broker's exit; the FTPS and control ports' is the bind's
+    EADDRINUSE (#4765, #4944)."""
+    for attempt in range(attempts):
+        ports = Ports(free_port(), free_port(), free_port())
+        printer = module.FakePrinter(config_for(ports))
+        ready = asyncio.Event()
+        task = asyncio.create_task(printer.run(ready))
+        waiting = asyncio.create_task(ready.wait())
+        done, _ = await asyncio.wait(
+            [task, waiting], timeout=60, return_when=asyncio.FIRST_COMPLETED
+        )
+        waiting.cancel()
+        if task in done:
+            try:
+                task.result()  # the printer failed to start: raise its error
+            except (OSError, RuntimeError) as error:
+                clash = getattr(error, "errno", None) == errno.EADDRINUSE or (
+                    "mosquitto exited" in str(error)
+                )
+                if not clash or attempt == attempts - 1:
+                    raise
+                continue
+        if not ready.is_set():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+            raise AssertionError("the fake printer did not come up")
+        return printer, task, ports
+    raise AssertionError("unreachable")
+
+
 @asynccontextmanager
 async def running_fake_lan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, print_seconds: float = 1.0
@@ -92,53 +137,31 @@ async def running_fake_lan(
     """Start the fake printer and point `scadbuddy.printers.lan` at it until the end."""
     assert MOSQUITTO is not None
     module = load_fake_printer()
-    # A port `free_port` picked can be taken by a parallel worker before the fake binds
-    # it ("Address already in use"): start again on new ports, a few times.
-    for attempt in range(3):
-        mqtt, ftps, control = free_port(), free_port(), free_port()
-        config = module.Config(
+    printer, task, ports = await start_fake_printer(
+        module,
+        lambda ports: module.Config(
             serial=SERIAL,
             access_code=ACCESS_CODE,
             print_seconds=print_seconds,
             host="127.0.0.1",
-            mqtt_port=mqtt,
-            ftps_port=ftps,
-            control_port=control,
+            mqtt_port=ports.mqtt,
+            ftps_port=ports.ftps,
+            control_port=ports.control,
             sdcard=tmp_path / "sdcard",
             state=tmp_path / "state",
             mosquitto=MOSQUITTO,
-        )
-        printer = module.FakePrinter(config)
-        ready = asyncio.Event()
-        task = asyncio.create_task(printer.run(ready))
-        done, _ = await asyncio.wait(
-            [task, asyncio.create_task(ready.wait())],
-            timeout=60,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if task in done:
-            try:
-                task.result()  # the printer failed to start: raise its error
-            except (OSError, RuntimeError) as error:
-                # FTPS or control: EADDRINUSE; the broker: it exits ("mosquitto exited").
-                clash = getattr(error, "errno", None) == errno.EADDRINUSE or (
-                    "mosquitto exited" in str(error)
-                )
-                if not clash or attempt == 2:
-                    raise
-                continue
-        break
-    assert ready.is_set(), "the fake printer did not come up"
-    monkeypatch.setattr(lan_module, "MQTT_PORT", mqtt)
-    monkeypatch.setattr(lan_module, "FTPS_PORT", ftps)
+        ),
+    )
+    monkeypatch.setattr(lan_module, "MQTT_PORT", ports.mqtt)
+    monkeypatch.setattr(lan_module, "FTPS_PORT", ports.ftps)
     monkeypatch.setattr(lan_module, "lan_address", _loopback)
     try:
         yield FakeLan(
             host="127.0.0.1",
             serial=SERIAL,
             access_code=ACCESS_CODE,
-            cert_sha256=await asyncio.to_thread(fetch_cert_sha256, "127.0.0.1", mqtt),
-            control_port=control,
+            cert_sha256=await asyncio.to_thread(fetch_cert_sha256, "127.0.0.1", ports.mqtt),
+            control_port=ports.control,
             sdcard=tmp_path / "sdcard",
             printer=printer,
         )
