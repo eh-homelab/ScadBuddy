@@ -82,7 +82,7 @@ export const settingsTools: Tool[] = [
 
   defineTool({
     name: 'get_remembered_choices',
-    label: "Read the print dialog's remembered choices",
+    label: 'Read remembered printer and spool choices',
     description:
       'What the print dialog remembers (#322): per-model printer and spool choices, per-printer plates, ' +
       'the print options at each scope, and the project each model was last filed in (`model_projects`, keyed ' +
@@ -112,7 +112,7 @@ export const settingsTools: Tool[] = [
 
   defineTool({
     name: 'get_print_options',
-    label: 'Read remembered print options',
+    label: 'Read remembered print settings',
     description:
       'Remembered print options (timelapse, bed levelling, AMS, …) at each scope: global, per printer and ' +
       'per model, and the printer the per-printer scope keys on (the Settings printer).',

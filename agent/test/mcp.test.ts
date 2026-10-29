@@ -1,12 +1,13 @@
-import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app.js'
+import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { createHarnessServer } from '../src/tools/projections.js'
-import { tiersUpTo } from '../src/auth/principal.js'
 import { appFetch, BACKEND, baseDeps, connect, firstText, INGRESS, LOOPBACK, MCP_URL, services, testApp, UNTRUSTED } from './helpers/mcp.js'
 
 // /mcp end to end with the MCP SDK's own Streamable HTTP client (issue #251
@@ -53,8 +54,6 @@ describe('/mcp: tools over Streamable HTTP', () => {
   })
 
   it("the in-process server's tools carry their label as annotations.title", async () => {
-    const { InMemoryTransport } = await import('@modelcontextprotocol/sdk/inMemory.js')
-    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js')
     const principal = { id: 'browser', kind: 'browser' as const, tiers: tiersUpTo('outward') }
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair()
     await createHarnessServer(ALL_TOOLS, services(), principal).instance.connect(serverSide)

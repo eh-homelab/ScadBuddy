@@ -148,7 +148,7 @@ describe('tool labels', () => {
   })
 
   it('labels are unique', () => {
-    const labels = DURABLE_TOOLS.map((t) => t.label)
+    const labels = DURABLE_TOOLS.map((t) => t.label.toLowerCase())
     const dup = labels.filter((l, i) => labels.indexOf(l) !== i)
     expect(dup).toEqual([])
     expect(new Set(labels).size).toBe(DURABLE_TOOLS.length)

@@ -120,7 +120,7 @@ export const historyTools: Tool[] = [
 
   defineTool({
     name: 'update_from_upstream',
-    label: 'Merge or dismiss an upstream change',
+    label: 'Merge, dismiss or detach from upstream',
     description:
       "Act on a duplicate's upstream: `merge` its current revision, `dismiss` that revision (stop offering " +
       'it), or `detach` from an upstream that no longer exists.',

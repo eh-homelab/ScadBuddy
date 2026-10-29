@@ -204,7 +204,7 @@ export const flowTools: Tool[] = [
 
   defineTool({
     name: 'get_flow',
-    label: 'Read a flow version',
+    label: 'Read a flow',
     description: 'One flow version, with its script.',
     input: z.object({ definition_id: definitionId }),
     risk: 'read',

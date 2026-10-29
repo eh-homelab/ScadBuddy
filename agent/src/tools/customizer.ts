@@ -584,7 +584,7 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'get_asset',
-    label: 'Read an uploaded image',
+    label: 'Read an uploaded file',
     description: "An uploaded file's metadata and, with `include_content`, the image itself.",
     input: z.object({
       slug,

@@ -517,7 +517,7 @@ export const orderTools: Tool[] = [
   }),
   defineTool({
     name: 'order_item_fulfil',
-    label: 'Record a fulfilment attempt',
+    label: 'Record or edit a fulfilment attempt',
     description:
       'Record a fulfilment attempt by hand (`attempt`: the quantity made and the outcome; a failed one fails the ' +
       'item, the next returns it to approved), edit one not yet accepted (`fulfilment_id` with `attempt`), or accept ' +

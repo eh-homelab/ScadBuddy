@@ -66,7 +66,7 @@ export const printHistoryTools: Tool[] = [
   // ── outward (#311): the print detail page's "Print again" and "Pull timelapse" ──
   defineTool({
     name: 'print_again',
-    label: 'Print again',
+    label: 'Print an earlier print again',
     description:
       "Queue a print again on Bambuddy: the same sliced file, on the printer and plate it printed on, with Bambuddy's " +
       'default options. Refused when the archive was deleted in Bambuddy or has no known printer.',

@@ -285,7 +285,7 @@ export const browserTools: Tool[] = [
   // ── Global ──────────────────────────────────────────────────────────────────
   forwarded({
     tool: 'navigate',
-    label: "Go to a page in your tab",
+    label: 'Go to a page in your tab',
     description:
       PREFIX +
       'go to a route in the app, e.g. "/", "/settings/general", "/m/name-keychain", "/m/name-keychain/source". The ' +
@@ -307,7 +307,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'click',
-    label: "Click in your tab",
+    label: 'Click in your tab',
     description:
       PREFIX +
       'fallback for UI no other browser_* tool covers: click the visible element with this ARIA role and ' +
@@ -322,7 +322,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'highlight',
-    label: "Highlight something in your tab",
+    label: 'Highlight something in your tab',
     description:
       PREFIX +
       'point at the visible element with this ARIA role and accessible name: it scrolls into view and is ' +
@@ -336,7 +336,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'fill',
-    label: "Fill a field in your tab",
+    label: 'Fill a field in your tab',
     description:
       PREFIX +
       'fallback for UI no other browser_* tool covers: type a value into the visible field with this label (a ' +
@@ -352,7 +352,7 @@ export const browserTools: Tool[] = [
   // ── Catalogue ("/") ───────────────────────────────────────────────────────────
   forwarded({
     tool: 'search',
-    label: "Search the catalogue in your tab",
+    label: 'Search the catalogue in your tab',
     description:
       PREFIX +
       'on the catalogue ("/"), find models whose name, slug, description or tags contain the query. An empty ' +
@@ -362,7 +362,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'open_model',
-    label: "Open a model in your tab",
+    label: 'Open a model in your tab',
     description: PREFIX + 'on the catalogue ("/"), open a model in the customizer.',
     input: z.object({ slug: z.string().min(1) }),
     risk: 'write',
@@ -371,7 +371,7 @@ export const browserTools: Tool[] = [
   // ── Customizer ("/m/<slug>") ──────────────────────────────────────────────────
   forwarded({
     tool: 'get_params',
-    label: "Read the parameters in your tab",
+    label: 'Read the parameters in your tab',
     description:
       PREFIX +
       "in the customizer, the open model's parameters: each one's type, group, limits, options, default and " +
@@ -381,7 +381,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'set_param',
-    label: "Set a parameter in your tab",
+    label: 'Set a parameter in your tab',
     description:
       PREFIX +
       'in the customizer, set one parameter exactly as editing its field does: the preview re-renders after the ' +
@@ -391,7 +391,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'set_params',
-    label: "Set several parameters in your tab",
+    label: 'Set several parameters in your tab',
     description:
       PREFIX + 'in the customizer, set several parameters at once (one render). Every value is checked before any is applied.',
     input: z.object({
@@ -402,14 +402,14 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'reset_param',
-    label: "Reset a parameter in your tab",
+    label: 'Reset a parameter in your tab',
     description: PREFIX + 'in the customizer, put one parameter back to its default, or all of them when no name is given.',
     input: z.object({ name: z.string().min(1).optional() }),
     risk: 'write',
   }),
   forwarded({
     tool: 'render',
-    label: "Render in your tab",
+    label: 'Render in your tab',
     description:
       PREFIX +
       'in the customizer, wait for the preview render of the current values to settle and report it: status, ' +
@@ -419,7 +419,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'generate',
-    label: "Generate in your tab",
+    label: 'Generate in your tab',
     description:
       PREFIX +
       'in the customizer, save the settled render as an output (the Generate button). Needed before the print ' +
@@ -437,7 +437,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'select_plate',
-    label: "Select a plate in your tab",
+    label: 'Select a plate in your tab',
     description:
       PREFIX +
       'in the customizer, choose the printer model whose plate the preview draws and checks the fit against; ' +
@@ -447,7 +447,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'open_print_dialog',
-    label: "Open the print dialog in your tab",
+    label: 'Open the print dialog in your tab',
     description:
       PREFIX +
       'in the customizer, open the Print or Send to Bambuddy dialog for the generated output. It only opens the ' +
@@ -460,14 +460,14 @@ export const browserTools: Tool[] = [
   // ── Source editor ("/m/<slug>/source", "/new") ────────────────────────────────
   forwarded({
     tool: 'get_editor_text',
-    label: "Read the editor text in your tab",
+    label: 'Read the editor text in your tab',
     description: PREFIX + "in the source editor, the source as it stands (saved or not), and whether it's read-only.",
     input: z.object({}),
     risk: 'read',
   }),
   forwarded({
     tool: 'replace_range',
-    label: "Replace editor text in your tab",
+    label: 'Replace editor text in your tab',
     description:
       PREFIX +
       'in the source editor, replace a range of the source (1-based lines and columns, end exclusive) with text, ' +
@@ -483,7 +483,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'get_problems',
-    label: "Read the editor problems in your tab",
+    label: 'Read the editor problems in your tab',
     description:
       PREFIX +
       "in the source editor, OpenSCAD's parse check of the source: ok, diagnostics by line, or the log. With " +
@@ -495,7 +495,7 @@ export const browserTools: Tool[] = [
   // ── Settings ("/settings/…") ────────────────────────────────────────────────────
   forwarded({
     tool: 'get_form',
-    label: "Read a settings form in your tab",
+    label: 'Read a settings form in your tab',
     description:
       PREFIX +
       'on Settings, the form as it stands, saved or not, and the choices each picker offers. The API key is ' +
@@ -505,7 +505,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'set_field',
-    label: "Set a settings field in your tab",
+    label: 'Set a settings field in your tab',
     description:
       PREFIX +
       'on Settings, change one field in the form. Nothing is saved: the user presses Save. The API key is not a ' +
@@ -515,7 +515,7 @@ export const browserTools: Tool[] = [
   }),
   forwarded({
     tool: 'test_connection',
-    label: "Test a connection in your tab",
+    label: 'Test a connection in your tab',
     description:
       PREFIX +
       'on Settings, test the stored Bambuddy connection. Refused while the form has unsaved changes, because the ' +
