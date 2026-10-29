@@ -37,12 +37,23 @@ export function Component() {
 
 /** Each built-in source's tools; nothing without the agent's database (503). */
 function BuiltInSources() {
-  const { sources, error, replace } = useCapabilities(shown)
+  const { sources, loading, error, replace } = useCapabilities(shown)
   if (error instanceof ApiError && error.status === 503) return null
   if (error) {
+    // The origin lists have a route of their own, which may still answer.
     return (
-      <p role="alert" className="text-xs text-warn">
-        Could not load the built-in tools: {error.message}
+      <div className="flex flex-col gap-2">
+        <p role="alert" className="text-xs text-warn">
+          Could not load the built-in tools: {error.message}
+        </p>
+        <BrowserOriginsSetting />
+      </div>
+    )
+  }
+  if (loading && sources.length === 0) {
+    return (
+      <p role="status" className="text-xs text-muted-foreground">
+        Loading the built-in tools…
       </p>
     )
   }
@@ -52,6 +63,12 @@ function BuiltInSources() {
         .sort((a, b) => rank(a) - rank(b))
         .map((source) => (
           <SourceCard key={source.id} source={source} onChange={replace}>
+            {source.id === 'builtin:scadbuddy' && (
+              <p className="text-xs text-muted-foreground">
+                A camera frame shows whatever is in view of the printer, not only the print. Set Printer camera to off
+                to keep it from the assistant and from MCP clients; they are then told the camera is turned off here.
+              </p>
+            )}
             {/* #982: where the assistant's headless browser may go. */}
             {source.id === 'builtin:browser' && <BrowserOriginsSetting />}
           </SourceCard>

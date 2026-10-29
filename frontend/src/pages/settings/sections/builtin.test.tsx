@@ -5,7 +5,7 @@ import { isUserOnly } from '../../../agent/dom'
 import { aiCapabilities } from '../../../api/capabilities'
 import { server } from '../../../mocks/server'
 import { choose } from '../../../test/select'
-import { renderSettingsSection } from '../testing'
+import { enter, renderSettingsSection } from '../testing'
 import { Component as BuiltIn } from './builtin'
 
 // Radix Select scrolls its selected option into view; jsdom has no layout.
@@ -56,6 +56,50 @@ describe('Built-in (#2171)', () => {
     const browser = await card('Your browser tab')
     expect(await within(browser).findByTestId('browser-origins')).toBeInTheDocument()
     expect(within(browser).getByRole('combobox', { name: 'Access of browser_click' })).toBeInTheDocument()
+  })
+
+  it("keeps the browser tab's unsaved origin lists through a fold", async () => {
+    const { user } = renderSettingsSection(<BuiltIn />, { route })
+    await card('Your browser tab')
+    const fold = screen.getByRole('button', { name: 'Your browser tab' })
+    await user.click(fold)
+    const allow = await screen.findByLabelText('Opens without asking')
+    await enter(user, allow, '\nprinter.lan')
+    await user.click(fold)
+    expect(screen.getByLabelText('Opens without asking')).not.toBeVisible()
+    await user.click(fold)
+    expect((screen.getByLabelText('Opens without asking') as HTMLTextAreaElement).value).toMatch(/printer\.lan$/)
+  })
+
+  it("says the camera's privacy switch is get_printer_camera's access", async () => {
+    const { user } = renderSettingsSection(<BuiltIn />, { route })
+    const scadbuddy = await card('ScadBuddy tools')
+    await user.click(screen.getByRole('button', { name: 'ScadBuddy tools' }))
+    expect(within(scadbuddy).getByText(/Set Printer camera to off/)).toBeVisible()
+  })
+
+  it('says it is loading until the tools are read', async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    server.use(
+      // Answers nothing once released, so the feature's own handler answers.
+      http.get('/api/v1/ai/capabilities', async () => {
+        await held
+      }),
+    )
+    renderSettingsSection(<BuiltIn />, { route })
+    expect(await screen.findByText('Loading the built-in tools…')).toHaveAttribute('role', 'status')
+    release()
+    await card('ScadBuddy tools')
+    expect(screen.queryByText('Loading the built-in tools…')).toBeNull()
+  })
+
+  it('a failed read other than 503 says so, and keeps the origin lists', async () => {
+    server.use(http.get('/api/v1/ai/capabilities', () => HttpResponse.json({ detail: 'agent broke' }, { status: 500 })))
+    renderSettingsSection(<BuiltIn />, { route })
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the built-in tools: agent broke')
+    expect(await screen.findByTestId('browser-origins')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: WEBMCP })).toBeInTheDocument()
   })
 
   it('the printer camera is a row: switching get_printer_camera off stores off', async () => {

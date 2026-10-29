@@ -83,7 +83,8 @@ export function SourceCard({
             {error}
           </p>
         )}
-        <CollapsibleContent className="mt-2 flex flex-col gap-2">
+        {/* Kept mounted while folded, so an option's unsaved edit (the origin lists) survives a fold. */}
+        <CollapsibleContent forceMount hidden={!open} className="mt-2 flex flex-col gap-2">
           {source.items.length > FILTER_ABOVE && (
             <Input
               aria-label={`Filter ${source.title}`}
