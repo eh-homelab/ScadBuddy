@@ -21,6 +21,7 @@ import {
   capProblems,
   frontmatter,
   hookId,
+  HOOK_URL_CAP,
   isAllowlistedTool,
   markdownIn,
   packageItems,
@@ -347,6 +348,20 @@ describe("a package's items (#4757)", () => {
     ).review!.hooks
     expect(pretty[0]!.id).toBe(vetPackage(tree(GREETER)).review!.hooks[0]!.id)
     expect(hookId('Stop', { b: 1, a: [2, { d: 3, c: 4 }] }, STOP)).toBe(hookId('Stop', { a: [2, { c: 4, d: 3 }], b: 1 }, { prompt: STOP.prompt, type: 'prompt' }))
+  })
+
+  it('refuses a hook url past the cap and stores none, while the egress check sees it whole', () => {
+    const url = `https://hooks.example/${'u'.repeat(HOOK_URL_CAP)}`
+    const v = vetPackage(tree({ ...GREETER, ...hooksFile([{ hooks: [{ type: 'http', url }] }]) }))
+    const hook = v.review!.hooks[0]!
+    expect(hook.url).toBeUndefined()
+    expect(hook.id).toBe(hookId('Stop', undefined, { type: 'http', url }))
+    expect(v.review!.cut).toEqual(['hooks/hooks.json Stop url'])
+    expect(v.review!.refused).toEqual([`hooks/hooks.json: Stop http hook url is longer than ${HOOK_URL_CAP} characters`])
+    expect(v.fatal).toEqual([])
+    expect(v.endpoints).toContainEqual({ what: 'hooks/hooks.json Stop hook', url })
+    const atCap = `https://hooks.example/${'u'.repeat(HOOK_URL_CAP - 'https://hooks.example/'.length)}`
+    expect(vetPackage(tree({ ...GREETER, ...hooksFile([{ hooks: [{ type: 'http', url: atCap }] }]) })).review!.hooks[0]!.url).toBe(atCap)
   })
 
   it("a hook's id changes with its url", () => {

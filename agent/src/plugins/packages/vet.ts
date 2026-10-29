@@ -479,6 +479,8 @@ function readText(root: string, rel: string): string | undefined {
 const DESCRIPTION_CAP = LISTING_CAPS.description
 const NAME_CAP = LISTING_CAPS.name
 const MATCHER_CAP = LISTING_CAPS.title
+/** A hook url longer than this is refused (allowable), never stored cut: a cut url is another endpoint. */
+export const HOOK_URL_CAP = 2_048
 
 /** `text` cut to `max` and made storable; `what` joins `cut` when it was longer. */
 function capped(text: string, max: number, what: string, cut: string[]): string {
@@ -660,7 +662,13 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
         }
         if (handler.allowedEnvVars !== undefined) problems.push(`${where}: ${shown} http hook sets allowedEnvVars`)
         if (typeof handler.url === 'string') {
-          hook.url = handler.url
+          if (handler.url.length > HOOK_URL_CAP) {
+            // The egress check still sees the whole url; the review keeps none.
+            problems.push(`${where}: ${shown} http hook url is longer than ${HOOK_URL_CAP} characters`)
+            cut.push(`${where} ${shown} url`)
+          } else {
+            hook.url = handler.url
+          }
           endpoints.push({ what: `${where} ${shown} hook`, url: handler.url })
         } else {
           problems.push(`${where}: ${shown} http hook has no url`)
