@@ -73,6 +73,11 @@ function cut(text: string, max: number): string {
   return text.slice(0, max).toWellFormed()
 }
 
+/** `text` cut to `max` code units and made storable: what a package review keeps (vet.ts). */
+export function storableCut(text: string, max: number): string {
+  return storable(cut(text, max))
+}
+
 function otherKeys(raw: Record<string, unknown>): string[] {
   return Object.keys(raw).filter((k) => !KNOWN.has(k))
 }

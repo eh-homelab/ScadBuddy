@@ -117,8 +117,9 @@ export interface PackageReview {
   refused?: string[]
   /** The Claude Code built-ins its skills and subagents name, offered while the pin is allowed. */
   builtin_tools?: string[]
-  /** Each skill, command and agent (`<plugin>:<name>`) to its frontmatter description (#4757). */
+  /** Each item's id (`skill:<name>` for a skill or command, `subagent:<name>`) to its frontmatter description (#4757). */
   described?: Record<string, string | null>
+  // `aliases` (vet.ts `PackageReview.aliases`) is left out on purpose: the browser never reads it.
 }
 
 export interface FileDiff {

@@ -31,6 +31,7 @@ import {
 import { PluginError } from '../src/plugins/registry.js'
 import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
+import { LISTING_CAPS } from '../src/access/listings.js'
 import { packageServerSource } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { harnessTierOf } from '../src/harness/run.js'
@@ -368,16 +369,49 @@ describe("a package's items (#4757)", () => {
       tree({ ...GREETER, 'skills/bare/SKILL.md': 'No frontmatter.\n', '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', commands: { shout: { content: '---\ndescription: Shouts.\n---\nShout.\n' } } }) }),
     ).review!
     expect(review.described).toEqual({
-      'greeter:hello': 'Greets the user by name.',
-      'greeter:bare': null,
-      'greeter:shout': 'Shouts.',
-      'greeter:helper': 'Helps.',
+      'skill:hello': 'Greets the user by name.',
+      'skill:bare': null,
+      'skill:shout': 'Shouts.',
+      'subagent:helper': 'Helps.',
     })
     expect(vetPackage(tree(GREETER)).review!.described).toEqual({
-      'greeter:hello': 'Greets the user by name.',
-      'greeter:wave': 'Waves.',
-      'greeter:helper': 'Helps.',
+      'skill:hello': 'Greets the user by name.',
+      'skill:wave': 'Waves.',
+      'subagent:helper': 'Helps.',
     })
+  })
+
+  it('keeps a skill and a subagent of one name apart, each with its own description', () => {
+    const review = vetPackage(
+      tree({ ...GREETER, 'skills/x/SKILL.md': '---\ndescription: Formats code.\n---\n', 'agents/x.md': '---\ndescription: Deletes branches.\n---\n' }),
+    ).review!
+    expect(review.described!['skill:x']).toBe('Formats code.')
+    expect(review.described!['subagent:x']).toBe('Deletes branches.')
+  })
+
+  it('caps the package text a review stores, and names what it cut', () => {
+    const long = 'd'.repeat(10_000)
+    const v = vetPackage(
+      tree({
+        ...GREETER,
+        'skills/x/SKILL.md': `---\ndescription: ${long}\n---\n`,
+        'agents/y.md': `---\nname: ${'n'.repeat(200)}\n---\n`,
+        'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ matcher: 'm'.repeat(2_000), hooks: [STOP] }], ['E'.repeat(300)]: [{ hooks: [STOP] }] } }),
+      }),
+    )
+    const review = v.review!
+    expect(review.described!['skill:x']).toBe('d'.repeat(LISTING_CAPS.description))
+    expect(review.hooks[0]!.matcher).toBe('m'.repeat(LISTING_CAPS.title))
+    // The id is the hook's own, uncut: a cut never makes two hooks one.
+    expect(review.hooks[0]!.id).toBe(hookId('Stop', 'm'.repeat(2_000), STOP))
+    expect(review.hooks[1]!.event).toBe('E'.repeat(LISTING_CAPS.name))
+    expect(packageItems(tree({ 'hooks/hooks.json': JSON.stringify({ hooks: { ['E'.repeat(300)]: [{ hooks: [STOP] }] } }) }), {}).hooks[0]!.event).toBe(
+      'E'.repeat(LISTING_CAPS.name),
+    )
+    expect(Object.keys(review.aliases!)).toEqual([`subagent:${'n'.repeat(LISTING_CAPS.name)}`])
+    expect(review.cut).toEqual(['skill:x description', 'subagent:y name', 'hooks/hooks.json Stop matcher', `hooks/hooks.json ${'E'.repeat(LISTING_CAPS.name)} event`])
+    // A frontmatter name past the cap is refused (allowable): a cut name could not match a call.
+    expect(review.refused!.join('\n')).toMatch(/agents\/y\.md: frontmatter "name" is longer than 128 characters/)
   })
 
   it('packageItems finds a manifest-named skill directory and a nested subagent file', () => {
@@ -404,7 +438,7 @@ describe("a package's items (#4757)", () => {
       '.claude-plugin/plugin.json#commands.shout',
     ])
     // One description per name: the skill's.
-    expect(vetPackage(tree(files)).review!.described!['greeter:hello']).toBe('Greets the user by name.')
+    expect(vetPackage(tree(files)).review!.described!['skill:hello']).toBe('Greets the user by name.')
   })
 
   it("records a subagent's frontmatter name where it differs from its file", () => {
@@ -413,9 +447,40 @@ describe("a package's items (#4757)", () => {
       'agents/review/deep.md': '---\nname: deep-review\ndescription: Reviews deeply.\n---\n',
       'skills/hi/SKILL.md': '---\nname: greet\ndescription: Hi.\n---\n',
     })
-    expect(Object.fromEntries(packageItems(root, {}).aliases)).toEqual({ 'deep-review': 'review:deep', greet: 'hi' })
-    expect(vetPackage(root).review!.aliases).toEqual({ 'deep-review': 'review:deep', greet: 'hi' })
+    expect(Object.fromEntries(packageItems(root, {}).aliases)).toEqual({ 'subagent:deep-review': ['subagent:review:deep'], 'skill:greet': ['skill:hi'] })
+    expect(vetPackage(root).review!.aliases).toEqual({ 'subagent:deep-review': ['subagent:review:deep'], 'skill:greet': ['skill:hi'] })
     expect(vetPackage(tree(GREETER)).review!.aliases).toEqual({})
+  })
+
+  it("keeps aliases per kind: a subagent's name never names a skill", () => {
+    const root = tree({
+      ...GREETER,
+      'agents/review/deep.md': '---\nname: deep-review\n---\n',
+      'skills/deep-review/SKILL.md': '---\ndescription: A real skill.\n---\n',
+    })
+    const aliases = packageItems(root, {}).aliases
+    expect(aliases.get('subagent:deep-review')).toEqual(['subagent:review:deep'])
+    expect(aliases.has('skill:deep-review')).toBe(false)
+  })
+
+  it('records every item that declares one name, not the first', () => {
+    const root = tree({
+      ...GREETER,
+      'agents/a.md': '---\nname: twin\n---\n',
+      'agents/b.md': '---\nname: twin\n---\n',
+      // Skill dir `a` calls itself `b` while a skill dir `b` exists: a call `b` checks both.
+      'skills/a/SKILL.md': '---\nname: b\n---\n',
+      'skills/b/SKILL.md': '---\nname: b\n---\n',
+    })
+    const aliases = packageItems(root, {}).aliases
+    expect(aliases.get('subagent:twin')).toEqual(['subagent:a', 'subagent:b'])
+    expect(aliases.get('skill:b')).toEqual(['skill:a'])
+  })
+
+  it("names a manifest hook file as a path relative to the root, without './'", () => {
+    const manifest = { name: 'greeter', hooks: ['./hooks/extra.json'] }
+    const root = tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify(manifest), 'hooks/extra.json': JSON.stringify({ hooks: { Stop: [{ hooks: [STOP] }] } }) })
+    expect(packageItems(root, manifest).hooks.map((h) => h.where)).toEqual(['hooks/hooks.json', 'hooks/extra.json'])
   })
 })
 
