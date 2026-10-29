@@ -290,6 +290,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const [row] = await db.sql<{ j: string }[]>`SELECT tool_tiers::text AS j FROM ai_plugins WHERE name = 'mem'`
         expect(row?.j).toBe('{"__proto__": "read"}')
         expect(await rowsBy('mem')).toContainEqual({ item: '__proto__', access: 'read', updated_by: 'browser:browser' })
+        // A write to another tool keeps it, and the summary names it.
+        const summary = await store.setToolAccess('mem', 'other', 'write', UI_CONTEXT)
+        expect(Object.hasOwn(summary.tool_tiers, '__proto__')).toBe(true)
+        expect(summary.tool_tiers['__proto__']).toBe('read')
+        const [after] = await db.sql<{ j: string }[]>`SELECT tool_tiers::text AS j FROM ai_plugins WHERE name = 'mem'`
+        expect(after?.j).toBe('{"other": "write", "__proto__": "read"}')
+        expect(await rowsBy('mem')).toContainEqual({ item: '__proto__', access: 'read', updated_by: 'browser:browser' })
       })
 
       it("a source switch through the tree records the UI's actor", async () => {
