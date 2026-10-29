@@ -1703,6 +1703,7 @@ describe('arrange (#1864)', () => {
   })
 
   it('arranges outputs and library files, waits for the job and saves it under its template', async () => {
+    const ROW = '3f2c7c1e-8a4b-4d7e-9f00-0123456789ab'
     let arranged: unknown
     let saved: { slug?: string; body?: unknown } = {}
     let reads = 0
@@ -1721,11 +1722,12 @@ describe('arrange (#1864)', () => {
     const plan = { slots: [{ slot_id: 1, spool_id: 9 }], force_colour_match: false }
     const result = await runTool(
       tool('arrange'),
-      { objects, goal: 'fewest_swaps', slug: 'lid', filament_plan: plan, name: 'mix' },
+      { objects, goal: 'fewest_swaps', slug: 'lid', filament_plan: plan, name: 'mix', printer: ROW },
       ctx({ pollIntervalMs: 1 }),
     )
     expect(result.isError).toBeFalsy()
-    expect(arranged).toMatchObject({ objects, goal: 'fewest_swaps', slug: 'lid', filament_plan: plan, name: 'mix' })
+    // #4551: the registry printer goes out as the dialog's run sends it.
+    expect(arranged).toMatchObject({ objects, goal: 'fewest_swaps', slug: 'lid', filament_plan: plan, name: 'mix', printer: ROW })
     expect(saved).toEqual({ slug: 'lid', body: { job_id: JOB, name: 'mix' } })
     expect(firstText(result)).toMatchObject({ job_id: JOB, slug: 'lid', plates: 2, output: { id: ARRANGED } })
   })

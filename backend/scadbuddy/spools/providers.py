@@ -11,11 +11,13 @@ feature export, so no list is written by hand. Bambuddy's inventory is the first
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from types import ModuleType
 from typing import Protocol
 
 import scadbuddy
-from scadbuddy.core.components import Components, Core, feature_exports
+from scadbuddy.core.components import Components, feature_exports
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.spools.models import SeenTray, SpoolSnapshot
 
@@ -54,8 +56,26 @@ class TraySource(Protocol):
     async def latest(self) -> list[SeenTray]: ...
 
 
-#: Builds a feature's provider over the core services; ``None`` when it has none.
-SpoolProviderBuild = Callable[[Core, Components], SpoolProvider | None]
+class ProviderCore(Protocol):
+    """What a provider's build may read of the core services: `Core` is one, and so is
+    :class:`SettingsOnly`, so the print worker, which has no `Core`, finds the same
+    providers (#4551: a run's plan reads the overlay there)."""
+
+    @property
+    def settings_store(self) -> SettingsStore: ...
+
+
+@dataclass(frozen=True)
+class SettingsOnly:
+    """The :class:`ProviderCore` of a process with no `Core` (the print worker)."""
+
+    settings_store: SettingsStore
+
+
+#: Builds a feature's provider over the core services and the components, which are
+#: ``None`` in a process with no registry (the print worker): a provider that needs a
+#: component returns ``None`` there. ``None`` when the feature has none.
+SpoolProviderBuild = Callable[[ProviderCore, Components | None], SpoolProvider | None]
 
 
 class DuplicateProviderError(ValueError):
@@ -63,7 +83,7 @@ class DuplicateProviderError(ValueError):
 
 
 def discover_providers(
-    core: Core, components: Components, package: ModuleType = scadbuddy
+    core: ProviderCore, components: Components | None, package: ModuleType = scadbuddy
 ) -> list[SpoolProvider]:
     """Every feature's providers by `SpoolProvider.priority`, then name; two named alike
     are refused."""

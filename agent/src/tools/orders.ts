@@ -112,6 +112,15 @@ const printChoices = z
 const sliceQuote = z
   .object({
     printer_id: z.number().int().optional().describe('Omit for the configured printer'),
+    printer: z
+      .string()
+      .uuid()
+      .optional()
+      .describe(
+        "A registry printer's `id` (list_printers, get_printers_now), as print_output takes it: beside " +
+          '`printer_id` it must link that Bambuddy printer; a row only the LAN reaches is named by this alone, ' +
+          'and a printer a run reaches over the LAN is sliced for with no Bambuddy call',
+      ),
     filament_plan: z
       .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(false) })
       .describe('One spool per slot (slot_id from 1), as the print dialog sends it'),

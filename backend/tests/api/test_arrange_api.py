@@ -27,6 +27,8 @@ from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import META_NAME, OutputMeta, OutputStore
+from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.models import PrinterCreate
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.job_models import Job, now
 from scadbuddy.render.jobs import LAYOUT_NAME
@@ -619,3 +621,55 @@ def test_a_library_file_that_cannot_be_read_is_refused_saying_why(
     listed = client.get("/api/v1/print/library/88/objects")
     assert listed.status_code == 422
     assert listed.json()["code"] == LIBRARY_FILE_NOT_ARRANGEABLE
+
+
+def _registry_row(client: TestClient, *, bambuddy_id: int | None = None) -> str:
+    state: AppState = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    printers = state.components.get(PRINTERS)
+    row = printers.store.create(PrinterCreate(serial="01P00A000000009", name="Attic", model="H2C"))
+    if bambuddy_id is not None:
+        printers.store.link_bambuddy(row.id, bambuddy_id)
+    return row.id
+
+
+@respx.mock
+def test_a_registry_printer_sets_the_plate_with_no_bambuddy_call(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """#4551: the dialog's registry `printer` is the plate's printer, read from its row,
+    so a printer only the LAN reaches (or a native one) costs no Bambuddy read: respx
+    refuses any request it has no route for."""
+    configure(client)
+    _, meta, written = asyncio.run(saved_output(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={
+            "objects": [{"output_id": meta.id, "part": written.manifest[0].part, "count": 1}],
+            "printer": _registry_row(client),
+        },
+    )
+    assert response.status_code == 202, response.text
+    [inputs] = arranger.inputs
+    assert inputs.plate_model == "H2C"
+
+
+def test_a_registry_printer_linking_another_bambuddy_printer_is_refused(
+    client: TestClient, app: FastAPI, tmp_path: Path
+) -> None:
+    """As a run refuses the pair (`DisagreeingPrinterError`): packed for neither."""
+    _, meta, written = asyncio.run(saved_output(tmp_path))
+    arranger = Arranger()
+    app.dependency_overrides[get_render] = lambda: arranger
+    response = client.post(
+        "/api/v1/outputs/arrange",
+        json={
+            "objects": [{"output_id": meta.id, "part": written.manifest[0].part, "count": 1}],
+            "printer": _registry_row(client, bambuddy_id=2),
+            "printer_id": 1,
+        },
+    )
+    assert response.status_code == 422, response.text
+    assert "disagreeing printer" in response.json()["detail"]
+    assert arranger.inputs == []

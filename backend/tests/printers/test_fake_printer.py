@@ -37,15 +37,14 @@ from typing import Any, BinaryIO
 import aiomqtt
 import pytest
 
+from tests.support.fake_lan import needs_fake_lan
+
 PRINTER_PY = Path(__file__).resolve().parents[3] / "e2e-stack" / "fake-printer" / "printer.py"
 MOSQUITTO = os.environ.get("SCADBUDDY_TEST_MQTT") or shutil.which("mosquitto")
 SERIAL = "01P00FAKE000001"
 ACCESS_CODE = "12345678"
 
-pytestmark = [
-    pytest.mark.skipif(MOSQUITTO is None, reason="needs mosquitto on PATH or SCADBUDDY_TEST_MQTT"),
-    pytest.mark.skipif(not PRINTER_PY.is_file(), reason=f"{PRINTER_PY} is not in this tree"),
-]
+pytestmark = needs_fake_lan
 
 
 def _load() -> ModuleType:
