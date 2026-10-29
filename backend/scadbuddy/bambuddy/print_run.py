@@ -2137,6 +2137,19 @@ class DisagreeingPrinterError(RunRefusalError):
         self.extensions["reason"] = reason
 
 
+async def registry_printer(
+    printer: str,
+    printer_id: int | None,
+    settings: StoredSettings,
+    printers: PrinterStore,
+) -> tuple[PrinterRow | None, int | None]:
+    """The registry row a dialog body names as ``printer`` beside ``printer_id``, and the
+    Bambuddy printer it is, judged as a run judges them (`_named_printer`): for the reads
+    that are not a run (Arrange, a quote, #4551). A disagreeing pair or a virtual printer
+    is the run's refusal (`RunRefusalError`, a 422)."""
+    return await _named_printer(printer, printer_id, settings, printers)
+
+
 async def _named_printer(
     printer: str | None,
     sent: int | None,

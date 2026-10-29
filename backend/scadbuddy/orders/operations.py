@@ -22,10 +22,10 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 
-from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.client import client_for, maybe_client
 from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
-from scadbuddy.bambuddy.print_run import PrintRunRequest
+from scadbuddy.bambuddy.print_run import PrintRunRequest, ensured_route, run_route
 from scadbuddy.bambuddy.print_source import OutputSource
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
@@ -48,6 +48,8 @@ from scadbuddy.orders.quote import (
     quote_run,
 )
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.hot_path import native_backends
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
@@ -95,6 +97,36 @@ class PreviewSlicer:
     ) -> list[PreviewStarted]:
         core = self.core
         settings = await asyncio.to_thread(core.settings_store.load)
+        body = PrintRunRequest(
+            printer=request.printer,
+            printer_id=request.printer_id,
+            filament_plan=request.filament_plan,
+            choices=request.choices,
+        )
+        registry = self.components.get(PRINTERS)
+        # The run's own decision (plan 2026-10-18 D2), as the dialog's background slice
+        # makes it (`bambuddy/operations.py` `preview_run`): a quote for a printer a run
+        # reaches over the LAN builds no Bambuddy client (D3, #4551).
+        route = (
+            await run_route(
+                settings,
+                registry.store,
+                registry.reports,
+                printer=body.printer,
+                printer_id=body.printer_id,
+                say_fallback=False,
+            )
+            if native_backends(settings)
+            else None
+        )
+        if route is not None and route.row is None and route.printer_id is not None:
+            # A printer with no row yet takes the row it makes, as the run's check.
+            async with client_for(settings) as client:
+                route = await ensured_route(
+                    client, settings, registry.store, registry.reports, route
+                )
+        lan = route is not None and route.native
+        native_reads = await self.components.get(PRINT_LIBRARY).serving_native()
         outputs = LocalOutputs(core.outputs, core.catalogue)
         meta = await require(outputs, output_id)
         naming = await outputs.naming(meta)
@@ -106,15 +138,11 @@ class PreviewSlicer:
             # The quote's copy goes to the inbox, as the dialog's does.
             stem=None,
             print_settings=naming.print_settings,
+            # A native run's copy goes into the native library (D6).
+            native=native_reads if lan else None,
         )
         slicing = self.components.get(SLICING)
-        body = PrintRunRequest(
-            printer_id=request.printer_id,
-            filament_plan=request.filament_plan,
-            choices=request.choices,
-        )
-        native_reads = await self.components.get(PRINT_LIBRARY).serving_native()
-        async with client_for(settings) as client:
+        async with maybe_client(settings, native=lan) as client:
             return await start_preview_plates(
                 client,
                 source,
@@ -126,6 +154,8 @@ class PreviewSlicer:
                 native_slices=slicing.store,
                 temporal=slicing.temporal(),
                 native_reads=native_reads,
+                route=route,
+                title=naming.title,
             )
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:

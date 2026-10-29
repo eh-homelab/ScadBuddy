@@ -394,14 +394,12 @@ export function PrintPicker({
   /** #3818 — of those, the ones the server says a run reaches: choosable. */
   const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row))
   /**
-   * #3818 Task 9 — the `printer_id` every run, check, background-slice and batch-step body
-   * sends beside `printer`: none beside a LAN-only row, which links no Bambuddy printer.
+   * #3818 Task 9 — the `printer_id` every run, check, background-slice, batch-step,
+   * analysis (#4629), arrange and quote (#4551) body sends beside `printer`: none beside a
+   * LAN-only row, which links no Bambuddy printer, so `printer` alone names it.
    * `registryPrinter` is `registryAsked` first, so while the view still shows the Bambuddy
    * printer's read the old id would ride along with the asked row, and the server refuses
-   * that pair (422) rather than print on the Bambuddy printer. The analysis sends both too
-   * (#4629). Arrange and quote send the view's `printerId` and no `printer` (#4551): their
-   * routes take no registry printer, and a null there would mean Settings' printer, not
-   * the LAN-only row.
+   * that pair (422) rather than print on the Bambuddy printer.
    */
   const sentPrinterId = lanOnly.some((row) => row.id === registryPrinter) ? null : printerId
   const { askRegistry } = picker
@@ -949,7 +947,8 @@ export function PrintPicker({
                 recolour: object.recolour ?? {},
               })),
               goal: arrangeGoal,
-              printer_id: printerId,
+              ...(registryPrinter ? { printer: registryPrinter } : {}),
+              printer_id: sentPrinterId,
               filament_plan: { slots: plan, force_colour_match: false },
               // #3637 — every colour a recoloured copy prints in has its slot, whether
               // or not this output's `colors` already lists it.
@@ -1330,7 +1329,8 @@ export function PrintPicker({
     setQuoteError(null)
     try {
       await quote.start({
-        printer_id: printerId,
+        ...(registryPrinter ? { printer: registryPrinter } : {}),
+        printer_id: sentPrinterId,
         filament_plan: { slots: plan, force_colour_match: false },
         choices: printChoices,
         filaments: priced,

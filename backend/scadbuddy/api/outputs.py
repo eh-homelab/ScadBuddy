@@ -78,6 +78,7 @@ from scadbuddy.bambuddy.library_objects import (
     read_library_objects,
 )
 from scadbuddy.bambuddy.library_view import plate_glb
+from scadbuddy.bambuddy.print_run import registry_printer
 from scadbuddy.bambuddy.print_source import ReadOutOfMemoryError
 from scadbuddy.bambuddy.project_file import (
     ProjectFile,
@@ -113,6 +114,7 @@ from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.reads import LibraryReads, served_reads
 from scadbuddy.print_library.store import NativeFile
+from scadbuddy.printers.component import PrintersDep
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
 from scadbuddy.render.inputs import (
@@ -394,6 +396,11 @@ class ArrangeRequest(BaseModel):
     #: The printer whose plate to pack for; omitted means the configured one, and with
     #: none configured the default plate.
     printer_id: int | None = None
+    #: The registry printer (#4551), as the print dialog's run names it: sent with
+    #: ``printer_id`` it must link that Bambuddy printer (a 422 otherwise), and alone it
+    #: names a printer only the LAN reaches. Its plate is the row's model, read from the
+    #: registry with no Bambuddy call.
+    printer: str | None = Field(default=None, max_length=64)
     filament_plan: FilamentPlan | None = None
     #: The filament order the plan's slots refer to; omitted means the first object's
     #: output's colours, then any colour the others add, less every colour no copy
@@ -749,6 +756,7 @@ async def arrange_outputs(
     state: StateDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
     print_library: PrintLibraryDep,
+    printers: PrintersDep,
     idempotency_key: IdempotencyKey = None,
 ) -> JobStatus:
     native = await print_library.serving_native()
@@ -757,6 +765,15 @@ async def arrange_outputs(
     printer_id = body.printer_id if body.printer_id is not None else stored.printer_id
     # No printer: the plate the preview falls back to (Settings), else the default plate.
     plate_model = stored.default_plate
+    if body.printer is not None:
+        # The registry printer, judged as the run judges it (#4551): its row's model is
+        # the plate, so a printer only the LAN reaches, or a native one, asks Bambuddy
+        # nothing. A row gone since the body was made packs for `printer_id`, as a run.
+        row, printer_id = await registry_printer(
+            body.printer, body.printer_id, stored, printers.store
+        )
+        if row is not None and row.model:
+            plate_model, printer_id = row.model, None
     library: dict[int, LibraryObjects] = {}
     budget = budget_of(state.settings, body.read_budget)
     # On native the plain files are read from it (#3827): Bambuddy only names the plate.
