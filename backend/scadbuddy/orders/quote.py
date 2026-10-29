@@ -94,6 +94,11 @@ class SliceQuoteRequest(BaseModel):
 
     #: The printer to slice for, as the dialog's; omitted, the configured one.
     printer_id: int | None = None
+    #: The registry printer (#4551), as the print dialog's run names it: sent with
+    #: ``printer_id`` it must link that Bambuddy printer, and alone it names a printer
+    #: only the LAN reaches. A printer a run reaches over the LAN is sliced for with no
+    #: Bambuddy call (plan 2026-10-18 D2, D3).
+    printer: str | None = Field(default=None, max_length=64)
     #: One spool per slot (``slot_id`` from 1, the dialog's).
     filament_plan: FilamentPlan
     choices: PrintChoices

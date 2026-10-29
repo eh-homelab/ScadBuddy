@@ -93,6 +93,7 @@ from scadbuddy.bambuddy.print_run import (
     filament_options,
     filament_options_for_output,
     first_native_route,
+    lan_printers,
 )
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
 from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now
@@ -611,12 +612,21 @@ async def get_printers_now(
 ) -> PrintersNow:
     now = datetime.now(UTC)
     settings = await asyncio.to_thread(store.load)
-    if not settings.bambuddy_url or await all_native(settings, printers.store, printers.reports):
+    # The rows a run reaches natively: their cards are their LAN reports', never
+    # Bambuddy's status, whatever else the strip asks Bambuddy (#4551, D4).
+    native = frozenset(await lan_printers(settings, printers.store, printers.reports))
+    if not settings.bambuddy_url or await all_native(
+        settings, printers.store, printers.reports, native=native
+    ):
         # No Bambuddy (#3823), or every printer printed to natively (plan 2026-10-18 D4):
         # the cards are the LAN reports', and Bambuddy is not asked.
-        return await printers_now(None, links, printers.store, printers.reports, now=now)
+        return await printers_now(
+            None, links, printers.store, printers.reports, now=now, native=native
+        )
     async with client_for(settings) as client:
-        return await printers_now(client, links, printers.store, printers.reports, now=now)
+        return await printers_now(
+            client, links, printers.store, printers.reports, now=now, native=native
+        )
 
 
 @router.get(

@@ -1,28 +1,66 @@
 # Unified agent runtime Implementation Plan
 
-> **On hold from Phase 6 (2026-10-26).** Spec §14 moves the agent's Temporal workers into a
-> worker Deployment of their own and keeps `agent-durable/` as the Python worker. Phases 1–5
-> are merged and stand. Phases 6–8 below are kept as written for the record and must be
-> rewritten against spec §14.3–§14.6 before any task in them starts.
+> **Phases 6–9 rewritten 2026-10-29** against spec §14 (PR #4771), spec §14.7 and the
+> requirements R1–R7 of #4773. Phases 1–5 are merged and stand. The user reviews this plan,
+> and the decisions Q1–Q11 under "Phases 6–9", before any task in Phases 6–9 starts.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Every agent session runs the classic TypeScript turn, as an activity of a TypeScript `AgentSession` workflow. The activity lands on the replica that keeps the session's Claude Code process warm, so there is one tool and permission layer and no second mode. `agent-durable/` is retired.
+**Goal:** Every agent session runs the classic TypeScript turn, as an activity of a TypeScript `AgentSession` workflow. The activity lands on the replica that keeps the session's Claude Code process warm, so there is one tool and permission layer and no second mode. The turns run in a worker Deployment of their own, `scadbuddy-agent-worker`, which scales apart from the API (spec §14). `agent-durable/` stays as the Python worker; only its turn code retires (spec §14.4).
 
 **Architecture:**
 - Session affinity follows Go Worker Sessions, built on worker-specific queues (spec §5.2).
 - `runTurn`'s assembly becomes `TurnRunner`. A per-replica `WarmSessions` cache keeps one streaming-input `query()` per session, reused only while a fingerprint, the transcript tail and the remaining budget match.
-- `AgentSession` (workflow id `session-<id>`, queue `agent-sessions`) schedules `session_turn` on its home queue `agent-tools.<hostname>` and falls back to `agent-tools`.
+- `AgentSession` (workflow id `session-<id>`, queue `agent-sessions`) schedules `session_turn` on its home queue `agent-sessions.<hostname>` and re-acquires through `agent-tools` (spec §5.2). The hostname is a worker pod's (spec §14.3).
 - Parks go through the workflow (Update `open_input`, `ai_pending_input`). The activity holds a park for up to `park_hold_seconds`, then releases it. The next activity runs the approved call once and resumes.
 - The transcript stays in `ai_session_entries`, now sealed under the session's data key.
+- The API pod's `agent` container serves HTTP only and runs no turn (spec §14.3, Step 6.1).
 
 **Tech Stack:** TypeScript (agent, Claude Agent SDK 0.3.296 / Claude Code 2.1.296, `@temporalio/*` 1.24.0, postgres.js, vitest), Postgres, Temporal. Python only for reading old `DurableSession` histories during migration.
 
-**Spec:** `docs/superpowers/specs/2026-10-13-unified-agent-runtime-design.md` (read it first; §2 holds the measured facts, §13 the user's decisions D1–D7).
+**Spec:** `docs/superpowers/specs/2026-10-13-unified-agent-runtime-design.md` (read it first; §2 holds the measured facts, §13 the user's decisions D1–D7, §14 the 2026-10-26 amendment).
+
+## The epic's phases (#2726)
+
+One PR per step. A clusters step is a PR on `eh-homelab/clusters`.
+
+- [x] 1. Pin the SDK facts as tests; extract `TurnRunner` (#2809)
+- [x] 2. Warm processes for every turn (#3558)
+- [x] 3. Seal `ai_session_entries` (#3560)
+- [x] 4. The gate's workflow half in TypeScript (#3561)
+- [x] 5. `AgentSession` and `session_turn` behind a flag
+- [ ] 6. Turns on a worker Deployment of their own; one runtime (#4773)
+  - 6.1 a worker-only agent process (needs #4806)
+  - 6.2 clusters: Deployment `scadbuddy-agent-worker`
+  - 6.3 every session is an `AgentSession`; the mode switch retires
+  - 6.4 clusters: the API's agent container at its HTTP-only size
+  - 6.5 forks are copy-on-write for the transcript (Q8)
+  - 6.6 evals through the one runtime; the parity guard
+- [ ] 7. Migrate open `DurableSession`s
+  - 7.1 gate: the old transcript resumes under the TypeScript CLI
+  - 7.2 lazy migration on send, and the backfill (closes #4772 on its zero report)
+- [ ] 8. Retire the Python turn; `agent-durable/` stays
+  - 8.1 remove `session/` and the plugin pins (closes #2320, #2660, #2745)
+  - 8.2 remove the agent's durable-only code
+  - 8.3 clusters: `scadbuddy-agent-durable` at zero (Q9)
+- [ ] 9. Sessions live outside the pod (#4773 R1–R6); background tasks; dashboard and docs
+  - 9.1 a session's own workflows seal under its key
+  - 9.2 ScadBuddy's tools run as activities (R1, Q1)
+  - 9.3 plugin, package and `http_request` tools run as activities (R1)
+  - 9.4 a loopback gateway keeps the key out of Claude Code (R4, Q6)
+  - 9.5 a session's directory on the NAS share, plus a clusters PR (R3, Q5; needs #4812)
+  - 9.6 Claude Code's own built-ins (R2, Q2–Q4)
+  - 9.7 `ai_pending_input` is the gate's record (R5, Q7)
+  - 9.8 cron jobs as Temporal Schedules (R6, Q11)
+  - 9.9 dashboard and docs
+- [ ] 10. Drop the durable-era columns
+- [ ] 11. Versioned queues (`RollingUpdate` is already in place, §2.4)
+
+R7 (workspace bytes in the blob store) is #4812 (#4789), not a step of this plan.
 
 ## Global Constraints
 
-- **One turn path.** Nothing under `agent/src/harness/` or `agent/src/sessions/turnRunner.ts` branches on a session mode. Task 6.3's `lint-one-runtime.sh` enforces it from Phase 6 on.
+- **One turn path.** Nothing under `agent/src/harness/` or `agent/src/sessions/turnRunner.ts` branches on a session mode. Step 6.6's `lint-one-runtime.sh` enforces it from Phase 6 on.
 - **Tiers.** Every outward call parks for a human. A tier is resolved when the call runs (`effectiveTool`, #2088), never at declaration.
 - **The credential** goes only into a query's `env` (`credentialEnv`, `agent/src/harness/run.ts:233`). It never reaches a tool server, a plugin, a file, a log or a Temporal payload.
 - **No transcript in Temporal.** The transcript never enters a Temporal payload. Session payloads stay sealed by `payloadCodec.ts`.
@@ -56,7 +94,7 @@
 3. **A turn that ran on another replica while this one stayed warm** (a fallback and back). The stale process must not answer from an old transcript. Test: Task 2.2, `recycles when the transcript tail moved`.
 4. **An approval granted after the hold released the process.** The call runs exactly once, with the request id as its Idempotency-Key, even if the continuing activity is retried. Test: Task 5.4, `an approved released call runs once across an activity retry`.
 5. **An interrupt while parked and held.** The entry is cancelled, the turn ends `interrupted`, the process survives, and no further model call is made. Test: Task 5.6, `interrupt while held cancels the entry and keeps the process`.
-6. **A send to a session whose `DurableSession` is still open.** It is migrated before the turn runs, its parked entries are cancelled `migrated`, and the old workflow closes. Test: Task 7.2, `a send migrates an open DurableSession first`.
+6. **A send to a session whose `DurableSession` is still open.** It is migrated before the turn runs, its parked entries are cancelled `migrated`, and the old workflow closes. Test: Step 7.2, `a send migrates an open DurableSession first`.
 
 ---
 
@@ -705,186 +743,683 @@ async function runTurn(input: SessionTurnInput): Promise<SessionTurnResult> {
 
 ---
 
-## Phase 6: One runtime (PR 6, `feat(agent)!: every session is an AgentSession`)
+## Phases 6–9 (rewritten 2026-10-29 against spec §14 and #4773 R1–R7)
 
-> **On hold (spec §14).** Rewrite before starting: the worker Deployment comes first.
+The text these phases replace (the 2026-10-13 Phases 6–9, which put every turn in the API pod
+and deleted `agent-durable/`) is in git history at `4c130e08b`. What changed, and why, is spec
+§14 (PR #4771) and spec §14.7 (this rewrite).
 
-### Task 6.1: Route every new session to `AgentSession`; retire the mode switch
+**Built on, not redone.** Three open PRs by session `92109e29` carry part of this work. Each
+step below that needs one says so under **Depends on**.
+
+| PR | Issue | What it gives this plan |
+|---|---|---|
+| #4806 (draft) | #4780 | A `browser_*` call reaches the tab's pod through Temporal: a `BridgeCall` workflow whose one activity, `bridge.tab`, runs on the queue of the pod that holds the tab (`ai_tab_owners`). A turn on a worker pod can then drive a tab connected to an API pod. |
+| #4868 (issue, after #4806 ships for one release) | #4868 | Drops `PgTabRelay` and `ai_bridge_messages`. Nothing here waits for it. |
+| #4812 (draft) | #4789 | Workspace file bytes in the blob store, sealed per session, with per-file keys wrapped under each session's key, so a fork copies no bytes. R7 of #4773 is this PR. |
+
+**Where the four open issues close.**
+
+| Issue | Closed by | Pinned by |
+|---|---|---|
+| #2320 (capability parity) | Step 8.1, which merges only after the Step 7.2 backfill reports zero open `DurableSession`s | Step 6.3's parity tests: a session with a remote plugin, a package, `http_request`, the browser, Hindsight and subagents gets each in its turn |
+| #2660 (subagents get the turn's plugin, `http_request` and browser tools) | Step 8.1 | Step 6.3's `a subagent gets the turn's plugin, http_request and browser tools, and its outward call parks` |
+| #2745 (tiers and manifest from the agent) | Step 8.1, which removes `SCADBUDDY_DURABLE_TOOLS_JSON`, its manifest load in `agent-durable/.../worker.py` and the image's `tools.json` copy | Step 8.1's `agent-durable` start test without the variable |
+| #4772 (a durable session's conversation is only in its workflow) | Step 7.2, closed by hand with the backfill's zero report linked (the PR says `Refs #4772`, because the fix is complete only once the backfill has run) | Step 6.3 stops new `DurableSession`s; Step 7.2's migration tests |
+
+### Decisions the user must make
+
+Each has a recommendation. A step that depends on one says so; nothing that depends on an
+open decision starts before it is made.
+
+- **Q1. How a ScadBuddy tool call reaches its activity (R1).** R1 says the turn sends each
+  call to its `AgentSession` as an Update, and the workflow schedules the activity. Temporal
+  allows "a maximum of 10 in-flight Updates and 2000 total Updates in History" per Workflow
+  Execution ([docs.temporal.io/cloud/limits](https://docs.temporal.io/cloud/limits), "Per
+  Workflow Execution Update limits"; the self-hosted server has the same defaults as dynamic
+  config, which Step 9.2 measures on the deployed server first). A turn runs inside one
+  workflow run (it cannot continue-as-new while `session_turn` runs), and its parks are
+  `open_input` Updates too. So a turn with more than 10 parallel calls (subagents in parallel
+  reach that) would be refused, and a long turn could exhaust the 2000. The history also
+  carries every result (51,200 events or 50 MB, [docs.temporal.io/workflow-execution/limits](https://docs.temporal.io/workflow-execution/limits)).
+  - **Recommended:** one short workflow per call, `ToolCall`, id
+    `session-<uuid>-call-<tool_use_id>` (so a re-send after a lost answer finds the same
+    execution), on `agent-tools`, sealed under the session's key (the §8 subject pattern,
+    Step 9.1), whose one activity runs the tool on the right queue. This is #4806's
+    `BridgeCall` shape. The session's own history stays small, and each call is an
+    execution of its own, so neither Update limit applies to it.
+  - Alternative: R1 as written, with a turn refusing its 11th parallel call and ending at a
+    call budget below 2000.
+- **Q2. WebFetch and WebSearch (R2).** R2 asks for Claude Code's own built-ins. Claude Code's
+  own WebFetch skips the egress check: measured in #2684, a call to `127.0.0.1:9` tried to
+  connect (`agent/src/builtins/web.ts` header). **Recommended:** keep ScadBuddy's egress-checked
+  `WebFetch` and `WebSearch` (`builtins/web.ts`, `nested.ts`) as the one exception, until a
+  test shows Claude Code's WebFetch goes through an egress proxy the worker controls
+  (`HTTPS_PROXY`: "Claude Code respects standard proxy environment variables",
+  [code.claude.com/docs/en/network-config](https://code.claude.com/docs/en/network-config);
+  **unverified** that WebFetch's own fetch takes it). The same page says Claude Code's WebFetch
+  also calls `api.anthropic.com` for a domain safety check unless `skipWebFetchPreflight` is
+  set, which a gateway credential (R4) would have to allow for.
+- **Q3. Which native built-ins every session gets, at what default access (R2).**
+  **Recommended:** a new access source `builtin:claude-code` in #2171's model (spec
+  2026-10-18 §4.2) with `Read`, `Glob`, `Grep` and the task list at `read`; `Write`, `Edit`
+  and `NotebookEdit` at `write`, confined to the session directory by the `PreToolUse` seam;
+  `Bash` and `PowerShell` at `outward` (each call waits for a person). An `allow_refused`
+  package's `builtinTools` then only switch items on; they no longer decide what exists.
+- **Q4. Bash isolation (R2).** Native `Bash` runs in the worker pod. Its environment is only
+  what the SDK's `env` gives it (`run.ts`: `env` "REPLACES the subprocess environment
+  entirely"), but its file system holds the KEK mount (`/etc/scadbuddy/kek`) and, with R3,
+  every session's directory. Claude Code's own sandbox
+  ([code.claude.com/docs/en/sandboxing](https://code.claude.com/docs/en/sandboxing)) uses
+  bubblewrap on Linux. Its default "still allows reading credential files", so the KEK path
+  needs a deny rule. And "in an unprivileged container, [bubblewrap] can't mount a fresh
+  `/proc` filesystem" without `enableWeakerNestedSandbox`, of which the page says: "Only use
+  this setting when the outer container already provides the isolation boundary you need." **Recommended:** before
+  Step 9.6 turns `Bash` on, measure that sandbox in the worker image, with reads denied
+  outside the session directory. If it cannot run in the worker pod, `Bash` and `PowerShell`
+  stay `off` by default, and a sandbox pod (#779) is the follow-up.
+- **Q5. The session directory (R3) against the blob store (R7).** **Recommended:**
+  `SessionFiles` (blob store, #4812) stays the record; the NFS directory
+  `Scadbuddy/sessions/<id>/` is a working copy, filled from `SessionFiles` when a placement
+  starts and written back (by sha256 against the row) at every turn end, release and
+  shutdown. A panel upload or a `workspace_*` write goes to `SessionFiles` and marks the
+  directory stale; the next placement refreshes it. So a pod that dies mid-turn loses at
+  most that turn's unsynced writes, which the restart message already tells the model to
+  check.
+- **Q6. The local gateway (R4).** **Recommended:** a loopback proxy in the worker process
+  (`agent/src/gateway/`). Each spawn gets `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/t/<token>`
+  and `ANTHROPIC_AUTH_TOKEN=<token>`, a random token per process that the proxy maps to the
+  turn's credential and that dies with the process. The proxy adds the real key and meters
+  each request's spend against the session, so a request made by a `Bash` command with the
+  token is still counted in the budget. The credential never enters Claude Code's
+  environment.
+- **Q7. `ai_pending_input` as the record (R5).** **Recommended:** yes, keeping the gate's
+  public shape (spec §3 non-goals). `open_input` writes the row first; `respond` writes the
+  decision row in its transaction and then sends the `respond` Update as a wake-up; the
+  workflow keeps only request ids and timers, and on each wake or timer reads the rows
+  through an activity. A lost Update is recovered by the timer's read.
+- **Q8. Fork (#4212 against spec §6.3).** Spec §6.3 copies the transcript into the child,
+  re-sealed. The user's rule is copy-on-write: a fork points at its parent and copies on
+  write, never duplicating transcripts or events. **Recommended:** Step 6.5: the child's
+  `PostgresSessionStore.load` reads the parent's entries up to the cut, under the parent's
+  key, then its own; forgetting a parent that has live forks first copies the referenced
+  range into each child (the parent's deletion is the write). The events and workspace parts
+  stay #4212's and #4812's.
+- **Q9. `scadbuddy-agent-durable` after Phase 8.** With `session/` gone the Python worker
+  serves nothing. **Recommended:** keep `agent-durable/` and its CI job (its reusable parts
+  stay tested, spec §14.4), and scale the clusters Deployment to zero in Step 8.3, until a
+  Python workload exists. The vector files stay while `codec.py`, `secrets.py` and `gate/`
+  read them.
+- **Q10. #2171 delivery step 6 (PR #4201 spec §4.5).** Its "agent + agent-durable" half
+  changes the loopback `routes/subagentMcp.ts`, which Step 8.2 deletes. **Recommended:** drop
+  that half; #2660 closes through this epic (Step 8.1), and §4.5's "subagents park like the
+  main agent" already holds for an in-process subagent, whose calls pass `canUseTool`.
+- **Q11. Existing cron tasks (R6).** **Recommended:** a start-time pass converts every active
+  cron row's `BackgroundTask` workflow into a Schedule (create the Schedule by the task's id,
+  then terminate the old workflow; idempotent), rather than waiting up to
+  `CRON_EXPIRY_MS` (7 days, `background/schedule.ts`) for them to lapse.
+
+---
+
+## Phase 6: Turns on a worker Deployment of their own; one runtime
+
+### Step 6.1: A worker-only agent process (PR, `feat(agent): a worker-only agent process`)
+
+Spec §14.3: same image, two entrypoints. #4773's audit (§14.5) is answered in this PR.
 
 **Files:**
-- Modify: `agent/src/sessions/manager.ts` (`startMode` and `sessionModeOf` removed; `send` always goes through `DurableTurns` with `AgentSession`; the lease, renew loop and `reapExpired` removed; `resumeApproved` removed), `agent/src/main.ts` (no reaper; sessions refuse `unavailable` without Temporal), `agent/src/routes/chat.ts:317`, `agent/src/routes/sessions.ts:108`, `agent/src/routes/pendingInput.ts` (drops its `session_mode` branch), `agent/src/sessions/clientProtocol.ts` (drops its `sessionModeOf` branch), `agent/src/tools/sessions.ts` (`mode` accepted and ignored), `agent/src/routes/sessionMode.ts` (deleted; its settings key ignored), `agent/src/temporal/flowSessions.ts:50` (no mode check)
-- Modify: `frontend/src/components/assistant/*` (remove the Advanced mode select and the Durable badge; the `scadbuddy.assistant.mode` localStorage key is ignored), `frontend/src/mocks/features/*` (sessions)
-- Test: `agent/test/sessions.e2e.test.ts` (every case now runs through `AgentSession` on the dev server), `frontend` vitest for the composer
+- Modify: `agent/src/config.ts`. Add `SCADBUDDY_AGENT_ROLE` to `ENV_VARS`: `all` (the default:
+  dev, tests, today's pod), `api` or `worker`. Any other value exits 1, naming it.
+- Create: `agent/src/runtime/workers.ts` (the worker wiring moved out of `main.ts`:
+  `temporalWorker` on `agent-tools`, `sessionWorker` on `agent-sessions`, `startHostWorkers`
+  for `agent-tools.<hostname>` and `agent-sessions.<hostname>`, `TurnHost`, `WarmSessions`,
+  the warm-evict and interrupt listeners, the plugin forwarder and `turnClients` the turns
+  use, memory retains), `agent/src/runtime/http.ts` (the app, the chat and bridge sockets,
+  `/mcp`, the routes and the sweeps only HTTP needs), `agent/src/runtime/health.ts` (the
+  worker's `/healthz`, a body like the agent's, and `/readyz`, 200 once its three queues have
+  pollers, as the print worker's `/readyz` does).
+- Modify: `agent/src/main.ts` (the shared services, then the role switch, then `stop()` per
+  role).
+  - `api` builds the HTTP half and a Temporal client. It also runs the one host worker #4806
+    needs: `bridge.tab` on its own `agent-tools.<identity>`, since the tab's socket is in this
+    process. It polls neither `agent-sessions`, nor the shared `agent-tools`, nor a session
+    host queue, so it runs no `AgentSession` turn.
+  - Classic sessions still run in-process wherever `SessionManager.send` runs, until Step 6.3.
+  - Until Step 8.1, `api`'s host worker also registers the pinned `turn:` activities
+    (`turnToolActivities`, `default`). A `DurableSession` turn pins each call to the
+    `agent-tools.<hostname>` of the replica that listed its servers (`turnTools.ts`
+    `pinned`). One that listed them on an API pod before the role switch would otherwise
+    schedule an activity that nobody there serves. New listings run on worker pods, so the
+    API pods' share falls to nothing as those turns end.
+  - `worker` builds the worker half and serves only `runtime/health.ts`.
+- Modify: `agent/src/sessions/durable.ts` (`unready`: an `api` process has no session host
+  queue of its own; a unified session is ready when `agent-sessions` and `agent-tools` have
+  fresh pollers and `liveHostQueues` names at least one session host).
+- Modify: `docs/superpowers/specs/2026-10-13-unified-agent-runtime-design.md` §14.5 items 2
+  and 3 only: the audit's answers, each with the test that shows it. (#4806 already edits
+  item 1.)
+- Modify: `docs/ai/operating.md` (the roles), `README.md` ("Deploying"), and the agent
+  bullet in `CLAUDE.md`.
 
-With the lease retired, the claim is `durable_turn_id` alone (as it already is for a `DurableSession`, `plan:627`); `turn_id` and `lease_until` are never written again and stay `NULL`, so `ai_sessions`' `CHECK ((turn_id IS NULL) = (lease_until IS NULL))` (`20260928T0107Z_sessions.sql:36`) holds trivially until Phase 10 drops `lease_until` (Task 10.1) and the now-dead `turn_id` with it.
+**The audit (spec §14.5), as the tests below check it:**
+- the browser bridge: #4806's `BridgeCall`;
+- tab-reconnect waits: they resolve through `ai_questions` `reconnected`
+  (`questions/service.ts`), written by the pod whose hub sees the tab (#4773, comment of
+  2026-10-27). For an `AgentSession` park (`tab_disconnected`, spec §5.4), the hub's pod sends
+  `respond` to the session's workflow;
+- interrupt: the row flag plus `NOTIFY` (spec §5.6) crosses pods;
+- forget: `NOTIFY scadbuddy_warm_evict` crosses pods;
+- the plugin forwarder's loopback is per process, so the worker builds its own;
+- `/internal/durable/subagent-mcp` and `GET /internal/flows/tools` stay on `api`: the
+  backend and `agent-durable` reach them as they do now.
 
-- [ ] **Step 1: Write the tests.** Rewrite `sessions.e2e.test.ts`'s setup to start a dev server and the three workers, and keep every assertion. Add:
+**Tests:**
+- `agent/test/agentRole.test.ts`: which workers and routes each role starts. `api` starts no
+  `agent-sessions`, shared `agent-tools` or session host worker; `worker` answers 404 on
+  `/api/v1/ai/*`.
+- `agent/test/agentRole.temporal.test.ts`, with one `api` and one `worker` process on one dev
+  server and Postgres:
+  - a unified session sent through `api` runs its turn on `worker`;
+  - a `browser_*` call from that turn reaches a tab connected to `api`;
+  - an interrupt from `api` ends the turn within 2 s;
+  - a forget from `api` closes `worker`'s warm process;
+  - a tab that drops and comes back resolves the turn's `tab_disconnected` park.
+
+**Rollout:** the default is `all`, so nothing changes in prod until Step 6.2.
+
+**Depends on:** #4806 (the `bridge.tab` host worker and the cross-pod browser test).
+**Closes:** none. It is #4773's code half.
+
+### Step 6.2: Clusters: the `scadbuddy-agent-worker` Deployment (eh-homelab/clusters PR, `feat(scadbuddy): the agent's Temporal workers in a Deployment of their own`)
+
+**Files (eh-homelab/clusters):**
+- Create: `applications/scadbuddy/scadbuddy-agent-worker.yaml`. It is a Deployment with
+  container `agent-worker`, the `scadbuddy-agent` image the API pod's `agent` container runs
+  (hand-pinned, #738), and `SCADBUDDY_AGENT_ROLE=worker`. It carries:
+  - the agent container's database, Temporal, `SCADBUDDY_PAYLOAD_DIR` and backend
+    variables;
+  - the `agent-kek` Secret mount;
+  - `nas-share` at subPath `Scadbuddy/payloads` (never the share root, clusters#1877);
+  - the `agent-state` and `/tmp` emptyDirs (Chromium for the Playwright plugin);
+  - D3's memory request 2Gi and limit 8Gi, which move here from the API's `agent` container;
+  - `replicas: 3`, `RollingUpdate` with `maxSurge: 1, maxUnavailable: 0` (spec §5.5);
+  - `terminationGracePeriodSeconds: 30` or more, covering the turns' 17 s;
+  - a topology spread across nodes, and `/readyz` as readiness.
+- Create: `applications/scadbuddy/pdb-agent-worker.yaml` and
+  `networkpolicy-agent-worker.yaml`. Egress: Postgres, the Temporal frontend, the backend's
+  internal URL, the Anthropic endpoint or gateway, the plugin hosts and `playwright-mcp`. No
+  ingress except the probes.
+- Modify: `kustomization.yaml`; `scadbuddy.yaml` (the API pod's `agent` container gets
+  `SCADBUDDY_AGENT_ROLE=api`); `playwright-mcp.yaml`'s policy (allow the worker);
+  `networkpolicy-temporal-v2-frontend.yaml` (allow the worker).
+- Before the PR: read the nodes' allocatable memory for 3 × 2Gi requests beside the API's (spec §12).
+
+**Rollout:** open it once Step 6.1's image is the pinned one, and merge it by the clusters
+repo's process. It is the step that makes turns scale apart from the API (#4773). From
+here, `DurableSession`'s tool activities on `agent-tools` run on worker pods too.
+**Depends on:** Step 6.1, and #4806 deployed (a worker's turn reaches an API pod's tab).
+**Closes:** none. It is #4773's clusters half.
+
+### Step 6.3: Every session is an `AgentSession` (PR, `feat(agent)!: every session is an AgentSession`)
+
+This is the old Task 6.1, now on the worker Deployment. From this release on, no new
+`DurableSession` is made, so #4772 stops growing.
+
+**Files:**
+- Modify: `agent/src/sessions/manager.ts`:
+  - `startMode` and `sessionModeOf` are removed;
+  - `send` always goes through `DurableTurns` with `AgentSession`;
+  - the lease, the renew loop, `reapExpired` and `resumeApproved` are removed;
+  - fork drops its `durable` refusal for `AgentSession` (an open `DurableSession` still
+    forks as #2688 made it, until Phase 7).
+- Modify: `agent/src/sessions/durable.ts` (the `unified_sessions` flag goes; a session
+  whose `session-<id>` is an open `DurableSession` keeps going to it until Step 7.2).
+- Modify: `agent/src/main.ts` and `agent/src/runtime/*` (no reaper; without Temporal,
+  sessions refuse `unavailable`, spec §10.1), `agent/src/routes/chat.ts`,
+  `agent/src/routes/sessions.ts`, `agent/src/routes/pendingInput.ts` (no `session_mode`
+  branch), `agent/src/sessions/clientProtocol.ts`, `agent/src/tools/sessions.ts` (`mode`
+  accepted and ignored), `agent/src/routes/sessionMode.ts` (deleted; the key is ignored),
+  `agent/src/temporal/flowSessions.ts` (no mode check), `agent/src/tools/coverage.ts` (the
+  deleted route).
+- Modify: `frontend/src/components/assistant/*` (the mode select and the Durable badge go;
+  `scadbuddy.assistant.mode` in localStorage is ignored), `frontend/src/mocks/features/*`
+  (sessions).
+
+**Tests:**
+- `agent/test/sessions.e2e.test.ts`: every case runs through `AgentSession` on a dev server,
+  with the `api` and `worker` roles of Step 6.1. Every assertion stays. New cases:
   - `a session created with mode classic runs as AgentSession`;
-  - `fork works for every session` (removing `manager.ts:2300-2305`).
-- [ ] **Step 2: Run them.** Expected: FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run them, plus `cd frontend && pnpm lint && pnpm typecheck && pnpm test`.** Expected: PASS.
-- [ ] **Step 5: Commit** with `feat(agent)!: one session runtime; the mode switch is retired`.
+  - `a classic session's next send resumes its old turns` (the model request carries
+    them);
+  - `fork works for every AgentSession`.
+- `agent/test/parity.temporal.test.ts` (new) pins #2320 and #2660. One `AgentSession` turn,
+  with a remote plugin, an approved package, `http_request`, a paired tab and Hindsight on,
+  sees each tool, and Hindsight's recall and retain run. Also:
+  - `a subagent gets the turn's plugin, http_request and browser tools, and its outward call
+    parks`;
+  - an `allow_refused` package's named built-ins are all offered, not only `Bash`.
+- `frontend` vitest for the composer.
 
-### Task 6.2: Evals through the one runtime
+**Rollout:** a breaking change for the UI's mode picker only. Prod's `session_mode` stops
+being read. The API pod runs no turn after this release, so Step 6.4 follows.
+**Depends on:** Step 6.2 deployed (a turn needs a worker pod).
+**Closes:** none outright. It pins #2320 and #2660, which close in Step 8.1 once no session
+runs the Python turn. It may also close #2377 (durable sessions have no traces), since
+`TurnTrace` wraps every turn: check its acceptance in the PR.
+
+### Step 6.4: Clusters: the API's agent container at its HTTP-only size (eh-homelab/clusters PR, `chore(scadbuddy): size the agent sidecar for HTTP only`)
+
+**Files (eh-homelab/clusters):** `applications/scadbuddy/scadbuddy.yaml`. The `agent`
+container's memory comes back from D3's 2Gi/8Gi to what one release of Step 6.3 measures
+(p50/p95/p99/max from Grafana, written in the comment as the existing block does). Its
+`nas-share` mount stays while `SCADBUDDY_PAYLOAD_DIR` is read there (the payload codec,
+`api` role).
+
+**Rollout:** after Step 6.3 has run for one release.
+**Depends on:** Step 6.3. **Closes:** none.
+
+### Step 6.5: Forks are copy-on-write for the transcript (PR, `feat(agent): a fork reads its parent's transcript through the cut`)
+
+Decision Q8. Without it, Step 6.3 extends classic's copying fork to every session.
 
 **Files:**
-- Modify: `agent/evals/durable.ts` (drive `AgentSession`, not the Python worker), `agent/test/evals.durable.e2e.test.ts` (now the only replay), `agent/test/evals.test.ts` (removed, since its classic replay is now the same path), `docs/ai/evals.md` (`SCADBUDDY_EVAL_MODE` removed)
-- [ ] **Step 1:** Run `pnpm test` with the scenario set and expect FAIL (the Python worker is no longer started).
-- [ ] **Step 2:** Implement it, and confirm every scenario passes.
-- [ ] **Step 3: Commit** with `test(agent): evals replay through AgentSession only`.
+- Create: `agent/src/db/migrations/<ts>_session_fork_cut.sql` (`ai_sessions.fork_parent_id`
+  and `fork_cut`, the parent's last entry `uuid` or `id` at the cut; a NEW file).
+- Modify: `agent/src/sessions/store.ts` `PostgresSessionStore.load` (the parent's entries
+  through the cut, opened under the parent's key, then the child's own),
+  `agent/src/sessions/manager.ts` `fork` (it records the cut instead of
+  `sdkForkSession`'s copy), `agent/src/sessions/forget.ts` (before a parent's key row goes,
+  copy the range each live child references into that child, sealed under the child's key).
 
-### Task 6.3: The parity guard
+**Tests:** `agent/test/forkCow.pg.test.ts`:
+- a fork writes no entry rows until its first turn;
+- the child's first turn's model request holds the parent's turns through the cut, and
+  nothing after it;
+- forgetting the parent leaves the child resumable, and its copied rows open only under the
+  child's key;
+- a fork of a fork reads both cuts.
+
+**Rollout:** new forks only. Forks made before this keep their copies.
+**Depends on:** Step 6.3; Q8. #4812 for the workspace's own copy-on-write.
+**Closes:** the transcript part of #4212 (it says `Refs #4212`).
+
+### Step 6.6: Evals and the parity guard (PR, `test(agent): evals through the one runtime; fail on a second turn path`)
+
+The old Tasks 6.2 and 6.3, unchanged in substance.
 
 **Files:**
-- Create: `.github/scripts/lint-one-runtime.sh`, `.github/scripts/lint-one-runtime.test.sh`
-- Modify: `.github/workflows/ci.yml` (the `lint` job runs it)
-- [ ] **Step 1: Write `lint-one-runtime.test.sh`.** It creates fixture trees that each must fail:
-  - a `mode === 'durable'` in `agent/src/harness/x.ts`;
-  - an import of the SDK's `query` outside `agent/src/harness/run.ts` and `testConnection.ts`, one tree per form: `import { query } from '@anthropic-ai/claude-agent-sdk'` called as `query(opts)`; the same import across lines (`import {\n  type Options,\n  query,\n} from …`) called as `query(\n  {`; `import { query as q } from …`; `import * as sdk from …` called as `sdk.query(`; and a dynamic `await import('@anthropic-ai/claude-agent-sdk')`.
+- Modify: `agent/evals/durable.ts` (drives `AgentSession` with the `api` and `worker`
+  roles, not the Python worker), `agent/test/evals.durable.e2e.test.ts` (the only replay),
+  `agent/test/evals.test.ts` (removed), `docs/ai/evals.md` (`SCADBUDDY_EVAL_MODE` removed).
+- Create: `.github/scripts/lint-one-runtime.sh` and `lint-one-runtime.test.sh`, with the
+  script and fixtures of the old Task 6.3 (at `4c130e08b`). Until Step 7.2,
+  `agent/src/sessions/durable.ts` still routes open `DurableSession`s. Run the guard on that
+  tree first; if it trips there, allowlist that one file, with a comment naming Step 7.2,
+  and remove the allowlist in Step 7.2. Modify:
+  `.github/workflows/ci.yml` (the `lint` job runs both).
 
-  And trees that must pass: `import type { Options } from …` and `import { createSdkMcpServer, tool } from …` in any file (no `query`), and a comment naming `session_mode` (`// the session_mode setting is gone`, ` * sessionModeOf …`): the guard reads code, not comments, so Task 6.1 need not edit comments such as `agent/src/sessions/clientProtocol.ts:67`. The current tree must pass. (`agent-durable/` still exists at this point — PR 7 migrates its sessions and PR 8 removes it — so its own check is added in Task 8.1, once checking for the directory's absence is actually meaningful.)
-- [ ] **Step 2: Run it.** `bash .github/scripts/lint-one-runtime.test.sh`. Expected: FAIL (no script).
-- [ ] **Step 3: Implement.**
-
-```bash
-#!/usr/bin/env bash
-# One agent runtime (spec 2026-10-13 §3 goal 7): fail if a second turn path appears.
-set -euo pipefail
-root="${1:-.}"
-fail=0
-# --include='*.ts' already leaves out the .sql migrations. A comment line (`//`, `/*`, ` *`)
-# is not a branch, so the comments that still name the old setting pass.
-if grep -rnE "mode ?={2,3} ?'(durable|classic)'|sessionModeOf|session_mode" "$root/agent/src" --include='*.ts' \
-    | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*)'; then
-  echo "a session mode branch is back: every session is an AgentSession" >&2; fail=1
-fi
-# Every import of the SDK's `query` (named, renamed, across lines, a namespace import, a
-# dynamic import), wherever it is called, outside the harness's two call sites.
-python3 - "$root/agent/src" <<'PY' || fail=1
-import re, sys
-from pathlib import Path
-SDK = r"['\"]@anthropic-ai/claude-agent-sdk['\"]"
-STATIC = re.compile(r"\bimport\s+(?!type\s)([^;]*?)\s+from\s+" + SDK, re.S)
-DYNAMIC = re.compile(r"\bimport\(\s*" + SDK)
-ALLOWED = {"harness/run.ts", "harness/testConnection.ts"}
-root, bad = Path(sys.argv[1]), 0
-for f in sorted(root.rglob("*.ts")):
-    if f.relative_to(root).as_posix() in ALLOWED:
-        continue
-    text = f.read_text(encoding="utf-8")
-    clauses = [m.group(1) for m in STATIC.finditer(text)]
-    if DYNAMIC.search(text) or any(
-        re.search(r"\*\s+as\s|(^|[{,])\s*query\b", c) for c in clauses
-    ):
-        print(f"query() outside the harness: {f}", file=sys.stderr)
-        bad = 1
-sys.exit(bad)
-PY
-exit "$fail"
-```
-
-- [ ] **Step 4: Run it.** Both scripts pass, and `shellcheck` is clean.
-- [ ] **Step 5: Commit** with `ci: fail if a second agent turn path appears`. Open PR 6.
+**Tests:** every scenario passes through `AgentSession`; the guard's fixture trees fail and
+pass as the old Task 6.3 lists; the real tree passes; `shellcheck` is clean.
+**Rollout:** CI only. **Depends on:** Step 6.3. **Closes:** none.
 
 ---
 
-## Phase 7: Migrate open `DurableSession`s (PR 7, `feat(agent): migrate durable sessions to AgentSession`)
+## Phase 7: Migrate open `DurableSession`s
 
-### Task 7.1: Verify the old transcript resumes under the TypeScript CLI (gate for the phase)
+Unchanged from the 2026-10-13 plan, except where its backfill runs. Spec §10.2 and #4772's
+comment of 2026-10-27 hold. Namespace retention applies only to closed executions
+([docs.temporal.io](https://docs.temporal.io/temporal-service/temporal-server#retention-period)),
+so an open `DurableSession` is not at risk. Nothing may send `end` to one before it is
+migrated.
+
+### Step 7.1: The old transcript resumes under the TypeScript CLI (gate) (PR, `test(agent): a DurableSession conversation resumes under the TS CLI`)
+
+**Files:** create `agent/test/fixtures/durable_conversation/` (one conversation from a recorded
+`DurableSession` history: `temporal workflow query --type __claude_agent_conversation`) and
+`agent/test/durableImport.sdk.test.ts`.
+**Test:** load the entries into an `InMemorySessionStore`, `query({resume})` against the fake,
+and assert that the request carries the old turns. If the format differs, **stop the phase and
+report to the user** with the diff of one entry against a TypeScript-written one. A
+converter is then its own step before Step 7.2.
+**Rollout:** test only. **Depends on:** nothing. It can run beside Phase 6. **Closes:** none.
+
+### Step 7.2: Lazy migration on send, and the backfill (PR, `feat(agent): migrate DurableSessions to AgentSession`)
 
 **Files:**
-- Create: `agent/test/fixtures/durable_conversation/` (one conversation exported from a recorded `DurableSession` history in `agent-durable/tests/`, or from a dev run: `temporal workflow query --type __claude_agent_conversation`)
-- Test: `agent/test/durableImport.sdk.test.ts`
+- Create: `agent/src/sessions/migrateDurable.ts` and `agent/src/migrate-durable-sessions.ts`
+  (built to `dist/`).
+- Modify: `agent/src/sessions/durable.ts` (`send`: `describe('session-<id>')`; an open
+  `DurableSession` is migrated first).
+- Steps (spec §10.2):
+  1. `cancel_input(migrated)`.
+  2. Page the conversation Query into `PostgresSessionStore.append`, sealed and idempotent
+     by `uuid`.
+  3. Signal `end` and await the close.
+  4. Start `AgentSession`.
 
-- [ ] **Step 1: Write the test.** Load the entries into an `InMemorySessionStore`, `query({resume})` against the fake, and assert that the request carries the old turns.
-- [ ] **Step 2: Run it.** If it FAILS because the format differs, **stop the phase and report to the user**, with the diff of an entry against a TypeScript-written one. Otherwise go on.
-- [ ] **Step 3: Commit** the fixture and test as `test(agent): a DurableSession conversation resumes under the TS CLI`.
+**Tests:** `agent/test/migrateDurable.temporal.test.ts`:
+- `a send migrates an open DurableSession first`: a fake `DurableSession` answers the Query
+  from Step 7.1's fixture. Its parked entry ends `cancelled`, reason `migrated`, the old
+  workflow is closed, and the new turn's request carries the old turns;
+- `the backfill migrates every open DurableSession and is idempotent`;
+- `a migrated session's events stay readable in the panel`.
 
-### Task 7.2: Lazy migration on send; the backfill script
-
-**Files:**
-- Create: `agent/src/sessions/migrateDurable.ts`, `agent/src/migrate-durable-sessions.ts` (built to `dist/`)
-- Modify: `agent/src/sessions/durable.ts` (`send`: `describe('session-<id>')`; type `DurableSession` and open → `migrateDurable` first)
-- Test: `agent/test/migrateDurable.temporal.test.ts`
-
-**Interfaces:**
-- Produces: `migrateDurable(deps: {client; store: PostgresSessionStore; sql}, sessionId: string): Promise<'migrated' | 'not-durable'>`.
-- The steps are spec §10.2's: `cancel_input(migrated)`; query the conversation pages into `store.append`; Signal `end`; await the result; then the caller starts `AgentSession`.
-
-- [ ] **Step 1: Write the tests.**
-  - `a send migrates an open DurableSession first`: a fake `DurableSession` registered in the test worker answers `__claude_agent_conversation` from the fixture. It has one parked entry, which ends `cancelled` with reason `migrated`. The old workflow is closed, and the new turn's model request contains the old turns.
-  - `the backfill migrates every open DurableSession and is idempotent`.
-- [ ] **Step 2: Run them.** Expected: FAIL.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run them.** Expected: PASS.
-- [ ] **Step 5: Commit** with `feat(agent): open DurableSessions migrate on next send or by backfill`. Open PR 7, and put the operator step in the body: run `node dist/migrate-durable-sessions.js` after deploy, and confirm it reports 0 open.
+**Rollout:** the operator step is in the PR body. After the deploy, run
+`node dist/migrate-durable-sessions.js` from one `scadbuddy-agent-worker` pod (it needs the
+KEK, Postgres and Temporal, all of which that pod has), and confirm that it reports 0 open
+(66 on 2026-10-26, spec §14.2). Paste the report on #4772 and close it.
+**Depends on:** Steps 6.3 and 7.1.
+**Closes:** #4772, by hand on the zero report (the PR says `Refs #4772`).
 
 ---
 
-## Phase 8: Retire `agent-durable` (PR 8, `chore!: retire agent-durable`)
+## Phase 8: Retire the Python turn; `agent-durable/` stays
 
-> **On hold (spec §14.4).** `agent-durable/` stays; only its `session/` package and the plugin pins retire.
+Spec §14.4. Merge Step 8.1 only after Step 7.2's backfill reported 0 open `DurableSession`s,
+and link the report in its PR.
 
-Merge this only after the PR 7 backfill reported 0 open `DurableSession`s in production. Link the run output in the PR.
-
-### Task 8.1: Remove the Python service and its CI
-
-**Files:**
-- Delete: `agent-durable/`, `.github/scripts/agent-durable-pin.sh`, `.github/workflows/agent-durable-pin.yml`
-- Modify: `.github/scripts/lint-one-runtime.sh` and `lint-one-runtime.test.sh` (add the `agent-durable/` directory check Task 6.3 deferred: a fixture tree containing the directory must fail), `Dockerfile` (remove the `agent-durable` stage), `.github/workflows/ci.yml` and `build-image.yml` (remove the `agent-durable` jobs and the `CI Summary` needs), `.hadolint.yaml` if it names the stage, `CLAUDE.md` (the Durable sessions command block and layout bullet), `README.md` ("Deploying")
-- [ ] **Step 1:** Add `if [ -d "$root/agent-durable" ]; then echo "agent-durable/ is retired" >&2; fail=1; fi` to `lint-one-runtime.sh` and the matching fixture to its test. Run `bash .github/scripts/lint-one-runtime.test.sh`. Expected: PASS for the fixtures, FAIL for the real tree (`agent-durable/` still exists).
-- [ ] **Step 2:** Delete `agent-durable/` and the rest of the Files list above.
-- [ ] **Step 3:** Run `bash .github/scripts/lint-one-runtime.sh` and `lint-one-runtime.test.sh`. Both now pass. Run `actionlint` and `hadolint Dockerfile`. Expected: clean.
-- [ ] **Step 4: Commit** with `chore!: retire agent-durable and the temporalio-claude-agent-sdk pin`.
-
-### Task 8.2: Remove the agent's durable-only code
+### Step 8.1: Remove the Python turn and its pins (PR, `chore(agent-durable)!: retire the Python turn`)
 
 **Files:**
-- Delete: `agent/src/temporal/turnPackages.ts`, `memoryActivities.ts`, `subagentToken.ts`, `sessionClients.ts`, `agent/src/routes/subagentMcp.ts`, `agent/src/sessions/durableSweep.ts`, `gate/sweep.ts`'s describe pass, `gate/classic.ts`, the session path of `ApprovalService.gate`, `agent/src/questions/` (folded into the gate), and their tests
-- Modify: `agent/src/temporal/turnTools.ts`, `turnServers.ts` (kept for flows' `turn:` and `turn_tool_tier` only; `turn_tools` listing and `turn_tools_close` removed), `agent/src/main.ts` (workers and sweeps)
-- [ ] **Step 1:** Run `pnpm lint && pnpm typecheck && pnpm test && pnpm build`. Expected: PASS, and `test/coverage.test.ts` is still green.
-- [ ] **Step 2: Commit** with `refactor(agent): drop the durable-only turn plumbing`. Open PR 8. File the clusters PR that removes the `agent-durable` container from `applications/scadbuddy/scadbuddy.yaml`, and link it.
+- Delete: `agent-durable/src/scadbuddy_durable/session/`,
+  `agent-durable/src/scadbuddy_durable/check_cli_version.py`, `check_manifest.py`, their
+  tests, `.github/scripts/agent-durable-pin.sh` and `.github/workflows/agent-durable-pin.yml`.
+- Modify: `agent-durable/pyproject.toml` and `uv.lock` (drop `temporalio-claude-agent-sdk`
+  and `claude-agent-sdk`); `agent-durable/src/scadbuddy_durable/worker.py` (no manifest load,
+  no `SCADBUDDY_DURABLE_TOOLS_JSON`, no `DurableSession`. It starts health only and says why,
+  as it does without its variables today).
+- Keep: `__main__.py`, `health.py`, `codec.py`, `secrets.py`, `credentials.py`,
+  `payload_store.py`, `gate/` and their tests and vectors.
+- Decide `background.py` with Q4. It runs a durable session's Monitor source; once Step 9.6
+  runs `Bash` in the worker, a Monitor runs there too, and `background.py` loses its caller.
+  Until then it stays.
+- Modify: `Dockerfile` (the `agent-durable` stage stops copying `tools.json` and checking the
+  bundled CLI), `.github/workflows/ci.yml` (the `agent-durable` job drops the pin script),
+  `.github/scripts/lint-one-runtime.sh` (fail if `agent-durable/` imports
+  `claude_agent_sdk` or names `DurableSession`), and `CLAUDE.md` (the durable sessions block
+  and layout bullet).
+
+**Tests:**
+- `agent-durable/tests/test_worker.py`: the worker starts without `SCADBUDDY_DURABLE_TOOLS_JSON`
+  and registers no workflow;
+- the codec, secrets and gate vector tests still pass;
+- `lint-one-runtime.test.sh` gains a fixture that fails.
+
+**Rollout:** the clusters change is Step 8.3.
+**Depends on:** Step 7.2's zero report.
+**Closes:** #2320, #2660 and #2745 (`Fixes` all three). No session runs the Python turn, and
+the tests of Step 6.3 pin the parity.
+
+### Step 8.2: Remove the agent's durable-only code (PR, `refactor(agent): drop the durable-only turn plumbing`)
+
+**Files:**
+- Delete: `agent/src/temporal/turnPackages.ts`, `memoryActivities.ts`, `subagentToken.ts`,
+  `agent/src/routes/subagentMcp.ts`, `agent/src/sessions/durableSweep.ts`,
+  `agent/src/tools/answerTools.ts` and the manifest-only projection
+  (`agent/src/tools/manifest.ts`, `export-tools.ts`, and the `dist/tools.json` step of
+  `pnpm build`), `gate/sweep.ts`'s describe pass, `gate/classic.ts`, the session path of
+  `ApprovalService.gate`, `agent/src/questions/` (folded into the gate), and their tests.
+- Keep: `temporal/turnTools.ts`, `turnServers.ts` and `sessionClients.ts`. Flows use them,
+  and so do sessions once R1 lands (Step 9.3; this reverses spec §11's list for these three,
+  as spec §14.7 says).
+- Modify: `agent/src/runtime/*` (workers and sweeps) and `agent/src/tools/coverage.ts`.
+
+**Tests:** `pnpm lint && pnpm typecheck && pnpm test && pnpm build`; `test/coverage.test.ts`
+stays green.
+**Rollout:** with or after Step 8.1. **Depends on:** Step 8.1. **Closes:** none.
+
+### Step 8.3: Clusters: `scadbuddy-agent-durable` at zero (eh-homelab/clusters PR, `chore(scadbuddy): scale agent-durable to zero`)
+
+Decision Q9. **Files (eh-homelab/clusters):** `applications/scadbuddy/scadbuddy-agent-durable.yaml`
+(`replicas: 0`, with a comment naming spec §14.4), and `pdb-agent-durable.yaml` (removed,
+since a PDB over zero pods only blocks drains). `networkpolicy-agent-durable.yaml` stays for
+the day it scales up again.
+**Depends on:** Step 8.1 deployed. **Closes:** none.
 
 ---
 
-## Phase 9: Background tasks, Visibility, dashboard, docs (PR 9, `feat(agent): background tasks as session workflows; docs`)
+## Phase 9: Sessions live outside the pod (#4773 R1–R6), background tasks, dashboard, docs
 
-### Task 9.1: The codec subject for a session's child workflows
+Each step keeps one turn path. A workflow change goes behind `patched()`, and
+`agent/test/fixtures/agent_session_histories/` replays.
+
+### Step 9.1: A session's own workflows seal under its key (PR, `feat(agent): a session's child workflows seal under its key`)
+
+The old Task 9.1, needed by Steps 9.2 and 9.7.
+
+**Files:** `agent/src/temporal/payloadCodec.ts` `SUBJECT` and `subjectOf`. The pattern
+becomes `^(session|flow)-<uuid>(-[A-Za-z0-9_-]+)?$` with subject `session-<uuid>`, beside
+#4806's `bridge-<uuid>`. The suffix takes capitals and `_`, because an Anthropic
+`tool_use_id` has both (`toolu_01Ab…`), and Step 9.2's `ToolCall` id carries one. Keep the
+existing `BACKGROUND_TASK` mapping (`bgtask-<session uuid>-<8 hex>` already seals under
+`session-<session>`).
+**Tests:** `agent/test/payloadCodec.test.ts`:
+- `session-<u>-call-toolu_01AbC_d` seals under `session-<u>`'s key. This test must stay as
+  written: a narrower pattern would send every tool call's input and result to history
+  unsealed;
+- `bgtask-<u>-0a1b2c3d` still seals under `session-<u>`'s key;
+- `session-<u>x` passes through unsealed;
+- `payload-vectors.json` is regenerated (`UPDATE_PAYLOAD_VECTORS=1`), and
+  `agent-durable/tests/test_codec.py` still opens every vector.
+
+**Rollout:** new workflows only; old `bgtask-` histories stay readable (unsealed payloads
+pass through). **Depends on:** #4806 (it edits the same pattern; rebase on it).
+**Closes:** none.
+
+### Step 9.2: ScadBuddy's own tools run as activities (R1) (PR, `feat(agent): a turn's ScadBuddy tool calls run as activities`)
+
+Decision Q1. The recommended shape is described here; the alternative (an Update on
+`AgentSession`) changes only the transport.
 
 **Files:**
-- Modify: `agent/src/temporal/payloadCodec.ts:45-50` (pattern `^(session|flow)-<uuid>(-[a-z0-9-]+)?$`, subject = the `session-<uuid>` prefix)
-- Test: `agent/test/payloadCodec.test.ts`
-- [ ] **Step 1:** Write the tests: `session-<u>-cron-1` seals under `session-<u>`'s key, and `session-<u>x` passes through.
-- [ ] **Step 2:** Implement it and run the tests. Expected: PASS.
-- [ ] **Step 3: Commit** with `feat(agent): a session's child workflows seal under its key`.
+- Create: `agent/src/temporal/toolCall.ts`, the `ToolCall` workflow (in the bundle). Its id is
+  `session-<uuid>-call-<tool_use_id>`. Its one activity is `tool:<name>`, the existing
+  `toolActivities(ALL_TOOLS)`, with `runToolWithOutcome(..., gate: 'workflow')`, which
+  re-gates by input hash and runs the call with `Idempotency-Key: call:<session>:<tool_use_id>`
+  (spec §7).
+- Create: `agent/src/tools/activityProjection.ts`. The in-process SDK MCP server the turn
+  gets keeps `tools/projections.ts`'s names, schemas and descriptions, so the model and
+  Settings see no change. Its handler starts or attaches to the call's `ToolCall` and returns
+  its result.
+- Modify: `agent/src/sessions/turnRunner.ts` (the turn's ScadBuddy server is the activity
+  projection), `agent/src/sessions/warm.ts` (`fingerprint` includes `tools_as_activities`,
+  because a warm process keeps the MCP servers it was spawned with; without it a flip would
+  reach only new processes), `agent/src/sessions/turnHost.ts` (a `restarted` continuation fetches the
+  results of calls whose `ToolCall` completed and states them in the restart message, in
+  place of "unknown"), `agent/src/sessions/forget.ts` (terminate the session's open
+  `ToolCall`s, listed from `ai_session_events`' `tool.call` rows that have no result).
+- Images and large results move as blobs plus pointers (`SessionBlobs`), never inline in a
+  payload.
+- Before the PR: measure the deployed Temporal's `history.maxInFlightUpdates` and
+  `history.maxTotalUpdates` (Q1). Record them in spec §2.3.
 
-### Task 9.2: Forget ends a session's child workflows
+**Tests:** `agent/test/toolCall.temporal.test.ts`:
+- a read call runs once, as an activity, on a worker other than the turn's;
+- 12 parallel calls in one assistant message all run;
+- a turn whose pod dies after a call completed resumes with that call's result in the
+  restart message, and the call ran once;
+- an outward call parks (spec §5.4) and its approved run carries the request id's key;
+- `test/coverage.test.ts` and the tier tests (#2088, #2100) stay green.
+
+**Rollout:** a setting, `tools_as_activities` (an `ai_settings` key read per turn, default
+off for one release, then on, then removed in Step 9.9). The turn path stays one:
+the flag picks the projection, not a second turn.
+**Depends on:** Step 6.3; Step 9.1; Q1. **Closes:** none.
+
+### Step 9.3: Remote plugins, package MCP servers and `http_request` as activities (R1) (PR, `feat(agent): a turn's plugin and http tools run as activities`)
 
 **Files:**
-- Modify: `agent/src/sessions/forget.ts` (list `WorkflowId STARTS_WITH 'session-<u>-'` and terminate and delete each before the session's own)
-- Test: `agent/test/forget.temporal.test.ts`
-- [ ] **Step 1:** Write the test: a `session-<u>-wakeup-1` workflow is gone after `forgetSubject`. **If the dev server or the deployed Visibility store rejects `STARTS_WITH` on `WorkflowId`, stop and report it.** The alternative is a `ScadbuddySubject` search attribute on each child, already registered (`workflows.ts:50-52`).
-- [ ] **Step 2:** Implement it and run the test. Expected: PASS.
-- [ ] **Step 3: Commit** with `feat(agent): forgetting a session ends its background workflows`.
+- Modify: `agent/src/sessions/turnRunner.ts`. The turn's remote plugins, package MCP servers
+  and `http_request` come from `temporal/turnServers.ts`'s listing, which flows and
+  `DurableSession` already use, as one in-process server per source that keeps the
+  `mcp__<server>__<tool>` names (#2660 question 1). Each call is a `ToolCall` whose activity
+  is `turn:<server>__<tool>`.
+- A server whose state lives on a pod (`http_request`'s, a kept plugin session such as
+  Playwright's, `sessionClients.ts`) is pinned. Its calls run on the turn's own
+  `agent-tools.<hostname>`, the worker pod whose warm process runs the turn. The browser
+  stays #4806's `BridgeCall`.
+- Modify: `agent/src/harness/run.ts` (no remote `mcpServers` handed to Claude Code; the
+  loopback forwarder then serves only the activities).
 
-### Task 9.3: Dashboard panels
+**Tests:** `agent/test/turnToolCall.temporal.test.ts`:
+- a remote plugin's call runs as `turn:<server>__<tool>`;
+- a Playwright-style kept session keeps its state across two calls of one turn, on the pod
+  the turn runs on;
+- a subagent's plugin call takes the same path and parks when outward;
+- the flow `turn:` tests stay green.
+
+**Rollout:** the same `tools_as_activities` setting.
+**Depends on:** Step 9.2. **Closes:** none.
+
+### Step 9.4: The Anthropic key never enters Claude Code's process (R4) (PR, `feat(agent): a loopback gateway holds the turn's credential`)
+
+Decision Q6.
 
 **Files:**
-- Modify: `deploy/grafana/scadbuddy-agent.json` (warm hit ratio, spawn p50/p95 by `warm.outcome`, releases per hour, continued turns by kind, all from span metrics of `agent.turn.spawn`, `agent.turn.release` and `agent.turn.continue`)
-- [ ] **Step 1:** Run `KUSTOMIZE=… .github/scripts/lint-dashboard.sh`. Expected: PASS (the span names are `*_SPAN` constants since Tasks 2.3 and 5.4).
-- [ ] **Step 2: Commit** with `feat(grafana): warm-process and park panels`.
+- Create: `agent/src/gateway/` (`server.ts`: the loopback proxy on `127.0.0.1`, with a token
+  per process, the credential's real header added upstream, streaming SSE passed through,
+  and each request's usage priced and added to the session's spend as `spent()` does;
+  `tokens.ts`).
+- Modify: `agent/src/harness/run.ts` `credentialEnv` (it returns the proxy's
+  `ANTHROPIC_BASE_URL` and token; the real secret stays in the worker),
+  `agent/src/harness/fallback.ts` (a fallback swaps the proxy's mapping, then respawns, as
+  now), `agent/src/sessions/warm.ts` (the fingerprint names the proxy token's credential row,
+  so a disabled credential still recycles the process, Review Focus 2).
+- The gateway credential kind keeps its own `ANTHROPIC_BASE_URL` upstream.
 
-### Task 9.4: Docs
+**Tests:**
+- `agent/test/gateway.test.ts`: the key never appears in the spawned process's environment
+  (read through the spawn seam);
+- a request with a wrong token is refused;
+- spend through the proxy reaches `cost_usd`;
+- `agent/test/run.test.ts` against the fake Anthropic endpoint, through the proxy, for every
+  credential kind.
+
+**Rollout:** a release on its own. No flag: the proxy is the only path.
+**Depends on:** Step 6.3. **Closes:** none.
+
+### Step 9.5: A session's directory on the shared volume (R3) (PR plus an eh-homelab/clusters PR, `feat(agent): a session's working directory on the NAS share`)
+
+Decision Q5.
 
 **Files:**
-- Modify:
-  - `docs/superpowers/specs/2026-10-01-durable-printing-agents-flows-design.md` (an "Amended by 2026-10-13" note at §6 and §6.6 "Classic sessions");
-  - `docs/superpowers/plans/2026-10-11-durable-capability-parity.md` (a "Superseded" header);
-  - `docs/ai/operating.md`, `docs/user-guide.md` (no mode picker; restart and park behaviour);
-  - `CLAUDE.md` (agent layout: `sessions/turnRunner.ts`, `warm.ts`, `temporal/session/`).
-- [ ] **Step 1:** Run `bash .github/scripts/lint-plugin.sh` if plugin docs are touched, and check the links.
-- [ ] **Step 2: Commit** with `docs: the unified agent runtime`. Open PR 9.
+- Create: `agent/src/workspace/directory.ts`. It fills `Scadbuddy/sessions/<session-id>/`
+  from `SessionFiles` at a placement, writes it back by sha256 at a turn end, a release and
+  a shutdown, and marks it stale on a panel or `workspace_*` write. The sweep removes a
+  directory whose session is gone.
+- Modify: `agent/src/sessions/turnHost.ts` (the warm process's `cwd` is the directory),
+  `agent/src/sessions/forget.ts` (remove the directory), `agent/src/config.ts`
+  (`SCADBUDDY_SESSION_DIR`).
+- Clusters PR: in `scadbuddy-agent-worker.yaml`, `nas-share` at subPath `Scadbuddy/sessions`
+  (never the share root, clusters#1877), `SCADBUDDY_SESSION_DIR` set, and the directory in
+  Velero's excludes as `nas-share` already is.
+
+**Tests:** `agent/test/sessionDirectory.pg.test.ts`:
+- a file written in turn 1 on pod A is there in turn 2 on pod B;
+- a panel upload between turns is in the directory at the next placement;
+- a pod killed mid-turn loses only that turn's unsynced writes;
+- a forgotten session's directory is gone;
+- a fork's directory starts from the parent's files as of the cut (#4812's copy).
+
+**Rollout:** the directory is filled and synced, but no tool uses it until Step 9.6.
+**Depends on:** #4812 merged; Q5. **Closes:** none. It is #1399's per-agent-session
+directory (`Refs #1399`).
+
+### Step 9.6: Claude Code's own built-ins (R2) (PR, `feat(agent)!: Claude Code's own built-ins in every session`)
+
+Decisions Q2, Q3 and Q4.
+
+**Files:**
+- Modify: `agent/src/harness/options.ts` (`tools` lists the native built-ins Q3 offers, in
+  place of `[]`), `agent/src/harness/permissions.ts` (their tiers from `AccessResolver`
+  under `builtin:claude-code`; the `PreToolUse` seam refuses a path outside the session
+  directory for the file tools), `agent/src/access/model.ts` (the new source).
+- Delete: `agent/src/builtins/files.ts`, `session.ts`, `schemas.json` and
+  `agent/test/builtins.sdk.test.ts`. Keep `web.ts` and `nested.ts` if Q2 keeps ScadBuddy's
+  WebFetch, and `background.ts` (the Cron, Wakeup, Monitor, Workflow and TaskStop tools stay
+  ScadBuddy's, spec §8).
+- Modify: `agent/src/builtins/server.ts` (only what stays), `agent/src/temporal/turnServers.ts`
+  (no `builtin__` file tools), `docs/ai/operating.md` (the built-ins section).
+- If Q4's sandbox holds: the Claude Code sandbox settings for `Bash` and `PowerShell`. If it
+  does not: their default access is `off`.
+
+**Tests:**
+- `agent/test/nativeBuiltins.sdk.test.ts` (the real binary): `Read`, `Write`, `Edit`, `Glob`
+  and `Grep` work in the session directory and are refused outside it;
+- the task list survives a release and a move to another pod (Claude Code keeps it in the
+  transcript, or the directory: measure which and say so);
+- `Bash` parks as `outward`, and with the sandbox it cannot read `/etc/scadbuddy/kek`;
+- the evals pass.
+
+**Rollout:** breaking for package authors who relied on `builtin__<Name>` names; the
+operating notes say so.
+**Depends on:** Steps 9.4 and 9.5; Q2, Q3 and Q4. **Closes:** none.
+
+### Step 9.7: `ai_pending_input` is the record of an open request (R5) (PR, `feat(agent): the gate's record is ai_pending_input`)
+
+Decision Q7.
+
+**Files:**
+- Modify: `agent/src/temporal/session/gate.ts` and `workflow.ts` (entries become request ids
+  plus timers, behind `patched('gate-record-r5')`), `agent/src/gate/store.ts` (the row first,
+  then the wake-up Update), `agent/src/routes/pendingInput.ts` (`respond` writes the
+  decision in its transaction, then sends the Update), and a new
+  `gate_read` activity in `agent/src/temporal/session/gateActivities.ts`.
+- The `pending_input` Query answers from the rows; its shape is unchanged.
+
+**Tests:**
+- `agent/test/sessionGateRecord.temporal.test.ts`: a `respond` whose Update is lost is picked
+  up by the timer's read;
+- a restart of every worker while a park is open keeps it, and its resolution;
+- `pending-input-vectors.json` is unchanged, and `agent-durable/tests` still open it;
+- the old `agent_session_histories/` fixtures replay.
+
+**Rollout:** `patched()`; old runs keep their entries.
+**Depends on:** Step 6.3; Q7. **Closes:** none.
+
+### Step 9.8: Recurring cron jobs are Temporal Schedules (R6) (PR, `feat(agent): cron jobs as Temporal Schedules`)
+
+This replaces the old Task 9.2. Forget already finds a session's background workflows by
+their rows (`sessions/forget.ts` step 0), so the Visibility `STARTS_WITH` check of spec §8
+is no longer needed. Spec §14.7 records that.
+
+**Files:**
+- Modify: `agent/src/background/temporal.ts` (`CronCreate` makes a Schedule
+  `bgtask-<session>-<id>` whose action starts a short `BackgroundFire` workflow; `CronDelete`
+  and `TaskStop` delete it), `agent/src/temporal/backgroundTask.ts` (wakeups and monitors stay
+  timer and poll workflows, behind `patched()` for the fire path), `agent/src/sessions/forget.ts`
+  (delete the session's Schedules), and the start-time conversion pass of Q11.
+
+**Tests:** `agent/test/backgroundSchedule.temporal.test.ts`:
+- a cron fires on schedule as the session's next message;
+- a busy session is asked again (`BUSY_RETRY_MS`);
+- forget deletes the Schedule;
+- the conversion pass is idempotent;
+- a `ScheduleWakeup` still fires once.
+
+**Rollout:** new crons are Schedules from this release on; the pass converts the rest.
+**Depends on:** Step 9.1; Q11. **Closes:** none.
+
+### Step 9.9: Dashboard and docs (PR, `docs: the unified agent runtime`)
+
+The old Tasks 9.3 and 9.4.
+
+**Files:**
+- `deploy/grafana/scadbuddy-agent.json`: warm hit ratio, spawn p50/p95 by `warm.outcome`,
+  releases per hour, continued turns by kind, and tool activities by queue, all from span
+  metrics. Check with `KUSTOMIZE=… .github/scripts/lint-dashboard.sh`.
+- Docs:
+  - `docs/superpowers/specs/2026-10-01-durable-printing-agents-flows-design.md` ("Amended by
+    2026-10-13" at §6 and §6.6);
+  - `docs/superpowers/plans/2026-10-11-durable-capability-parity.md` ("Superseded");
+  - `docs/ai/operating.md` and `docs/user-guide.md` (no mode picker; restart, park and
+    worker behaviour);
+  - `CLAUDE.md` (the agent layout: `runtime/`, `sessions/turnRunner.ts`, `warm.ts`,
+    `temporal/session/`, `temporal/toolCall.ts`, `gateway/`).
+- Remove `tools_as_activities` (Step 9.2): the activity projection is the only one.
+
+**Tests:** `lint-dashboard.sh`, `link-check` on the touched docs, and the agent suite.
+**Rollout:** docs. **Depends on:** Steps 9.2–9.8. **Closes:** none.
 
 ---
 
@@ -892,7 +1427,7 @@ Merge this only after the PR 7 backfill reported 0 open `DurableSession`s in pro
 
 ### Task 10.1: Migration
 
-The agent migrates at start, and once Phase 11 moves it to `RollingUpdate` (D6) a release's old pods run beside the new one while it rolls out, so the new pod's migration must not take away what they still read. This migration therefore ships in a release AFTER the one that removed the columns' last readers (Task 6.1 and Phase 8): never in PR 6 or PR 8's release, and only once that release is the one running everywhere. Before opening PR 10, grep the running release's tag for the dropped names (`git grep -nE 'durable_offset|lease_until|turn_id|ai_questions|session_mode' <tag> -- agent/src agent-durable`, plus every read of `ai_sessions.mode`) and expect only migrations.
+The agent migrates at start, and once Phase 11 moves it to `RollingUpdate` (D6) a release's old pods run beside the new one while it rolls out, so the new pod's migration must not take away what they still read. This migration therefore ships in a release AFTER the one that removed the columns' last readers (Step 6.3 and Phase 8): never in Step 6.3's or Phase 8's release, and only once that release is the one running everywhere. Before opening PR 10, grep the running release's tag for the dropped names (`git grep -nE 'durable_offset|lease_until|turn_id|ai_questions|session_mode' <tag> -- agent/src agent-durable`, plus every read of `ai_sessions.mode`) and expect only migrations.
 
 **Files:**
 - Create: `agent/src/db/migrations/<ts>_drop_session_mode.sql`:
@@ -900,7 +1435,7 @@ The agent migrates at start, and once Phase 11 moves it to `RollingUpdate` (D6) 
 ```sql
 -- Spec 2026-10-13 §10.2: one runtime. durable_offset was the Python follower's cursor;
 -- mode was the switch; turn_id/lease_until was classic's claim, dead and NULL on every
--- row since Task 6.1 (the CHECK that paired them goes with the columns).
+-- row since Step 6.3 (the CHECK that paired them goes with the columns).
 ALTER TABLE ai_sessions DROP COLUMN durable_offset;
 ALTER TABLE ai_sessions DROP COLUMN mode;
 ALTER TABLE ai_sessions DROP COLUMN turn_id;
@@ -926,8 +1461,11 @@ could not span (spec §5.5), is gone; Task 11.4's `maxUnavailable: 1, maxSurge: 
 what landed, and `terminationGracePeriodSeconds` is still the default 30 (the same read).
 The manifest said moving to RollingUpdate needed that queue versioned first
 (`eh-homelab/clusters` `applications/scadbuddy/scadbuddy.yaml:125-131`). After Phase 8,
-the agent polls `agent-tools`, `agent-tools.<hostname>` and `agent-sessions`; only the last
-is versioned (Task 5.1).
+the worker Deployment `scadbuddy-agent-worker` (Step 6.2) polls `agent-tools`, `agent-sessions`
+and its pods' `agent-tools.<hostname>` and `agent-sessions.<hostname>`; the API pod's `agent`
+container polls only its own `agent-tools.<identity>`, for `bridge.tab` (#4806). Only
+`agent-sessions` is versioned (Task 5.1). Task 11.2 versions the worker Deployment's queues;
+that Deployment is `RollingUpdate` from Step 6.2 on.
 
 ### Task 11.1: Design check (gate)
 
@@ -964,30 +1502,38 @@ is versioned (Task 5.1).
 
 - **Spec coverage, section by section:**
   - §5.1 → 5.1
-  - §5.2 → 5.2
+  - §5.2 → 5.2; on a worker Deployment → 6.1–6.2
   - §5.3 → 2.1–2.4
-  - §5.4 → 5.3–5.4
+  - §5.4 → 5.3–5.4; R5 → Step 9.7
   - §5.5 → 5.5
   - §5.6 → 5.6
   - §6.1 → 5.2
   - §6.2 → 3.1–3.2
-  - §6.3 → 3.2, 6.1
+  - §6.3 → 3.2, Step 6.3; copy-on-write (§14.7, Q8) → Step 6.5
   - §6.4–6.5 → 5.6
   - §6.6 → 2.2–2.3
-  - §6.7 → 2.2 (credential recycle)
-  - §6.8 → 6.1, 8.2
-  - §6.9 → 2.3, 9.3
-  - §6.10 → 5.2
-  - §7 → 5.4
-  - §8 → 9.1–9.2
-  - §9 → 6.1 (`flowSessions.ts`)
-  - §10 → 6.1, 7, 10
-  - §11 → 8
-  - §12's unverified items → 5.4, 7.1, 9.2
+  - §6.7 → 2.2 (credential recycle); R4 → Step 9.4
+  - §6.8 → Steps 6.3, 8.2; R2 → Step 9.6
+  - §6.9 → 2.3, Step 9.9
+  - §6.10 → 5.2, Steps 6.2 and 6.4
+  - §7 → 5.4; R1's call keys → Step 9.2
+  - §8 → Steps 9.1 and 9.8
+  - §9 → Step 6.3 (`flowSessions.ts`)
+  - §10 → Steps 6.3, 7.1–7.2, Phase 10
+  - §11 → Phase 8 (as amended by §14.4 and §14.7)
+  - §12's unverified items → 5.4, Step 7.1; the Visibility `STARTS_WITH` item is no longer needed (Step 9.8)
+  - §14.3 → Steps 6.1–6.4; §14.4 → Phase 8; §14.5 → Step 6.1 (and #4806 for item 1)
+  - §14.7 R1 → 9.2–9.3; R2 → 9.6; R3 → 9.5; R4 → 9.4; R5 → 9.7; R6 → 9.8; R7 → #4812
 - **Decisions D1–D7** were made by the user on 2026-10-13 (spec §13):
-  - D1 → Phase 6;
+  - D1 → Step 6.3;
   - D2/D3/D5 → Task 2.5 settings;
-  - D3 limit → Task 2.6;
+  - D3 limit → Task 2.6, moved to the worker container by Step 6.2 (spec §14.7);
   - D4 → 5.1;
   - D6 → Phase 11;
   - D7 → Phase 3.
+- **Decisions Q1–Q11** are open (under "Phases 6–9"); the steps that depend on each name it.
+- **The user's standing rules, checked:** turns run in a worker Deployment of their own (Steps 6.1–6.2);
+  `agent-durable/` stays and only its turn retires (Phase 8); every tool works in every
+  session, and nothing is documented as a gap (Steps 6.3 and 9.2–9.6); forks are
+  copy-on-write (Step 6.5, #4812); images and large results move as blobs plus pointers
+  (Step 9.2); state in Postgres, bytes in the blob store (Steps 9.5 and 9.7, #4812).

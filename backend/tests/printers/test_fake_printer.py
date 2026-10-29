@@ -38,17 +38,14 @@ from tests.support import fake_lan
 from tests.support.fake_lan import (
     ACCESS_CODE,
     MOSQUITTO,
-    PRINTER_PY,
     SERIAL,
+    needs_fake_lan,
     start_fake_printer,
 )
 from tests.support.fake_lan import free_port as _free_port
 from tests.support.fake_lan import load_fake_printer as _load
 
-pytestmark = [
-    pytest.mark.skipif(MOSQUITTO is None, reason="needs mosquitto on PATH or SCADBUDDY_TEST_MQTT"),
-    pytest.mark.skipif(not PRINTER_PY.is_file(), reason=f"{PRINTER_PY} is not in this tree"),
-]
+pytestmark = needs_fake_lan
 
 
 def _trusting(cert: Path) -> ssl.SSLContext:

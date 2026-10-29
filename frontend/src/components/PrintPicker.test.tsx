@@ -606,6 +606,9 @@ describe('PrintPicker', () => {
       name: 'Reagan (arranged)',
     })
     expect(sent?.filament_plan?.slots?.length).toBeGreaterThan(0)
+    // #4551: the registry row beside the Bambuddy id, as the run names them.
+    const linked = printersState().find((row) => row.bambuddy_printer_id === choicesView.printer_id)!
+    expect(sent).toMatchObject({ printer: linked.id, printer_id: choicesView.printer_id })
     // The dialog now reads the new output: its plates are asked for by the new id.
     await screen.findByTestId('filament-slot-1')
   })

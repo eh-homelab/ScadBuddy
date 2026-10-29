@@ -1544,12 +1544,11 @@ Bambuddy recorder (`e2e-stack/bambuddy-recorder`) that fails every call, and run
 recorder saw nothing. It needs docker with compose v2, curl, python3 and the frontend's
 dependencies with Playwright's chromium; the header of `e2e-stack/run.sh` has the flags.
 CI runs it in `.github/workflows/hot-path-e2e.yml`'s `stack` job, weekly and on dispatch;
-it is not in `CI Summary`. Its two other jobs also run on a PR, neither one required:
-`fakes` (the two fakes' own tests, and ruff and mypy over them) and `native` (the
-backend's native-run tests against the fake printer, `tests/test_print_native_workflow.py`
-and `tests/api/test_hot_path_native.py`, with mosquitto, Postgres and Temporal; it fails
-if one skips). Both run on a PR that touches `e2e-stack/**`, `backend/**` or the
-workflow.
+it is not in `CI Summary`. Its `fakes` job (the two fakes' own tests, and ruff and mypy
+over them) also runs, not required, on a PR that touches `e2e-stack/**`, `backend/**` or
+the workflow. The backend's native-run tests against the fake printer
+(`tests/test_print_native_workflow.py`, `tests/api/test_hot_path_native.py`) run in every
+`backend-pytest` shard: the Dockerfile's `test` stage carries mosquitto and both fakes.
 
 ### Switching continuous deploy off
 
