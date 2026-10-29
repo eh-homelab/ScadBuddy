@@ -100,4 +100,5 @@ export const queuedResult: PrintRunResult = {
   project_id: null,
   folder_id: null,
   bambuddy_url: `${settings.bambuddy_url}/queue`,
+  lan_awaiting_clear: false,
 }

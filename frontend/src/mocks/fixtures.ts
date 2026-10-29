@@ -975,6 +975,8 @@ export const settingsDefaults = {
   rough_estimate_factor: '1.15',
   // #4953 — whether a fulfilled line item may be unfulfilled.
   orders_allow_unfulfil: true,
+  // #4939 — whether a native run waits for a cleared plate between its prints.
+  lan_require_plate_clear: false,
   fonts_catalogue_ttl: 86400,
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,

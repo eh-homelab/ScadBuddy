@@ -125,6 +125,8 @@ class SettingsView(BaseModel):
     rough_estimate_factor: str
     #: Whether a fulfilled line item may be unfulfilled (#4953); on by default.
     orders_allow_unfulfil: bool = True
+    #: Whether a native run waits for a cleared plate between its prints (#4939).
+    lan_require_plate_clear: bool = False
     store_s3_endpoint: str | None = None
     store_s3_region: str = "us-east-1"
     store_s3_bucket: str | None = None

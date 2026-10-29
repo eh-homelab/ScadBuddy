@@ -17,6 +17,7 @@ from scadbuddy.bambuddy.runs import PrintRun, RecentRuns, given_run, newest_fail
 from scadbuddy.core.events import PrintEvent, PrintRunEvent
 from scadbuddy.printers.lan_models import LanStarted, LanStopped
 from scadbuddy.printers.progress import (
+    AWAITING_CLEAR,
     IDLE_SINCE,
     MOVED_ON,
     NOT_HEARD,
@@ -451,3 +452,48 @@ async def test_a_stopped_run_settles_the_starts_it_never_made(
     assert progress.copies_detail[1].message == stopped.message
     assert progress.copies_detail[1].plate_id == 2
     assert progress.error_message == (stopped.message if stage == "failed" else None)
+
+
+async def test_a_sequenced_run_names_its_controls() -> None:
+    """#4942: a run with prints still to start says so, with its id, so the panel and the
+    agent can stop the rest; a run that stopped, or has none left, offers nothing."""
+    done = OURS.model_copy(update={"plate_id": 1, "ended": "done"})
+    result = PrintRunResult(
+        library_file_id=41, copies=3, path="native", lan=[done, SECOND], lan_waiting=[1]
+    )
+    value = (
+        {"subtask_name": SECOND.subtask_name, "gcode_state": "RUNNING"},
+        at(hours=2, seconds=10),
+    )
+    progress = await _lan(_run(result), value).read("o" * 32)
+    assert progress is not None and progress.lan_run is not None
+    assert progress.lan_run.model_dump() == {"run_id": "r", "waiting": 1, "awaiting_clear": False}
+    stopped = result.model_copy(
+        update={"lan_stopped": LanStopped(stage="cancelled", message="Stopped.")}
+    )
+    progress = await _lan(_run(stopped), value).read("o" * 32)
+    assert progress is not None and progress.lan_run is None
+    single = await _lan(_run(LAN_RESULT), report()).read("o" * 32)
+    assert single is not None and single.lan_run is None
+
+
+async def test_a_run_waiting_for_a_cleared_plate_says_so() -> None:
+    """#4939: the next print waits for someone to say the plate is clear, not for the
+    printer, and the run's controls say it does."""
+    done = OURS.model_copy(update={"plate_id": 1, "ended": "done"})
+    result = PrintRunResult(
+        library_file_id=41,
+        copies=3,
+        path="native",
+        lan=[done],
+        lan_waiting=[1, 1],
+        lan_awaiting_clear=True,
+    )
+    progress = await _lan(_run(result), report(gcode_state="FINISH")).read("o" * 32)
+    assert progress is not None and progress.lan_run is not None
+    assert progress.lan_run.awaiting_clear and progress.lan_run.waiting == 2
+    assert progress.settled is False
+    assert [copy.waiting_reason for copy in progress.copies_detail[1:]] == [
+        AWAITING_CLEAR.format(printer="H2C"),
+        WAITING,
+    ]

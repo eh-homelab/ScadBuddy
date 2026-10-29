@@ -329,6 +329,7 @@ function startRun(subject: string, outputId: string, body: PrintRunRequest): Htt
     project_id: null,
     folder_id: body.folder_id ?? null,
     bambuddy_url: null,
+    lan_awaiting_clear: false,
   }
   const run: PrintRun = {
     id: `hot-run-${++state.seq}`,

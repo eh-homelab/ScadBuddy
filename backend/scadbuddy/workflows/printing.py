@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from datetime import timedelta
+from functools import partial
 from typing import Any, Literal
 
 from temporalio import workflow
@@ -63,6 +64,7 @@ with workflow.unsafe.imports_passed_through():
         LAN_UNSURE,
         LAN_UPLOAD_ACTIVITY,
         LAN_WAIT_ACTIVITY,
+        PLATE_CLEARED_SIGNAL,
         PRINT_LAN_UPDATE_ACTIVITY,
         PRINT_RUN_WORKFLOW,
         REFUSED,
@@ -178,16 +180,18 @@ def outlived_slice(error: ActivityError) -> ApplicationError | None:
     )
 
 
-#: Why a cancelled LAN run started none of its later plate copies (#4541).
+#: Why a cancelled LAN run started none of its later plate copies (#4541): the run's
+#: cancel, or a stop of the rest (``POST /print/runs/{id}/stop``, #4942), which cancels
+#: its ``PrintLanSequence``. The print on the printer carries on either way.
 _LAN_CANCELLED = LanStopped(
     stage="cancelled",
-    message="The print was cancelled, so the plates still to print were not started.",
+    message="The run was stopped, so the plates still to print were not started.",
 )
 
 
-#: Where a LAN run's later copies stopped: waiting for a print, starting the next
-#: copy, or recording a plate it started.
-LanStep = Literal["wait", "start", "record"]
+#: Where a LAN run's later copies stopped: waiting for a print, waiting for the plate to
+#: be cleared (#4939), starting the next copy, or recording a plate it started.
+LanStep = Literal["wait", "clear", "start", "record"]
 
 
 def _lan_failed(error: BaseException, step: LanStep, plate_id: int, next_id: int) -> LanStopped:
@@ -202,6 +206,12 @@ def _lan_failed(error: BaseException, step: LanStep, plate_id: int, next_id: int
         detail = (
             f"The printer did not finish the print before plate {next_id} within"
             f" {LAN_WAIT_BOUND.days} days, so it and the plates after it were not started."
+        )
+        return LanStopped(stage="failed", message=detail)
+    if step == "clear" and isinstance(error, TimeoutError):
+        detail = (
+            f"Nobody said the plate was clear within {LAN_WAIT_BOUND.days} days, so plate"
+            f" {next_id} and the plates after it were not started."
         )
         return LanStopped(stage="failed", message=detail)
     if step == "record":
@@ -306,6 +316,9 @@ LAN_PRINT_TIMEOUT = timedelta(seconds=LAN_PROBE_TIMEOUT + LAN_START_WAIT + 45)
 #: it starts the next (#4541): a print of days, and the printer off a while between.
 #: Past it the run starts none of the rest, and says so.
 LAN_WAIT_BOUND = timedelta(days=7)
+#: ``workflow.patched`` id of a LAN run that waits for a cleared plate before each later
+#: copy (#4939). Only a run planned with ``plate_clear`` asks, and no recorded run was.
+PLATE_CLEAR_PATCH = "print-lan-plate-clear"
 #: ``lan_wait`` only reads, so it is taken up again whenever it stops, within the bound:
 #: a heartbeat timeout (a worker that died) is retried too, and only the bound ends the
 #: wait (`_lan_failed`'s wait text).
@@ -1088,7 +1101,25 @@ class LanSequenceWorkflow(_PlateStarts):
     """A LAN run's later plate copies (#4541), each started once ``lan_wait`` sees the
     printer finish the one before, then recorded on the run (``print_lan_update``). The
     run has succeeded, so nothing here fails it: a wait or a start that fails, or a
-    cancel, stops the rest, and the run's result says why (``lan_stopped``)."""
+    cancel, stops the rest, and the run's result says why (``lan_stopped``).
+
+    A run planned with ``plate_clear`` (#4939) then waits, as Bambuddy's queue does with
+    ``require_plate_clear`` on, for `PLATE_CLEARED_SIGNAL` before each later copy: its
+    result says so (``lan_awaiting_clear``) until it comes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        #: The most prints a plate-cleared signal said had started (`plate_cleared`).
+        self.cleared = 0
+
+    @workflow.signal(name=PLATE_CLEARED_SIGNAL)
+    def plate_cleared(self, starts: int) -> None:
+        """The plate is clear after the run's ``starts``-th print: a confirmation sent
+        for an earlier wait than the current one starts nothing."""
+        self.cleared = max(self.cleared, starts)
+
+    def _cleared_after(self, starts: int) -> bool:
+        return self.cleared >= starts
 
     @workflow.run
     async def run(self, sequence: LanSequenceInput) -> PrintRun:
@@ -1116,8 +1147,18 @@ class LanSequenceWorkflow(_PlateStarts):
                     retry_policy=LAN_WAIT_RETRY,
                 )
                 result = result.model_copy(update={"lan": [*result.lan[:-1], ended]})
+                gate = planned.plate_clear and workflow.patched(PLATE_CLEAR_PATCH)
+                if gate:
+                    result = result.model_copy(update={"lan_awaiting_clear": True})
                 row = await self._lan_update(input, accepted, result)
                 self._stop_if_cancelled()
+                if gate:
+                    step = "clear"
+                    await workflow.wait_condition(
+                        partial(self._cleared_after, len(result.lan)), timeout=LAN_WAIT_BOUND
+                    )
+                    # Recorded with the next start, which follows at once.
+                    result = result.model_copy(update={"lan_awaiting_clear": False})
                 step = "start"
                 if native is not None and plate.plan is not None:
                     # Days may have passed: the slice's row, and its hold on the blob, is
@@ -1167,7 +1208,7 @@ class LanSequenceWorkflow(_PlateStarts):
                         lan=taken,
                     )
                     sent = await self._record_plate(accepted, planned, plate, outcome, sent, 0, 0)
-        except (ActivityError, ApplicationError, asyncio.CancelledError) as error:
+        except (ActivityError, ApplicationError, asyncio.CancelledError, TimeoutError) as error:
             cancelled = is_cancelled_exception(error)
             if cancelled:
                 self.cancel_absorbed = True
@@ -1184,6 +1225,8 @@ class LanSequenceWorkflow(_PlateStarts):
                 else _lan_failed(error, step, plate_id, result.lan_waiting[0])
             )
             row = await self._lan_update(
-                input, accepted, result.model_copy(update={"lan_stopped": stopped})
+                input,
+                accepted,
+                result.model_copy(update={"lan_stopped": stopped, "lan_awaiting_clear": False}),
             )
         return row

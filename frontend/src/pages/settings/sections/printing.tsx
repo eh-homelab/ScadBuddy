@@ -3,7 +3,7 @@ import { ChoiceSelect } from '../../../components/settings/form'
 import { useSettingsAgentField } from '../agentFields'
 import { useBambuddyResources } from '../bambuddyResources'
 import { FieldRow } from '../controls'
-import { SavedSection } from '../formParts'
+import { RuntimeRows, SavedSection } from '../formParts'
 import type { AreaId } from '../registry'
 import { useBackendSettings } from '../useBackendSettings'
 import { RETENTION_MAX_DAYS, fieldsOf } from '../values'
@@ -80,6 +80,7 @@ export function Component() {
           onChange={(event) => setField('operation_retention_seconds', event.target.value)}
         />
       </FieldRow>
+      <RuntimeRows form={form} section="printing" />
     </SavedSection>
   )
 }

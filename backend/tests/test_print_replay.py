@@ -72,7 +72,10 @@ recorded failed with its stderr).
 is cancelled while it waits), ``lan_later_start_failed`` (the second start is refused)
 and ``lan_cancelled_during_succeed`` (a cancel while ``print_succeed`` runs: no sequence,
 the rest recorded stopped). The sequence's own histories of the first three are in
-``print_lan_sequence_histories/``. It is AUTO_UPGRADE on the print worker and may run
+``print_lan_sequence_histories/``. ``PLATE_CLEAR_PATCH`` (#4939) waits for the
+``plate_cleared`` signal before each later copy of a run planned with ``plate_clear``:
+``lan_plate_clear`` (three copies, two confirmations, the first after a stale one),
+both histories. It is AUTO_UPGRADE on the print worker and may run
 for days, so a change to its commands goes behind ``workflow.patched`` as ``PrintRun``'s
 does.
 """
@@ -138,6 +141,7 @@ SEQUENCE_HISTORIES = Path(__file__).parent / "fixtures" / "print_lan_sequence_hi
         "lan_cancelled_while_waiting",
         "lan_later_start_failed",
         "lan_cancelled_during_succeed",
+        "lan_plate_clear",
     ],
 )
 async def test_print_run_replays_its_recorded_history(name: str) -> None:
@@ -147,7 +151,8 @@ async def test_print_run_replays_its_recorded_history(name: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["lan_copies", "lan_cancelled_while_waiting", "lan_later_start_failed"]
+    "name",
+    ["lan_copies", "lan_cancelled_while_waiting", "lan_later_start_failed", "lan_plate_clear"],
 )
 async def test_lan_sequence_replays_its_recorded_history(name: str) -> None:
     text = (SEQUENCE_HISTORIES / f"{name}.json").read_text()

@@ -24,7 +24,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, Field
 from starlette.types import Receive, Scope, Send
+from temporalio.client import WorkflowExecutionStatus, WorkflowHandle
 from temporalio.common import WorkflowIDReusePolicy
+from temporalio.service import RPCError
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.activity.index import attribute_request
@@ -96,8 +98,9 @@ from scadbuddy.bambuddy.print_run import (
     lan_printers,
 )
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
-from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now
+from scadbuddy.bambuddy.printers_now import PrintersNow, printers_now, with_lan_runs
 from scadbuddy.bambuddy.progress import (
+    LanRunControl,
     PrintProgress,
     from_failed_run,
     progress_for,
@@ -144,7 +147,7 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.print_library.component import PrintLibraryDep
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import Printers, PrintersDep
-from scadbuddy.printers.progress import LanProgress
+from scadbuddy.printers.progress import LanProgress, lan_control
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
 from scadbuddy.rack.usage import RackUsage
@@ -168,16 +171,20 @@ from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
     TemporalUnreachableError,
+    execution_gone,
     follow_update,
     start_command,
+    temporal_failure,
 )
 from scadbuddy.workflows.component import FollowsDep
 from scadbuddy.workflows.print_models import (
     ACCEPTED_UPDATE,
+    PLATE_CLEARED_SIGNAL,
     PRINT_RUN_WORKFLOW,
     AcceptAnswer,
     PrintRunInput,
     SourceSpec,
+    lan_sequence_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -608,7 +615,7 @@ async def post_tray_spool(
     ),
 )
 async def get_printers_now(
-    store: SettingsStoreDep, links: PrintLinksDep, printers: PrintersDep
+    store: SettingsStoreDep, links: PrintLinksDep, printers: PrintersDep, runs: PrintRunsDep
 ) -> PrintersNow:
     now = datetime.now(UTC)
     settings = await asyncio.to_thread(store.load)
@@ -620,13 +627,27 @@ async def get_printers_now(
     ):
         # No Bambuddy (#3823), or every printer printed to natively (plan 2026-10-18 D4):
         # the cards are the LAN reports', and Bambuddy is not asked.
-        return await printers_now(
+        cards = await printers_now(
             None, links, printers.store, printers.reports, now=now, native=native
         )
-    async with client_for(settings) as client:
-        return await printers_now(
-            client, links, printers.store, printers.reports, now=now, native=native
-        )
+    else:
+        async with client_for(settings) as client:
+            cards = await printers_now(
+                client, links, printers.store, printers.reports, now=now, native=native
+            )
+    return with_lan_runs(cards, await _lan_controls(runs, cards))
+
+
+async def _lan_controls(runs: PrintCommands, cards: PrintersNow) -> dict[str, LanRunControl]:
+    """Each card's waiting native run (#4942); none when the runs cannot be read, so a
+    database blip costs the controls, never the strip."""
+    try:
+        waiting = await runs.store.lan_waiting([card.id for card in cards.printers])
+    except DATABASE_ERRORS:
+        logger.warning("print runs unreadable; the strip shows no run controls")
+        return {}
+    controls = {printer: lan_control(run) for printer, run in waiting.items()}
+    return {printer: control for printer, control in controls.items() if control is not None}
 
 
 @router.get(
@@ -1044,6 +1065,112 @@ async def get_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
     run = await runs.store.get(run_id)
     if run is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"there is no print run {run_id}")
+    return run
+
+
+#: Why a stop or a plate-cleared finds nothing to act on (#4942, #4939).
+NOTHING_WAITING = (
+    "This run has no prints still to start: it started every one, or they were stopped."
+)
+NOT_AWAITING_CLEAR = "This run is not waiting for the plate to be cleared."
+SEQUENCE_GONE = (
+    "This run's later prints are no longer running in ScadBuddy's background service,"
+    " so there is nothing to stop or start."
+)
+#: What both routes answer beside the 202.
+LAN_CONTROL_RESPONSES: dict[int | str, dict[str, Any]] = {
+    status.HTTP_404_NOT_FOUND: {"description": "There is no such run."},
+    status.HTTP_409_CONFLICT: {
+        "description": f"Nothing to act on: {NOTHING_WAITING} {NOT_AWAITING_CLEAR} {SEQUENCE_GONE}"
+    },
+    status.HTTP_503_SERVICE_UNAVAILABLE: {
+        "description": f"{TEMPORAL_DOWN_DETAIL} Nothing was sent; send it again."
+    },
+}
+
+
+async def _waiting_run(runs: PrintCommands, run_id: str) -> PrintRun:
+    """The succeeded native run ``run_id`` with prints still to start, or the 404 or 409
+    that says why there is none."""
+    run = await runs.store.get(run_id)
+    if run is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"there is no print run {run_id}")
+    result = run.result
+    if (
+        run.status != "succeeded"
+        or result is None
+        or result.path != "native"
+        or not result.lan_waiting
+        or result.lan_stopped is not None
+    ):
+        raise ApiError(status.HTTP_409_CONFLICT, NOTHING_WAITING)
+    return run
+
+
+async def _to_sequence(
+    runs: PrintCommands, run_id: str, send: Callable[[WorkflowHandle[Any, Any]], Awaitable[None]]
+) -> None:
+    """``send`` to the run's ``PrintLanSequence``: a closed one, or none, is the 409 that
+    says so. Asked first, since Temporal takes a cancel of a closed execution as done."""
+    handle = runs.client.get_workflow_handle(lan_sequence_id(run_id))
+    try:
+        described = await handle.describe()
+        if described.status != WorkflowExecutionStatus.RUNNING:
+            raise ApiError(status.HTTP_409_CONFLICT, SEQUENCE_GONE)
+        await send(handle)
+    except ApiError:
+        raise
+    except Exception as error:
+        if isinstance(error, RPCError) and execution_gone(error):
+            raise ApiError(status.HTTP_409_CONFLICT, SEQUENCE_GONE) from None
+        failure = temporal_failure(error, handle.id)
+        if isinstance(failure, TemporalUnavailableError):
+            raise temporal_unavailable(
+                "a native run's later prints", TEMPORAL_DOWN_DETAIL, may_have_started=None
+            ) from None
+        raise
+
+
+@router.post(
+    "/runs/{run_id}/stop",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=PrintRun,
+    responses=LAN_CONTROL_RESPONSES,
+    summary="Stop the prints a native run has not started yet",
+)
+async def post_stop_run(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
+    """A native run of several plates or copies starts each once the printer has ended
+    the one before (#4541). This stops the ones it has not started (#4942): it cancels
+    the run's ``PrintLanSequence``, which records the stop on the run (``lan_stopped``),
+    and the progress shows them cancelled. The print on the printer carries on; one
+    being started as the stop arrives still starts. Answers **202** with the run as it
+    was read; follow it, or the output's progress, for the stop."""
+    run = await _waiting_run(runs, run_id)
+    await _to_sequence(runs, run_id, lambda handle: handle.cancel())
+    return run
+
+
+@router.post(
+    "/runs/{run_id}/plate-cleared",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=PrintRun,
+    responses=LAN_CONTROL_RESPONSES,
+    summary="Say the plate is clear, so a native run starts its next print",
+)
+async def post_plate_cleared(run_id: RunIdPath, runs: PrintRunsDep) -> PrintRun:
+    """With ``lan_require_plate_clear`` on (#4939), a native run of several prints waits,
+    once the printer has ended each, for someone to say the plate is clear, as Bambuddy's
+    queue does with its ``require_plate_clear``. While it waits its result says so
+    (``lan_awaiting_clear``). This tells it the plate is clear, and it starts the next
+    print. Answers **202** with the run as it was read; 409 when the run is not waiting
+    for a clear."""
+    run = await _waiting_run(runs, run_id)
+    assert run.result is not None  # `_waiting_run` answers a run with a result
+    if not run.result.lan_awaiting_clear:
+        raise ApiError(status.HTTP_409_CONFLICT, NOT_AWAITING_CLEAR)
+    # The prints started when the person saw it, so a late one never clears a later wait.
+    starts = len(run.result.lan)
+    await _to_sequence(runs, run_id, lambda handle: handle.signal(PLATE_CLEARED_SIGNAL, starts))
     return run
 
 

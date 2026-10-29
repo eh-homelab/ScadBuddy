@@ -293,6 +293,8 @@ export type InventorySpool = Schemas['InventorySpool']
  * hand-kept copy would drift the moment it gains a state.
  */
 export type PrintProgress = Schemas['PrintProgress']
+/** #4942, #4939 — a native run's prints still to start, and its controls. */
+export type LanRunControl = Schemas['LanRunControl']
 /** #977 — what each printer is doing now, whoever started it. */
 export type PrintersNow = Schemas['PrintersNow']
 /** #2351 — Bambuddy's print queue and the farm's totals, read through `/farm`. */

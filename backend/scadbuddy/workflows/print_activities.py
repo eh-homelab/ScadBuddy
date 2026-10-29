@@ -175,6 +175,16 @@ class PrintDeps:
     spools: Spools | None = None
 
 
+def plate_clear_of(planned: PlannedRun, settings: SettingsStore) -> PlannedRun:
+    """``planned`` with ``lan_require_plate_clear`` as it is now (#4939), for a native run
+    of several prints: the run keeps it, so a change applies from the next run. Any
+    other run has no print to wait between, and reads nothing."""
+    if not planned.lan_start or planned.copies * len(planned.plates) < 2:
+        return planned
+    required = settings.snapshot().runtime.lan_require_plate_clear
+    return planned.model_copy(update={"plate_clear": required})
+
+
 def problem(error: ApiError) -> PrintRunError:
     """The problem document the route answered with before #470."""
     return PrintRunError(
@@ -410,7 +420,7 @@ class PrintActivities:
             async with maybe_client(settings, native=native) as client:
                 source = await self._source(client, input.accepted.source, settings)
                 overlay, labels = await self._overlay(input.accepted.prepared)
-                return await heartbeating(
+                planned = await heartbeating(
                     plan_run(
                         client,
                         source,
@@ -425,6 +435,7 @@ class PrintActivities:
                 )
         except ApiError as error:
             raise raised_as(error, FAILED) from None
+        return await asyncio.to_thread(plate_clear_of, planned, self.d.settings_store)
 
     async def _overlay(
         self, prepared: PreparedPlates

@@ -252,6 +252,14 @@ class PrintRunStore:
         place a run that failed before it queued anything is recorded."""
         return await asyncio.to_thread(self._latest_for_output, output_id)
 
+    async def lan_waiting(self, printers: list[str]) -> dict[str, PrintRun]:
+        """Each of ``printers``' newest succeeded native run with prints still to start,
+        neither all started nor stopped (#4942), by printer, in one read: the Prints page
+        card's controls."""
+        if not printers:
+            return {}
+        return await asyncio.to_thread(self._lan_waiting, printers)
+
     async def running_for(self, output_id: str) -> list[PrintRun]:
         """The output's runs still ``running``, newest first: what may still read a
         slice of it (#4312 re-review I-a)."""
@@ -381,6 +389,20 @@ class PrintRunStore:
                 (output_id,),
             ).fetchone()
         return PrintRun.model_validate(row) if row else None
+
+    def _lan_waiting(self, printers: list[str]) -> dict[str, PrintRun]:
+        # The predicate is `print_runs_lan_waiting`'s, so the read is that index's.
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT DISTINCT ON (printer) {_COLUMNS} FROM print_runs"
+                " WHERE printer = ANY(%s::uuid[]) AND status = 'succeeded'"
+                " AND result->'lan_waiting' <> '[]'::jsonb"
+                " AND result->>'lan_stopped' IS NULL"
+                " ORDER BY printer, created_at DESC",
+                (printers,),
+            ).fetchall()
+        runs = [PrintRun.model_validate(row) for row in rows]
+        return {run.printer: run for run in runs if run.printer is not None}
 
     def _running_for(self, output_id: str) -> list[PrintRun]:
         with self._pool.connection() as conn:

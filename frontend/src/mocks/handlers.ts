@@ -3400,6 +3400,7 @@ export const handlers = [
         body.rack_algorithm === 'bambuddy' && body.rack_position == null
           ? []
           : mockRackPicks(body.rack_position ?? null, [body.plate_id ?? 1]),
+      lan_awaiting_clear: false,
     } satisfies PrintRunResult
     // #470: the server answers 202 with a run. This one has already finished, so the
     // client reads its result without polling; GET /print/runs/:id answers it too.
@@ -3423,6 +3424,28 @@ export const handlers = [
   http.get(`${base}/print/runs/:id`, ({ params }) => {
     const run = state.printRuns.get(String(params['id']))
     return run ? HttpResponse.json(run) : problem(404, 'Not Found', `there is no print run ${params['id']}`)
+  }),
+
+  // #4942, #4939 — a native run's prints still to start, as `api/printing.py` answers:
+  // 202 with the run as read, and the change recorded as its sequence would record it.
+  http.post(`${base}/print/runs/:id/:action`, ({ params }) => {
+    const action = String(params['action'])
+    if (action !== 'stop' && action !== 'plate-cleared') return undefined
+    const run = state.printRuns.get(String(params['id']))
+    if (!run) return problem(404, 'Not Found', `there is no print run ${params['id']}`)
+    const result = run.result
+    if (run.status !== 'succeeded' || result?.path !== 'native' || !result.lan_waiting?.length || result.lan_stopped) {
+      return problem(409, 'Conflict', 'This run has no prints still to start: it started every one, or they were stopped.')
+    }
+    if (action === 'plate-cleared' && !result.lan_awaiting_clear) {
+      return problem(409, 'Conflict', 'This run is not waiting for the plate to be cleared.')
+    }
+    const next =
+      action === 'stop'
+        ? { ...result, lan_awaiting_clear: false, lan_stopped: { stage: 'cancelled' as const, message: 'The run was stopped, so the plates still to print were not started.' } }
+        : { ...result, lan_awaiting_clear: false }
+    state.printRuns.set(run.id, { ...run, result: next })
+    return HttpResponse.json(run, { status: 202 })
   }),
 
   /**

@@ -3334,3 +3334,47 @@ describe('a command the backend answers 202 accepting (#2795)', () => {
     expect(followed).toBe(false)
   })
 })
+
+describe("a native run's prints still to start (#4942, #4939)", () => {
+  const RUN = 'fedcba9876543210fedcba9876543210'
+  const run = {
+    id: RUN,
+    subject: `output:${'0'.repeat(32)}`,
+    output_id: '0'.repeat(32),
+    status: 'succeeded',
+    created_at: '2026-10-29T10:00:00Z',
+    result: { library_file_id: 41, copies: 3, path: 'native', lan: [], lan_waiting: [1, 1], lan_awaiting_clear: true },
+  }
+
+  it('are outward: stopping them and saying the plate is clear each act on the printer', () => {
+    expect([tool('stop_print_run').risk, tool('confirm_plate_clear').risk]).toEqual(['outward', 'outward'])
+  })
+
+  it.each([
+    ['stop_print_run', 'stop'],
+    ['confirm_plate_clear', 'plate-cleared'],
+  ])('%s posts to the run', async (name, action) => {
+    let posted = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/runs/${RUN}/${action}`, () => {
+        posted += 1
+        return HttpResponse.json(run, { status: 202 })
+      }),
+    )
+    const result = await runTool({ ...tool(name), gated: false }, { run_id: RUN }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(posted).toBe(1)
+    expect(firstText(result)).toMatchObject({ id: RUN, follow: { tool: 'get_print_progress' } })
+  })
+
+  it('passes the refusal through when nothing waits', async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/runs/${RUN}/stop`, () =>
+        HttpResponse.json({ title: 'Conflict', detail: 'This run has no prints still to start.' }, { status: 409 }),
+      ),
+    )
+    const result = await runTool({ ...tool('stop_print_run'), gated: false }, { run_id: RUN }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('no prints still to start')
+  })
+})
