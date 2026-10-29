@@ -381,7 +381,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
 
     it('a pending review without hook ids keeps the hook overrides', async () => {
       const first = await installApproved()
-      await seed('package:greeter', { [hookRow(first)]: 'off', 'skill:gone': 'off' })
+      await seed('package:greeter', { [hookRow(first)]: 'off' })
       repos.greeter!.commitFiles({
         'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Was the user waved at?' }] }] } }),
       })
@@ -392,9 +392,48 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         UPDATE ai_plugin_packages
         SET pending_review = jsonb_set(pending_review, '{hooks}',
           (SELECT jsonb_agg(h - 'id') FROM jsonb_array_elements(pending_review -> 'hooks') AS h))`
+      await seed('package:greeter', { 'skill:gone': 'off' })
       await store.approve('greeter', pending.pending!.commit_sha, pending.pending!.content_hash)
-      // It cannot tell a kept hook from a lost one, so no hook row goes; the lost skill does.
-      expect(await accessRows()).toEqual([`package:greeter ${hookRow(first)}=off`])
+      // It cannot tell a kept hook from a lost one, nor name items as this code does: no item row goes.
+      expect(await accessRows()).toEqual([`package:greeter ${hookRow(first)}=off`, 'package:greeter skill:gone=off'])
+    })
+
+    it('an off root skill survives a package switch write over an old review', async () => {
+      repos.solo = gitRepo({
+        '.claude-plugin/plugin.json': JSON.stringify({ name: 'solo' }),
+        'SKILL.md': '---\ndescription: Alone.\n---\n\nAlone.\n',
+      })
+      const installed = await store.create(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/solo.git' })))
+      await store.approve('solo', installed.commit_sha, installed.content_hash)
+      await seed('package:solo', { 'skill:solo': 'off' })
+      // The review as an older vet wrote it: the root skill named by its vet folder, no `described`.
+      await db.sql`
+        UPDATE ai_plugin_packages
+        SET review = (review - 'described' - 'local_servers') || jsonb_build_object('skills', jsonb_build_array('solo:pkg'))`
+      await store.setEnabled('solo', true)
+      expect(await accessRows()).toEqual(['package:solo skill:solo=off'])
+    })
+
+    it("keeps every server's rows over a review stored without its server list", async () => {
+      await installApproved()
+      await seed('package:greeter/mcp:mem', { recall: 'read' })
+      await seed('package:greeter/mcp:box', { '*': 'off' })
+      await list('package:greeter/mcp:box')
+      await db.sql`UPDATE ai_plugin_packages SET review = review - 'local_servers'`
+      await store.setEnabled('greeter', true)
+      expect(await accessRows()).toEqual(['package:greeter/mcp:box *=off', 'package:greeter/mcp:mem recall=read'])
+      expect(await listings()).toEqual(['package:greeter/mcp:box'])
+    })
+
+    it('keeps the rows of a local server whose name holds a newline', async () => {
+      repos.greeter!.commitFiles({
+        '.mcp.json': JSON.stringify({ mcpServers: { mem: { type: 'http', url: 'https://mcp.example/mcp/' }, 'a\nb': { command: 'box' } } }),
+      })
+      const installed = await install()
+      expect(installed.review.local_servers).toEqual(['a\nb'])
+      await seed('package:greeter/mcp:a\nb', { '*': 'off' })
+      await store.approve('greeter', installed.commit_sha, installed.content_hash, true)
+      expect(await accessRows()).toEqual(['package:greeter/mcp:a\nb *=off'])
     })
 
     it("rows an older replica's approval left are pruned by the next write to the package", async () => {
@@ -683,6 +722,19 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         expect.stringMatching(/^plugin name "bad name" is not 1–64/),
       ])
       expect(await store.list()).toEqual([])
+    })
+
+    it('answers 422 for a re-pin to a commit no approval can allow, and changes no access row', async () => {
+      const installed = await install()
+      await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      await db.sql`INSERT INTO ai_access (source, item, access, updated_by) VALUES ('package:greeter', 'skill:gone', 'off', 'test')`
+      repos.greeter!.commitFiles({ 'agents/long.md': `---\nname: ${'a'.repeat(1025)}\ndescription: Long.\n---\n\nLong.\n` })
+      const res = await app().request('/api/v1/ai/plugin-packages/greeter/repin', json('POST', { ref: 'main' }))
+      expect(res.status).toBe(422)
+      expect(((await res.json()) as { problems: string[] }).problems).toContainEqual(expect.stringMatching(/longer than 1024/))
+      expect((await store.get('greeter'))?.pending).toBeNull()
+      const rows = await db.sql<{ item: string }[]>`SELECT item FROM ai_access WHERE source = 'package:greeter'`
+      expect(rows.map((r) => r.item)).toEqual(['skill:gone'])
     })
 
     it('answers 400 for a bad source', async () => {

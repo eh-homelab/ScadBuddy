@@ -87,6 +87,13 @@ export type PackageReview = {
   agents: string[]
   hooks: ReviewHook[]
   mcp_servers: ReviewMcpServer[]
+  /**
+   * Every other server the package declares, by name (#4757): a local (stdio) one, which loads
+   * only with `allow_refused`, or one no turn offers. With `mcp_servers`, every server a
+   * `package:<name>/mcp:<server>` row may be for (store.ts `pruneStaleRows`). Absent in an
+   * older review.
+   */
+  local_servers?: string[]
   /** Every Markdown and JSON file, for the admin to read. */
   files: string[]
   /**
@@ -797,8 +804,10 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
   }
 
   const mcpServers: ReviewMcpServer[] = []
+  const serverNames: string[] = []
   for (const { where, map } of declared.mcp) {
     for (const [server, config] of mcpEntries(map)) {
+      serverNames.push(server)
       if (!isRecord(config)) continue // pluginProblems reports it
       const dollars = dollarFields(config)
       if (dollars.length) {
@@ -832,6 +841,7 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
         agents: markdownIn(abs, m.agents, 'agents', true).map((a) => `${name}:${a}`),
         hooks,
         mcp_servers: mcpServers,
+        local_servers: [...new Set(serverNames)].filter((s) => !mcpServers.some((m) => m.name === s)).sort(),
         files: files.filter((f) => /\.(md|json)$/i.test(f)),
         builtin_tools: [...builtins].sort(),
         described: Object.fromEntries(items.described),
