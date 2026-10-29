@@ -1130,6 +1130,17 @@ class OrderStore:
             raise LookupError(f"no fulfilment {fulfilment_id}")
         return Fulfilment.model_validate(row)
 
+    def unaccept_fulfilment(self, conn: Conn, fulfilment_id: str) -> Fulfilment:
+        """An unfulfil (#4952): the attempt stays, no longer counted as made."""
+        row = conn.execute(
+            "UPDATE order_item_fulfilments SET accepted_at = NULL"
+            f" WHERE id = %s RETURNING {_FULFILMENT}",
+            (fulfilment_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"no fulfilment {fulfilment_id}")
+        return Fulfilment.model_validate(row)
+
     def fulfilment(self, fulfilment_id: str, *, conn: Conn | None = None) -> Fulfilment | None:
         with self._read(conn) as c:
             row = c.execute(

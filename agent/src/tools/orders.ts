@@ -531,6 +531,26 @@ export const orderTools: Tool[] = [
     },
   }),
   defineTool({
+    name: 'order_item_unfulfil',
+    description:
+      "Undo a line item's fulfilment (#4952): its latest accepted attempt is no longer counted as made (the attempt " +
+      'stays, and order_item_fulfil may edit or accept it again), and the item goes back to the status its latest ' +
+      'attempt gives it (`approved`, or `failed`); the order follows (`ready` goes back to `in_production`). ' +
+      'Refused with `item_not_fulfilled`, `order_item_shipped` (a shipment carries the item: its `shipments` name ' +
+      'them; take the item off them with order_ship first) and `order_on_hold`. Outward, as accepting the attempt is.',
+    input: z.object({ order_id: orderId, item_id: itemId }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/unfulfil'],
+    summarize: ({ order_id, item_id }) => `Undo the fulfilment of item ${item_id} of order ${order_id}`,
+    handler: async ({ order_id, item_id }, { backend }) =>
+      json(
+        await ok(
+          backend.POST('/api/v1/orders/{order_id}/items/{item_id}/unfulfil', { params: { path: { order_id, item_id } } }),
+          `unfulfil item ${item_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_ship',
     description:
       'Record a shipment of fulfilled items (or edit one with `shipment_id`): carrier, service, tracking, when, the ' +

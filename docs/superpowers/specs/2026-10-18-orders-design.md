@@ -256,6 +256,15 @@ the body.
   priced items only.
 - Both reopens are allowed while the order is on hold, as a cancel is: undoing a
   mistake does not advance the order.
+- `POST /orders/{id}/items/{item}/unfulfil` (#4952) undoes a fulfilment. The item's
+  latest accepted attempt is marked not accepted; the attempt row stays, and a person
+  may edit or accept it again. The item takes the status its latest attempt gives it:
+  `approved`, or `failed` when that attempt failed. Then the order's status follows
+  (`ready` goes back to `in_production`). One `item.unfulfilled` audit row names the
+  attempt. It is refused for an item not `fulfilled` (`item_not_fulfilled`), for an
+  item a shipment carries (`order_item_shipped`, naming the shipments: take the item off
+  them first), on hold (`order_on_hold`, as every move of a fulfilment), and once the
+  order ended (`order_closed`/`order_cancelled`).
 - A cancel's or a close's release drops its holds after its commit, under the orders'
   row locks and only for quotes still released then (`OrderStore.drop_released_holds`),
   so a reopen racing it keeps the holds it took.

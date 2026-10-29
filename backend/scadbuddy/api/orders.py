@@ -966,6 +966,24 @@ async def accept_fulfilment(
     )
 
 
+@router.post(
+    "/{order_id}/items/{item_id}/unfulfil",
+    response_model=OrderItem,
+    summary="Undo a line item's fulfilment",
+    description=(
+        "Marks the item's latest accepted attempt not accepted (the attempt stays) and "
+        "returns the item to the status its latest attempt gives it (`approved` or "
+        "`failed`); the order's status follows. 409 `item_not_fulfilled`, "
+        "`order_item_shipped` (a shipment carries it: its `shipments` name them), "
+        "`order_on_hold`, `order_not_accepted` and `order_closed`/`order_cancelled`."
+    ),
+)
+async def unfulfil_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderItem:
+    _path(order_id, item_id)
+    by = current_actor()
+    return await _run(lambda: orders.lifecycle.unfulfil_item(order_id, item_id, by))
+
+
 # -- shipments (§6.3) --------------------------------------------------------------------------
 
 

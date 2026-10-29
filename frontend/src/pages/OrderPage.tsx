@@ -15,6 +15,8 @@ import { QUANTITY_HINT, parseQuantity } from '../components/orders/quantity'
 import { QuoteEditor } from '../components/orders/QuoteEditor'
 import { refusalItems, refusalText } from '../components/orders/refusal'
 import { ShipmentForm } from '../components/orders/ShipmentForm'
+import { UnfulfilDialog } from '../components/orders/Unfulfil'
+import { offersUnfulfil, unfulfilBlock } from '../components/orders/unfulfilRules'
 import { useSliceQuotes } from '../components/orders/useSliceQuotes'
 import { RecordDrawer } from '../components/records/RecordDrawer'
 import { Button } from '@/components/ui/button'
@@ -240,6 +242,8 @@ export function OrderPage() {
           canAdd={editable}
           selected={current?.id ?? null}
           quoting={slices.runs}
+          onHold={order.on_hold}
+          shipments={shipments}
         />
 
         <div className="grid gap-4 md:grid-cols-2">
@@ -428,6 +432,8 @@ function ItemDrawer({
   const editable = OPEN_FOR_EDITS.has(order.status)
   const settled = item.status === 'fulfilled' || item.status === 'cancelled'
   const [error, setError] = useState<string | null>(null)
+  const [unfulfilling, setUnfulfilling] = useState(false)
+  const unfulfilBlocked = unfulfilBlock(order, detail.shipments, item)
   const [quantity, setQuantity] = useState(String(item.quantity))
   const [title, setTitle] = useState(item.title)
   useEffect(() => {
@@ -465,7 +471,19 @@ function ItemDrawer({
         </>
       }
       footer={
-        item.status === 'cancelled' && !ENDED.has(order.status) ? (
+        offersUnfulfil(order, item) ? (
+          <>
+            <Button variant="outline" disabled={unfulfilBlocked !== null} onClick={() => setUnfulfilling(true)}>
+              Unfulfil…
+            </Button>
+            {unfulfilBlocked && (
+              <p className="text-xs text-muted-foreground" data-testid="unfulfil-blocked">
+                {unfulfilBlocked}
+              </p>
+            )}
+            <UnfulfilDialog orderId={order.id} item={item} open={unfulfilling} onOpenChange={setUnfulfilling} onChanged={onChanged} />
+          </>
+        ) : item.status === 'cancelled' && !ENDED.has(order.status) ? (
           editable || item.quotes.some((q) => q.accepted) ? (
             <Button variant="outline" onClick={() => void run(() => api.reopenOrderItem(order.id, item.id))}>
               Reopen item

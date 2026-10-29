@@ -640,7 +640,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   recorded, with the items it took) and `reopen_item` (a cancelled item back to what its
   quotes and attempts give it), each taking its quotes' sliced-file holds again (`_hold`);
   `POST /customers/{id}/unarchive`. Agent `order_reopen` (outward, as a cancel) and
-  `customer_upsert`'s `unarchive`.
+  `customer_upsert`'s `unarchive`. `Lifecycle.unfulfil_item` (#4952, `POST
+  …/items/{item}/unfulfil`, agent `order_item_unfulfil`, outward) clears the latest
+  accepted attempt's `accepted_at` (the row stays) and sets the item to what its latest
+  attempt gives; refused for an item on a shipment (`order_item_shipped`) and on hold.
+  The browser's row menu and drawer (`components/orders/Unfulfil.tsx`) confirm first.
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
   times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
