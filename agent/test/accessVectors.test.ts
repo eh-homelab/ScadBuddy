@@ -1,7 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { type AccessRow, MIGRATED_BY, registrySource, type StoredOverrides, TOOL_ACCESS } from '../src/access/model.js'
-import { type CallPlugin, type ItemKind, itemKindIn, offCallItem } from '../src/access/items.js'
+import { type CallPlugin, type ItemKind, itemKindIn, offCallItem, offItemReason } from '../src/access/items.js'
 import { registryOverrides, sourceEnabled } from '../src/access/resolve.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import type { AccessReader } from '../src/access/store.js'
@@ -17,7 +17,7 @@ type RegistryVector = { name: string; durable_only?: true; tools: VectorTool[]; 
 type SourceVector = { name: string; source: string; rows: AccessRow[]; expect: boolean }
 type ItemKindVector = { source: string; item: string; expect: ItemKind }
 /** One Skill, Agent or Task call (#4757): the item it names that is off, or null. */
-type CallVector = { name: string; tool: string; input: unknown; plugins: CallPlugin[]; rows: AccessRow[]; expect: string | null }
+type CallVector = { name: string; tool: string; input: unknown; plugins: CallPlugin[]; rows: AccessRow[]; expect: { source: string; item: string; reason: string } | null }
 type Vectors = {
   tool_access: string[]
   item_kinds: ItemKindVector[]
@@ -43,12 +43,21 @@ const none: StoredOverrides = { tool_tiers: {}, disabled_tools: [] }
 const PA = 'package:pa'
 const PB = 'package:pb'
 const OWN = 'builtin:own-plugin'
-/** Two packages and the own plugin; `pa`'s `agents/review/deep.md` declares `name: deep-review`, two skills declare `name: tidy`. */
+/**
+ * Two packages and the own plugin, each with the items it has. `pa`'s `agents/review/deep.md`
+ * declares `name: deep-review`; its skills `sweep` and `dust` both declare `name: tidy`.
+ */
 const PLUGINS: CallPlugin[] = [
-  { name: 'pa', source: PA, aliases: { 'subagent:deep-review': ['subagent:review:deep'], 'skill:tidy': ['skill:sweep', 'skill:dust'] } },
-  { name: 'pb', source: PB, aliases: {} },
-  { name: 'scadbuddy', source: OWN, aliases: {} },
+  {
+    name: 'pa',
+    source: PA,
+    items: ['skill:jot', 'skill:wave', 'skill:sweep', 'skill:dust', 'subagent:reviewer', 'subagent:review:deep'],
+    aliases: { 'subagent:deep-review': ['subagent:review:deep'], 'skill:tidy': ['skill:sweep', 'skill:dust'] },
+  },
+  { name: 'pb', source: PB, items: ['skill:jot', 'skill:dust', 'subagent:reviewer'], aliases: {} },
+  { name: 'scadbuddy', source: OWN, items: ['skill:print', 'subagent:print-analyst'], aliases: {} },
 ]
+const off = (source: string, item: string): CallVector['expect'] => ({ source, item, reason: offItemReason({ source, item }) })
 
 function build(): Vectors {
   return {
@@ -150,16 +159,16 @@ function build(): Vectors {
       { name: 'a source with a newline is no package server', source: 'package:pk\n/mcp:srv', rows: [], expect: false },
     ],
     calls: [
-      { name: 'a qualified skill off', tool: 'Skill', input: { skill: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: 'skill:jot' },
+      { name: 'a qualified skill off', tool: 'Skill', input: { skill: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: off(PA, 'skill:jot') },
       { name: 'a qualified skill of another plugin', tool: 'Skill', input: { skill: 'pb:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: null },
-      { name: 'an unqualified skill off in one plugin', tool: 'Skill', input: { skill: 'jot' }, plugins: PLUGINS, rows: [row(PB, 'skill:jot', 'off')], expect: 'skill:jot' },
+      { name: 'an unqualified skill off in one plugin', tool: 'Skill', input: { skill: 'jot' }, plugins: PLUGINS, rows: [row(PB, 'skill:jot', 'off')], expect: off(PB, 'skill:jot') },
       {
         name: 'an unqualified subagent off in one plugin',
         tool: 'Agent',
         input: { subagent_type: 'reviewer', prompt: 'p' },
         plugins: PLUGINS,
         rows: [row(PB, 'subagent:reviewer', 'off')],
-        expect: 'subagent:reviewer',
+        expect: off(PB, 'subagent:reviewer'),
       },
       {
         name: 'a subagent by its frontmatter name',
@@ -167,7 +176,7 @@ function build(): Vectors {
         input: { subagent_type: 'pa:deep-review' },
         plugins: PLUGINS,
         rows: [row(PA, 'subagent:review:deep', 'off')],
-        expect: 'subagent:review:deep',
+        expect: off(PA, 'subagent:review:deep'),
       },
       {
         name: 'a nested subagent named without its plugin',
@@ -175,18 +184,37 @@ function build(): Vectors {
         input: { subagent_type: 'review:deep' },
         plugins: PLUGINS,
         rows: [row(PA, 'subagent:review:deep', 'off')],
-        expect: 'subagent:review:deep',
+        expect: off(PA, 'subagent:review:deep'),
       },
-      { name: 'Task as Agent', tool: 'Task', input: { subagent_type: 'pa:reviewer' }, plugins: PLUGINS, rows: [row(PA, 'subagent:reviewer', 'off')], expect: 'subagent:reviewer' },
-      { name: 'an alias with several targets, one off', tool: 'Skill', input: { skill: 'pa:tidy' }, plugins: PLUGINS, rows: [row(PA, 'skill:dust', 'off')], expect: 'skill:dust' },
+      { name: 'Task as Agent', tool: 'Task', input: { subagent_type: 'pa:reviewer' }, plugins: PLUGINS, rows: [row(PA, 'subagent:reviewer', 'off')], expect: off(PA, 'subagent:reviewer') },
+      { name: 'an alias with several targets, one off', tool: 'Skill', input: { skill: 'pa:tidy' }, plugins: PLUGINS, rows: [row(PA, 'skill:dust', 'off')], expect: off(PA, 'skill:dust') },
       { name: "an alias is its own plugin's only", tool: 'Skill', input: { skill: 'pb:tidy' }, plugins: PLUGINS, rows: [row(PB, 'skill:dust', 'off')], expect: null },
-      { name: "the own plugin's skill off", tool: 'Skill', input: { skill: 'scadbuddy:print' }, plugins: PLUGINS, rows: [row(OWN, 'skill:print', 'off')], expect: 'skill:print' },
+      { name: "the own plugin's skill off", tool: 'Skill', input: { skill: 'scadbuddy:print' }, plugins: PLUGINS, rows: [row(OWN, 'skill:print', 'off')], expect: off(OWN, 'skill:print') },
       { name: 'an on row refuses nothing', tool: 'Skill', input: { skill: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'on')], expect: null },
       { name: 'a skill row does not refuse a subagent', tool: 'Agent', input: { subagent_type: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: null },
       { name: 'a row of an unloaded source refuses nothing', tool: 'Skill', input: { skill: 'pc:jot' }, plugins: PLUGINS, rows: [row('package:pc', 'skill:jot', 'off')], expect: null },
       { name: 'a tool that is not Skill, Agent or Task', tool: 'Bash', input: { skill: 'pa:jot', subagent_type: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off'), row(PA, 'subagent:jot', 'off')], expect: null },
       { name: 'an input without the field', tool: 'Skill', input: { subagent_type: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: null },
       { name: 'an input that is not an object', tool: 'Agent', input: 'pa:reviewer', plugins: PLUGINS, rows: [row(PA, 'subagent:reviewer', 'off')], expect: null },
+      // Claude Code 2.1.310's Skill tool trims the name and drops one leading `/`, then matches exactly (items.ts `callNames`).
+      { name: 'a skill name with spaces around it', tool: 'Skill', input: { skill: '  pa:jot\n' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: off(PA, 'skill:jot') },
+      { name: 'a skill name with a leading slash', tool: 'Skill', input: { skill: '/pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: off(PA, 'skill:jot') },
+      { name: 'a command named as its slash command, spaced', tool: 'Skill', input: { skill: ' /wave ' }, plugins: PLUGINS, rows: [row(PA, 'skill:wave', 'off')], expect: off(PA, 'skill:wave') },
+      { name: 'only one leading slash is dropped', tool: 'Skill', input: { skill: '//pa:jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: null },
+      { name: 'a skill name in other case is another name', tool: 'Skill', input: { skill: 'PA:Jot' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: null },
+      // Its Agent tool takes the exact agent type, else the one whose NFKC, lower-cased form without spaces, dashes and underscores is the same.
+      { name: 'a subagent type in other case and spacing', tool: 'Agent', input: { subagent_type: ' PA:Re_viewer ' }, plugins: PLUGINS, rows: [row(PA, 'subagent:reviewer', 'off')], expect: off(PA, 'subagent:reviewer') },
+      { name: 'a frontmatter name normalised', tool: 'Agent', input: { subagent_type: 'pa:Deep_Review' }, plugins: PLUGINS, rows: [row(PA, 'subagent:review:deep', 'off')], expect: off(PA, 'subagent:review:deep') },
+      { name: 'a subagent type in full-width letters', tool: 'Task', input: { subagent_type: 'ｒｅｖｉｅｗｅｒ' }, plugins: PLUGINS, rows: [row(PB, 'subagent:reviewer', 'off')], expect: off(PB, 'subagent:reviewer') },
+      { name: 'a subagent type keeps its slash', tool: 'Agent', input: { subagent_type: '/reviewer' }, plugins: PLUGINS, rows: [row(PB, 'subagent:reviewer', 'off')], expect: null },
+      // #4757 review M2: a row refuses only an item its plugin has.
+      { name: 'a built-in subagent type with no item is left alone (a stale off row)', tool: 'Agent', input: { subagent_type: 'general-purpose' }, plugins: PLUGINS, rows: [row(PB, 'subagent:general-purpose', 'off')], expect: null },
+      { name: 'a stale off skill row of a plugin without it', tool: 'Skill', input: { skill: 'jot' }, plugins: PLUGINS, rows: [row(OWN, 'skill:jot', 'off')], expect: null },
+      // #4757 review M1: a plugin switched off as a whole refuses every call that reaches one of its items.
+      { name: 'a package switched off', tool: 'Skill', input: { skill: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, '*', 'off')], expect: off(PA, '*') },
+      { name: 'the own plugin switched off', tool: 'Agent', input: { subagent_type: 'print-analyst' }, plugins: PLUGINS, rows: [row(OWN, '*', 'off')], expect: off(OWN, '*') },
+      { name: "a switched-off plugin does not refuse another's item", tool: 'Skill', input: { skill: 'pb:jot' }, plugins: PLUGINS, rows: [row(PA, '*', 'off')], expect: null },
+      { name: 'a switch reaches only a name the plugin has', tool: 'Agent', input: { subagent_type: 'general-purpose' }, plugins: PLUGINS, rows: [row(PA, '*', 'off')], expect: null },
     ],
   }
 }
@@ -232,7 +260,10 @@ describe('access vectors', () => {
 
   it.each(built.sources)('source: $name', (v) => expect(sourceEnabled(v.source, v.rows)).toBe(v.expect))
 
-  it.each(built.calls)('call: $name', (v) => expect(offCallItem(v.tool, v.input, v.plugins, v.rows) ?? null).toBe(v.expect))
+  it.each(built.calls)('call: $name', (v) => {
+    const found = offCallItem(v.tool, v.input, v.plugins, v.rows)
+    expect(found ? { ...found, reason: offItemReason(found) } : null).toEqual(v.expect)
+  })
 
   it("names each tool's registry source", () => {
     for (const [tool, source] of Object.entries(built.registry_source)) expect(registrySource(tool)).toBe(source)

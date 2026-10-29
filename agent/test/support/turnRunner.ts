@@ -4,6 +4,7 @@ import { createSdkMcpServer } from '@anthropic-ai/claude-agent-sdk'
 import { ROOT_CONTEXT } from '@opentelemetry/api'
 import { type AccessRow, BUILTIN_SOURCES, SOURCE_ITEM } from '../../src/access/model.js'
 import { AccessResolver } from '../../src/access/resolver.js'
+import type { AccessReader } from '../../src/access/store.js'
 import { SETTING_RECALL_MAX_QUERY_CHARS } from '../../src/memory/hindsight.js'
 import type { ApprovalRequest, RiskTier } from '../../src/harness/permissions.js'
 import { builtInPolicy } from '../../src/plugins/builtInTools.js'
@@ -48,6 +49,8 @@ export type TurnRunnerTestOptions = {
   ownPlugin?: string
   /** The turn's packages; three that are never read when undefined. */
   packages?: Omit<PackagesForRun, 'release'>
+  /** Wraps the access store's reader (a read that fails, #4757). */
+  reader?: (base: AccessReader) => AccessReader
 }
 
 /** The runner's `sql`, which only http_request's saved bodies would use: these tests save none. */
@@ -96,6 +99,8 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
     rows.push({ source: BUILTIN_SOURCES.http, item: SOURCE_ITEM, access: options.httpRequest ? 'on' : 'off', updated_by: 'test' })
   }
   const store = memoryAccess(rows)
+  /** Every event the turn appended to the session's log. */
+  const appended: unknown[] = []
   const runner = new TurnRunner({
     sql: unusedSql,
     paths,
@@ -109,7 +114,7 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
         return Promise.resolve(stored[key] as T | undefined)
       },
     },
-    access: new AccessResolver(store.access),
+    access: new AccessResolver(options.reader ? options.reader(store.access) : store.access),
     tierOf: () => 'read',
     mcpServers: () => ({ scadbuddy: createSdkMcpServer({ name: 'scadbuddy', tools: [] }) }),
     prepareApproval: options.prepareApproval ?? (() => async () => undefined),
@@ -164,7 +169,12 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
       append: () => Promise.resolve(),
       load: () => Promise.resolve(null),
     },
-    events: { append: () => Promise.resolve([]) },
+    events: {
+      append: (_id: string, events: readonly unknown[]) => {
+        appended.push(...events)
+        return Promise.resolve([] as number[])
+      },
+    },
     files: {} as SessionFiles,
   })
   const seen: { turnId: string; toolUseId: string }[] = []
@@ -190,5 +200,5 @@ export async function turnRunnerForTest(options: TurnRunnerTestOptions = {}) {
       }
     },
   }
-  return { runner, session, principal, gateCalls, paths, access: store.access }
+  return { runner, session, principal, gateCalls, paths, access: store.access, appended }
 }

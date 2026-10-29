@@ -562,12 +562,12 @@ export function packageItems(root: string, manifest: Record<string, unknown>, fa
 }
 
 /**
- * `PackageItems.aliases` of the package at `root` as it is loaded (#4757): read from its
- * files, so a review stored before them cannot leave a name out. The call rule's
- * (access/items.ts `CallPlugin.aliases`).
+ * `packageItems` of the plugin at `root`, read from its files as it is loaded (#4757): the
+ * call rule's items and aliases (access/items.ts `CallPlugin`) for a plugin loaded as it is,
+ * so a review stored before them cannot leave a name out.
  */
-export function aliasesOf(root: string, packageName: string): Record<string, string[]> {
-  return Object.fromEntries(packageItems(root, declaredConfigs(path.resolve(root)).manifest, packageName).aliases)
+export function itemsOfPlugin(root: string, packageName: string): PackageItems {
+  return packageItems(root, declaredConfigs(path.resolve(root)).manifest, packageName)
 }
 
 type ItemsRead = {

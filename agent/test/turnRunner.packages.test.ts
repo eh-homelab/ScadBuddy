@@ -10,6 +10,9 @@ import { hashTree } from '../src/plugins/packages/hash.js'
 import type { LoadedPackage, PackagesForRun } from '../src/plugins/packages/install.js'
 import { packageItems } from '../src/plugins/packages/vet.js'
 import { turnRunnerForTest } from './support/turnRunner.js'
+import type { AccessReader } from '../src/access/store.js'
+import { TurnAssemblyError } from '../src/sessions/turnRunner.js'
+import { readdir } from 'node:fs/promises'
 
 // A classic turn's packages and own plugin (#4757): each loaded as its derived copy, without
 // what Settings → Tools & plugins switched off; the allowed built-ins by their access.
@@ -50,8 +53,8 @@ function forRun(loaded: LoadedPackage[]): Omit<PackagesForRun, 'release'> {
   }
 }
 
-async function assemble(loaded: LoadedPackage[], access: AccessRow[] = [], ownPlugin = OWN_PLUGIN_DIR) {
-  const rig = await turnRunnerForTest({ ownPlugin, packages: forRun(loaded), access })
+async function assemble(loaded: LoadedPackage[], access: AccessRow[] = [], ownPlugin = OWN_PLUGIN_DIR, reader?: (base: AccessReader) => AccessReader) {
+  const rig = await turnRunnerForTest({ ownPlugin, packages: forRun(loaded), access, ...(reader ? { reader } : {}) })
   const turn = await rig.runner.assemble(rig.session, rig.principal)
   turn.release()
   return { turn, ...rig }
@@ -104,7 +107,9 @@ describe("a classic turn's packages and own plugin (#4757)", () => {
     expect(existsSync(path.join(own, 'skills', 'print'))).toBe(false)
     expect(existsSync(path.join(own, 'skills', 'authoring', 'SKILL.md'))).toBe(true)
     // A call naming it is refused too, mid-turn as at its start.
-    expect(await turn.run.live!.access('Agent', { subagent_type: 'scadbuddy:print-analyst' })).toBe('off')
+    expect(await turn.run.live!.access('Agent', { subagent_type: 'scadbuddy:print-analyst' })).toEqual({
+      off: `subagent "print-analyst" of ScadBuddy's own plugin is switched off in Settings → Tools & plugins; the user can turn it back on there`,
+    })
     expect(await turn.run.live!.access('Agent', { subagent_type: 'scadbuddy:model-author' })).toBeUndefined()
     // Fingerprinted by what was loaded, so a warm process is not reused across the change.
     const plain = await assemble([])
@@ -179,8 +184,39 @@ describe("a classic turn's packages and own plugin (#4757)", () => {
     const review = await pkg({ name: 'review', agents: { 'review/deep.md': '---\nname: deep-review\ndescription: deep\n---\nDeep.\n' } })
     const { turn } = await assemble([solo, review], [row(packageSource('solo'), 'skill:solo', 'off'), row(packageSource('review'), 'subagent:review:deep', 'off')])
     expect(existsSync(path.join(copyOf(turn.run.pluginPaths, solo), 'SKILL.md'))).toBe(false)
-    expect(await turn.run.live!.access('Skill', { skill: 'solo:solo' })).toBe('off')
-    expect(await turn.run.live!.access('Agent', { subagent_type: 'review:deep-review' })).toBe('off')
-    expect(await turn.run.live!.access('Agent', { subagent_type: 'review:review:deep' })).toBe('off')
+    expect(await turn.run.live!.access('Skill', { skill: 'solo:solo' })).toMatchObject({ off: expect.stringContaining('skill "solo"') })
+    expect(await turn.run.live!.access('Agent', { subagent_type: 'review:deep-review' })).toMatchObject({ off: expect.stringContaining('subagent "review:deep"') })
+    expect(await turn.run.live!.access('Agent', { subagent_type: 'review:review:deep' })).toMatchObject({ off: expect.stringContaining('subagent "review:deep"') })
+  })
+
+  it('leaves out a local server whose tools would carry a name with __, and says so as a durable turn does', async () => {
+    const notes = await pkg({ name: 'notes', allowed: true, mcp: { mcpServers: { x__y: { command: 'node' }, ok: { command: 'node' } } } })
+    const { turn, appended } = await assemble([notes], [row(packageServerSource('notes', 'x__y'), 'run', 'off')])
+    const servers = JSON.parse(await readFile(path.join(copyOf(turn.run.allowedPluginPaths, notes), '.mcp.json'), 'utf8')) as { mcpServers: Record<string, unknown> }
+    expect(Object.keys(servers.mcpServers)).toEqual(['ok'])
+    expect(JSON.stringify(appended)).toContain('plugin package notes: MCP server \\"x__y\\" has a name that cannot be offered')
+  })
+
+  it('loads nothing when what is off cannot be read', async () => {
+    const notes = await pkg({ name: 'notes', skills: ['jot', 'wipe'] })
+    const failing = (base: AccessReader): AccessReader => ({
+      rows: (sources) => (sources.some((s) => s.startsWith('package:')) ? Promise.reject(new Error('db down')) : base.rows(sources)),
+    })
+    const rig = await turnRunnerForTest({ ownPlugin: OWN_PLUGIN_DIR, packages: forRun([notes]), access: [row(packageSource('notes'), 'skill:wipe', 'off')], reader: failing })
+    await expect(rig.runner.assemble(rig.session, rig.principal)).rejects.toBeInstanceOf(TurnAssemblyError)
+    expect(await readdir(path.join(rig.paths.stateDir, 'plugins-local')).catch(() => [])).toEqual([])
+  })
+
+  it('does not load the own plugin when its copy cannot be made, and says so', async () => {
+    // A name that is not a safe path segment: its copy cannot be placed.
+    const own = await mkdtemp(path.join(os.tmpdir(), 'runner-own-'))
+    await mkdir(path.join(own, '.claude-plugin'))
+    await writeFile(path.join(own, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'not safe/name' }))
+    await mkdir(path.join(own, 'skills', 'print'), { recursive: true })
+    await writeFile(path.join(own, 'skills', 'print', 'SKILL.md'), '---\nname: print\ndescription: prints\n---\nPrint.\n')
+    const { turn, appended } = await assemble([], [row(BUILTIN_SOURCES.ownPlugin, 'skill:print', 'off')], own)
+    expect(turn.run.ownPlugin).toBeUndefined()
+    expect(turn.fingerprintParts.ownPlugin).toBeNull()
+    expect(JSON.stringify(appended)).toContain("ScadBuddy's own plugin was not loaded")
   })
 })

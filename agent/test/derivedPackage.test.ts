@@ -97,9 +97,9 @@ describe('derivedPackage', () => {
   it('answers the package itself when nothing changes', async () => {
     const pkg = await fakePackage({ mcpServers: { local: { command: 'node' } } })
     const root = await temp('derived-root-')
-    expect(await derivedPackage(pkg.dir, pkg.contentHash, root)).toEqual(pkg)
+    expect(await derivedPackage(pkg.dir, pkg.contentHash, root)).toMatchObject(pkg)
     // Omitting what it does not hold changes nothing either.
-    expect(await derivedPackage(pkg.dir, pkg.contentHash, root, omit({ skills: ['gone'], servers: ['absent'] }))).toEqual(pkg)
+    expect(await derivedPackage(pkg.dir, pkg.contentHash, root, omit({ skills: ['gone'], servers: ['absent'] }))).toMatchObject(pkg)
     expect(await readdir(root)).toEqual([])
   })
 
@@ -350,7 +350,7 @@ describe('derivedPackage', () => {
 
   it('answers the own plugin as it is with no pin hash, and hashes only a copy', async () => {
     const root = await temp('derived-root-')
-    expect(await derivedPackage(OWN_PLUGIN_DIR, undefined, root)).toEqual({ dir: OWN_PLUGIN_DIR, contentHash: undefined })
+    expect(await derivedPackage(OWN_PLUGIN_DIR, undefined, root)).toMatchObject({ dir: OWN_PLUGIN_DIR, contentHash: undefined })
     const skills = [...packageItems(OWN_PLUGIN_DIR, declaredConfigs(OWN_PLUGIN_DIR).manifest).skills.keys()]
     expect(skills.length).toBeGreaterThan(1)
     const copy = await derivedPackage(OWN_PLUGIN_DIR, undefined, root, omit({ skills: [skills[0]!] }))

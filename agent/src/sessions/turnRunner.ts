@@ -13,7 +13,7 @@ import type { SDKMessage, SessionStore } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, ROOT_CONTEXT } from '@opentelemetry/api'
 import { NoUsableCredentialError, type PooledCredential } from '../harness/fallback.js'
 import { BUILTIN_SOURCES, packageServerSource, packageSource, type ToolAccess } from '../access/model.js'
-import type { CallPlugin } from '../access/items.js'
+import { type CallPlugin, skillItem, subagentItem } from '../access/items.js'
 import type { PackageAccess } from '../access/resolver.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
 import { liveAccess } from '../access/live.js'
@@ -28,8 +28,8 @@ import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { PluginEndpoint, PluginsForRun } from '../plugins/forwarder.js'
 import type { PackagesForRun } from '../plugins/packages/install.js'
 import { builtinsOffOf, derivedPackage, omitsAny, omittedOf, packageOmitted } from '../plugins/packages/derived.js'
-import { collidingServerNames, localServers, type PackageServers, serverAccess, type ServerAccess } from '../plugins/packages/mcp.js'
-import { aliasesOf, OWN_PLUGIN_NAME } from '../plugins/packages/vet.js'
+import { collidingServerNames, localServers, type PackageServers, serverAccess, type ServerAccess, unofferableNameProblem, unofferedLocalServers } from '../plugins/packages/mcp.js'
+import { itemsOfPlugin, OWN_PLUGIN_NAME, type PackageItems } from '../plugins/packages/vet.js'
 import { harnessToolName, toolPrefix } from '../plugins/registry.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import { withSpan } from '../telemetry/trace.js'
@@ -331,17 +331,23 @@ export class TurnRunner {
       const itemAccess = this.deps.access && itemSources.length ? await this.deps.access.packageAccess(itemSources) : new Map<string, PackageAccess>()
       const switches = loadedPackages.length ? await serverAccess(loadedPackages, this.deps.access) : new Map<string, ServerAccess>()
       const colliding = collidingServerNames(loadedPackages)
+      const unoffered = unofferedLocalServers(loadedPackages)
       const localRoot = path.join(this.deps.paths.stateDir, 'plugins-local')
       /** The built-ins the allowed packages name that no turn offers: `off` across them. */
       const builtinsOff = builtinsOffOf(loadedPackages, itemAccess)
-      const problems: string[] = []
+      // A local server no turn can offer is left out of its copy, and said, as a durable turn says it.
+      const problems: string[] = unoffered.map(({ pkg, server }) => unofferableNameProblem(pkg, server))
+      /** The own plugin's items when its copy was made (read from its source); else read below. */
+      let ownItems: PackageItems | undefined
       // The own plugin as a copy without what is off; with nothing off, as it is. One that
       // cannot be made is not loaded, and said: never loaded with an off item in it.
       if (ownPlugin !== undefined) {
         const omitted = omittedOf(itemAccess.get(BUILTIN_SOURCES.ownPlugin), new Map())
         if (omitsAny(omitted)) {
           try {
-            ownPlugin = (await derivedPackage(ownPlugin, undefined, localRoot, omitted, OWN_PLUGIN_NAME)).dir
+            const copy = await derivedPackage(ownPlugin, undefined, localRoot, omitted, OWN_PLUGIN_NAME)
+            ownPlugin = copy.dir
+            ownItems = copy.items
           } catch (err) {
             problems.push(`ScadBuddy's own plugin was not loaded: ${(err as Error).message}`)
             ownPlugin = undefined
@@ -351,6 +357,8 @@ export class TurnRunner {
       // Each loaded directory's package and the hash of what Claude Code is handed, by its path.
       const packageNames = new Map<string, string>()
       const loadedHashes = new Map<string, string>()
+      /** What each loaded pin holds (derived.ts `derivedPackage`), for the call rule. */
+      const loadedItems = new Map<string, PackageItems>()
       if (packages) {
         // Loaded as their derived copies: without their own http MCP servers, which come
         // through the forwarder below (a query with strictMcpConfig off would start them
@@ -363,9 +371,10 @@ export class TurnRunner {
           const pkg = loaded.loaded.find((p) => p.dir === dir)
           if (!pkg) return dir
           try {
-            const copy = await derivedPackage(dir, pkg.contentHash, localRoot, packageOmitted(pkg.name, itemAccess, switches, colliding), pkg.name)
+            const copy = await derivedPackage(dir, pkg.contentHash, localRoot, packageOmitted(pkg.name, itemAccess, switches, colliding, unoffered), pkg.name)
             packageNames.set(copy.dir, pkg.name)
             loadedHashes.set(pkg.dir, copy.contentHash ?? pkg.contentHash)
+            loadedItems.set(pkg.dir, copy.items)
             return copy.dir
           } catch (err) {
             problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
@@ -394,10 +403,8 @@ export class TurnRunner {
       // The plugins a Skill, Agent or Task call may name, their items from the loaded pins
       // (never a stored review's), so each call is refused when it names one that is off.
       const callPlugins: CallPlugin[] = [
-        ...inTurn.map((p) => ({ name: p.name, source: packageSource(p.name), aliases: aliasesOf(p.dir, p.name) })),
-        ...(ownPlugin !== undefined
-          ? [{ name: OWN_PLUGIN_NAME, source: BUILTIN_SOURCES.ownPlugin, aliases: aliasesOf(this.deps.ownPlugin!, OWN_PLUGIN_NAME) }]
-          : []),
+        ...inTurn.map((p) => callPlugin(p.name, packageSource(p.name), loadedItems.get(p.dir)!)),
+        ...(ownPlugin !== undefined ? [callPlugin(OWN_PLUGIN_NAME, BUILTIN_SOURCES.ownPlugin, ownItems ?? itemsOfPlugin(this.deps.ownPlugin!, OWN_PLUGIN_NAME))] : []),
       ]
       const callBuiltins = [...new Set(allowedLoaded.flatMap((p) => p.builtinTools))].map((name) => ({
         name,
@@ -758,6 +765,16 @@ export class TurnRunner {
           recordMemoryActivity({ audit: this.deps.audit, events: this.deps.events }, session, turnId, activity, secrets),
       })
     return { hooks, recallMaxQueryChars }
+  }
+}
+
+/** A loaded plugin as the call rule sees it (access/items.ts `CallPlugin`): its items and aliases from what it holds. */
+function callPlugin(name: string, source: string, items: PackageItems): CallPlugin {
+  return {
+    name,
+    source,
+    items: [...[...items.skills.keys()].map(skillItem), ...[...items.subagents.keys()].map(subagentItem)],
+    aliases: Object.fromEntries(items.aliases),
   }
 }
 

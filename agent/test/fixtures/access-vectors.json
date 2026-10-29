@@ -795,6 +795,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -808,11 +816,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -824,7 +841,11 @@
           "updated_by": "browser:browser"
         }
       ],
-      "expect": "skill:jot"
+      "expect": {
+        "source": "package:pa",
+        "item": "skill:jot",
+        "reason": "skill \"jot\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
     },
     {
       "name": "a qualified skill of another plugin",
@@ -836,6 +857,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -849,11 +878,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -877,6 +915,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -890,11 +936,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -906,7 +961,11 @@
           "updated_by": "browser:browser"
         }
       ],
-      "expect": "skill:jot"
+      "expect": {
+        "source": "package:pb",
+        "item": "skill:jot",
+        "reason": "skill \"jot\" of plugin package pb is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
     },
     {
       "name": "an unqualified subagent off in one plugin",
@@ -919,6 +978,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -932,11 +999,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -948,7 +1024,11 @@
           "updated_by": "browser:browser"
         }
       ],
-      "expect": "subagent:reviewer"
+      "expect": {
+        "source": "package:pb",
+        "item": "subagent:reviewer",
+        "reason": "subagent \"reviewer\" of plugin package pb is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
     },
     {
       "name": "a subagent by its frontmatter name",
@@ -960,6 +1040,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -973,11 +1061,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -989,7 +1086,11 @@
           "updated_by": "browser:browser"
         }
       ],
-      "expect": "subagent:review:deep"
+      "expect": {
+        "source": "package:pa",
+        "item": "subagent:review:deep",
+        "reason": "subagent \"review:deep\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
     },
     {
       "name": "a nested subagent named without its plugin",
@@ -1001,6 +1102,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -1014,11 +1123,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -1030,7 +1148,11 @@
           "updated_by": "browser:browser"
         }
       ],
-      "expect": "subagent:review:deep"
+      "expect": {
+        "source": "package:pa",
+        "item": "subagent:review:deep",
+        "reason": "subagent \"review:deep\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
     },
     {
       "name": "Task as Agent",
@@ -1042,6 +1164,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -1055,11 +1185,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -1071,7 +1210,11 @@
           "updated_by": "browser:browser"
         }
       ],
-      "expect": "subagent:reviewer"
+      "expect": {
+        "source": "package:pa",
+        "item": "subagent:reviewer",
+        "reason": "subagent \"reviewer\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
     },
     {
       "name": "an alias with several targets, one off",
@@ -1083,6 +1226,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -1096,11 +1247,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -1112,7 +1272,11 @@
           "updated_by": "browser:browser"
         }
       ],
-      "expect": "skill:dust"
+      "expect": {
+        "source": "package:pa",
+        "item": "skill:dust",
+        "reason": "skill \"dust\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
     },
     {
       "name": "an alias is its own plugin's only",
@@ -1124,6 +1288,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -1137,11 +1309,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -1165,6 +1346,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -1178,11 +1367,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -1194,7 +1392,11 @@
           "updated_by": "browser:browser"
         }
       ],
-      "expect": "skill:print"
+      "expect": {
+        "source": "builtin:own-plugin",
+        "item": "skill:print",
+        "reason": "skill \"print\" of ScadBuddy's own plugin is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
     },
     {
       "name": "an on row refuses nothing",
@@ -1206,6 +1408,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -1219,11 +1429,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -1247,6 +1466,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -1260,11 +1487,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -1288,6 +1524,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -1301,11 +1545,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -1330,6 +1583,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -1343,11 +1604,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -1377,6 +1647,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -1390,11 +1668,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -1416,6 +1703,14 @@
         {
           "name": "pa",
           "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
           "aliases": {
             "subagent:deep-review": [
               "subagent:review:deep"
@@ -1429,11 +1724,20 @@
         {
           "name": "pb",
           "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
           "aliases": {}
         },
         {
           "name": "scadbuddy",
           "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
           "aliases": {}
         }
       ],
@@ -1441,6 +1745,908 @@
         {
           "source": "package:pa",
           "item": "subagent:reviewer",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "a skill name with spaces around it",
+      "tool": "Skill",
+      "input": {
+        "skill": "  pa:jot\n"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "skill:jot",
+        "reason": "skill \"jot\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "a skill name with a leading slash",
+      "tool": "Skill",
+      "input": {
+        "skill": "/pa:jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "skill:jot",
+        "reason": "skill \"jot\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "a command named as its slash command, spaced",
+      "tool": "Skill",
+      "input": {
+        "skill": " /wave "
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:wave",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "skill:wave",
+        "reason": "skill \"wave\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "only one leading slash is dropped",
+      "tool": "Skill",
+      "input": {
+        "skill": "//pa:jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "a skill name in other case is another name",
+      "tool": "Skill",
+      "input": {
+        "skill": "PA:Jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "a subagent type in other case and spacing",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": " PA:Re_viewer "
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:reviewer",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "subagent:reviewer",
+        "reason": "subagent \"reviewer\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "a frontmatter name normalised",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "pa:Deep_Review"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:review:deep",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "subagent:review:deep",
+        "reason": "subagent \"review:deep\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "a subagent type in full-width letters",
+      "tool": "Task",
+      "input": {
+        "subagent_type": "ｒｅｖｉｅｗｅｒ"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pb",
+          "item": "subagent:reviewer",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pb",
+        "item": "subagent:reviewer",
+        "reason": "subagent \"reviewer\" of plugin package pb is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "a subagent type keeps its slash",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "/reviewer"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pb",
+          "item": "subagent:reviewer",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "a built-in subagent type with no item is left alone (a stale off row)",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "general-purpose"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pb",
+          "item": "subagent:general-purpose",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "a stale off skill row of a plugin without it",
+      "tool": "Skill",
+      "input": {
+        "skill": "jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:own-plugin",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "a package switched off",
+      "tool": "Skill",
+      "input": {
+        "skill": "pa:jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "*",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "*",
+        "reason": "plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "the own plugin switched off",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "print-analyst"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "builtin:own-plugin",
+          "item": "*",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "builtin:own-plugin",
+        "item": "*",
+        "reason": "ScadBuddy's own plugin is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "a switched-off plugin does not refuse another's item",
+      "tool": "Skill",
+      "input": {
+        "skill": "pb:jot"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "*",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": null
+    },
+    {
+      "name": "a switch reaches only a name the plugin has",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "general-purpose"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "*",
           "access": "off",
           "updated_by": "browser:browser"
         }

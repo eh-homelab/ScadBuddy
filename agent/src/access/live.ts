@@ -2,7 +2,7 @@ import { HTTP_TOOL, HTTP_TOOL_NAME, httpTierOf } from '../harness/httpRequest.js
 import { toolPrefix } from '../plugins/registry.js'
 import { SERVER_NAME } from '../tools/projections.js'
 import type { Tool } from '../tools/registry.js'
-import { type CallPlugin, namesItem, offCallItem } from './items.js'
+import { type CallPlugin, namesItem, offCallItem, offItemReason } from './items.js'
 import { BUILTIN_SOURCES, packageServerSource, registrySource, remoteSource, type ToolAccess } from './model.js'
 import type { AccessResolver } from './resolver.js'
 
@@ -11,7 +11,10 @@ import type { AccessResolver } from './resolver.js'
  * tool; undefined where ai_access says nothing of its own for this call, so the turn's
  * resolver stands. A read that fails rejects: the seam then refuses the call.
  */
-export type LiveAccess = (harnessName: string, input?: unknown) => Promise<ToolAccess | undefined>
+export type LiveAccess = (harnessName: string, input?: unknown) => Promise<LiveAnswer>
+
+/** A call's access now: a tier or `off`, `{off}` with the one sentence why when it names an item that is off, or undefined. */
+export type LiveAnswer = ToolAccess | { off: string } | undefined
 
 /** What a turn offers, so each call is read from its own source. */
 export type LiveTurn = {
@@ -52,13 +55,15 @@ export function liveAccess(resolver: Pick<AccessResolver, 'item' | 'entry' | 'sw
   const callSources = turn.plugins.map((p) => p.source)
   const builtins = new Map(turn.builtins.map((b) => [b.name, b.packages]))
   return async (harnessName, input) => {
-    if (namesItem(harnessName)) {
-      if (callSources.length === 0) return undefined
-      return offCallItem(harnessName, input, turn.plugins, await resolver.rows(callSources)) === undefined ? undefined : 'off'
+    if (namesItem(harnessName) && callSources.length) {
+      const off = offCallItem(harnessName, input, turn.plugins, await resolver.rows(callSources))
+      if (off) return { off: offItemReason(off) }
     }
+    // A package built-in by its access, Skill, Agent and Task too when a package names them (#4757 review M4).
     const builtin = harnessName.startsWith(SERVED_PREFIX) ? harnessName.slice(SERVED_PREFIX.length) : harnessName
     const packages = builtins.get(builtin)
     if (packages) return resolver.builtin(builtin, packages)
+    if (namesItem(harnessName)) return undefined
     const tool = own.get(harnessName)
     if (tool) {
       const source = registrySource(tool.name)

@@ -24,7 +24,7 @@ import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
-import { collidingServerNames, type PackageServers, serverAccess } from '../plugins/packages/mcp.js'
+import { collidingServerNames, type PackageServers, serverAccess, unofferedLocalServers } from '../plugins/packages/mcp.js'
 import { builtinAccessOf, builtinsOffOf, packageOmitted } from '../plugins/packages/derived.js'
 import { pluginTierResolver } from '../plugins/registry.js'
 import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
@@ -318,6 +318,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         : new Map()
       const switches = await serverAccess(loaded.loaded, deps.access)
       const colliding = collidingServerNames(loaded.loaded)
+      const unoffered = unofferedLocalServers(loaded.loaded)
       const builtinsOff = builtinsOffOf(loaded.loaded, itemAccess)
       if (context.listing) {
         shared = []
@@ -331,7 +332,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
             continue
           }
           try {
-            const turnPackage = await sharePackage(pkg, root, localRoot, packageOmitted(pkg.name, itemAccess, switches, colliding), builtinsOff)
+            const turnPackage = await sharePackage(pkg, root, localRoot, packageOmitted(pkg.name, itemAccess, switches, colliding, unoffered), builtinsOff)
             const dark = unparkableBuiltins(turnPackage, provided)
             if (dark.length) {
               problems.push(

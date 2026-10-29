@@ -13,6 +13,7 @@ import {
   collisionProblem,
   packageServerName,
   type ServerAccess,
+  unofferableNameProblem,
 } from '../plugins/packages/mcp.js'
 import { copyPath, derivedPackage, NOTHING_OMITTED, type Omitted, placeCopy, touch } from '../plugins/packages/derived.js'
 import { pluginTierResolver } from '../plugins/registry.js'
@@ -220,7 +221,7 @@ export function localPackageServers(
         if (!pkg.allowed || typeof config.command !== 'string') continue
         const name = packageServerName(pkg.name, server)
         if (name.includes('__')) {
-          problems.push(`plugin package ${pkg.name}: MCP server "${server}" has a name a durable session cannot offer`)
+          problems.push(unofferableNameProblem(pkg.name, server))
           continue
         }
         const collision = collisionProblem(colliding, pkg.name, server)

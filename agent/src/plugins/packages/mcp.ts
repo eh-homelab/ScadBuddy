@@ -129,6 +129,22 @@ export function localServers(loaded: readonly LoadedPackage[]): { name: string; 
   return out
 }
 
+/** Why a package's local server is not offered: its tools' names would hold `__`, which splits a tool name. One text for both runtimes. */
+export function unofferableNameProblem(pkg: string, server: string): string {
+  return `plugin package ${pkg}: MCP server "${server}" has a name that cannot be offered`
+}
+
+/**
+ * The local servers of the allowed packages that no turn offers, because the name their
+ * tools carry holds `__` (#4757 review I2): a classic copy leaves them out, as a durable turn
+ * starts none of them, and both say so (`unofferableNameProblem`).
+ */
+export function unofferedLocalServers(loaded: readonly LoadedPackage[]): { pkg: string; server: string }[] {
+  return offeredServers(loaded)
+    .filter(({ pkg, server, local }) => local && packageServerName(pkg.name, server).includes('__'))
+    .map(({ pkg, server }) => ({ pkg: pkg.name, server }))
+}
+
 /** Why a server named like another is not offered, or undefined when its name is its own. */
 export function collisionProblem(colliding: ReadonlyMap<string, { pkg: string; server: string }[]>, pkg: string, server: string): string | undefined {
   const name = packageServerName(pkg, server)

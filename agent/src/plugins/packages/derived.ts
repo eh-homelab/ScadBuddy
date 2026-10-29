@@ -59,19 +59,21 @@ export function omittedOf(access: PackageAccess | undefined, servers: ReadonlyMa
 /**
  * What package `pkg`'s copy leaves out in a turn, classic and durable alike: `omittedOf` its
  * items' access and its own servers' switches (`switches`, by `packageServerSource`, mcp.ts
- * `serverAccess`), and its servers whose names another package's server carries
- * (`colliding`, mcp.ts `collidingServerNames`).
+ * `serverAccess`), its servers whose names another package's server carries
+ * (`colliding`, mcp.ts `collidingServerNames`), and those no turn can offer
+ * (`unoffered`, mcp.ts `unofferedLocalServers`).
  */
 export function packageOmitted(
   pkg: string,
   access: ReadonlyMap<string, PackageAccess>,
   switches: ReadonlyMap<string, { enabled: boolean }>,
   colliding: ReadonlyMap<string, readonly { pkg: string; server: string }[]>,
+  unoffered: readonly { pkg: string; server: string }[] = [],
 ): Omitted {
   const prefix = `${packageSource(pkg)}/mcp:`
   const own = new Map([...switches].flatMap(([source, at]) => (source.startsWith(prefix) ? [[source.slice(prefix.length), at] as const] : [])))
   const omitted = omittedOf(access.get(packageSource(pkg)), own)
-  const named = [...colliding.values()].flat().filter((o) => o.pkg === pkg).map((o) => o.server)
+  const named = [...[...colliding.values()].flat(), ...unoffered].filter((o) => o.pkg === pkg).map((o) => o.server)
   return { ...omitted, servers: new Set([...omitted.servers, ...named]) }
 }
 
@@ -148,8 +150,7 @@ function itemsOf(dir: string, name: string): PackageItems {
 }
 
 /** What `dir` holds that `omitted` names, as `kind name` lines. */
-function heldOmitted(dir: string, name: string, omitted: Omitted): string[] {
-  const items = itemsOf(dir, name)
+function heldOmitted(dir: string, name: string, omitted: Omitted, items: PackageItems = itemsOf(dir, name)): string[] {
   return [
     ...[...items.skills.keys()].filter((n) => omitted.skills.has(n)).map((n) => `skill ${n}`),
     ...[...items.subagents.keys()].filter((n) => omitted.subagents.has(n)).map((n) => `subagent ${n}`),
@@ -349,7 +350,8 @@ export async function placeCopy(tmp: string, target: string, want: string): Prom
  * undefined, a trusted image path): only its copy is hashed. A copy is made again from
  * `dir` on every call: one already there is kept only while it hashes to the fresh copy,
  * so it is never trusted as it is. The original is never written to. It fails when the
- * copy still declares an http server or an omitted item.
+ * copy still declares an http server or an omitted item. `items` are the source's
+ * (`packageItems`), whatever the copy left out.
  */
 export async function derivedPackage(
   dir: string,
@@ -357,14 +359,16 @@ export async function derivedPackage(
   root: string,
   omitted: Omitted = NOTHING_OMITTED,
   name?: string,
-): Promise<{ dir: string; contentHash: string | undefined }> {
+): Promise<{ dir: string; contentHash: string | undefined; items: PackageItems }> {
   const source = path.resolve(dir)
   const manifest = declaredConfigs(source).manifest
   const pkgName = typeof manifest.name === 'string' ? manifest.name : name
   if (pkgName === undefined) throw new Error(`${dir} has no name: no manifest name and none given`)
   if (!SAFE_NAME_RE.test(pkgName)) throw new Error(`${dir} has a name that is not a safe path segment`)
-  const namedByFolder = typeof manifest.name !== 'string' || [...itemsOf(source, pkgName).skills.values()].some((at) => at.includes('.'))
-  if (!namedByFolder && !declaresRemoteServers(source) && heldOmitted(source, pkgName, omitted).length === 0) return { dir, contentHash }
+  // What the source holds, read once: the turn's call rule takes its items and aliases from it.
+  const items = itemsOf(source, pkgName)
+  const namedByFolder = typeof manifest.name !== 'string' || [...items.skills.values()].some((at) => at.includes('.'))
+  if (!namedByFolder && !declaresRemoteServers(source) && heldOmitted(source, pkgName, omitted, items).length === 0) return { dir, contentHash, items }
   await mkdir(root, { recursive: true })
   const tmp = path.join(root, `.tmp-${randomUUID()}`)
   try {
@@ -381,7 +385,7 @@ export async function derivedPackage(
     const want = (await hashTree(tmp)).hash
     const target = copyPath(root, want, pkgName)
     await placeCopy(tmp, target, want)
-    return { dir: target, contentHash: want }
+    return { dir: target, contentHash: want, items }
   } finally {
     await rm(tmp, { recursive: true, force: true })
   }
