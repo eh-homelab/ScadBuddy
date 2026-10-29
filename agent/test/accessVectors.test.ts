@@ -57,6 +57,17 @@ const PLUGINS: CallPlugin[] = [
   { name: 'pb', source: PB, items: ['skill:jot', 'skill:dust', 'subagent:reviewer'], aliases: {} },
   { name: 'scadbuddy', source: OWN, items: ['skill:print', 'subagent:print-analyst'], aliases: {} },
 ]
+/** A frontmatter name that fits the 128-character cap, but not once called as `pa:<name>`. */
+const LONG = `long-${'x'.repeat(122)}`
+/** A frontmatter name over the cap: a stored review keeps it cut, the loaded pin whole. */
+const OVER = 'deep-'.repeat(40)
+/** `pa` as the loaded pin gives it, with the uncut alias keys (vet.ts `PackageItems.declared`). */
+const PA_LONG: CallPlugin = {
+  name: 'pa',
+  source: PA,
+  items: ['skill:jot', 'subagent:reviewer', 'subagent:re-viewer', 'subagent:review:deep', 'subagent:long'],
+  aliases: { [`subagent:${LONG}`]: ['subagent:long'], [`skill:${LONG}`]: ['skill:jot'], [`subagent:${OVER}`]: ['subagent:review:deep'] },
+}
 const off = (source: string, item: string): CallVector['expect'] => ({ source, item, reason: offItemReason({ source, item }) })
 
 function build(): Vectors {
@@ -214,6 +225,21 @@ function build(): Vectors {
       { name: 'a package switched off', tool: 'Skill', input: { skill: 'pa:jot' }, plugins: PLUGINS, rows: [row(PA, '*', 'off')], expect: off(PA, '*') },
       { name: 'the own plugin switched off', tool: 'Agent', input: { subagent_type: 'print-analyst' }, plugins: PLUGINS, rows: [row(OWN, '*', 'off')], expect: off(OWN, '*') },
       { name: "a switched-off plugin does not refuse another's item", tool: 'Skill', input: { skill: 'pb:jot' }, plugins: PLUGINS, rows: [row(PA, '*', 'off')], expect: null },
+      // #4757 review round 2: the `<plugin>:` prefix comes off before the rest is cut and compared.
+      { name: 'a 127-character frontmatter name called qualified', tool: 'Agent', input: { subagent_type: `pa:${LONG}` }, plugins: [PA_LONG], rows: [row(PA, 'subagent:long', 'off')], expect: off(PA, 'subagent:long') },
+      { name: 'a 127-character skill alias called qualified', tool: 'Skill', input: { skill: `/pa:${LONG}` }, plugins: [PA_LONG], rows: [row(PA, 'skill:jot', 'off')], expect: off(PA, 'skill:jot') },
+      {
+        name: 'a frontmatter name over the cap, called in another spelling',
+        tool: 'Agent',
+        input: { subagent_type: `PA:${'DEEP'.repeat(40)}` },
+        plugins: [PA_LONG],
+        rows: [row(PA, 'subagent:review:deep', 'off')],
+        expect: off(PA, 'subagent:review:deep'),
+      },
+      { name: 'an ambiguous agent type is refused when any match is off', tool: 'Agent', input: { subagent_type: 'pa:REVIEWER' }, plugins: [PA_LONG], rows: [row(PA, 'subagent:re-viewer', 'off')], expect: off(PA, 'subagent:re-viewer') },
+      { name: 'an exact match that is on beside an off one its spelling reaches is refused (fail closed)', tool: 'Agent', input: { subagent_type: 'pa:reviewer' }, plugins: [PA_LONG], rows: [row(PA, 'subagent:re-viewer', 'off')], expect: off(PA, 'subagent:re-viewer') },
+      // JS trim() also removes U+FEFF, which Python's str.strip() keeps: a port trims by the JS set.
+      { name: 'a skill name with a byte order mark before it', tool: 'Skill', input: { skill: '\uFEFFpa:jot\u3000' }, plugins: PLUGINS, rows: [row(PA, 'skill:jot', 'off')], expect: off(PA, 'skill:jot') },
       { name: 'a switch reaches only a name the plugin has', tool: 'Agent', input: { subagent_type: 'general-purpose' }, plugins: PLUGINS, rows: [row(PA, '*', 'off')], expect: null },
     ],
   }

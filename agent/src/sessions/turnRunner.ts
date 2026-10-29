@@ -774,7 +774,8 @@ function callPlugin(name: string, source: string, items: PackageItems): CallPlug
     name,
     source,
     items: [...[...items.skills.keys()].map(skillItem), ...[...items.subagents.keys()].map(subagentItem)],
-    aliases: Object.fromEntries(items.aliases),
+    // The whole frontmatter names, never a review's cut ones.
+    aliases: Object.fromEntries(items.declared),
   }
 }
 

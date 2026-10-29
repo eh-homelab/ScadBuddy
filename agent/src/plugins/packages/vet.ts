@@ -554,6 +554,11 @@ export type PackageItems = {
    * Claude Code names a command by it (its file or manifest key names it).
    */
   aliases: Map<string, string[]>
+  /**
+   * `aliases` keyed by each frontmatter `name` whole, never cut: what the loaded pin says, for
+   * the call rule (access/items.ts `offCallItem`), so a name over the cap is still matched.
+   */
+  declared: Map<string, string[]>
 }
 
 /** Where each of the package's items lives (#4757), so a derived copy can leave one out. */
@@ -583,6 +588,7 @@ function itemsOf(root: string, manifest: Record<string, unknown>, fallbackName?:
   const problems: string[] = []
   const described = new Map<string, string | null>()
   const aliases = new Map<string, string[]>()
+  const declaredAliases = new Map<string, string[]>()
   const describe = (id: string, description: string | undefined) => {
     if (described.get(id)) return
     described.set(id, description === undefined ? null : capped(description, DESCRIPTION_CAP, `${id} description`, cut))
@@ -593,6 +599,7 @@ function itemsOf(root: string, manifest: Record<string, unknown>, fallbackName?:
     if (declared.length > NAME_CAP) problems.push(`${file}: frontmatter "name" is longer than ${NAME_CAP} characters`)
     const key = kind(capped(declared, NAME_CAP, `${id} name`, cut))
     aliases.set(key, [...(aliases.get(key) ?? []), id])
+    declaredAliases.set(kind(declared), [...(declaredAliases.get(kind(declared)) ?? []), id])
   }
 
   const skills = new Map<string, string[]>()
@@ -625,7 +632,7 @@ function itemsOf(root: string, manifest: Record<string, unknown>, fallbackName?:
       where: configAt(where),
     })),
   )
-  return { items: { skills, subagents, hooks, aliases }, described, cut, problems }
+  return { items: { skills, subagents, hooks, aliases, declared: declaredAliases }, described, cut, problems }
 }
 
 /** Vets the package at `root` (a materialised copy) and builds its review. `fallbackName` is used without a manifest name. */

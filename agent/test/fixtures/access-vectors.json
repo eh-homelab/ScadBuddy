@@ -2596,6 +2596,288 @@
       "expect": null
     },
     {
+      "name": "a 127-character frontmatter name called qualified",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "pa:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "subagent:reviewer",
+            "subagent:re-viewer",
+            "subagent:review:deep",
+            "subagent:long"
+          ],
+          "aliases": {
+            "subagent:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": [
+              "subagent:long"
+            ],
+            "skill:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": [
+              "skill:jot"
+            ],
+            "subagent:deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-": [
+              "subagent:review:deep"
+            ]
+          }
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:long",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "subagent:long",
+        "reason": "subagent \"long\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "a 127-character skill alias called qualified",
+      "tool": "Skill",
+      "input": {
+        "skill": "/pa:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "subagent:reviewer",
+            "subagent:re-viewer",
+            "subagent:review:deep",
+            "subagent:long"
+          ],
+          "aliases": {
+            "subagent:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": [
+              "subagent:long"
+            ],
+            "skill:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": [
+              "skill:jot"
+            ],
+            "subagent:deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-": [
+              "subagent:review:deep"
+            ]
+          }
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "skill:jot",
+        "reason": "skill \"jot\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "a frontmatter name over the cap, called in another spelling",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "PA:DEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEPDEEP"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "subagent:reviewer",
+            "subagent:re-viewer",
+            "subagent:review:deep",
+            "subagent:long"
+          ],
+          "aliases": {
+            "subagent:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": [
+              "subagent:long"
+            ],
+            "skill:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": [
+              "skill:jot"
+            ],
+            "subagent:deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-": [
+              "subagent:review:deep"
+            ]
+          }
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:review:deep",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "subagent:review:deep",
+        "reason": "subagent \"review:deep\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "an ambiguous agent type is refused when any match is off",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "pa:REVIEWER"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "subagent:reviewer",
+            "subagent:re-viewer",
+            "subagent:review:deep",
+            "subagent:long"
+          ],
+          "aliases": {
+            "subagent:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": [
+              "subagent:long"
+            ],
+            "skill:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": [
+              "skill:jot"
+            ],
+            "subagent:deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-": [
+              "subagent:review:deep"
+            ]
+          }
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:re-viewer",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "subagent:re-viewer",
+        "reason": "subagent \"re-viewer\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "an exact match that is on beside an off one its spelling reaches is refused (fail closed)",
+      "tool": "Agent",
+      "input": {
+        "subagent_type": "pa:reviewer"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "subagent:reviewer",
+            "subagent:re-viewer",
+            "subagent:review:deep",
+            "subagent:long"
+          ],
+          "aliases": {
+            "subagent:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": [
+              "subagent:long"
+            ],
+            "skill:long-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx": [
+              "skill:jot"
+            ],
+            "subagent:deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-deep-": [
+              "subagent:review:deep"
+            ]
+          }
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "subagent:re-viewer",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "subagent:re-viewer",
+        "reason": "subagent \"re-viewer\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
+      "name": "a skill name with a byte order mark before it",
+      "tool": "Skill",
+      "input": {
+        "skill": "﻿pa:jot　"
+      },
+      "plugins": [
+        {
+          "name": "pa",
+          "source": "package:pa",
+          "items": [
+            "skill:jot",
+            "skill:wave",
+            "skill:sweep",
+            "skill:dust",
+            "subagent:reviewer",
+            "subagent:review:deep"
+          ],
+          "aliases": {
+            "subagent:deep-review": [
+              "subagent:review:deep"
+            ],
+            "skill:tidy": [
+              "skill:sweep",
+              "skill:dust"
+            ]
+          }
+        },
+        {
+          "name": "pb",
+          "source": "package:pb",
+          "items": [
+            "skill:jot",
+            "skill:dust",
+            "subagent:reviewer"
+          ],
+          "aliases": {}
+        },
+        {
+          "name": "scadbuddy",
+          "source": "builtin:own-plugin",
+          "items": [
+            "skill:print",
+            "subagent:print-analyst"
+          ],
+          "aliases": {}
+        }
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "skill:jot",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": {
+        "source": "package:pa",
+        "item": "skill:jot",
+        "reason": "skill \"jot\" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there"
+      }
+    },
+    {
       "name": "a switch reaches only a name the plugin has",
       "tool": "Agent",
       "input": {

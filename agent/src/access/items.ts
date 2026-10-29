@@ -122,7 +122,11 @@ function reaches(kind: 'skill' | 'subagent', called: string, name: string): bool
   return called === name || (kind === 'subagent' && agentTypeForm(called) === agentTypeForm(name))
 }
 
-/** A call's name as Claude Code reads it before its lookup (`reaches`). */
+/**
+ * A call's name as Claude Code reads it before its lookup (`reaches`). A skill name is
+ * trimmed by JavaScript's `trim()` set (it removes U+FEFF and the line terminators, which
+ * Python's `str.strip()` does not all remove: a port trims by this set).
+ */
 function calledName(kind: 'skill' | 'subagent', raw: string): string {
   if (kind === 'subagent') return raw
   const trimmed = raw.trim()
@@ -134,8 +138,9 @@ function calledName(kind: 'skill' | 'subagent', raw: string): string {
  * The call's name is `input.skill` (Skill) or `input.subagent_type`, read as Claude Code reads
  * it (`calledName`, `reaches`). In each plugin it reaches every item the plugin has whose name,
  * or `<plugin>:<name>`, it names (a nested subagent's name holds a `:` too, so a whole name is
- * looked up in every plugin), and every target of an alias it names the same way (an alias key
- * is cut, `cutName`, so the name is cut before that lookup). Of what it reaches, the first
+ * looked up in every plugin), and every target of an alias it names the same way: by the
+ * whole name, or the rest once a `<plugin>:` naming that plugin comes off, compared with the
+ * key as it is (the loaded pin's whole frontmatter name) and, cut (`cutName`), with a cut key. Of what it reaches, the first
  * whose plugin is switched off (`*` `off`: `{source, item: '*'}`) or whose row is `off`
  * answers: any one refuses the call (fail closed). A row refuses only an item its plugin has.
  * Pure: agent-durable's `off_call_item` is the same rule, and the `calls` access vectors pin both.
@@ -148,13 +153,19 @@ export function offCallItem(tool: string, input: unknown, plugins: readonly Call
   const called = calledName(call.kind, raw)
   if (called === '') return undefined
   const prefix = `${call.kind}:`
-  const cut = cutName(called)
   const isOff = (source: string, item: string) => rows.some((r) => r.source === source && r.item === item && r.access === 'off')
   for (const plugin of plugins) {
-    const named = (name: string, as: string) => reaches(call.kind, as, name) || reaches(call.kind, as, `${plugin.name}:${name}`)
-    const direct = plugin.items.filter((id) => id.startsWith(prefix) && named(id.slice(prefix.length), called))
+    // The whole name, and the rest of it once a `<plugin>:` naming this plugin comes off (an
+    // alias key is cut alone, so only the rest is cut before it is compared with one).
+    const at = called.indexOf(':')
+    const head = at > 0 ? called.slice(0, at) : undefined
+    const spellings = [called, ...(head !== undefined && reaches(call.kind, head, plugin.name) ? [called.slice(at + 1)] : [])]
+    const itemNamed = (name: string) => spellings.some((as) => reaches(call.kind, as, name) || reaches(call.kind, as, `${plugin.name}:${name}`))
+    // An alias key is the loaded pin's whole frontmatter name, or a stored review's cut one.
+    const aliasNamed = (key: string) => spellings.some((as) => reaches(call.kind, as, key) || reaches(call.kind, cutName(as), key))
+    const direct = plugin.items.filter((id) => id.startsWith(prefix) && itemNamed(id.slice(prefix.length)))
     const aliased = Object.entries(plugin.aliases)
-      .filter(([key]) => key.startsWith(prefix) && named(key.slice(prefix.length), cut))
+      .filter(([key]) => key.startsWith(prefix) && aliasNamed(key.slice(prefix.length)))
       .flatMap(([, targets]) => targets.filter((t) => plugin.items.includes(t)))
     const reached = [...new Set([...direct, ...aliased])]
     if (reached.length === 0) continue

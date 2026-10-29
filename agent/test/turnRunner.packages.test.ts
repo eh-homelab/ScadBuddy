@@ -187,6 +187,10 @@ describe("a classic turn's packages and own plugin (#4757)", () => {
     expect(await turn.run.live!.access('Skill', { skill: 'solo:solo' })).toMatchObject({ off: expect.stringContaining('skill "solo"') })
     expect(await turn.run.live!.access('Agent', { subagent_type: 'review:deep-review' })).toMatchObject({ off: expect.stringContaining('subagent "review:deep"') })
     expect(await turn.run.live!.access('Agent', { subagent_type: 'review:review:deep' })).toMatchObject({ off: expect.stringContaining('subagent "review:deep"') })
+    // A frontmatter name over the 128-character cap is matched whole, from the loaded pin (#4757 review round 2).
+    const over = await pkg({ name: 'over', agents: { 'deep.md': `---\nname: ${'deep-'.repeat(40)}\ndescription: deep\n---\nDeep.\n` } })
+    const long = await assemble([over], [row(packageSource('over'), 'subagent:deep', 'off')])
+    expect(await long.turn.run.live!.access('Agent', { subagent_type: `over:${'DEEP'.repeat(40)}` })).toMatchObject({ off: expect.stringContaining('subagent "deep"') })
   })
 
   it('leaves out a local server whose tools would carry a name with __, and says so as a durable turn does', async () => {
