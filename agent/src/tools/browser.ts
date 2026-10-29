@@ -190,7 +190,7 @@ export function tabBackNotRun(tool: string, why: 'reconnected' | 'user_back'): s
 
 /** Why a read retried after a tab wait can still find no tab here. */
 const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
-  // Neutral (#1410): the hub reaches a tab on any replica (bridge/relay.ts, #1916), so it dropped again,
+  // Neutral (#1410): the hub reaches a tab on any replica (bridge/relay.ts, #4780), so it dropped again,
   // or the replica holding it did not answer.
   reconnected: 'The session\'s tab reconnected, but it cannot be reached now: it may have dropped again.',
   user_back: 'The user said they were back, but no tab is attached here yet.',

@@ -281,3 +281,10 @@ it("seals a session's background tasks under the session's key", () => {
   expect(subjectOf('bgtask-ab12cd34')).toBeUndefined()
   expect(subjectOf(`bgtask-${id}-ab12cd34x`)).toBeUndefined()
 })
+
+it('seals every browser call between replicas under a key of its own (#4780)', () => {
+  const call = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d'
+  expect(subjectOf(`bridge-${call}`)).toBe(`bridge-${call}`)
+  expect(subjectOf(`bridge-${call}x`)).toBeUndefined()
+  expect(subjectOf('bridge-')).toBeUndefined()
+})

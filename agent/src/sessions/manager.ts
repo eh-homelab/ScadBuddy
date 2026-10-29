@@ -289,7 +289,7 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
       })
       if ('reconnected' in verdict && verdict.reconnected) {
         // reconnected() runs on whichever replica saw the tab. isBack reaches a tab on
-        // another replica too (bridge/relay.ts, #1916); when it still finds none, nothing
+        // another replica too (bridge/relay.ts, #4780); when it still finds none, nothing
         // here will end a later wait but its timer (#1308), so the rest of the turn does
         // not wait. A failed check does not latch.
         if (!(await isBack(turn).catch(() => true))) {

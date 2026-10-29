@@ -11,7 +11,11 @@ import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes
 // copy of the subject's payloads undecryptable: history, Visibility, Archival. Other
 // workflows' payloads (renders, prints, commands) pass through as they are. A session's
 // background task (`bgtask-<session uuid>-<task id>`, background/service.ts) is sealed
-// under its session's key, so forgetting the session forgets its tasks' payloads too.
+// under its session's key, so forgetting the session forgets its tasks' payloads too. A
+// browser call between replicas (`bridge-<uuid>`, bridge/relay.ts, #4780) is a subject of
+// its own, whatever session it is for, and never stored by reference: the caller deletes
+// its key once it has the answer (`dropPayloadKey`), and `sweepBridgeKeys` deletes the
+// keys of calls that never got one.
 //
 // The subject comes from the serialization context on encode (the workflow the payload
 // belongs to, `@temporalio/common` 1.24 gives it to every client and worker call), and
@@ -44,7 +48,7 @@ export const OFFLOAD_BYTES = 128 * 1024
 const REFERENCE_TYPE = 'temporal.api.sdk.v1.ExternalStorageReference'
 const DIGEST = /^[0-9a-f]{64}$/
 const SESSION = /^session-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-const SUBJECT = /^(session|flow)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const SUBJECT = /^(session|flow|bridge)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
@@ -187,6 +191,10 @@ export class PgPayloadKeys implements PayloadKeys {
     const kek = row.kek_id === this.#kek.id ? this.#kek : row.kek_id === this.#previous?.id ? this.#previous : undefined
     if (!kek) throw new SealError(`the payload key of ${subject} was sealed with key ${row.kek_id}, which is not mounted`)
     const key = openBytes(kek.key, row.dek_sealed, payloadKeyContext(subject))
+    // Never cached for a browser call (`bridge-<uuid>`): its caller deletes the key once it has the
+    // answer (dropPayloadKey), and a copy cached on the owner's or the workflow's replica would
+    // outlive that by up to `cacheMs`.
+    if (subject.startsWith('bridge-')) return key
     // Expired keys go now, not when their subject is next asked for.
     const now = Date.now()
     for (const [held, entry] of this.#cache) if (entry.until <= now) this.forget(held)
@@ -198,6 +206,30 @@ export class PgPayloadKeys implements PayloadKeys {
     // A copy: the cache zeroes its own when it forgets or evicts it, never one an encode holds.
     return Buffer.from(key)
   }
+}
+
+/** How old a browser call's key is before `sweepBridgeKeys` deletes it: far past the longest call. */
+export const BRIDGE_KEY_MAX_AGE_S = 3600
+
+/**
+ * Deletes a subject's key, which crypto-shreds every payload sealed under it: a browser
+ * call's (`bridge-<uuid>`) once its caller has the answer. No tombstone: nothing takes the
+ * id again. `keys` drops this process's cached copy first.
+ */
+export async function dropPayloadKey(sql: Sql, keys: PgPayloadKeys | undefined, subject: string): Promise<void> {
+  keys?.forget(subject)
+  await sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
+    await tx`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
+  })
+}
+
+/** Deletes the keys of browser calls older than `maxAgeS` (one cancelled, or whose caller went away), and returns how many. */
+export async function sweepBridgeKeys(sql: Sql, maxAgeS = BRIDGE_KEY_MAX_AGE_S): Promise<number> {
+  const gone = await sql`
+    DELETE FROM ai_payload_keys
+    WHERE subject LIKE 'bridge-%' AND created_at < now() - make_interval(secs => ${maxAgeS})`
+  return gone.count
 }
 
 /** Where a session's large sealed payloads are kept, by subject and digest. */

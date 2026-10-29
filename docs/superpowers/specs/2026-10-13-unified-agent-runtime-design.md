@@ -1107,7 +1107,11 @@ with its workflow. The vector files stay while a Python reader of them remains.
 
 1. **The browser bridge.** `browser_*` tools need the tab's WebSocket, which lives in the
    HTTP process. Whether `bridge/relay.ts` (#1916) reaches a turn running in a worker pod
-   is unverified.
+   is unverified. *#4780:* the relay no longer goes through Postgres. A call for a tab on
+   another pod is a `BridgeCall` workflow whose one activity runs on the queue of the pod
+   that holds the tab (`ai_tab_owners`), so a caller needs Temporal and the database, not
+   the tab's socket (`agent/test/bridgeRelay.temporal.test.ts`). A worker-only `main.ts`
+   still has to build that relay.
 2. **Session-tab waits.** `sessions/manager.ts` `onSessionTab` is wired to the hub in
    `main.ts`; a worker pod has no hub.
 3. **Anything else the turn reaches in-process** in the HTTP process (an audit of

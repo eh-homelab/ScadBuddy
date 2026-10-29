@@ -422,7 +422,12 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
 
   it("leaves a session alone when attached from another tab while another replica holds the session's tab", async () => {
     const { rows, store } = sharedRows()
-    const relay: TabRelay = { serve: () => {}, forward: async () => ({ op: 'status', route: '/', live: [] }) }
+    const relay: TabRelay = {
+      serve: () => {},
+      attached: () => {},
+      detached: () => {},
+      forward: async () => ({ op: 'status', route: '/', live: [] }),
+    }
     const here = new TabHub({ sessionTabs: store, relay })
     await tab(here, TAB)
     rows.set('s-new', OTHER_TAB) // paired on the replica that holds OTHER_TAB
@@ -442,6 +447,8 @@ describe('the chat socket pairs the sessions it chats with (tab.bind)', () => {
     const logged: string[] = []
     const relay: TabRelay = {
       serve: () => {},
+      attached: () => {},
+      detached: () => {},
       forward: async () => {
         throw new Error('bridge insert failed')
       },
