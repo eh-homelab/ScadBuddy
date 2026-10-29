@@ -183,23 +183,9 @@ def test_an_order_is_not_deleted_from_under_its_files_holds(rows: OrderStore) ->
     assert holds is not None and holds["n"] == 0
 
 
-def test_the_old_table_name_reads_and_writes_while_the_api_rolls_out(
-    rows: OrderStore, pool: PgPool
-) -> None:
-    """#4678's rename keeps the name `attachments` as a view (#4754 drops it), so the
-    previous build's replicas read and write the same rows until they stop."""
-    order_id, attachment_id = attached(rows)
+def test_the_old_table_name_is_gone(pool: PgPool) -> None:
+    """#4678's rename kept the name `attachments` as a view for the previous build's
+    replicas while the API rolled out; #4754 drops it once every replica has the rename."""
     with pool.connection() as conn:
-        conn.execute("UPDATE attachments SET caption = 'old build' WHERE id = %s", (attachment_id,))
-        conn.execute(
-            "INSERT INTO attachments (id, order_id, subject, kind, role, filename, media_type,"
-            " size_bytes, sha256, blob_key, caption, created_by)"
-            " VALUES ('a2', %s, %s, 'other', 'other', 'x.bin', 'application/octet-stream',"
-            " 1, %s, %s, '', %s) RETURNING id",
-            (order_id, order_subject(order_id), SHA, blob_key(SHA), '{"kind": "browser"}'),
-        )
-        listed = conn.execute(
-            "SELECT id FROM attachments WHERE order_id = %s ORDER BY created_at", (order_id,)
-        ).fetchall()
-    assert [row["id"] for row in listed] == [attachment_id, "a2"]
-    assert [a.caption for a in rows.attachments(order_id)] == ["old build", ""]
+        row = conn.execute("SELECT to_regclass('attachments') AS old").fetchone()
+    assert row is not None and row["old"] is None
