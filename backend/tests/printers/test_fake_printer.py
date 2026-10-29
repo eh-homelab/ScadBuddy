@@ -313,7 +313,12 @@ async def test_plain_ftp_is_refused(lan: _Lan) -> None:
 async def test_each_upload_is_its_own_session(lan: _Lan) -> None:
     first = await asyncio.to_thread(lan.upload, b"one", "/one.3mf")
     second = await asyncio.to_thread(lan.upload, b"two", "/two.3mf")
-    received = lan.control("GET", "/__received")["ftps"]
+    # pyftpdlib answers 226 before it calls `on_file_received` (2.2.0,
+    # `handlers/ftp/data.py` `close`), so the client can ask before the fake has
+    # recorded the last upload (#4991): wait for it, a bounded while.
+    async with asyncio.timeout(10):
+        while len(received := lan.control("GET", "/__received")["ftps"]) < 2:
+            await asyncio.sleep(0.05)
     assert [(e["name"], e["md5"]) for e in received] == [("/one.3mf", first), ("/two.3mf", second)]
 
 
