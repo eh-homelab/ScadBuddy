@@ -1,7 +1,7 @@
 import type { RiskTier } from '../harness/permissions.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import type { Tool, ToolOverrides } from '../tools/registry.js'
-import { builtinItem, itemKindOf, strictest } from './items.js'
+import { builtinItem, itemKindIn, strictest } from './items.js'
 import { type AccessRow, BUILTIN_SOURCES, isToolAccess, packageSource, registrySource, type StoredOverrides, type ToolAccess } from './model.js'
 import { isRegistrySource, pluginOverrides, registryOverrides, sourceEnabled, toolAccess } from './resolve.js'
 import type { AccessReader } from './store.js'
@@ -121,7 +121,7 @@ export class AccessResolver {
     for (const row of rows) {
       const into = out.get(row.source)
       if (!into) continue
-      const kind = itemKindOf(row.item)
+      const kind = itemKindIn(row.source, row.item)
       if (kind === 'tool') continue
       const name = row.item.slice(row.item.indexOf(':') + 1)
       if (kind === 'builtin') {

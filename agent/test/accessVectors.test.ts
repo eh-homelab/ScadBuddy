@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { type AccessRow, MIGRATED_BY, registrySource, type StoredOverrides, TOOL_ACCESS } from '../src/access/model.js'
+import { type ItemKind, itemKindIn } from '../src/access/items.js'
 import { registryOverrides, sourceEnabled } from '../src/access/resolve.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import type { AccessReader } from '../src/access/store.js'
@@ -14,8 +15,10 @@ const FILE = new URL('./fixtures/access-vectors.json', import.meta.url)
 type VectorTool = { name: string; risk: RiskTier | '?'; hitl: 'approval' | 'answer' | null }
 type RegistryVector = { name: string; durable_only?: true; tools: VectorTool[]; rows: AccessRow[]; expect: StoredOverrides }
 type SourceVector = { name: string; source: string; rows: AccessRow[]; expect: boolean }
+type ItemKindVector = { source: string; item: string; expect: ItemKind }
 type Vectors = {
   tool_access: string[]
+  item_kinds: ItemKindVector[]
   migrated_by: string
   registry_source: Record<string, string>
   registry: RegistryVector[]
@@ -37,6 +40,19 @@ const none: StoredOverrides = { tool_tiers: {}, disabled_tools: [] }
 function build(): Vectors {
   return {
     tool_access: [...TOOL_ACCESS],
+    // #4757 review I1: only a package's own source and the own plugin hold named items.
+    item_kinds: [
+      { source: 'package:pk', item: 'skill:a', expect: 'skill' },
+      { source: 'package:pk', item: 'subagent:a', expect: 'subagent' },
+      { source: 'package:pk', item: 'hook:Stop:0123456789abcdef', expect: 'hook' },
+      { source: 'package:pk', item: 'builtin:Bash', expect: 'builtin' },
+      { source: 'package:pk', item: 'search', expect: 'tool' },
+      { source: 'builtin:own-plugin', item: 'skill:print', expect: 'skill' },
+      { source: 'remote:hs', item: 'skill:x', expect: 'tool' },
+      { source: 'package:pk/mcp:srv', item: 'skill:x', expect: 'tool' },
+      { source: 'builtin:scadbuddy', item: 'builtin:x', expect: 'tool' },
+      { source: 'builtin:http', item: 'hook:Stop:0123456789abcdef', expect: 'tool' },
+    ],
     migrated_by: MIGRATED_BY,
     registry_source: {
       get_model: S,
@@ -118,6 +134,7 @@ function build(): Vectors {
       { name: 'a package server is on by default', source: 'package:pk/mcp:srv', rows: [], expect: true },
       { name: 'a package server off', source: 'package:pk/mcp:srv', rows: [row('package:pk/mcp:srv', '*', 'off')], expect: false },
       { name: 'a package is off by default', source: 'package:pk', rows: [], expect: false },
+      { name: 'a source with a newline is no package server', source: 'package:pk\n/mcp:srv', rows: [], expect: false },
     ],
   }
 }
@@ -158,6 +175,8 @@ describe('access vectors', () => {
     const browser = tools.filter((t) => registrySource(t.name) === B).length
     expect(reads).toEqual({ rows: browser, row: tools.length - browser })
   })
+
+  it.each(built.item_kinds)('item kind: $item in $source', (v) => expect(itemKindIn(v.source, v.item)).toBe(v.expect))
 
   it.each(built.sources)('source: $name', (v) => expect(sourceEnabled(v.source, v.rows)).toBe(v.expect))
 

@@ -175,9 +175,8 @@ describe('builtin:browser switched off, at every gate (#4757)', () => {
     expect(await listed()).toEqual([other.name])
   })
 
-  // A flow has no tab, so the route never lists a browser tool (temporal/flowTools.ts forFlows):
-  // switched off, it stays unlisted, and nothing else changes.
-  it('builtin:browser switched off answers disabled from /internal/flows/tools', async () => {
+  // A flow has no tab (temporal/flowTools.ts forFlows): the switch has nothing to gate here.
+  it('/internal/flows/tools never lists a browser tool, switched or not', async () => {
     const { tools, svc, off, access } = browserRig()
     const app = createApp({
       access: access as never,

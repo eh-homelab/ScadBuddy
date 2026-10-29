@@ -5,6 +5,8 @@ import type { ToolAccess } from './model.js'
 // `ai_access` row under its source, its item named by kind. Anything else is a tool.
 
 export type SwitchAccess = 'on' | 'off'
+/** What one row holds: a tier or `off` (a tool, a built-in), or `on` (a switched item, a source's `*`). */
+export type Access = ToolAccess | 'on'
 export type ItemKind = 'tool' | 'hook' | 'skill' | 'subagent' | 'builtin'
 
 export const skillItem = (name: string): string => `skill:${name}`
@@ -20,9 +22,26 @@ const PREFIXES: readonly [string, Exclude<ItemKind, 'tool'>][] = [
   ['hook:', 'hook'],
 ]
 
+/** The kind a name's prefix gives; `itemKindIn` is what a stored row is (its source decides). */
 export function itemKindOf(item: string): ItemKind {
   return PREFIXES.find(([prefix]) => item.startsWith(prefix))?.[1] ?? 'tool'
 }
+
+/**
+ * Whether `source` holds skills, subagents, hooks and built-ins: a package's own source
+ * (`package:<p>`, not one of its servers) and the own plugin. Every other source holds only
+ * tools, whatever their names (a remote tool may be named `skill:x`).
+ */
+export function holdsItems(source: string): boolean {
+  return source === OWN_PLUGIN_SOURCE || (source.startsWith('package:') && !source.includes('/mcp:'))
+}
+
+/** An item's kind in its source: by prefix only where the source holds items, else a tool. */
+export function itemKindIn(source: string, item: string): ItemKind {
+  return holdsItems(source) ? itemKindOf(item) : 'tool'
+}
+
+const OWN_PLUGIN_SOURCE = 'builtin:own-plugin'
 
 /** Least to most strict: across the packages that name one built-in, the strictest wins. */
 export const BUILTIN_STRICTNESS: readonly ToolAccess[] = ['read', 'write', 'outward', 'off']

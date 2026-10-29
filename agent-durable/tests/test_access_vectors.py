@@ -38,6 +38,13 @@ def test_every_source_vector_matches(vector: dict[str, Any]) -> None:
     assert access.source_enabled(vector["source"], _rows(vector["rows"])) is vector["expect"]
 
 
+@pytest.mark.parametrize(
+    "vector", VECTORS["item_kinds"], ids=lambda v: f"{v['source']} {v['item']}"
+)
+def test_every_item_kind_vector_matches(vector: dict[str, str]) -> None:
+    assert access.item_kind_in(vector["source"], vector["item"]) == vector["expect"]
+
+
 def test_registry_sources_match() -> None:
     assert list(access.TOOL_ACCESS) == VECTORS["tool_access"]
     assert VECTORS["migrated_by"] == access.MIGRATED_BY

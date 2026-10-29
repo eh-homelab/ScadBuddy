@@ -25,7 +25,7 @@ BROWSER_SOURCE = "builtin:browser"
 REGISTRY_SOURCES = ("builtin:scadbuddy", BROWSER_SOURCE)
 OWN_PLUGIN_SOURCE = "builtin:own-plugin"
 # A package's MCP server, ``package:<pkg>/mcp:<server>`` (agent/src/access/model.ts).
-_PACKAGE_SERVER_RE = re.compile(r"package:.+/mcp:.+", re.DOTALL)
+_PACKAGE_SERVER_RE = re.compile(r"package:.+/mcp:.+")
 
 
 @dataclass(frozen=True)
@@ -61,6 +61,31 @@ def enabled_by_default(source: str) -> bool:
     """Built-in sources and package servers are on until turned off (a server is offered while
     its package is approved and enabled); remote plugins and packages off until turned on."""
     return source.startswith("builtin:") or _PACKAGE_SERVER_RE.fullmatch(source) is not None
+
+
+_ITEM_PREFIXES = (
+    ("skill:", "skill"),
+    ("subagent:", "subagent"),
+    ("builtin:", "builtin"),
+    ("hook:", "hook"),
+)
+
+
+def holds_items(source: str) -> bool:
+    """Whether ``source`` holds skills, subagents, hooks and built-ins (agent/src/access/items.ts
+    ``holdsItems``): a package's own source and the own plugin. Every other source holds only
+    tools, whatever their names."""
+    return source == OWN_PLUGIN_SOURCE or (source.startswith("package:") and "/mcp:" not in source)
+
+
+def item_kind_in(source: str, item: str) -> str:
+    """An item's kind in its source (items.ts ``itemKindIn``): by prefix only where the source
+    holds items, else ``tool``."""
+    if holds_items(source):
+        for prefix, kind in _ITEM_PREFIXES:
+            if item.startswith(prefix):
+                return kind
+    return "tool"
 
 
 def source_enabled(source: str, rows: Sequence[AccessRow]) -> bool:

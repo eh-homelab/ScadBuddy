@@ -2,9 +2,8 @@ import type { Sql, TransactionSql } from 'postgres'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from '../audit/log.js'
 import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { LEGACY_SOURCES, legacySettings, type RegistryTool } from './legacy.js'
-import type { Access } from './capabilities.js'
-import { itemKindOf } from './items.js'
-import { type AccessRow, BUILTIN_SOURCES, isToolAccess, SOURCE_ITEM, type ToolAccess } from './model.js'
+import { type Access, itemKindIn } from './items.js'
+import { type AccessRow, isToolAccess, SOURCE_ITEM, type ToolAccess } from './model.js'
 
 export type AccessReader = {
   rows(sources: readonly string[]): Promise<AccessRow[]>
@@ -42,21 +41,26 @@ function checkTool(item: string, access: unknown): asserts access is ToolAccess 
 }
 
 /**
- * One item's write as the model allows it (#4757, spec §4.1): a tool or an allowed built-in
- * takes off, read, write or outward; a hook, skill or subagent takes on or off, and only in
- * a package or the own plugin.
+ * One item's write as the model allows it (#4757, spec §4.1). Only a package's own source and
+ * the own plugin hold skills, subagents, hooks and built-ins (items.ts `itemKindIn`); every
+ * other item is a tool, whatever its name. A tool or built-in takes off, read, write or
+ * outward; a hook, skill or subagent on or off. A named item needs its name, and a hook
+ * `hook:<event>:<16 hex>`.
  */
 export function checkItem(source: string, item: string, access: unknown): asserts access is Access {
-  const kind = itemKindOf(item)
-  if (kind === 'tool' || kind === 'builtin') {
+  const kind = itemKindIn(source, item)
+  if (kind === 'tool') {
     checkTool(item, access)
     return
   }
-  if (access !== 'on' && access !== 'off') throw new AccessError(`a ${kind} takes on or off, not ${JSON.stringify(access)}`)
-  if (!source.startsWith('package:') && source !== BUILTIN_SOURCES.ownPlugin) {
-    throw new AccessError(`${JSON.stringify(source)} has no ${kind}s: only a package or the own plugin does`)
+  if (kind === 'hook' ? !HOOK_RE.test(item) : item.indexOf(':') === item.length - 1) {
+    throw new AccessError(`${JSON.stringify(item)} is not a ${kind} item`)
   }
+  if (kind === 'builtin') checkTool(item, access)
+  else if (access !== 'on' && access !== 'off') throw new AccessError(`a ${kind} takes on or off, not ${JSON.stringify(access)}`)
 }
+
+const HOOK_RE = /^hook:[^:]+:[0-9a-f]{16}$/
 
 /** `<actor.kind>:<actor.id>`; `system` without a context. */
 export function updatedBy(context?: AuditContext): string {

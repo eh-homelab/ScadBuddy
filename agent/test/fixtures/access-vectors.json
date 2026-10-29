@@ -5,6 +5,58 @@
     "write",
     "outward"
   ],
+  "item_kinds": [
+    {
+      "source": "package:pk",
+      "item": "skill:a",
+      "expect": "skill"
+    },
+    {
+      "source": "package:pk",
+      "item": "subagent:a",
+      "expect": "subagent"
+    },
+    {
+      "source": "package:pk",
+      "item": "hook:Stop:0123456789abcdef",
+      "expect": "hook"
+    },
+    {
+      "source": "package:pk",
+      "item": "builtin:Bash",
+      "expect": "builtin"
+    },
+    {
+      "source": "package:pk",
+      "item": "search",
+      "expect": "tool"
+    },
+    {
+      "source": "builtin:own-plugin",
+      "item": "skill:print",
+      "expect": "skill"
+    },
+    {
+      "source": "remote:hs",
+      "item": "skill:x",
+      "expect": "tool"
+    },
+    {
+      "source": "package:pk/mcp:srv",
+      "item": "skill:x",
+      "expect": "tool"
+    },
+    {
+      "source": "builtin:scadbuddy",
+      "item": "builtin:x",
+      "expect": "tool"
+    },
+    {
+      "source": "builtin:http",
+      "item": "hook:Stop:0123456789abcdef",
+      "expect": "tool"
+    }
+  ],
   "migrated_by": "migration:2171",
   "registry_source": {
     "get_model": "builtin:scadbuddy",
@@ -722,6 +774,12 @@
     {
       "name": "a package is off by default",
       "source": "package:pk",
+      "rows": [],
+      "expect": false
+    },
+    {
+      "name": "a source with a newline is no package server",
+      "source": "package:pk\n/mcp:srv",
       "rows": [],
       "expect": false
     }
