@@ -25,6 +25,7 @@ from temporalio.worker import Worker
 from scadbuddy import worker as worker_module
 from scadbuddy.bambuddy import operations as bambuddy_operations
 from scadbuddy.bambuddy import output_reader
+from scadbuddy.bambuddy import print_run as print_run_module
 from scadbuddy.bambuddy.print_run import RunRoute, run_route
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import StoredSettings
@@ -375,7 +376,8 @@ async def test_the_print_workers_background_slice_takes_a_native_printers_route(
         raise _RoutedError
 
     monkeypatch.setattr(worker_module, "bambuddy_kinds_over", recording)
-    monkeypatch.setattr(bambuddy_operations, "run_route", routed)
+    # `slice_route` calls it (#4551), for the quote and the dialog's slice alike.
+    monkeypatch.setattr(print_run_module, "run_route", routed)
     deps = await asyncio.to_thread(
         build_print_deps, print_settings(pg_conninfo, tmp_path, secret_key_file=kek_file)
     )

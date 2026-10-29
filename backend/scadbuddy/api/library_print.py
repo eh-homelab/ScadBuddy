@@ -65,7 +65,11 @@ from scadbuddy.api.printing import (
     opening_route,
 )
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
-from scadbuddy.bambuddy.catalogue import catalogue_name_key, kept_catalogue
+from scadbuddy.bambuddy.catalogue import (
+    catalogue_name_key,
+    catalogue_refresh_claim,
+    kept_catalogue,
+)
 from scadbuddy.bambuddy.choices import (
     ChoicesView,
     choices_for,
@@ -1167,6 +1171,7 @@ async def get_library_choices(
             printer_id=printer_id,
             cache=paths.cache,
             catalogue_key=catalogue_name_key(store.kek),
+            refresh_claim=catalogue_refresh_claim(store.defaults.database_url),
             rack=rack,
         )
     return await with_lan_printers(view, settings, printers)
@@ -1566,6 +1571,13 @@ async def post_library_check(
             files=files,
             printers=printers.store,
             reports=printers.reports,
-            catalogue=None if client is None else kept_catalogue(client, paths.cache, store.kek),
+            catalogue=None
+            if client is None
+            else kept_catalogue(
+                client,
+                paths.cache,
+                store.kek,
+                catalogue_refresh_claim(store.defaults.database_url),
+            ),
             profiles=slicing.profiles,
         )

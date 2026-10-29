@@ -1196,6 +1196,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         native=state.components.get(SLICING).starter,
         printers=state.components.get(PRINTERS).store,
         reports=state.components.get(PRINTERS).reports,
+        spools=state.components.get(SPOOLS),
     )
     ops = state.components.get(OPERATIONS)
     registry = state.components.get(PRINTERS)

@@ -99,6 +99,9 @@ from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.start import native_slice_starter
 from scadbuddy.slicing.store import NativeSliceStore
+from scadbuddy.spools.component import Spools
+from scadbuddy.spools.providers import SettingsOnly, discover_providers
+from scadbuddy.spools.store import SpoolStore
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
@@ -1117,6 +1120,12 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             native=native,
             printers=printers,
             reports=reports,
+            # A native run's plan lays the providers' records over its trays (#4551):
+            # the same providers the API discovers, over this worker's settings.
+            spools=Spools(
+                store=SpoolStore(pool),
+                providers=discover_providers(SettingsOnly(settings_store), None),
+            ),
         )
     )
     # A LAN print's sliced blob, through the API's internal route with a token signed
