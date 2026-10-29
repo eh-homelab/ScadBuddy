@@ -245,8 +245,14 @@ function missingItem(plugin: PluginSummary, tool: string): ItemView {
 function remoteView(plugin: PluginSummary, listing: Listing): SourceView {
   const tools = listing?.tools ?? []
   const views = describeTools({ name: plugin.name, toolTiers: plugin.tool_tiers, disabledTools: plugin.disabled_tools }, tools)
-  const items = views.map((view, i) => remoteItem(plugin, view, tools[i]!))
-  const listed = new Set(tools.map((t) => t.name))
+  // One row per name: a name listed twice is one item (its id is the write's key).
+  const listed = new Set<string>()
+  const items: ItemView[] = []
+  views.forEach((view, i) => {
+    if (listed.has(view.name)) return
+    listed.add(view.name)
+    items.push(remoteItem(plugin, view, tools[i]!))
+  })
   const stored = [...new Set([...Object.keys(plugin.tool_tiers), ...plugin.disabled_tools])].filter((t) => !listed.has(t)).sort()
   return {
     id: remoteSource(plugin.name),

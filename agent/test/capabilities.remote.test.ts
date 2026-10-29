@@ -210,6 +210,15 @@ describe('remote MCP plugins as capability sources', () => {
     expect(setToolAccess).not.toHaveBeenCalled()
   })
 
+  it('a tool listed twice under one name is one row, fixed off, as the forwarder hides it', async () => {
+    const { caps, setToolAccess } = setup({ listings: { 'remote:hs': listing([{ name: 'recall' }, { name: 'recall' }, { name: 'retain' }]) } })
+    const source = await caps.source('remote:hs')
+    expect(source.items.map((i) => i.id)).toEqual(['recall', 'retain'])
+    expect(item(source, 'recall')).toMatchObject({ access: 'off', fixed: { access: 'off', reason: 'Shares its name with recall, so both are hidden' } })
+    expect((await refusal(caps.setItem('remote:hs', 'recall', 'read', ctx))).status).toBe(409)
+    expect(setToolAccess).not.toHaveBeenCalled()
+  })
+
   it('setItem off then read moves the tool between disabled_tools and tool_tiers', async () => {
     const { caps, repo } = setup()
     await caps.setItem('remote:hs', 'recall', 'off', ctx)

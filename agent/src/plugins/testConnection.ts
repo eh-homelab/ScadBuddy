@@ -104,7 +104,11 @@ export function describeTools(
   }
   return tools.map((tool) => {
     const name = harnessToolName(tool.name)
-    const others = (byName.get(name) ?? []).filter((n) => n !== tool.name)
+    // Every other entry of the harness name, a second entry of the same name included:
+    // the forwarder's filterToolList counts entries, so it hides both.
+    const entries = byName.get(name) ?? []
+    const self = entries.indexOf(tool.name)
+    const others = entries.filter((_, j) => j !== self)
     const annotations = tool.annotations
     let tier: RiskTier = 'outward'
     let source: PluginToolView['tier_source'] = 'default'

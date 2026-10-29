@@ -227,6 +227,15 @@ describe('tool names as Claude Code sees them', () => {
     ])
   })
 
+  it('a tool listed twice under one name collides with itself, as the forwarder hides it', () => {
+    const tools = describeTools(memory, listed([{ name: 'recall' }, { name: 'recall' }, { name: 'retain' }]))
+    expect(tools.map((t) => [t.name, t.tier_source, t.collides_with, t.disabled])).toEqual([
+      ['recall', 'collision', ['recall'], true],
+      ['recall', 'collision', ['recall'], true],
+      ['retain', 'default', [], false],
+    ])
+  })
+
   it('keeps title, input and output schema and the raw entry of each tool', () => {
     const inputSchema = { type: 'object', properties: { query: { type: 'string' } } }
     const outputSchema = { type: 'object', properties: { hits: { type: 'array' } } }

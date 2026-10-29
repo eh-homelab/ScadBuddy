@@ -18,7 +18,7 @@ afterEach(async () => {
 })
 
 /** An upstream that issues session `s-1` to a POST and records every request; `hang` never answers a DELETE. */
-async function upstream(options: { hang?: boolean; body?: string; type?: string } = {}) {
+async function upstream(options: { hang?: boolean; body?: string; type?: string; status?: number } = {}) {
   const seen: Seen[] = []
   const server = createServer((req, res) => {
     seen.push({ method: req.method ?? '', headers: req.headers })
@@ -28,7 +28,7 @@ async function upstream(options: { hang?: boolean; body?: string; type?: string 
     }
     req.resume()
     req.on('end', () => {
-      res.writeHead(200, { 'content-type': options.type ?? 'application/json', 'mcp-session-id': 's-1' })
+      res.writeHead(options.status ?? 200, { 'content-type': options.type ?? 'application/json', 'mcp-session-id': 's-1' })
       res.end(options.body ?? JSON.stringify({ jsonrpc: '2.0', id: 1, result: {} }))
     })
   })
@@ -171,5 +171,16 @@ describe('the response cap (#2171 review M6)', () => {
     expect(text).not.toContain('d'.repeat(100))
     const events = text.split('\n\n').filter(Boolean).map((e) => JSON.parse(e.replace(/^data: /, '')) as { id: number; error: { message: string } })
     expect(events).toEqual([{ jsonrpc: '2.0', id: 1, error: { code: -32603, message: expect.stringMatching(/too large/) as unknown } }])
+  })
+  it('a capped body that is not an event stream is cut off, never given SSE frames (#2171 final review M6)', async () => {
+    const { plugin } = await upstream({ body: 'e'.repeat(5000), type: 'text/plain', status: 500 })
+    const forwarder = await PluginForwarder.start()
+    forwarders.push(forwarder)
+    // The head may not have left yet: the request then fails, else its body does.
+    const text = await post(forwarder.register(plugin, '127.0.0.1', { maxResponseBytes: 1000 }).url)
+      .then((res) => res.text())
+      .catch(() => 'cut off')
+    expect(text).not.toContain('data:')
+    expect(text).not.toContain('e'.repeat(100))
   })
 })

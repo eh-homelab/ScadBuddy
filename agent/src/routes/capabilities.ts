@@ -134,7 +134,8 @@ export const route: RouteModule = {
     app.post(`${one}/refresh`, (c) =>
       answer(c, async (caps) => {
         const { test, source } = await caps.refresh(c.req.param('source'))
-        const { stored: _stored, ...sent } = test
+        // The listing is `source`'s items: neither the stored copy nor the test's views are sent again.
+        const { stored: _stored, tools: _tools, ...sent } = test
         return { test: sent, source }
       }),
     )

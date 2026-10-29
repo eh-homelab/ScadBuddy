@@ -301,6 +301,8 @@ describe('/api/v1/ai/capabilities', () => {
     const body = (await res.json()) as { test: PluginTest; source: SourceView }
     expect(body.test).toMatchObject({ ok: true, detail: 'connected' })
     expect(body.test).not.toHaveProperty('stored')
+    // The listing is the source's items; the test's own copy is not sent twice (final review M3).
+    expect(body.test).not.toHaveProperty('tools')
     expect(body.source.id).toBe('remote:hs')
     expect(body.source.listed_at).toBe('2026-10-29T12:00:00.000Z')
     expect(body.source.truncated).toBe(false)

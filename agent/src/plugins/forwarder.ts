@@ -551,6 +551,8 @@ export class PluginForwarder {
           queueMicrotask(() => {
             const why = `plugin response too large (over ${max} bytes)`
             if (!res.headersSent) return fail(res, 502, why)
+            // Any other body already begun has no frame for the reason: cut it off.
+            if (!type.startsWith('text/event-stream')) return void res.destroy()
             // An event stream already begun: each request this POST carried gets the reason as its error.
             if (!res.writableEnded) for (const id of asked) res.write(`data: ${withheldError(id, why)}\n\n`)
             res.end()

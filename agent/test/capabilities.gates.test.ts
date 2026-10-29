@@ -1,16 +1,19 @@
 import { randomBytes } from 'node:crypto'
+import type { HookInput } from '@anthropic-ai/claude-agent-sdk'
 import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { BUILTIN_SOURCES } from '../src/access/model.js'
 import { createApp } from '../src/app.js'
 import { tiersUpTo } from '../src/auth/principal.js'
+import { buildHarnessOptions } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { BuiltInTools } from '../src/plugins/builtInTools.js'
 import { CAPABILITIES_PATH } from '../src/routes/capabilities.js'
 import { FLOW_TOOLS_PATH } from '../src/routes/flowTools.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
+import { harnessTools } from '../src/tools/harness.js'
 import { TOOL_TIER_ACTIVITY } from '../src/temporal/toolTier.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { defineTool, json, runToolWithOutcome } from '../src/tools/registry.js'
@@ -21,9 +24,9 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 // #2171 acceptance: access the user sets through /api/v1/ai/capabilities is what every gate
 // reads. One memoryAccess sits behind the route and the gates. The stand-in has the name of
 // one of ScadBuddy's own outward tools, so the route offers it, but runs nothing real. The
-// classic seam and the durable run of a lowered tool are pinned by builtInTools.test.ts
-// ("the harness seam allows a lowered outward tool", "the durable activities run a lowered
-// outward tool with no approval recorded") over the same store; they are not repeated.
+// durable run of a lowered tool is pinned by builtInTools.test.ts ("the durable activities
+// run a lowered outward tool with no approval recorded") over the same store. A remote
+// tool's tier at the classic seam is capabilities.gates.pg.test.ts.
 
 const kek = kekFromBase64(randomBytes(32).toString('base64'))
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https', 'content-type': 'application/json' }
@@ -58,7 +61,7 @@ function rig() {
     })
     expect(res.status).toBe(200)
   }
-  return { app, peer, rows, standIn, handler, svc, lower }
+  return { app, peer, rows, access, standIn, handler, svc, lower }
 }
 
 describe('access set in Settings → Tools & plugins, at every gate (#2171)', () => {
@@ -75,6 +78,32 @@ describe('access set in Settings → Tools & plugins, at every gate (#2171)', ()
     expect(run.outcome).not.toBe('refused')
     expect(JSON.stringify(run.result)).not.toMatch(/pending_approval/)
     expect(handler).toHaveBeenCalledTimes(1)
+  })
+
+  it('a tool lowered in Settings is allowed at the classic seam: canUseTool and PreToolUse', async () => {
+    const { access, svc, lower } = rig()
+    const seam = async () => {
+      const options = buildHarnessOptions({
+        paths: { stateDir: '/var/lib/scadbuddy-agent' },
+        credential: { kind: 'anthropic_api_key', secret: 'sk-ant-api03-unit-test-key-000011112222' },
+        prompt: 'hi',
+        tierOf: harnessTools(svc).tierOf,
+        builtInPolicy: await new BuiltInTools(access).policy(),
+      })
+      const name = `mcp__scadbuddy__${real.name}`
+      const input = { hook_event_name: 'PreToolUse', tool_name: name, tool_input: {}, tool_use_id: 'toolu_1', session_id: 's', transcript_path: '/dev/null', cwd: '/tmp' }
+      return {
+        canUseTool: await options.canUseTool!(name, {}, { signal, toolUseID: 't', requestId: 'r' }),
+        preToolUse: await options.hooks!.PreToolUse![0]!.hooks[0]!(input as HookInput, 'toolu_1', { signal }),
+      }
+    }
+    // Before: outward, so with no approval gate it is denied as needing approval.
+    expect(await seam()).toMatchObject({
+      canUseTool: { behavior: 'deny', message: expect.stringMatching(/approval/) as unknown },
+      preToolUse: { hookSpecificOutput: { permissionDecision: 'deny' } },
+    })
+    await lower()
+    expect(await seam()).toEqual({ canUseTool: expect.objectContaining({ behavior: 'allow' }) as unknown, preToolUse: {} })
   })
 
   it('a tool lowered in Settings answers write from /internal/flows/tools', async () => {

@@ -1225,7 +1225,7 @@ Settings → Tools & plugins reads and writes `ai_access` through seven agent ro
 | `GET /api/v1/ai/capabilities/{source}/items/{item}` | the item with its input and output schemas, annotations, the raw listed entry and what the caps `omitted` |
 | `PUT /api/v1/ai/capabilities/{source}/items/{item}` | `{ "access": … }`: `off`, `read`, `write` or `outward` for a tool. Choosing the default deletes the row. 400 on an access the kind does not take, 409 on a `fixed` item or one outside `allowed` |
 | `DELETE /api/v1/ai/capabilities/{source}/items/{item}` | back to the default |
-| `POST /api/v1/ai/capabilities/{source}/refresh` | `{ test, source }`: a remote plugin's connection test and its source after it. A good test stores the listing (`testAndList` in `agent/src/routes/plugins.ts`, shared with `POST /plugins/{name}/test`, one at a time per plugin; a second is 429). 409 on a source that lists no tools |
+| `POST /api/v1/ai/capabilities/{source}/refresh` | `{ test, source }`: a remote plugin's connection test (without its `tools`: they are the source's items) and its source after it. A good test stores the listing (`testAndList` in `agent/src/routes/plugins.ts`, shared with `POST /plugins/{name}/test`, one at a time per plugin; a second is 429). 409 on a source that lists no tools |
 
 - A source or item id is one percent-encoded path segment (`remote%3Ahindsight`). An
   unknown one is 404. Every other write answers the source as it is after the write.

@@ -268,6 +268,23 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect((await oldColumns('mem'))?.disabled_tools).toEqual(['files.list'])
       })
 
+      it('setToolAccess refuses the 257th change of one kind in the page\'s words, not a field the page never shows (final review M7)', async () => {
+        const names = Array.from({ length: 256 }, (_, i) => `t${i}`)
+        await store.create(
+          { name: 'mem', url: 'https://hs.example/mcp', disabled_tools: names, tool_tiers: Object.fromEntries(names.map((n) => [`r${n}`, 'read'])) },
+          kek,
+        )
+        const off = store.setToolAccess('mem', 'x', 'off', UI_CONTEXT)
+        await expect(off).rejects.toMatchObject({ name: 'PluginError', status: 400 })
+        await expect(off).rejects.toThrow('At most 256 tools of plugin "mem" can be off: reset one of them first')
+        const read = store.setToolAccess('mem', 'x', 'read', UI_CONTEXT)
+        await expect(read).rejects.toThrow('At most 256 tools of plugin "mem" can have an access other than off or the default: reset one of them first')
+        // A change to a tool already counted, or a reset, still goes through.
+        await store.setToolAccess('mem', 'rt0', 'write', UI_CONTEXT)
+        await store.setToolAccess('mem', 't0', null, UI_CONTEXT)
+        await store.setToolAccess('mem', 'x', 'off', UI_CONTEXT)
+      })
+
       it("setToolAccess attributes only the changed row: the others keep their author and time", async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
         await db.sql`UPDATE ai_access SET updated_by = 'migration:2171', updated_at = now() - interval '1 day'

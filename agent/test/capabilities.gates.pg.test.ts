@@ -7,6 +7,7 @@ import { remoteSource } from '../src/access/model.js'
 import { AccessStore } from '../src/access/store.js'
 import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
+import { buildHarnessOptions } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { PluginForwarder } from '../src/plugins/forwarder.js'
 import { PluginStore } from '../src/plugins/registry.js'
@@ -17,7 +18,8 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // #2171, #778 acceptance: a remote tool set off through /api/v1/ai/capabilities is what the
-// forwarder enforces: gone from tools/list and refused on tools/call.
+// forwarder enforces: gone from tools/list and refused on tools/call. A tier set there is
+// what the classic seam reads.
 
 const kek = kekFromBase64(randomBytes(32).toString('base64'))
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https', 'content-type': 'application/json' }
@@ -40,7 +42,7 @@ describe.skipIf(skip !== '')(`remote access set through the capabilities routes$
     await drop()
   })
 
-  it("a remote tool set off in Settings is absent from the forwarder's tools/list and refused on tools/call", async () => {
+  async function rig() {
     const store = new PluginStore(db.sql)
     const listings = new ToolListings(db.sql)
     await store.create({ name: 'hs', url: mcp.url }, kek)
@@ -60,6 +62,11 @@ describe.skipIf(skip !== '')(`remote access set through the capabilities routes$
     const put = (path: string, body: unknown) =>
       app.request(`${CAPABILITIES_PATH}/${encodeURIComponent('remote:hs')}${path}`, { method: 'PUT', headers: UI, body: JSON.stringify(body) })
     expect((await put('', { enabled: true })).status).toBe(200)
+    return { store, put }
+  }
+
+  it("a remote tool set off in Settings is absent from the forwarder's tools/list and refused on tools/call", async () => {
+    const { store, put } = await rig()
     const off = await put('/items/b', { access: 'off' })
     expect(off.status).toBe(200)
 
@@ -76,6 +83,26 @@ describe.skipIf(skip !== '')(`remote access set through the capabilities routes$
       expect(mcp.calls).toEqual(['a:x'])
     } finally {
       await client.close()
+      registration.release()
+    }
+  })
+
+  it('a remote tool given read in Settings is allowed at the classic seam; one left at the default asks first', async () => {
+    const { store, put } = await rig()
+    expect((await put('/items/a', { access: 'read' })).status).toBe(200)
+    const [plugin] = (await store.enabled(kek)).plugins
+    const registration = forwarder.register(plugin!, '127.0.0.1')
+    try {
+      const options = buildHarnessOptions({
+        paths: { stateDir: '/var/lib/scadbuddy-agent' },
+        credential: { kind: 'anthropic_api_key', secret: 'sk-ant-api03-unit-test-key-000011112222' },
+        prompt: 'hi',
+        remotePlugins: [{ name: 'hs', url: registration.url, toolTiers: plugin!.toolTiers, disabledTools: plugin!.disabledTools }],
+      })
+      const ask = (name: string) => options.canUseTool!(name, {}, { signal: new AbortController().signal, toolUseID: 't', requestId: 'r' })
+      expect(await ask('mcp__hs__a')).toMatchObject({ behavior: 'allow' })
+      expect(await ask('mcp__hs__b')).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/approval/) as unknown })
+    } finally {
       registration.release()
     }
   })

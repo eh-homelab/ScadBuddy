@@ -663,6 +663,16 @@ export class PluginStore implements PluginRepo {
       const disabled = stored.disabledTools.filter((t) => t !== tool)
       if (value === 'off') disabled.push(tool)
       else if (value !== null) tiers[tool] = value
+      // In the page's words: the validators' refusal names fields the page never shows.
+      if (disabled.length > MAX_TOOL_ENTRIES) {
+        throw new PluginError(`At most ${MAX_TOOL_ENTRIES} tools of plugin "${name}" can be off: reset one of them first`, 400)
+      }
+      if (Object.keys(tiers).length > MAX_TOOL_ENTRIES) {
+        throw new PluginError(
+          `At most ${MAX_TOOL_ENTRIES} tools of plugin "${name}" can have an access other than off or the default: reset one of them first`,
+          400,
+        )
+      }
       await this.writeAccess(
         tx,
         name,
