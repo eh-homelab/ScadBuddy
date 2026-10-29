@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { aiCapabilities, type Access, type ItemView, type SourceView } from '../../api/capabilities'
 import { ChoiceSelect } from '../settings/form'
 import { Button } from '@/components/ui/button'
@@ -27,29 +27,38 @@ export function ItemRow({
   claims?: boolean
 }) {
   const selectId = useId()
+  const statusId = useId()
   const [pending, setPending] = useState<Access | null>(null)
   /** The last lowering asked about, kept while the dialog closes. */
   const [asked, setAsked] = useState<Access>('off')
+  /** What the row showed when the lowering was asked: the confirmation's "from". */
+  const [askedFrom, setAskedFrom] = useState<Access | 'default'>('default')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const shown = shownAccess(item)
+  /** An open lowering a refresh has overtaken: fixed now, no longer a lowering, or from another access. */
+  const stale = pending !== null && (item.fixed !== null || !lowers(item, pending) || shown !== askedFrom)
+
+  useEffect(() => {
+    if (stale) setPending(null)
+  }, [stale])
 
   const focusSelect = () => document.getElementById(selectId)?.focus()
 
-  async function save(write: () => Promise<SourceView>, after?: () => void) {
+  async function save(write: () => Promise<SourceView>, settled?: () => void) {
     setBusy(true)
     setError(null)
     try {
       onSaved(await write())
-      after?.()
     } catch (caught) {
       setError(message(caught))
     } finally {
       setBusy(false)
+      settled?.()
     }
   }
 
-  // Reset unmounts once it succeeds, so focus moves to the select.
+  // Reset is disabled while it runs and unmounts once it succeeds: focus moves to the select either way.
   const reset = () => void save(() => aiCapabilities.resetItem(source, item.id), focusSelect)
   const apply = (access: Access) => void save(() => aiCapabilities.setItem(source, item.id, access))
 
@@ -60,6 +69,7 @@ export function ItemRow({
     const next = value as Access
     if (lowers(item, next)) {
       setAsked(next)
+      setAskedFrom(shown)
       setPending(next)
     }
     else apply(next)
@@ -76,12 +86,20 @@ export function ItemRow({
           <div className="sb-num text-xs text-muted-foreground">{item.harness_name}</div>
         </div>
         <div className="flex items-center gap-2">
-          {busy && <Spinner />}
+          <span id={statusId} role="status" className="flex items-center gap-1 text-xs text-muted-foreground">
+            {busy && (
+              <>
+                <Spinner />
+                Saving…
+              </>
+            )}
+          </span>
           <ChoiceSelect
             size="sm"
             className="w-48"
             id={selectId}
             aria-label={`Access of ${item.name}`}
+            aria-describedby={statusId}
             value={shown}
             onValueChange={choose}
             choices={choicesOf(item)}
@@ -115,7 +133,7 @@ export function ItemRow({
         onCancel={() => setPending(null)}
         onConfirm={() => {
           setPending(null)
-          apply(asked)
+          if (!stale) apply(asked)
         }}
         returnFocus={focusSelect}
       />

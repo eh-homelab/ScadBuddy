@@ -205,6 +205,50 @@ describe('ItemRow', () => {
     expect(sent).toEqual([{ method: 'DELETE' }])
   })
 
+  it('a failed Reset keeps focus in the row', async () => {
+    server.use(http.delete(`${BASE}/:source/items/:item`, () => HttpResponse.json({ detail: 'reset refused' }, { status: 409 })))
+    const { user } = renderPage(<Harness start={item({ access: 'off', overridden: true })} />)
+    await user.click(screen.getByRole('button', { name: 'Reset send_to_printer' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('reset refused')
+    await waitFor(() => expect(select('send_to_printer')).toHaveFocus())
+  })
+
+  it('says Saving… while a write runs, tied to the select', async () => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const start = item({ id: 'list_models', name: 'list_models', default: 'read', access: 'read' })
+    serve(start)
+    server.use(
+      http.put(`${BASE}/:source/items/:item`, async () => {
+        await held
+        return HttpResponse.json({ detail: 'held' }, { status: 409 })
+      }),
+    )
+    const { user } = renderPage(<Harness start={start} />)
+    expect(select('list_models')).not.toHaveAccessibleDescription('Saving…')
+    await choose(user, select('list_models'), 'write')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Saving…'))
+    expect(select('list_models')).toHaveAccessibleDescription('Saving…')
+    release()
+    await screen.findByRole('alert')
+    expect(screen.getByRole('status')).toHaveTextContent('')
+  })
+
+  it.each([
+    ['the item becomes fixed', (i: ItemView) => ({ ...i, access: 'off' as const, fixed: { access: 'off' as const, reason: 'collides' } })],
+    ['the shown access changes', (i: ItemView) => ({ ...i, access: 'write' as const, overridden: true })],
+    ['the choice no longer lowers', (i: ItemView) => ({ ...i, default: 'read' as const, access: 'outward' as const, overridden: true })],
+  ])('closes an open lowering when a refresh means %s, and sends nothing', async (_, refreshed) => {
+    const sent = serve(item())
+    const props = { source: 'builtin:scadbuddy', onSaved: () => {} }
+    const { user, rerender } = renderPage(<ItemRow {...props} item={item()} />)
+    await choose(user, select('send_to_printer'), 'read')
+    await screen.findByRole('alertdialog')
+    rerender(<ItemRow {...props} item={refreshed(item())} />)
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    expect(sent).toEqual([])
+  })
+
   it("a fixed item's select is disabled and says why", () => {
     const reason = 'Two servers list a tool under this name, so it stays off'
     renderPage(<Harness start={item({ access: 'off', fixed: { access: 'off', reason } })} />)
