@@ -1,9 +1,6 @@
-import { randomUUID } from 'node:crypto'
 import { packageServerSource } from '../../access/model.js'
 import type { AccessResolver } from '../../access/resolver.js'
-import { existsSync } from 'node:fs'
-import { cp, mkdir, readFile, rename, rm, utimes, writeFile } from 'node:fs/promises'
-import path from 'node:path'
+import { utimes } from 'node:fs/promises'
 import { declaredConfigs, noCommand } from '../../harness/plugins.js'
 import { EgressError, type Resolver, systemResolver } from '../../http/egress.js'
 import {
@@ -26,7 +23,7 @@ import {
   validateHeaderName,
   validateSecret,
 } from '../registry.js'
-import { hashTree, PackageContentError } from './hash.js'
+import { derivedPackage } from './derived.js'
 import type { LoadedPackage } from './install.js'
 import { packageLedgerId } from '../pluginSessions.js'
 
@@ -275,74 +272,17 @@ export function declaresRemoteServers(dir: string): boolean {
   return declaredConfigs(dir).mcp.some(({ map }) => entries(map).some(([, config]) => isRemoteEntry(config)))
 }
 
-async function hashesTo(dir: string, hash: string): Promise<boolean> {
-  if (!existsSync(dir)) return false
-  try {
-    return (await hashTree(dir)).hash === hash
-  } catch (err) {
-    if (err instanceof PackageContentError || (err as NodeJS.ErrnoException).code === 'ENOENT') return false
-    throw err
-  }
-}
-
-function withoutRemote(map: unknown): unknown {
-  // A manifest's mcpServers may be a list of config paths and inline maps (harness/plugins.ts).
-  if (Array.isArray(map)) return map.map((entry: unknown) => (typeof entry === 'string' ? entry : withoutRemote(entry)))
-  const nested = isRecord(map) && isRecord(map.mcpServers)
-  const servers = nested ? (map.mcpServers as Record<string, unknown>) : map
-  if (!isRecord(servers)) return map
-  const kept = Object.fromEntries(Object.entries(servers).filter(([, c]) => !(isRecord(c) && isRemoteEntry(c))))
-  return nested ? { ...(map as Record<string, unknown>), mcpServers: kept } : kept
-}
-
-/**
- * The package as Claude Code may load it when its own MCP configs are read (a query with
- * `strictMcpConfig` off, for an allowed package, harness/run.ts):
- * `dir` itself when it declares no server reached by URL, else a copy under `root`
- * whose `.mcp.json` and manifest keep only its local servers. Its http servers reach
- * the turn through the forwarder instead (`forwardPackageServers`). The copy is named
- * by the content hash and made again from `dir` (re-hashed by its loader) on every
- * load: one already there is kept only while it hashes to the fresh copy, so it is
- * never trusted as it is. The original is never written to.
- */
 /** Marks a package copy as just used: its folder's mtime is what turnPackages.ts `sweepPackageCopies` reads. */
 export async function touch(dir: string): Promise<void> {
   const now = new Date()
   await utimes(dir, now, now).catch(() => {})
 }
 
+/**
+ * The package without its own http MCP servers: derived.ts `derivedPackage` leaving
+ * nothing else out, named by the copy's own hash. Goes once its callers take
+ * `derivedPackage` (#4757).
+ */
 export async function withoutRemoteServers(dir: string, contentHash: string, root: string): Promise<string> {
-  if (!declaresRemoteServers(dir)) return dir
-  const target = path.join(root, contentHash.replace(/^sha256:/, ''))
-  await mkdir(root, { recursive: true })
-  const tmp = path.join(root, `.tmp-${randomUUID()}`)
-  try {
-    await cp(dir, tmp, { recursive: true })
-    for (const { where, map } of declaredConfigs(tmp).mcp) {
-      if (where === '.mcp.json') {
-        await writeFile(path.join(tmp, '.mcp.json'), JSON.stringify(withoutRemote(map)))
-      } else if (where === 'plugin.json mcpServers') {
-        const file = path.join(tmp, '.claude-plugin', 'plugin.json')
-        const manifest = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>
-        await writeFile(file, JSON.stringify({ ...manifest, mcpServers: withoutRemote(manifest.mcpServers) }))
-      } else {
-        // A config file the manifest names: rewritten in place in the copy.
-        await writeFile(path.join(tmp, where), JSON.stringify(withoutRemote(map)))
-      }
-    }
-    if (declaresRemoteServers(tmp)) throw new Error(`could not strip the http MCP servers of ${dir}`)
-    const want = (await hashTree(tmp)).hash
-    // Its last use, which turnPackages.ts `sweepPackageCopies` keeps it by (#2395),
-    // touched before it is checked, as sharePackage does.
-    await touch(target)
-    if (await hashesTo(target, want)) return target
-    await rm(target, { recursive: true, force: true })
-    await rename(tmp, target).catch(async (err: NodeJS.ErrnoException) => {
-      // Another turn placed it first: fine when it is the same copy.
-      if ((err.code !== 'ENOTEMPTY' && err.code !== 'EEXIST') || !(await hashesTo(target, want))) throw err
-    })
-  } finally {
-    await rm(tmp, { recursive: true, force: true })
-  }
-  return target
+  return (await derivedPackage(dir, contentHash, root)).dir
 }

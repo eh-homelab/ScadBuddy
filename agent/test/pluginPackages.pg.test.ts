@@ -7,6 +7,7 @@ import { type AppDeps, createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
+import { hashTree } from '../src/plugins/packages/hash.js'
 import { loadPackagesForRun, PackageInstaller } from '../src/plugins/packages/install.js'
 import { validateSource } from '../src/plugins/packages/source.js'
 import { packageKinds } from '../src/plugins/packages/operations.js'
@@ -473,7 +474,14 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
 
   describe('the session manager', () => {
     // sessions/manager.ts: a package that declares an http MCP server is loaded as its copy without it.
-    const strippedCopy = (stateDir: string, contentHash: string) => path.join(stateDir, 'plugins-local', contentHash.replace(/^sha256:/, ''))
+    // The copy without its http servers, named by its own hash, not the pin's (#4757).
+    const expectStrippedCopy = async (paths: readonly string[] | undefined, stateDir: string, pin: string) => {
+      expect(paths).toHaveLength(1)
+      const copy = paths![0]!
+      expect(path.dirname(copy)).toBe(path.join(stateDir, 'plugins-local'))
+      expect(`sha256:${path.basename(copy)}`).not.toBe(pin)
+      expect((await hashTree(copy)).hash).toBe(`sha256:${path.basename(copy)}`)
+    }
 
     it('loads the enabled packages into each turn by path, and reports the ones it cannot load', async () => {
       const installed = await install()
@@ -507,7 +515,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
       await turn!.done
       // The fixture declares an http MCP server: Claude Code gets the copy without it (#2320).
-      expect(runs[0]?.pluginPaths).toEqual([strippedCopy(paths.stateDir, installed.content_hash)])
+      await expectStrippedCopy(runs[0]?.pluginPaths, paths.stateDir, installed.content_hash)
 
       const logged = (
         await db.sql<{ event: string }[]>`
@@ -568,7 +576,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
       await turn!.done
       expect(runs[0]?.pluginPaths).toBeUndefined()
-      expect(runs[0]?.allowedPluginPaths).toEqual([strippedCopy(paths.stateDir, installed.content_hash)])
+      await expectStrippedCopy(runs[0]?.allowedPluginPaths, paths.stateDir, installed.content_hash)
     })
   })
 })
