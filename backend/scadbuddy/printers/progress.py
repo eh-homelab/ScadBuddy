@@ -110,8 +110,13 @@ def from_lan_report(
 IDLE_SINCE = "The printer has been idle since, so how this print ended is not known."
 
 
+def shows(report: tuple[dict[str, Any], datetime] | None, started: LanStarted) -> bool:
+    """Whether ``report`` names ``started``'s print (each start's name is its own)."""
+    return report is not None and report[0].get("subtask_name") == started.subtask_name
+
+
 def lan_ended(
-    report: tuple[dict[str, Any], datetime] | None, started: LanStarted
+    report: tuple[dict[str, Any], datetime] | None, started: LanStarted, *, seen: bool
 ) -> LanStarted | None:
     """``started`` with how it ended (`LanStarted.ended`), once a report seen after the
     start shows the printer no longer printing: its own ``FINISH`` or ``FAILED``, or
@@ -122,10 +127,18 @@ def lan_ended(
     Another ``subtask_name`` is read as an end (``MOVED_ON``). That holds because the
     report is whole: `PrinterWatch` asks for a ``pushall`` on every connect
     (`lan.LanPrinter.reports`) and merges each delta over it, so a report that names
-    no ``subtask_name`` yet never reaches this."""
+    no ``subtask_name`` yet never reaches this.
+
+    Another name, or ``IDLE`` under one, counts only once ``seen``: a report has named this
+    print (`shows`). ``started_at`` is the print worker's clock and the report's time the
+    watch's, maybe another pod's, and the watch may not have merged the start's delta yet,
+    so a report from before the start can look newer. Read as an end, it would start the
+    next copy over this one."""
     if report is None or report[1] <= started.started_at:
         return None
     data, seen_at = report
+    if not seen and not shows(report, started):
+        return None
     state = data.get("gcode_state")
     if state in _RUNNING:
         return None

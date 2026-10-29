@@ -1539,7 +1539,11 @@ failed. Bambuddy's queue does the same with its defaults (`require_plate_clear` 
 yet (#4939), so clear the bed before each print ends. The run succeeds at the first start.
 The dialog and the progress show each copy still to start as queued. A start that fails,
 or a cancel, stops the rest, and the progress says why. A wait longer than 7 days stops
-them too.
+them too. A copy counts the one before as ended only after a report has shown that print
+by name, so an older report never starts the next over it. Each later copy joins its
+plate's slice again. Once that slice has been swept (6 hours after it finished), the plate
+is sliced again with the slicer profiles the image then has, so after an image update a
+later copy's G-code can differ from the first's.
 
 To check that a deployment's hot path is clear of Bambuddy, find the run's request trace
 in Tempo (`{ name = "POST /api/v1/print/outputs/{output_id}/run" }`) and then
