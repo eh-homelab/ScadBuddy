@@ -178,6 +178,19 @@ describe('global tools', () => {
     expect(!scheme.ok && scheme.error.code).toBe('invalid_args')
   })
 
+  it('answers a hash-only move at once, with the hash (#781)', async () => {
+    renderShell()
+    await waitFor(() => expect(bridge.liveNames()).toContain('navigate'))
+    await bridge.call('navigate', { route: '/settings' })
+
+    const started = Date.now()
+    expect(await bridge.call('navigate', { route: '/settings#mcp-connect' })).toEqual({
+      ok: true,
+      result: { route: '/settings#mcp-connect' },
+    })
+    expect(Date.now() - started).toBeLessThan(500)
+  })
+
   it('snapshots the route, dialogs, fields, errors and interactive elements', async () => {
     renderShell()
     await waitFor(() => expect(bridge.liveNames()).toContain('snapshot'))

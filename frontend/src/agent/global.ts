@@ -113,6 +113,9 @@ export function useGlobalAgentTools() {
       const from = current.current
       await navigate(checkRoute(target))
       if (target === from) return { route: from }
+      // The tab's route has no hash, so a move to a section of the page it is on never
+      // changes it: the answer is the target, with its hash, and nothing is waited for (#781).
+      if (target.includes('#') && target.slice(0, target.indexOf('#')) === from) return { route: target }
       // Wait for the router to commit, so the next call sees the new page's tools. A
       // redirect (an unknown path lands on "/") still counts as having moved.
       // One that redirects straight back to where it started never changes it, so the
