@@ -48,8 +48,7 @@ describe.skipIf(skip !== '')(`remote plugins on ai_access${skip}`, () => {
 
   it('a tool set off in ai_access is refused by the forwarder', async () => {
     await store.update('mem', { enabled: true, disabled_tools: ['b'] }, kek)
-    // The old column says nothing is disabled (written past the mirror trigger): only ai_access does.
-    await db.sql`ALTER TABLE ai_plugins DISABLE TRIGGER ai_plugins_mirror_access`
+    // The old column says nothing is disabled (an older replica's write): only ai_access does.
     await db.sql`UPDATE ai_plugins SET disabled_tools = '{}' WHERE name = 'mem'`
     const [plugin] = (await store.enabled(kek)).plugins
     const registration = forwarder.register(plugin!, '127.0.0.1')
@@ -70,7 +69,6 @@ describe.skipIf(skip !== '')(`remote plugins on ai_access${skip}`, () => {
 
   it('turn_tool_tier answers outward for an unlisted tool and the stored tier for a listed one', async () => {
     await store.update('mem', { enabled: true, tool_tiers: { a: 'read' } }, kek)
-    await db.sql`ALTER TABLE ai_plugins DISABLE TRIGGER ai_plugins_mirror_access`
     await db.sql`UPDATE ai_plugins SET tool_tiers = '{}' WHERE name = 'mem'`
     const loopback = () => Promise.resolve(['127.0.0.1'])
     const build = turnServers({ remotePlugins: async () => forwardForRun(await loadEnabledPlugins(store, kek, loopback), forwarder) })
