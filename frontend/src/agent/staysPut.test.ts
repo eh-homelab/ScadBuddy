@@ -25,5 +25,7 @@ describe('staysPut', () => {
   it('stays put outside Settings whatever the registry holds', async () => {
     const { staysPut } = await import('./global')
     expect(staysPut('/library#top', '/library')).toBe(true)
+    // Only `/settings` and the paths under it are Settings, not a path that merely starts so.
+    expect(staysPut('/settingsx#a', '/settingsx')).toBe(true)
   })
 })
