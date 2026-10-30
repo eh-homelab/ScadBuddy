@@ -556,6 +556,8 @@ Other Claude clients reach ScadBuddy's tools at `https://<your ScadBuddy>/mcp` (
 HTTP is refused, except on loopback). They sign in with a token from **Settings → MCP access →
 Tokens** ([operating.md §4.1](ai/operating.md#41-mcp-access-tokens)),
 or through your identity provider when the operator has turned on **OIDC sign-in** ([operating.md §6a](ai/operating.md#6a-mcp-sign-in-with-oidc)).
+**Settings → MCP access → Connect snippet** gives the commands below with your address
+(and a token just created) filled in (#781, #1910).
 
 1. Under **Settings → MCP access → Tokens**, give the token a name ("Claude Desktop on my laptop"),
    an **Access** level (Read, Write or Outward) and an expiry, and press **Create
