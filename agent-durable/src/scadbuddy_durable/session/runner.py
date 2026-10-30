@@ -897,6 +897,8 @@ def own_plugin_copy(plugin_dir: str, off: frozenset[str], root: str) -> str:
     skills = _off_names(off, "skill")
     agents = _off_names(off, "subagent")
     held_skills = [d for n, d in _own_skills(plugin_dir).items() if n in skills]
+    # Only the plugin's own agents/: the image's subagents (``agents_dir``, which
+    # own_call_plugin also reads) are left out by ``_subagent_tools`` when off, not here.
     held_agents = [
         f
         for stem, f in _agent_files(os.path.join(plugin_dir, "agents")).items()

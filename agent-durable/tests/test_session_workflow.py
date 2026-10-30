@@ -1515,13 +1515,37 @@ async def test_builtin_tier_failing_parks_after_three_attempts(
     """An agent that cannot answer builtin_tier (an older one, mid-rollout) leaves the call
     to a person: three attempts, then it parks."""
     harness.stand_in.turn_packages = [NOTES_PACKAGE]
-    harness.stand_in.builtin_fails = True
+    harness.stand_in.builtin_fails = "unregistered"
     _, handle = await harness.session(agent_db)
     await send(handle, "run it")
     [entry] = await _parked(handle)
     assert (entry["kind"], entry["tool"]) == ("approval", "Bash")
     assert len(harness.stand_in.builtin_asked) == 3
     await _replays(harness, handle)
+
+
+async def test_builtin_tier_whose_read_fails_refuses_the_call_unparked(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """PR #5001 review: an agent that serves builtin_tier but cannot read ai_access refuses
+    the call, as a classic turn's seam does (permissions.ts decideLive); only an agent that
+    does not serve the activity leaves it to a person."""
+    harness.stand_in.turn_packages = [NOTES_PACKAGE]
+    harness.stand_in.builtin_fails = "read"
+    await harness.agent.shutdown()
+    harness.claude = ScriptedClaude(_bash_then_asks)
+    async with harness.restart_agent():
+        _, handle = await harness.session(agent_db)
+        await send(handle, "run it")
+        [entry] = await _parked(handle)
+        assert entry["kind"] == "answer"  # the question: Bash itself never parked
+        context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+        assert list(context.replaced.values()) == [
+            "Bash is refused: its Settings → Tools & plugins entry cannot be read"
+        ]
+        assert len(harness.stand_in.builtin_asked) == 3
+        await _replays(harness, handle)
+    harness.claude = None
 
 
 async def test_a_turn_from_before_builtin_access_replays(harness: Harness) -> None:
