@@ -74,12 +74,15 @@ function findOne(role: string, name: string, index: number | undefined): Element
   return element
 }
 
+/** A Settings address: `/settings` itself, or anything under it. */
+const isSettingsPath = (route: string): boolean => /^\/settings(?:[/?#]|$)/.test(route)
+
 /** A hash-only move that the page leaves where it is (#781). */
 export function staysPut(target: string, from: string): boolean {
   const at = target.indexOf('#')
   if (at === -1 || target.slice(0, at) !== from) return false
   const pathname = from.split('?')[0] ?? from
-  if (!pathname.startsWith('/settings')) return true
+  if (!isSettingsPath(pathname)) return true
   // The sections are known once the lazy Settings chunk has loaded; before that a section of
   // another area cannot be told from one of this, so the move is waited for (#5021).
   if (!sectionsLoaded()) return false
@@ -135,7 +138,7 @@ export function useGlobalAgentTools() {
       // that a hash-only move never makes), inside the same deadline as the route wait below.
       const started = performance.now()
       // Only a Settings address needs the sections: the registry loads with the Settings chunk.
-      if (target.includes('#') && /^\/settings(?:[/?#]|$)/.test(target) && !sectionsLoaded()) {
+      if (target.includes('#') && isSettingsPath(target) && !sectionsLoaded()) {
         await waitFor(() => (sectionsLoaded() ? true : undefined), { timeout: 1000, what: 'the sections to load', interval: 10 }).catch(
           () => undefined,
         )
