@@ -35,7 +35,7 @@ export function registryOverrides(tools: readonly { name: string; risk: RiskTier
 
 /**
  * Each registry tool's own access, no source switch folded in: every effective tier that
- * differs from the tool's own, and every `off`. What the legacy key holds (access/legacy.ts).
+ * differs from the tool's own, and every `off`.
  */
 export function itemOverrides(tools: readonly { name: string; risk: RiskTier }[], rows: readonly AccessRow[]): StoredOverrides {
   // No prototype: a tool named `__proto__` is an own key, as in agent-durable's dict.

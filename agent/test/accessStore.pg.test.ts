@@ -215,21 +215,28 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
     await expect(tools.update(set, { tool_tiers: {}, disabled_tools: ['list_models', 'browser_click'] }, ctx)).rejects.toThrow(/refused for the test/)
     expect(await store.rows([SCAD, 'builtin:browser'])).toMatchObject([{ source: SCAD, item: 'get_model', access: 'outward' }])
   })
-  it("replaceToolsOf takes the old keys' lock before it locks rows, so it cannot deadlock with another write (review m1)", async () => {
-    await store.setItem(SCAD, 'get_model', 'outward', ctx)
-    const other = await db.sql.reserve()
-    try {
-      // Another writer, in the store's order: the lock first, then the rows.
-      await other`BEGIN`
-      await other`SELECT pg_advisory_xact_lock(hashtext('ai_access legacy keys'))`
-      const replaced = store.replaceToolsOf({ [SCAD]: { get_model: 'read' } }, ctx)
-      await new Promise((r) => setTimeout(r, 300))
-      await other`UPDATE ai_access SET updated_at = now() WHERE source = ${SCAD} AND item = 'get_model'`
-      await other`COMMIT`
-      await replaced
-    } finally {
-      other.release()
-    }
-    expect(await store.rows([SCAD])).toMatchObject([{ item: 'get_model', access: 'read' }])
+
+  it('an access write writes none of the old ai_settings keys (#4828)', async () => {
+    const withTools = new AccessStore(db.sql, audit)
+    const tools = new BuiltInTools(withTools)
+    await tools.update(tools.named(OWN_PLUGIN_NAME)!, { tool_tiers: { get_model: 'outward' }, disabled_tools: ['list_models'] }, ctx)
+    await withTools.setItem(SCAD, 'get_printer_camera', 'off', ctx)
+    await withTools.setEnabled('builtin:http', false, ctx)
+    await withTools.setEnabled('builtin:own-plugin', false, ctx)
+    expect(
+      await db.sql`SELECT key FROM ai_settings WHERE key IN ('builtin_tools.scadbuddy', 'printer_camera_enabled', 'http_request_enabled', 'scadbuddy_plugin_enabled')`,
+    ).toEqual([])
+  })
+
+  it('a built-in patch while builtin:browser is off writes no browser tool rows', async () => {
+    await store.setItem('builtin:browser', 'browser_click', 'outward', ctx)
+    await store.setEnabled('builtin:browser', false, ctx)
+    const tools = new BuiltInTools(store)
+    await tools.update(tools.named(OWN_PLUGIN_NAME)!, { disabled_tools: ['list_models'] }, ctx)
+    expect(await store.rows([SCAD, 'builtin:browser'])).toEqual([
+      { source: 'builtin:browser', item: '*', access: 'off', updated_by: 'browser:browser' },
+      { source: 'builtin:browser', item: 'browser_click', access: 'outward', updated_by: 'browser:browser' },
+      { source: SCAD, item: 'list_models', access: 'off', updated_by: 'browser:browser' },
+    ])
   })
 })
