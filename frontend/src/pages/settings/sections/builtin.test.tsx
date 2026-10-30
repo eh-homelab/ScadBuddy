@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { isUserOnly } from '../../../agent/dom'
+import { aiPlugins } from '../../../api/aiPlugins'
 import { aiCapabilities } from '../../../api/capabilities'
 import { server } from '../../../mocks/server'
 import { accessName, choose } from '../../../test/select'
@@ -40,17 +41,17 @@ describe('Built-in (#2171)', () => {
     vi.restoreAllMocks()
   })
 
-  it("shows ScadBuddy's tools, the browser tab with its origin lists, and HTTP requests", async () => {
+  it("shows ScadBuddy's tools, the browser tab with its origin lists, HTTP requests and ScadBuddy's skills and subagents", async () => {
     const { user } = renderSettingsSection(<BuiltIn />, { route })
     const regions = await screen.findAllByRole('region', { name: /^Source / })
     expect(regions.map((r) => r.getAttribute('aria-label'))).toEqual([
       'Source ScadBuddy tools',
       'Source Your browser tab',
       'Source HTTP requests',
+      'Source ScadBuddy skills and subagents',
     ])
-    expect(screen.queryByRole('region', { name: 'Source ScadBuddy skills and subagents' })).toBeNull()
-    // The browser tab is not switchable until #4757.
-    expect(within(await card('Your browser tab')).queryByRole('switch')).toBeNull()
+    // ScadBuddy's own tools have no switch (#4757).
+    expect(within(await card('ScadBuddy tools')).queryByRole('switch')).toBeNull()
 
     await user.click(screen.getByRole('button', { name: 'Your browser tab' }))
     const browser = await card('Your browser tab')
@@ -133,6 +134,68 @@ describe('Built-in (#2171)', () => {
     await user.click(toggle)
     await waitFor(async () => expect(within(await card('HTTP requests')).getByRole('switch', { name: 'Enabled (HTTP requests)' })).not.toBeChecked())
     expect((await aiCapabilities.list()).find((s) => s.id === 'builtin:http')?.enabled).toBe(false)
+  })
+
+  it('switches the browser tab off; its tools read off', async () => {
+    const { user } = renderSettingsSection(<BuiltIn />, { route })
+    const toggle = within(await card('Your browser tab')).getByRole('switch', { name: 'Enabled (Your browser tab)' })
+    expect(toggle).toBeChecked()
+    expect(isUserOnly(toggle)).toBe(false)
+    await user.click(toggle)
+    await waitFor(() => expect(within(screen.getByRole('region', { name: 'Source Your browser tab' })).getByRole('switch')).not.toBeChecked())
+    await user.click(screen.getByRole('button', { name: 'Your browser tab' }))
+    const browser = await card('Your browser tab')
+    // The select keeps the tool's own access; the row says why it is off.
+    expect(within(browser).getByRole('combobox', { name: accessName('browser_click') })).toHaveTextContent('write')
+    expect(within(browser).getByText('Off while "Your browser tab" is switched off')).toBeInTheDocument()
+    const item = (await aiCapabilities.list()).find((s) => s.id === 'builtin:browser')?.items.find((i) => i.id === 'browser_click')
+    expect(item).toMatchObject({ access: 'off', own_access: 'write' })
+  })
+
+  it("shows ScadBuddy's skills and subagents with their descriptions", async () => {
+    const { user } = renderSettingsSection(<BuiltIn />, { route })
+    const own = await card('ScadBuddy skills and subagents')
+    await user.click(screen.getByRole('button', { name: 'ScadBuddy skills and subagents' }))
+    for (const name of ['authoring', 'customize', 'print', 'model-author', 'print-analyst']) {
+      expect(within(own).getByRole('combobox', { name: accessName(name) })).toHaveTextContent('on')
+    }
+    expect(within(own).getByText('scadbuddy:model-author')).toBeInTheDocument()
+    expect(within(own).getByText(/^Creates and iterates on ScadBuddy OpenSCAD templates/)).toBeVisible()
+    expect(within(own).getByText(/^How to write and edit ScadBuddy OpenSCAD templates/)).toBeVisible()
+  })
+
+  it('turns a ScadBuddy subagent off after the confirmation', async () => {
+    const { user } = renderSettingsSection(<BuiltIn />, { route })
+    const own = await card('ScadBuddy skills and subagents')
+    await user.click(screen.getByRole('button', { name: 'ScadBuddy skills and subagents' }))
+    const subagent = within(own).getByRole('combobox', { name: accessName('model-author') })
+    expect(isUserOnly(subagent)).toBe(false)
+    await choose(user, subagent, 'off')
+    const dialog = await screen.findByRole('alertdialog', { name: 'Lower model-author?' })
+    expect(isUserOnly(within(dialog).getByRole('button', { name: 'Lower to off' }))).toBe(false)
+    expect(await itemAccess('builtin:own-plugin', 'subagent:model-author')).toBe('on')
+    await user.click(within(dialog).getByRole('button', { name: 'Lower to off' }))
+    await waitFor(() => expect(within(own).getByRole('combobox', { name: accessName('model-author') })).toHaveTextContent('off'))
+    expect(await itemAccess('builtin:own-plugin', 'subagent:model-author')).toBe('off')
+    expect(within(own).getByRole('button', { name: 'Reset model-author' })).toBeInTheDocument()
+  })
+
+  it("the own plugin's switch is on its card, not user-only", async () => {
+    const { user } = renderSettingsSection(<BuiltIn />, { route })
+    const toggle = within(await card('ScadBuddy skills and subagents')).getByRole('switch', {
+      name: 'Enabled (ScadBuddy skills and subagents)',
+    })
+    expect(toggle).toBeChecked()
+    expect(isUserOnly(toggle)).toBe(false)
+    await user.click(toggle)
+    await waitFor(() =>
+      expect(within(screen.getByRole('region', { name: 'Source ScadBuddy skills and subagents' })).getByRole('switch')).not.toBeChecked(),
+    )
+    const own = (await aiCapabilities.list()).find((s) => s.id === 'builtin:own-plugin')
+    expect(own?.enabled).toBe(false)
+    expect(own?.items.every((i) => i.access === 'off' && i.own_access === 'on')).toBe(true)
+    // One switch: the built-in package the Packages section lists reads it too, as the agent's `*` row.
+    expect((await aiPlugins.listPackages()).find((p) => p.name === 'scadbuddy')?.enabled).toBe(false)
   })
 
   it('keeps the WebMCP switch, this browser only', async () => {

@@ -1,5 +1,13 @@
 import { HttpResponse, http } from 'msw'
-import type { PluginToolView, RemotePlugin, RiskTier } from '../../api/aiPlugins'
+import {
+  isBuiltIn,
+  type PackageReview,
+  type PluginPackage,
+  type PluginTest,
+  type PluginToolView,
+  type RemotePlugin,
+  type RiskTier,
+} from '../../api/aiPlugins'
 import {
   ITEM_ACCESS,
   type Access,
@@ -8,16 +16,25 @@ import {
   type RefreshResult,
   type SourceView,
 } from '../../api/capabilities'
-import { remotePluginList, setRemotePluginAccess, toolsFor } from '../aiPlugins'
+import { onPackageSwitch, packageList, remotePluginList, setPackageEnabled, setRemotePluginAccess, toolsFor } from '../aiPlugins'
 
 /**
  * #2171 — the agent's capabilities tree (`/api/v1/ai/capabilities`, agent/src/routes/capabilities.ts,
  * access/capabilities.ts, access/providers.ts). The four built-in sources keep their own rows here;
  * the remote sources are read from `../aiPlugins.ts` on every request and written back through
  * `setRemotePluginAccess`, as the agent's `PluginRepo` dual-writes, so `GET /plugins` agrees. A remote
- * source lists its tools only after a refresh (`toolsFor`). The rules the UI depends on are kept:
- * choosing the default resets; an access the kind does not take is 400; a fixed item, an access
- * outside `allowed` and a switch on a source without one are 409; an unknown source or item is 404.
+ * source lists its tools only after a refresh (`toolsFor`). The package sources (`package:<name>`,
+ * agent access/packageProvider.ts, #4757) are read from `packageList()` too: their switch is the
+ * package's `enabled` (`setPackageEnabled`), and only an approved pin has one; their items are the
+ * review's hooks, skills (its commands among them), subagents and, approved with `allow_refused`, its
+ * built-ins; each http server is a child `package:<name>/mcp:<server>`, on by default, its tools
+ * listed after a refresh. ScadBuddy's own plugin (`builtin:own-plugin`) lists its review's skills and
+ * subagents, its switch the built-in package's `enabled`, so the Packages section reads it too.
+ * A source switched off reads every item `off`, saying so, its `own_access` kept (agent
+ * `switched`). The rules the UI depends on are kept: choosing the default resets; an access the
+ * kind does not take is 400; a fixed item, an access outside `allowed` and a switch on a source
+ * without one are 409; an unknown source or item is 404. Load checks are not mocked: an enabled,
+ * approved package loads unless it is named as a built-in, and no two servers collide.
  */
 
 const base = '/api/v1/ai/capabilities'
@@ -28,7 +45,7 @@ type Spec = { id: string; title: string; switchable: boolean; options_route: str
 
 const SPECS: readonly Spec[] = [
   { id: 'builtin:scadbuddy', title: 'ScadBuddy tools', switchable: false, options_route: null },
-  { id: 'builtin:browser', title: 'Your browser tab', switchable: false, options_route: '/api/v1/ai/settings/browser-origins' },
+  { id: 'builtin:browser', title: 'Your browser tab', switchable: true, options_route: '/api/v1/ai/settings/browser-origins' },
   { id: 'builtin:http', title: 'HTTP requests', switchable: true, options_route: null },
   { id: 'builtin:own-plugin', title: 'ScadBuddy skills and subagents', switchable: true, options_route: null },
 ]
@@ -53,16 +70,21 @@ const TOOLS: Record<string, readonly BuiltInTool[]> = {
   ],
 }
 
+const OWN_PLUGIN = 'builtin:own-plugin'
+const OWN_PLUGIN_NAME = 'scadbuddy'
+
 const HTTP_TOOL = 'http_request'
 const HTTP_NOTE = 'read for GET and HEAD, outward (asks first) for anything else'
 
 const state = {
   /** Built-in rows: `<source>\u0000<item>` -> access. */
   rows: new Map<string, Access>(),
-  /** Built-in source switches; a source without a row is on. */
+  /** Built-in and package server switches; a source without a row is on. */
   enabled: new Map<string, boolean>(),
   /** Remote plugins refreshed at least once, by name. */
   listed: new Set<string>(),
+  /** Package servers refreshed at least once, by source id. */
+  listedServers: new Set<string>(),
 }
 
 /**
@@ -76,6 +98,9 @@ type Stored = {
   rows: [string, Access][]
   enabled: [string, boolean][]
   listed: string[]
+  listed_servers?: string[]
+  /** The built-in packages' switches (the own plugin's is `builtin:own-plugin`'s). */
+  built_ins?: Record<string, boolean>
   remote: Record<string, { tool_tiers: Record<string, RiskTier>; disabled_tools: string[]; enabled: boolean }>
 }
 
@@ -84,6 +109,8 @@ function save(): void {
     rows: [...state.rows],
     enabled: [...state.enabled],
     listed: [...state.listed],
+    listed_servers: [...state.listedServers],
+    built_ins: Object.fromEntries(packageList().filter(isBuiltIn).map((p) => [p.name, p.enabled])),
     remote: Object.fromEntries(
       remotePluginList().map((p) => [p.name, { tool_tiers: p.tool_tiers, disabled_tools: p.disabled_tools, enabled: p.enabled }]),
     ),
@@ -106,6 +133,8 @@ function load(): void {
   for (const [k, access] of stored.rows) state.rows.set(k, access)
   for (const [id, on] of stored.enabled) state.enabled.set(id, on)
   for (const name of stored.listed) state.listed.add(name)
+  for (const id of stored.listed_servers ?? []) state.listedServers.add(id)
+  for (const [name, enabled] of Object.entries(stored.built_ins ?? {})) setPackageEnabled(name, enabled)
   for (const [name, access] of Object.entries(stored.remote)) setRemotePluginAccess(name, access)
 }
 
@@ -122,6 +151,7 @@ export function reset(): void {
   state.rows.clear()
   state.enabled.clear()
   state.listed.clear()
+  state.listedServers.clear()
   try {
     sessionStorage.removeItem(STORAGE_KEY)
   } catch {
@@ -129,6 +159,8 @@ export function reset(): void {
   }
 }
 load()
+// A package switched through `PATCH /plugin-packages` is kept too.
+onPackageSwitch(save)
 
 const key = (source: string, item: string) => `${source}\u0000${item}`
 const detail = (status: number, text: string) => HttpResponse.json({ detail: text }, { status })
@@ -187,13 +219,54 @@ function httpItem(): ItemView {
   }
 }
 
+/**
+ * A plugin's skill and subagent items (the agent's `pluginItems`): one per skill, command and
+ * subagent its review lists, `<plugin>:<name>` as the harness names it; on by default.
+ */
+function pluginItems(review: PackageReview, source: string, plugin: string): ItemView[] {
+  const prefix = `${plugin}:`
+  const of = (kind: 'skill' | 'subagent', harnessName: string): ItemView => {
+    const name = harnessName.startsWith(prefix) ? harnessName.slice(prefix.length) : harnessName
+    const id = `${kind}:${name}`
+    const row = state.rows.get(key(source, id))
+    const access: Access = row === 'off' ? 'off' : 'on'
+    return {
+      id,
+      kind,
+      name,
+      harness_name: harnessName,
+      label: name,
+      description: review.described?.[id] ?? null,
+      default: 'on',
+      default_note: null,
+      suggested: null,
+      access,
+      own_access: access,
+      overridden: row !== undefined,
+      missing: false,
+      allowed: null,
+      fixed: null,
+      reason: null,
+    }
+  }
+  const skills = [...new Set([...review.skills, ...review.commands])]
+  return [...skills.map((s) => of('skill', s)), ...review.agents.map((a) => of('subagent', a))]
+}
+
+const ownPlugin = () => packageList().find((p) => isBuiltIn(p) && p.name === OWN_PLUGIN_NAME)!
+
 function builtInView(spec: Spec): SourceView {
-  const items = spec.id === 'builtin:http' ? [httpItem()] : (TOOLS[spec.id] ?? []).map((t) => builtInItem(spec.id, t))
+  const items =
+    spec.id === 'builtin:http'
+      ? [httpItem()]
+      : spec.id === OWN_PLUGIN
+        ? pluginItems(ownPlugin().review, OWN_PLUGIN, OWN_PLUGIN_NAME)
+        : (TOOLS[spec.id] ?? []).map((t) => builtInItem(spec.id, t))
   return {
     id: spec.id,
     kind: 'builtin',
     title: spec.title,
-    enabled: state.enabled.get(spec.id) ?? true,
+    enabled: !spec.switchable || (spec.id === OWN_PLUGIN ? ownPlugin().enabled : (state.enabled.get(spec.id) ?? true)),
     switchable: spec.switchable,
     options_route: spec.options_route,
     listed_at: null,
@@ -208,7 +281,10 @@ function builtInView(spec: Spec): SourceView {
 // ------------------------------------------------------------------ remote sources
 
 /** The stored `disabled_tools` entry of another name that Claude Code names as `tool` (the agent's `disabledAs`). */
-function disabledAs(plugin: RemotePlugin, tool: string): string | undefined {
+/** What a listed source's items are read from (the agent's `ToolRows`, with the harness names' prefix). */
+type ToolRows = Pick<RemotePlugin, 'name' | 'tool_prefix' | 'tool_tiers' | 'disabled_tools'>
+
+function disabledAs(plugin: ToolRows, tool: string): string | undefined {
   if (plugin.disabled_tools.includes(tool)) return undefined
   const harnessOf = (name: string) => name.replace(/[^A-Za-z0-9_-]/g, '_')
   return plugin.disabled_tools.find((d) => harnessOf(d) === harnessOf(tool))
@@ -222,7 +298,7 @@ function collisionReason(view: PluginToolView): string {
   return `Shares its name with ${others.join(', ')}, so ${all} hidden`
 }
 
-function listedItem(plugin: RemotePlugin, view: PluginToolView): ItemView {
+function listedItem(plugin: ToolRows, view: PluginToolView): ItemView {
   const renamed = view.tier_source === 'renamed'
   // The agent's `remoteProvider`: tools colliding on one harness name are fixed off, both.
   const collision = view.tier_source === 'collision'
@@ -253,7 +329,7 @@ function listedItem(plugin: RemotePlugin, view: PluginToolView): ItemView {
   }
 }
 
-function missingItem(plugin: RemotePlugin, tool: string): ItemView {
+function missingItem(plugin: ToolRows, tool: string): ItemView {
   const renamed = tool.replace(/[^A-Za-z0-9_-]/g, '_') !== tool
   const access: Access = plugin.disabled_tools.includes(tool) ? 'off' : (plugin.tool_tiers[tool] ?? 'outward')
   return {
@@ -276,9 +352,8 @@ function missingItem(plugin: RemotePlugin, tool: string): ItemView {
   }
 }
 
-function remoteView(plugin: RemotePlugin): SourceView {
-  const listed = state.listed.has(plugin.name)
-  const tools = listed ? toolsFor(plugin) : []
+/** A listed source's tool items (the agent's `listedItems`): one per listed name, then each stored row the listing lacks. */
+function listedItems(plugin: ToolRows, tools: PluginTest['tools']): ItemView[] {
   // One row per name, as the agent's `remoteView`: a name listed twice is one item.
   const names = new Set<string>()
   const items: ItemView[] = []
@@ -288,6 +363,11 @@ function remoteView(plugin: RemotePlugin): SourceView {
     items.push(listedItem(plugin, tool))
   }
   const stored = [...new Set([...Object.keys(plugin.tool_tiers), ...plugin.disabled_tools])].filter((t) => !names.has(t)).sort()
+  return [...items, ...stored.map((t) => missingItem(plugin, t))]
+}
+
+function remoteView(plugin: RemotePlugin): SourceView {
+  const listed = state.listed.has(plugin.name)
   return {
     id: `remote:${plugin.name}`,
     kind: 'remote',
@@ -299,7 +379,7 @@ function remoteView(plugin: RemotePlugin): SourceView {
     truncated: false,
     problem: null,
     checking: false,
-    items: [...items, ...stored.map((t) => missingItem(plugin, t))],
+    items: listedItems(plugin, listed ? toolsFor(plugin) : []),
     children: [],
   }
 }
@@ -312,24 +392,200 @@ function remotePlugins(): RemotePlugin[] {
   return plugins
 }
 
-// ------------------------------------------------------------------ the tree
+// ------------------------------------------------------------------ package sources
 
-function tree(): SourceView[] {
-  return [...SPECS.map(builtInView), ...remotePlugins().map(remoteView)]
+const PACKAGE = 'package:'
+const SERVER = '/mcp:'
+const harnessOf = (name: string) => name.replace(/[^A-Za-z0-9_-]/g, '_')
+const packageSource = (pkg: string) => `${PACKAGE}${pkg}`
+const serverSource = (pkg: string, server: string) => `${PACKAGE}${pkg}${SERVER}${server}`
+/** The agent's `packageServerName`: what a turn names the server, and its tools' prefix. */
+const serverName = (pkg: string, server: string) => `plugin_${harnessOf(pkg)}_${harnessOf(server)}`
+const BUILTIN_NOTE = (tool: string) => `Claude Code's ${tool}; where several packages name it, the strictest access applies`
+const sourceOfKey = (k: string) => k.slice(0, k.indexOf('\u0000'))
+
+/** `package:<p>` or `package:<p>/mcp:<s>` as its parts. */
+function parse(id: string): { pkg: string; server: string | undefined } {
+  const rest = id.slice(PACKAGE.length)
+  const at = rest.indexOf(SERVER)
+  return at < 0 ? { pkg: rest, server: undefined } : { pkg: rest.slice(0, at), server: rest.slice(at + SERVER.length) }
 }
 
-function found(id: string): SourceView {
+/** The installed packages as `../aiPlugins.ts` has them now; a removed one's rows, switches and listings go. */
+function installed(): PluginPackage[] {
+  const packages = packageList().filter((p): p is PluginPackage => !isBuiltIn(p))
+  const names = new Set(packages.map((p) => p.name))
+  const gone = (id: string) => id.startsWith(PACKAGE) && !names.has(parse(id).pkg)
+  for (const k of [...state.rows.keys()]) if (gone(sourceOfKey(k))) state.rows.delete(k)
+  for (const id of [...state.enabled.keys()]) if (gone(id)) state.enabled.delete(id)
+  for (const id of [...state.listedServers]) if (gone(id)) state.listedServers.delete(id)
+  return packages
+}
+
+type LoadState = { kind: 'off' } | { kind: 'problem'; problem: string } | { kind: 'loads' }
+
+/** The agent's `stateOf`, without a load check: off, refused (why), or loads. */
+function loadState(pkg: PluginPackage): LoadState {
+  if (!pkg.enabled || !pkg.approved) return { kind: 'off' }
+  if (packageList().some((p) => isBuiltIn(p) && p.name === pkg.name)) {
+    return { kind: 'problem', problem: `plugin package ${pkg.name} was not loaded: "${pkg.name}" is built in; remove the installed package` }
+  }
+  return { kind: 'loads' }
+}
+
+/** The agent's `unoffered`: forced off, saying why. */
+const unoffered = (items: ItemView[], reason: string): ItemView[] =>
+  items.map((i) => ({ ...i, access: 'off', own_access: 'off', fixed: { access: 'off', reason }, reason }))
+
+type ItemFields = Pick<ItemView, 'id' | 'kind' | 'name' | 'harness_name' | 'label' | 'description' | 'default'>
+
+/** A hook (on/off) or an allowed built-in (a tier, outward by default) with its row. */
+function packageItem(fields: ItemFields, source: string): ItemView {
+  const row = state.rows.get(key(source, fields.id))
+  const access: Access = fields.kind === 'builtin' ? (row ?? 'outward') : row === 'off' ? 'off' : 'on'
+  return {
+    ...fields,
+    default_note: null,
+    suggested: null,
+    access,
+    own_access: access,
+    overridden: row !== undefined,
+    missing: false,
+    allowed: null,
+    fixed: null,
+    reason: null,
+  }
+}
+
+function packageItems(pkg: PluginPackage, source: string): ItemView[] {
+  const { review } = pkg
+  const hooks: ItemView[] = []
+  for (const hook of review.hooks) {
+    // A hook without an id cannot be named by a row: only an older review has one.
+    if (hook.id === undefined) continue
+    const id = `hook:${hook.event}:${hook.id}`
+    if (hooks.some((i) => i.id === id)) continue
+    const label = `${hook.event} hook (${hook.type})`
+    hooks.push(packageItem({ id, kind: 'hook', name: hook.id, harness_name: id, label, description: hook.url ?? null, default: 'on' }, source))
+  }
+  const builtins = (pkg.allow_refused ? (review.builtin_tools ?? []) : []).map((tool) =>
+    packageItem(
+      { id: `builtin:${tool}`, kind: 'builtin', name: tool, harness_name: tool, label: tool, description: BUILTIN_NOTE(tool), default: 'outward' },
+      source,
+    ),
+  )
+  return [...hooks, ...pluginItems(review, source, pkg.name), ...builtins]
+}
+
+/** A package server's stored tool rows, as the agent's `pluginOverrides`. */
+function serverRows(pkg: string, server: string): ToolRows {
+  const id = serverSource(pkg, server)
+  const name = serverName(pkg, server)
+  const tool_tiers: Record<string, RiskTier> = {}
+  const disabled_tools: string[] = []
+  for (const [k, access] of state.rows) {
+    if (sourceOfKey(k) !== id) continue
+    const tool = k.slice(id.length + 1)
+    if (access === 'off') disabled_tools.push(tool)
+    else if (access !== 'on') tool_tiers[tool] = access
+  }
+  return { name, tool_prefix: `mcp__${name}__`, tool_tiers, disabled_tools: disabled_tools.sort() }
+}
+
+function packageView(pkg: PluginPackage): SourceView {
+  const loaded = loadState(pkg)
+  const problem = loaded.kind === 'problem' ? loaded.problem : null
+  const notLoaded = (items: ItemView[]) => (problem === null ? items : unoffered(items, problem))
+  const children = [...new Set(pkg.review.mcp_servers.map((s) => s.name))].map((server): SourceView => {
+    const id = serverSource(pkg.name, server)
+    const rows = serverRows(pkg.name, server)
+    const listed = state.listedServers.has(id)
+    return {
+      id,
+      kind: 'package_server',
+      title: server,
+      enabled: state.enabled.get(id) ?? true,
+      switchable: true,
+      options_route: null,
+      listed_at: listed ? LISTED_AT : null,
+      truncated: false,
+      problem,
+      checking: false,
+      items: notLoaded(listedItems(rows, listed ? toolsFor(rows) : [])),
+      children: [],
+    }
+  })
+  return {
+    id: packageSource(pkg.name),
+    kind: 'package',
+    title: pkg.name,
+    // Off when switched off, unapproved or refused at load.
+    enabled: loaded.kind === 'loads',
+    switchable: pkg.approved,
+    options_route: null,
+    listed_at: null,
+    truncated: false,
+    problem,
+    checking: false,
+    items: notLoaded(packageItems(pkg, packageSource(pkg.name))),
+    children,
+  }
+}
+
+// ------------------------------------------------------------------ the tree
+
+/**
+ * `view` with its source's switch on its items (the agent's `switched`): while it, or the source
+ * above it, is off, every item reads `off`, saying so; an item already off keeps its own reason.
+ */
+function switched(view: SourceView, offBy?: SourceView): SourceView {
+  const off = offBy ?? (view.enabled ? undefined : view)
+  const items =
+    off === undefined
+      ? view.items
+      : view.items.map((item) => ({
+          ...item,
+          access: 'off' as const,
+          reason: item.own_access === 'off' && item.reason !== null ? item.reason : `Off while "${off.title}" is switched off`,
+        }))
+  return { ...view, items, children: view.children.map((child) => switched(child, off)) }
+}
+
+function tree(): SourceView[] {
+  return [...SPECS.map(builtInView), ...remotePlugins().map(remoteView), ...installed().map(packageView)].map((view) => switched(view))
+}
+
+/** A source as its provider answers it, no switch folded in: what a write is checked against. */
+function ownFound(id: string): SourceView {
   const spec = SPECS.find((s) => s.id === id)
   if (spec) return builtInView(spec)
   const plugin = id.startsWith('remote:') ? remotePlugins().find((p) => `remote:${p.name}` === id) : undefined
   if (plugin) return remoteView(plugin)
+  if (id.startsWith(PACKAGE)) {
+    const { pkg, server } = parse(id)
+    const match = installed().find((p) => p.name === pkg)
+    const view = match && packageView(match)
+    const source = server === undefined ? view : view?.children.find((c) => c.id === id)
+    if (source) return source
+  }
   throw new Refusal(404, `no source "${id}"`)
+}
+
+/** A source as the tree shows it: its switch folded in, and a server's package's above it. */
+function found(id: string): SourceView {
+  const view = ownFound(id)
+  if (view.kind !== 'package_server') return switched(view)
+  return switched(ownFound(packageSource(parse(id).pkg))).children.find((c) => c.id === id)!
 }
 
 function itemOf(source: SourceView, item: string): ItemView {
   const view = source.items.find((i) => i.id === item)
   if (!view) throw new Refusal(404, `no item "${item}" in "${source.id}"`)
   return view
+}
+
+function packageOf(source: SourceView): PluginPackage {
+  return installed().find((p) => p.name === parse(source.id).pkg)!
 }
 
 function pluginOf(source: SourceView): RemotePlugin {
@@ -348,14 +604,14 @@ function writeRemote(source: SourceView, item: string, access: Exclude<Access, '
 }
 
 function write(source: SourceView, item: string, access: Access | null): void {
-  if (access === 'on') throw new Refusal(400, 'a tool takes off, read, write or outward, not "on"')
-  if (source.kind === 'remote') writeRemote(source, item, access)
+  if (source.kind === 'remote') writeRemote(source, item, access as Exclude<Access, 'on'> | null)
   else if (access === null) state.rows.delete(key(source.id, item))
   else state.rows.set(key(source.id, item), access)
 }
 
 function setItem(id: string, item: string, access: Access): SourceView {
-  const source = found(id)
+  // The item as its provider answers it: a refusal gives the item's own reason, not its source's switch.
+  const source = ownFound(id)
   const view = itemOf(source, item)
   if (!ITEM_ACCESS[view.kind].includes(access)) {
     throw new Refusal(400, `a ${view.kind} takes ${ITEM_ACCESS[view.kind].join(', ')}, not ${JSON.stringify(access)}`)
@@ -369,7 +625,7 @@ function setItem(id: string, item: string, access: Access): SourceView {
 }
 
 function resetItem(id: string, item: string): SourceView {
-  const source = found(id)
+  const source = ownFound(id)
   const view = itemOf(source, item)
   if (view.fixed) throw new Refusal(409, view.fixed.reason)
   write(source, item, null)
@@ -380,6 +636,10 @@ function setEnabled(id: string, enabled: boolean): SourceView {
   const source = found(id)
   if (!source.switchable) throw new Refusal(409, `"${id}" cannot be switched off or on`)
   if (source.kind === 'remote') setRemotePluginAccess(pluginOf(source).name, { enabled })
+  else if (source.kind === 'package') {
+    const answer = setPackageEnabled(packageOf(source).name, enabled)
+    if (typeof answer === 'string') throw new Refusal(409, answer)
+  } else if (id === OWN_PLUGIN) setPackageEnabled(OWN_PLUGIN_NAME, enabled)
   else state.enabled.set(id, enabled)
   return found(id)
 }
@@ -396,11 +656,17 @@ const INPUT_SCHEMA = {
 function details(id: string, item: string): ItemDetails {
   const source = found(id)
   const view = itemOf(source, item)
-  if (view.missing || view.id === HTTP_TOOL) {
+  if (view.missing || view.id === HTTP_TOOL || source.kind === 'package' || id === OWN_PLUGIN) {
     return { item: view, input_schema: null, output_schema: null, annotations: null, raw: null, omitted: [] }
   }
   if (source.kind === 'remote') {
     const listed = toolsFor(pluginOf(source)).find((t) => t.name === item)!
+    const { input_schema, output_schema, annotations, raw, omitted } = listed
+    return { item: view, input_schema, output_schema, annotations, raw, omitted }
+  }
+  if (source.kind === 'package_server') {
+    const { pkg, server } = parse(id)
+    const listed = toolsFor(serverRows(pkg, server!)).find((t) => t.name === item)!
     const { input_schema, output_schema, annotations, raw, omitted } = listed
     return { item: view, input_schema, output_schema, annotations, raw, omitted }
   }
@@ -409,9 +675,32 @@ function details(id: string, item: string): ItemDetails {
   return { item: view, input_schema: INPUT_SCHEMA, output_schema: null, annotations, raw, omitted: [] }
 }
 
+/** The agent's package listing (plugins/packages/listing.ts, `listingRefusal`): only a server a turn would offer. */
+function refreshServer(source: SourceView): RefreshResult {
+  const { pkg, server } = parse(source.id)
+  const match = packageOf(source)
+  if (!match.approved) throw new Refusal(409, 'approve the pin before listing its servers')
+  const loaded = loadState(match)
+  if (loaded.kind === 'off') throw new Refusal(409, `"${packageSource(pkg)}" is switched off; switch it on to list its tools`)
+  if (loaded.kind === 'problem') throw new Refusal(409, loaded.problem)
+  if (!(state.enabled.get(source.id) ?? true)) throw new Refusal(409, `"${source.id}" is switched off; switch it on to list its tools`)
+  state.listedServers.add(source.id)
+  const rows = serverRows(pkg, server!)
+  const test: RefreshResult['test'] = {
+    ok: true,
+    detail: `connected; ${toolsFor(rows).length} tools`,
+    duration_ms: 42,
+    server: { name: rows.name, version: '0.4.1' },
+    truncated: false,
+  }
+  return { test, source: found(source.id) }
+}
+
 function refresh(id: string): RefreshResult {
   const source = found(id)
+  if (source.kind === 'package_server') return refreshServer(source)
   if (source.kind !== 'remote') throw new Refusal(409, `"${id}" lists no tools to refresh`)
+
   const plugin = pluginOf(source)
   state.listed.add(plugin.name)
   // The agent's refresh sends no `tools`: they are the source's items.

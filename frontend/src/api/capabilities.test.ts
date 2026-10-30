@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { seedStoredPackage } from '../mocks/aiPlugins'
 import { server } from '../mocks/server'
+import { aiPlugins } from './aiPlugins'
 import { aiCapabilities } from './capabilities'
 import { ApiError } from './client'
 
@@ -43,6 +45,38 @@ describe('aiCapabilities', () => {
     expect(await sent(() => aiCapabilities.details('remote:hindsight', 'a/b').catch(() => undefined))).toEqual([
       expect.objectContaining({ method: 'GET', path: `${BASE}/remote%3Ahindsight/items/a%2Fb` }),
     ])
+  })
+
+  it("a package server's id is one encoded segment", async () => {
+    expect(await sent(() => aiCapabilities.setItem('package:greeter/mcp:docs', 'search', 'read').catch(() => undefined))).toEqual([
+      { method: 'PUT', path: `${BASE}/package%3Agreeter%2Fmcp%3Adocs/items/search`, body: '{"access":"read"}' },
+    ])
+  })
+
+  it("the mock's package sources read the package's state, as GET /plugin-packages has it", async () => {
+    seedStoredPackage('greeter')
+    const pkg = (await aiCapabilities.list()).find((s) => s.id === 'package:greeter')!
+    expect(pkg).toMatchObject({ kind: 'package', enabled: true, switchable: true, problem: null })
+    expect(pkg.items.map((i) => [i.id, i.access])).toEqual([
+      ['hook:Stop:0f1e2d3c4b5a6978', 'on'],
+      ['skill:hello', 'on'],
+      ['skill:wave', 'on'],
+      ['subagent:helper', 'on'],
+    ])
+    expect(pkg.children.map((c) => c.id)).toEqual(['package:greeter/mcp:mem'])
+
+    const off = await aiCapabilities.setEnabled('package:greeter', false)
+    expect((await aiPlugins.listPackages()).find((p) => p.name === 'greeter')?.enabled).toBe(false)
+    expect(off.children[0]!.enabled).toBe(true)
+    expect(off.items[1]).toMatchObject({ access: 'off', own_access: 'on', reason: 'Off while "greeter" is switched off' })
+    const refused = await aiCapabilities.refresh('package:greeter/mcp:mem').catch((e: unknown) => e)
+    expect((refused as ApiError).status).toBe(409)
+
+    await aiCapabilities.setEnabled('package:greeter', true)
+    const { source } = await aiCapabilities.refresh('package:greeter/mcp:mem')
+    expect(source.items.find((i) => i.id === 'recall')?.harness_name).toBe('mcp__plugin_greeter_mem__recall')
+    const after = await aiCapabilities.setItem('package:greeter/mcp:mem', 'recall', 'read')
+    expect(after.items.find((i) => i.id === 'recall')).toMatchObject({ access: 'read', overridden: true })
   })
 
   it('answers an ApiError with the agent\'s detail on 409', async () => {

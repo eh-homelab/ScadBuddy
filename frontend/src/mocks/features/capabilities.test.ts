@@ -34,7 +34,15 @@ describe('capabilities mock (#2171)', () => {
     expect((await aiCapabilities.source('remote:hindsight')).items.map((i) => [i.id, i.missing])).toEqual([['recall', true]])
     const { source } = await aiCapabilities.refresh('remote:hindsight')
     expect(source.listed_at).not.toBeNull()
-    expect(source.items.find((i) => i.id === 'recall')).toMatchObject({ access: 'read', overridden: true, suggested: 'read', missing: false })
+    // hindsight is switched off: recall reads off, its own access kept (#4757).
+    expect(source.items.find((i) => i.id === 'recall')).toMatchObject({
+      access: 'off',
+      own_access: 'read',
+      reason: 'Off while "hindsight" is switched off',
+      overridden: true,
+      suggested: 'read',
+      missing: false,
+    })
     expect(source.items.find((i) => i.id === 'files.list')).toMatchObject({ allowed: ['off', 'outward'] })
     expect(source.items.find((i) => i.id === 'recall')?.label).toBe('Recall memories')
     expect(await aiCapabilities.details('remote:hindsight', 'recall')).toMatchObject({ annotations: { readOnlyHint: true }, omitted: [] })
