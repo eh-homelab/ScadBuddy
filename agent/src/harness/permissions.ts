@@ -215,7 +215,12 @@ export type ApprovalPreparer = (
   signal: AbortSignal,
 ) => Promise<{ input: Record<string, unknown>; summary: string } | undefined>
 
-/** Observes each decision (session events, audit log, tests). Must not throw. */
+/**
+ * Observes each decision (session events, audit log, tests). A listener that throws
+ * refuses the call (#5018). That deny is answered by the seam alone: no listener sees it,
+ * so the session events and audit log record nothing for it (intended, since the listener
+ * is what failed).
+ */
 export type DecisionListener = (toolName: string, decision: ToolDecision) => void
 
 function describeError(err: unknown): string {
@@ -238,6 +243,7 @@ async function decideLive(
   guard: InputGuard | undefined,
   live: LiveSeam | undefined,
   toolUseId: string | undefined,
+  known?: { tier?: RiskTier },
 ): Promise<ToolDecision> {
   let access: Awaited<ReturnType<LiveAccess>>
   try {
@@ -253,6 +259,8 @@ async function decideLive(
     return { decision: 'deny', tier, reason }
   }
   const resolve: TierResolver = access === undefined ? tierOf : () => access
+  // Once resolved, a later throw (the guard, the ledger) still denies at this tier (#5021).
+  if (known) known.tier = resolve(toolName, input) ?? 'outward'
   const decision = decide(toolName, resolve, input, await judgeInput(guard, toolName, input))
   // A deny is recorded too, harmlessly: a denied call never reaches the server that reads it.
   if (toolUseId !== undefined) live?.ledger?.record(toolUseId, decision.tier)
@@ -285,11 +293,13 @@ async function decideChecked(
   live: LiveSeam | undefined,
   toolUseId: string | undefined,
 ): Promise<ToolDecision> {
+  const known: { tier?: RiskTier } = {}
   try {
-    return await decideLive(toolName, tierOf, input, guard, live, toolUseId)
+    return await decideLive(toolName, tierOf, input, guard, live, toolUseId, known)
   } catch (err) {
     logRefusal(seam, toolName, err)
-    return { decision: 'deny', tier: 'outward', reason: uncheckedMessage(toolName) }
+    // The tier the call had when one was resolved before the throw, else outward.
+    return { decision: 'deny', tier: known.tier ?? 'outward', reason: uncheckedMessage(toolName) }
   }
 }
 

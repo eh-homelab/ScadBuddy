@@ -207,7 +207,10 @@ describe('/api/v1/ai/plugins with built-ins', () => {
     const { access, rows } = memoryAccess()
     const res = await patch(app(settings, remoteRepo(), access), 'scadbuddy', {})
     expect(res.status).toBe(400)
-    expect(((await res.json()) as { detail: string }).detail).toContain('/api/v1/ai/capabilities')
+    const body = (await res.json()) as { detail: string; built_in?: boolean }
+    expect(body.detail).toContain('/api/v1/ai/capabilities')
+    // The same built-in refusal as the 409s, with the same marker (#5021).
+    expect(body.built_in).toBe(true)
     expect(values.size).toBe(0)
     expect(rows).toEqual([])
   })

@@ -173,8 +173,11 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
 
   const builtIn = (name: string): BuiltInToolSet | undefined => deps.builtIns.named(name)
   /** 409 for what a built-in cannot do. */
+  // One body for every built-in refusal. 409 when the request asks for something a built-in
+  // cannot have; 400 for an empty PATCH, which asks for nothing and so conflicts with nothing.
+  const builtInRefusal = (c: Context, detail: string, status: 400 | 409) => c.json({ detail, built_in: true }, status)
   const isBuiltIn = (c: Context, name: string, what: string) =>
-    c.json({ detail: `"${name}" is built in: it cannot be ${what}`, built_in: true }, 409)
+    builtInRefusal(c, `"${name}" is built in: it cannot be ${what}`, 409)
 
   app.get(base, async (c) => {
     const repo = await store()
@@ -229,10 +232,9 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
       }
       // Nothing is left to patch on a built-in: a switch, a tier or a disabled tool is an
       // `ai_access` row, so the PATCH is refused as a no-op (#5016).
-      return c.json(
-        {
-          detail: `"${set.name}" is built in and has no field to patch here: change its switch, a tier or a disabled tool with PUT /api/v1/ai/capabilities/<source>`,
-        },
+      return builtInRefusal(
+        c,
+        `"${set.name}" is built in and has no field to patch here: change its switch, a tier or a disabled tool with PUT /api/v1/ai/capabilities/<source>`,
         400,
       )
     }
