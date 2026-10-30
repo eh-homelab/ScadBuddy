@@ -38,7 +38,7 @@ import { fixedCredentials } from './support/fixedCredentials.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
-import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
 
 // Parks through the session's workflow, held warm (unified runtime spec 2026-10-13 §5.4 "Open"
 // and "Hold", plan Task 5.3), end to end: AgentSession on a Temporal dev server, one replica
@@ -170,7 +170,7 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
           },
         }),
     })
-    m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: m.events, sessionHostQueue: hostQueue })
+    m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: m.events, liveHosts: polledHosts(env.client, hostQueue) })
     // The respond route's way to a durable entry: the workflow's `respond` Update (main.ts). Its
     // deadline is wall-clock (`withDeadline(Date.now() + …)`): 30 s, not 5, so a step of this host's
     // clock (about 8 s) or a loaded worker cannot turn a respond the workflow takes into a 503.

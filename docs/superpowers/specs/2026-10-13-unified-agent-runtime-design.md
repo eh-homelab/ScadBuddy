@@ -1113,9 +1113,40 @@ with its workflow. The vector files stay while a Python reader of them remains.
    the tab's socket (`agent/test/bridgeRelay.temporal.test.ts`). A worker-only `main.ts`
    still has to build that relay.
 2. **Session-tab waits.** `sessions/manager.ts` `onSessionTab` is wired to the hub in
-   `main.ts`; a worker pod has no hub.
+   `main.ts`; a worker pod has no hub. *Plan Step 6.1 (2026-10-30):* only the process whose
+   hub sees the tab needs the hook, and the `api` role keeps it (`resolveTabWaits`). A
+   classic turn's wait is an `ai_questions` row that its question gate polls
+   (`questions/service.ts` `waitFor`), so `reconnected`, written by the API's pod, ends a
+   wait held on a worker pod. An `AgentSession` turn opens no tab wait yet: `TurnHost`
+   answers a browser call that finds no tab, and an attention request, with `NO_PARKS` at
+   once (#5003). That park is still to be built through `open_input` (§5.4), with the
+   hub's pod sending `respond` to the session's workflow, before Step 6.3.
 3. **Anything else the turn reaches in-process** in the HTTP process (an audit of
-   `TurnHost`'s dependencies against what a worker-only `main.ts` builds).
+   `TurnHost`'s dependencies against what a worker-only `main.ts` builds). *Plan Step 6.1
+   (2026-10-30):* `SCADBUDDY_AGENT_ROLE` (`all`, `api`, `worker`; `runtime/role.ts`)
+   builds the same services in every role and leaves out only the HTTP server, its
+   sweeps and its start-time passes (`worker`), or the shared queues and the session host
+   (`api`). What a worker's turn reaches, and how, each shown by
+   `agent/test/agentRole.temporal.test.ts` (one `api` and one `worker` process on one dev
+   server and Postgres) where it crosses processes:
+   - the session's start and its turn: the `api` process starts `AgentSession` and polls
+     no turn queue; the turn runs on the worker ("a unified session sent through api runs
+     its turn on worker"). `DurableTurns.unready` reads the live session hosts of every
+     replica (`liveHostQueues`), not the sender's own;
+   - the browser: item 1's `BridgeCall` ("a browser call from the worker's turn reaches the
+     tab connected to api");
+   - a Stop: the row's `interrupt_requested` and the workflow ("an interrupt from api ends
+     the turn on worker within 2 s"); a classic turn's Stop is the same flag, read at its
+     lease renewal (`SessionManager.interrupt`);
+   - a forget, a hand-off, done or archive: `NOTIFY scadbuddy_warm_evict`, which every role
+     follows (`wireRuntimeSync`; "a forget from api closes the worker's warm process");
+   - approvals and questions of a classic turn that a background task started on a worker:
+     their rows, which the waiters poll and the API's sweeps expire;
+   - the plugin forwarder: per process, so the worker starts its own;
+   - `/internal/durable/subagent-mcp` and `GET /internal/flows/tools` stay on `api`;
+     agent-durable and the backend reach them as before;
+   - the backend: a worker pod reaches it at `SCADBUDDY_BACKEND_URL`, which must then be the
+     backend Service's cluster address, not the API pod's loopback (Step 6.2).
 
 ### 14.6 Effect on the plan
 

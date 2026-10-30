@@ -21,6 +21,20 @@ covers the same ground more briefly.
 - **A second container in the ScadBuddy pod** (spec §4.1). The two containers share
   the pod network, so the agent reaches the backend on `http://127.0.0.1:8080`
   (spec §4.3; `DEFAULT_BACKEND_URL` in [`agent/src/config.ts`](../../agent/src/config.ts)).
+- **Roles (#2726, plan Step 6.1).** The same image runs as one of three roles,
+  `SCADBUDDY_AGENT_ROLE` (§2; what each starts is `roleParts` in
+  [`agent/src/runtime/role.ts`](../../agent/src/runtime/role.ts)):
+  - `all` (the default): everything, as every pod ran before the roles.
+  - `api`: the HTTP server (the routes, the chat and bridge sockets, `/mcp`, the
+    loopback `/internal/*` routes), its sweeps and start-time passes, and its own
+    `agent-tools.<hostname>` queue (browser calls for its tabs, a classic session's
+    Monitor commands, a DurableSession's pinned calls). It polls neither
+    `agent-sessions` nor the shared `agent-tools`, nor a session host queue, so it runs
+    no `AgentSession` turn. Classic sessions still run where they are sent, until Step 6.3.
+  - `worker`: the Temporal workers that run turns (`agent-tools`, `agent-sessions`,
+    `agent-sessions.<hostname>`, `agent-tools.<hostname>`), and over HTTP only
+    `/healthz` and `/readyz` on port 8081 (§5). A worker pod is not beside the backend,
+    so its `SCADBUDDY_BACKEND_URL` must name the backend's cluster address.
 - **Port 8081**, fixed. The comment on `PORT` in [`agent/src/main.ts`](../../agent/src/main.ts)
   calls it "part of the pod contract with the ingress (spec §4.2)". The Dockerfile
   `EXPOSE`s 8081.
@@ -218,6 +232,7 @@ as unset (`present()`).
 | `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` | unset | `main.ts`, `loadKek()` | The old KEK during a rotation. See §3.3. |
 | `SCADBUDDY_PUBLIC_URL` | unset → loopback only | `originPolicy()` in [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts) | The UI's public URL. This is the same variable the backend reads (`public_url` in `backend/scadbuddy/core/settings.py`). Its origin is the only non-loopback origin allowed to write. Must be `http(s)`. See §6. |
 | `SCADBUDDY_AGENT_TRUSTED_PROXIES` | unset → no proxy trusted | `parseCidrList()` in `origins.ts` | A comma-separated list of CIDRs or bare addresses whose `X-Forwarded-Proto`/`X-Forwarded-Host` are believed. A malformed entry is a `ConfigError` at start. See §6. |
+| `SCADBUDDY_AGENT_ROLE` | `all` | `loadConfig()` | `all`, `api` or `worker` (§1, "Roles"). Any other value stops the process with exit code 1, naming the value. |
 
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.
@@ -496,6 +511,13 @@ curl -sS -X DELETE http://localhost:8081/api/v1/ai/mcp-tokens/<id> -H 'Origin: h
 ## 5. Health
 
 `GET /healthz` is in `createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts).
+A `worker` process (§1, "Roles") serves its own instead
+([`agent/src/runtime/health.ts`](../../agent/src/runtime/health.ts)): `GET /healthz`,
+always `200`, with `{ status, role: "worker", database, secret_key, temporal, queues }`
+(each worker's state by the queue it polls, and `temporal` the worst of them), and
+`GET /readyz`, `200` only once Temporal lists this process as a fresh poller of each of
+its four queues (`queuesPolled`), else `503` with the reason. Every other path is `404`.
+In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
 
 - **It is liveness, and always `200`** while the process serves HTTP. A missing or
   unreachable database or backend is *reported*, not failed on, so a Postgres blip

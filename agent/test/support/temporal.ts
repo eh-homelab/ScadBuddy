@@ -1,5 +1,8 @@
+import type { Client } from '@temporalio/client'
 import { TestWorkflowEnvironment } from '@temporalio/testing'
 import { execFileSync } from 'node:child_process'
+import { seenAtMs } from '../../src/sessions/durable.js'
+import { HOST_FRESH_MS } from '../../src/temporal/session/affinity.js'
 
 // A Temporal dev server for the agent's `agent-tools` tests (spec 2026-10-01 §8, #1055),
 // as the backend's `requires_temporal` tests get one: SCADBUDDY_TEST_TEMPORAL_DEV_SERVER
@@ -23,4 +26,23 @@ export function localTemporal(): Promise<TestWorkflowEnvironment> {
   return TestWorkflowEnvironment.createLocal({
     server: { executable: { type: 'existing-path', path: TEMPORAL_CLI! } },
   })
+}
+
+/**
+ * Which of `queues` (session host queues) a worker polls now: DurableTurns' `liveHosts` in a test,
+ * where the real listing (`liveHostQueues`) would also name other tests' replicas.
+ */
+export function polledHosts(client: Pick<Client, 'workflowService' | 'options'>, ...queues: string[]): () => Promise<ReadonlySet<string>> {
+  return async () => {
+    const live = new Set<string>()
+    for (const queue of queues) {
+      const { pollers } = await client.workflowService.describeTaskQueue({
+        namespace: client.options.namespace,
+        taskQueue: { name: queue },
+        taskQueueType: 2,
+      })
+      if ((pollers ?? []).some((p) => Date.now() - seenAtMs(p.lastAccessTime) < HOST_FRESH_MS)) live.add(queue)
+    }
+    return live
+  }
 }

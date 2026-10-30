@@ -62,7 +62,17 @@ export type Config = {
    * `dev` default is no tag). Neither → that worker runs unversioned.
    */
   buildId: string | undefined
+  /**
+   * SCADBUDDY_AGENT_ROLE (spec 2026-10-13 §14.3, plan Step 6.1): which half of the service this
+   * process runs, from one image. `api`: the HTTP server and no turn worker; `worker`: the
+   * Temporal workers that run turns, and only `/healthz` and `/readyz` over HTTP; `all` (the
+   * default, as before): both. What each starts is `runtime/role.ts` `roleParts`.
+   */
+  agentRole: AgentRole
 }
+
+export const AGENT_ROLES = ['all', 'api', 'worker'] as const
+export type AgentRole = (typeof AGENT_ROLES)[number]
 
 export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
 /** The backend's `DEFAULT_TEMPORAL_NAMESPACE` (backend/scadbuddy/core/config.py). */
@@ -83,6 +93,7 @@ export const ENV_VARS = [
   'SCADBUDDY_PAYLOAD_DIR',
   'SCADBUDDY_BUILD_ID',
   'SCADBUDDY_VERSION',
+  'SCADBUDDY_AGENT_ROLE',
 ] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
@@ -110,6 +121,13 @@ function flag(name: string, value: string | undefined): boolean {
   if (['true', '1', 'yes', 'on'].includes(lower)) return true
   if (['false', '0', 'no', 'off'].includes(lower)) return false
   throw new ConfigError(`${name} must be true or false, not ${value}`)
+}
+
+function agentRole(value: string | undefined): AgentRole {
+  if (value === undefined) return 'all'
+  const role = AGENT_ROLES.find((r) => r === value)
+  if (!role) throw new ConfigError(`SCADBUDDY_AGENT_ROLE must be all, api or worker, not ${JSON.stringify(value)}`)
+  return role
 }
 
 function imageTag(value: string | undefined): string | undefined {
@@ -174,5 +192,6 @@ export function loadConfig(env: Env = process.env): Config {
     ),
     payloadDir: present(env.SCADBUDDY_PAYLOAD_DIR),
     buildId: temporalValue('SCADBUDDY_BUILD_ID', present(env.SCADBUDDY_BUILD_ID)) ?? imageTag(env.SCADBUDDY_VERSION),
+    agentRole: agentRole(present(env.SCADBUDDY_AGENT_ROLE)),
   }
 }

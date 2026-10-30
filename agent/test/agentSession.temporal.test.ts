@@ -37,7 +37,7 @@ import {
 } from '../src/temporal/session/names.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
-import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
 
 // AgentSession (unified runtime spec 2026-10-13 §5.1, plan Task 5.1) on a Temporal dev
 // server: send, busy, end, continue-as-new after each turn and the replay of recorded
@@ -720,7 +720,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
         settings: { get: <T>(key: string) => Promise.resolve((key === SETTING_SESSION_MODE ? 'durable' : undefined) as T) },
         run: scriptedRunner(() => ({ throws: 'a durable turn ran in the classic harness' })).runner,
       })
-      m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: STANDIN_QUEUE, sessionQueue: SESSION_QUEUE, sessionHostQueue: HOST })
+      m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: STANDIN_QUEUE, sessionQueue: SESSION_QUEUE, liveHosts: polledHosts(env.client, HOST) })
       return m
     }
 

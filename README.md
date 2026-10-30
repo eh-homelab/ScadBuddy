@@ -1146,6 +1146,18 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `"temporal"`: `not configured`, `connecting`, `ok` or `unavailable`; without it,
   plugin package installs answer `503`. The pod's network policy must let the agent
   reach the Temporal frontend, as it does the API.
+- **`SCADBUDDY_AGENT_ROLE`** (#2726, plan Step 6.1): `all` (the default), `api` or
+  `worker`; any other value stops the container, naming it. `api` serves HTTP and runs
+  no turn: it polls only its own `agent-tools.<hostname>` queue (browser calls for the
+  tabs connected to it). `worker` runs the Temporal workers that run turns
+  (`agent-tools`, `agent-sessions` and its own `agent-sessions.<hostname>` and
+  `agent-tools.<hostname>`) and serves only `GET /healthz` and `GET /readyz` on port
+  `8081`; `/readyz` is `200` once Temporal lists it on all four queues. Run `worker` in
+  a Deployment of its own, with the agent container's database, Temporal, KEK, payload
+  and backend settings, but with `SCADBUDDY_BACKEND_URL` set to the backend's cluster
+  address (it is not in the API's pod), and set the API pod's `agent` container to
+  `api`. Without any `worker` or `all` process, no unified session can start
+  (`docs/ai/operating.md` §1, "Roles").
 - **`SCADBUDDY_SECRET_KEY_FILE`** is the key-encryption key for the Claude
   credential, which is stored encrypted in the database (envelope encryption,
   spec §9; `agent/src/secrets.ts`). The file holds exactly 32 random bytes,
