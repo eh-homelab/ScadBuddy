@@ -172,7 +172,6 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
   })
 
   const builtIn = (name: string): BuiltInToolSet | undefined => deps.builtIns.named(name)
-  /** 409 for what a built-in cannot do. */
   // One body for every built-in refusal. 409 when the request asks for something a built-in
   // cannot have; 400 for an empty PATCH, which asks for nothing and so conflicts with nothing.
   const builtInRefusal = (c: Context, detail: string, status: 400 | 409) => c.json({ detail, built_in: true }, status)

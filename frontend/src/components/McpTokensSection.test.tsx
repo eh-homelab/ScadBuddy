@@ -253,6 +253,23 @@ describe('McpTokensSection', () => {
     await waitFor(() => expect(screen.queryByTestId('mcp-auth-note')).toBeNull())
   })
 
+  it('keeps nothing of a failed read while the next one loads (#5023)', async () => {
+    const auth = { mode: 'disabled', configured_mode: 'disabled', anonymous_cap: 'outward' } as const
+    server.use(http.get('/api/v1/ai/mcp-tokens', () => HttpResponse.json({ auth_mode: 'bearer', tokens: [] })))
+    vi.spyOn(api, 'getMcpAuth').mockResolvedValue(auth)
+    renderPage(<McpTokensSection />)
+    expect(await screen.findByTestId('mcp-auth-note')).toHaveTextContent('MCP authentication is turned off')
+
+    vi.spyOn(api, 'getMcpAuth').mockRejectedValue(new Error('down'))
+    act(() => mcpAuthChanged())
+    await waitFor(() => expect(screen.queryByTestId('mcp-auth-note')).toBeNull())
+
+    vi.spyOn(api, 'getMcpAuth').mockReturnValue(new Promise(() => {}))
+    act(() => mcpAuthChanged())
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByTestId('mcp-auth-note')).toBeNull()
+  })
+
   it('says why when the AI service cannot list tokens', async () => {
     server.use(
       http.get('/api/v1/ai/mcp-tokens', () =>

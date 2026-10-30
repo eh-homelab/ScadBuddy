@@ -131,6 +131,14 @@ export function useGlobalAgentTools() {
       // changes it: the answer is the target, with its hash, and nothing is waited for
       // (#781). Not when Settings redirects the address (a section of another area, an
       // old anchor, a bare "/settings"): the router then lands elsewhere.
+      // Before the Settings chunk has loaded, wait for its registry (not for a route change
+      // that a hash-only move never makes), inside the same deadline as the route wait below.
+      const started = performance.now()
+      if (target.includes('#') && !sectionsLoaded()) {
+        await waitFor(() => (sectionsLoaded() ? true : undefined), { timeout: 1000, what: 'the sections to load', interval: 10 }).catch(
+          () => undefined,
+        )
+      }
       if (staysPut(target, from)) return { route: target }
       // Wait for the router to commit, so the next call sees the new page's tools. A
       // redirect (an unknown path lands on "/") still counts as having moved.
@@ -144,7 +152,7 @@ export function useGlobalAgentTools() {
           const now = settled.current
           return now !== from && now === historyRoute(navigator, now) ? now : undefined
         },
-        { timeout: 1000, what: 'the route to change' },
+        { timeout: Math.max(0, 1000 - (performance.now() - started)), what: 'the route to change' },
       ).catch(() => current.current)
       // Where a hash ended up is the history's (Settings rewrites it with the area).
       const hash = target.includes('#') ? ((navigator as { location?: { hash: string } }).location?.hash ?? '') : ''

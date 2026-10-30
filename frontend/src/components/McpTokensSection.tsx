@@ -163,6 +163,7 @@ export function McpTokensSection() {
   // keeps nothing: the mode falls back to the list's (#5021).
   const [lastAuth, setLastAuth] = useState(auth.data)
   if (auth.data && auth.data !== lastAuth) setLastAuth(auth.data)
+  if (auth.error && lastAuth) setLastAuth(undefined)
   const authData = auth.error ? undefined : (auth.data ?? lastAuth)
   const authMode = authData?.mode ?? list?.auth_mode ?? null
   // Shared with the Connect snippet, so it asks for the mode no second time (#781).
