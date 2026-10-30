@@ -11,7 +11,7 @@ import {
   roleOf,
   setControlValue,
 } from './dom'
-import { resolveLocation } from '../pages/settings/areas'
+import { resolveLocation, sectionsLoaded } from '../pages/settings/areas'
 import { fillableOf, type Fillable } from './fillable'
 import { touch, waitFor } from './highlight'
 import { AgentToolError } from './types'
@@ -75,11 +75,14 @@ function findOne(role: string, name: string, index: number | undefined): Element
 }
 
 /** A hash-only move that the page leaves where it is (#781). */
-function staysPut(target: string, from: string): boolean {
+export function staysPut(target: string, from: string): boolean {
   const at = target.indexOf('#')
   if (at === -1 || target.slice(0, at) !== from) return false
   const pathname = from.split('?')[0] ?? from
   if (!pathname.startsWith('/settings')) return true
+  // The sections are known once the lazy Settings chunk has loaded; before that a section of
+  // another area cannot be told from one of this, so the move is waited for (#5021).
+  if (!sectionsLoaded()) return false
   const hash = target.slice(at)
   return `${pathname}${hash}` === `/settings/${resolveLocation(pathname, hash).area}${hash}`
 }

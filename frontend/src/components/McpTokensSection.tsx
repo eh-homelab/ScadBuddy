@@ -159,10 +159,11 @@ export function McpTokensSection() {
 
   const list = listState.data
   // The last answer is kept while a saved mode is read again, so the mode never falls
-  // back to the list's, nor the snippet beside it, for a frame (#5016).
+  // back to the list's, nor the snippet beside it, for a frame (#5016). A read that failed
+  // keeps nothing: the mode falls back to the list's (#5021).
   const [lastAuth, setLastAuth] = useState(auth.data)
   if (auth.data && auth.data !== lastAuth) setLastAuth(auth.data)
-  const authData = auth.data ?? lastAuth
+  const authData = auth.error ? undefined : (auth.data ?? lastAuth)
   const authMode = authData?.mode ?? list?.auth_mode ?? null
   // Shared with the Connect snippet, so it asks for the mode no second time (#781).
   const resolvedMode = authData ? authData.mode : list ? list.auth_mode : undefined

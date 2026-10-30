@@ -160,8 +160,9 @@ describe('Connect snippet section', () => {
       { route },
     )
     await waitFor(() => expect(read).toHaveBeenCalled())
-    // Let the settings load and the snippet mount, then count: the card's read alone.
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    // The section's body is in the page once the settings have loaded, and the snippet with
+    // it (its effects ran in that commit); then count: the card's read alone (#5021).
+    await waitFor(() => expect(document.getElementById('mcp-connect-body')).not.toBeNull())
     expect(read).toHaveBeenCalledTimes(1)
     expect(screen.queryByTestId('mcp-snippet-claude-code')).toBeNull()
   })
@@ -182,7 +183,8 @@ describe('Connect snippet section', () => {
     vi.spyOn(api, 'getMcpAuth').mockImplementation(() => new Promise(() => {}))
     act(() => mcpAuthChanged())
     await waitFor(() => expect(api.getMcpAuth).toHaveBeenCalled())
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    // Flush the commit the signal caused, with the snippet's effects (no timer, #5021).
+    await act(async () => {})
     expect(snippet()).toContain('Authorization')
   })
 
