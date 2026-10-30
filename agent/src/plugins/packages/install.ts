@@ -15,7 +15,7 @@ import {
 } from './source.js'
 import type { PackagePin, PackageRepo, PreparedPackage } from './store.js'
 import { builtInNamed } from './builtins.js'
-import { capProblems, type Endpoint, itemsOfPlugin, LISTING_PACKAGES_BUDGET, listedPackageSize, vetPackage } from './vet.js'
+import { capProblems, type Endpoint, itemsOfPlugin, LISTING_PACKAGES_BUDGET, listedPackageSize, type PackageReview, vetPackage } from './vet.js'
 
 // Installing a plugin package, and turning its pin back into a directory for a
 // harness run (issue #297, "Installing a plugin"; the SDK "loads plugins by
@@ -552,4 +552,68 @@ export async function warmPackages(
   const run = await loadPackagesForRun(store, installer)
   run.release()
   return run.problems
+}
+
+/**
+ * `pin`'s review vetted from its verified copy (#4757), for one stored by an older vet: the
+ * copy is acquired as a turn's is, but as allowed, so what the rules allow does not stop the
+ * read (a fatal problem still does, as at load), then vetted as at install.
+ */
+export async function verifiedReview(installer: Pick<PackageInstaller, 'acquire'>, pin: PackagePin): Promise<PackageReview> {
+  const { dir, release } = await installer.acquire({ ...pin, allowRefused: true })
+  try {
+    const { review } = vetPackage(dir, pin.name)
+    if (!review) throw new PluginError(`plugin package ${pin.name} has no usable name`, 502)
+    return review
+  } finally {
+    release()
+  }
+}
+
+/**
+ * The enabled packages a turn would not load now (#4757): refused at load, past the listing
+ * budget, named as a built-in. Read with `loadPackagesForRun`, as a turn loads them, and kept
+ * while the enabled pins are the same, at most `maxAgeMs` (an endpoint's egress check may
+ * answer differently later). A read that takes longer than `waitMs` (a fetch into an empty
+ * cache) answers the last one meanwhile, or none before the first.
+ */
+export function unloadablePackages(
+  store: Pick<PackageRepo, 'enabledPins'>,
+  installer: Pick<PackageInstaller, 'acquire'>,
+  options: { maxAgeMs?: number; waitMs?: number } = {},
+): () => Promise<ReadonlySet<string>> {
+  const maxAgeMs = options.maxAgeMs ?? 60_000
+  const waitMs = options.waitMs ?? 2_000
+  let kept: { key: string; at: number; names: Promise<ReadonlySet<string>> } | undefined
+  let last: ReadonlySet<string> = new Set()
+  return async () => {
+    const pins = await store.enabledPins()
+    const key = JSON.stringify(pins.map((p) => [p.name, p.contentHash, p.allowRefused === true]))
+    if (!kept || kept.key !== key || performance.now() - kept.at >= maxAgeMs) {
+      const names = (async () => {
+        const run = await loadPackagesForRun({ enabledPins: () => Promise.resolve(pins) }, installer)
+        run.release()
+        const loaded = new Set(run.loaded.map((p) => p.name))
+        return new Set(pins.map((p) => p.name).filter((n) => !loaded.has(n)))
+      })()
+      kept = { key, at: performance.now(), names }
+      names.then(
+        (n) => {
+          last = n
+        },
+        () => {
+          if (kept?.names === names) kept = undefined
+        },
+      )
+    }
+    let timer: NodeJS.Timeout | undefined
+    const waited = new Promise<ReadonlySet<string>>((resolve) => {
+      timer = setTimeout(() => resolve(last), waitMs)
+    })
+    try {
+      return await Promise.race([kept.names, waited])
+    } finally {
+      clearTimeout(timer)
+    }
+  }
 }

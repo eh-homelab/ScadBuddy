@@ -2,11 +2,13 @@ import type { Context, Hono } from 'hono'
 import { z } from 'zod'
 import { Capabilities, CapabilityError, type CapabilityProvider } from '../access/capabilities.js'
 import type { ToolListings } from '../access/listings.js'
+import { packageProvider } from '../access/packageProvider.js'
 import { builtInProviders, remoteProvider } from '../access/providers.js'
 import { AccessError } from '../access/store.js'
 import type { AppDeps } from '../app.js'
 import type { AuditContext } from '../audit/log.js'
 import { UI_ACTOR } from '../audit/writes.js'
+import { listPackageServer } from '../plugins/packages/listing.js'
 import { PluginError } from '../plugins/registry.js'
 import { jsonBodyLimit, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
@@ -21,7 +23,7 @@ import { pluginTestDeps, testAndList } from './plugins.js'
 //   GET    /api/v1/ai/capabilities/:source/items/:item      the item with its schemas
 //   PUT    /api/v1/ai/capabilities/:source/items/:item      { access } sets it
 //   DELETE /api/v1/ai/capabilities/:source/items/:item      back to its default
-//   POST   /api/v1/ai/capabilities/:source/refresh          lists a remote plugin's tools again
+//   POST   /api/v1/ai/capabilities/:source/refresh          lists a remote plugin's or a package server's tools again
 //
 // A source or item id is one path segment, percent-encoded (`remote%3Ahs`,
 // `package%3Ap%2Fmcp%3As`). Reads are behind `uiReadProblem`, writes and the refresh behind
@@ -67,6 +69,23 @@ export const route: RouteModule = {
           const tests = { ...pluginTestDeps(deps), ready: isReady }
           providers.push(
             remoteProvider({ plugins: deps.plugins, listings: deps.listings ?? NO_LISTINGS, refresh: (name) => testAndList(tests, name) }),
+          )
+        }
+        if (deps.pluginPackages) {
+          const packages = deps.pluginPackages
+          const { packageInstaller: installer, pluginForwarder: forwarder, listings } = deps
+          providers.push(
+            packageProvider({
+              packages,
+              access: deps.access,
+              listings: listings ?? NO_LISTINGS,
+              verifiedReviewOf: deps.verifiedPackageReview ?? (() => Promise.reject(new Error('no verified copy can be read here'))),
+              ...(deps.unloadablePackages ? { unloadable: deps.unloadablePackages } : {}),
+              refresh: (pkg, server) =>
+                installer && forwarder && listings
+                  ? listPackageServer({ packages, installer, forwarder, listings, ...(deps.resolveHost ? { resolve: deps.resolveHost } : {}) }, pkg, server)
+                  : Promise.resolve({ status: 502, body: { detail: 'package servers cannot be listed here: no package cache, forwarder or database' } }),
+            }),
           )
         }
         built = new Capabilities(providers)

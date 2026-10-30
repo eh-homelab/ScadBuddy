@@ -330,6 +330,44 @@ describe.skipIf(!TEST_DATABASE_URL)(`ToolListings${TEST_DATABASE_URL ? '' : ` (s
     })
   })
 
+  describe("a package server's listing (#4757)", () => {
+    const H1 = `sha256:${'1'.repeat(64)}`
+    const H2 = `sha256:${'2'.repeat(64)}`
+    const pkg = (hash: string) => db.sql`
+      INSERT INTO ai_plugin_packages (name, source_kind, source_url, source_ref, fetch_url, fetch_path, commit_sha, content_hash, files, review)
+      VALUES ('notes', 'git', 'https://git.example/notes.git', 'main', 'https://git.example/notes.git', '', ${'a'.repeat(40)}, ${hash}, '{}', '{}')`
+
+    it('is stored under its server source while the package is pinned to the hash listed, else nothing', async () => {
+      expect(await listings.exclusiveServer('notes', 'api', (put) => put(H1, toStoredTools([{ name: 'a' }]), {}))).toEqual({ value: false })
+      await pkg(H1)
+      expect(await listings.exclusiveServer('notes', 'api', (put) => put(H2, toStoredTools([{ name: 'a' }]), {}))).toEqual({ value: false })
+      expect(await listings.get('package:notes/mcp:api')).toBeUndefined()
+      expect(await listings.exclusiveServer('notes', 'api', (put) => put(H1, toStoredTools([{ name: 'a' }]), { truncated: true }))).toEqual({
+        value: true,
+      })
+      expect(await listings.get('package:notes/mcp:api')).toMatchObject({ tools: [{ name: 'a' }], truncated: true })
+    })
+
+    it('holds one listing per server at a time, apart from a remote plugin of a like name', async () => {
+      let finish!: () => void
+      const running = new Promise<void>((resolve) => (finish = resolve))
+      let started!: () => void
+      const holding = new Promise<void>((resolve) => (started = resolve))
+      const first = listings.exclusiveServer('notes', 'api', async () => {
+        started()
+        await running
+        return 'first'
+      })
+      await holding
+      const other = new ToolListings(db.sql, db.locks)
+      expect(await other.exclusiveServer('notes', 'api', async () => 'second')).toBe('busy')
+      expect(await other.exclusiveServer('notes', 'db', async () => 'db')).toEqual({ value: 'db' })
+      expect(await other.exclusive('notes', async () => 'remote')).toEqual({ value: 'remote' })
+      finish()
+      expect(await first).toEqual({ value: 'first' })
+    })
+  })
+
   it('getMany reads several sources in one query', async () => {
     await put('remote:aa', toStoredTools([{ name: 'x' }]))
     await put('remote:bb', toStoredTools([{ name: 'y' }]))

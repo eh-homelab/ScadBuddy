@@ -8,7 +8,7 @@ import type { Database } from '../src/db.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
-import { loadPackagesForRun, PackageInstaller } from '../src/plugins/packages/install.js'
+import { loadPackagesForRun, PackageInstaller, verifiedReview } from '../src/plugins/packages/install.js'
 import { validateSource } from '../src/plugins/packages/source.js'
 import { packageKinds } from '../src/plugins/packages/operations.js'
 import { PackageStore, type PackageView } from '../src/plugins/packages/store.js'
@@ -525,6 +525,32 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       expect(del.status).toBe(204)
       expect(await store.list()).toEqual([])
       expect(() => rmSync(dir)).toThrow() // evicted from the cache
+    })
+
+    it("serves a pending re-pin's review stored without hook ids with the verified copy's ids (#4757)", async () => {
+      const installed = await install()
+      await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      repos.greeter!.commitFiles({
+        'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Was the user waved at?' }] }] } }),
+      })
+      const current = await store.pinOf('greeter')
+      await store.setPending('greeter', await installer.prepare({ ...current!.source, ref: 'main' }))
+      const [row] = await db.sql<{ id: string }[]>`SELECT pending_review -> 'hooks' -> 0 ->> 'id' AS id FROM ai_plugin_packages`
+      const id = row!.id
+      expect(id).toMatch(/^[0-9a-f]{16}$/)
+      // As an older replica stores it: no hook has an id.
+      await db.sql`
+        UPDATE ai_plugin_packages
+        SET pending_review = jsonb_set(pending_review, '{hooks}',
+          (SELECT jsonb_agg(h - 'id') FROM jsonb_array_elements(pending_review -> 'hooks') AS h))`
+      const ids = async (a: ReturnType<typeof app>) => {
+        const one = (await (await a.request('/api/v1/ai/plugin-packages/greeter', { headers: READ })).json()) as PackageView
+        const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as PackageView[]
+        return [one, listed.find((p) => p.name === 'greeter')!].map((v) => v.pending!.review.hooks.map((h) => h.id))
+      }
+      expect(await ids(app())).toEqual([[undefined], [undefined]])
+      const verified = createApp({ ...appDeps(), verifiedPackageReview: (pin) => verifiedReview(installer, pin) })
+      expect(await ids(verified)).toEqual([[id], [id]])
     })
 
     it('lists the built-in plugins first; they enable and disable through their settings, and are never removed', async () => {

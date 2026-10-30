@@ -87,16 +87,17 @@ function httpItem(rows: readonly AccessRow[]): ItemView {
 const OWN_PLUGIN = BUILT_INS.find((b) => b.name === OWN_PLUGIN_NAME)!
 
 /**
- * The own plugin's items (#4757): one per skill, command and subagent its review lists (as the
- * harness names them, `scadbuddy:<name>`), on by default, `off` with its row. A command is a
- * skill item, as the call rule judges it (vet.ts `itemsOf`): one item per name with a skill.
+ * A plugin's items (#4757): one per skill, command and subagent its review lists (as the
+ * harness names them, `<plugin>:<name>`), on by default, `off` with its row under `source`.
+ * A command is a skill item, as the call rule judges it (vet.ts `itemsOf`): one item per name
+ * with a skill.
  */
-export function ownPluginItems(review: PackageReview, rows: readonly AccessRow[]): ItemView[] {
-  const prefix = `${OWN_PLUGIN_NAME}:`
+export function pluginItems(review: PackageReview, rows: readonly AccessRow[], source: string, plugin: string): ItemView[] {
+  const prefix = `${plugin}:`
   const of = (kind: 'skill' | 'subagent', harnessName: string): ItemView => {
     const name = harnessName.startsWith(prefix) ? harnessName.slice(prefix.length) : harnessName
     const id = kind === 'skill' ? skillItem(name) : subagentItem(name)
-    const row = rowOf(rows, BUILTIN_SOURCES.ownPlugin, id)
+    const row = rowOf(rows, source, id)
     const access: Access = row?.access === 'off' ? 'off' : 'on'
     return {
       id,
@@ -119,6 +120,11 @@ export function ownPluginItems(review: PackageReview, rows: readonly AccessRow[]
   }
   const skills = [...new Set([...review.skills, ...review.commands])]
   return [...skills.map((s) => of('skill', s)), ...review.agents.map((a) => of('subagent', a))]
+}
+
+/** The own plugin's items (`pluginItems` under `builtin:own-plugin`, harness names `scadbuddy:<name>`). */
+export function ownPluginItems(review: PackageReview, rows: readonly AccessRow[]): ItemView[] {
+  return pluginItems(review, rows, BUILTIN_SOURCES.ownPlugin, OWN_PLUGIN_NAME)
 }
 
 /** AccessError (the store refused the write) as a 400. */
@@ -205,7 +211,7 @@ const REMOTE_PREFIX = remoteSource('')
 
 export const RENAMED_REASON = 'Claude Code renames this tool, so it cannot take a tier: it asks first, or is off'
 
-type Listing = Awaited<ReturnType<ToolListings['get']>>
+export type Listing = Awaited<ReturnType<ToolListings['get']>>
 
 /** A refusal of the registry's, as the tree answers it; a status the tree has no word for is 400. */
 async function registry<T>(write: Promise<T>): Promise<T> {
@@ -218,13 +224,13 @@ async function registry<T>(write: Promise<T>): Promise<T> {
 }
 
 /** A stored tool's own access: off when disabled, else its tier; `undefined` without a row. */
-function storedAccess(plugin: PluginSummary, tool: string): Exclude<Access, 'on'> | undefined {
+function storedAccess(plugin: ToolRows, tool: string): Exclude<Access, 'on'> | undefined {
   if (plugin.disabled_tools.includes(tool)) return 'off'
   return Object.hasOwn(plugin.tool_tiers, tool) ? plugin.tool_tiers[tool] : undefined
 }
 
 /** A stored disabled entry under another name that disables `tool` by its harness name (`a.b` for `a_b`). */
-function disabledAs(plugin: PluginSummary, tool: string): string | undefined {
+function disabledAs(plugin: ToolRows, tool: string): string | undefined {
   if (plugin.disabled_tools.includes(tool)) return undefined
   return plugin.disabled_tools.find((d) => harnessToolName(d) === harnessToolName(tool))
 }
@@ -237,7 +243,7 @@ function collisionReason(view: Pick<PluginToolView, 'name' | 'collides_with'>): 
   return `Shares its name with ${others.join(', ')}, so ${all} hidden`
 }
 
-function remoteItem(plugin: PluginSummary, view: PluginToolView, listed: ListedTool): ItemView {
+function remoteItem(plugin: ToolRows, view: PluginToolView, listed: ListedTool): ItemView {
   const collision = view.tier_source === 'collision'
   const renamed = view.tier_source === 'renamed'
   const other = collision || !view.disabled ? undefined : disabledAs(plugin, view.name)
@@ -269,7 +275,7 @@ function remoteItem(plugin: PluginSummary, view: PluginToolView, listed: ListedT
 }
 
 /** A tool with stored access the listing does not name (or no listing at all). */
-function missingItem(plugin: PluginSummary, tool: string): ItemView {
+function missingItem(plugin: ToolRows, tool: string): ItemView {
   const renamed = harnessToolName(tool) !== tool
   const access = storedAccess(plugin, tool) ?? 'outward'
   return {
@@ -292,7 +298,14 @@ function missingItem(plugin: PluginSummary, tool: string): ItemView {
   }
 }
 
-function remoteView(plugin: PluginSummary, listing: Listing): SourceView {
+/** What a source's listed items are read from: its name (the harness names' prefix) and its stored tool rows. */
+export type ToolRows = Pick<PluginSummary, 'name' | 'tool_tiers' | 'disabled_tools'>
+
+/**
+ * A listed source's tool items (a remote plugin's, a package server's, #4757): one per name
+ * its stored listing has, then one per stored row the listing does not name (`missing`).
+ */
+export function listedItems(plugin: ToolRows, listing: Listing): ItemView[] {
   const tools = listing?.tools ?? []
   const views = describeTools({ name: plugin.name, toolTiers: plugin.tool_tiers, disabledTools: plugin.disabled_tools }, tools)
   // One row per name: a name listed twice is one item (its id is the write's key).
@@ -304,6 +317,10 @@ function remoteView(plugin: PluginSummary, listing: Listing): SourceView {
     items.push(remoteItem(plugin, view, tools[i]!))
   })
   const stored = [...new Set([...Object.keys(plugin.tool_tiers), ...plugin.disabled_tools])].filter((t) => !listed.has(t)).sort()
+  return [...items, ...stored.map((tool) => missingItem(plugin, tool))]
+}
+
+function remoteView(plugin: PluginSummary, listing: Listing): SourceView {
   return {
     id: remoteSource(plugin.name),
     kind: 'remote',
@@ -313,7 +330,7 @@ function remoteView(plugin: PluginSummary, listing: Listing): SourceView {
     options_route: null,
     listed_at: listing?.listed_at ?? null,
     truncated: listing?.truncated ?? false,
-    items: [...items, ...stored.map((tool) => missingItem(plugin, tool))],
+    items: listedItems(plugin, listing),
     children: [],
   }
 }

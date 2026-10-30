@@ -14,7 +14,8 @@ import {
 import { fileContent } from '../plugins/packages/files.js'
 import { INSTALL_KIND, REPIN_KIND } from '../plugins/packages/operations.js'
 import { UI_ACTOR } from '../audit/writes.js'
-import type { PackageRepo } from '../plugins/packages/store.js'
+import type { PackagePin, PackageRepo, PackageView } from '../plugins/packages/store.js'
+import type { PackageReview } from '../plugins/packages/vet.js'
 import { type PackageSource, validateRef, validateSource } from '../plugins/packages/source.js'
 import { PluginError } from '../plugins/registry.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
@@ -68,6 +69,8 @@ export type PackageRouteDeps = {
   /** The plugins that ship with the agent (builtins.ts), listed first; undefined without the database. */
   builtIns: BuiltInPackages | undefined
   installer: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile'> | undefined
+  /** A pending re-pin's review with its hooks' ids, for one stored without them (#4757); kept as stored when omitted or failing. */
+  verifiedReviewOf?: (pin: PackagePin) => Promise<PackageReview>
   /** Install and re-pin run here; undefined without Temporal (503). */
   commands: Commands | undefined
   ready: () => Promise<boolean>
@@ -169,10 +172,33 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     await next()
   })
 
+  /**
+   * `view` with its pending re-pin's review read from the verified copy when its hooks have no
+   * ids (a review stored by an older vet, #4757), so a comparison with the pin's items has ids
+   * to compare; as stored when it cannot be read.
+   */
+  async function withPendingIds(view: PackageView): Promise<PackageView> {
+    const pending = view.pending
+    if (!pending || !deps.verifiedReviewOf || pending.review.hooks.every((h) => h.id !== undefined)) return view
+    const pin: PackagePin = {
+      name: view.name,
+      fetchUrl: pending.plugin_url,
+      fetchPath: pending.plugin_path,
+      commit: pending.commit_sha,
+      contentHash: pending.content_hash,
+    }
+    try {
+      const review = await deps.verifiedReviewOf(pin)
+      return { ...view, pending: { ...pending, review: { ...review, refused: review.refused ?? [] } } }
+    } catch {
+      return view
+    }
+  }
+
   app.get(base, async (c) => {
     const repo = await store()
     if (typeof repo === 'string') return c.json({ detail: repo }, 503)
-    return c.json([...((await deps.builtIns?.list()) ?? []), ...(await repo.list())])
+    return c.json([...((await deps.builtIns?.list()) ?? []), ...(await Promise.all((await repo.list()).map(withPendingIds)))])
   })
 
   app.get(`${base}/:name`, async (c) => {
@@ -182,7 +208,7 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     if (builtin) return typeof builtin === 'string' ? c.json({ detail: builtin }, 503) : c.json(builtin)
     const found = await repo.get(c.req.param('name'))
     if (!found) return c.json({ detail: `no plugin package named "${c.req.param('name')}"` }, 404)
-    return c.json(found)
+    return c.json(await withPendingIds(found))
   })
 
   // A package's files for review (#1029). Only a path in the pin's own file list
@@ -327,7 +353,14 @@ declare module '../app.js' {
     /** Installed plugin packages (#297, plugins/packages/); undefined when there is no database. */
     pluginPackages?: PackageRepo | undefined
     /** Fetches and caches plugin packages; undefined disables installing. */
-    packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile'> | undefined
+    packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile' | 'acquire'> | undefined
+    /**
+     * A pin's review vetted from its verified copy (#4757), for one stored by an older vet
+     * (hooks without ids): main.ts's over `acquire` + `vetPackage`, kept by content hash.
+     */
+    verifiedPackageReview?: (pin: PackagePin) => Promise<PackageReview>
+    /** The enabled packages a turn would not load now (refused at load, past the listing budget, #4757). */
+    unloadablePackages?: () => Promise<ReadonlySet<string>>
   }
 }
 
@@ -338,6 +371,7 @@ export const route: RouteModule = {
       packages: deps.pluginPackages,
       builtIns: deps.access ? new BuiltInPackages(deps.access) : undefined,
       installer: deps.packageInstaller,
+      ...(deps.verifiedPackageReview ? { verifiedReviewOf: deps.verifiedPackageReview } : {}),
       commands: deps.commands,
       ready: ready(deps),
       remoteAddress: deps.remoteAddress,

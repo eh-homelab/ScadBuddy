@@ -84,7 +84,7 @@ export function packageServerName(pkg: string, server: string): string {
  * Every server a package offers a turn: its http servers (reached through the forwarder)
  * and, for a package approved with `allow_refused`, its local (stdio) ones.
  */
-function offeredServers(loaded: readonly LoadedPackage[]): { pkg: LoadedPackage; server: string; config: Record<string, unknown>; local: boolean }[] {
+export function offeredServers(loaded: readonly LoadedPackage[]): { pkg: LoadedPackage; server: string; config: Record<string, unknown>; local: boolean }[] {
   const out: { pkg: LoadedPackage; server: string; config: Record<string, unknown>; local: boolean }[] = []
   for (const pkg of loaded) {
     for (const { map } of declaredConfigs(pkg.dir).mcp) {

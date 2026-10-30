@@ -13,6 +13,7 @@ import { CAPABILITIES_PATH } from '../src/routes/capabilities.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { memoryAccess } from './support/memoryAccess.js'
+import { memoryPackages, packageView } from './support/memoryPackages.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 
 // /api/v1/ai/capabilities (#2171, Task 5): the tree over the built-in sources and the
@@ -103,7 +104,7 @@ const listing = (entries: Record<string, unknown>[], truncated = false): Listing
 
 const okTest = (stored: StoredTool[] = []): PluginTest => ({ ok: true, detail: 'connected', duration_ms: 1, server: { name: 'hs', version: '1' }, tools: [], truncated: false, stored })
 
-function rig(opts: { access?: boolean; ready?: boolean; plugins?: boolean; testPlugin?: () => Promise<PluginTest> } = {}) {
+function rig(opts: { access?: boolean; ready?: boolean; plugins?: boolean; packages?: boolean; testPlugin?: () => Promise<PluginTest> } = {}) {
   const mem = memoryAccess()
   const plugins = memoryPlugins(['hs', 'other'])
   const listings = memoryListings({
@@ -117,6 +118,7 @@ function rig(opts: { access?: boolean; ready?: boolean; plugins?: boolean; testP
     kek: { ok: true, kek },
     credentials: new MemoryCredentials(),
     ...(opts.plugins === false ? {} : { plugins: plugins.repo }),
+    ...(opts.packages ? { pluginPackages: memoryPackages([packageView('p', {}, { mcp_servers: [{ name: 's', type: 'http', url: 'https://s.example/mcp' }] })]).repo } : {}),
     listings: listings as never,
     testPlugin,
     testConnection: () => Promise.resolve({ ok: true, detail: '', duration_ms: 0, model: null }),
@@ -158,6 +160,15 @@ describe('/api/v1/ai/capabilities', () => {
     expect(hs.truncated).toBe(true)
     expect(sources.find((s) => s.id === 'remote:other')!.truncated).toBe(false)
     expect(sources[0]!.truncated).toBe(false)
+  })
+
+  it('lists packages after the remote plugins', async () => {
+    const { app } = rig({ packages: true })
+    const { sources } = (await (await get(app)).json()) as { sources: SourceView[] }
+    expect(sources.map((s) => s.id).slice(-3)).toEqual(['remote:hs', 'remote:other', 'package:p'])
+    const p = sources.at(-1)!
+    expect(p).toMatchObject({ kind: 'package', title: 'p', enabled: true, switchable: true })
+    expect(p.children.map((c) => [c.id, c.kind])).toEqual([['package:p/mcp:s', 'package_server']])
   })
 
   it('answers 503 without the database', async () => {
@@ -285,6 +296,23 @@ describe('/api/v1/ai/capabilities', () => {
     const item = await get(app, `/${enc('remote:hs')}/items/${enc('a/b')}`)
     expect(item.status).toBe(404)
     expect(await item.json()).toEqual({ detail: 'no item "a/b" in "remote:hs"' })
+  })
+
+  it('routes package%3Ap%2Fmcp%3As to its server source', async () => {
+    const { app, rows } = rig({ packages: true })
+    const res = await app.request(`${CAPABILITIES_PATH}/package%3Ap%2Fmcp%3As`, { headers: READ })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ id: 'package:p/mcp:s', kind: 'package_server', title: 's', enabled: true, listed_at: null, items: [] })
+    const off = await app.request(`${CAPABILITIES_PATH}/package%3Ap%2Fmcp%3As`, { method: 'PUT', headers: UI, body: JSON.stringify({ enabled: false }) })
+    expect(off.status).toBe(200)
+    expect(rows).toEqual([expect.objectContaining({ source: 'package:p/mcp:s', item: SOURCE_ITEM, access: 'off' })])
+    const item = await app.request(`${CAPABILITIES_PATH}/package%3Ap%2Fmcp%3As/items/recall`, { method: 'PUT', headers: UI, body: JSON.stringify({ access: 'read' }) })
+    // No listing names `recall`: an item the source does not have.
+    expect(item.status).toBe(404)
+    expect((await get(app, `/${enc('package:p/mcp:nope')}`)).status).toBe(404)
+    // Without the cache and forwarder, a server cannot be listed here.
+    const refreshed = await refresh(app, 'package:p/mcp:s')
+    expect(refreshed.status).toBe(502)
   })
 
   it('refresh answers the test and the source, and a refresh while a connection test runs answers 429', async () => {
