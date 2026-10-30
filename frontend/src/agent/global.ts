@@ -11,7 +11,7 @@ import {
   roleOf,
   setControlValue,
 } from './dom'
-import { resolveLocation } from '../pages/settings/registry'
+import { resolveLocation } from '../pages/settings/areas'
 import { fillableOf, type Fillable } from './fillable'
 import { touch, waitFor } from './highlight'
 import { AgentToolError } from './types'
@@ -74,11 +74,6 @@ function findOne(role: string, name: string, index: number | undefined): Element
   return element
 }
 
-/**
- * Where the router's history is now: it moves the moment a navigation is asked for,
- * before React renders it. The browser and memory histories both expose it; `fallback`
- * for a navigator that does not.
- */
 /** A hash-only move that the page leaves where it is (#781). */
 function staysPut(target: string, from: string): boolean {
   const at = target.indexOf('#')
@@ -89,6 +84,11 @@ function staysPut(target: string, from: string): boolean {
   return `${pathname}${hash}` === `/settings/${resolveLocation(pathname, hash).area}${hash}`
 }
 
+/**
+ * Where the router's history is now: it moves the moment a navigation is asked for,
+ * before React renders it. The browser and memory histories both expose it; `fallback`
+ * for a navigator that does not.
+ */
 function historyRoute(navigator: object, fallback: string): string {
   const { location } = navigator as { location?: { pathname: string; search: string } }
   return location ? createPath({ pathname: location.pathname, search: location.search }) : fallback
