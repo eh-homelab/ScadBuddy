@@ -148,6 +148,11 @@ describe('the navigate tool', () => {
 
   it("names every area in the agent's navigate description (agent/src/tools/browser.ts)", () => {
     const source = readFileSync(resolve(process.cwd(), '../agent/src/tools/browser.ts'), 'utf8')
-    for (const { id } of AREAS) expect(source).toContain(`"/settings/${id}"`)
+    // Only the navigate entry: "/settings/general" is also in other tools' examples.
+    const start = source.indexOf("tool: 'navigate'")
+    expect(start).toBeGreaterThan(-1)
+    const next = source.indexOf("tool: '", start + 1)
+    const entry = source.slice(start, next === -1 ? undefined : next)
+    for (const { id } of AREAS) expect(entry).toContain(`"/settings/${id}"`)
   })
 })
