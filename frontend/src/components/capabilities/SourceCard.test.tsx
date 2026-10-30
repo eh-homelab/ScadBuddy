@@ -1,14 +1,14 @@
-import { renderHook, screen, waitFor, within } from '@testing-library/react'
+import { act, renderHook, screen, waitFor, within } from '@testing-library/react'
 import { accessName } from '../../test/select'
 import { http, HttpResponse } from 'msw'
 import { useState } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import type { ItemView, SourceView } from '../../api/capabilities'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { SourceCard } from './SourceCard'
-import { useCapabilities } from './useCapabilities'
+import { POLL_MAX, POLL_MS, useCapabilities } from './useCapabilities'
 
 function tool(n: number, over: Partial<ItemView> = {}): ItemView {
   return {
@@ -153,6 +153,39 @@ describe('SourceCard', () => {
     expect(await screen.findByText('Claims made by the server, not checked by ScadBuddy.')).toBeInTheDocument()
   })
 
+  it('shows a load problem once, keeps the switch on, and switching off clears it (#4757)', async () => {
+    const problem = 'plugin package greeter is not loaded: skills/hello/SKILL.md changed since it was approved'
+    const child = source({ id: 'package:greeter/mcp:mem', kind: 'package_server', title: 'mem', switchable: true, problem }, 1)
+    const refused = source({ id: 'package:greeter', kind: 'package', title: 'greeter', enabled: false, switchable: true, problem, children: [child] }, 1)
+    let sent: unknown
+    server.use(
+      http.put('/api/v1/ai/capabilities/:source', async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ ...refused, problem: null, enabled: false, children: [{ ...child, problem: null }] })
+      }),
+    )
+    const { user } = renderPage(<Harness start={refused} />)
+    await user.click(screen.getByRole('button', { name: 'greeter' }))
+    expect(within(card('greeter')).getAllByText(problem)).toHaveLength(1)
+    // Switched on, though a turn does not load it: switching off is what is offered.
+    const toggle = screen.getByRole('switch', { name: 'Enabled (greeter)' })
+    expect(toggle).toBeChecked()
+    await user.click(toggle)
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Enabled (greeter)' })).not.toBeChecked())
+    expect(sent).toEqual({ enabled: false })
+    expect(screen.queryByText(problem)).toBeNull()
+  })
+
+  it('puts the extra for each nested source in its header', async () => {
+    const child = source({ id: 'package:x/mcp:s', kind: 'package_server', title: 'Child server' }, 1)
+    const { user } = renderPage(
+      <SourceCard source={source({ children: [child] }, 1)} onChange={() => {}} childExtra={(c) => <span>{`extra of ${c.title}`}</span>} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'ScadBuddy tools' }))
+    expect(within(card('Child server')).getByText('extra of Child server')).toBeInTheDocument()
+    expect(screen.getAllByText(/^extra of /)).toHaveLength(1)
+  })
+
   it('shows its header extra and its children', async () => {
     const { user } = renderPage(
       <SourceCard source={source({}, 1)} onChange={() => {}} headerExtra={<span>extra</span>}>
@@ -179,6 +212,59 @@ describe('useCapabilities', () => {
     result.current.replace(replaced)
     await waitFor(() => expect(result.current.sources[2]!.enabled).toBe(false))
     expect(calls).toHaveBeenCalledTimes(1)
+  })
+
+  describe('while a source is checking (#4757)', () => {
+    afterEach(() => vi.useRealTimers())
+
+    /** Serves the list with `package:x`'s child checking for the first `checkingReads` reads. */
+    function serve(checkingReads: number) {
+      let reads = 0
+      server.use(
+        http.get('/api/v1/ai/capabilities', () => {
+          reads += 1
+          const child = source({ id: 'package:x/mcp:s', kind: 'package_server', title: 's', checking: reads <= checkingReads }, 1)
+          return HttpResponse.json({ sources: [source({ id: 'package:x', kind: 'package', title: 'x', children: [child] }, 1)] })
+        }),
+      )
+      return () => reads
+    }
+    const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms))
+    const checking = (sources: SourceView[]) => sources[0]?.children[0]?.checking
+
+    it('reads again, and stops once it settles', async () => {
+      const reads = serve(2)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const { result } = renderHook(() => useCapabilities(() => true))
+      await tick(0)
+      expect(checking(result.current.sources)).toBe(true)
+      await tick(POLL_MS)
+      expect(reads()).toBe(2)
+      await tick(POLL_MS)
+      expect(reads()).toBe(3)
+      expect(checking(result.current.sources)).toBe(false)
+      await tick(POLL_MS * 5)
+      expect(reads()).toBe(3)
+    })
+
+    it('gives up after POLL_MAX reads', async () => {
+      const reads = serve(Infinity)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      renderHook(() => useCapabilities(() => true))
+      await tick(0)
+      for (let i = 0; i < POLL_MAX + 3; i++) await tick(POLL_MS)
+      expect(reads()).toBe(1 + POLL_MAX)
+    })
+
+    it('stops once unmounted', async () => {
+      const reads = serve(Infinity)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      const { unmount } = renderHook(() => useCapabilities(() => true))
+      await tick(0)
+      unmount()
+      await tick(POLL_MS * 3)
+      expect(reads()).toBe(1)
+    })
   })
 
   it('says why the list failed', async () => {

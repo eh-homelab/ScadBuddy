@@ -4,7 +4,7 @@ import { bridgeCall } from './bridge'
 /**
  * #297 — Settings → Plugin packages and Plugin endpoints, against the msw stand-ins for
  * the agent service (`src/mocks/aiPlugins.ts`). Install from git, review each part,
- * approve the exact commit and hash, enable, re-pin with a diff, remove; a refused
+ * approve the exact commit and hash, switch on, re-pin with a diff, remove; a refused
  * package lists its problems; and the in-page agent cannot approve or install.
  */
 
@@ -57,8 +57,9 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await dialog.getByRole('button', { name: 'Approve this pin' }).click()
     await expect(dialog).toBeHidden()
 
-    await card.getByRole('button', { name: 'Enable' }).click()
-    await expect(card.getByText('Enabled', { exact: true })).toBeVisible()
+    // The package's own switch (#4757), on its capabilities source.
+    await card.getByRole('switch', { name: 'Enabled (greeter)' }).click()
+    await expect(card.locator('[data-slot="badge"]', { hasText: /^Enabled$/ })).toBeVisible()
 
     await card.getByLabel('Re-pin to branch, tag or commit').fill('v2')
     await card.getByRole('button', { name: 'Fetch re-pin' }).click()
@@ -73,7 +74,7 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await repin.getByRole('checkbox').check()
     await repin.getByRole('button', { name: 'Approve this pin' }).click()
     await expect(card.getByText(V2, { exact: true })).toBeVisible()
-    await expect(card.getByText('Enabled', { exact: true })).toBeVisible()
+    await expect(card.locator('[data-slot="badge"]', { hasText: /^Enabled$/ })).toBeVisible()
 
     await card.getByRole('button', { name: 'Remove' }).click()
     await page.getByRole('alertdialog', { name: 'Remove greeter?' }).getByRole('button', { name: 'Remove package' }).click()

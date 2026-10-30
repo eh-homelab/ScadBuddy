@@ -18,7 +18,8 @@ export function Component() {
         <div>
           <p className="text-sm font-medium">Assistant plugins</p>
           <p className="mt-0.5 text-xs text-muted-foreground">
-            What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
+            Plugin packages the assistant may load. Install and approve a pin here; then set each hook, skill, subagent,
+            built-in and server tool.
           </p>
           <PluginPackagesPanel />
         </div>

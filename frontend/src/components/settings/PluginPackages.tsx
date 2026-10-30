@@ -7,7 +7,6 @@ import {
   packageFetch,
   refusalProblems,
   repinMoves,
-  type BuiltInPluginPackage,
   type FileDiff,
   type ListedPackage,
   type PackageFilesOf,
@@ -15,6 +14,10 @@ import {
   type PackageReview,
   type PluginPackage,
 } from '../../api/aiPlugins'
+import { aiCapabilities, type SourceView } from '../../api/capabilities'
+import { ApiError } from '../../api/client'
+import { SourceCard } from '../capabilities/SourceCard'
+import { useCapabilities } from '../capabilities/useCapabilities'
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { useAsync } from '../../lib/useAsync'
 import { ChevronRightIcon } from 'lucide-react'
@@ -55,19 +58,39 @@ import { PackageFiles } from './PackageFiles'
  *
  * The flow follows the server's: an install only fetches, vets and stores the pin; it
  * loads nothing until you approve exactly the commit and content hash the review shows
- * (AI design spec §8.2), and only an approved pin can be enabled. A re-pin waits,
+ * (AI design spec §8.2), and only an approved pin can be switched on. A re-pin waits,
  * with its file diff, for the same approval. A pin whose review lists refusals (a
  * command hook, a local MCP server, ...) is approved only with a second confirmation,
  * `allow_refused`, which loads it as it is.
  *
- * The plugins that ship with the agent (ScadBuddy's own) are
- * listed first as "Built in": reviewable and switchable like any other, never removed
- * or re-pinned. An install that names one is answered "built in", not refused.
+ * Each package's capabilities source (`package:<name>`, #4757) sits on its card: its switch,
+ * its hooks, skills, subagents and built-ins as shared rows, and its servers with their tools.
+ * ScadBuddy's own plugin is in Built-in, not here. An install that names it is answered
+ * "built in", not refused.
  *
- * Every control that installs, approves, enables, re-pins or deletes is user-only
- * (`USER_ONLY`): the in-page agent's `click` and `fill` refuse them, so an agent can
- * never approve its own plugins.
+ * Every control that installs, approves, re-pins or deletes is user-only (`USER_ONLY`): the
+ * in-page agent's `click` and `fill` refuse them, so an agent can never approve its own
+ * plugins. The switch and each item's access are the agent's too (#4208).
  */
+
+const isPackage = (source: SourceView) => source.kind === 'package'
+const packageSource = (name: string) => `package:${name}`
+
+/** The stored review names its items (the agent's `namesItems`); an older one's are read from its cached copy. */
+const namesItems = (review: PackageReview) =>
+  review.described !== undefined && review.local_servers !== undefined && review.hooks.every((h) => h.id !== undefined)
+
+/**
+ * The hook ids the current pin has, to mark a re-pin's new ones: the package source's hook items
+ * and the current review's ids. `null` when they cannot be told (no source, or an older review
+ * whose copy is not cached yet), so nothing is marked.
+ */
+function knownHooks(pkg: PluginPackage, source: SourceView | undefined): ReadonlySet<string> | null {
+  if (!source) return null
+  const items = source.items.filter((i) => i.kind === 'hook').map((i) => i.name)
+  if (items.length === 0 && pkg.review.hooks.some((h) => h.id === undefined)) return null
+  return new Set([...items, ...pkg.review.hooks.flatMap((h) => (h.id === undefined ? [] : [h.id]))])
+}
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -105,8 +128,20 @@ function PartList({ label, items }: { label: string; items: ReactNode[] }) {
   )
 }
 
-/** Every part of a package, as the admin reviews it before approving; `of` is whose files to read. */
-export function ReviewParts({ review, of }: { review: PackageReview; of: PackageFilesOf }) {
+/**
+ * Every part of a package, as the admin reviews it before approving; `of` is whose files to read.
+ * With `knownHooks` (a re-pin's review), a hook whose id the current pin lacks is marked new; a
+ * hook with no id never is.
+ */
+export function ReviewParts({
+  review,
+  of,
+  knownHooks = null,
+}: {
+  review: PackageReview
+  of: PackageFilesOf
+  knownHooks?: ReadonlySet<string> | null
+}) {
   return (
     <dl className="grid gap-2 text-[12px] sm:grid-cols-2" aria-label={`Review of ${review.name}`}>
       <PartList label="Skills" items={review.skills.map((s) => `/${s}`)} />
@@ -114,7 +149,16 @@ export function ReviewParts({ review, of }: { review: PackageReview; of: Package
       <PartList label="Subagents" items={review.agents} />
       <PartList
         label="Hooks"
-        items={review.hooks.map((h) => `${h.event}: ${h.type}${h.url ? ` → ${h.url}` : ''}`)}
+        items={review.hooks.map((h) => (
+          <>
+            {`${h.event}: ${h.type}${h.url ? ` → ${h.url}` : ''}`}
+            {knownHooks !== null && h.id !== undefined && !knownHooks.has(h.id) && (
+              <Badge tone="warn" className="ml-1.5">
+                New since you last reviewed
+              </Badge>
+            )}
+          </>
+        ))}
       />
       <PartList
         label="MCP servers"
@@ -201,10 +245,13 @@ interface ApproveTarget {
  */
 function ApproveDialog({
   target,
+  known,
   onClose,
   onApproved,
 }: {
   target: ApproveTarget | null
+  /** The current pin's hook ids (`knownHooks`), for a re-pin's review. */
+  known: ReadonlySet<string> | null
   onClose: () => void
   onApproved: (pkg: PluginPackage) => void
 }) {
@@ -259,7 +306,11 @@ function ApproveDialog({
             </dd>
           </dl>
           {pending && <MovedNotice pkg={pkg} />}
-          <ReviewParts review={pin.review} of={{ name: pkg.name, pending: pending && pkg.pending !== null }} />
+          <ReviewParts
+            review={pin.review}
+            of={{ name: pkg.name, pending: pending && pkg.pending !== null }}
+            knownHooks={pending ? known : null}
+          />
           <div className="flex items-start gap-2.5" {...USER_ONLY}>
             <Checkbox
               id="approve-reviewed"
@@ -467,9 +518,9 @@ const TONE = {
   muted: 'text-muted-foreground',
 } as const
 
-function Badge({ tone, children }: { tone: keyof typeof TONE; children: ReactNode }) {
+function Badge({ tone, className, children }: { tone: keyof typeof TONE; className?: string; children: ReactNode }) {
   return (
-    <UiBadge variant="outline" className={TONE[tone]}>
+    <UiBadge variant="outline" className={cn(TONE[tone], className)}>
       {children}
     </UiBadge>
   )
@@ -491,37 +542,16 @@ function ReviewFold({ defaultOpen = false, children }: { defaultOpen?: boolean; 
   )
 }
 
-/** A built-in's skills and subagents on its card, not only in its review (#1297). */
-function BuiltInParts({ review }: { review: PackageReview }) {
-  if (review.skills.length === 0 && review.agents.length === 0) return null
-  return (
-    <div aria-label={`What ${review.name} adds`} className="mt-2 space-y-0.5 text-[12px]">
-      {review.skills.length > 0 && (
-        <p className="[overflow-wrap:anywhere]">
-          <span className="text-muted-foreground">Skills: </span>
-          <span className="sb-num">{review.skills.map((s) => `/${s}`).join(', ')}</span>
-        </p>
-      )}
-      {review.agents.length > 0 && (
-        <p className="[overflow-wrap:anywhere]">
-          <span className="text-muted-foreground">Subagents: </span>
-          <span className="sb-num">{review.agents.join(', ')}</span>
-        </p>
-      )}
-    </div>
-  )
-}
-
-function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (pkg: ListedPackage) => void }) {
+/** A package server's "List tools": lists what the approved review showed, so it is not user-only. */
+function ListTools({ source, onChange }: { source: SourceView; onChange: (source: SourceView) => void }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  async function toggle() {
+  async function list() {
     setBusy(true)
     setError(null)
     try {
-      const saved = await aiPlugins.setPackageEnabled<BuiltInPluginPackage>(pkg.name, !pkg.enabled)
-      onChange(saved)
+      onChange((await aiCapabilities.refresh(source.id)).source)
     } catch (caught) {
       setError(message(caught))
     } finally {
@@ -530,55 +560,37 @@ function BuiltInCard({ pkg, onChange }: { pkg: BuiltInPluginPackage; onChange: (
   }
 
   return (
-    <li aria-label={`Built-in plugin ${pkg.name}`}>
-      <Card size="sm">
-        <CardContent>
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-medium">{pkg.name}</span>
-            {pkg.review.version && <span className="sb-num text-xs text-muted-foreground">v{pkg.review.version}</span>}
-            <Badge tone="muted">Built in</Badge>
-            {pkg.enabled ? <Badge tone="ok">Enabled</Badge> : <Badge tone="muted">Disabled</Badge>}
-          </div>
-          {pkg.review.description && <p className="mt-1 text-xs text-muted-foreground">{pkg.review.description}</p>}
-          <BuiltInParts review={pkg.review} />
-          <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
-            <dt className="text-muted-foreground">Source</dt>
-            <dd>
-              Ships with ScadBuddy · <span className="sb-num break-all">{pkg.source.path}</span>
-            </dd>
-          </dl>
-          <ReviewFold>
-            <ReviewParts review={pkg.review} of={{ name: pkg.name, pending: false }} />
-          </ReviewFold>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <Button size="sm" variant="outline" onClick={() => void toggle()} disabled={busy} aria-busy={busy} {...USER_ONLY}>
-              {busy && <Spinner />}
-              {pkg.enabled ? 'Disable' : 'Enable'}
-            </Button>
-            <p className="text-xs text-muted-foreground">Built in: it cannot be removed or re-pinned.</p>
-          </div>
-          {error && (
-            <p role="alert" className="mt-2 text-xs text-warn">
-              {error}
-            </p>
-          )}
-        </CardContent>
-      </Card>
-    </li>
+    <>
+      {error && (
+        <span role="alert" className="text-xs [overflow-wrap:anywhere] text-warn">
+          {error}
+        </span>
+      )}
+      <Button size="sm" variant="outline" onClick={() => void list()} disabled={busy} aria-busy={busy}>
+        {busy && <Spinner />}
+        List tools
+      </Button>
+    </>
   )
 }
 
 function PackageCard({
   pkg,
   shadowed,
+  source,
   onChange,
+  onSource,
   onRemoved,
   onApprove,
 }: {
   pkg: PluginPackage
   /** Stored under a built-in's name (before built-ins were listed): never loaded, only removable. */
   shadowed: boolean
+  /** Its capabilities source, once read. */
+  source: SourceView | undefined
   onChange: (pkg: PluginPackage) => void
+  /** A source after a write: the package's or one of its servers'. */
+  onSource: (source: SourceView) => void
   onRemoved: (name: string) => void
   onApprove: (target: ApproveTarget) => void
 }) {
@@ -600,7 +612,13 @@ function PackageCard({
     }
   }
 
-  const source = pkg.source
+  const fetched = pkg.source
+  /** A write's answer; the package's own switch is its Enabled badge too (a refused package's row stays on). */
+  const sourceChanged = (next: SourceView) => {
+    onSource(next)
+    const enabled = next.enabled || next.problem !== null
+    if (next.id === packageSource(pkg.name) && enabled !== pkg.enabled) onChange({ ...pkg, enabled })
+  }
   return (
     <li aria-label={`Plugin package ${pkg.name}`}>
       <Card size="sm">
@@ -628,10 +646,10 @@ function PackageCard({
           <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 text-xs">
             <dt className="text-muted-foreground">Source</dt>
             <dd className="break-all">
-              <ExternalLink href={source.url}>{source.url}</ExternalLink>
-              {source.kind === 'git' && source.path && <span className="sb-num"> · {source.path}</span>}
-              {source.kind === 'marketplace' && <span className="sb-num"> · entry {source.entry}</span>}
-              <span className="sb-num text-muted-foreground"> @ {source.ref}</span>
+              <ExternalLink href={fetched.url}>{fetched.url}</ExternalLink>
+              {fetched.kind === 'git' && fetched.path && <span className="sb-num"> · {fetched.path}</span>}
+              {fetched.kind === 'marketplace' && <span className="sb-num"> · entry {fetched.entry}</span>}
+              <span className="sb-num text-muted-foreground"> @ {fetched.ref}</span>
             </dd>
             <dt className="text-muted-foreground">Commit</dt>
             <dd className="sb-num break-all">{pkg.commit_sha}</dd>
@@ -647,21 +665,6 @@ function PackageCard({
             {!pkg.approved && !shadowed && (
               <Button size="sm" onClick={() => onApprove({ pkg, pending: false })} {...USER_ONLY}>
                 Approve…
-              </Button>
-            )}
-            {pkg.approved && !shadowed && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() =>
-                  void act('enable', async () => onChange(await aiPlugins.setPackageEnabled(pkg.name, !pkg.enabled)))
-                }
-                disabled={busy !== null}
-                aria-busy={busy === 'enable'}
-                {...USER_ONLY}
-              >
-                {busy === 'enable' && <Spinner />}
-                {pkg.enabled ? 'Disable' : 'Enable'}
               </Button>
             )}
             <Button size="sm" variant="destructive" onClick={() => setConfirmDelete(true)} disabled={busy !== null} {...USER_ONLY}>
@@ -714,7 +717,7 @@ function PackageCard({
                   id={`repin-${pkg.name}`}
                   value={repinRef}
                   onChange={(event) => setRepinRef(event.target.value)}
-                  placeholder={source.ref}
+                  placeholder={fetched.ref}
                   className="sb-num"
                 />
               </div>
@@ -729,6 +732,21 @@ function PackageCard({
             <p role="alert" className="mt-2 text-xs text-warn">
               {error}
             </p>
+          )}
+
+          {source && (
+            <div className="mt-3">
+              <SourceCard
+                source={source}
+                onChange={sourceChanged}
+                childExtra={(child) => <ListTools source={child} onChange={sourceChanged} />}
+              />
+              {!namesItems(pkg.review) && source.items.length === 0 && source.children.length === 0 && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Its hooks, skills, subagents and servers show here once the package is next loaded.
+                </p>
+              )}
+            </div>
           )}
 
           <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
@@ -770,22 +788,32 @@ function PackageCard({
 
 export function PluginPackagesPanel() {
   const state = useAsync(() => aiPlugins.listPackages(), [])
+  const caps = useCapabilities(isPackage)
   const [approve, setApprove] = useState<ApproveTarget | null>(null)
-  const packages = useMemo(() => state.data ?? [], [state.data])
+  const listed = useMemo(() => state.data ?? [], [state.data])
+  // ScadBuddy's own plugin is in Built-in; a package stored under a built-in's name is still shown, to be removed.
+  const packages = useMemo(() => listed.filter((p): p is PluginPackage => !isBuiltIn(p)), [listed])
+  const shadowed = (name: string) => listed.some((p) => isBuiltIn(p) && p.name === name)
+  const sourceOf = (name: string) => caps.sources.find((s) => s.id === packageSource(name))
 
-  // A built-in and a package stored under its name (before built-ins were listed) share a name.
-  const same = (a: ListedPackage, b: ListedPackage) => a.name === b.name && isBuiltIn(a) === isBuiltIn(b)
-  const replace = (pkg: ListedPackage) =>
-    state.setData(packages.some((p) => same(p, pkg)) ? packages.map((p) => (same(p, pkg) ? pkg : p)) : [...packages, pkg])
+  const replace = (pkg: PluginPackage) => {
+    // A built-in and a package stored under its name share a name.
+    const at = (p: ListedPackage) => !isBuiltIn(p) && p.name === pkg.name
+    state.setData(listed.some(at) ? listed.map((p) => (at(p) ? pkg : p)) : [...listed, pkg])
+  }
+  /** A change to which pin is stored or approved changes its items: read the sources again. */
+  const repinned = (pkg: PluginPackage) => {
+    replace(pkg)
+    void caps.reload()
+  }
 
   return (
     <SettingCard title="Plugin packages" headingId="plugin-packages-heading">
       <SettingBody>
         <p className="text-xs text-muted-foreground">
           Claude plugins (skills, subagents, hooks and MCP servers) from a git repository or a marketplace, pinned to a
-          commit. The assistant loads them from the next turn once approved and enabled. A plugin that runs commands
-          loads only if you allow it when approving, and a plugin&rsquo;s own tools always ask before they act.
-          ScadBuddy&rsquo;s own plugin is built in: switch it here like any other.
+          commit. The assistant loads them from the next turn once approved and switched on. A plugin that runs
+          commands loads only if you allow it when approving.
         </p>
         {state.loading && <LoadingLines label="Loading plugin packages" lines={['h-20 w-full', 'h-20 w-full']} />}
         {state.error && (
@@ -793,34 +821,42 @@ export function PluginPackagesPanel() {
             Plugin packages are unavailable: {state.error.message}
           </p>
         )}
+        {/* A 503 is the agent without its database: `GET /plugin-packages` says so already. */}
+        {caps.error && !state.error && !(caps.error instanceof ApiError && caps.error.status === 503) && (
+          <p role="alert" className="text-xs text-warn">
+            Could not load the packages&rsquo; items: {caps.error.message}
+          </p>
+        )}
         {packages.length > 0 && (
           <ul className="space-y-3" aria-label="Installed plugin packages">
-            {packages.map((pkg) =>
-              isBuiltIn(pkg) ? (
-                <BuiltInCard key={`built-in:${pkg.name}`} pkg={pkg} onChange={replace} />
-              ) : (
-                <PackageCard
-                  key={pkg.name}
-                  pkg={pkg}
-                  shadowed={packages.some((p) => isBuiltIn(p) && p.name === pkg.name)}
-                  onChange={replace}
-                  onRemoved={(name) => state.setData(packages.filter((p) => isBuiltIn(p) || p.name !== name))}
-                  onApprove={setApprove}
-                />
-              ),
-            )}
+            {packages.map((pkg) => (
+              <PackageCard
+                key={pkg.name}
+                pkg={pkg}
+                shadowed={shadowed(pkg.name)}
+                source={sourceOf(pkg.name)}
+                onChange={replace}
+                onSource={caps.replace}
+                onRemoved={(name) => {
+                  state.setData(listed.filter((p) => isBuiltIn(p) || p.name !== name))
+                  void caps.reload()
+                }}
+                onApprove={setApprove}
+              />
+            ))}
           </ul>
         )}
-        {!state.loading && !state.error && !packages.some((p) => !isBuiltIn(p)) && (
+        {!state.loading && !state.error && packages.length === 0 && (
           <p className="text-xs text-muted-foreground">No plugin packages installed.</p>
         )}
-        <InstallForm onInstalled={replace} />
+        <InstallForm onInstalled={repinned} />
       </SettingBody>
       <ApproveDialog
         target={approve}
+        known={approve ? knownHooks(approve.pkg, sourceOf(approve.pkg.name)) : null}
         onClose={() => setApprove(null)}
         onApproved={(pkg) => {
-          replace(pkg)
+          repinned(pkg)
           setApprove(null)
         }}
       />
