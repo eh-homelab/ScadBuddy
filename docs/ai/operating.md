@@ -1390,8 +1390,9 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   See [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql)
   and [`20261030T1020Z_access_drop_mirrors.sql`](../../agent/src/db/migrations/20261030T1020Z_access_drop_mirrors.sql).
 - The printer camera is the access of `get_printer_camera` (`builtin:scadbuddy`): `off`
-  replaces the old switch (spec §4.2; `agent/src/routes/printerCamera.ts`, #1911). The
-  route `PUT /api/v1/ai/settings/printer-camera` writes that row.
+  replaces the old switch (spec §4.2, #1911). The old route `/api/v1/ai/settings/printer-camera`
+  is gone (#4828): change it in Settings → Tools & plugins, or with
+  `PUT /api/v1/ai/capabilities/builtin:scadbuddy/items/get_printer_camera`.
 
 ### The capabilities API
 
