@@ -335,7 +335,7 @@ function AuditLogView() {
   return (
     <Card className="mt-4 gap-0 py-0">
       <CardHeader className="border-b py-3">
-        <h4 id="ai-audit-heading" className="font-heading text-sm font-medium">
+        <h4 data-testid="ai-audit-heading" className="font-heading text-sm font-medium">
           AI activity
         </h4>
       </CardHeader>

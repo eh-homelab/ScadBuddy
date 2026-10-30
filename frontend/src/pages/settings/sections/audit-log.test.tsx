@@ -82,6 +82,6 @@ describe('Audit log', () => {
     expect(within(section).queryByRole('tablist')).toBeNull()
     // The AI card keeps its own gate.
     expect(within(section).queryByRole('list', { name: 'AI activity entries' })).toBeNull()
-    expect(document.getElementById('ai-audit-heading')).toBeNull()
+    expect(screen.queryByTestId('ai-audit-heading')).toBeNull()
   })
 })
