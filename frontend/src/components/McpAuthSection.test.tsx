@@ -8,7 +8,7 @@ import { renderPage } from '../test/utils'
 import { McpAuthSection } from './McpAuthSection'
 import { choose } from '../test/select'
 
-// #251 — Settings → "MCP authentication" over the msw stand-in for the agent
+// #251 — Settings → MCP access → Auth mode over the msw stand-in for the agent
 // service's /api/v1/ai/mcp/auth (src/mocks/features/mcpTokens.ts).
 
 async function loaded() {

@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label'
 import { LoadingLines, SwitchField } from './settings/form'
 import { Spinner } from './ui/spinner'
 
-// Settings → "MCP sign-in (OIDC)" (#262). Talks to the agent service's
+// Settings → MCP access → OIDC sign-in (#262). Talks to the agent service's
 // /api/v1/ai/mcp/oidc (agent/src/routes/mcpAuth.ts), which the ingress routes to
 // the agent (AI spec §4.2). That API is not in the backend's OpenAPI document, so
 // the shapes are declared here. Nothing in it is secret.

@@ -1,13 +1,14 @@
 import { expect, test } from '@playwright/test'
 
-test.describe('AI activity in Settings (#258)', () => {
+test.describe('AI activity in Settings → Audits (#258, #781)', () => {
   // The mocked build serves the agent's audit log from msw (src/mocks/features/audit.ts);
   // against a real stack the section needs a running agent service.
   test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
 
   test('lists the audit log, filters it, and saves the retention', async ({ page }) => {
     await page.goto('/settings/audits')
-    const section = page.getByRole('region', { name: 'AI activity' })
+    await expect(page.getByRole('tab', { name: 'AI activity' })).toHaveAttribute('aria-selected', 'true')
+    const section = page.getByRole('tabpanel', { name: 'AI activity' })
     await expect(section).toBeVisible()
 
     const entries = section.getByRole('list', { name: 'AI activity entries' }).getByTestId('audit-entry')

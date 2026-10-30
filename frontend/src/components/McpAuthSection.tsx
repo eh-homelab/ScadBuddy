@@ -18,7 +18,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { ChoiceSelect, LoadingLines, SettingBody, SettingCard } from './settings/form'
 import { Spinner } from './ui/spinner'
 
-// #251 — Settings → "MCP authentication": whether an outside MCP client needs a token
+// #251 — Settings → MCP access → Auth mode: whether an outside MCP client needs a token
 // at /mcp, and how far an anonymous caller may go when it does not (AI design spec
 // §8.3). The agent service keeps both in `ai_settings` and reads them on every /mcp
 // request, so a save applies to the next call.
@@ -182,7 +182,7 @@ export function McpAuthSection({ onSaved }: Props) {
                 >
                   OIDC sign-in is on, so it overrides the choice below: every call needs an OIDC
                   sign-in or an access token. The choice below is stored, and applies once OIDC is
-                  turned off in &ldquo;MCP sign-in (OIDC)&rdquo;.
+                  turned off in MCP access &rarr; OIDC sign-in.
                   {current.configured_mode === 'disabled' && (
                     <span className="mt-1 block text-warn" data-testid="mcp-auth-oidc-disabled">
                       The stored choice allows calls without a token: turning OIDC off will let

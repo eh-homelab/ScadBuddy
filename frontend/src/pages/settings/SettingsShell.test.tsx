@@ -68,6 +68,14 @@ function Ghost() {
   )
 }
 
+function GhostMcp() {
+  return (
+    <Section id="ghost-mcp" title="Ghost MCP">
+      {null}
+    </Section>
+  )
+}
+
 const fakes: readonly SettingsSection[] = [
   { id: 'alpha', area: 'general', title: 'Alpha', order: 10, Component: Alpha },
   { id: 'beta', area: 'library', title: 'Beta', order: 10, Component: Beta },
@@ -218,6 +226,41 @@ describe('SettingsShell (#2171)', () => {
       renderSettingsShell(fakes, { route: '/settings/tools' })
       await waitFor(() => expect(sectionLinks()).toEqual(['Packages']))
       expect(screen.queryByText(/The assistant service is not answering/)).toBeNull()
+    },
+  )
+
+  it('says where to look when every section of an agent-served area hid itself while the assistant is not_configured', async () => {
+    Object.assign(availability, { available: false, state: 'not_configured' })
+    const withGhostMcp: readonly SettingsSection[] = [
+      ...fakes,
+      { id: 'ghost-mcp', area: 'mcp', title: 'Ghost MCP', order: 10, Component: GhostMcp, hideWhenEmpty: true },
+    ]
+    const first = renderSettingsShell(withGhostMcp, { route: '/settings/mcp' })
+    const notice = await screen.findByRole('status')
+    expect(notice).toHaveTextContent(
+      'Nothing here until the assistant service is set up. Status & credentials says what it needs.',
+    )
+    expect(within(notice).getByRole('link', { name: 'Status & credentials' })).toHaveAttribute(
+      'href',
+      '/settings/assistant#assistant-credentials',
+    )
+    first.unmount()
+    renderSettingsShell(fakes, { route: '/settings/tools' })
+    await waitFor(() => expect(sectionLinks()).toEqual(['Packages']))
+    expect(screen.queryByText(/Nothing here until/)).toBeNull()
+  })
+
+  it.each(['unavailable', 'unreachable'] as const)(
+    'shows no "nothing here" notice on an emptied agent-served area while the assistant is %s',
+    async (state) => {
+      Object.assign(availability, { available: false, state })
+      const withGhostMcp: readonly SettingsSection[] = [
+        ...fakes,
+        { id: 'ghost-mcp', area: 'mcp', title: 'Ghost MCP', order: 10, Component: GhostMcp, hideWhenEmpty: true },
+      ]
+      renderSettingsShell(withGhostMcp, { route: '/settings/mcp' })
+      await screen.findByRole('status')
+      expect(screen.queryByText(/Nothing here until/)).toBeNull()
     },
   )
 

@@ -25,7 +25,7 @@ describe('SettingsPage and the AI availability gate', () => {
     vi.restoreAllMocks()
   })
 
-  it('banners the top of the page while MCP authentication is off, until it is back on (#1921)', async () => {
+  it('banners the top of the page while the MCP auth mode is off, until it is back on (#1921)', async () => {
     availability.available = true
     const { user } = renderPage(<SettingsPage />, { route: '/settings/mcp' })
     await seeded()

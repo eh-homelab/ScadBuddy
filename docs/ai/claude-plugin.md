@@ -10,7 +10,8 @@ today.
 > **Status.** The skills and subagents load in your Claude Code, and in ScadBuddy's own
 > harness through its copy of the plugin ([Inside ScadBuddy](#inside-scadbuddy), #896). The MCP server the plugin connects to,
 > `<your ScadBuddy>/mcp`, is served by the agent sidecar (#368), and its bearer tokens
-> are minted in Settings → MCP access → **MCP access tokens** (#251).
+> are minted in Settings → MCP access → **Tokens** (#251). **Connect snippet** in the same area
+> gives the Claude Code and Claude Desktop setup (#781).
 
 ## What is in it
 
@@ -52,7 +53,7 @@ declares:
 | Key | Required | Enter |
 |---|---|---|
 | `scadbuddy_url` | yes | Your ScadBuddy's HTTPS base URL, **with no trailing slash**, for example `https://scadbuddy.example.org`. The server URL is `${user_config.scadbuddy_url}/mcp` ([`.mcp.json`](../../plugins/scadbuddy/.mcp.json)). |
-| `scadbuddy_token` | no; `sensitive` | A bearer token minted in ScadBuddy Settings → MCP access → **MCP access tokens** ([operating.md](operating.md#41-mcp-access-tokens)), sent as `Authorization: Bearer …`. Leave it empty only if the operator set the MCP auth mode to `disabled`. |
+| `scadbuddy_token` | no; `sensitive` | A bearer token minted in ScadBuddy Settings → MCP access → **Tokens** ([operating.md](operating.md#41-mcp-access-tokens)), sent as `Authorization: Bearer …`. Leave it empty only if the operator set the MCP auth mode to `disabled`. |
 
 What the server does (spec §8.2–§8.4; [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts)):
 

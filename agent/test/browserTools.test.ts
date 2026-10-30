@@ -82,6 +82,15 @@ describe('the browser_* tools match the tab catalogue (frontend catalog.ts)', ()
     return out
   }
 
+  it('name every Settings area in navigate, as the tab does', async () => {
+    const AREAS = ['general', 'printing', 'library', 'assistant', 'tools', 'mcp', 'audits', 'system']
+    const { TOOLS } = await frontendBridgeCatalog()
+    for (const a of AREAS) {
+      expect(tool('browser_navigate').description).toContain(`"/settings/${a}"`)
+      expect(TOOLS.navigate?.description).toContain(`"/settings/${a}"`)
+    }
+  })
+
   it('forward every tab tool as browser_<name>, and nothing else', async () => {
     const { TOOLS } = await frontendBridgeCatalog()
     const forwarded = browserTools.map((t) => t.name).filter((n) => n !== 'browser_status' && n !== 'browser_pair')

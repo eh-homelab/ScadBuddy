@@ -288,7 +288,8 @@ export const browserTools: Tool[] = [
     label: 'Go to a page in your tab',
     description:
       PREFIX +
-      'go to a route in the app, e.g. "/", "/settings/general", "/m/name-keychain", "/m/name-keychain/source". The ' +
+      'go to a route in the app, e.g. "/", "/settings/general", "/m/name-keychain", "/m/name-keychain/source". ' +
+      'Settings areas: "/settings/general", "/settings/printing", "/settings/library", "/settings/assistant", "/settings/tools" (tools & plugins), "/settings/mcp" (MCP access), "/settings/audits" (the AI activity log) and "/settings/system"; "#<section>" opens one section. The ' +
       'catalogue ("/") takes its search, filters, sort and view from the query: ' +
       '"/?q=keychain&tag=a&tag=b&origin=builtin|mine&sort=name&view=list" (tags are ANDed). Returns the route ' +
       'that ended up on screen (an unknown path lands on "/").',

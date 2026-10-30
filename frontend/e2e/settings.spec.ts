@@ -102,7 +102,7 @@ test.describe('settings', () => {
     library: 'Preview',
     assistant: 'Memory',
     tools: 'Remote MCP plugins',
-    mcp: 'OIDC sign-in',
+    mcp: 'Connect snippet',
     audits: 'Audit log',
     system: 'About',
   } as const
@@ -147,6 +147,19 @@ test.describe('settings', () => {
 
     await page.getByRole('link', { name: 'Models', exact: true }).click()
     await expect(page.getByRole('alertdialog', { name: 'Leave without saving?' })).toContainText('Rendering')
+  })
+
+  test('old anchors land on their areas (#781)', async ({ page }) => {
+    for (const [from, to] of [
+      ['/settings#assistant-audit', '/settings/audits#audit-log'],
+      ['/settings#assistant-mcp', '/settings/mcp#mcp-auth-mode'],
+    ]) {
+      await page.goto(from)
+      await expect(page).toHaveURL(new RegExp(`${to}$`))
+      if (to.startsWith('/settings/audits')) {
+        await expect(page.getByRole('tab', { name: 'AI activity' })).toHaveAttribute('aria-selected', 'true')
+      }
+    }
   })
 })
 

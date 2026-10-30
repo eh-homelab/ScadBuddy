@@ -1,4 +1,7 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { TOOLS } from '../../agent/catalog'
 import {
   AREAS,
   foldIdsOf,
@@ -124,7 +127,7 @@ describe('registry', () => {
         ],
       ],
       ['tools', ['builtin', 'packages', 'remote']],
-      ['mcp', ['mcp-auth-mode', 'mcp-access-tokens', 'mcp-oidc']],
+      ['mcp', ['mcp-auth-mode', 'mcp-access-tokens', 'mcp-oidc', 'mcp-connect']],
       ['audits', ['audit-log']],
       ['system', ['diagnostics', 'administration', 'about']],
     ])
@@ -135,5 +138,21 @@ describe('registry', () => {
       expect(SECTION_REGISTRY.find((s) => s.id === section)?.area, anchor).toBe(area)
       expect(settingsTarget(`#${anchor}`)).toEqual({ area, hash: `#${section}` })
     }
+  })
+})
+
+describe('the navigate tool', () => {
+  it("names every area in the navigate tool's description", () => {
+    for (const { id } of AREAS) expect(TOOLS.navigate.description).toContain(`"/settings/${id}"`)
+  })
+
+  it("names every area in the agent's navigate description (agent/src/tools/browser.ts)", () => {
+    const source = readFileSync(resolve(process.cwd(), '../agent/src/tools/browser.ts'), 'utf8')
+    // Only the navigate entry: "/settings/general" is also in other tools' examples.
+    const start = source.indexOf("tool: 'navigate'")
+    expect(start).toBeGreaterThan(-1)
+    const next = source.indexOf("tool: '", start + 1)
+    const entry = source.slice(start, next === -1 ? undefined : next)
+    for (const { id } of AREAS) expect(entry).toContain(`"/settings/${id}"`)
   })
 })

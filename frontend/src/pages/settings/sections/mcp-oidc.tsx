@@ -16,7 +16,7 @@ export function Component() {
     <Section id={id} title={title}>
       {ai.available && (
         <div>
-          <p className="mb-3 text-sm font-medium">MCP sign-in (OIDC)</p>
+          <p className="mb-3 text-sm font-medium">Sign-in through your identity provider</p>
           <McpOidcSettings />
         </div>
       )}

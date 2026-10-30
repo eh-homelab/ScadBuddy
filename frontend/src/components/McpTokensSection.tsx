@@ -1,12 +1,12 @@
-import { useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { McpToken, McpTokenTier, MintedMcpToken } from '../api/mcpTokens'
 import { copyText, selectContents } from '../lib/clipboard'
 import { timeAgo } from '../lib/format'
 import { useMcpAuthVersion } from '../lib/mcpAuthChanges'
+import { setMintedMcpToken, setTokensCardAuthMode } from '../lib/mcpMintedToken'
 import { useAsync } from '../lib/useAsync'
-import { McpConnectSnippet } from './McpConnectSnippet'
 import {
   AlertDialog,
   AlertDialogCancel,
@@ -25,7 +25,7 @@ import { Label } from '@/components/ui/label'
 import { ChoiceSelect, LoadingLines, SettingBody, SettingCard, Tip } from './settings/form'
 import { Spinner } from './ui/spinner'
 
-// #251 — Settings → "MCP access tokens": mint, list and revoke the bearer tokens an
+// #251 — Settings → MCP access → Tokens: mint, list and revoke the bearer tokens an
 // outside MCP client presents at /mcp (AI design spec §8.1, §8.3). The agent service
 // serves `/api/v1/ai/mcp-tokens` and keeps only a token's SHA-256, so the plaintext
 // exists in the browser once, in the answer to the create request, and only in this
@@ -131,14 +131,9 @@ function TokenRow({ token, onRevoke }: { token: McpToken; onRevoke: (token: McpT
   )
 }
 
-interface Props {
-  /** SCADBUDDY_PUBLIC_URL as Settings has it, for the connect snippet (#1910); this page's origin when unset. */
-  publicUrl?: string | null | undefined
-}
-
-export function McpTokensSection({ publicUrl }: Props = {}) {
+export function McpTokensSection() {
   const listState = useAsync(() => api.listMcpTokens(), [])
-  // The mode as "MCP authentication" last saved it, wherever on the page that is (#1921):
+  // The mode as Auth mode last saved it, wherever on the page that is (#1921):
   // newer than the one this list was loaded with.
   const authVersion = useMcpAuthVersion()
   const auth = useAsync(() => api.getMcpAuth(), [authVersion])
@@ -155,8 +150,21 @@ export function McpTokensSection({ publicUrl }: Props = {}) {
   const [revokeError, setRevokeError] = useState<string | null>(null)
   const tokenRef = useRef<HTMLElement>(null)
 
+  // The Connect snippet section fills itself from the token just minted (#781); it is
+  // forgotten on Done, and when this card leaves the page.
+  useEffect(() => {
+    setMintedMcpToken(minted?.token ?? null)
+  }, [minted])
+  useEffect(() => () => setMintedMcpToken(null), [])
+
   const list = listState.data
   const authMode = auth.data?.mode ?? list?.auth_mode ?? null
+  // Shared with the Connect snippet once known, so it asks for the mode no second time (#781).
+  const resolvedMode = auth.data ? auth.data.mode : list ? list.auth_mode : undefined
+  useEffect(() => {
+    setTokensCardAuthMode(resolvedMode)
+  }, [resolvedMode])
+  useEffect(() => () => setTokensCardAuthMode(undefined), [])
 
   async function create(event: FormEvent) {
     event.preventDefault()
@@ -292,8 +300,6 @@ export function McpTokensSection({ publicUrl }: Props = {}) {
             </CardContent>
           </Card>
         )}
-
-        <McpConnectSnippet publicUrl={publicUrl} authMode={authMode} token={minted?.token} />
 
         <form className="grid gap-3 sm:grid-cols-[1fr_auto_auto_auto] sm:items-end" onSubmit={(event) => void create(event)}>
           <div className="grid gap-1.5">

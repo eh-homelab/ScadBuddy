@@ -80,7 +80,7 @@ describe('SettingsPage, every area at once (#2171)', () => {
     renderPage(<SettingsPage />, { route: '/settings/general' })
     await seeded()
     // Once the agent's sections have loaded too: their cards bring headings of their own.
-    await waitFor(() => expect(document.getElementById('ai-audit-heading')).not.toBeNull())
+    await waitFor(() => expect(screen.queryByTestId('ai-audit-heading')).not.toBeNull())
     await waitFor(() => expect(document.getElementById('ai-credential-heading')).not.toBeNull())
     const misplaced: string[] = []
     for (const { id } of SECTION_REGISTRY) {

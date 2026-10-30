@@ -1,7 +1,7 @@
 import { expect, test, type FrameLocator, type Page } from '@playwright/test'
 import { bambuddyFrame } from './bambuddyFrame'
 
-// Settings → MCP access tokens (#251), against the msw stand-in for the agent
+// Settings → MCP access → Tokens (#251), against the msw stand-in for the agent
 // service's /api/v1/ai/mcp-tokens (src/mocks/features/mcpTokens.ts).
 
 type Scope = Page | FrameLocator
@@ -20,7 +20,7 @@ async function createToken(scope: Scope, name: string) {
   return { section, panel, token: (await value.textContent()) ?? '' }
 }
 
-test.describe('MCP access tokens', () => {
+test.describe('Tokens (MCP access)', () => {
   test.skip(
     !!process.env.E2E_BASE_URL,
     'msw-backed; the real stack is covered by real-backend.spec.ts',
@@ -54,6 +54,17 @@ test.describe('MCP access tokens', () => {
     await expect(dialog).toBeHidden()
     await expect(rows.first()).toContainText('Revoked')
     await expect(section.getByRole('button', { name: 'Revoke Claude Code' })).toHaveCount(0)
+  })
+
+  test('the Connect snippet section fills in a token just minted, until Done (#1910, #781)', async ({ page }) => {
+    await page.goto('/settings/mcp')
+    const snippet = page.locator('#mcp-connect').getByTestId('mcp-snippet-claude-code')
+    await expect(snippet).toContainText('<your token>')
+    const { panel, token } = await createToken(page, 'Snippet')
+    await expect(snippet).toContainText(token)
+    await panel.getByRole('button', { name: 'Done' }).click()
+    await expect(snippet).toContainText('<your token>')
+    await expect(snippet).not.toContainText(token)
   })
 
   test('copies the token inside Bambuddy’s sandboxed frame', async ({ page, baseURL }) => {
