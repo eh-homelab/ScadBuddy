@@ -44,10 +44,6 @@ export type { StoredOverrides }
 /** Where the registry tools' rows live. */
 const REGISTRY_SOURCES = [BUILTIN_SOURCES.scadbuddy, BUILTIN_SOURCES.browser] as const
 
-export function builtInToolsSetting(set: string): string {
-  return `builtin_tools.${set}`
-}
-
 /**
  * The tools of each built-in, from the code that serves them. ScadBuddy's own
  * are always served (its built-in's switch is its skills').

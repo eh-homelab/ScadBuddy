@@ -17,9 +17,6 @@ import { OWN_PLUGIN_NAME, type PackageReview, vetPackage } from './vet.js'
 //     skills and subagents. On unless its source `builtin:own-plugin` is
 //     switched off in `ai_access` (#2171).
 
-/** The `ai_settings` key its switch was kept under until #2171; the access migration copied it. */
-export const SETTING_OWN_PLUGIN = 'scadbuddy_plugin_enabled'
-
 type BuiltIn = {
   name: string
   dir: string

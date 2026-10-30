@@ -82,12 +82,6 @@ export const HTTP_READ_TOOL = 'http_response_read'
 export const HTTP_TOOL_NAME = `mcp__${HTTP_SERVER}__${HTTP_TOOL}`
 export const HTTP_READ_TOOL_NAME = `mcp__${HTTP_SERVER}__${HTTP_READ_TOOL}`
 
-/**
- * The `ai_settings` key the switch was kept under (#827) until #2171 moved it to
- * `ai_access` (`builtin:http`'s `*` row, on by default); the access migration copied it.
- */
-export const SETTING_HTTP_REQUEST = 'http_request_enabled'
-
 export const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'] as const
 export type HttpMethod = (typeof METHODS)[number]
 const READ_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD'])
