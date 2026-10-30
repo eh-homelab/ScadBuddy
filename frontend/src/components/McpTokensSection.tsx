@@ -163,6 +163,8 @@ export function McpTokensSection() {
   // keeps nothing: the mode falls back to the list's (#5021).
   const [lastAuth, setLastAuth] = useState(auth.data)
   if (auth.data && auth.data !== lastAuth) setLastAuth(auth.data)
+  // Safe in render only because useAsync drops `data` on an error: a hook that kept stale
+  // data on error would set these two back and forth forever.
   if (auth.error && lastAuth) setLastAuth(undefined)
   const authData = auth.error ? undefined : (auth.data ?? lastAuth)
   const authMode = authData?.mode ?? list?.auth_mode ?? null

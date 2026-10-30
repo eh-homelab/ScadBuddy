@@ -134,7 +134,8 @@ export function useGlobalAgentTools() {
       // Before the Settings chunk has loaded, wait for its registry (not for a route change
       // that a hash-only move never makes), inside the same deadline as the route wait below.
       const started = performance.now()
-      if (target.includes('#') && !sectionsLoaded()) {
+      // Only a Settings address needs the sections: the registry loads with the Settings chunk.
+      if (target.includes('#') && /^\/settings(?:[/?#]|$)/.test(target) && !sectionsLoaded()) {
         await waitFor(() => (sectionsLoaded() ? true : undefined), { timeout: 1000, what: 'the sections to load', interval: 10 }).catch(
           () => undefined,
         )
