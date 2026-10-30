@@ -113,6 +113,23 @@ describe('Connect snippet section', () => {
     await waitFor(() => expect(snippet()).not.toContain('Authorization'))
   })
 
+  it('keeps the snippet on screen while a saved auth mode is read again (#781)', async () => {
+    setMcpAuthMode('bearer')
+    renderSettingsSection(<McpConnect />, { route })
+    await waitFor(() => expect(snippet()).toContain('Authorization'))
+    let release: () => void = () => {}
+    const real = api.getMcpAuth.bind(api)
+    vi.spyOn(api, 'getMcpAuth').mockImplementation(
+      () => new Promise((resolve) => (release = () => resolve(real()))),
+    )
+    setMcpAuthMode('disabled')
+    act(() => mcpAuthChanged())
+    await waitFor(() => expect(api.getMcpAuth).toHaveBeenCalled())
+    expect(screen.getByTestId('mcp-snippet-claude-code')).toBeInTheDocument()
+    release()
+    await waitFor(() => expect(snippet()).not.toContain('Authorization'))
+  })
+
   it('falls back to the mode the token list reports when the auth read fails', async () => {
     setMcpAuthMode('disabled')
     vi.spyOn(api, 'getMcpAuth').mockRejectedValue(new Error('down'))
