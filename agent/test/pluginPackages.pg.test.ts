@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
@@ -548,9 +548,24 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as PackageView[]
         return [one, listed.find((p) => p.name === 'greeter')!].map((v) => v.pending!.review.hooks.map((h) => h.id))
       }
+      // The current pin's copy, as a turn leaves it.
+      const pin = (await store.pinOf('greeter'))!
+      ;(await installer.acquire(pin)).release()
+      const currentDir = installer.cacheDir(pin)
+      const cached = () => readdirSync(path.join(cacheRoot, 'greeter')).sort()
+      const before = cached()
       expect(await ids(app())).toEqual([[undefined], [undefined]])
-      const verified = createApp({ ...appDeps(), verifiedPackageReview: (pin) => verifiedReview(installer, pin) })
+      const verified = createApp({ ...appDeps(), verifiedPackageReview: (p) => verifiedReview(installer, p) })
+      // No copy of the re-pin is cached: the GET fetches none, and answers the review as stored.
+      expect(await ids(verified)).toEqual([[undefined], [undefined]])
+      expect(cached()).toEqual(before)
+      // Once the review's file reads have cached it, its ids are read from it, and no GET moves the cache.
+      const file = await verified.request('/api/v1/ai/plugin-packages/greeter/file?path=hooks%2Fhooks.json&pending=true', { headers: READ })
+      expect(file.status).toBe(200)
+      const after = cached()
       expect(await ids(verified)).toEqual([[id], [id]])
+      expect(cached()).toEqual(after)
+      expect(existsSync(currentDir)).toBe(true)
     })
 
     it('lists the built-in plugins first; they enable and disable through their settings, and are never removed', async () => {

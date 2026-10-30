@@ -59,6 +59,14 @@ export type SourceView = {
   listed_at: string | null
   /** The stored listing is not every tool the source has (a `nextCursor`, or entries dropped); false without one. */
   truncated: boolean
+  /**
+   * Why a turn does not load the source although it is switched on (#4757: a package refused at
+   * load, past the listing budget, named as a built-in); its items say it too. `enabled` is then
+   * false, and switching it off still clears its row.
+   */
+  problem: string | null
+  /** Whether a turn would load it is not known yet (#4757): its items read off meanwhile; read it again shortly. */
+  checking: boolean
   items: ItemView[]
   children: SourceView[]
 }

@@ -198,6 +198,8 @@ function builtInView(spec: Spec): SourceView {
     options_route: spec.options_route,
     listed_at: null,
     truncated: false,
+    problem: null,
+    checking: false,
     items,
     children: [],
   }
@@ -295,6 +297,8 @@ function remoteView(plugin: RemotePlugin): SourceView {
     options_route: null,
     listed_at: listed ? LISTED_AT : null,
     truncated: false,
+    problem: null,
+    checking: false,
     items: [...items, ...stored.map((t) => missingItem(plugin, t))],
     children: [],
   }

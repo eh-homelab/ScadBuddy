@@ -61,8 +61,8 @@ function fakeProvider(sources: readonly SourceView[]): CapabilityProvider {
 /** A package `p` (on or off) with one server child `s`, whose tool `grep` is read. */
 function parentAndChild(enabled: boolean) {
   const grep: ItemView = { id: 'grep', kind: 'tool', name: 'grep', harness_name: 'mcp__plugin_p_s__grep', label: 'grep', description: null, default: 'outward', default_note: null, suggested: null, access: 'read', own_access: 'read', overridden: true, missing: false, allowed: null, fixed: null, reason: null }
-  const child: SourceView = { id: 'package:p/mcp:s', kind: 'package_server', title: 's', enabled: true, switchable: true, options_route: null, listed_at: null, truncated: false, items: [grep], children: [] }
-  const parent: SourceView = { id: 'package:p', kind: 'package', title: 'p', enabled, switchable: true, options_route: null, listed_at: null, truncated: false, items: [], children: [child] }
+  const child: SourceView = { id: 'package:p/mcp:s', kind: 'package_server', title: 's', enabled: true, switchable: true, options_route: null, listed_at: null, truncated: false, problem: null, checking: false, items: [grep], children: [] }
+  const parent: SourceView = { id: 'package:p', kind: 'package', title: 'p', enabled, switchable: true, options_route: null, listed_at: null, truncated: false, problem: null, checking: false, items: [], children: [child] }
   const fake = fakeProvider([parent])
   const setItem = vi.fn(async () => {})
   const provider: CapabilityProvider = {
@@ -313,7 +313,7 @@ describe('the capabilities tree', () => {
     const base = { kind: 'tool', label: 'x', description: null, default: 'outward', default_note: null, suggested: null, missing: false, allowed: null, fixed: null } as const
     const renamed: ItemView = { ...base, id: 'a.b', name: 'a.b', harness_name: 'mcp__p__a_b', access: 'outward', own_access: 'outward', overridden: false, allowed: ['off', 'outward'], reason: 'renamed' }
     const offAs: ItemView = { ...base, id: 'c_d', name: 'c_d', harness_name: 'mcp__p__c_d', access: 'off', own_access: 'off', overridden: true, reason: 'Off because "c.d" is off' }
-    const source: SourceView = { id: 'remote:p', kind: 'remote', title: 'p', enabled: false, switchable: true, options_route: null, listed_at: null, truncated: false, items: [renamed, offAs], children: [] }
+    const source: SourceView = { id: 'remote:p', kind: 'remote', title: 'p', enabled: false, switchable: true, options_route: null, listed_at: null, truncated: false, problem: null, checking: false, items: [renamed, offAs], children: [] }
     const caps = new Capabilities([fakeProvider([source])])
     return caps.source('remote:p').then((view) => {
       expect(item(view, 'a.b')).toMatchObject({ access: 'off', own_access: 'outward', reason: 'Off while "p" is switched off', allowed: ['off', 'outward'] })
@@ -343,7 +343,7 @@ describe('the capabilities tree', () => {
 
   it('refresh answers a switched-off source folded', async () => {
     const tool: ItemView = { id: 't', kind: 'tool', name: 't', harness_name: 'mcp__p__t', label: 't', description: null, default: 'outward', default_note: null, suggested: null, access: 'outward', own_access: 'outward', overridden: false, missing: false, allowed: null, fixed: null, reason: null }
-    const source: SourceView = { id: 'remote:p', kind: 'remote', title: 'p', enabled: false, switchable: true, options_route: null, listed_at: null, truncated: false, items: [tool], children: [] }
+    const source: SourceView = { id: 'remote:p', kind: 'remote', title: 'p', enabled: false, switchable: true, options_route: null, listed_at: null, truncated: false, problem: null, checking: false, items: [tool], children: [] }
     const provider = { ...fakeProvider([source]), refresh: async () => ({ test: {} as never, source }) }
     const { source: answered } = await new Capabilities([provider]).refresh('remote:p')
     expect(item(answered, 't')).toMatchObject({ access: 'off', own_access: 'outward' })
@@ -414,7 +414,7 @@ describe('the capabilities tree', () => {
     }
     const pinned: ItemView = { ...base, id: 'dup', name: 'dup', harness_name: 'mcp__p__dup', allowed: null, fixed: { access: 'off', reason: 'two tools share "dup"' }, reason: null }
     const renamed: ItemView = { ...base, id: 'a.b', name: 'a.b', harness_name: 'mcp__p__a_b', allowed: ['off', 'outward'], fixed: null, reason: 'Claude Code renames "a.b"' }
-    const source: SourceView = { id: 'remote:p', kind: 'remote', title: 'p', enabled: true, switchable: true, options_route: null, listed_at: null, truncated: false, items: [pinned, renamed], children: [] }
+    const source: SourceView = { id: 'remote:p', kind: 'remote', title: 'p', enabled: true, switchable: true, options_route: null, listed_at: null, truncated: false, problem: null, checking: false, items: [pinned, renamed], children: [] }
     const setItem = vi.fn(async () => {})
     const resetItem = vi.fn(async () => {})
     const provider: CapabilityProvider = {

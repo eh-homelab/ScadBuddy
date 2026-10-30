@@ -67,6 +67,10 @@ export interface SourceView {
   listed_at: string | null
   /** The stored listing is not every tool the source has. */
   truncated: boolean
+  /** Why a turn does not load it although it is switched on (a package refused at load, #4757); its items say it too. */
+  problem: string | null
+  /** Whether a turn would load it is not known yet (#4757): its items read off meanwhile; read the source again shortly. */
+  checking: boolean
   items: ItemView[]
   children: SourceView[]
 }

@@ -43,6 +43,8 @@ function source(over: Partial<SourceView> = {}, count = 10): SourceView {
     options_route: null,
     listed_at: null,
     truncated: false,
+    problem: null,
+    checking: false,
     items: Array.from({ length: count }, (_, i) => tool(i + 1, i === 0 ? { access: 'off', overridden: true } : {})),
     children: [],
     ...over,

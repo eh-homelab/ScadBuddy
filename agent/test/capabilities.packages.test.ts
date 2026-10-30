@@ -7,7 +7,7 @@ import { listedTool, type PackageListingPut, type StoredTool, toStoredTools } fr
 import { packageServerSource, SOURCE_ITEM } from '../src/access/model.js'
 import { packageProvider } from '../src/access/packageProvider.js'
 import { UI_ACTOR } from '../src/audit/writes.js'
-import { PackageRefusedError, unloadablePackages } from '../src/plugins/packages/install.js'
+import { type LoadCheck, packageLoadCheck, PackageRefusedError } from '../src/plugins/packages/install.js'
 import { listPackageServer } from '../src/plugins/packages/listing.js'
 import type { PackagePin, PackageView } from '../src/plugins/packages/store.js'
 import type { PackageReview } from '../src/plugins/packages/vet.js'
@@ -39,12 +39,18 @@ function memoryListings(initial: Record<string, Record<string, unknown>[]> = {})
   }
 }
 
+function checkOf(check: NonNullable<RigOptions['check']>): () => Promise<LoadCheck> {
+  if (check === 'fails') return () => Promise.reject(new Error('the check failed'))
+  return async () => ({ problems: new Map(Object.entries(check.problems ?? {})), checking: new Set(check.checking ?? []) })
+}
+
 type RigOptions = {
   packages?: PackageView[]
   listings?: Record<string, Record<string, unknown>[]>
   verified?: (pin: PackagePin) => Promise<PackageReview>
   refresh?: Parameters<typeof packageProvider>[0]['refresh']
-  unloadable?: string[]
+  /** What the load check answers: problems by package, and the packages not yet checked. */
+  check?: { problems?: Record<string, string>; checking?: string[] } | 'fails'
 }
 
 function rig(opts: RigOptions = {}) {
@@ -59,7 +65,7 @@ function rig(opts: RigOptions = {}) {
     listings,
     verifiedReviewOf,
     refresh,
-    ...(opts.unloadable ? { unloadable: async () => new Set(opts.unloadable) } : {}),
+    ...(opts.check ? { loadCheck: checkOf(opts.check) } : {}),
   })
   return { caps: new Capabilities([provider]), mem, packages, listings, verifiedReviewOf, refresh }
 }
@@ -153,12 +159,11 @@ describe('plugin packages as capability sources (#4757)', () => {
     expect((await caps.setEnabled('package:notes', true, CTX)).enabled).toBe(true)
   })
 
-  it('a server of a switched-off, unapproved or unloadable package reads off by its own id, keeping own_access', async () => {
+  it('a server of a switched-off or unapproved package reads off by its own id, keeping own_access', async () => {
     const server = 'package:notes/mcp:api'
     const cases: [string, RigOptions][] = [
       ['off', { packages: [pkg('notes', { enabled: false })] }],
       ['unapproved', { packages: [pkg('notes', { approved: false, approved_at: null, enabled: false })] }],
-      ['refused at load', { unloadable: ['notes'] }],
     ]
     for (const [what, opts] of cases) {
       const { caps } = rig({
@@ -254,10 +259,60 @@ describe('plugin packages as capability sources (#4757)', () => {
     // Kept by its content hash: read once.
     await caps.tree()
     expect(verifiedReviewOf).toHaveBeenCalledTimes(1)
-    // A copy that cannot be read lists no item of the older review (no id is invented), and its package reads off.
+    // A copy not yet readable lists no item of the older review (no id is invented); its package reads as not yet checked.
     const unread = rig({ packages: [old] })
     const [shown] = await unread.caps.tree()
-    expect(shown).toMatchObject({ enabled: false, items: [], children: [] })
+    expect(shown).toMatchObject({ enabled: true, checking: true, problem: null, items: [], children: [] })
+    // Switched off, it reads off.
+    const off = rig({ packages: [{ ...old, enabled: false }] })
+    expect((await off.caps.tree())[0]).toMatchObject({ enabled: false, checking: false, items: [], children: [] })
+  })
+
+  it('a package not yet checked keeps its switch on, its items read off saying so, and it says to read again (I1)', async () => {
+    const checks: NonNullable<RigOptions['check']>[] = [{ checking: ['notes'] }, 'fails']
+    for (const check of checks) {
+      const { caps } = rig({ check })
+      const [notes] = await caps.tree()
+      expect(notes, String(check)).toMatchObject({ enabled: true, checking: true, problem: null })
+      expect(notes!.items.find((i) => i.id === 'skill:jot')).toMatchObject({ access: 'off', own_access: 'on', fixed: null, reason: 'Checking whether "notes" can load…' })
+      const server = await caps.source('package:notes/mcp:api')
+      expect(server).toMatchObject({ checking: true })
+      expect(server.items.find((i) => i.id === 'recall')).toMatchObject({ access: 'off', own_access: 'outward', reason: 'Checking whether "notes" can load…' })
+      // Its items still take writes.
+      expect((await caps.setItem('package:notes', 'skill:jot', 'off', CTX)).items.find((i) => i.id === 'skill:jot')).toMatchObject({ own_access: 'off' })
+    }
+    // Checked and loadable: as switched.
+    const loads = rig({ check: {} })
+    expect((await loads.caps.tree())[0]).toMatchObject({ enabled: true, checking: false })
+  })
+
+  it('a package refused at load says why on the source and its items, and can still be switched off (I2)', async () => {
+    const problem = 'plugin package notes was not loaded: the turn\'s packages would take more than 1048576 bytes of its listing with it'
+    const { caps, packages } = rig({ check: { problems: { notes: problem } } })
+    const [notes] = await caps.tree()
+    expect(notes).toMatchObject({ enabled: false, problem, checking: false })
+    expect(notes!.items.every((i) => i.access === 'off' && i.reason === problem && i.fixed?.reason === problem)).toBe(true)
+    const server = await caps.source('package:notes/mcp:api')
+    expect(server).toMatchObject({ problem })
+    expect(server.items.find((i) => i.id === 'recall')).toMatchObject({ access: 'off', reason: problem })
+    const off = await caps.setEnabled('package:notes', false, CTX)
+    expect(packages.setEnabled).toHaveBeenCalledWith('notes', false)
+    expect(off).toMatchObject({ enabled: false, problem: null })
+    expect(off.items.find((i) => i.id === 'skill:jot')).toMatchObject({ reason: 'Off while "notes" is switched off', fixed: null })
+  })
+
+  it('a package named as a built-in reads refused at load', async () => {
+    const { caps } = rig({ packages: [pkg('scadbuddy')], listings: {} })
+    const [own] = await caps.tree()
+    expect(own).toMatchObject({ enabled: false, problem: 'plugin package scadbuddy was not loaded: "scadbuddy" is built in; remove the installed package' })
+  })
+
+  it('a review stored without local_servers is read again from the verified copy (m2)', async () => {
+    const older = pkg('notes', { allow_refused: true }, { local_servers: undefined })
+    const { caps, verifiedReviewOf } = rig({ packages: [older], verified: async () => review({ local_servers: ['db'] }) })
+    const [notes] = await caps.tree()
+    expect(verifiedReviewOf).toHaveBeenCalledTimes(1)
+    expect(ids(notes!.children)).toEqual(['package:notes/mcp:api', 'package:notes/mcp:db'])
   })
 
   it('refresh of a package answers 409', async () => {
@@ -287,21 +342,30 @@ describe('listing a package server (#4757)', () => {
     return { ok: true, detail: 'connected', duration_ms: 1, server: { name: 'api', version: '1' }, tools: [], truncated: false, stored }
   }
 
-  async function listingRig(opts: { packages?: PackageView[]; test?: () => Promise<PluginTest>; mcp?: unknown } = {}) {
+  async function listingRig(opts: { packages?: PackageView[]; test?: () => Promise<PluginTest>; mcp?: unknown; check?: RigOptions['check'] } = {}) {
     const dir = await copy(opts.mcp ?? { mcpServers: { api: { type: 'http', url: 'https://api.example/mcp' }, db: { command: 'db-server' } } })
     const release = vi.fn()
     const installer = { acquire: vi.fn(async () => ({ dir, release, builtinTools: [] })) }
     const test = vi.fn(opts.test ?? (async () => okTest([{ name: 'fresh' }])))
     const base = rig({ ...(opts.packages ? { packages: opts.packages } : {}) })
-    const listing = { packages: base.packages.repo, installer, forwarder: {} as PluginForwarder, listings: base.listings, resolve: async () => ['93.184.216.34'], test }
+    const listing = {
+      packages: base.packages.repo,
+      installer,
+      forwarder: {} as PluginForwarder,
+      listings: base.listings,
+      resolve: async () => ['93.184.216.34'],
+      test,
+      refusal: (p: string, s: string) => provider.listingRefusal(p, s),
+    }
     const provider = packageProvider({
       packages: base.packages.repo,
       access: base.mem.access,
       listings: base.listings,
       verifiedReviewOf: () => Promise.reject(new Error('no copy')),
       refresh: (p, s) => listPackageServer(listing, p, s),
+      ...(opts.check ? { loadCheck: checkOf(opts.check) } : {}),
     })
-    return { caps: new Capabilities([provider]), installer, release, test, listing, listings: base.listings }
+    return { caps: new Capabilities([provider]), installer, release, test, listing, listings: base.listings, mem: base.mem }
   }
 
   it('refresh lists a server and stores its tools', async () => {
@@ -341,17 +405,46 @@ describe('listing a package server (#4757)', () => {
   it('answers 409 with the problem for a server a turn would not offer, and stores nothing', async () => {
     const other = pkg('notes_x', {}, { mcp_servers: [{ name: 'api', type: 'http', url: 'https://o.example/mcp' }] })
     const colliding = await listingRig({ packages: [pkg('notes.x'), other] })
-    // `notes.x`'s copy says `notes`; the review is the package's own record.
     const answer = await listPackageServer(colliding.listing, 'notes.x', 'api')
     expect(answer).toEqual({
       status: 409,
-      body: { detail: 'plugin package notes.x: MCP server "api" is named plugin_notes_x_api, as "api" of plugin package notes_x is, so none of them is offered' },
+      body: { detail: 'Its server is named plugin_notes_x_api, as "api" of plugin package notes_x is, so none of them is offered' },
     })
     const blocked = await listingRig({ mcp: { mcpServers: { api: { type: 'http', url: 'https://api.example/mcp' } } } })
     const refused = await listPackageServer({ ...blocked.listing, resolve: async () => ['169.254.169.254'] }, 'notes', 'api')
     expect(refused.status).toBe(409)
     expect((refused.body as { detail: string }).detail).toMatch(/^plugin package notes: MCP server "api" is not offered: /)
     expect(blocked.test).not.toHaveBeenCalled()
+  })
+
+  it('makes no connection to a server a turn would not offer (I4)', async () => {
+    const cases: [string, Parameters<typeof listingRig>[0], string, string?][] = [
+      ['package off', { packages: [pkg('notes', { enabled: false })] }, '"package:notes" is switched off; switch it on to list its tools'],
+      ['past the budget', { check: { problems: { notes: 'plugin package notes was not loaded: over' } } }, 'plugin package notes was not loaded: over'],
+      ['not yet checked', { check: { checking: ['notes'] } }, 'Checking whether "notes" can load… Try again shortly'],
+      ['a built-in name', { packages: [pkg('scadbuddy')] }, 'plugin package scadbuddy was not loaded: "scadbuddy" is built in; remove the installed package', 'scadbuddy'],
+    ]
+    for (const [what, opts, detail, name = 'notes'] of cases) {
+      const { listing } = await listingRig(opts)
+      expect(await listPackageServer(listing, name, 'api'), what).toEqual({ status: 409, body: { detail } })
+      expect(listing.test, what).not.toHaveBeenCalled()
+      expect(listing.installer.acquire, what).not.toHaveBeenCalled()
+    }
+    const server = await listingRig()
+    await server.mem.access.setEnabled('package:notes/mcp:api', false)
+    expect(await listPackageServer(server.listing, 'notes', 'api')).toEqual({
+      status: 409,
+      body: { detail: '"package:notes/mcp:api" is switched off; switch it on to list its tools' },
+    })
+    expect(server.listing.test).not.toHaveBeenCalled()
+  })
+
+  it("judges a collision as the tree does: a package refused at load names no server (m1)", async () => {
+    const other = pkg('notes_x', {}, { mcp_servers: [{ name: 'api', type: 'http', url: 'https://o.example/mcp' }] })
+    const { listing, caps } = await listingRig({ packages: [pkg('notes.x'), other], check: { problems: { notes_x: 'plugin package notes_x was not loaded: nope' } } })
+    expect((await caps.source('package:notes.x/mcp:api')).items.every((i) => i.fixed === null)).toBe(true)
+    expect((await listPackageServer(listing, 'notes.x', 'api')).status).toBe(200)
+    expect(listing.test).toHaveBeenCalledTimes(1)
   })
 
   it('answers 429 while a listing of the same server runs', async () => {
@@ -382,25 +475,42 @@ describe('the packages a turn would not load (#4757)', () => {
       if (p.name === 'bad') throw new PackageRefusedError(['nope'])
       return { dir, release: () => {}, builtinTools: [] }
     })
-    const unloadable = unloadablePackages({ enabledPins: async () => pins }, { acquire })
-    expect([...(await unloadable())]).toEqual(['bad'])
-    expect([...(await unloadable())]).toEqual(['bad'])
+    const check = packageLoadCheck({ enabledPins: async () => pins }, { acquire })
+    const bad = { problems: new Map([['bad', 'plugin package bad was not loaded: nope']]), checking: new Set() }
+    expect(await check()).toEqual(bad)
+    expect(await check()).toEqual(bad)
     expect(acquire).toHaveBeenCalledTimes(2)
     pins = [pin('good')]
-    expect([...(await unloadable())]).toEqual([])
+    expect(await check()).toEqual({ problems: new Map(), checking: new Set() })
     expect(acquire).toHaveBeenCalledTimes(3)
   })
 
-  it('answers the last read while a slow one runs, and none before the first', async () => {
-    let finish!: () => void
-    const slow = new Promise<void>((resolve) => (finish = resolve))
-    const acquire = vi.fn(async () => {
-      await slow
-      throw new PackageRefusedError(['nope'])
+  it('answers a pin not yet checked as checking, at the first read and after a pin change, until its check ends (I1)', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'pkg-unloadable-'))
+    const gates = new Map<string, () => void>()
+    const acquire = vi.fn(async (p: PackagePin) => {
+      await new Promise<void>((resolve) => gates.set(p.contentHash, resolve))
+      return { dir, release: () => {}, builtinTools: [] }
     })
-    const unloadable = unloadablePackages({ enabledPins: async () => [pin('bad')] }, { acquire }, { waitMs: 10 })
-    expect([...(await unloadable())]).toEqual([])
-    finish()
-    await vi.waitFor(async () => expect([...(await unloadable())]).toEqual(['bad']))
+    let pins = [pin('notes', 'h1')]
+    const check = packageLoadCheck({ enabledPins: async () => pins }, { acquire }, { waitMs: 10 })
+    expect(await check()).toEqual({ problems: new Map(), checking: new Set(['notes']) })
+    gates.get('h1')!()
+    await vi.waitFor(async () => expect(await check()).toEqual({ problems: new Map(), checking: new Set() }))
+    pins = [pin('notes', 'h2'), pin('other')]
+    expect(await check()).toEqual({ problems: new Map(), checking: new Set(['notes', 'other']) })
+  })
+
+  it('a check that fails answers as one that has not finished, never an error (m3)', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'pkg-unloadable-'))
+    const acquire = async () => ({
+      dir,
+      release: () => {
+        throw new Error('release failed')
+      },
+      builtinTools: [],
+    })
+    const check = packageLoadCheck({ enabledPins: async () => [pin('notes')] }, { acquire })
+    expect(await check()).toEqual({ problems: new Map(), checking: new Set(['notes']) })
   })
 })

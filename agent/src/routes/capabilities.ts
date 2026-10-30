@@ -74,19 +74,30 @@ export const route: RouteModule = {
         if (deps.pluginPackages) {
           const packages = deps.pluginPackages
           const { packageInstaller: installer, pluginForwarder: forwarder, listings } = deps
-          providers.push(
-            packageProvider({
-              packages,
-              access: deps.access,
-              listings: listings ?? NO_LISTINGS,
-              verifiedReviewOf: deps.verifiedPackageReview ?? (() => Promise.reject(new Error('no verified copy can be read here'))),
-              ...(deps.unloadablePackages ? { unloadable: deps.unloadablePackages } : {}),
-              refresh: (pkg, server) =>
-                installer && forwarder && listings
-                  ? listPackageServer({ packages, installer, forwarder, listings, ...(deps.resolveHost ? { resolve: deps.resolveHost } : {}) }, pkg, server)
-                  : Promise.resolve({ status: 502, body: { detail: 'package servers cannot be listed here: no package cache, forwarder or database' } }),
-            }),
-          )
+          const provider = packageProvider({
+            packages,
+            access: deps.access,
+            listings: listings ?? NO_LISTINGS,
+            verifiedReviewOf: deps.verifiedPackageReview ?? (() => Promise.reject(new Error('no verified copy can be read here'))),
+            ...(deps.packageLoadCheck ? { loadCheck: deps.packageLoadCheck } : {}),
+            refresh: (pkg, server) =>
+              installer && forwarder && listings
+                ? listPackageServer(
+                    {
+                      packages,
+                      installer,
+                      forwarder,
+                      listings,
+                      // The tree's own rule: no connection to a server a turn would not offer.
+                      refusal: (p, s) => provider.listingRefusal(p, s),
+                      ...(deps.resolveHost ? { resolve: deps.resolveHost } : {}),
+                    },
+                    pkg,
+                    server,
+                  )
+                : Promise.resolve({ status: 502, body: { detail: 'package servers cannot be listed here: no package cache, forwarder or database' } }),
+          })
+          providers.push(provider)
         }
         built = new Capabilities(providers)
       }

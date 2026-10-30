@@ -35,6 +35,8 @@ function source(items: ItemView[], over: Partial<SourceView> = {}): SourceView {
     options_route: null,
     listed_at: null,
     truncated: false,
+    problem: null,
+    checking: false,
     items,
     children: [],
     ...over,

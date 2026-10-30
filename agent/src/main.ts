@@ -34,7 +34,7 @@ import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep, startMark } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
-import { loadPackagesForRun, PackageInstaller, unloadablePackages, verifiedReview, warmPackages } from './plugins/packages/install.js'
+import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview, warmPackages } from './plugins/packages/install.js'
 import { reviewsByHash } from './access/packageProvider.js'
 import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
@@ -397,10 +397,10 @@ const stopWorkspaceSweep = workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
 // Each session turn loads the enabled ones (`packagePlugins` below).
 const pluginPackages = database ? new PackageStore(database.sql) : undefined
 const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
-// Settings → Tools & plugins (#4757): an older stored review's items read from the verified copy,
-// once per content hash; and which enabled packages a turn would not load.
+// Settings → Tools & plugins (#4757): an older stored review's items read from the cached copy
+// (read only), once per content hash; and what a turn would make of the enabled packages.
 const verifiedPackageReview = reviewsByHash((pin) => verifiedReview(packageInstaller, pin))
-const packagesUnloadable = pluginPackages ? unloadablePackages(pluginPackages, packageInstaller) : undefined
+const packagesLoadCheck = pluginPackages ? packageLoadCheck(pluginPackages, packageInstaller) : undefined
 // The cache is this pod's scratch, empty after every deploy: filled at start, so a
 // turn does not wait on a whole repository's fetch (#4217).
 if (database && pluginPackages) {
@@ -1020,7 +1020,7 @@ const app = createApp({
   pluginPackages,
   packageInstaller,
   verifiedPackageReview,
-  ...(packagesUnloadable ? { unloadablePackages: packagesUnloadable } : {}),
+  ...(packagesLoadCheck ? { packageLoadCheck: packagesLoadCheck } : {}),
   settings,
   tokens: database ? tokens : undefined,
   aiSettings: settings,

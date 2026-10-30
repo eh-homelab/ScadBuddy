@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { EgressError } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
 import type { Commands } from '../operations/run.js'
-import { BuiltInPluginError, PackageRefusedError, type PackageInstaller } from '../plugins/packages/install.js'
+import { BuiltInPluginError, type LoadCheck, PackageRefusedError, type PackageInstaller } from '../plugins/packages/install.js'
 import {
   BuiltInPackages,
   type BuiltInPackageView,
@@ -355,12 +355,13 @@ declare module '../app.js' {
     /** Fetches and caches plugin packages; undefined disables installing. */
     packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict' | 'readFile' | 'acquire'> | undefined
     /**
-     * A pin's review vetted from its verified copy (#4757), for one stored by an older vet
-     * (hooks without ids): main.ts's over `acquire` + `vetPackage`, kept by content hash.
+     * A pin's review vetted from its cached copy (#4757), for one stored by an older vet (hooks
+     * without ids): main.ts's over the read-only `PackageInstaller.review`, held to a short wait
+     * and kept by content hash. Never fetches, makes a copy current or prunes one.
      */
     verifiedPackageReview?: (pin: PackagePin) => Promise<PackageReview>
-    /** The enabled packages a turn would not load now (refused at load, past the listing budget, #4757). */
-    unloadablePackages?: () => Promise<ReadonlySet<string>>
+    /** What a turn would make of the enabled packages now (#4757, install.ts `packageLoadCheck`). */
+    packageLoadCheck?: () => Promise<LoadCheck>
   }
 }
 

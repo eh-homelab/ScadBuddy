@@ -378,6 +378,19 @@ export class PackageInstaller {
     return this.serial(pin.name, async () => readFile(path.join(await this.verifiedCopy(pin), rel)))
   }
 
+  /**
+   * `pin`'s review vetted from its cached copy (#4757), read only: undefined unless a copy that
+   * hashes to the pin is already cached. Nothing is fetched, made current or pruned, and no
+   * allow rule applies (a review needs no allowance). Runs in the package's queue, as `readFile`.
+   */
+  review(pin: PackagePin): Promise<PackageReview | undefined> {
+    return this.serial(pin.name, async () => {
+      const dir = this.cacheDir(pin)
+      if (!(await this.cacheMatches(dir, pin))) return undefined
+      return vetPackage(dir, pin.name).review
+    })
+  }
+
   /** The cached directory of `pin` when every file hashes to it, else fetched again at the pinned commit. */
   private async verifiedCopy(pin: PackagePin): Promise<string> {
     const dir = this.cacheDir(pin)
@@ -554,66 +567,101 @@ export async function warmPackages(
   return run.problems
 }
 
-/**
- * `pin`'s review vetted from its verified copy (#4757), for one stored by an older vet: the
- * copy is acquired as a turn's is, but as allowed, so what the rules allow does not stop the
- * read (a fatal problem still does, as at load), then vetted as at install.
- */
-export async function verifiedReview(installer: Pick<PackageInstaller, 'acquire'>, pin: PackagePin): Promise<PackageReview> {
-  const { dir, release } = await installer.acquire({ ...pin, allowRefused: true })
-  try {
-    const { review } = vetPackage(dir, pin.name)
-    if (!review) throw new PluginError(`plugin package ${pin.name} has no usable name`, 502)
-    return review
-  } finally {
-    release()
-  }
+/** Rejects after `ms`: a read Settings waits on is held to a short time. */
+function within<T>(ms: number, work: Promise<T>, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} took more than ${ms} ms`)), ms)
+  })
+  return Promise.race([work, late]).finally(() => clearTimeout(timer))
 }
 
 /**
- * The enabled packages a turn would not load now (#4757): refused at load, past the listing
- * budget, named as a built-in. Read with `loadPackagesForRun`, as a turn loads them, and kept
- * while the enabled pins are the same, at most `maxAgeMs` (an endpoint's egress check may
- * answer differently later). A read that takes longer than `waitMs` (a fetch into an empty
- * cache) answers the last one meanwhile, or none before the first.
+ * `pin`'s review vetted from its cached copy (#4757), for one stored by an older vet: read only
+ * (`PackageInstaller.review`), within `waitMs`. Rejects when no verified copy is cached yet.
  */
-export function unloadablePackages(
+export async function verifiedReview(installer: Pick<PackageInstaller, 'review'>, pin: PackagePin, waitMs = 2_000): Promise<PackageReview> {
+  const review = await within(waitMs, installer.review(pin), `reading the review of plugin package ${pin.name}`)
+  if (!review) throw new PluginError(`plugin package ${pin.name} has no verified copy cached yet`, 503)
+  return review
+}
+
+/**
+ * What a turn would make of the enabled packages now (#4757). `problems`: each one it would not
+ * load (refused at load, past the listing budget, named as a built-in), with why; `checking`:
+ * each one not yet checked (a fetch into an empty cache, a pin set that changed), which counts
+ * as not loadable until the check says so.
+ */
+export type LoadCheck = { problems: ReadonlyMap<string, string>; checking: ReadonlySet<string> }
+
+const pinKey = (p: PackagePin): string => JSON.stringify([p.name, p.contentHash, p.allowRefused === true])
+
+/**
+ * `LoadCheck` of the enabled pins, read with `loadPackagesForRun` as a turn loads them, and kept
+ * while the enabled pins are the same, at most `maxAgeMs` (only an endpoint's egress answer may
+ * go stale meanwhile). A read that takes longer than `waitMs`, or fails, answers the last
+ * finished read for the pins it covers (same name, hash and allowance) and `checking` for the
+ * rest: an unknown state is never shown as loadable.
+ */
+export function packageLoadCheck(
   store: Pick<PackageRepo, 'enabledPins'>,
   installer: Pick<PackageInstaller, 'acquire'>,
   options: { maxAgeMs?: number; waitMs?: number } = {},
-): () => Promise<ReadonlySet<string>> {
+): () => Promise<LoadCheck> {
   const maxAgeMs = options.maxAgeMs ?? 60_000
   const waitMs = options.waitMs ?? 2_000
-  let kept: { key: string; at: number; names: Promise<ReadonlySet<string>> } | undefined
-  let last: ReadonlySet<string> = new Set()
+  type Done = { pins: ReadonlySet<string>; problems: ReadonlyMap<string, string> }
+  let kept: { key: string; at: number; done: Promise<Done> } | undefined
+  let last: Done = { pins: new Set(), problems: new Map() }
   return async () => {
     const pins = await store.enabledPins()
-    const key = JSON.stringify(pins.map((p) => [p.name, p.contentHash, p.allowRefused === true]))
+    const key = JSON.stringify(pins.map(pinKey))
     if (!kept || kept.key !== key || performance.now() - kept.at >= maxAgeMs) {
-      const names = (async () => {
+      const done = (async (): Promise<Done> => {
         const run = await loadPackagesForRun({ enabledPins: () => Promise.resolve(pins) }, installer)
         run.release()
         const loaded = new Set(run.loaded.map((p) => p.name))
-        return new Set(pins.map((p) => p.name).filter((n) => !loaded.has(n)))
+        const problems = new Map<string, string>()
+        for (const { name } of pins) {
+          if (loaded.has(name)) continue
+          const said = run.problems.find((p) => p.startsWith(`plugin package ${name} was not loaded:`))
+          problems.set(name, said ?? `plugin package ${name} was not loaded`)
+        }
+        return { pins: new Set(pins.map(pinKey)), problems }
       })()
-      kept = { key, at: performance.now(), names }
-      names.then(
-        (n) => {
-          last = n
+      kept = { key, at: performance.now(), done }
+      done.then(
+        (d) => {
+          last = d
         },
         () => {
-          if (kept?.names === names) kept = undefined
+          if (kept?.done === done) kept = undefined
         },
       )
     }
     let timer: NodeJS.Timeout | undefined
-    const waited = new Promise<ReadonlySet<string>>((resolve) => {
-      timer = setTimeout(() => resolve(last), waitMs)
+    const waited = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), waitMs)
     })
+    let done: Done | undefined
     try {
-      return await Promise.race([kept.names, waited])
+      done = await Promise.race([kept.done, waited])
+    } catch {
+      // A failed read answers as one that has not finished.
+      done = undefined
     } finally {
       clearTimeout(timer)
     }
+    const known = done ?? last
+    const problems = new Map<string, string>()
+    const checking = new Set<string>()
+    for (const pin of pins) {
+      if (!known.pins.has(pinKey(pin))) checking.add(pin.name)
+      else {
+        const problem = known.problems.get(pin.name)
+        if (problem !== undefined) problems.set(pin.name, problem)
+      }
+    }
+    return { problems, checking }
   }
 }

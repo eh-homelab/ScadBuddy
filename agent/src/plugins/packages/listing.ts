@@ -5,9 +5,8 @@ import type { PluginForwarder } from '../forwarder.js'
 import { PluginError } from '../registry.js'
 import { DEFAULT_PLUGIN_TEST_TIMEOUT_MS, type PluginTest, testPlugin } from '../testConnection.js'
 import { type LoadedPackage, type PackageInstaller, PackageRefusedError } from './install.js'
-import { collisionProblem, offeredServers, packageServerConfigs, packageServerName } from './mcp.js'
+import { offeredServers, packageServerConfigs } from './mcp.js'
 import type { PackageRepo } from './store.js'
-import type { PackageReview } from './vet.js'
 
 // Listing a plugin package's http MCP server (#4757): Settings → Tools & plugins' refresh of a
 // `package:<pkg>/mcp:<server>` source, as a remote plugin's test lists its tools (routes/plugins.ts
@@ -15,29 +14,6 @@ import type { PackageReview } from './vet.js'
 // offers it (mcp.ts `packageServerConfigs`), and one `tools/list` made through the forwarder at the
 // address the egress check passed. A local (stdio) server is never listed here: listing it would
 // start the package's own process outside a turn.
-
-/** The servers a package's review says a turn offers: its http ones, and its local ones while it is allowed. */
-export function reviewServers(review: PackageReview, allowed: boolean): { server: string; local: boolean }[] {
-  const out: { server: string; local: boolean }[] = []
-  for (const { name } of review.mcp_servers) if (!out.some((s) => s.server === name)) out.push({ server: name, local: false })
-  if (allowed) for (const name of review.local_servers ?? []) if (!out.some((s) => s.server === name)) out.push({ server: name, local: true })
-  return out
-}
-
-/**
- * The server names (`packageServerName`) more than one of `servers` would carry, with their
- * owners: mcp.ts `collidingServerNames` over what the packages a turn loads offer.
- */
-export function serverCollisions(servers: readonly { pkg: string; server: string }[]): Map<string, { pkg: string; server: string }[]> {
-  const owners = new Map<string, { pkg: string; server: string }[]>()
-  for (const { pkg, server } of servers) {
-    const name = packageServerName(pkg, server)
-    const list = owners.get(name) ?? []
-    if (!list.some((o) => o.pkg === pkg && o.server === server)) list.push({ pkg, server })
-    owners.set(name, list)
-  }
-  return new Map([...owners].filter(([, list]) => list.length > 1))
-}
 
 // One listing per server at a time in this process; ToolListings.exclusiveServer holds it across replicas.
 const listing = new Set<string>()
@@ -52,14 +28,20 @@ const refusal = (status: 404 | 409 | 502, detail: string): PackageListingAnswer 
 /**
  * Lists package `pkg`'s server `server` and, on a good test, stores its tools under
  * `package:<pkg>/mcp:<server>`; a failed test stores nothing. 429 while another listing of it
- * runs; 404 for an unknown package or server; 409 for an unapproved pin, a pin refused at
- * load, a local server, and a server a turn would not offer (its problem: named as another,
- * a name that cannot be offered, a URL the egress check refuses).
+ * runs; 404 for an unknown package or server; 409 for an unapproved pin, a local server, and
+ * a server a turn would not offer (`deps.refusal`, or its own problem: a name that cannot be
+ * offered, a URL the egress check refuses), before any connection is made.
  */
 export async function listPackageServer(
   deps: {
-    packages: Pick<PackageRepo, 'pinOf' | 'get' | 'list'>
+    packages: Pick<PackageRepo, 'pinOf' | 'get'>
     installer: Pick<PackageInstaller, 'acquire'>
+    /**
+     * Why a turn would not offer the server now, as Settings shows it (access/packageProvider.ts
+     * `listingRefusal`: the package or the server switched off, the package refused at load, past
+     * the budget or not yet checked, a name another loaded server carries); undefined when it would.
+     */
+    refusal: (pkg: string, server: string) => Promise<string | undefined>
     forwarder: PluginForwarder
     listings: Pick<ToolListings, 'exclusiveServer'>
     resolve?: Resolver
@@ -77,6 +59,9 @@ export async function listPackageServer(
     const pin = view && (await deps.packages.pinOf(pkg))
     if (!view || !pin) return refusal(404, `no plugin package named "${pkg}"`)
     if (!view.approved) return refusal(409, 'approve the pin before listing its servers')
+    // No connection is made for a server a turn would not offer.
+    const refused = await deps.refusal(pkg, server)
+    if (refused !== undefined) return refusal(409, refused)
     const run = async (put: PackageListingPut): Promise<PackageListingAnswer> => {
       let acquired: Awaited<ReturnType<PackageInstaller['acquire']>>
       try {
@@ -90,17 +75,6 @@ export async function listPackageServer(
         const declared = offeredServers([loaded]).find((s) => s.server === server)
         if (!declared) return refusal(404, `plugin package ${pkg} has no MCP server "${server}"`)
         if (declared.local) return refusal(409, `"${source}" is started only by a turn, so its tools are not listed here`)
-        // Named as a server of another package a turn loads: neither is offered (as a turn's own are, below).
-        const others = (await deps.packages.list()).filter((p) => p.name !== pkg && p.enabled && p.approved)
-        const collision = collisionProblem(
-          serverCollisions([
-            { pkg, server },
-            ...others.flatMap((p) => reviewServers(p.review, p.allow_refused).map((s) => ({ pkg: p.name, server: s.server }))),
-          ]),
-          pkg,
-          server,
-        )
-        if (collision) return refusal(409, collision)
         const { configs, problems } = await packageServerConfigs([loaded], deps.resolve ?? systemResolver)
         const config = configs.find((c) => c.server === server)
         if (!config) {

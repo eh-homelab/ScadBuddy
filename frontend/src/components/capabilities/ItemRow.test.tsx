@@ -52,6 +52,8 @@ function serve(start: ItemView, source = 'builtin:scadbuddy'): Sent[] {
     options_route: null,
     listed_at: null,
     truncated: false,
+    problem: null,
+    checking: false,
     items: [current],
     children: [],
   })
