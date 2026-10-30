@@ -668,7 +668,7 @@ class SegmentCalls:
         call = str(data.get("tool_use_id") or tool_use_id or "")
         if not call or self._workflows(name):
             if not call and self._judge is not None and name in access.CALL_TOOLS:
-                return await self._judge(data)  # judged whatever Claude Code sends
+                return await self._judged(name, data)  # judged whatever Claude Code sends
             return {}
         event: dict[str, Any] = {
             "type": "tool_call",
@@ -687,13 +687,24 @@ class SegmentCalls:
         self._open[call] = name
         emit(event)
         if self._judge is not None and name in access.CALL_TOOLS:
-            decision = await self._judge(data)
+            decision = await self._judged(name, data)
             if decision:
                 self._agents.pop(call, None)
                 self._open.pop(call, None)
                 emit({"type": "tool_result", "id": call, "name": name, "status": "failed"})
                 return decision
         return {}
+
+    async def _judged(self, name: str, data: Any) -> dict[str, Any]:
+        """The judge's answer, or a deny when it raises (#5017 security review): Claude Code
+        2.1.292 runs a call whose PreToolUse hook callback fails (the SDK answers the hook's
+        control request with an error), so an exception here must never reach it."""
+        assert self._judge is not None
+        try:
+            return await self._judge(data)
+        except Exception as err:
+            logger.warning("%s could not be judged: %s", name, type(err).__name__)
+            return _deny(f"{name} is refused: its access could not be checked")
 
     async def _subagent_started(self, data: Any, _tool_use_id: str | None, _context: Any) -> Any:
         agent, kind = data.get("agent_id"), data.get("agent_type")
@@ -1058,14 +1069,22 @@ class CallAccess:
         if self._park is None or not call:
             return _deny(f"{tool} needs approval, and it could not be asked for")
         tool_input = data.get("tool_input") or {}
-        size = len(
-            json.dumps(tool_input, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        )
-        if self._input_max is not None and size > self._input_max:
-            return _deny(
-                f"{tool}'s input is over {self._input_max} bytes, too large to ask the"
-                " user about, so the call is refused; make it shorter"
-            )
+        if self._input_max is not None:
+            try:
+                # surrogatepass: JSON can carry a lone surrogate, which plain UTF-8 refuses.
+                size = len(
+                    json.dumps(tool_input, ensure_ascii=False, separators=(",", ":")).encode(
+                        "utf-8", errors="surrogatepass"
+                    )
+                )
+            except Exception as err:
+                logger.warning("%s's input could not be measured: %s", tool, type(err).__name__)
+                return _deny(f"{tool} is refused: its input could not be measured")
+            if size > self._input_max:
+                return _deny(
+                    f"{tool}'s input is over {self._input_max} bytes, too large to ask the"
+                    " user about, so the call is refused; make it shorter"
+                )
         self._waiting.add(call)
         try:
             # The hook's own deadline (re-review R2): a gate that never answers refuses it.

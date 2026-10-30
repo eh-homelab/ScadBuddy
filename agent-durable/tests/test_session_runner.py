@@ -2235,6 +2235,57 @@ async def test_the_call_hook_names_a_packages_builtins_from_its_listing(
     assert call_builtins_of([old]) == {"Agent": ["old"]}  # a listing from an older agent
 
 
+@pytest.mark.parametrize("input_max", [BUILTIN_CALL_INPUT_MAX, None])
+async def test_an_input_with_a_lone_surrogate_is_measured_and_asked_about(
+    connect: Connect, input_max: int | None
+) -> None:
+    """#5017 security review: an input Claude Code sends with a lone surrogate (JSON may
+    carry one) is measured without raising, with or without a cap, and asked about: never
+    an exception in the hook, whose outcome Claude Code decides."""
+    parked: list[str] = []
+
+    async def park(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        parked.append(call)
+        return {"go": False, "reason": "Skill was not approved"}
+
+    gate = CallAccess(connect, [], {"Skill": ["notes"]}, park, input_max=input_max)
+    lone = {
+        "tool_name": "Skill",
+        "tool_input": {"skill": "x", "args": "\ud800"},
+        "tool_use_id": "t1",
+    }
+    out = await gate.check(lone)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert parked == ["t1"]
+
+
+@pytest.mark.parametrize("tool_use_id", ["t1", None])
+async def test_a_judge_that_raises_refuses_the_call(tool_use_id: str | None) -> None:
+    """#5017 security review: the hook refuses a call whose judge raises, in a plain reason,
+    and the panel sees it end; it never answers the hook with an exception."""
+
+    async def judge(data: Any) -> dict[str, Any]:
+        raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+
+    started: Any = SegmentCalls([], judge).hooks()["PreToolUse"][0].hooks[0]
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        data = {"tool_name": "Skill", "tool_input": {"skill": "x"}}
+        if tool_use_id:
+            data["tool_use_id"] = tool_use_id
+        answer = await started(data, tool_use_id, None)
+    finally:
+        _EMIT.reset(token)
+    assert answer["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert answer["hookSpecificOutput"]["permissionDecisionReason"] == (
+        "Skill is refused: its access could not be checked"
+    )
+    if tool_use_id:
+        assert [e["type"] for e in seen] == ["tool_call", "tool_result"]
+        assert seen[-1]["status"] == "failed"
+
+
 async def test_a_call_without_a_tool_use_id_is_judged_too() -> None:
     """m2: fail closed whatever Claude Code sends."""
     asked: list[Any] = []
@@ -2500,6 +2551,83 @@ async def test_an_outward_package_skill_over_the_offload_size_parks_and_runs_onc
     assert len(args) == 2
     assert all(len(a.external_payloads) == 1 and a.ByteSize() < 4096 for a in args)
     assert max(e.ByteSize() for e in history.events) < OFFLOAD_BYTES + 4096
+
+
+async def test_a_gate_that_raises_in_a_real_segment_refuses_the_call(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#5017 security review, end to end: the bundled Claude Code's Skill call, whose gate
+    raises, is refused, never run."""
+    root = tmp_path / "plugins"
+    staging = root / "staging" / "notes"
+    (staging / "skills" / "jot").mkdir(parents=True)
+    (staging / "skills" / "jot" / "SKILL.md").write_text("---\nname: jot\n---\nJot.\n")
+    digest = hash_tree(staging)
+    hex_ = digest.removeprefix("sha256:")
+    (root / "staging").rename(root / hex_)
+    stand_in = StandInTools(connect)
+    stand_in.turn_packages = [
+        {
+            "name": "notes",
+            "dir": f"{hex_}/notes",
+            "content_hash": digest,
+            "allowed": True,
+            "builtin_tools": ["Skill"],
+            "named_builtins": ["Skill"],
+            "items": ["skill:jot"],
+        }
+    ]
+
+    async def raises(self: CallAccess, data: Any) -> dict[str, Any]:
+        raise RuntimeError("the gate broke")
+
+    monkeypatch.setattr(CallAccess, "check", raises)
+    main: list[list[dict[str, Any]]] = []
+    call = {"name": "Skill", "input": {"skill": "scadbuddy:print"}}
+
+    def reply(body: dict[str, Any]) -> dict[str, Any]:
+        if "Skill" not in [t.get("name") for t in body.get("tools") or []]:
+            return {"text": "ok"}
+        results = _results(body)
+        main.append(results)
+        return {"tool_use": call} if not results else {"text": "All done."}
+
+    fake = FakeAnthropic(reply).start()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    try:
+        await insert_gateway(agent_db, KEK, fake.url)
+        runner = ScadBuddyRunner(
+            connect,
+            KEK,
+            cwd=os.path.realpath(cwd),
+            plugin_dir=str(_own_plugin(tmp_path)),
+            package_root=str(root),
+            make_runner=ClaudeAgentSdkRunner,
+            own_plugin_root=str(tmp_path / "own"),
+        )
+        async with running(temporal_env, connect, runner, stand_in) as (client, queue):
+            sid = await insert_session(agent_db)
+            handle = await start_session(client, sid, queue)
+            try:
+                await send(handle, "go")
+                assert await settled(connect, sid, timeout=180) == "idle"
+            finally:
+                await handle.terminate()
+    finally:
+        fake.close()
+        await asyncio.sleep(0)
+    [result] = next(r for r in reversed(main) if r)
+    assert result.get("is_error") is True, result
+    assert "its access could not be checked" in _text_of(result), _text_of(result)
 
 
 async def _seen_results_async(main: list[list[dict[str, Any]]], n: int) -> bool:
