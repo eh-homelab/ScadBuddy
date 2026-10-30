@@ -154,7 +154,9 @@ export function usePollStatus(): { stalled: boolean; pollError: string | null; r
 /**
  * The capabilities tree (#2171), read once per mount (sections mounted together share one read),
  * and again with back-off while a source says whether a turn loads it is not known yet
- * (`checking`); `filter` picks the top-level sources a section shows. A write answers the source
+ * (`checking`); `filter` picks the top-level sources a section shows. Pass a stable function (one
+defined at module level, as every section does): `sources` is kept by it, and a new one each render
+filters again each render. A write answers the source
  * after it, which `replace` puts in place; a poll read already under way then is dropped, so it
  * cannot undo the write.
  */

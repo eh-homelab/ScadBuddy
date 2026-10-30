@@ -149,10 +149,12 @@ class StandInTools:
         self.called_on: list[str] = []
         # builtin_tier (agent temporal/toolTier.ts, #4757): an engine-parked built-in's
         # access, each answer in turn (outward once none is left); each request it got, and
-        # builtin_fails makes it fail (retryably).
+        # builtin_fails makes it fail (retryably): "unregistered" as an older agent's worker
+        # answers an activity it does not serve (turnTools.ts turnToolActivity), "read" as a
+        # failed ai_access read.
         self.builtin_answers: list[str] = []
         self.builtin_asked: list[dict[str, Any]] = []
-        self.builtin_fails = False
+        self.builtin_fails: str | None = None
 
     async def _response(self, tool: str) -> tuple[str, Any] | None:
         info = activity.info()
@@ -280,8 +282,12 @@ class StandInTools:
         @activity.defn(name="builtin_tier")
         async def builtin_tier(args: dict[str, Any]) -> dict[str, str]:
             self.builtin_asked.append(args)
-            if self.builtin_fails:
-                raise ApplicationError("the agent is away")
+            if self.builtin_fails == "unregistered":
+                raise ApplicationError(
+                    "no activity builtin_tier is served on this queue", type="NotFoundError"
+                )
+            if self.builtin_fails == "read":
+                raise ApplicationError("the database is away", type="PostgresError")
             return {"tier": self.builtin_answers.pop(0) if self.builtin_answers else "outward"}
 
         @activity.defn(name="memory_recall")

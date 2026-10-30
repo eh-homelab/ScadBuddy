@@ -41,6 +41,9 @@ export function toolTierActivity(
  * a classic turn's seam reads it per call (access/live.ts): resolver.ts `builtin`, the
  * strictest of each package's `builtin:<tool>`, an unset one `outward`. The caller names
  * the packages, so both runtimes ask about the same set. Without a resolver, `outward`.
+ * The caller never passes an empty `packages` for a package's built-in (workflow.py
+ * `_builtin_tier` asks only about a built-in a turn package names): `resolver.builtin`
+ * answers an empty list `outward` without reading anything, which classic never asks.
  */
 export const BUILTIN_TIER_ACTIVITY = 'builtin_tier'
 

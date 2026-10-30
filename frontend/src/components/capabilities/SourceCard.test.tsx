@@ -56,9 +56,15 @@ function Harness({ start }: { start: SourceView }) {
   return <SourceCard source={shown} onChange={setShown} />
 }
 
+// Stable filters, as the sections pass them (useCapabilities keeps `sources` by its filter).
+const ALL = () => true
+const BUILTIN = (s: SourceView) => s.kind === 'builtin'
+const REMOTE = (s: SourceView) => s.kind === 'remote'
+const PACKAGE = (s: SourceView) => s.kind === 'package'
+
 /** The tree as a section shows it: each source on its card. */
 function Polled() {
-  const { sources, replace } = useCapabilities(() => true)
+  const { sources, replace } = useCapabilities(ALL)
   return (
     <>
       {sources.map((s) => (
@@ -236,7 +242,7 @@ describe('useCapabilities', () => {
     server.events.on('request:start', ({ request }) => {
       if (request.method === 'GET' && new URL(request.url).pathname === '/api/v1/ai/capabilities') calls()
     })
-    const { result } = renderHook(() => useCapabilities((s) => s.kind === 'builtin'))
+    const { result } = renderHook(() => useCapabilities(BUILTIN))
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current.error).toBeNull()
     expect(result.current.sources.map((s) => s.id)).toEqual(['builtin:scadbuddy', 'builtin:browser', 'builtin:http', 'builtin:own-plugin'])
@@ -269,7 +275,7 @@ describe('useCapabilities', () => {
     it('reads again with back-off, and stops once it settles', async () => {
       const reads = serve(3)
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-      const { result } = renderHook(() => useCapabilities(() => true))
+      const { result } = renderHook(() => useCapabilities(ALL))
       await tick(0)
       expect(checking(result.current.sources)).toBe(true)
       await tick(POLL_DELAYS[0]!)
@@ -328,9 +334,9 @@ describe('useCapabilities', () => {
       const reads = serve(Infinity)
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
       renderHook(() => {
-        useCapabilities((s) => s.kind === 'builtin')
-        useCapabilities((s) => s.kind === 'remote')
-        useCapabilities((s) => s.kind === 'package')
+        useCapabilities(BUILTIN)
+        useCapabilities(REMOTE)
+        useCapabilities(PACKAGE)
       })
       await tick(0)
       expect(reads()).toBe(1)
@@ -351,7 +357,7 @@ describe('useCapabilities', () => {
         }),
       )
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-      const { result } = renderHook(() => useCapabilities(() => true))
+      const { result } = renderHook(() => useCapabilities(ALL))
       await tick(0)
       await tick(POLL_DELAYS[0]!)
       expect(reads).toBe(2)
@@ -378,7 +384,7 @@ describe('useCapabilities', () => {
           return answer
         }),
       )
-      const { result } = renderHook(() => useCapabilities(() => true))
+      const { result } = renderHook(() => useCapabilities(ALL))
       await waitFor(() => expect(result.current.sources).toHaveLength(1))
       let reloaded: Promise<void> | undefined
       act(() => void (reloaded = result.current.reload()))
@@ -398,7 +404,7 @@ describe('useCapabilities', () => {
     it('stops once unmounted', async () => {
       const reads = serve(Infinity)
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-      const { unmount } = renderHook(() => useCapabilities(() => true))
+      const { unmount } = renderHook(() => useCapabilities(ALL))
       await tick(0)
       unmount()
       await tick(total)
@@ -408,7 +414,7 @@ describe('useCapabilities', () => {
 
   it('says why the list failed', async () => {
     server.use(http.get('/api/v1/ai/capabilities', () => HttpResponse.json({ detail: 'agent down' }, { status: 503 })))
-    const { result } = renderHook(() => useCapabilities(() => true))
+    const { result } = renderHook(() => useCapabilities(ALL))
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current.error?.message).toContain('agent down')
     expect(result.current.sources).toEqual([])

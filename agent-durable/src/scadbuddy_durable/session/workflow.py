@@ -123,6 +123,10 @@ BUILTIN_TIER = "builtin_tier"
 BUILTIN_ACCESS_PATCH = "builtin-access-4757"
 # A classic turn's words for a tool switched off (agent harness/permissions.ts decideLive).
 BUILTIN_OFF = access.TOOL_OFF
+# A classic turn's words for a call whose access cannot be read (permissions.ts decideLive).
+BUILTIN_UNREADABLE = "{} is refused: its Settings → Tools & plugins entry cannot be read"
+# What builtin_tier answers when its access cannot be read (not a tier).
+_UNREADABLE = "unreadable"
 # Skill, Agent and Task as a package's built-ins: they run inside the segment, so the
 # segment runner's hook asks the gate (BUILTIN_CALL_UPDATE) and waits. Their approval waits
 # at most HOOKED_WAIT_S, inside the segment's own hour (models.SEGMENT_TIMEOUT).
@@ -634,11 +638,12 @@ class DurableSession:
         hooked = str(call["id"]) in self._hooked
         if (name in ENGINE_PARKED or hooked) and workflow.patched(BUILTIN_ACCESS_PATCH):
             tier = await self._builtin_tier(name, hooked=hooked)
-            if tier == "off":
+            if tier in ("off", _UNREADABLE):
                 if self._turn is not None:
                     # Refused by Settings, not by a person: the model is told so in place of
                     # the plugin's rejection, as a classic turn tells it.
-                    self._turn.replaced[str(call["id"])] = BUILTIN_OFF.format(name)
+                    why = BUILTIN_OFF if tier == "off" else BUILTIN_UNREADABLE
+                    self._turn.replaced[str(call["id"])] = why.format(name)
                 self._decide(str(call["id"]), False, approver="scadbuddy")
                 return
             if tier in ("read", "write"):
@@ -919,8 +924,10 @@ class DurableSession:
 
     async def _builtin_tier(self, name: str, *, hooked: bool = False) -> str | None:
         """An engine-parked built-in's access as it is now (builtin_tier), over the turn's
-        packages that name it; None when the agent did not answer (an older one has no such
-        activity), and the call then parks: fail toward asking."""
+        packages that name it. None when the agent does not serve the activity (an older
+        one answers NotFoundError, turnTools.ts turnToolActivity), and the call then parks:
+        fail toward asking. ``_UNREADABLE`` when it failed otherwise (its ai_access read),
+        and the call is refused, as a classic turn's seam refuses it (PR #5001 review)."""
         try:
             answer = await workflow.execute_activity(
                 BUILTIN_TIER,
@@ -939,8 +946,10 @@ class DurableSession:
                 ),
                 result_type=dict,
             )
-        except FailureError:
-            return None
+        except FailureError as err:
+            cause = err.cause if isinstance(err, ActivityError) else err
+            unserved = isinstance(cause, ApplicationError) and cause.type == "NotFoundError"
+            return None if unserved else _UNREADABLE
         tier = answer.get("tier") if isinstance(answer, dict) else None
         return tier if isinstance(tier, str) else None
 
