@@ -5,7 +5,8 @@ import { bridgeCall } from './bridge'
  * #2171 — Settings → Tools & plugins, against the msw capabilities tree
  * (`src/mocks/features/capabilities.ts`): one access select per tool, a lowering asks one
  * line, Reset returns the default, and a tool's details show its parameters and raw JSON.
- * Every access control is the agent's too (#4208).
+ * A source switch (the browser tab's, a package's) and a skill or subagent item are set the same way
+ * (#4757). Every access control is the agent's too (#4208).
  */
 
 const DEFAULT = 'outward (asks first) (default)'
@@ -103,5 +104,85 @@ test.describe('Tools & plugins (#2171)', () => {
     await page.reload()
     await source.getByRole('button', { name: 'ScadBuddy tools', exact: true }).click()
     await expect(source.getByRole('combobox', { name: 'Access of send_to_printer' })).toHaveText('write')
+  })
+
+  test('switches the browser tab off and on', async ({ page }) => {
+    await page.goto('/settings/tools')
+    const source = page.getByRole('region', { name: 'Source Your browser tab' })
+    const enabled = source.getByRole('switch', { name: 'Enabled (Your browser tab)' })
+    await expect(enabled).toBeChecked()
+    await enabled.click()
+    await expect(enabled).not.toBeChecked()
+
+    // Off at every gate (#4757): each tool says so and keeps its own access for when the tab is
+    // back on, and a reload keeps the switch.
+    await page.reload()
+    await expect(enabled).not.toBeChecked()
+    await source.getByRole('button', { name: 'Your browser tab', exact: true }).click()
+    await expect(source).toContainText('Off while "Your browser tab" is switched off')
+    await expect(source.getByRole('combobox', { name: /^Access of browser_click/ })).toHaveText('write (default)')
+
+    await enabled.click()
+    await expect(enabled).toBeChecked()
+    await page.reload()
+    await expect(enabled).toBeChecked()
+  })
+
+  test('turns a ScadBuddy subagent off and resets it', async ({ page }) => {
+    await page.goto('/settings/tools')
+    const source = page.getByRole('region', { name: 'Source ScadBuddy skills and subagents' })
+    await source.getByRole('button', { name: 'ScadBuddy skills and subagents', exact: true }).click()
+    const select = source.getByRole('combobox', { name: 'Access of model-author' })
+    await expect(select).toHaveText('on (default)')
+    await select.click()
+    await page.getByRole('listbox').getByRole('option', { name: 'off', exact: true }).click()
+    await page.getByRole('alertdialog', { name: 'Lower model-author?' }).getByRole('button', { name: 'Lower to off' }).click()
+    await expect(select).toHaveText('off')
+
+    await page.reload()
+    await source.getByRole('button', { name: 'ScadBuddy skills and subagents', exact: true }).click()
+    await expect(select).toHaveText('off')
+    await source.getByRole('button', { name: 'Reset model-author' }).click()
+    await expect(select).toHaveText('on (default)')
+    await expect(source.getByRole('button', { name: 'Reset model-author' })).toHaveCount(0)
+
+    await page.reload()
+    await source.getByRole('button', { name: 'ScadBuddy skills and subagents', exact: true }).click()
+    await expect(select).toHaveText('on (default)')
+  })
+
+  test("the agent's bridge may set a package skill's access (#4208)", async ({ page }) => {
+    await page.goto('/settings/tools')
+    await page.waitForFunction(() => Boolean((globalThis as { __scadbuddyBridge?: unknown }).__scadbuddyBridge))
+
+    // Install and approve stay the user's: they decide which code is trusted.
+    const section = page.getByRole('region', { name: 'Plugin packages' })
+    await section.getByLabel('Repository URL').fill('https://git.example/greeter.git')
+    await section.getByRole('button', { name: 'Fetch and review' }).click()
+    const card = section.getByRole('listitem', { name: 'Plugin package greeter' })
+    await card.getByRole('button', { name: 'Approve…' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Approve greeter' })
+    await dialog.getByRole('checkbox').check()
+    await dialog.getByRole('button', { name: 'Approve this pin' }).click()
+    await expect(dialog).toBeHidden()
+
+    // The source's switch, its items and the lowering's one line are the agent's too.
+    const source = card.getByRole('region', { name: 'Source greeter' })
+    for (const [role, name] of [
+      ['switch', 'Enabled (greeter)'],
+      ['button', 'greeter'],
+      ['combobox', 'Access of hello'],
+      ['option', 'off'],
+      ['button', 'Lower to off'],
+    ] as const) {
+      await expect(page.getByRole(role, { name, exact: true }).first()).toBeVisible()
+      expect(await bridgeCall(page, 'click', { role, name }), `${role} ${name}`).toMatchObject({ ok: true })
+    }
+    await expect(source.getByRole('combobox', { name: 'Access of hello' })).toHaveText('off')
+    await expect(source.getByRole('button', { name: 'Reset hello' })).toBeVisible()
+
+    await page.reload()
+    await source.getByRole('button', { name: 'greeter', exact: true }).click()
+    await expect(source.getByRole('combobox', { name: 'Access of hello' })).toHaveText('off')
   })
 })
