@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { McpToken, McpTokenTier, MintedMcpToken } from '../api/mcpTokens'
 import { copyText, selectContents } from '../lib/clipboard'
 import { timeAgo } from '../lib/format'
 import { useMcpAuthVersion } from '../lib/mcpAuthChanges'
-import { setMintedMcpToken, setTokensCardAuthMode } from '../lib/mcpMintedToken'
+import { setMintedMcpToken, setTokensCard } from '../lib/mcpMintedToken'
 import { useAsync } from '../lib/useAsync'
 import {
   AlertDialog,
@@ -158,13 +158,20 @@ export function McpTokensSection() {
   useEffect(() => () => setMintedMcpToken(null), [])
 
   const list = listState.data
-  const authMode = auth.data?.mode ?? list?.auth_mode ?? null
-  // Shared with the Connect snippet once known, so it asks for the mode no second time (#781).
-  const resolvedMode = auth.data ? auth.data.mode : list ? list.auth_mode : undefined
-  useEffect(() => {
-    setTokensCardAuthMode(resolvedMode)
+  // The last answer is kept while a saved mode is read again, so the mode never falls
+  // back to the list's, nor the snippet beside it, for a frame (#5016).
+  const [lastAuth, setLastAuth] = useState(auth.data)
+  if (auth.data && auth.data !== lastAuth) setLastAuth(auth.data)
+  const authData = auth.data ?? lastAuth
+  const authMode = authData?.mode ?? list?.auth_mode ?? null
+  // Shared with the Connect snippet, so it asks for the mode no second time (#781).
+  const resolvedMode = authData ? authData.mode : list ? list.auth_mode : undefined
+  // A layout effect, so the card is known before any passive effect of the same commit
+  // (the snippet's first read) runs.
+  useLayoutEffect(() => {
+    setTokensCard({ mode: resolvedMode })
   }, [resolvedMode])
-  useEffect(() => () => setTokensCardAuthMode(undefined), [])
+  useLayoutEffect(() => () => setTokensCard(undefined), [])
 
   async function create(event: FormEvent) {
     event.preventDefault()
