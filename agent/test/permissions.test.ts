@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 import type { HookInput } from '@anthropic-ai/claude-agent-sdk'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   decide,
   type InputGuard,
@@ -8,10 +8,12 @@ import {
   makePreToolUseHook,
   GUARD_DEADLINE_MS,
   judgeInput,
+  type LiveSeam,
   makeResultScreenHook,
   RISK_TIERS,
   type RiskTier,
   type ToolDecision,
+  uncheckedMessage,
 } from '../src/harness/permissions.js'
 
 const tiers: Record<string, RiskTier> = {
@@ -232,6 +234,82 @@ describe('an input guard (#982)', () => {
     expect(await run('https://denied.example/')).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
     expect(await run('https://other.example/')).toMatchObject({ hookSpecificOutput: { permissionDecision: 'ask' } })
     expect(await run('https://allowed.example/')).toEqual({})
+  })
+})
+
+// #5018: Claude Code passes over a PreToolUse hook that throws (measured, test/run.test.ts),
+// so each seam must answer a deny itself when anything in its decision throws.
+describe('a decision that throws fails closed (#5018)', () => {
+  const opts = (id: string) => ({ signal, toolUseID: id, requestId: `r-${id}` })
+  const tool = 'mcp__scadbuddy__list_models'
+  const SECRET = 'input-secret-5018'
+  const boom = (): never => {
+    throw new TypeError(`bad ${SECRET}`)
+  }
+  const throwingTier = (name: string) => (name === tool ? boom() : tiers[name])
+  const throwingGuard: InputGuard = () => boom()
+  const allowAll = async () => undefined
+  const throwingLedger: LiveSeam = { access: allowAll, ledger: { record: () => boom(), tierOf: () => undefined } }
+  const failingRead: LiveSeam = { access: () => Promise.reject(new Error('db down')) }
+  type Case = [string, Parameters<typeof makeCanUseTool>[0], InputGuard | undefined, LiveSeam | undefined]
+  const cases: Case[] = [
+    ['a throwing tier resolver', throwingTier, undefined, undefined],
+    ['a throwing guard', tierOf, throwingGuard, undefined],
+    ['a throwing ledger', tierOf, undefined, throwingLedger],
+    ['a failed access read whose resolver throws', throwingTier, undefined, failingRead],
+  ]
+  let logged: string[] = []
+  const spy = () => {
+    logged = []
+    vi.spyOn(console, 'error').mockImplementation((line: string) => void logged.push(line))
+  }
+  afterEach(() => vi.restoreAllMocks())
+
+  for (const [what, resolver, guard, live] of cases) {
+    it(`canUseTool denies a call on ${what}, and reports the deny`, async () => {
+      spy()
+      const seen: ToolDecision[] = []
+      const canUseTool = makeCanUseTool(resolver, (_n, d) => seen.push(d), undefined, guard, undefined, live)
+      const answer = await canUseTool(tool, { text: SECRET }, opts('t'))
+      expect(answer).toMatchObject({ behavior: 'deny' })
+      expect(seen.map((d) => d.decision)).toEqual(['deny'])
+      expect(JSON.stringify(logged)).not.toContain(SECRET)
+    })
+
+    it(`the hook denies a call on ${what}, and reports the deny`, async () => {
+      spy()
+      const seen: ToolDecision[] = []
+      const hook = makePreToolUseHook(resolver, (_n, d) => seen.push(d), undefined, guard, live)
+      const answer = await hook.hooks[0]!({ ...preToolUse(tool), tool_input: { text: SECRET } } as HookInput, 'toolu_1', {
+        signal,
+      })
+      expect(answer).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny' } })
+      expect(seen.map((d) => d.decision)).toEqual(['deny'])
+      expect(JSON.stringify(logged)).not.toContain(SECRET)
+    })
+  }
+
+  it('says why, and logs only the error type', async () => {
+    spy()
+    const canUseTool = makeCanUseTool(throwingTier)
+    expect(await canUseTool(tool, { text: SECRET }, opts('m'))).toEqual({ behavior: 'deny', message: uncheckedMessage(tool) })
+    expect(uncheckedMessage(tool)).toBe(`${tool} is refused: its access could not be checked.`)
+    expect(logged).toEqual([`canUseTool: deciding ${tool} failed (TypeError); the call is refused`])
+    const hook = makePreToolUseHook(throwingTier)
+    expect(await hook.hooks[0]!(preToolUse(tool), 'toolu_1', { signal })).toEqual({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: uncheckedMessage(tool) },
+    })
+  })
+
+  it('a listener that throws refuses an allowed call in both seams', async () => {
+    spy()
+    const canUseTool = makeCanUseTool(tierOf, () => boom())
+    expect(await canUseTool(tool, {}, opts('l'))).toEqual({ behavior: 'deny', message: uncheckedMessage(tool) })
+    const hook = makePreToolUseHook(tierOf, () => boom())
+    expect(await hook.hooks[0]!(preToolUse('mcp__scadbuddy__send_to_printer'), 'toolu_1', { signal })).toMatchObject({
+      hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: uncheckedMessage('mcp__scadbuddy__send_to_printer') },
+    })
+    expect(JSON.stringify(logged)).not.toContain(SECRET)
   })
 })
 
