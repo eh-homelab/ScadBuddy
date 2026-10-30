@@ -269,7 +269,14 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
           )}
 
           <div className="mt-5">
-            {AREAS.map((area) => (
+            {AREAS.map((area) => {
+              const areaSections = sections.filter((section) => section.area === area.id)
+              const nothingToShow =
+                area.servedByAgent &&
+                ai.state === 'not_configured' &&
+                areaSections.length > 0 &&
+                areaSections.every((s) => s.hideWhenEmpty && collapse?.empty.has(s.id))
+              return (
               <div key={area.id} data-area={area.id} hidden={area.id !== target.area} className="space-y-4">
                 {/* Announces the area on a switch; the page's h1 stays "Settings". */}
                 <h2 className="sr-only">{area.title}</h2>
@@ -278,15 +285,23 @@ export function SettingsShell({ sections = SECTION_REGISTRY }: { sections?: read
                     The assistant service is not answering: the settings it serves are hidden until it does.
                   </p>
                 )}
-                {sections
-                  .filter((section) => section.area === area.id)
-                  .map((section) => (
-                    <SectionSlot key={section.id} section={section}>
-                      <section.Component />
-                    </SectionSlot>
-                  ))}
+                {nothingToShow && (
+                  <p role="status" className="text-sm text-muted-foreground">
+                    Nothing here until the assistant service is set up.{' '}
+                    <Link to="/settings/assistant#assistant-credentials" className="underline">
+                      Status &amp; credentials
+                    </Link>{' '}
+                    says what it needs.
+                  </p>
+                )}
+                {areaSections.map((section) => (
+                  <SectionSlot key={section.id} section={section}>
+                    <section.Component />
+                  </SectionSlot>
+                ))}
               </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       </div>
