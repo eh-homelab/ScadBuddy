@@ -1635,6 +1635,57 @@ async def test_a_package_skill_read_or_off_is_answered_without_parking(
     await _replays(harness, handle)
 
 
+@pytest.mark.parametrize("decision", ["approve", "deny"])
+async def test_a_hooked_call_over_the_offload_size_parks_with_history_holding_a_reference(
+    harness: Harness, agent_db: Conn, connect: Connect, decision: str
+) -> None:
+    """#5000: External Storage takes the ``builtin_call`` Update's argument out of history as
+    it takes every other payload over OFFLOAD_BYTES, so a hooked call's large input parks
+    (as a classic turn's does) and is answered by its decision; no event holds the input."""
+    harness.stand_in.turn_packages = [SKILL_PACKAGE]
+    harness.stand_in.builtin_answers = ["outward"]
+    sid, handle = await harness.session(agent_db)
+    await send(handle, "ask me")
+    await _parked(handle)
+    big = {"skill": "notes:jot", "args": "a long note " + "q" * (OFFLOAD_BYTES * 2)}
+    asked = asyncio.ensure_future(
+        handle.execute_update(
+            BUILTIN_CALL_UPDATE,
+            {"call_id": "toolu_big", "tool": "Skill", "input": big},
+            result_type=dict,
+        )
+    )
+
+    async def two() -> bool:
+        return len(await handle.query(PENDING_INPUT_QUERY)) == 2
+
+    await until(two)
+    [entry] = [e for e in await handle.query(PENDING_INPUT_QUERY) if e["tool"] == "Skill"]
+    assert entry["id"].endswith(":toolu_big")
+    await handle.execute_update(
+        RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": decision})
+    )
+    answer = await asked
+    if decision == "approve":
+        assert answer == {"go": True, "reason": None}
+    else:
+        assert answer["go"] is False
+        assert answer["reason"] == refusal("Skill", entry["id"], "denied", None)
+    history = await handle.fetch_history()
+    [accepted] = [
+        e.workflow_execution_update_accepted_event_attributes.accepted_request.input
+        for e in history.events
+        if e.HasField("workflow_execution_update_accepted_event_attributes")
+        and e.workflow_execution_update_accepted_event_attributes.accepted_request.input.name
+        == BUILTIN_CALL_UPDATE
+    ]
+    [arg] = accepted.args.payloads
+    assert len(arg.external_payloads) == 1 and arg.ByteSize() < 4096  # a reference only
+    assert max(e.ByteSize() for e in history.events) < OFFLOAD_BYTES + 4096
+    assert any((harness.payload_dir / f"session-{sid}").iterdir())
+    await _replays(harness, handle)
+
+
 async def test_a_hooked_call_outside_a_turn_is_refused(
     harness: Harness, agent_db: Conn, connect: Connect
 ) -> None:

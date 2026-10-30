@@ -48,13 +48,14 @@ from temporalio.claude_agent_sdk import (
 )
 from temporalio.claude_agent_sdk._events import _EMIT, emit
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowHistory
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.credentials import Credential, credential_aad
 from scadbuddy_durable.gate.names import PENDING_INPUT_QUERY, RESPOND_UPDATE
+from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
 from scadbuddy_durable.session import access, models, tools
 from scadbuddy_durable.session import runner as runner_module
@@ -143,20 +144,30 @@ class Recording:
         return self.scripted
 
 
-async def _client(env: WorkflowEnvironment, connect: Connect) -> Client:
+async def _client(
+    env: WorkflowEnvironment, connect: Connect, payload_dir: Path | None = None
+) -> Client:
+    """The worker's client; with ``payload_dir``, its External Storage too, as the worker
+    has whenever SCADBUDDY_PAYLOAD_DIR is set (worker.py ``connect_client``)."""
     return await Client.connect(
         env.client.service_client.config.target_host,
         namespace=env.client.namespace,
-        data_converter=data_converter(PgPayloadKeys(connect, KEK)),
+        data_converter=data_converter(
+            PgPayloadKeys(connect, KEK), external_storage(payload_dir) if payload_dir else None
+        ),
     )
 
 
 @contextlib.asynccontextmanager
 async def running(
-    env: WorkflowEnvironment, connect: Connect, runner: Any, stand_in: StandInTools | None = None
+    env: WorkflowEnvironment,
+    connect: Connect,
+    runner: Any,
+    stand_in: StandInTools | None = None,
+    payload_dir: Path | None = None,
 ) -> AsyncIterator[tuple[Client, str]]:
     tools.use_manifest(MANIFEST)
-    client = await _client(env, connect)
+    client = await _client(env, connect, payload_dir)
     queue = f"agent-{uuid.uuid4().hex[:8]}"
     async with (
         build_worker(client, connect, runner, task_queue=queue),
@@ -2081,12 +2092,13 @@ async def test_a_packages_builtin_skill_is_read_per_call(agent_db: Conn, connect
 SKILL_CALL = {"tool_name": "Skill", "tool_input": {"skill": "anything"}, "tool_use_id": "t1"}
 
 
-async def test_an_outward_call_whose_input_is_over_the_cap_is_refused_unasked(
+async def test_an_outward_call_over_the_cap_is_refused_unasked_only_without_offloading(
     connect: Connect,
 ) -> None:
-    """#4757 final review M3: an input too large to put in the session's history is refused
-    with a plain reason before the Update is sent, never failed as one that could not be
-    asked for; one at the cap is asked about."""
+    """#4757 final review M3: with no External Storage to take it out of history, an input
+    over the cap is refused with a plain reason before the Update is sent, never failed as
+    one that could not be asked for; one at the cap is asked about. #5000: with External
+    Storage (``input_max=None``) the same input is asked about, as in a classic turn."""
     parked: list[str] = []
 
     async def park(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
@@ -2105,6 +2117,9 @@ async def test_an_outward_call_whose_input_is_over_the_cap_is_refused_unasked(
     assert parked == []
     assert await judge({"tool_name": "Agent", "tool_input": at_cap, "tool_use_id": "t2"}) == {}
     assert parked == ["t2"]
+    offloaded = CallAccess(connect, [], {"Agent": ["notes"]}, park, input_max=None).check
+    assert await offloaded({"tool_name": "Agent", "tool_input": over, "tool_use_id": "t3"}) == {}
+    assert parked == ["t2", "t3"]
 
 
 async def test_a_park_that_never_answers_is_refused_at_the_hooks_own_deadline(
@@ -2220,6 +2235,57 @@ async def test_the_call_hook_names_a_packages_builtins_from_its_listing(
     assert call_builtins_of([old]) == {"Agent": ["old"]}  # a listing from an older agent
 
 
+@pytest.mark.parametrize("input_max", [BUILTIN_CALL_INPUT_MAX, None])
+async def test_an_input_with_a_lone_surrogate_is_measured_and_asked_about(
+    connect: Connect, input_max: int | None
+) -> None:
+    """#5017 security review: an input Claude Code sends with a lone surrogate (JSON may
+    carry one) is measured without raising, with or without a cap, and asked about: never
+    an exception in the hook, whose outcome Claude Code decides."""
+    parked: list[str] = []
+
+    async def park(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        parked.append(call)
+        return {"go": False, "reason": "Skill was not approved"}
+
+    gate = CallAccess(connect, [], {"Skill": ["notes"]}, park, input_max=input_max)
+    lone = {
+        "tool_name": "Skill",
+        "tool_input": {"skill": "x", "args": "\ud800"},
+        "tool_use_id": "t1",
+    }
+    out = await gate.check(lone)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert parked == ["t1"]
+
+
+@pytest.mark.parametrize("tool_use_id", ["t1", None])
+async def test_a_judge_that_raises_refuses_the_call(tool_use_id: str | None) -> None:
+    """#5017 security review: the hook refuses a call whose judge raises, in a plain reason,
+    and the panel sees it end; it never answers the hook with an exception."""
+
+    async def judge(data: Any) -> dict[str, Any]:
+        raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+
+    started: Any = SegmentCalls([], judge).hooks()["PreToolUse"][0].hooks[0]
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        data = {"tool_name": "Skill", "tool_input": {"skill": "x"}}
+        if tool_use_id:
+            data["tool_use_id"] = tool_use_id
+        answer = await started(data, tool_use_id, None)
+    finally:
+        _EMIT.reset(token)
+    assert answer["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert answer["hookSpecificOutput"]["permissionDecisionReason"] == (
+        "Skill is refused: its access could not be checked"
+    )
+    if tool_use_id:
+        assert [e["type"] for e in seen] == ["tool_call", "tool_result"]
+        assert seen[-1]["status"] == "failed"
+
+
 async def test_a_call_without_a_tool_use_id_is_judged_too() -> None:
     """m2: fail closed whatever Claude Code sends."""
     asked: list[Any] = []
@@ -2323,17 +2389,19 @@ def test_own_plugin_copies_are_swept(tmp_path: Path) -> None:
     assert sorted(later) == sorted([used.name, ".tmp-live"])
 
 
-async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_approved(
+async def _skill_approved_then_denied(
     temporal_env: WorkflowEnvironment,
     agent_db: Conn,
     connect: Connect,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Review round 2, end to end: the bundled Claude Code calls Skill twice in a turn whose
-    allowed package names Skill (no row: outward). Each call waits at the gate in the
-    segment's hook; the first, approved, runs; the second, denied, is refused with why."""
-    root = tmp_path / "plugins"
+    skill_input: dict[str, Any],
+    payload_dir: Path | None = None,
+) -> tuple[list[dict[str, Any]], WorkflowHistory]:
+    """The bundled Claude Code calls Skill with ``skill_input`` twice in a turn whose allowed
+    package names Skill (no row: outward); the first wait at the gate is approved, the
+    second denied. Answers the main thread's last tool results and the session's history."""
+    root = (payload_dir or tmp_path) / "plugins"
     staging = root / "staging" / "notes"
     (staging / "skills" / "jot").mkdir(parents=True)
     (staging / "skills" / "jot" / "SKILL.md").write_text("---\nname: jot\n---\nJot.\n")
@@ -2353,7 +2421,7 @@ async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_ap
         }
     ]
     main: list[list[dict[str, Any]]] = []
-    call = {"name": "Skill", "input": {"skill": "scadbuddy:print"}}
+    call = {"name": "Skill", "input": skill_input}
 
     def reply(body: dict[str, Any]) -> dict[str, Any]:
         if "Skill" not in [t.get("name") for t in body.get("tools") or []]:
@@ -2380,7 +2448,10 @@ async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_ap
             make_runner=ClaudeAgentSdkRunner,
             own_plugin_root=str(tmp_path / "own"),
         )
-        async with running(temporal_env, connect, runner, stand_in) as (client, queue):
+        async with running(temporal_env, connect, runner, stand_in, payload_dir) as (
+            client,
+            queue,
+        ):
             sid = await insert_session(agent_db)
             handle = await start_session(client, sid, queue)
             try:
@@ -2411,15 +2482,152 @@ async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_ap
                     if decision == "approve":
                         await until(lambda: _seen_results(main, 1), timeout=120)
                 assert await settled(connect, sid, timeout=180) == "idle"
+                history = await handle.fetch_history()
             finally:
                 await handle.terminate()
     finally:
         fake.close()
         await asyncio.sleep(0)
-    first, second = next(r for r in reversed(main) if len(r) >= 2)
+    return next(r for r in reversed(main) if len(r) >= 2), history
+
+
+def _segment_attempts(history: WorkflowHistory) -> list[int]:
+    """Each activity attempt the history started: a segment retried would run a call again."""
+    return [
+        e.activity_task_started_event_attributes.attempt
+        for e in history.events
+        if e.HasField("activity_task_started_event_attributes")
+    ]
+
+
+async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_approved(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 2, end to end: each call waits at the gate in the segment's hook; the
+    first, approved, runs; the second, denied, is refused with why."""
+    results, _ = await _skill_approved_then_denied(
+        temporal_env, agent_db, connect, tmp_path, monkeypatch, {"skill": "scadbuddy:print"}
+    )
+    first, second = results
     assert not first.get("is_error"), first
     assert second.get("is_error") is True
     assert "denied" in _text_of(second), _text_of(second)
+
+
+async def test_an_outward_package_skill_over_the_offload_size_parks_and_runs_once_approved(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#5000, end to end: a Skill call whose input is over OFFLOAD_BYTES (once refused
+    unasked) parks as a classic turn's does; the worker's External Storage keeps the input
+    out of history (the Update's argument is a reference). Approved, it runs once (one
+    segment attempt, one result); denied, it is refused with why."""
+    payloads = tmp_path / "payloads"
+    big = {"skill": "scadbuddy:print", "args": "a long brief " + "q" * (OFFLOAD_BYTES * 2)}
+    results, history = await _skill_approved_then_denied(
+        temporal_env, agent_db, connect, tmp_path, monkeypatch, big, payloads
+    )
+    first, second = results
+    assert not first.get("is_error"), first
+    assert second.get("is_error") is True
+    assert "denied" in _text_of(second), _text_of(second)
+    assert "too large" not in _text_of(second)
+    assert all(attempt == 1 for attempt in _segment_attempts(history))
+    # Each builtin_call Update's argument is a reference to the stored input, and no event
+    # holds a payload over the threshold (the input is sealed, so its text never shows).
+    inputs = [
+        e.workflow_execution_update_accepted_event_attributes.accepted_request.input
+        for e in history.events
+        if e.HasField("workflow_execution_update_accepted_event_attributes")
+    ]
+    args = [p for i in inputs if i.name == BUILTIN_CALL_UPDATE for p in i.args.payloads]
+    assert len(args) == 2
+    assert all(len(a.external_payloads) == 1 and a.ByteSize() < 4096 for a in args)
+    assert max(e.ByteSize() for e in history.events) < OFFLOAD_BYTES + 4096
+
+
+async def test_a_gate_that_raises_in_a_real_segment_refuses_the_call(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#5017 security review, end to end: the bundled Claude Code's Skill call, whose gate
+    raises, is refused, never run."""
+    root = tmp_path / "plugins"
+    staging = root / "staging" / "notes"
+    (staging / "skills" / "jot").mkdir(parents=True)
+    (staging / "skills" / "jot" / "SKILL.md").write_text("---\nname: jot\n---\nJot.\n")
+    digest = hash_tree(staging)
+    hex_ = digest.removeprefix("sha256:")
+    (root / "staging").rename(root / hex_)
+    stand_in = StandInTools(connect)
+    stand_in.turn_packages = [
+        {
+            "name": "notes",
+            "dir": f"{hex_}/notes",
+            "content_hash": digest,
+            "allowed": True,
+            "builtin_tools": ["Skill"],
+            "named_builtins": ["Skill"],
+            "items": ["skill:jot"],
+        }
+    ]
+
+    async def raises(self: CallAccess, data: Any) -> dict[str, Any]:
+        raise RuntimeError("the gate broke")
+
+    monkeypatch.setattr(CallAccess, "check", raises)
+    main: list[list[dict[str, Any]]] = []
+    call = {"name": "Skill", "input": {"skill": "scadbuddy:print"}}
+
+    def reply(body: dict[str, Any]) -> dict[str, Any]:
+        if "Skill" not in [t.get("name") for t in body.get("tools") or []]:
+            return {"text": "ok"}
+        results = _results(body)
+        main.append(results)
+        return {"tool_use": call} if not results else {"text": "All done."}
+
+    fake = FakeAnthropic(reply).start()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    try:
+        await insert_gateway(agent_db, KEK, fake.url)
+        runner = ScadBuddyRunner(
+            connect,
+            KEK,
+            cwd=os.path.realpath(cwd),
+            plugin_dir=str(_own_plugin(tmp_path)),
+            package_root=str(root),
+            make_runner=ClaudeAgentSdkRunner,
+            own_plugin_root=str(tmp_path / "own"),
+        )
+        async with running(temporal_env, connect, runner, stand_in) as (client, queue):
+            sid = await insert_session(agent_db)
+            handle = await start_session(client, sid, queue)
+            try:
+                await send(handle, "go")
+                assert await settled(connect, sid, timeout=180) == "idle"
+            finally:
+                await handle.terminate()
+    finally:
+        fake.close()
+        await asyncio.sleep(0)
+    [result] = next(r for r in reversed(main) if r)
+    assert result.get("is_error") is True, result
+    assert "its access could not be checked" in _text_of(result), _text_of(result)
 
 
 async def _seen_results_async(main: list[list[dict[str, Any]]], n: int) -> bool:
