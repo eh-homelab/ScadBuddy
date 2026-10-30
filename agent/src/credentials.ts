@@ -635,6 +635,13 @@ export class CredentialStore implements CredentialRepo {
  */
 const READ_ONLY_KEYS: ReadonlySet<string> = new Set([UNIFIED_SESSIONS_SETTING])
 
+/** The settings the routes and the session code read and write (`SettingsStore`); `AppDeps.settings`. */
+export type SettingsRepo = {
+  get<T>(key: string): Promise<T | undefined>
+  /** `context` says who wrote it, for the audit row (`SettingsStore.set`). */
+  set(key: string, value: unknown, context: AuditContext): Promise<void>
+}
+
 export class SettingsStore {
   private readonly sql: Sql
   private readonly audit: AuditSink | undefined

@@ -121,7 +121,10 @@ describe.skipIf(skip !== '')(`the tool-access migrations${skip}`, () => {
     await setting('builtin_tools.scadbuddy', { tool_tiers: { get_model: 'read' } })
     await setting('http_request_enabled', false)
     await plugin('hs', true, { recall: 'read' }, [])
-    await migrate(db.sql, MIGRATIONS)
+    await migrate(
+      db.sql,
+      MIGRATIONS.filter((m) => m.id <= COPY),
+    )
     const keys = await db.sql`SELECT key FROM ai_settings ORDER BY key`
     expect(keys.map((k) => k.key)).toEqual(['builtin_tools.scadbuddy', 'http_request_enabled'])
     const [p] = await db.sql`SELECT tool_tiers, disabled_tools, enabled FROM ai_plugins WHERE name = 'hs'`

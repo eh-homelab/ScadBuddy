@@ -1,15 +1,13 @@
-import { BUILTIN_SOURCES, registrySource, type StoredOverrides, type ToolAccess } from '../access/model.js'
+import { BUILTIN_SOURCES, type StoredOverrides } from '../access/model.js'
 import { itemOverrides, registryOverrides } from '../access/resolve.js'
 import { AccessResolver } from '../access/resolver.js'
 import type { AccessReader, AccessWriter } from '../access/store.js'
-import type { AuditContext } from '../audit/log.js'
-import { RISK_TIERS, type RiskTier } from '../harness/permissions.js'
+import type { RiskTier } from '../harness/permissions.js'
 import { ALL_TOOLS } from '../tools/index.js'
 import { SERVER_NAME } from '../tools/projections.js'
 import type { Tool, ToolOverrides } from '../tools/registry.js'
 import { BUILT_INS, builtInEnabled, builtInNamed } from './packages/builtins.js'
 import { OWN_PLUGIN_NAME } from './packages/vet.js'
-import { PluginError } from './registry.js'
 
 // ScadBuddy's own tool sets as plugins (#1953): listed in /api/v1/ai/plugins
 // beside the remote MCP plugins, with the same per-tool controls (a tier, and
@@ -44,10 +42,6 @@ export type { StoredOverrides }
 /** Where the registry tools' rows live. */
 const REGISTRY_SOURCES = [BUILTIN_SOURCES.scadbuddy, BUILTIN_SOURCES.browser] as const
 
-export function builtInToolsSetting(set: string): string {
-  return `builtin_tools.${set}`
-}
-
 /**
  * The tools of each built-in, from the code that serves them. ScadBuddy's own
  * are always served (its built-in's switch is its skills').
@@ -68,36 +62,6 @@ export function builtInToolSets(tools: readonly Tool[] = ALL_TOOLS): BuiltInTool
     const source = SOURCES[b.name]
     return source ? [{ name: b.name, ...source(tools) }] : []
   })
-}
-
-/** A patch checked against the set: known tools and valid tiers only, in either direction (400 otherwise). */
-export function validateOverrides(
-  set: BuiltInToolSet,
-  patch: { tool_tiers?: Record<string, string> | undefined; disabled_tools?: readonly string[] | undefined },
-  current: StoredOverrides,
-): StoredOverrides {
-  const risk = new Map(set.tools.map((t) => [t.name, t.risk]))
-  let tool_tiers = current.tool_tiers
-  if (patch.tool_tiers !== undefined) {
-    tool_tiers = {}
-    for (const [tool, tier] of Object.entries(patch.tool_tiers)) {
-      const own = risk.get(tool)
-      if (own === undefined) throw new PluginError(`tool_tiers: ${set.name} has no tool "${tool}"`, 400)
-      if (!(RISK_TIERS as readonly string[]).includes(tier)) {
-        throw new PluginError(`tool_tiers.${tool} must be one of ${RISK_TIERS.join(', ')}`, 400)
-      }
-      // Its own tier is no override.
-      if (tier !== own) tool_tiers[tool] = tier as RiskTier
-    }
-  }
-  let disabled_tools = current.disabled_tools
-  if (patch.disabled_tools !== undefined) {
-    for (const tool of patch.disabled_tools) {
-      if (!risk.has(tool)) throw new PluginError(`disabled_tools: ${set.name} has no tool "${tool}"`, 400)
-    }
-    disabled_tools = [...new Set(patch.disabled_tools)].sort()
-  }
-  return { tool_tiers, disabled_tools }
 }
 
 /**
@@ -195,24 +159,6 @@ export class BuiltInTools {
 
   list(): Promise<BuiltInPluginView[]> {
     return Promise.all(this.sets.map((s) => this.view(s)))
-  }
-
-  /** Stores a checked patch (400 on an unknown tool or tier); omitted fields are kept. */
-  async update(
-    set: BuiltInToolSet,
-    patch: { tool_tiers?: Record<string, string> | undefined; disabled_tools?: readonly string[] | undefined },
-    context: AuditContext,
-  ): Promise<BuiltInPluginView> {
-    const replaceToolsOf = this.#access?.replaceToolsOf?.bind(this.#access)
-    if (!replaceToolsOf) throw new PluginError('built-in tool settings need the database', 503)
-    const next = validateOverrides(set, patch, await this.stored(set))
-    // A tool's own tier is not stored; a disabled tool is `off`, whatever its tier.
-    const rows = new Map<string, Record<string, ToolAccess>>(REGISTRY_SOURCES.map((source) => [source, {}]))
-    for (const [tool, tier] of Object.entries(next.tool_tiers)) rows.get(registrySource(tool))![tool] = tier
-    for (const tool of next.disabled_tools) rows.get(registrySource(tool))![tool] = 'off'
-    // Both sources in one transaction; one whose rows do not change is left alone.
-    await replaceToolsOf(Object.fromEntries(rows), context)
-    return this.view(set)
   }
 
   /** Every set's overrides, for one harness turn. */

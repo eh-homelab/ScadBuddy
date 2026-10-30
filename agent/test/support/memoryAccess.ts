@@ -34,9 +34,6 @@ export function memoryAccess(initial: AccessRow[] = []): { access: AccessReader 
     async resetItem(source, item) {
       drop((r) => !(r.source === source && r.item === item))
     },
-    async resetItemIf(source, item, only) {
-      drop((r) => !(r.source === source && r.item === item && r.access === only))
-    },
     async setEnabled(source, enabled, context) {
       checkSwitch(source)
       put(source, SOURCE_ITEM, enabled ? 'on' : 'off', by(context))

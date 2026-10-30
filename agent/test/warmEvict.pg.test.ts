@@ -3,10 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AccessStore } from '../src/access/store.js'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
-import { SETTING_HTTP_REQUEST } from '../src/harness/httpRequest.js'
 import { SETTING_RECALL_MAX_QUERY_CHARS } from '../src/memory/hindsight.js'
-import { builtInToolsSetting } from '../src/plugins/builtInTools.js'
-import { SETTING_OWN_PLUGIN } from '../src/plugins/packages/builtins.js'
 import { PluginStore } from '../src/plugins/registry.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
@@ -40,8 +37,12 @@ describe('evictOnNotify', () => {
 
 describe('evictsWarmOnWrite', () => {
   it('names every Settings key a turn is assembled by, and no other', () => {
-    for (const key of [SETTING_MODEL, SETTING_HTTP_REQUEST, SETTING_RECALL_MAX_QUERY_CHARS, SETTING_OWN_PLUGIN, builtInToolsSetting('claude')]) {
+    for (const key of [SETTING_MODEL, SETTING_RECALL_MAX_QUERY_CHARS]) {
       expect(evictsWarmOnWrite(key), key).toBe(true)
+    }
+    // The tool-access switches are ai_access rows now; an ai_access write sends its own eviction (#4828).
+    for (const old of ['http_request_enabled', 'scadbuddy_plugin_enabled', 'builtin_tools.scadbuddy', 'builtin_tools.claude', 'printer_camera_enabled']) {
+      expect(evictsWarmOnWrite(old), old).toBe(false)
     }
     // A session's limits are read when it starts, not into its process (manager.ts `start`).
     expect(evictsWarmOnWrite(SETTING_SESSION_BUDGET_USD)).toBe(false)
@@ -88,9 +89,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`warm eviction notifications${TEST_DATABASE_
   it('a Settings write a turn is assembled by tells every replica to evict everything', async () => {
     const settings = new SettingsStore(db.sql)
     await settings.set(SETTING_MODEL, 'claude-opus-5')
-    await expect.poll(() => received).toContain('*')
-    received.length = 0
-    await settings.setMany({ [builtInToolsSetting('claude')]: { raised: {}, disabled: [] } })
     await expect.poll(() => received).toContain('*')
   })
 

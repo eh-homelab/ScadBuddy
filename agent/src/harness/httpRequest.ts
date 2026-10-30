@@ -17,7 +17,7 @@ import type { RiskTier, TierResolver } from './permissions.js'
 // with `tools: []` (options.ts: no Bash, no WebFetch) and refuses plugins that
 // start a process (plugins.ts). An in-process SDK MCP server, added to a session's
 // turn unless `builtin:http` is switched off, or its item is `off`, in `ai_access`
-// (#2171, routes/httpRequest.ts; on by default).
+// (#2171, access/capabilities.ts; on by default).
 //
 // REACH IS OPEN, decided by the owner on 2026-09-30 (#827): the internet, the
 // LAN, private ranges, `*.internal` names and plain `http:` to any host. There
@@ -81,12 +81,6 @@ export const HTTP_TOOL = 'http_request'
 export const HTTP_READ_TOOL = 'http_response_read'
 export const HTTP_TOOL_NAME = `mcp__${HTTP_SERVER}__${HTTP_TOOL}`
 export const HTTP_READ_TOOL_NAME = `mcp__${HTTP_SERVER}__${HTTP_READ_TOOL}`
-
-/**
- * The `ai_settings` key the switch was kept under (#827) until #2171 moved it to
- * `ai_access` (`builtin:http`'s `*` row, on by default); the access migration copied it.
- */
-export const SETTING_HTTP_REQUEST = 'http_request_enabled'
 
 export const METHODS = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'] as const
 export type HttpMethod = (typeof METHODS)[number]

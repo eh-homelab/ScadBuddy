@@ -762,11 +762,12 @@ design is [spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-de
   are hidden (spec §4.1).
 - **Old keys.** The `ai_settings` keys `builtin_tools.scadbuddy`, `scadbuddy_plugin_enabled`,
   `http_request_enabled` and `printer_camera_enabled`, and the `ai_plugins` columns
-  `enabled`, `tool_tiers` and `disabled_tools`, no longer decide. Migrations
-  `agent/src/db/migrations/20261026T2201Z_access_copy.sql` (the copy, and the `ai_plugins` and
-  `ai_settings` mirror triggers for older replicas during a rolling deploy; the new code also
-  writes the four `ai_settings` keys, old key first, until #4828) carries their values into
-  `ai_access`. `20261026T2200Z_access.sql` made the table.
+  `enabled`, `tool_tiers` and `disabled_tools`, no longer decide. Migration
+  [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql)
+  carried their values into `ai_access`. `20261030T1020Z_access_drop_mirrors.sql` (#4828) dropped the
+  mirror triggers and deleted the four keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only. The
+  `ai_plugins` columns stay, unread and unwritten, until a follow-up migration. Rolling back
+  the agent past #4838 is not supported. `20261026T2200Z_access.sql` made the table.
 
 ## A browser plugin (Playwright MCP)
 
@@ -861,10 +862,10 @@ so a name re-pointed between check and connect reaches nothing new.
   call itself is also a `tool_call` row, whose input summary is scrubbed like any
   other (`Authorization` and `Cookie` headers are blanked by name).
 - **On by default, and a user-only switch.** The `ai_access` row (`builtin:http`, `*`)
-  (spec §4.2, `agent/src/routes/httpRequest.ts`); anything but a stored `off` is on. It is set through
-  `PUT /api/v1/ai/settings/http-request` ([`agent/src/routes/httpRequest.ts`](../../agent/src/routes/httpRequest.ts)),
+  (spec §4.2); anything but a stored `off` is on. It is set through
+  `PUT /api/v1/ai/capabilities/builtin:http` (`agent/src/routes/capabilities.ts`),
   behind `uiRequestProblem` like the other AI settings writes, and the write is audited
-  as a `settings` row. Settings → Tools & plugins shows it.
+  as a `settings` row. The old `/api/v1/ai/settings/http-request` route is gone (#4828). Settings → Tools & plugins shows it.
 
 ## Workflow scripts (#2393)
 

@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import { originPolicy } from '../src/http/origins.js'
-import type { SettingsRepo } from '../src/routes/httpRequest.js'
+import type { SettingsRepo } from '../src/credentials.js'
 import type { SettingsWriter } from '../src/routes/mcpAuthMode.js'
 import {
   MAX_FILE_BYTES,

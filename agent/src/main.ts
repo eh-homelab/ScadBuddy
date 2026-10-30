@@ -244,8 +244,7 @@ const oidcRepo = settings
   ? new SettingsOidcConfigRepo(settings, (detail) => console.error(`mcp auth: ${detail}`))
   : undefined
 const oidcProvider = new OidcProvider()
-// The registry's tools let it keep the old ai_settings keys for older replicas (access/legacy.ts, #4828).
-const access = database ? new AccessStore(database.sql, audit, ALL_TOOLS) : undefined
+const access = database ? new AccessStore(database.sql, audit) : undefined
 // What each remote source last listed (#2171): a good connection test stores it.
 const listings = database ? new ToolListings(database.sql, database.locks) : undefined
 // Each item's effective access, read at each call (#2171): the turns' http_request and own-plugin switches.
@@ -515,7 +514,7 @@ const sessions =
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
         packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true, access: accessResolver }),
         // The http_request tool (#827): on for a turn unless `builtin:http` is
-        // switched off in ai_access (routes/httpRequest.ts, #2171).
+        // switched off in ai_access (#2171).
         httpRequest: {},
         // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
         ...(workspace ? { workspace } : {}),

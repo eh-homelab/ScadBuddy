@@ -2,13 +2,10 @@ import type { Context, Hono } from 'hono'
 import { z } from 'zod'
 import type { PluginListingPut, ToolListings } from '../access/listings.js'
 import type { AppDeps } from '../app.js'
-import { RISK_TIERS } from '../harness/permissions.js'
 import { EgressError, type Resolver, systemResolver } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
-import { UI_ACTOR } from '../audit/writes.js'
 import { BuiltInTools, type BuiltInToolSet } from '../plugins/builtInTools.js'
 import type { PluginForwarder } from '../plugins/forwarder.js'
-import { BuiltInPackages } from '../plugins/packages/builtins.js'
 import {
   assertEndpointAllowed,
   normalisePluginUrl,
@@ -41,10 +38,12 @@ import { ready, type RouteModule } from './module.js'
 // views carry the header NAME and the value's last four characters.
 //
 // ScadBuddy's own tool sets (#1953, plugins/builtInTools.ts) are listed first,
-// `built_in: true`. A PATCH may raise their tools' tiers and disable tools
-// (a tier in either direction; an unknown tool or tier: 400), and switch a set that has a switch; anything a
-// remote plugin has and they do not (register, remove, URL, header, secret,
-// connection test) answers 409 `{ built_in: true }`.
+// `built_in: true`. Anything a remote plugin has and they do not (register, remove, URL,
+// header, secret, connection test) answers 409 `{ built_in: true }`.
+//
+// A plugin's switch, tiers and disabled tools are not fields of POST or PATCH (#4828):
+// they are `ai_access` rows, changed through /api/v1/ai/capabilities (spec §4.6). A body
+// that names one is refused by the strict schema (400).
 
 export type PluginRouteDeps = {
   /** Undefined when there is no database (spec §9). */
@@ -58,8 +57,6 @@ export type PluginRouteDeps = {
   testPlugin: (plugin: RemotePlugin, address: string) => Promise<PluginTest>
   /** ScadBuddy's own tool sets (#1953). */
   builtIns: BuiltInTools
-  /** The sets' switches (plugins/packages/builtins.ts); undefined without a database. */
-  switches: BuiltInPackages | undefined
   /** Where a good connection test's tools/list is stored (#2171); undefined without a database. */
   listings?: ToolListings
 }
@@ -86,23 +83,16 @@ export type PluginView = {
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 
-const Tiers = z.record(z.string(), z.enum(RISK_TIERS))
 const CreateBody = z.strictObject({
   name: z.string().max(64),
   url: z.string().max(2048),
-  enabled: z.boolean().optional(),
   auth_header: z.string().max(64).nullable().optional(),
   secret: z.string().min(1).max(4096).optional(),
-  tool_tiers: Tiers.optional(),
-  disabled_tools: z.array(z.string().max(128)).max(256).optional(),
 })
 const PatchBody = z.strictObject({
   url: z.string().max(2048).optional(),
-  enabled: z.boolean().optional(),
   auth_header: z.string().max(64).nullable().optional(),
   secret: z.string().min(1).max(4096).nullable().optional(),
-  tool_tiers: Tiers.optional(),
-  disabled_tools: z.array(z.string().max(128)).max(256).optional(),
 })
 
 export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
@@ -123,9 +113,19 @@ export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
   }
 }
 
+/** Fields these routes had until #4828: a plugin's switch, tiers and disabled tools are `ai_access` rows now. */
+const ACCESS_FIELDS = ['enabled', 'tool_tiers', 'disabled_tools'] as const
+
 async function parseBody<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer<T> | string> {
   try {
-    return schema.parse(await c.req.json())
+    const json: unknown = await c.req.json()
+    if (typeof json === 'object' && json !== null) {
+      const old = ACCESS_FIELDS.find((key) => Object.hasOwn(json, key))
+      if (old !== undefined) {
+        return `${old} is not a field of /plugins (#4828): change a switch, a tier or a disabled tool with PUT /api/v1/ai/capabilities/<source> (remote:<name> or builtin:<source>)`
+      }
+    }
+    return schema.parse(json)
   } catch (err) {
     return err instanceof z.ZodError
       ? err.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ')
@@ -205,11 +205,8 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
         {
           name: body.name,
           url: body.url,
-          ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
           ...(body.auth_header === undefined ? {} : { auth_header: body.auth_header }),
           ...(body.secret === undefined ? {} : { secret: body.secret }),
-          ...(body.tool_tiers === undefined ? {} : { tool_tiers: body.tool_tiers }),
-          ...(body.disabled_tools === undefined ? {} : { disabled_tools: body.disabled_tools }),
         },
         kek(),
       )
@@ -229,24 +226,8 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
       if (body.url !== undefined || body.auth_header !== undefined || body.secret !== undefined) {
         return isBuiltIn(c, set.name, 'given a URL, an auth header or a secret: it runs inside the agent')
       }
-      if (body.enabled !== undefined && !set.switchable) {
-        return isBuiltIn(c, set.name, 'switched off as a whole: disable its tools one by one instead')
-      }
-      if (body.enabled !== undefined && !deps.switches) return c.json({ detail: NO_DATABASE }, 503)
-      const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
-      try {
-        // The overrides first: a refused one (400) writes nothing, the switch included.
-        if (body.tool_tiers !== undefined || body.disabled_tools !== undefined) {
-          await deps.builtIns.update(set, { tool_tiers: body.tool_tiers, disabled_tools: body.disabled_tools }, context)
-        }
-        if (body.enabled !== undefined) {
-          // The existing switch (builtins.ts): the same as Settings → Plugin packages.
-          await deps.switches!.setEnabled(set.name, body.enabled, context)
-        }
-        return c.json(await deps.builtIns.view(set))
-      } catch (err) {
-        return refusal(c, err)
-      }
+      // Nothing is left to patch on a built-in: the answer is its view.
+      return c.json(await deps.builtIns.view(set))
     }
     try {
       if (body.url !== undefined) await assertEndpointAllowed(normalisePluginUrl(body.url), resolveHost)
@@ -396,7 +377,6 @@ export const route: RouteModule = {
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
       builtIns: new BuiltInTools(deps.access),
-      switches: deps.access ? new BuiltInPackages(deps.access) : undefined,
       ...pluginTestDeps(deps),
     })
   },

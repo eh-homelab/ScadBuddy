@@ -5,7 +5,7 @@ import type { AccessStore } from './access/store.js'
 import type { AuditRepo } from './audit/log.js'
 import type { AttachmentStore } from './attachments/store.js'
 import { auditWrites, RefusalCoalescer } from './audit/writes.js'
-import type { CredentialRepo } from './credentials.js'
+import type { CredentialRepo, SettingsRepo } from './credentials.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
@@ -43,8 +43,10 @@ export interface AppDeps {
   /** Undefined exactly when `database` is. */
   credentials: CredentialRepo | undefined
   remoteAddress: RemoteAddress
-  /** The tool-access store (#2171), shared by the plugins, plugin packages, http-request and printer-camera routes; undefined when there is no database. */
+  /** The tool-access store (#2171), shared by the plugins, plugin packages and capabilities routes; undefined when there is no database. */
   access?: AccessStore | undefined
+  /** `ai_settings` (credentials.ts SettingsStore), shared by the settings routes (session limits #790, routes/sessionLimits.ts, ...), which answer 503 without it. */
+  settings?: SettingsRepo | undefined
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
   origins: OriginPolicy
   /** Gateway host resolver for the SSRF check; the system resolver when omitted. */

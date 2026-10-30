@@ -6,7 +6,7 @@ import {
   MAX_RECALL_MAX_QUERY_CHARS,
   SETTING_RECALL_MAX_QUERY_CHARS,
 } from '../src/memory/hindsight.js'
-import type { SettingsRepo } from '../src/routes/httpRequest.js'
+import type { SettingsRepo } from '../src/credentials.js'
 import { MEMORY_SETTINGS_PATH, registerMemorySettingsRoutes } from '../src/routes/memorySettings.js'
 
 // /api/v1/ai/settings/memory: the automatic recall query's cap (the Claude Code Hindsight

@@ -396,15 +396,11 @@ type Row = {
   name: string
   kind: PluginKind
   url: string
-  /** The old columns `enabled`, `tool_tiers` and `disabled_tools` are still written for one release (#2171), never read. */
-  enabled: boolean
   auth_header: string | null
   secret_sealed: Buffer | null
   dek_sealed: Buffer | null
   kek_id: string | null
   last4: string | null
-  tool_tiers: Record<string, RiskTier>
-  disabled_tools: string[]
   created_at: Date
   updated_at: Date
   /** The plugin's `remote:<name>` rows of ai_access (#2171): its enabled flag, tiers and disabled tools. */
@@ -416,7 +412,7 @@ const ACCESS_ROWS = `(SELECT coalesce(jsonb_agg(jsonb_build_object('source', a.s
     'updated_by', a.updated_by)), '[]'::jsonb)
   FROM ai_access a WHERE a.source = '${remoteSource('')}' || ai_plugins.name) AS access_rows`
 
-const SUMMARY_COLUMNS = `name, kind, url, enabled, auth_header, kek_id, last4, tool_tiers, disabled_tools,
+const SUMMARY_COLUMNS = `name, kind, url, auth_header, kek_id, last4,
   created_at, updated_at, ${ACCESS_ROWS}`
 
 const ALL_COLUMNS = `*, ${ACCESS_ROWS}`
@@ -557,14 +553,11 @@ export class PluginStore implements PluginRepo {
       throw new PluginError('auth_header needs a secret', 400)
     }
     return this.sql.begin(async (tx) => {
-      // The old columns too, for one release (#2171): an older replica still reads them.
       const rows = await tx`
-        INSERT INTO ai_plugins (name, kind, url, enabled, auth_header, secret_sealed, dek_sealed, kek_id, last4,
-                                tool_tiers, disabled_tools)
-        VALUES (${name}, 'remote_mcp', ${url}, false, ${sealed?.header ?? null},
+        INSERT INTO ai_plugins (name, kind, url, auth_header, secret_sealed, dek_sealed, kek_id, last4)
+        VALUES (${name}, 'remote_mcp', ${url}, ${sealed?.header ?? null},
                 ${sealed?.envelope.secretSealed ?? null}, ${sealed?.envelope.dekSealed ?? null},
-                ${sealed?.envelope.kekId ?? null}, ${sealed?.last4 ?? null},
-                ${tx.json(tiers)}, ${disabled})
+                ${sealed?.envelope.kekId ?? null}, ${sealed?.last4 ?? null})
         ON CONFLICT (name) DO NOTHING
         RETURNING name`
       if (rows.length === 0) throw new PluginError(`a plugin named "${name}" already exists`, 409)
@@ -682,8 +675,7 @@ export class PluginStore implements PluginRepo {
         updatedBy(context),
         { enabled: false, tools: true },
       )
-      // writeTools (and the mirror trigger before it) wrote every tool row as new: the rows
-      // this write left as they were get their own author and time back.
+      // writeTools wrote every tool row as new: the rows this write left as they were get their own author and time back.
       const kept = before.filter((r) => r.item !== tool)
       if (kept.length > 0) {
         await tx`
@@ -696,9 +688,8 @@ export class PluginStore implements PluginRepo {
   }
 
   /**
-   * The plugin's access: the old columns first, for one release (#2171), since an older
-   * replica still reads them; their mirror trigger writes ai_access, and the rows written
-   * after it (`write` names which) win. Then the warm eviction.
+   * The plugin's access, written to ai_access (`write` names which rows). The old
+   * ai_plugins columns are not written. Then the warm eviction.
    */
   private async writeAccess(
     tx: TransactionSql,
@@ -708,9 +699,7 @@ export class PluginStore implements PluginRepo {
     write: { enabled: boolean; tools: boolean },
   ): Promise<void> {
     await tx`
-      UPDATE ai_plugins SET
-        enabled = ${next.enabled}, tool_tiers = ${tx.json(next.tiers)}, disabled_tools = ${next.disabled}, updated_at = now()
-      WHERE name = ${name}`
+      UPDATE ai_plugins SET updated_at = now() WHERE name = ${name}`
     const source = remoteSource(name)
     if (write.enabled) await writeEnabled(tx, source, next.enabled, by)
     if (write.tools) await writeTools(tx, source, toolRows(next.tiers, next.disabled), by)

@@ -390,10 +390,14 @@ export const aiPluginHandlers = [
   http.patch(`${base}/plugins/:name`, async ({ params, request }) => {
     const plugin = state.remote.get(String(params.name))
     if (!plugin) return undefined
-    const body = (await request.json()) as RemotePluginPatch
+    const body = (await request.json()) as RemotePluginPatch & Record<string, unknown>
+    // As the agent's route (#4828): a switch, tiers or disabled tools are /capabilities'.
+    for (const key of ['enabled', 'tool_tiers', 'disabled_tools']) {
+      if (key in body) return detail(400, `${key} is not a field of /plugins (#4828): change a switch, a tier or a disabled tool with PUT /api/v1/ai/capabilities/<source> (remote:<name> or builtin:<source>)`)
+    }
     const next: RemotePlugin = {
       ...plugin,
-      ...(body.enabled === undefined ? {} : { enabled: body.enabled }),
+      ...(body.url === undefined ? {} : { url: body.url }),
       updated_at: now(),
     }
     state.remote.set(plugin.name, next)
@@ -464,14 +468,6 @@ export const aiPluginHandlers = [
       return HttpResponse.json(next)
     }
     return detail(409, 'the commit and content hash do not match the pin under review')
-  }),
-
-  http.patch(`${base}/plugin-packages/:name`, async ({ params, request }) => {
-    const { enabled } = (await request.json()) as { enabled: boolean }
-    const next = setPackageEnabled(String(params.name), enabled)
-    if (next === undefined) return detail(404, 'no such plugin package')
-    if (typeof next === 'string') return detail(409, next)
-    return HttpResponse.json(next)
   }),
 
   http.post(`${base}/plugin-packages/:name/repin`, async ({ params, request }) => {

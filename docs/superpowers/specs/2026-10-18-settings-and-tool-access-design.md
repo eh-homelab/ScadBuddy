@@ -371,6 +371,12 @@ new pin no longer has are deleted with the re-pin.
   `PATCH /plugins/{name}` tier fields and the http-request and printer-camera switch
   routes answer from `ai_access` for one release, then go.
 
+  *As built (#4828):* they are gone. `GET`/`PUT /api/v1/ai/settings/http-request` and
+  `/settings/printer-camera` are not routes. `POST` and `PATCH /plugins` refuse `enabled`,
+  `tool_tiers` and `disabled_tools` (400, the strict schema), and a built-in tool set takes
+  no `PATCH` of them either. `PATCH /plugin-packages/{name}` is not a route. The
+  capabilities API above is the one way to change a switch, a tier or a disabled tool.
+
 ### 4.7 Names
 
 - `defineTool` gains a required `label` (for example "Send to Bambuddy"), served as the

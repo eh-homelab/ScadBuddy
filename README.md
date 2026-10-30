@@ -1294,19 +1294,19 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     takes `off` or `outward` only. When two tools end up with the same name,
     both are hidden from the model and fixed `off`, and the test marks them
     `collision`.
-  - For one release (until #4828), `tool_tiers` and `disabled_tools` stay on
-    `POST /plugins` and `PATCH /plugins/{name}`, and the page's writes also
-    keep those columns of `ai_plugins` right for an older replica. The page
-    itself writes through `/api/v1/ai/capabilities` (below and
+  - A plugin's switch, tiers and disabled tools are not fields of `POST /plugins`
+    or `PATCH /plugins/{name}` (a body that names one answers 400, #4828). They are
+    `ai_access` rows, changed through `/api/v1/ai/capabilities` (below and
     [`docs/ai/operating.md`, "The capabilities API"](docs/ai/operating.md#the-capabilities-api)).
-  - New plugins start disabled (`enabled: true` on create is refused). Run
-    the test, review the tools, then turn the plugin's source switch on.
+    The old `ai_plugins` columns are no longer written, and #5014 drops them.
+  - New plugins start disabled. Run the test, review the tools, then turn the
+    plugin's source switch on.
 
   | Route | |
   |---|---|
   | `GET /api/v1/ai/plugins`, `GET …/{name}` | list, one |
-  | `POST /api/v1/ai/plugins` | register (disabled): `name`, `url`, optional `auth_header` (default `Authorization`), `secret`, `tool_tiers`, `disabled_tools` |
-  | `PATCH /api/v1/ai/plugins/{name}` | change any of those but `name`, and `enabled`; `secret: null` removes the header |
+  | `POST /api/v1/ai/plugins` | register (disabled): `name`, `url`, optional `auth_header` (default `Authorization`), `secret` |
+  | `PATCH /api/v1/ai/plugins/{name}` | change `url`, `auth_header` or `secret` (`secret: null` removes the header) |
   | `DELETE /api/v1/ai/plugins/{name}` | remove |
   | `POST /api/v1/ai/plugins/{name}/test` | through the forwarder: connect, one `tools/list` (10 s timeout), and report each tool with its harness name and tier |
   | `/api/v1/ai/capabilities` and its six sub-routes | Settings → Tools & plugins (#2171): every source with its tools and their access; a source's switch, a tool's access, its reset, its details, and `POST …/{source}/refresh` (the test above, which also stores the listing). See [`docs/ai/operating.md`, "The capabilities API"](docs/ai/operating.md#the-capabilities-api) |
@@ -1324,9 +1324,12 @@ the backend on `http://127.0.0.1:8080` (§4.3).
          "secret": "Bearer <token>"}'
   curl -sS -X POST http://127.0.0.1:8081/api/v1/ai/plugins/memory/test \
     -H 'Origin: http://127.0.0.1:8081'
-  curl -sS -X PATCH http://127.0.0.1:8081/api/v1/ai/plugins/memory \
+  curl -sS -X PUT http://127.0.0.1:8081/api/v1/ai/capabilities/remote:memory/items/search \
     -H 'Origin: http://127.0.0.1:8081' -H 'Content-Type: application/json' \
-    -d '{"tool_tiers": {"search": "read"}, "enabled": true}'
+    -d '{"access": "read"}'
+  curl -sS -X PUT http://127.0.0.1:8081/api/v1/ai/capabilities/remote:memory \
+    -H 'Origin: http://127.0.0.1:8081' -H 'Content-Type: application/json' \
+    -d '{"enabled": true}'
   ```
 
   **Hindsight** (the motivating example, #297). Its docs give a per-bank MCP
@@ -1356,7 +1359,6 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `POST …/{id}/fork` | `{title?, up_to?}` → `201 {session}`: a new session with the transcript so far, or through the reply `up_to` names (an `assistant.text.done` event's `messageId`, #793), and a budget of its own (the panel's Fork, "Fork from here" and "Continue in a new chat", #790); counted like a start (`429`); `409` before the session has a transcript; audited. Through the `sessions_fork` tool, the fork instead spends from the parent's budget: the parent and all its forks share one budget, and a spent one's fork is refused (`409`, #823) |
   | `POST …/{id}/budget` | `{add_usd}` (0.01–100): adds to the budget that session spends from (shared with its forks and its parent, #823), up to $100 in all. User-only and owner-only, audited (#790) |
   | `GET/PUT /api/v1/ai/settings/session-limits` | `{budget_usd, max_turns}` (0.01–100 USD, 1–200 turns) for sessions started after a change; audited (#790) |
-  | `GET/PUT /api/v1/ai/settings/printer-camera` | `{enabled}`: whether `get_printer_camera` may run (on by default); while off, every call to it is refused; audited (#1911) |
   | `GET/PUT /api/v1/ai/settings/model` | `{model}`: the Claude model (an alias such as `opus`, or a full id) every turn and the connection test use from the next one on, `null` for Claude Code's default; audited (#1917) |
 
   A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any

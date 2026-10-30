@@ -9,7 +9,8 @@ const REGISTRY_SOURCES: readonly string[] = [BUILTIN_SOURCES.scadbuddy, BUILTIN_
 /**
  * A tool's effective access: the row's when it holds one, else the declared tier. With
  * `migratedRaisesOnly` (a registry source), a row the migration copied counts only when it is
- * `off` or above `declared`: the old registry overrides could only raise.
+ * `off` or above `declared`: the old registry overrides could only raise. Kept for good: a
+ * copied tier the old code ignored must not start to lower a tool's gate (#4828).
  */
 export function toolAccess(declared: RiskTier, row: AccessRow | undefined, migratedRaisesOnly: boolean): ToolAccess {
   if (row === undefined || !isToolAccess(row.access)) return declared
@@ -35,7 +36,7 @@ export function registryOverrides(tools: readonly { name: string; risk: RiskTier
 
 /**
  * Each registry tool's own access, no source switch folded in: every effective tier that
- * differs from the tool's own, and every `off`. What the legacy key holds (access/legacy.ts).
+ * differs from the tool's own, and every `off`.
  */
 export function itemOverrides(tools: readonly { name: string; risk: RiskTier }[], rows: readonly AccessRow[]): StoredOverrides {
   // No prototype: a tool named `__proto__` is an own key, as in agent-durable's dict.

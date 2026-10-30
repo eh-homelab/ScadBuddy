@@ -503,13 +503,17 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as PackageView[]
       expect(listed.map((p) => [p.name, p.approved, p.enabled])).toEqual([['greeter', false, false]])
 
-      expect((await a.request('/api/v1/ai/plugin-packages/greeter', json('PATCH', { enabled: true }))).status).toBe(409)
+      // The old PATCH switch is gone (#4828): the capabilities API switches a package.
+      expect((await a.request('/api/v1/ai/plugin-packages/greeter', json('PATCH', { enabled: true }))).status).toBe(404)
       const approve = await a.request(
         '/api/v1/ai/plugin-packages/greeter/approve',
         json('POST', { commit_sha: installed.commit_sha, content_hash: installed.content_hash }),
       )
       expect(approve.status).toBe(200)
-      const enabled = await a.request('/api/v1/ai/plugin-packages/greeter', json('PATCH', { enabled: true }))
+      expect((await a.request('/api/v1/ai/plugin-packages/greeter', json('PATCH', { enabled: true }))).status).toBe(404)
+      expect((await store.get('greeter'))?.enabled).toBe(false)
+      await store.setEnabled('greeter', true)
+      const enabled = await a.request('/api/v1/ai/plugin-packages/greeter', { headers: READ })
       expect(((await enabled.json()) as PackageView).enabled).toBe(true)
 
       repos.greeter!.commitFiles({ 'commands/wave.md': 'Wave twice.\n' })
@@ -568,7 +572,7 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       expect(existsSync(currentDir)).toBe(true)
     })
 
-    it('lists the built-in plugins first; they enable and disable through their settings, and are never removed', async () => {
+    it('lists the built-in plugins first; they switch through ai_access, and are never removed', async () => {
       const access = new AccessStore(db.sql)
       const a = createApp({ ...appDeps(), access })
       const listed = (await (await a.request('/api/v1/ai/plugin-packages', { headers: READ })).json()) as {
@@ -582,12 +586,16 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       ])
       expect(listed[0]!.review.skills).toContain('scadbuddy:authoring')
 
-      const off = await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: false }))
-      expect(((await off.json()) as { enabled: boolean }).enabled).toBe(false)
+      // The old PATCH switch is gone (#4828): the switch is the ai_access row (/capabilities writes it).
       const own = () => access.rows([BUILTIN_SOURCES.ownPlugin])
+      const off = await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: false }))
+      expect(off.status).toBe(404)
+      expect(await own()).toEqual([])
+      await access.setEnabled(BUILTIN_SOURCES.ownPlugin, false)
       expect((await own()).map((r) => [r.item, r.access])).toEqual([['*', 'off']])
       expect(await ownPluginEnabled(access)).toBe(false)
-      await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: true }))
+      expect(await (await a.request('/api/v1/ai/plugin-packages/scadbuddy', { headers: READ })).json()).toMatchObject({ enabled: false })
+      await access.setEnabled(BUILTIN_SOURCES.ownPlugin, true)
       expect((await own()).map((r) => [r.item, r.access])).toEqual([['*', 'on']])
       const one = await a.request('/api/v1/ai/plugin-packages/scadbuddy', { headers: READ })
       expect(await one.json()).toMatchObject({ name: 'scadbuddy', built_in: true, enabled: true })
@@ -602,9 +610,6 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         expect(res.status, `${method} ${url}`).toBe(409)
         expect(await res.json()).toMatchObject({ built_in: true })
       }
-      // Without the access store a built-in cannot be switched: 503, never a stored row.
-      const noSettings = await app().request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: false }))
-      expect(noSettings.status).toBe(503)
     })
 
     it('never loads a package stored under a built-in\'s name, and lets DELETE remove it', async () => {
@@ -626,9 +631,6 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
         ['scadbuddy', true],
         ['scadbuddy', false],
       ])
-      // PATCH always switches the built-in: the stored row never loads.
-      const patched = await a.request('/api/v1/ai/plugin-packages/scadbuddy', json('PATCH', { enabled: true }))
-      expect(await patched.json()).toMatchObject({ name: 'scadbuddy', built_in: true, enabled: true })
       const del = () => a.request('/api/v1/ai/plugin-packages/scadbuddy', { method: 'DELETE', headers: UI })
       expect((await del()).status).toBe(204)
       expect(await store.list()).toEqual([])

@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import { originPolicy } from '../src/http/origins.js'
-import type { SettingsRepo } from '../src/routes/httpRequest.js'
+import type { SettingsRepo } from '../src/credentials.js'
 import {
   DEFAULT_IMAGE_LONG_EDGE,
   IMAGE_SETTINGS_PATH,

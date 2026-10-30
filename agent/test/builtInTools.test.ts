@@ -15,7 +15,7 @@ import { BUILTIN_SOURCES, MIGRATED_BY, registrySource, type ToolAccess } from '.
 import { BuiltInTools, builtInToolSets, type BuiltInToolSet } from '../src/plugins/builtInTools.js'
 import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import type { PluginRepo } from '../src/plugins/registry.js'
-import type { SettingsRepo } from '../src/routes/httpRequest.js'
+import type { SettingsRepo } from '../src/credentials.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { harnessTools } from '../src/tools/harness.js'
@@ -187,54 +187,22 @@ describe('/api/v1/ai/plugins with built-ins', () => {
     expect(list[0]!.enabled).toBe(true)
   })
 
-  it('accepts a raised tier and a disabled tool, and stores them in ai_access', async () => {
-    const { settings } = memorySettings()
-    const { access, rows } = memoryAccess()
-    const res = await patch(app(settings, remoteRepo(), access), 'scadbuddy', {
-      tool_tiers: { [readTool.name]: 'outward', [writeTool.name]: 'write' },
-      disabled_tools: [otherReadTool.name],
-    })
-    expect(res.status).toBe(200)
-    const view = (await res.json()) as { tool_tiers: Record<string, string>; disabled_tools: string[]; built_in: boolean }
-    expect(view.built_in).toBe(true)
-    // A tool's own tier is no override.
-    expect(view.tool_tiers).toEqual({ [readTool.name]: 'outward' })
-    expect(view.disabled_tools).toEqual([otherReadTool.name])
-    const stored = rows.map(({ source, item, access }) => ({ source, item, access }))
-    expect(stored).toHaveLength(2)
-    expect(stored).toEqual(
-      expect.arrayContaining([
-        { source: registrySource(otherReadTool.name), item: otherReadTool.name, access: 'off' },
-        { source: registrySource(readTool.name), item: readTool.name, access: 'outward' },
-      ]),
-    )
-    const one = await app(settings, remoteRepo(), access).request('/api/v1/ai/plugins/scadbuddy', { headers: READ })
-    expect(((await one.json()) as { tool_tiers: unknown }).tool_tiers).toEqual({ [readTool.name]: 'outward' })
-  })
-
   it.each([
-    ['a tier that is none', { tool_tiers: { [readTool.name]: 'none' } }],
-    ['a tool the set does not have', { tool_tiers: { no_such_tool: 'outward' } }],
-    ['disabling a tool the set does not have', { disabled_tools: ['no_such_tool'] }],
-  ])('answers 400 for %s, and stores nothing', async (_label, body) => {
+    ['a raised tier', { tool_tiers: { [readTool.name]: 'outward' } }],
+    ['a lowered tier', { tool_tiers: { [outwardTool.name]: 'write' } }],
+    ['a disabled tool', { disabled_tools: [otherReadTool.name] }],
+    ['a switch', { enabled: false }],
+  ])('answers 400 for %s: /capabilities is the way to change a built-in tool (#4828)', async (_label, body) => {
     const { settings, values } = memorySettings()
     const { access, rows } = memoryAccess()
-    expect((await patch(app(settings, remoteRepo(), access), 'scadbuddy', body)).status).toBe(400)
+    const res = await patch(app(settings, remoteRepo(), access), 'scadbuddy', body)
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { detail: string }).detail).toContain('/api/v1/ai/capabilities')
     expect(values.size).toBe(0)
     expect(rows).toEqual([])
   })
 
-  it('accepts a lowered tier and stores it in ai_access', async () => {
-    const { settings } = memorySettings()
-    const { access, rows } = memoryAccess()
-    const res = await patch(app(settings, remoteRepo(), access), 'scadbuddy', { tool_tiers: { [outwardTool.name]: 'write' } })
-    expect(res.status).toBe(200)
-    const view = (await res.json()) as { tool_tiers: Record<string, string> }
-    expect(view.tool_tiers).toEqual({ [outwardTool.name]: 'write' })
-    expect(rows).toContainEqual(expect.objectContaining({ source: 'builtin:scadbuddy', item: outwardTool.name, access: 'write' }))
-  })
-
-  it('answers 409 built_in to add, remove, test, re-point or switch off a built-in', async () => {
+  it('answers 409 built_in to add, remove, test or re-point a built-in', async () => {
     const { settings, values } = memorySettings()
     const { access, rows } = memoryAccess()
     const repo = remoteRepo()
@@ -249,8 +217,6 @@ describe('/api/v1/ai/plugins with built-ins', () => {
       await a.request('/api/v1/ai/plugins/scadbuddy/test', { method: 'POST', headers: UI }),
       await patch(a, 'scadbuddy', { url: 'https://x.example/mcp' }),
       await patch(a, 'scadbuddy', { secret: 'abcd' }),
-      // ScadBuddy's own tools have no switch as a set: they are switched one by one.
-      await patch(a, 'scadbuddy', { enabled: false }),
     ]
     for (const res of answers) {
       expect(res.status).toBe(409)

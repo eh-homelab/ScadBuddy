@@ -162,11 +162,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(loaded.problems).toEqual([expect.stringMatching(/plugin moved was not loaded: .*169\.254\.169\.254/)])
       })
 
+      // The old ai_plugins columns keep their defaults: nothing writes them any more (#4828).
+      const DEFAULTS = { enabled: false, tool_tiers: {}, disabled_tools: [] }
       const accessRows = async (name: string) =>
         db.sql<{ item: string; access: string }[]>`
           SELECT item, access FROM ai_access WHERE source = ${`remote:${name}`} ORDER BY item`
 
-      it('stores tool_tiers, disabled_tools and enabled in ai_access, and keeps writing them to ai_plugins for one release', async () => {
+      it('stores tool_tiers, disabled_tools and enabled in ai_access only; the old ai_plugins columns keep their defaults', async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { c: 'write' } }, kek)
         expect(await accessRows('mem')).toEqual([
           { item: '*', access: 'off' },
@@ -180,7 +182,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         ])
         const [old] = await db.sql<{ enabled: boolean; tool_tiers: unknown; disabled_tools: string[] }[]>`
           SELECT enabled, tool_tiers, disabled_tools FROM ai_plugins WHERE name = 'mem'`
-        expect(old).toEqual({ enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
+        expect(old).toEqual(DEFAULTS)
         // Disabled wins over a tier for the same tool.
         await store.update('mem', { tool_tiers: { a: 'read', b: 'read' } }, kek)
         expect(await accessRows('mem')).toEqual([
@@ -194,38 +196,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
         await store.create({ name: 'other', url: 'https://other.example/mcp' }, kek)
         await store.update('mem', { enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
-        // The dual-written columns disagree (written past the mirror trigger): ai_access wins, either way.
-        await db.sql`ALTER TABLE ai_plugins DISABLE TRIGGER ai_plugins_mirror_access`
+        // The old columns disagree: ai_access wins, either way.
         await db.sql`UPDATE ai_plugins SET enabled = false, tool_tiers = '{"a":"outward"}', disabled_tools = '{}' WHERE name = 'mem'`
         await db.sql`UPDATE ai_plugins SET enabled = true WHERE name = 'other'`
         const { plugins } = await store.enabled(kek)
         expect(plugins.map((p) => [p.name, p.toolTiers, p.disabledTools])).toEqual([['mem', { a: 'read' }, ['b']]])
         expect(await store.get('mem')).toMatchObject({ enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
         expect(await store.get('other')).toMatchObject({ enabled: false })
-      })
-
-      it('a plugin an older replica creates after the copy reads as on with its tiers', async () => {
-        // An older replica writes only the old columns.
-        await db.sql`
-          INSERT INTO ai_plugins (name, kind, url, enabled, tool_tiers, disabled_tools)
-          VALUES ('mem', 'remote_mcp', 'https://hs.example/mcp', true, '{"a":"read","b":"write"}', ${['b']})`
-        const { plugins } = await store.enabled(kek)
-        expect(plugins.map((p) => [p.name, p.toolTiers, p.disabledTools])).toEqual([['mem', { a: 'read' }, ['b']]])
-      })
-
-      it("an older replica's switch-on is seen, and a new replica's partial update keeps it", async () => {
-        await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
-        await db.sql`UPDATE ai_plugins SET enabled = true, disabled_tools = ${['x']} WHERE name = 'mem'`
-        expect(await store.get('mem')).toMatchObject({ enabled: true, disabled_tools: ['x'] })
-        await store.update('mem', { tool_tiers: { a: 'read' } }, kek)
-        const [old] = await db.sql<{ enabled: boolean; tool_tiers: unknown; disabled_tools: string[] }[]>`
-          SELECT enabled, tool_tiers, disabled_tools FROM ai_plugins WHERE name = 'mem'`
-        expect(old).toEqual({ enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['x'] })
-        expect(await accessRows('mem')).toEqual([
-          { item: '*', access: 'on' },
-          { item: 'a', access: 'read' },
-          { item: 'x', access: 'off' },
-        ])
       })
 
       it('delete forgets the plugin\'s access rows', async () => {
@@ -257,12 +234,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
         return row
       }
 
-      it('setToolAccess writes ai_plugins and ai_access, so an older replica reads the same', async () => {
+      it('setToolAccess writes ai_access only', async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
         await store.setToolAccess('mem', 'b', 'off', UI_CONTEXT)
         const summary = await store.setToolAccess('mem', 'a', 'read', UI_CONTEXT)
         expect(summary).toMatchObject({ tool_tiers: { a: 'read' }, disabled_tools: ['b'], enabled: false })
-        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
+        expect(await oldColumns('mem')).toEqual(DEFAULTS)
         expect(await rowsBy('mem')).toEqual([
           { item: '*', access: 'off', updated_by: 'system' },
           { item: 'a', access: 'read', updated_by: 'browser:browser' },
@@ -270,12 +247,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
         ])
         // A tier over a disabled tool moves it out of disabled_tools.
         await store.setToolAccess('mem', 'b', 'write', UI_CONTEXT)
-        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: { a: 'read', b: 'write' }, disabled_tools: [] })
+        expect(await oldColumns('mem')).toEqual(DEFAULTS)
         await expect(store.setToolAccess('gone', 'a', 'off', UI_CONTEXT)).rejects.toMatchObject({ name: 'PluginError', status: 404 })
         // A tier needs a name Claude Code keeps; off takes any.
         await expect(store.setToolAccess('mem', 'files.list', 'read', UI_CONTEXT)).rejects.toMatchObject({ status: 400 })
         await store.setToolAccess('mem', 'files.list', 'off', UI_CONTEXT)
-        expect((await oldColumns('mem'))?.disabled_tools).toEqual(['files.list'])
+        expect(await oldColumns('mem')).toEqual(DEFAULTS)
       })
 
       it('setToolAccess refuses the 257th change of one kind in the page\'s words, not a field the page never shows (final review M7)', async () => {
@@ -311,18 +288,31 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(c1).toMatchObject({ item: 'c', updated_by: 'browser:browser' })
       })
 
+      it("a URL-only update keeps every access row's author and time (#4828)", async () => {
+        // Guards PluginStore.writeAccess: it must not write the old columns from ai_access, which
+        // (with the old mirror trigger in place) would re-attribute every row to migration:2171.
+        await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
+        await db.sql`UPDATE ai_access SET updated_by = 'browser:browser', updated_at = now() - interval '1 day' WHERE source = 'remote:mem'`
+        const rows = () =>
+          db.sql`SELECT item, access, updated_by, updated_at::text AS t FROM ai_access WHERE source = 'remote:mem' ORDER BY item`
+        const saved = await db.sql`SELECT source, item, access, updated_by, updated_at FROM ai_access WHERE source = 'remote:mem'`
+        // The old columns disagree with ai_access, as after an older replica's write: put ai_access back as it was.
+        await db.sql`UPDATE ai_plugins SET tool_tiers = '{"a":"outward"}', disabled_tools = '{}' WHERE name = 'mem'`
+        await db.sql`DELETE FROM ai_access WHERE source = 'remote:mem'`
+        await db.sql`INSERT INTO ai_access ${db.sql(saved.map((r) => ({ ...r })) as never)}`
+        const before = await rows()
+        await store.update('mem', { url: 'https://hs2.example/mcp' }, kek)
+        expect(await rows()).toEqual(before)
+      })
+
       it('setToolAccess keeps a tool named __proto__ as its own key', async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
         await store.setToolAccess('mem', '__proto__', 'read', UI_CONTEXT)
-        const [row] = await db.sql<{ j: string }[]>`SELECT tool_tiers::text AS j FROM ai_plugins WHERE name = 'mem'`
-        expect(row?.j).toBe('{"__proto__": "read"}')
         expect(await rowsBy('mem')).toContainEqual({ item: '__proto__', access: 'read', updated_by: 'browser:browser' })
         // A write to another tool keeps it, and the summary names it.
         const summary = await store.setToolAccess('mem', 'other', 'write', UI_CONTEXT)
         expect(Object.hasOwn(summary.tool_tiers, '__proto__')).toBe(true)
         expect(summary.tool_tiers['__proto__']).toBe('read')
-        const [after] = await db.sql<{ j: string }[]>`SELECT tool_tiers::text AS j FROM ai_plugins WHERE name = 'mem'`
-        expect(after?.j).toBe('{"other": "write", "__proto__": "read"}')
         expect(await rowsBy('mem')).toContainEqual({ item: '__proto__', access: 'read', updated_by: 'browser:browser' })
       })
 
@@ -335,12 +325,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'on', updated_by: 'browser:browser' }])
       })
 
-      it('setToolAccess null removes the tool from both', async () => {
+      it('setToolAccess null removes the tool\'s row', async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
         await store.setToolAccess('mem', 'a', null, UI_CONTEXT)
         const summary = await store.setToolAccess('mem', 'b', null, UI_CONTEXT)
         expect(summary).toMatchObject({ tool_tiers: {}, disabled_tools: [] })
-        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: {}, disabled_tools: [] })
+        expect(await oldColumns('mem')).toEqual(DEFAULTS)
         expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'off', updated_by: 'system' }])
       })
 
@@ -385,7 +375,6 @@ describe.skipIf(!TEST_DATABASE_URL)(
             name: 'hindsight',
             url: 'https://hs.example/mcp/bank-1/',
             secret: `Bearer ${TOKEN}`,
-            tool_tiers: { recall: 'read' },
           }),
         )
         expect(created.status).toBe(201)
@@ -398,7 +387,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           auth: { header: 'Authorization', last4: TOKEN.slice(-4) },
           usable: true,
           problem: null,
-          tool_tiers: { recall: 'read' },
+          tool_tiers: {},
         })
 
         const list = await a.request('/api/v1/ai/plugins', { headers: READ })
@@ -407,9 +396,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const one = await a.request('/api/v1/ai/plugins/hindsight', { headers: READ })
         bodies.push(await one.text())
 
-        const patched = await a.request('/api/v1/ai/plugins/hindsight', json('PATCH', { enabled: true }))
-        expect(patched.status).toBe(200)
-        bodies.push(await patched.text())
+        // The switch is the capabilities API's (spec §4.6); the store enables it here.
+        await store.update('hindsight', { enabled: true }, kek)
+        const enabled = await a.request('/api/v1/ai/plugins/hindsight', { headers: READ })
+        bodies.push(await enabled.text())
         expect(JSON.parse(bodies.at(-1)!)).toMatchObject({ enabled: true })
 
         const tested = await a.request('/api/v1/ai/plugins/hindsight/test', { method: 'POST', headers: UI })
@@ -426,6 +416,25 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect((await a.request('/api/v1/ai/plugins/hindsight', { method: 'DELETE', headers: UI })).status).toBe(204)
         expect((await a.request('/api/v1/ai/plugins/hindsight', { headers: READ })).status).toBe(404)
         expect((await a.request('/api/v1/ai/plugins/hindsight', { method: 'DELETE', headers: UI })).status).toBe(404)
+      })
+
+      it('refuses the old access fields on POST and PATCH: /capabilities is the way (#4828)', async () => {
+        const { app: a } = app()
+        const old = [{ tool_tiers: { a: 'read' } }, { disabled_tools: ['b'] }, { enabled: false }, { enabled: true }]
+        for (const extra of old) {
+          const res = await a.request('/api/v1/ai/plugins', json('POST', { name: 'mem', url: 'https://hs.example/mcp', ...extra }))
+          expect(res.status, JSON.stringify(extra)).toBe(400)
+          expect(((await res.json()) as { detail: string }).detail).toContain('/api/v1/ai/capabilities')
+        }
+        expect(await store.list()).toEqual([])
+        expect((await a.request('/api/v1/ai/plugins', json('POST', { name: 'mem', url: 'https://hs.example/mcp' }))).status).toBe(201)
+        const before = await db.sql`SELECT item, access, updated_by, updated_at::text AS t FROM ai_access ORDER BY source, item`
+        for (const extra of old) {
+          const res = await a.request('/api/v1/ai/plugins/mem', json('PATCH', extra))
+          expect(res.status, JSON.stringify(extra)).toBe(400)
+          expect(((await res.json()) as { detail: string }).detail).toContain('/api/v1/ai/capabilities')
+        }
+        expect(await db.sql`SELECT item, access, updated_by, updated_at::text AS t FROM ai_access ORDER BY source, item`).toEqual(before)
       })
 
       it('answers 400 / 409 with the reason', async () => {
