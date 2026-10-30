@@ -104,4 +104,32 @@ describe("the worker's readiness", () => {
   it('is not ready when Temporal does not answer', async () => {
     expect(await queuesPolled(client(() => new Error('unavailable')), QUEUES, ME)).toBe('Temporal did not answer')
   })
+
+  it('names a queue this process never started a worker on, without asking Temporal', async () => {
+    let asked = 0
+    const counting = client(() => {
+      asked++
+      return [{ identity: ME, lastAccessTime: secondsAgo(2) }]
+    })
+    const queues = QUEUES.map((q) => ({ ...q, started: q.name !== 'agent-sessions.worker-1' }))
+    expect(await queuesPolled(counting, queues, ME)).toBe(
+      `this process started no worker on "agent-sessions.worker-1"; its start log says why`,
+    )
+    expect(asked).toBe(0)
+  })
+
+  it('gives each describe call its own deadline', async () => {
+    const deadlines: number[] = []
+    const slow = {
+      options: { namespace: 'default' },
+      withDeadline: async <R>(deadline: number, fn: () => Promise<R>) => {
+        deadlines.push(deadline)
+        await new Promise((r) => setTimeout(r, 30))
+        return fn()
+      },
+      workflowService: { describeTaskQueue: () => Promise.resolve({ pollers: [{ identity: ME, lastAccessTime: secondsAgo(2) }] }) },
+    } as unknown as Parameters<typeof queuesPolled>[0]
+    expect(await queuesPolled(slow, QUEUES, ME)).toBeUndefined()
+    expect(deadlines[2]! - deadlines[0]!).toBeGreaterThanOrEqual(50)
+  })
 })

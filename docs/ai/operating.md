@@ -34,7 +34,10 @@ covers the same ground more briefly.
   - `worker`: the Temporal workers that run turns (`agent-tools`, `agent-sessions`,
     `agent-sessions.<hostname>`, `agent-tools.<hostname>`), and over HTTP only
     `/healthz` and `/readyz` on port 8081 (§5). A worker pod is not beside the backend,
-    so its `SCADBUDDY_BACKEND_URL` must name the backend's cluster address.
+    so its `SCADBUDDY_BACKEND_URL` must name the backend's cluster address. A worker runs
+    none of the HTTP side's sweeps (the session lease reaper, the durable running and
+    pending-input orphan sweeps, approval and question expiry, audit retention), so keep
+    at least one `api` (or `all`) replica running whenever workers run.
 - **Port 8081**, fixed. The comment on `PORT` in [`agent/src/main.ts`](../../agent/src/main.ts)
   calls it "part of the pod contract with the ingress (spec §4.2)". The Dockerfile
   `EXPOSE`s 8081.

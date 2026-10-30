@@ -1118,11 +1118,12 @@ const health = role.http
         ),
       ready: () => {
         if (!temporalClient) return Promise.resolve('SCADBUDDY_TEMPORAL_ADDRESS and SCADBUDDY_DATABASE_URL are needed to run turns')
+        // A worker this process never started (it lacked what its start log names) is said so, not waited for.
         const queues: PolledQueue[] = [
-          { name: SESSION_QUEUE, type: 1 },
-          { name: TASK_QUEUE, type: 2 },
-          { name: HOST_QUEUE, type: 2 },
-          { name: SESSION_HOST_QUEUE, type: 2 },
+          { name: SESSION_QUEUE, type: 1, started: sessionWorker !== undefined },
+          { name: TASK_QUEUE, type: 2, started: temporalWorker !== undefined },
+          { name: HOST_QUEUE, type: 2, started: hostWorkers?.pinned !== undefined },
+          { name: SESSION_HOST_QUEUE, type: 2, started: hostWorkers?.sessions !== undefined },
         ]
         return queuesPolled(temporalClient, queues, workerIdentity(replicaIdentity()))
       },

@@ -32,15 +32,18 @@ export function localTemporal(): Promise<TestWorkflowEnvironment> {
  * Which of `queues` (session host queues) a worker polls now: DurableTurns' `liveHosts` in a test,
  * where the real listing (`liveHostQueues`) would also name other tests' replicas.
  */
-export function polledHosts(client: Pick<Client, 'workflowService' | 'options'>, ...queues: string[]): () => Promise<ReadonlySet<string>> {
+export function polledHosts(client: Pick<Client, 'workflowService' | 'options' | 'withDeadline'>, ...queues: string[]): () => Promise<ReadonlySet<string>> {
   return async () => {
     const live = new Set<string>()
     for (const queue of queues) {
-      const { pollers } = await client.workflowService.describeTaskQueue({
-        namespace: client.options.namespace,
-        taskQueue: { name: queue },
-        taskQueueType: 2,
-      })
+      // As liveHostQueues: a dev server that hangs fails the read, not the test's whole timeout.
+      const { pollers } = await client.withDeadline(Date.now() + 10_000, () =>
+        client.workflowService.describeTaskQueue({
+          namespace: client.options.namespace,
+          taskQueue: { name: queue },
+          taskQueueType: 2,
+        }),
+      )
       if ((pollers ?? []).some((p) => Date.now() - seenAtMs(p.lastAccessTime) < HOST_FRESH_MS)) live.add(queue)
     }
     return live
