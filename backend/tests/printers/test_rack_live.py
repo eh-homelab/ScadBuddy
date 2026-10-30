@@ -54,6 +54,7 @@ are the ones printed (``-s`` shows the mapping sent, each fetch and each layer).
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 from io import BytesIO
@@ -110,10 +111,14 @@ def printer() -> dict[str, str]:
     reason="starts a print: opt in with SCADBUDDY_TEST_PRINTER_PRINT=1 (or _DRY=1), _FILE and _AMS",
 )
 async def test_a_rack_print_uses_the_hotends_sent(printer: dict[str, str]) -> None:
+    # Checked first, in a dry run too: the dry run rehearses the print's settings, and a
+    # bad value fails before the printer is touched.
     try:
         wait = float(WAIT or START_WAIT)
     except ValueError:
-        pytest.fail(f"SCADBUDDY_TEST_PRINTER_WAIT={WAIT!r} is not a number of seconds")
+        wait = math.nan
+    if not (math.isfinite(wait) and wait > 0):
+        pytest.fail(f"SCADBUDDY_TEST_PRINTER_WAIT={WAIT!r} is not a positive number of seconds")
     lan = LanPrinter(**printer, cert_sha256=fetch_cert_sha256(printer["host"]))
     # Unique per run, so no earlier job (an earlier probe's among them) carries it.
     name = f"scadbuddy-rack-probe-{int(time.time())}"
