@@ -229,6 +229,23 @@ describe('global tools', () => {
     }
   })
 
+  it('answers a hash move outside Settings at once while the sections are unloaded', async () => {
+    renderShell()
+    await waitFor(() => expect(bridge.liveNames()).toContain('navigate'))
+    await bridge.call('navigate', { route: '/' })
+
+    registerSections([])
+    vi.useFakeTimers()
+    try {
+      // No timer is advanced: an answer that waited for the Settings sections would still be pending.
+      const answer = await bridge.call('navigate', { route: '/#top' })
+      expect(answer).toEqual({ ok: true, result: { route: '/#top' } })
+    } finally {
+      vi.useRealTimers()
+      registerSections(SECTION_REGISTRY)
+    }
+  })
+
   it.each(['/settings/library', '/settings'])(
     'waits for Settings to redirect a section of another area, from %s (#781)',
     async (start) => {
