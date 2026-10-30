@@ -3,17 +3,20 @@ import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
 import type { Sql, TransactionSql } from 'postgres'
 import { turnCostEntry } from '../audit/turn.js'
-import { redact } from '../gate/entry.js'
+import { redact, WAIT_FOR_USER } from '../gate/entry.js'
 import { refusal } from '../gate/refusal.js'
 import { INPUT_CHANNEL } from '../gate/store.js'
+import { type AttentionSpec, answeredText, BACK_REPLIES, DEFAULT_REPLIES, RECONNECTED_TEXT, timedOutText } from '../harness/attention.js'
 import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
-import type { QuestionGate, QuestionVerdict, UserQuestion } from '../harness/questions.js'
+import type { QuestionGate, QuestionRequest, QuestionVerdict, UserQuestion } from '../harness/questions.js'
+import type { QuestionService } from '../questions/service.js'
 import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
 import type { DecidedCall, DecidedRun } from '../temporal/toolActivities.js'
 import { NO_CAPACITY, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
+import { attentionGate, type HeldRow, replyOf, TAB_WAIT_CALL } from './attentionGate.js'
 import type { SessionBlobs } from './blobs.js'
 import { userPrompt } from './images.js'
-import { type ClaimedSession, runningDurableTurn, type TurnOutcome } from './manager.js'
+import { type ClaimedSession, runningDurableTurn, TAB_WAIT_S, type TurnOutcome, waitForTab } from './manager.js'
 import { scrubForLog } from './sdkEvents.js'
 import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
@@ -57,15 +60,23 @@ import type { WarmEntry } from './warm.js'
 // assistant message one after another, so they park in turn. A call refused after its
 // entry opened (the open's answer lost, Claude Code dropping the request) withdraws the
 // entry (Update `withdraw_input`), so nobody can approve a call that will never run; a read
-// of the row that fails is tried again on the next tick. An attention request and a browser
-// call's tab wait still read NO_PARKS.
+// of the row that fails is tried again on the next tick.
+//
+// Attention (#5003, §5.4). request_user_attention and a browser call's wait for its tab park the
+// same way, as the gate's `wait_for_user` entry, with classic's semantics (attentionGate.ts): a
+// reply, the tab's return (`reconnected`, which the process whose hub sees the tab sends as the
+// Update `tab_reconnected`, manager.ts `resolveTabWaits`), or the entry's timer, whose `stop` and
+// `wait` end the turn. A `done` summary waits for nothing and outlives its turn, so it is posted
+// as classic's is (questions/service.ts), never through the workflow, whose entries end with
+// their turn. A released one is told in the continuation in the words its call would have read.
 //
 // Release (§5.4 "Release"). A hold lasts `park_hold_seconds` (the input's parkHoldSeconds);
 // past it, or at a shutdown, the turn lets its process go. Each held call is answered with a
 // refusal that interrupts the turn (`interrupt`, as a Stop does): Claude Code records it as the
-// call's error result and asks the model nothing more. Closing the process instead, with the
-// call still held, makes Claude Code read the closed permission stream as a failed call and
-// ask the model again before it dies. Once the turn has ended the warm entry is closed (not
+// call's error result and asks the model nothing more. An attention request is an MCP tool's
+// call, whose result cannot interrupt, so its release stops the turn itself. Closing the
+// process instead, with the call still held, makes Claude Code read the closed permission
+// stream as a failed call and ask the model again before it dies. Once the turn has ended the warm entry is closed (not
 // cut: its mirror lands what Claude Code wrote), its spend is written as a stopped
 // placement's, and the activity returns `released` with the entries it held, which stay open
 // in the workflow. Once each is decided
@@ -105,6 +116,8 @@ export type TurnControl = {
   openInput?: (args: OpenInputArgs, signal: AbortSignal) => Promise<OpenInputAnswer>
   /** The Update `withdraw_input`: the entry of a call the turn no longer waits on is cancelled. */
   withdrawInput?: (args: WithdrawInputArgs) => Promise<boolean>
+  /** The Update `tab_reconnected` for one tab wait: its tab was back by the time its entry opened (#5003). */
+  reconnected?: (requestId: string) => Promise<unknown>
 }
 
 /** Why a placement was cut off: another holds the row, the turn ended, a newer one here, the shutdown. */
@@ -132,6 +145,8 @@ export type TurnHostDeps = {
   inputPollMs?: number
   /** Runs a released turn's approved call once (toolActivities.ts `decidedCalls`); absent, the model is told it was not run. */
   runCall?: (call: DecidedCall) => Promise<DecidedRun>
+  /** Where a `done` summary is posted, as a classic turn posts it (#815 §4); absent, it reads NO_PARKS. */
+  questions?: Pick<QuestionService, 'gate' | 'attentionLimit'>
 }
 
 /** A placement's holds (§5.4): the calls held now, the hold's length, and the release that ends them all. */
@@ -156,7 +171,10 @@ function questionsOf(input: unknown): string[] {
 }
 
 /** An entry's response row, as resolve_input (or a grant, or the flow's refusal) wrote it. */
-type Response = { outcome: string; response: { answers?: unknown } | null; reason: string | null; responder: { kind?: string } | null }
+type Response = HeldRow
+
+/** What a parked attention request named: its `wait_for_user` input (TurnHost's attention gate). */
+type AttentionInput = { reason?: string; timeout_s?: number; on_timeout?: string }
 
 type Running = { attempt: string; cut: (why: Cut) => void; release: () => boolean; done: Promise<void> }
 
@@ -187,6 +205,8 @@ const RELEASED_TEXT = 'a call waited longer than the turn holds its process; the
 const RELEASED_CALL = 'This call is still waiting for the user; the turn paused, and you will be told how it ended.'
 /** A held call's default hold, when the workflow names none (park_hold_seconds' default). */
 const PARK_HOLD_S = 300
+/** A tab wait's quick reply that ends the turn's tab waits (sessions/manager.ts waitForTab's CARRY_ON). */
+const CARRY_ON = 'Carry on without the tab'
 
 /**
  * Whether a user entry landed in `id`'s main transcript after row `mark`. A sealed row says so in
@@ -350,11 +370,14 @@ export class TurnHost {
     // a parked continuation's, once its outcome message is.
     const landed = (input.continuation?.kind === 'restarted' && input.message) || parked?.length ? await this.#landed(id, mark) : false
     const restarted = (input.continuation?.kind === 'restarted' && (!input.message || landed)) || (parked !== undefined && landed)
-    const text = restarted
-      ? RESTARTED_PROMPT
-      : parked
-        ? await this.#decided(id, parked, controller.signal, () => control.heartbeat({ pushed: false }))
-        : (input.message?.text ?? '')
+    const decided = parked && !restarted ? await this.#decided(id, parked, controller.signal, () => control.heartbeat({ pushed: false })) : undefined
+    // An attention request's `stop` or `wait` timer ended while the turn was released: the turn
+    // ends there, as it would have held, and the model is asked nothing more (harness/attention.ts).
+    if (decided?.stop !== undefined) {
+      const said = `the turn ended: ${decided.stop}`
+      return this.#result(tallyTurn(session, { stopped: said, interrupted: said, result: undefined, refused: undefined, failure: undefined, secrets: [], turnUsd: 0, cutUsd: 0 }), [])
+    }
+    const text = restarted ? RESTARTED_PROMPT : decided ? decided.text : (input.message?.text ?? '')
     if (!text) throw ApplicationFailure.nonRetryable(`turn ${turnId} of session ${id} has no message`, SESSION_GONE)
     const images = restarted || parked ? [] : await this.#images(id, input.message?.images ?? [])
     const prompt = images.length ? userPrompt(text, images) : text
@@ -391,7 +414,21 @@ export class TurnHost {
       userText: input.message?.text ?? text,
       signal: controller.signal,
       interrupt: () => controller.abort(new Error('the turn was interrupted')),
-      gates: (ctx) => this.#gates(turnId, control, controller.signal, parks, ctx.secrets, ctx.shown, ctx.turn.run.questionGate !== undefined),
+      gates: (ctx) =>
+        this.#gates({
+          session,
+          turnId,
+          control,
+          stop: controller.signal,
+          holds: parks,
+          secrets: ctx.secrets,
+          shown: ctx.shown,
+          asks: ctx.turn.run.questionGate !== undefined,
+          // An attention request's timer, or its release, ends the turn as a Stop does: an MCP tool's result cannot.
+          endTurn: (why) => {
+            if (!controller.signal.aborted) controller.abort(new Error(why))
+          },
+        }),
       // The prompt goes in right after the acquire.
       onAcquired: ({ entry }) => {
         entries.push(entry)
@@ -478,22 +515,24 @@ export class TurnHost {
   }
 
   /** The turn's parks (§5.4): each opened through the workflow, then held on its row. */
-  #gates(
-    turnId: string,
-    control: TurnControl,
-    stop: AbortSignal,
-    holds: Holds,
-    secrets: () => readonly string[],
-    shown: (toolUseId: string, toolName: string, input: Record<string, unknown>) => Promise<void>,
-    asks: boolean,
-  ): TurnGates {
-    const tabWait = () => Promise.resolve({ back: false as const, message: NO_PARKS })
+  #gates(turn: {
+    session: ClaimedSession
+    turnId: string
+    control: TurnControl
+    stop: AbortSignal
+    holds: Holds
+    secrets: () => readonly string[]
+    shown: (toolUseId: string, toolName: string, input: Record<string, unknown>) => Promise<void>
+    asks: boolean
+    endTurn: (why: string) => void
+  }): TurnGates {
+    const { session, turnId, control, stop, holds, secrets, shown, asks, endTurn } = turn
     const open = control.openInput
     if (!open) {
       return {
         approvalGate: () => Promise.resolve({ approved: false, message: NO_PARKS }),
         questionGate: () => Promise.resolve({ answered: false, message: NO_PARKS }),
-        waitForTab: tabWait,
+        waitForTab: () => Promise.resolve({ back: false as const, message: NO_PARKS }),
       }
     }
     /** Each parked call's request id, by its tool_use id: the audit row's approval. */
@@ -502,7 +541,11 @@ export class TurnHost {
     const withdraw = (callId: string, why: string) => {
       void control.withdrawInput?.({ turn_id: turnId, tool_use_id: callId, reason: why }).catch(() => {})
     }
-    const park = async (call: OpenInputArgs['call'], signal: AbortSignal): Promise<{ requestId: string; row?: Response; early?: OpenInputAnswer['resolution'] }> => {
+    const park = async (
+      call: OpenInputArgs['call'],
+      signal: AbortSignal,
+      options: { holdMs?: number; opened?: (requestId: string) => void } = {},
+    ): Promise<{ requestId: string; row?: Response; early?: OpenInputAnswer['resolution'] }> => {
       let opened: OpenInputAnswer
       try {
         opened = await open({ turn_id: turnId, call }, signal)
@@ -516,8 +559,9 @@ export class TurnHost {
       if (opened.resolution) return { requestId: opened.request_id, row: await this.#row(opened.request_id), early: opened.resolution }
       const rid = opened.request_id
       holds.held.add(rid)
+      options.opened?.(rid)
       // Past the hold, the turn lets its process go (§5.4 "Release"); the entry stays open.
-      const timer = setTimeout(() => holds.release(), holds.holdMs)
+      const timer = setTimeout(() => holds.release(), options.holdMs ?? holds.holdMs)
       timer.unref()
       try {
         return { requestId: rid, row: await this.#hold(rid, AbortSignal.any([signal, holds.released])) }
@@ -550,9 +594,31 @@ export class TurnHost {
       const decision = outcome === 'denied' || outcome === 'expired' ? outcome : 'cancelled'
       return { approved: false, message: refusal(request.toolName, requestId, said, row?.reason), approvalId: requestId, decision }
     }
+    /** A `done` summary is classic's (see the header); every other attention request waits through the workflow (attentionGate.ts). */
+    const waits = attentionGate({
+      session,
+      turnId,
+      stop,
+      secrets,
+      park,
+      hold: (requestId, signal) => this.#hold(requestId, signal),
+      holdMs: holds.holdMs,
+      released: holds.released,
+      release: () => {
+        endTurn(RELEASED_TEXT)
+        return { answered: false, message: RELEASED_CALL, interrupt: true }
+      },
+      endTurn,
+      ...(this.#deps.questions ? { questions: this.#deps.questions } : {}),
+    })
+    const attend = (request: QuestionRequest, attention: AttentionSpec): Promise<QuestionVerdict> => {
+      if (attention.reason !== 'done') return waits(request, attention)
+      const classic = this.#deps.questions
+      if (!classic) return Promise.resolve({ answered: false, message: NO_PARKS })
+      return classic.gate({ sessionId: session.id, turnId, secrets, signal: stop, turnStartedAt: session.claimedAt })(request)
+    }
     const questionGate: QuestionGate = async (request): Promise<QuestionVerdict> => {
-      // An attention request has its own timers and replies (harness/attention.ts), which this gate does not hold yet.
-      if (request.attention) return { answered: false, message: NO_PARKS }
+      if (request.attention) return attend(request, request.attention)
       if (stop.aborted) return { answered: false, message: 'The user did not answer: the turn is stopping.' }
       // The card the panel shows, with the turn's secrets redacted as the classic QuestionService does.
       const hidden = secrets()
@@ -577,8 +643,13 @@ export class TurnHost {
     return {
       approvalGate,
       approvalFor: (toolUseId) => Promise.resolve(parkedAs.get(toolUseId)),
-      ...(asks ? { questionGate } : {}),
-      waitForTab: tabWait,
+      // A browser call's wait for its tab, as a classic turn's (sessions/manager.ts): only where the user is asked.
+      ...(asks
+        ? {
+            questionGate,
+            waitForTab: waitForTab(questionGate, stop, (requestId) => control.reconnected?.(requestId) ?? Promise.resolve()),
+          }
+        : {}),
     }
   }
 
@@ -645,10 +716,47 @@ export class TurnHost {
    * approved call run once (deps.runCall), the others as they ended. What the model is told,
    * in one message: its own process marked each call's outcome unknown, and this settles it.
    */
-  async #decided(id: string, calls: readonly ParkedCall[], signal: AbortSignal, heartbeat: () => void): Promise<string> {
+  async #decided(id: string, calls: readonly ParkedCall[], signal: AbortSignal, heartbeat: () => void): Promise<{ text: string; stop?: string }> {
     const said: string[] = []
-    for (const call of calls) said.push(await this.#outcome(id, call, signal, heartbeat))
-    return `${said.join('\n\n')}\n\nContinue the task.`
+    for (const call of calls) {
+      if (call.tool === WAIT_FOR_USER) {
+        const attended = await this.#attended(call)
+        if (attended.stop !== undefined) return { text: '', stop: attended.stop }
+        said.push(attended.text)
+      } else said.push(await this.#outcome(id, call, signal, heartbeat))
+    }
+    return { text: `${said.join('\n\n')}\n\nContinue the task.` }
+  }
+
+  /**
+   * How a released attention request or tab wait ended, in the words its call would have
+   * returned (harness/attention.ts, sessions/manager.ts waitForTab); `stop` when its `stop` or
+   * `wait` timer ended it, which ends the turn.
+   */
+  async #attended(call: ParkedCall): Promise<{ text: string; stop?: string }> {
+    const { requestId, toolUseId, resolution } = call
+    const input = (call.input ?? {}) as AttentionInput
+    const row = await this.#row(requestId)
+    const reply = replyOf(row)
+    const reconnected = resolution.outcome === 'cancelled' && row?.response?.reconnected === true
+    const timedOut = resolution.outcome === 'timed_out'
+    const onTimeout = input.on_timeout ?? 'proceed'
+    if (toolUseId.startsWith(TAB_WAIT_CALL)) {
+      const paused = `A browser call (id ${toolUseId.slice(TAB_WAIT_CALL.length)}) was paused waiting for the ScadBuddy tab, and it was not run.`
+      const recheck = 'The page may have reloaded or changed while the tab was away: re-check it (browser_status, then browser_snapshot) and call the tool again if it is still what you want.'
+      if (reconnected) return { text: `${paused} The session has a connected tab again. ${recheck}` }
+      if (reply !== undefined && BACK_REPLIES.includes(reply)) return { text: `${paused} The user said they are back (a tab may not be attached yet). ${recheck}` }
+      if (reply === CARRY_ON || reply === DEFAULT_REPLIES[1]) return { text: `${paused} The user replied ${JSON.stringify(reply)}: carry on without the tab for the rest of this turn.` }
+      if (reply !== undefined) return { text: `${paused} The user replied ${JSON.stringify(reply)} instead. Act on their reply.` }
+      if (timedOut) return { text: `${paused} ${timedOutText(input.timeout_s ?? TAB_WAIT_S)}` }
+      return { text: `${paused} ${row?.reason ?? 'The wait was cancelled'}.` }
+    }
+    const paused = `Your request for the user's attention (id ${toolUseId}) was paused waiting for their reply.`
+    if (reply !== undefined) return { text: `${paused} ${answeredText(reply)}` }
+    if (reconnected) return { text: `${paused} ${RECONNECTED_TEXT}` }
+    if (timedOut && onTimeout === 'proceed') return { text: `${paused} ${timedOutText(input.timeout_s ?? 0)}` }
+    if (timedOut) return { text: '', stop: `nobody replied to the attention request in ${input.timeout_s ?? 0} s (on_timeout: ${onTimeout})` }
+    return { text: `${paused} The user did not answer: ${row?.reason ?? 'the request was cancelled'}.` }
   }
 
   async #outcome(id: string, call: ParkedCall, signal: AbortSignal, heartbeat: () => void): Promise<string> {

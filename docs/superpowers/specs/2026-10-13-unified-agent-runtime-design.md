@@ -1117,10 +1117,14 @@ with its workflow. The vector files stay while a Python reader of them remains.
    hub sees the tab needs the hook, and the `api` role keeps it (`resolveTabWaits`). A
    classic turn's wait is an `ai_questions` row that its question gate polls
    (`questions/service.ts` `waitFor`), so `reconnected`, written by the API's pod, ends a
-   wait held on a worker pod. An `AgentSession` turn opens no tab wait yet: `TurnHost`
-   answers a browser call that finds no tab, and an attention request, with `NO_PARKS` at
-   once (#5003). That park is still to be built through `open_input` (§5.4), with the
-   hub's pod sending `respond` to the session's workflow, before Step 6.3.
+   wait held on a worker pod. *#5003:* an `AgentSession` turn's tab wait, and its
+   `request_user_attention`, park through `open_input` (§5.4) as the gate's `wait_for_user`
+   entry. The hub's pod (`resolveTabWaits`) sends the session's workflow the Update
+   `tab_reconnected` when the projection lists a `tab_disconnected` entry, and the
+   workflow ends it `cancelled` with the response `{reconnected: true}`, which the held
+   turn on the worker reads as classic's `reconnected`
+   (`agent/test/agentRole.temporal.test.ts`, "a tab that drops and comes back on api";
+   the semantics in `agent/test/sessionPark.temporal.test.ts`).
 3. **Anything else the turn reaches in-process** in the HTTP process (an audit of
    `TurnHost`'s dependencies against what a worker-only `main.ts` builds). *Plan Step 6.1
    (2026-10-30):* `SCADBUDDY_AGENT_ROLE` (`all`, `api`, `worker`; `runtime/role.ts`)

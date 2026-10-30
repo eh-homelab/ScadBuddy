@@ -118,6 +118,13 @@ export class PendingProjection {
     return row !== undefined
   }
 
+  /** Whether the session has a pending `tab_disconnected` entry (#5003): an AgentSession turn waiting for its tab. */
+  async waitsForTab(sessionId: string): Promise<boolean> {
+    const [row] = await this.#sql<{ n: number }[]>`
+      SELECT 1 AS n FROM ai_pending_input WHERE session_id = ${sessionId}::uuid AND attention->>'reason' = 'tab_disconnected' LIMIT 1`
+    return row !== undefined
+  }
+
   /** What the gate recorded for a resolved request (`ai_input_responses`), or undefined. */
   async recorded(requestId: string): Promise<RecordedInput | undefined> {
     const [row] = await this.#sql<RecordedInput[]>`

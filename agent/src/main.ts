@@ -688,6 +688,8 @@ const turnHost =
         hostQueue: SESSION_HOST_QUEUE,
         ...(events ? { listen: (channel: string, onNotify: (payload: string) => void) => events.listenAlso(channel, onNotify) } : {}),
         ...(durableToolDeps ? { runCall: decidedCalls(DURABLE_TOOLS, durableToolDeps) } : {}),
+        // A `done` summary, posted as a classic turn's (#5003).
+        questions: sessions.questions,
       })
     : undefined
 // The enabled remote plugins and every usable credential's secret, as a classic turn

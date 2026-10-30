@@ -26,16 +26,21 @@ export const WAIT_FOR_USER = 'wait_for_user'
 export const DEFAULT_REPLIES: readonly string[] = ["I'm here", 'Carry on without me']
 export const REDACTED = '[redacted]'
 export const DEFAULT_TIMEOUT_S = 300
+/** A tab wait the tab's return ended (#5003; questions/service.ts `reconnected`'s words): its response row's `reason` and `response`. */
+export const RECONNECTED_REASON = 'the ScadBuddy tab is connected again'
+export const RECONNECTED_RESPONSE = { reconnected: true } as const
 
 const LABEL_MAX = 200
 const HEADER_MAX = 200
 const MESSAGE_MAX = 2_000
-const TIMEOUT_MIN_S = 10
+export const TIMEOUT_MIN_S = 10
 const TIMEOUT_MAX_S = 86_400
 /** An attention request's reasons, each with its card header (attention.ts HEADERS). */
 const WAIT_HEADERS: Record<string, string> = { tab_disconnected: 'Tab disconnected', question: 'Question', blocked: 'Blocked' }
-/** Only `proceed` until a durable turn's stop is offered (spec §6.6 Timeouts). */
+/** Only `proceed` until a durable turn's stop is offered (spec §6.6 Timeouts); `BuildEntryArgs.onTimeout` lets in more. */
 const ON_TIMEOUT = ['proceed']
+/** What an AgentSession turn's attention request may name besides (harness/attention.ts ON_TIMEOUT): its turn ends it (#5003). */
+export const TURN_ON_TIMEOUT = ['wait', 'stop']
 const WAIT_KEYS = ['reason', 'message', 'options', 'timeout_s', 'on_timeout']
 
 /** The call's input is not the tool's declared shape: refused, never parked. */
@@ -118,7 +123,7 @@ function checkAsk(input: Record<string, unknown>): Card[] {
 
 type Wait = { reason: string; message: string; options: string[]; timeoutS: number; onTimeout: string }
 
-function checkWait(input: Record<string, unknown>): Wait {
+function checkWait(input: Record<string, unknown>, more?: (onTimeout: string) => boolean): Wait {
   if (!Object.keys(input).every((k) => WAIT_KEYS.includes(k))) {
     throw new MalformedAnswerInputError(`wait_for_user takes only ${[...WAIT_KEYS].sort().join(', ')}`)
   }
@@ -139,8 +144,8 @@ function checkWait(input: Record<string, unknown>): Wait {
     throw new MalformedAnswerInputError(`timeout_s must be a whole number, ${TIMEOUT_MIN_S} to ${TIMEOUT_MAX_S}`)
   }
   const onTimeout = Object.hasOwn(input, 'on_timeout') ? input.on_timeout : 'proceed'
-  if (typeof onTimeout !== 'string' || !ON_TIMEOUT.includes(onTimeout)) {
-    throw new MalformedAnswerInputError(`on_timeout must be one of ${ON_TIMEOUT.join(', ')}`)
+  if (typeof onTimeout !== 'string' || !(ON_TIMEOUT.includes(onTimeout) || (more !== undefined && TURN_ON_TIMEOUT.includes(onTimeout) && more(onTimeout)))) {
+    throw new MalformedAnswerInputError(`on_timeout must be one of ${(more ? [...ON_TIMEOUT, ...TURN_ON_TIMEOUT] : ON_TIMEOUT).join(', ')}`)
   }
   return { reason, message, options, timeoutS: timeout, onTimeout }
 }
@@ -170,6 +175,12 @@ export type BuildEntryArgs = {
   secrets?: readonly string[]
   /** A flow run's call (#2482): decided by the person, never an approval grant. */
   inRun?: boolean
+  /**
+   * Whether a `wait_for_user` call may name `on_timeout` `wait` or `stop` (TURN_ON_TIMEOUT): only
+   * where the turn, not the workflow, acts on the timeout (AgentSession, #5003). Asked only for such
+   * a call, so a workflow can put its answer behind `patched()` without marking any other history.
+   */
+  onTimeout?: (onTimeout: string) => boolean
 }
 
 export function buildEntry(args: BuildEntryArgs): BuiltEntry {
@@ -197,7 +208,7 @@ export function buildEntry(args: BuildEntryArgs): BuiltEntry {
     prompt = card.map((q) => q.question).join('\n')
     entry = entryOf({ questions: card.map((q) => ({ question: q.question, multiSelect: q.multiSelect })) })
   } else if (args.tool === WAIT_FOR_USER) {
-    const wait = checkWait(args.toolInput)
+    const wait = checkWait(args.toolInput, args.onTimeout)
     prompt = redact(wait.message, secrets)
     const options = wait.options.map((o) => redact(o, secrets))
     card = [{ question: prompt, header: WAIT_HEADERS[wait.reason]!, multiSelect: false, options: options.map((label) => ({ label, description: '' })) }]

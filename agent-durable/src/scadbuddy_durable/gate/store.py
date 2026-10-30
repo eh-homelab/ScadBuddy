@@ -257,12 +257,13 @@ async def _resolved(
         # A run's entry keeps its way up, the resolution as its last step (§4.6).
         action = _HOP_ACTIONS.get(outcome, outcome)
         hops.append(_hop(row["hop"], action, _actor(responder), reason))
+    # The tool and when it was asked, which the agent's attention rate limit counts (#5003).
     await conn.execute(
         """
         INSERT INTO ai_input_responses
           (request_id, session_id, kind, outcome, response, responder, reason, hops,
-           response_hash)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+           response_hash, tool, requested_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """,
         (
             rid,
@@ -274,6 +275,8 @@ async def _resolved(
             reason,
             json.dumps(hops),
             None if raw_response is None else response_hash(raw_response),
+            row["tool"],
+            row["created_at"],
         ),
     )
     person = responder.get("kind") != "system"

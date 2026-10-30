@@ -940,9 +940,11 @@ Spec §14.3: same image, two entrypoints. #4773's audit (§14.5) is answered in 
 in place in `main.ts`, and `runtime/health.ts` is the worker's server; the wiring stays in
 `main.ts` rather than moving to `runtime/workers.ts` and `runtime/http.ts`, so this diff is
 the role switch alone (Step 6.3 rewrites that wiring anyway). `/readyz` waits for
-all four of the worker's queues, its `agent-tools.<hostname>` too. The last test above waits
-on #5003: an `AgentSession` turn opens no tab wait yet (`TurnHost` answers `NO_PARKS`), so
-there is no park to resolve; that park is built before Step 6.3.
+all four of the worker's queues, its `agent-tools.<hostname>` too. The last test above waited
+on #5003, which built the park (2026-10-30): a tab wait and `request_user_attention` open
+`wait_for_user` entries through `open_input`, and the hub's process ends a tab wait with the
+Update `tab_reconnected` (spec §14.5 item 2); the test is "a tab that drops and comes back on
+api resolves the worker's turn's tab_disconnected park".
 
 **Rollout:** the default is `all`, so nothing changes in prod until Step 6.2.
 

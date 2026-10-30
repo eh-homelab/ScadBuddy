@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
 import type { InputOutcome, Owner } from '../sessions/protocol.js'
 import { responseHash } from './canonical.js'
-import { OWNER_CHANGED_SIGNAL } from '../temporal/session/names.js'
+import { OWNER_CHANGED_SIGNAL, TAB_RECONNECTED_UPDATE } from '../temporal/session/names.js'
 import { CANCEL_INPUT_UPDATE, END_SIGNAL, GATE_REFUSED, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from './names.js'
 import type { PendingInputEntry } from './projection.js'
 import { REFUSALS, RespondRefusal, type RefusalCode, type Role } from './validate.js'
@@ -123,6 +123,16 @@ export class DurableGate {
     return this.#call(this.#cancelTimeoutMs, () =>
       handle.executeUpdate<'cancelled' | 'none', [{ reason: string }]>(CANCEL_INPUT_UPDATE, { args: [{ reason }] }),
     )
+  }
+
+  /**
+   * #5003: an AgentSession session's tab is connected again, so its workflow ends the session's
+   * pending `tab_disconnected` entries (`tab_reconnected`); how many. Only a unified session's
+   * workflow has the Update: DurableSession's tab waits are its own (agent-durable).
+   */
+  async tabReconnected(sessionId: string): Promise<number> {
+    const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
+    return this.#call(this.#timeoutMs, () => handle.executeUpdate<number, [Record<string, never>]>(TAB_RECONNECTED_UPDATE, { args: [{}] }))
   }
 
   /** The cancel-only `interrupt` Signal: recorded in history even while no worker runs. */

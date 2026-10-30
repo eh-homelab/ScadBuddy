@@ -14,6 +14,7 @@ import { connectDatabase, type Database } from '../src/db.js'
 import { PgEventListener } from '../src/events/pgListener.js'
 import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
+import { ATTENTION_TOOL } from '../src/harness/questions.js'
 import { runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { originPolicy } from '../src/http/origins.js'
@@ -524,5 +525,39 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     expect(fake.messageCalls()).toHaveLength(asked)
     expect(m.warm.size()).toBe(1)
     expect(spawned).toBe(1)
+  })
+
+  // #5003: an attention request is an MCP tool's call, whose released result cannot interrupt the
+  // turn as canUseTool's refusal does: its release stops the turn, and the continuation says how
+  // it ended in the words the tool would have returned.
+  const asksForAttention = (input: Record<string, unknown>, reply: string) => (r: RecordedRequest) =>
+    lastMessage(r).includes("paused waiting for their reply") ? { text: reply } : lastMessage(r).includes('tool_result') ? { text: 'waiting' } : { toolUse: { name: ATTENTION_TOOL, input } }
+
+  it('a released attention request resumes with the reply, in the words request_user_attention returns', async () => {
+    script = asksForAttention({ reason: 'blocked', message: 'Shall I go on?', options: ['Go', 'Stop'] }, 'going')
+    const { started, entry } = await released('work')
+    expect(entry).toMatchObject({ kind: 'answer', tool: 'wait_for_user', attention: { reason: 'blocked', on_timeout: 'proceed' } })
+    const asked = fake.messageCalls().length
+    expect((await respond(entry.id, { kind: 'answer', choice: 'Go' })).status).toBe(200)
+    expect(await started.turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(spawned).toBe(2)
+    expect(fake.messageCalls().slice(asked)).toHaveLength(1)
+    const told = lastMessage(fake.messageCalls().at(-1)!)
+    expect(told).toContain(`Your request for the user's attention (id ${entry.id.split(':').at(-1)}) was paused waiting for their reply. answered: the user replied \\"Go\\"`)
+    // The release stopped the turn: no request answered the released call's result.
+    expect(fake.messageCalls().map(lastMessage).filter((last) => last.includes('the turn paused, and you will be told how it ended'))).toEqual([])
+  })
+
+  it("a released attention request whose `stop` timer fires ends the turn, and the model is not asked again", async () => {
+    script = asksForAttention({ reason: 'blocked', message: 'Need you', timeout_s: 10, on_timeout: 'stop' }, 'too late')
+    const { started, id } = await released('work')
+    const asked = fake.messageCalls().length
+    expect(await started.turn!.done).toMatchObject({ kind: 'interrupted' })
+    expect(fake.messageCalls().length).toBe(asked)
+    expect(spawned).toBe(1)
+    const errors = (await db.sql<{ event: string }[]>`SELECT event FROM ai_session_events WHERE session_id = ${id} ORDER BY seq`)
+      .map((r) => JSON.parse(r.event) as { type: string; message?: string })
+      .filter((e) => e.type === 'error')
+    expect(errors.at(-1)?.message).toBe('the turn ended: nobody replied to the attention request in 10 s (on_timeout: stop)')
   })
 })

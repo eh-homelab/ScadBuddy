@@ -392,6 +392,10 @@ async function respondDurable(
 async function repeated(sessions: SessionManager, requestId: string, body: RespondBody, principal: Owner): Promise<RespondResult | undefined> {
   const done = await sessions.projection.recorded(requestId)
   if (!done || done.kind !== body.kind) return undefined
+  // #815 §2: "I'm back" to a tab wait the tab's return already ended (an AgentSession's, #5003)
+  // is the no-op success a classic one's is (#1538).
+  const reconnected = done.outcome === 'cancelled' && (done.response as { reconnected?: unknown } | null)?.reconnected === true
+  if (reconnected && body.kind === 'answer' && BACK_REPLIES.includes(body.choice ?? body.text ?? '')) return { id: requestId, kind: 'answer', outcome: 'answered' }
   // `role` is left out on purpose, though respondUpdateId hashes it: the recorded
   // responder must be this principal, and one principal answers a request in one role.
   if (done.responder.kind !== principal.kind || done.responder.id !== principal.id) return undefined

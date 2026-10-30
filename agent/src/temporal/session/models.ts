@@ -48,6 +48,9 @@ export type OpenInputArgs = { turn_id: string; call: { id: string; name: string;
  */
 export type OpenInputAnswer = { request_id: string; resolution?: Resolution }
 
+/** The `tab_reconnected` Update's argument: every tab wait of the session, or only `request_id`'s (a turn's own early check). */
+export type TabReconnectedArgs = { request_id?: string }
+
 /** The `withdraw_input` Update's argument: the call of the running turn whose entry nothing waits on any more. */
 export type WithdrawInputArgs = { turn_id: string; tool_use_id: string; reason: string }
 

@@ -22,6 +22,7 @@ import {
   ACQUIRE_WORKER_ACTIVITY,
   NO_CAPACITY,
   OPEN_INPUT_UPDATE,
+  TAB_RECONNECTED_UPDATE,
   OWNER_CHANGED_SIGNAL,
   SESSION_GATE_ACTIVITIES as GATE,
   RELEASE_WORKER_ACTIVITY,
@@ -658,6 +659,45 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     await handleOf(id).result()
   })
 
+  it('an attention request may name on_timeout stop, and `tab_reconnected` ends only the tab waits, as the system', async () => {
+    const id = randomUUID()
+    const turnHold = held()
+    let opens: { request_id: string; resolution?: unknown }[] = []
+    runTurn = async (input) => {
+      const handle = env.client.workflow.getHandle(sessionWorkflowId(input.sessionId))
+      const open = (call: string, wait: Record<string, unknown>) =>
+        handle.executeUpdate<{ request_id: string; resolution?: unknown }, [OpenInputArgs]>(OPEN_INPUT_UPDATE, {
+          args: [{ turn_id: input.turnId, call: { id: call, name: 'wait_for_user', input: { message: 'Need you', ...wait } } }],
+        })
+      // Each as TurnHost opens it (#5003): the model's own request, and a browser call's tab wait.
+      opens = [await open('toolu_a', { reason: 'blocked', timeout_s: 600, on_timeout: 'stop' }), await open('tab:toolu_b', { reason: 'tab_disconnected', timeout_s: 300 })]
+      await turnHold.promise
+      return { status: 'done', hostQueue: '' }
+    }
+    await send(env.client, id, message('t1'))
+    const turnRun = await runIdOf(id)
+    await poll(() => opens.length, 2)
+    // Both parked: `stop` is an AgentSession's to name (gate/entry.ts TURN_ON_TIMEOUT).
+    expect(opens.map((o) => o.resolution)).toEqual([undefined, undefined])
+    expect(opened.map((o) => o.attention)).toEqual([
+      { reason: 'blocked', on_timeout: 'stop' },
+      { reason: 'tab_disconnected', on_timeout: 'proceed' },
+    ])
+    expect(await handleOf(id).executeUpdate<number, [Record<string, never>]>(TAB_RECONNECTED_UPDATE, { args: [{}] })).toBe(1)
+    expect(resolved).toEqual([
+      expect.objectContaining({ requestId: opens[1]!.request_id, outcome: 'cancelled', responder: expect.objectContaining({ kind: 'system' }), response: { reconnected: true } }),
+    ])
+    // The other is still the user's to answer; once both have ended, a second tab_reconnected ends nothing.
+    expect((await handleOf(id).query<{ id: string }[]>(PENDING_INPUT_QUERY)).map((e) => e.id)).toEqual([opens[0]!.request_id])
+    await handleOf(id).executeUpdate(RESPOND_UPDATE, { args: [{ request_id: opens[0]!.request_id, response: { kind: 'answer', choice: "I'm here" }, responder: OWNER, role: 'browser' }] })
+    expect(await handleOf(id).executeUpdate<number, [Record<string, never>]>(TAB_RECONNECTED_UPDATE, { args: [{}] })).toBe(0)
+    turnHold.release()
+    await poll(() => finished.map((f) => f.turnId), ['t1'])
+    await record('attention_tab', id, turnRun)
+    await handleOf(id).signal('end')
+    await handleOf(id).result()
+  })
+
   it('replays its recorded histories', async () => {
     const id = randomUUID()
     const hold = held()
@@ -681,7 +721,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       for (const [name, history] of Object.entries(recorded)) await writeFile(new URL(`${name}.json`, FIXTURES), `${historyToJSON(history)}\n`)
     }
     const names = (await readdir(FIXTURES)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length))
-    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home']))
+    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home', 'attention_tab']))
     const fixtures = await Promise.all(
       names.map(async (name) => ({
         workflowId: `fixture-${name}`,

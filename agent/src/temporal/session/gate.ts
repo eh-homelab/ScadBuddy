@@ -11,7 +11,7 @@ import {
   TemporalFailure,
 } from '@temporalio/workflow'
 import type { Duration } from '@temporalio/common'
-import { ASK_USER, buildEntry, DEFAULT_TIMEOUT_S, MalformedAnswerInputError } from '../../gate/entry.js'
+import { ASK_USER, buildEntry, DEFAULT_TIMEOUT_S, MalformedAnswerInputError, RECONNECTED_REASON, RECONNECTED_RESPONSE } from '../../gate/entry.js'
 import { durableRequestId } from '../../gate/ids.js'
 import { cut } from '../../gate/limits.js'
 import { refusal } from '../../gate/refusal.js'
@@ -101,6 +101,8 @@ export type SessionGateOptions = {
   settings?: GateSettings
   /** How long a flow turn's call waits for the run grant's verdict before it parks; default one minute. */
   grantCheckWait?: Duration
+  /** Whether a `wait_for_user` call may name `on_timeout` `wait` or `stop` (gate/entry.ts `BuildEntryArgs.onTimeout`); never, when absent. */
+  onTimeout?: (onTimeout: string) => boolean
 }
 
 type Parked = {
@@ -334,6 +336,7 @@ export class SessionGate {
         sessionOwner: { kind: owner.kind, id: owner.id },
         sessionCreator: { kind: creator.kind, id: creator.id },
         inRun: escalation,
+        ...(this.#opts.onTimeout ? { onTimeout: this.#opts.onTimeout } : {}),
       })
     } catch (err) {
       // Refused to the model, never parked; the error is not kept.
@@ -430,6 +433,24 @@ export class SessionGate {
     const parked = [...this.#parked.values()].find((p) => p.callId === callId)
     if (!parked || parked.entry.state !== 'pending') return false
     return await this.#resolve(parked, 'cancelled', SYSTEM, undefined, reason, true)
+  }
+
+  /**
+   * #815 §2, #5003: the session's tab is connected again, so its pending `tab_disconnected`
+   * entries (only `request_id`'s, when given) end `cancelled` by the system, their response
+   * `{reconnected: true}` (RECONNECTED_RESPONSE), never an answer: the turn reads the row and
+   * tells the call so. Sent by the process whose hub sees the tab (sessions/manager.ts
+   * resolveTabWaits), or by the turn's own early check. How many it ended.
+   */
+  async reconnected(requestId?: string): Promise<number> {
+    const waits = [...this.#parked.values()].filter(
+      (p) => p.attention?.reason === 'tab_disconnected' && p.entry.state === 'pending' && (requestId === undefined || p.entry.id === requestId),
+    )
+    let ended = 0
+    for (const parked of waits) {
+      if (await this.#resolve(parked, 'cancelled', SYSTEM, RECONNECTED_RESPONSE, RECONNECTED_REASON, false)) ended++
+    }
+    return ended
   }
 
   /** How the entry ended, once it has. */

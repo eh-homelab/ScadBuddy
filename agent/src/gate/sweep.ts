@@ -132,8 +132,8 @@ export async function cancelOrphanedEntries(
         RETURNING request_id, session_id, kind, tool, summary, input_hash, requested_by, created_at`
       if (!row) return undefined
       await tx`
-        INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder, reason)
-        VALUES (${row.request_id}, ${row.session_id}, ${row.kind}, 'cancelled', ${tx.json(SYSTEM_ACTOR)}, ${ORPHAN_REASON})`
+        INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder, reason, tool, requested_at)
+        VALUES (${row.request_id}, ${row.session_id}, ${row.kind}, 'cancelled', ${tx.json(SYSTEM_ACTOR)}, ${ORPHAN_REASON}, ${row.tool}, ${row.created_at})`
       const events: ServerEvent[] = [
         row.kind === 'approval'
           ? event({ type: 'approval.resolved', sessionId: row.session_id, id: row.request_id, approved: false, decision: 'cancelled', reason: ORPHAN_REASON })
