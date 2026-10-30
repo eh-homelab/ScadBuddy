@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test'
 
-// Settings → MCP authentication (#251), against the msw stand-in for the agent
+// Settings → MCP access → Auth mode (#251), against the msw stand-in for the agent
 // service's /api/v1/ai/mcp/auth (src/mocks/features/mcpTokens.ts).
 
-test.describe('MCP authentication', () => {
+test.describe('Auth mode (MCP access)', () => {
   test.skip(
     !!process.env.E2E_BASE_URL,
     'msw-backed; the real stack is covered by real-backend.spec.ts',

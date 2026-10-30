@@ -25,7 +25,7 @@ import { Label } from '@/components/ui/label'
 import { ChoiceSelect, LoadingLines, SettingBody, SettingCard, Tip } from './settings/form'
 import { Spinner } from './ui/spinner'
 
-// #251 — Settings → "MCP access tokens": mint, list and revoke the bearer tokens an
+// #251 — Settings → MCP access → Tokens: mint, list and revoke the bearer tokens an
 // outside MCP client presents at /mcp (AI design spec §8.1, §8.3). The agent service
 // serves `/api/v1/ai/mcp-tokens` and keeps only a token's SHA-256, so the plaintext
 // exists in the browser once, in the answer to the create request, and only in this
@@ -133,7 +133,7 @@ function TokenRow({ token, onRevoke }: { token: McpToken; onRevoke: (token: McpT
 
 export function McpTokensSection() {
   const listState = useAsync(() => api.listMcpTokens(), [])
-  // The mode as "MCP authentication" last saved it, wherever on the page that is (#1921):
+  // The mode as Auth mode last saved it, wherever on the page that is (#1921):
   // newer than the one this list was loaded with.
   const authVersion = useMcpAuthVersion()
   const auth = useAsync(() => api.getMcpAuth(), [authVersion])

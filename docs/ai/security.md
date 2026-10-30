@@ -47,7 +47,7 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
   `/mcp` answers 503 before any token is looked at (`app.ts`), and `main.ts` wires
   `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
   the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
-- **Minting, listing and revoking** are Settings → MCP access → "MCP access tokens" (shown only
+- **Minting, listing and revoking** are Settings → MCP access → **Tokens** (shown only
   where `useAiAvailability()` says AI is available, that is, once a Claude credential is saved)
   ([`frontend/src/components/McpTokensSection.tsx`](../../frontend/src/components/McpTokensSection.tsx))
   over `/api/v1/ai/mcp-tokens`
@@ -1068,8 +1068,8 @@ its decider as the principal.
 - **Reading it.** `GET /api/v1/ai/audit` (`routes/audit.ts`) behind `uiReadProblem`,
   newest first, filtered by kind, outcome, surface, action, session, principal and time,
   paged by an id cursor (`next` → `before`). `PUT /api/v1/ai/audit/settings` behind
-  `uiRequestProblem`. The UI is Settings → **AI activity**
-  ([`frontend/src/components/assistant/AiAuditSection.tsx`](../../frontend/src/components/assistant/AiAuditSection.tsx)).
+  `uiRequestProblem`. The UI is Settings → Audits → **AI activity**
+  ([`frontend/src/components/audits/AiActivityLog.tsx`](../../frontend/src/components/audits/AiActivityLog.tsx)).
 - **Recording never blocks the action.** A failed insert goes to the log
   (`onError`); refusing to act would let a database blip stop every session, and the
   table lives in the same database as what the actions touch.

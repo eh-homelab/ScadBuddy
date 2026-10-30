@@ -18,7 +18,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { ChoiceSelect, LoadingLines, SettingBody, SettingCard } from './settings/form'
 import { Spinner } from './ui/spinner'
 
-// #251 — Settings → "MCP authentication": whether an outside MCP client needs a token
+// #251 — Settings → MCP access → Auth mode: whether an outside MCP client needs a token
 // at /mcp, and how far an anonymous caller may go when it does not (AI design spec
 // §8.3). The agent service keeps both in `ai_settings` and reads them on every /mcp
 // request, so a save applies to the next call.

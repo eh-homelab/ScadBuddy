@@ -466,7 +466,7 @@ match `SCADBUDDY_PUBLIC_URL`.
 ### 4.1 MCP access tokens
 
 An outside MCP client authenticates to `/mcp` with a bearer token (`bearer` auth mode,
-spec §8.3). Tokens are managed in Settings → MCP access → **MCP access tokens**, which calls the
+spec §8.3). Tokens are managed in Settings → MCP access → **Tokens**, which calls the
 routes in `registerMcpTokenRoutes()` in
 [`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts). Tokens are
 stored in `ai_mcp_tokens` (§7). The Settings section renders only where
@@ -650,7 +650,7 @@ keep working. The design and the specifications followed are in spec §8.3 (`oid
   MCP client with its redirect URI (Claude Code uses a loopback redirect), and give the
   client ID to the MCP client's configuration.
 
-**In ScadBuddy.** Settings → MCP access → "MCP sign-in (OIDC)" (the section appears where the agent
+**In ScadBuddy.** Settings → MCP access → **OIDC sign-in** (the section appears where the agent
 service is available), or the API it uses:
 
 ```bash
@@ -1235,7 +1235,7 @@ A value outside those lists fails closed: `bearer`, or a `read` cap. While the m
 `disabled`, the agent logs `mcp auth: MCP auth is DISABLED ...` with the cap. It logs
 this once, and again after any change to either key.
 
-Change them in Settings → MCP access → **MCP authentication** (shown where AI is available, beside
+Change them in Settings → MCP access → **Auth mode** (shown where AI is available, beside
 the access tokens), which calls `GET`/`PUT /api/v1/ai/mcp/auth`
 ([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)). The
 choice is "Require an access token" (`bearer`) or "Allow calls without a token"
@@ -1470,7 +1470,7 @@ call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
   replica that ran the call, under `durable-turns/flow-<id>/http/`, removed by every
   pod's hourly sweep after 7 days (#2496); that sweep also clears a `durable-turns/<id>/`
   directory a pod left before #2374.
-- Every request is listed in Settings → **AI activity** under **HTTP requests**, with
+- Every request is listed in Settings → Audits → **AI activity** under **HTTP requests**, with
   its method, host, status and size. A request whose body was saved has a **View /
   download body** link (#1292): plain text and JSON open as text, anything else
   downloads. It works while the body is among the session's 10 newest, on the replica

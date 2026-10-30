@@ -454,7 +454,7 @@ assistant panel.
 
 ### Adding the Claude credential
 
-The assistant panel, MCP access tokens and plugins show only once a credential is saved
+The assistant panel, MCP access **Tokens** and plugins show only once a credential is saved
 ([operating.md §4](ai/operating.md#4-setting-up-the-claude-credential),
 [AI README](ai/README.md#what-the-ai-integration-is-today)).
 
@@ -473,7 +473,7 @@ turns per reply) and **Assistant images**. The assistant's HTTP request tool is 
 **Make an HTTP request** row (`http_request`) of **Settings → Tools & plugins → Built-in**,
 on its **HTTP requests** card: **By call (default)** runs GET and HEAD at once and waits
 for your approval on anything else, and **Enabled** turns the tool off or on (see
-[Tool access](#tool-access)). **AI activity** is the log of what the assistant did.
+[Tool access](#tool-access)). **AI activity** is the log of what the assistant did, under **Settings → Audits**.
 
 ### The assistant panel
 
@@ -558,7 +558,7 @@ Tokens** ([operating.md §4.1](ai/operating.md#41-mcp-access-tokens)),
 or through your identity provider when the operator has turned on **MCP sign-in
 (OIDC)** ([operating.md §6a](ai/operating.md#6a-mcp-sign-in-with-oidc)).
 
-1. Under **MCP access tokens**, give the token a name ("Claude Desktop on my laptop"),
+1. Under **Settings → MCP access → Tokens**, give the token a name ("Claude Desktop on my laptop"),
    an **Access** level (Read, Write or Outward) and an expiry, and press **Create
    token**. Copy it then: it is shown once. **Revoke** ends it. Outward actions still
    wait for a human's approval in ScadBuddy, whatever the token allows.
@@ -581,7 +581,7 @@ or through your identity provider when the operator has turned on **MCP sign-in
 
 3. **Claude Desktop.** Its custom connectors take only a URL and sign in with OAuth
    ([Anthropic help](https://support.claude.com/en/articles/11175166-getting-started-with-custom-connectors-using-remote-mcp)),
-   so they work only with MCP sign-in (OIDC) on: add `https://scadbuddy.example/mcp`
+   so they work only with **OIDC sign-in** on: add `https://scadbuddy.example/mcp`
    as a custom connector. With a token instead, add the server to
    `claude_desktop_config.json`
    ([connecting local servers](https://modelcontextprotocol.io/docs/develop/connect-local-servers))

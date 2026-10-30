@@ -5,7 +5,7 @@ import { renderSettingsSection } from '../testing'
 import { Component as McpAuthMode } from './mcp-auth-mode'
 import { Component as McpAccessTokens } from './mcp-access-tokens'
 
-// #251 — "MCP access tokens" talks to the agent service, so Settings shows it only
+// #251 — Tokens talks to the agent service, so Settings shows it only
 // where the AI features are available (`useAiAvailability()`), as the assistant does.
 
 const availability = vi.hoisted(() => ({ available: false }))
@@ -21,7 +21,7 @@ describe('MCP access: the AI availability gate', () => {
     vi.restoreAllMocks()
   })
 
-  it('hides MCP access tokens, and asks the agent service nothing, when AI is unavailable', async () => {
+  it('hides Tokens, and asks the agent service nothing, when AI is unavailable', async () => {
     const list = vi.spyOn(api, 'listMcpTokens')
     const auth = vi.spyOn(api, 'getMcpAuth')
     renderSettingsSection(
@@ -39,7 +39,7 @@ describe('MCP access: the AI availability gate', () => {
     expect(auth).not.toHaveBeenCalled()
   })
 
-  it('shows MCP access tokens when AI is available', async () => {
+  it('shows Tokens when AI is available', async () => {
     availability.available = true
     renderSettingsSection(
       <>
@@ -52,7 +52,7 @@ describe('MCP access: the AI availability gate', () => {
     expect(await screen.findByRole('list', { name: 'Tokens' })).toBeInTheDocument()
   })
 
-  it('shows MCP authentication beside the tokens, and the token list follows a saved mode', async () => {
+  it('shows Auth mode beside the tokens, and the token list follows a saved mode', async () => {
     availability.available = true
     const { user } = renderSettingsSection(
       <>

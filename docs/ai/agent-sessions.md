@@ -158,8 +158,8 @@ per-token grant (§6), and never for its own calls or sessions."
   (`agent/src/db/migrations/20260929T0249Z_mcp_token_approval_grant.sql`), off for
   every token. Mint a token with it through `POST /api/v1/ai/mcp-tokens`
   (`{"name":…, "tier":"outward", "approval_grant":true}`,
-  [operating.md §4.1](operating.md#41-mcp-access-tokens)), or in Settings → "MCP access
-  tokens", whose checkbox shows only for Outward and is labelled with the grant's whole
+  [operating.md §4.1](operating.md#41-mcp-access-tokens)), or in Settings → MCP access →
+  **Tokens**, whose checkbox shows only for Outward and is labelled with the grant's whole
   scope, "This token can approve or deny any agent's outward action, in any session"
   (#804); a token holding it carries an "Approves for any session" badge. Only an `outward` token can
   hold it: the route answers 400 otherwise, and the table's `CHECK` refuses it. It
