@@ -83,7 +83,7 @@ function findOne(role: string, name: string, index: number | undefined): Element
 function staysPut(target: string, from: string): boolean {
   const at = target.indexOf('#')
   if (at === -1 || target.slice(0, at) !== from) return false
-  const pathname = from.split('?')[0]
+  const pathname = from.split('?')[0] ?? from
   if (!pathname.startsWith('/settings')) return true
   const hash = target.slice(at)
   return `${pathname}${hash}` === `/settings/${resolveLocation(pathname, hash).area}${hash}`
