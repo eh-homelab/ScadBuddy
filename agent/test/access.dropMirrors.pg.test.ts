@@ -41,7 +41,7 @@ describe.skipIf(skip !== '')(`the mirror-drop migration${skip}`, () => {
     ).toEqual([])
   })
 
-  it('deletes the four old keys and no other', async () => {
+  it('deletes the old keys (the four tool-access keys and builtin_tools.claude) and no other', async () => {
     await setting('builtin_tools.scadbuddy', { tool_tiers: {} })
     await setting('printer_camera_enabled', false)
     await setting('http_request_enabled', false)
@@ -50,7 +50,7 @@ describe.skipIf(skip !== '')(`the mirror-drop migration${skip}`, () => {
     await setting('builtin_tools.claude', {})
     await migrate(db.sql, MIGRATIONS)
     const keys = await db.sql`SELECT key FROM ai_settings ORDER BY key`
-    expect(keys.map((k) => k.key)).toEqual(['builtin_tools.claude', 'model'])
+    expect(keys.map((k) => k.key)).toEqual(['model'])
   })
 
   it('leaves every migration:2171 row as it is', async () => {

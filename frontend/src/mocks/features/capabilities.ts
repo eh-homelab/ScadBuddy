@@ -31,7 +31,7 @@ import {
  * #2171 — the agent's capabilities tree (`/api/v1/ai/capabilities`, agent/src/routes/capabilities.ts,
  * access/capabilities.ts, access/providers.ts). The four built-in sources keep their own rows here;
  * the remote sources are read from `../aiPlugins.ts` on every request and written back through
- * `setRemotePluginAccess`, as the agent's `PluginRepo` dual-writes, so `GET /plugins` agrees. A remote
+ * `setRemotePluginAccess`, as the agent's `PluginRepo` writes the `ai_access` rows that `GET /plugins` reads, so the two agree. A remote
  * source lists its tools only after a refresh (`toolsFor`). The package sources (`package:<name>`,
  * agent access/packageProvider.ts, #4757) are read from `packageList()` too: their switch is the
  * package's `enabled` (`setPackageEnabled`), and only an approved pin has one; their items are the

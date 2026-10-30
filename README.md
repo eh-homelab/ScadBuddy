@@ -1294,9 +1294,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     takes `off` or `outward` only. When two tools end up with the same name,
     both are hidden from the model and fixed `off`, and the test marks them
     `collision`.
-  - For one release (until #4828), `tool_tiers` and `disabled_tools` stay on
-    `POST /plugins` and `PATCH /plugins/{name}`, and the page's writes also
-    keep those columns of `ai_plugins` right for an older replica. The page
+  - `tool_tiers` and `disabled_tools` stay on `POST /plugins` and
+    `PATCH /plugins/{name}` until #781. They write `ai_access` only. The old
+    `ai_plugins` columns are no longer written, and #5014 drops them. The page
     itself writes through `/api/v1/ai/capabilities` (below and
     [`docs/ai/operating.md`, "The capabilities API"](docs/ai/operating.md#the-capabilities-api)).
   - New plugins start disabled (`enabled: true` on create is refused). Run

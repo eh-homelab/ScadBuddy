@@ -289,6 +289,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
 
       it("a URL-only update keeps every access row's author and time (#4828)", async () => {
+        // Guards PluginStore.writeAccess: it must not write the old columns from ai_access, which
+        // (with the old mirror trigger in place) would re-attribute every row to migration:2171.
         await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
         await db.sql`UPDATE ai_access SET updated_by = 'browser:browser', updated_at = now() - interval '1 day' WHERE source = 'remote:mem'`
         const rows = () =>

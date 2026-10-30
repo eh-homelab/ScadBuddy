@@ -1383,7 +1383,7 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   `agent/src/db/migrations/20261026T2200Z_access.sql` made the table.
   `20261026T2201Z_access_copy.sql` copied the old values into it (`updated_by` is
   `migration:2171`). `20261030T1020Z_access_drop_mirrors.sql` (#4828) dropped the two mirror
-  triggers and deleted the four `ai_settings` keys. The agent writes `ai_access` only. The
+  triggers and deleted the four `ai_settings` keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only. The
   `ai_plugins` columns stay in the schema, unread and unwritten, until a follow-up
   migration drops them. Rolling the agent back past #4838 is not supported: that build
   reads the deleted keys as absent, which means on. The copied `migration:2171` rows stay.

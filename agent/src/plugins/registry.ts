@@ -675,8 +675,7 @@ export class PluginStore implements PluginRepo {
         updatedBy(context),
         { enabled: false, tools: true },
       )
-      // writeTools wrote every tool row as new: the rows
-      // this write left as they were get their own author and time back.
+      // writeTools wrote every tool row as new: the rows this write left as they were get their own author and time back.
       const kept = before.filter((r) => r.item !== tool)
       if (kept.length > 0) {
         await tx`

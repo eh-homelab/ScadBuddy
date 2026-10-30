@@ -217,12 +217,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
   })
 
   it('an access write writes none of the old ai_settings keys (#4828)', async () => {
-    const withTools = new AccessStore(db.sql, audit)
-    const tools = new BuiltInTools(withTools)
+    const tools = new BuiltInTools(store)
     await tools.update(tools.named(OWN_PLUGIN_NAME)!, { tool_tiers: { get_model: 'outward' }, disabled_tools: ['list_models'] }, ctx)
-    await withTools.setItem(SCAD, 'get_printer_camera', 'off', ctx)
-    await withTools.setEnabled('builtin:http', false, ctx)
-    await withTools.setEnabled('builtin:own-plugin', false, ctx)
+    await store.setItem(SCAD, 'get_printer_camera', 'off', ctx)
+    await store.setEnabled('builtin:http', false, ctx)
+    await store.setEnabled('builtin:own-plugin', false, ctx)
     expect(
       await db.sql`SELECT key FROM ai_settings WHERE key IN ('builtin_tools.scadbuddy', 'printer_camera_enabled', 'http_request_enabled', 'scadbuddy_plugin_enabled')`,
     ).toEqual([])
