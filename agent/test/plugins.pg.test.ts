@@ -162,11 +162,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(loaded.problems).toEqual([expect.stringMatching(/plugin moved was not loaded: .*169\.254\.169\.254/)])
       })
 
+      // The old ai_plugins columns keep their defaults: nothing writes them any more (#4828).
+      const DEFAULTS = { enabled: false, tool_tiers: {}, disabled_tools: [] }
       const accessRows = async (name: string) =>
         db.sql<{ item: string; access: string }[]>`
           SELECT item, access FROM ai_access WHERE source = ${`remote:${name}`} ORDER BY item`
 
-      it('stores tool_tiers, disabled_tools and enabled in ai_access, and keeps writing them to ai_plugins for one release', async () => {
+      it('stores tool_tiers, disabled_tools and enabled in ai_access only; the old ai_plugins columns keep their defaults', async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { c: 'write' } }, kek)
         expect(await accessRows('mem')).toEqual([
           { item: '*', access: 'off' },
@@ -180,7 +182,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         ])
         const [old] = await db.sql<{ enabled: boolean; tool_tiers: unknown; disabled_tools: string[] }[]>`
           SELECT enabled, tool_tiers, disabled_tools FROM ai_plugins WHERE name = 'mem'`
-        expect(old).toEqual({ enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
+        expect(old).toEqual(DEFAULTS)
         // Disabled wins over a tier for the same tool.
         await store.update('mem', { tool_tiers: { a: 'read', b: 'read' } }, kek)
         expect(await accessRows('mem')).toEqual([
@@ -232,12 +234,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
         return row
       }
 
-      it('setToolAccess writes ai_plugins and ai_access, so an older replica reads the same', async () => {
+      it('setToolAccess writes ai_access only', async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
         await store.setToolAccess('mem', 'b', 'off', UI_CONTEXT)
         const summary = await store.setToolAccess('mem', 'a', 'read', UI_CONTEXT)
         expect(summary).toMatchObject({ tool_tiers: { a: 'read' }, disabled_tools: ['b'], enabled: false })
-        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
+        expect(await oldColumns('mem')).toEqual(DEFAULTS)
         expect(await rowsBy('mem')).toEqual([
           { item: '*', access: 'off', updated_by: 'system' },
           { item: 'a', access: 'read', updated_by: 'browser:browser' },
@@ -245,12 +247,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
         ])
         // A tier over a disabled tool moves it out of disabled_tools.
         await store.setToolAccess('mem', 'b', 'write', UI_CONTEXT)
-        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: { a: 'read', b: 'write' }, disabled_tools: [] })
+        expect(await oldColumns('mem')).toEqual(DEFAULTS)
         await expect(store.setToolAccess('gone', 'a', 'off', UI_CONTEXT)).rejects.toMatchObject({ name: 'PluginError', status: 404 })
         // A tier needs a name Claude Code keeps; off takes any.
         await expect(store.setToolAccess('mem', 'files.list', 'read', UI_CONTEXT)).rejects.toMatchObject({ status: 400 })
         await store.setToolAccess('mem', 'files.list', 'off', UI_CONTEXT)
-        expect((await oldColumns('mem'))?.disabled_tools).toEqual(['files.list'])
+        expect(await oldColumns('mem')).toEqual(DEFAULTS)
       })
 
       it('setToolAccess refuses the 257th change of one kind in the page\'s words, not a field the page never shows (final review M7)', async () => {
@@ -304,15 +306,11 @@ describe.skipIf(!TEST_DATABASE_URL)(
       it('setToolAccess keeps a tool named __proto__ as its own key', async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
         await store.setToolAccess('mem', '__proto__', 'read', UI_CONTEXT)
-        const [row] = await db.sql<{ j: string }[]>`SELECT tool_tiers::text AS j FROM ai_plugins WHERE name = 'mem'`
-        expect(row?.j).toBe('{"__proto__": "read"}')
         expect(await rowsBy('mem')).toContainEqual({ item: '__proto__', access: 'read', updated_by: 'browser:browser' })
         // A write to another tool keeps it, and the summary names it.
         const summary = await store.setToolAccess('mem', 'other', 'write', UI_CONTEXT)
         expect(Object.hasOwn(summary.tool_tiers, '__proto__')).toBe(true)
         expect(summary.tool_tiers['__proto__']).toBe('read')
-        const [after] = await db.sql<{ j: string }[]>`SELECT tool_tiers::text AS j FROM ai_plugins WHERE name = 'mem'`
-        expect(after?.j).toBe('{"other": "write", "__proto__": "read"}')
         expect(await rowsBy('mem')).toContainEqual({ item: '__proto__', access: 'read', updated_by: 'browser:browser' })
       })
 
@@ -325,12 +323,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'on', updated_by: 'browser:browser' }])
       })
 
-      it('setToolAccess null removes the tool from both', async () => {
+      it('setToolAccess null removes the tool\'s row', async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
         await store.setToolAccess('mem', 'a', null, UI_CONTEXT)
         const summary = await store.setToolAccess('mem', 'b', null, UI_CONTEXT)
         expect(summary).toMatchObject({ tool_tiers: {}, disabled_tools: [] })
-        expect(await oldColumns('mem')).toEqual({ enabled: false, tool_tiers: {}, disabled_tools: [] })
+        expect(await oldColumns('mem')).toEqual(DEFAULTS)
         expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'off', updated_by: 'system' }])
       })
 
