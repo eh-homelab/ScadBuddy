@@ -20,8 +20,23 @@ function Snippet() {
   // The mode as Auth mode last saved it (#1921).
   const authVersion = useMcpAuthVersion()
   const auth = useAsync(() => api.getMcpAuth(), [authVersion])
+  // A failed read falls back to the mode the token list carries, as the Tokens card does.
+  const failed = auth.error !== undefined
+  const fallback = useAsync(
+    () => (failed ? api.listMcpTokens().then((list) => list.auth_mode) : Promise.resolve(null)),
+    [authVersion, failed],
+  )
   const token = useMintedMcpToken()
-  return <McpConnectSnippet publicUrl={settings.public_url} authMode={auth.data?.mode ?? null} token={token ?? undefined} />
+  // Nothing until the mode is known, so a header never shows and then goes (#781).
+  if (auth.loading && !auth.data) return null
+  if (failed && fallback.loading && fallback.data === undefined) return null
+  return (
+    <McpConnectSnippet
+      publicUrl={settings.public_url}
+      authMode={auth.data?.mode ?? fallback.data ?? null}
+      token={token ?? undefined}
+    />
+  )
 }
 
 /** The commands that connect an MCP client; shown only where the assistant is available (#251). */

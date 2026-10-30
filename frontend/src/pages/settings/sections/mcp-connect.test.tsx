@@ -99,6 +99,27 @@ describe('Connect snippet section', () => {
     expect(document.body.textContent).not.toContain(token)
   })
 
+  it('shows no snippet until the auth mode is read, so no header flashes for disabled', async () => {
+    setMcpAuthMode('disabled')
+    let release: () => void = () => {}
+    const real = api.getMcpAuth.bind(api)
+    vi.spyOn(api, 'getMcpAuth').mockImplementation(
+      () => new Promise((resolve) => (release = () => resolve(real()))),
+    )
+    renderSettingsSection(<McpConnect />, { route })
+    await waitFor(() => expect(api.getMcpAuth).toHaveBeenCalled())
+    expect(screen.queryByTestId('mcp-snippet-claude-code')).toBeNull()
+    release()
+    await waitFor(() => expect(snippet()).not.toContain('Authorization'))
+  })
+
+  it('falls back to the mode the token list reports when the auth read fails', async () => {
+    setMcpAuthMode('disabled')
+    vi.spyOn(api, 'getMcpAuth').mockRejectedValue(new Error('down'))
+    renderSettingsSection(<McpConnect />, { route })
+    await waitFor(() => expect(snippet()).toBe("claude mcp add --transport http scadbuddy 'https://scadbuddy.example/mcp'"))
+  })
+
   it('hides itself, and asks the agent nothing, while the assistant is unavailable', async () => {
     availability.available = false
     const auth = vi.spyOn(api, 'getMcpAuth')
