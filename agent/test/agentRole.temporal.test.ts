@@ -21,6 +21,7 @@ import { PgEventListener } from '../src/events/pgListener.js'
 import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { runHarness } from '../src/harness/run.js'
+import { callContext } from '../src/harness/callContext.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { queuesPolled } from '../src/runtime/health.js'
 import { roleParts } from '../src/runtime/role.js'
@@ -188,13 +189,27 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-agent-role-test-token' }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === SETTING_SESSION_MODE ? 'durable' : undefined) as T) },
-      // A browser call as the browser_* tools make it (tools/browser.ts): through this process's hub, for the turn's session.
-      mcpServers: (session) => ({
+      // A browser call as the browser_* tools make it (tools/browser.ts): through this process's hub, for the turn's
+      // session; one that finds no tab waits for it on the turn's gate, and is made once more when it is back.
+      mcpServers: (session, _principal, extras) => ({
         stub: createSdkMcpServer({
           name: 'stub',
           tools: [
-            tool('tab_probe', 'Reads the page in the ScadBuddy tab', {}, async () => {
-              const outcome = await p.tabs.call({ principal: owner, sessionId: session.id }, 'snapshot', {}, { signal: AbortSignal.timeout(20_000) })
+            tool('tab_probe', 'Reads the page in the ScadBuddy tab', {}, async (_args, extra) => {
+              const target = { principal: owner, sessionId: session.id! }
+              const call = () => p.tabs.call(target, 'snapshot', {}, { signal: AbortSignal.timeout(20_000) })
+              let outcome = await call()
+              const context = callContext(extra)
+              if (!outcome.ok && outcome.error.code === 'no_browser' && extras?.waitForTab && context.ok) {
+                const waited = await extras.waitForTab({
+                  tool: 'browser_snapshot',
+                  toolUseId: context.toolUseId,
+                  signal: context.signal,
+                  isBack: async (signal) => (await p.tabs.status(target, { signal })).attached,
+                })
+                if (!waited.back) return { content: [{ type: 'text', text: `no tab: ${waited.message}` }], isError: true }
+                outcome = await call()
+              }
               return { content: [{ type: 'text', text: JSON.stringify(outcome) }] }
             }),
           ],
@@ -374,5 +389,30 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
     expect(worker.m.warm.size()).toBe(1)
     await forgetSubject({ sql: api.pool.sql, client, keys }, `session-${id}`)
     await pollUntil(() => worker.m.warm.size(), 0, 10_000)
+  })
+
+  it("a tab that drops and comes back on api resolves the worker's turn's tab_disconnected park", async () => {
+    const api = await agentProcess('api')
+    const worker = await agentProcess('worker')
+    script = (r) => (conversation(r).includes('tool_result') ? { text: 'seen' } : { toolUse: { name: PROBE, input: {} } })
+    // No tab is connected: the worker's turn finds none, and waits for it through its workflow (#5003).
+    const { id, turn } = await startOn(api, 'look at the page')
+    await pollUntil(async () => (await db.sql<{ reason: string }[]>`SELECT attention->>'reason' AS reason FROM ai_pending_input WHERE session_id = ${id}`).map((r) => r.reason), ['tab_disconnected'])
+    expect(tabCalls).toEqual([])
+    const sent = vi.spyOn(api.m.durable!, 'tabReconnected')
+    // The tab connects to api, and the panel pairs it with the session: api's hub sees the session's tab again.
+    await tabOn(api)
+    api.tabs.pairSession(id, TAB)
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    const [response] = await db.sql<{ outcome: string; reason: string }[]>`SELECT outcome, reason FROM ai_input_responses WHERE session_id = ${id}`
+    expect(response).toEqual({ outcome: 'cancelled', reason: 'the ScadBuddy tab is connected again' })
+    // api's hub ended it (resolveTabWaits): its `tab_reconnected` ended the one wait.
+    expect(sent).toHaveBeenCalledWith(id)
+    expect(await sent.mock.results[0]!.value).toBe(1)
+    // The call made once more on the worker reached the tab on api, and the turn held its process throughout.
+    expect(tabCalls).toHaveLength(1)
+    expect(conversation(fake.messageCalls().at(-1)!)).toContain('the page, from the api process')
+    expect(worker.spawned).toBe(1)
+    expect(api.spawned).toBe(0)
   })
 })

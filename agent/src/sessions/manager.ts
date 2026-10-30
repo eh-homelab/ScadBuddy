@@ -335,10 +335,26 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
 
 /**
  * #815 §2: a session whose tab is connected again (bridge/hub.ts `onSessionTab`)
- * stops waiting for it. main.ts wires the hub with this.
+ * stops waiting for it. main.ts wires the hub with this, on the process that holds
+ * the tab (the `api` role's, runtime/role.ts). A classic turn's waits are its
+ * `ai_questions` rows, which a turn on any replica polls; an AgentSession turn's
+ * are entries of its workflow (#5003), which this sends `tab_reconnected` to when
+ * the projection lists one, so the turn on whichever worker holds it goes on.
  */
 export function resolveTabWaits(tabs: { onSessionTab: ((sessionId: string) => Promise<unknown>) | undefined }, sessions: SessionManager): void {
-  tabs.onSessionTab = (sessionId) => sessions.questions.reconnected(sessionId)
+  tabs.onSessionTab = async (sessionId) => {
+    const [classic, durable] = await Promise.allSettled([sessions.questions.reconnected(sessionId), durableTabWaits(sessions, sessionId)])
+    if (classic.status === 'rejected') throw classic.reason
+    if (durable.status === 'rejected') throw durable.reason
+    return classic.value + durable.value
+  }
+}
+
+/** An AgentSession's pending tab waits ended by its workflow (`tab_reconnected`); how many. */
+async function durableTabWaits(sessions: SessionManager, sessionId: string): Promise<number> {
+  const gate = sessions.durable
+  if (!gate || !isUuid(sessionId)) return 0
+  return (await sessions.projection.waitsForTab(sessionId)) ? gate.tabReconnected(sessionId) : 0
 }
 
 /**

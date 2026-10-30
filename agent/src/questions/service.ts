@@ -8,6 +8,7 @@ import { isUuid } from '../harness/stateDirs.js'
 import { loadDoneSummary } from './doneSummary.js'
 import { isDoneSummary, isNotDoneSummary } from './waiting.js'
 import { inputRequested, inputResolved, questionEntry } from '../gate/classic.js'
+import { WAIT_FOR_USER } from '../gate/entry.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import {
@@ -347,12 +348,15 @@ export class QuestionService {
             WHEN EXISTS (SELECT 1 FROM ai_approvals WHERE session_id = ${sessionId} AND decision IS NULL)
               THEN 'waiting_approval'
             WHEN turn_id IS NOT NULL AND lease_until > now() THEN 'running'
+            WHEN durable_turn_id IS NOT NULL THEN 'running'
             ELSE 'idle'
           END,
           updated_at = now()
       WHERE id = ${sessionId} AND status = 'waiting_input'
         AND NOT EXISTS (SELECT 1 FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL
                         AND ${isNotDoneSummary(tx)})
+        -- An AgentSession's entries are the workflow's (gate/store.ts), which sets the status back itself.
+        AND NOT EXISTS (SELECT 1 FROM ai_pending_input WHERE session_id = ${sessionId})
       RETURNING status`
     return row ? [event({ type: 'session.status', sessionId, status: row.status })] : []
   }
@@ -740,6 +744,64 @@ export class QuestionService {
     return row
   }
 
+  /**
+   * #815 §5's limits for an AgentSession turn's attention request (#5003), whose entry its
+   * workflow opens (sessions/turnHost.ts): the model's own request (`own`) against
+   * ATTENTION_RATE_LIMIT, a browser call's tab wait against TAB_WAIT_RATE_LIMIT, each counting
+   * this table's rows (as `gate` does) and the gate's `wait_for_user` entries, open
+   * (`ai_pending_input`) or resolved (`ai_input_responses`), a tab wait's call id
+   * `tab:<tool_use id>` (TurnHost's; any other entry is a model's own request, a DurableSession's
+   * `wait_for_user` among them, whatever its reason, as a classic row is told apart by its tool;
+   * agent-durable records no `tool` on its responses, so its resolved ones are not counted).
+   * Undefined when it may be asked; else the refusal the model reads,
+   * audited as `gate` audits one. The count holds `gate`'s lock, but the entry is written
+   * after it, by the workflow: two requests raised at once may both pass at the limit.
+   */
+  async attentionLimit(context: { sessionId: string; turnId: string; toolUseId: string; tool: string; reason: string; own: boolean }): Promise<string | undefined> {
+    const { own } = context
+    const tab = '%:tab:%'
+    const [recent] = await this.deps.sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
+      return tx<{ n: number }[]>`
+        SELECT
+          (SELECT count(*) FROM ai_questions
+           WHERE kind = 'attention' AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})
+             AND CASE WHEN ${own} THEN tool = ${ATTENTION_TOOL} AND ${isNotDoneSummary(tx)}
+                      ELSE attention_reason = 'tab_disconnected' AND tool <> ${ATTENTION_TOOL} END)
+          + (SELECT count(*) FROM ai_pending_input
+             WHERE tool = ${WAIT_FOR_USER} AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})
+               AND (request_id LIKE ${tab}) <> ${own})
+          + (SELECT count(*) FROM ai_input_responses
+             WHERE tool = ${WAIT_FOR_USER} AND requested_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})
+               AND (request_id LIKE ${tab}) <> ${own}) AS n`
+    })
+    const limit = own ? ATTENTION_RATE_LIMIT : TAB_WAIT_RATE_LIMIT
+    if (Number(recent?.n ?? 0) < limit) return undefined
+    const limited = own
+      ? `The user was not asked: at most ${ATTENTION_RATE_LIMIT} attention requests are sent in ` +
+        `${ATTENTION_RATE_WINDOW_S / 60} minutes. Say what you need in your reply instead.`
+      : `The user was not asked for the tab: at most ${TAB_WAIT_RATE_LIMIT} tab waits are opened in ` +
+        `${ATTENTION_RATE_WINDOW_S / 60} minutes. Carry on without the tab.`
+    const at = new Date()
+    await this.audited([
+      {
+        kind: 'question',
+        action: 'rate_limited',
+        surface: 'system',
+        actor: SYSTEM_ACTOR,
+        sessionId: context.sessionId,
+        turnId: context.turnId,
+        toolUseId: context.toolUseId,
+        tier: 'read',
+        outcome: 'refused',
+        detail: safeDetail(`${context.tool} attention request (${context.reason}): ${limited}`),
+        startedAt: at,
+        finishedAt: at,
+      },
+    ])
+    return limited
+  }
+
   /** The canUseTool question gate for one turn (harness/questions.ts QuestionGate). */
   gate(context: QuestionGateContext): QuestionGate {
     // `until`: a joiner asking again on its own keeps the deadline it was first asked with.
@@ -771,8 +833,9 @@ export class QuestionService {
         const none = { asked: false, superseded: [] as Resolved[], joined: undefined as string | undefined, limited: undefined as string | undefined }
         // Still this turn's, and still the user's: after a handoff mid-turn
         // the new owner is not asked, so nothing parks for them.
+        // An AgentSession turn (#5003) is the row's `durable_turn_id`; it posts only `done` summaries here.
         const [owner] = await tx<{ owner_kind: string }[]>`
-          SELECT owner_kind FROM ai_sessions WHERE id = ${sessionId} AND turn_id = ${turnId} FOR UPDATE`
+          SELECT owner_kind FROM ai_sessions WHERE id = ${sessionId} AND (turn_id = ${turnId} OR durable_turn_id = ${turnId}) FOR UPDATE`
         if (owner?.owner_kind !== 'browser') return { value: none, events: [] }
         const tail: ServerEvent[] = []
         let superseded: Resolved[] = []

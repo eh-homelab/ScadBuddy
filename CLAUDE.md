@@ -734,7 +734,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   any of them through, refusing a stale id, a resolved entry or a body of the wrong kind;
   a browser_* call that finds no tab in such a session parks the same way as a
   `tab_disconnected` request, resolved `reconnected` when the bridge sees the session's
-  tab again, `sessions/manager.ts` `waitForTab`, `bridge/hub.ts` `onSessionTab`);
+  tab again, `sessions/manager.ts` `waitForTab`, `bridge/hub.ts` `onSessionTab`; in an
+  AgentSession turn both park as the workflow's `wait_for_user` entry, `sessions/turnHost.ts`,
+  and the hub's process ends a tab wait with the Update `tab_reconnected`, #5003);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
   `src/api/schema.d.ts`.
   Tracing (#988): `src/telemetry.ts` is the `node --import` entry (Dockerfile `CMD`,

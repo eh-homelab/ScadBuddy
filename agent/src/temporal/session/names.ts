@@ -31,6 +31,8 @@ export const SESSION_GONE = 'SessionGone'
 export const OPEN_INPUT_UPDATE = 'open_input'
 /** The turn's activity no longer waits on a call it opened (its answer was lost, Claude Code dropped it): its entry is cancelled. */
 export const WITHDRAW_INPUT_UPDATE = 'withdraw_input'
+/** The session's tab is connected again (#5003): its pending `tab_disconnected` entries end (SessionGate.reconnected). */
+export const TAB_RECONNECTED_UPDATE = 'tab_reconnected'
 export const OWNER_CHANGED_SIGNAL = 'owner_changed'
 export const SEND_MESSAGE_UPDATE = 'send_message'
 export const TURN_QUERY = 'turn'

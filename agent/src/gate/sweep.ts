@@ -33,6 +33,8 @@ type Row = {
   input_hash: string | null
   requested_by: { label?: string } | null
   created_at: Date
+  /** `created_at::text`: microseconds, which a Date loses (gate/store.ts PendingRow). */
+  created_at_text: string
 }
 
 export type SweepDeps = {
@@ -129,11 +131,11 @@ export async function cancelOrphanedEntries(
     const done = await sql.begin(async (tx) => {
       const [row] = await tx<Row[]>`
         DELETE FROM ai_pending_input WHERE request_id = ${request_id}
-        RETURNING request_id, session_id, kind, tool, summary, input_hash, requested_by, created_at`
+        RETURNING request_id, session_id, kind, tool, summary, input_hash, requested_by, created_at, created_at::text AS created_at_text`
       if (!row) return undefined
       await tx`
-        INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder, reason)
-        VALUES (${row.request_id}, ${row.session_id}, ${row.kind}, 'cancelled', ${tx.json(SYSTEM_ACTOR)}, ${ORPHAN_REASON})`
+        INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder, reason, tool, requested_at)
+        VALUES (${row.request_id}, ${row.session_id}, ${row.kind}, 'cancelled', ${tx.json(SYSTEM_ACTOR)}, ${ORPHAN_REASON}, ${row.tool}, ${row.created_at_text}::timestamptz)`
       const events: ServerEvent[] = [
         row.kind === 'approval'
           ? event({ type: 'approval.resolved', sessionId: row.session_id, id: row.request_id, approved: false, decision: 'cancelled', reason: ORPHAN_REASON })

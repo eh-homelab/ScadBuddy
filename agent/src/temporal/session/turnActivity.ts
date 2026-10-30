@@ -2,8 +2,8 @@ import { Context } from '@temporalio/activity'
 import type { Client } from '@temporalio/client'
 import { sessionWorkflowId } from '../../gate/durable.js'
 import type { CancelReason, TurnBeat, TurnHost } from '../../sessions/turnHost.js'
-import type { OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from './models.js'
-import { OPEN_INPUT_UPDATE, SESSION_TURN_ACTIVITY, WITHDRAW_INPUT_UPDATE } from './names.js'
+import type { OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, TabReconnectedArgs, WithdrawInputArgs } from './models.js'
+import { OPEN_INPUT_UPDATE, SESSION_TURN_ACTIVITY, TAB_RECONNECTED_UPDATE, WITHDRAW_INPUT_UPDATE } from './names.js'
 
 // `session_turn` (spec 2026-10-13 §5.2), on a replica's session host queue only: TurnHost.run
 // under the activity's heartbeat. It heartbeats every HEARTBEAT_MS (the workflow's
@@ -17,7 +17,8 @@ import { OPEN_INPUT_UPDATE, SESSION_TURN_ACTIVITY, WITHDRAW_INPUT_UPDATE } from 
 // A call the turn parks (§5.4) is opened by the Update `open_input` on the session's own
 // workflow, and withdrawn by `withdraw_input`, sent with `client`, the service's client (its
 // data converter seals the payloads as the workflow's are): ordinary client use from an
-// activity. The call's tool_use id names each Update, so a re-sent one is the same Update.
+// activity. The call's tool_use id names each Update, so a re-sent one is the same Update. A tab
+// wait whose tab is back by the time it is recorded ends itself with `tab_reconnected` (#5003).
 
 export const HEARTBEAT_MS = 5_000
 
@@ -73,5 +74,7 @@ function gateUpdates(client: Client, sessionId: string) {
       ),
     withdrawInput: (args: WithdrawInputArgs) =>
       handle.executeUpdate<boolean, [WithdrawInputArgs]>(WITHDRAW_INPUT_UPDATE, { args: [args], updateId: `${WITHDRAW_INPUT_UPDATE}:${args.tool_use_id}` }),
+    reconnected: (requestId: string) =>
+      handle.executeUpdate<number, [TabReconnectedArgs]>(TAB_RECONNECTED_UPDATE, { args: [{ request_id: requestId }], updateId: `${TAB_RECONNECTED_UPDATE}:${requestId}` }),
   }
 }

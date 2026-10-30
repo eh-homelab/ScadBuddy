@@ -20,7 +20,9 @@ import { cut } from './limits.js'
 //
 // Beyond Python: every resolution (resolveInput, and the Reset cancel in openInput) also sends `NOTIFY scadbuddy_input, <request id>`, in the
 // transaction that deletes the row, so a waiter learns of a resolution without polling.
-// The channel is new; Python does not send it.
+// The channel is new; Python does not send it. Nor does Python resolve an entry with the response
+// `{reconnected: true}` (an AgentSession's tab wait, #5003), whose `question.resolved` says
+// `reconnected` as a classic one does.
 
 const PROTOCOL_VERSION = 1
 const PG_CHANNEL = 'scadbuddy_events'
@@ -231,12 +233,13 @@ async function resolved(
     // A run's entry keeps its way up, the resolution as its last step (§4.6).
     hops.push(hop(row.hop, HOP_ACTIONS[outcome] ?? outcome, actor(responder), reason))
   }
+  // The tool and when it was asked, which the attention rate limit counts once the pending row is gone (#5003).
   await tx`
     INSERT INTO ai_input_responses
-      (request_id, session_id, kind, outcome, response, responder, reason, hops, response_hash)
+      (request_id, session_id, kind, outcome, response, responder, reason, hops, response_hash, tool, requested_at)
     VALUES (${rid}, ${sid}, ${row.kind}, ${outcome},
             ${response === undefined || response === null ? null : tx.json(response as never)}::jsonb,
-            ${tx.json(responder)}, ${reason}, ${tx.json(hops)}, ${hash})`
+            ${tx.json(responder)}, ${reason}, ${tx.json(hops)}, ${hash}, ${row.tool}, ${row.created_at_text}::timestamptz)`
   const person = responder.kind !== 'system'
   const events: ServerEvent[] = []
   if (row.kind === 'approval') {
@@ -263,6 +266,8 @@ async function resolved(
         answered: outcome === 'answered',
         ...(answered ? { answers: [...(answers as unknown[])], by: responder } : {}),
         ...(reason && outcome !== 'answered' ? { reason } : {}),
+        // #5003: a tab wait the tab's return ended, as a classic one's event says it (questions/service.ts `reconnected`).
+        ...(outcome === 'cancelled' && (response as { reconnected?: unknown } | null | undefined)?.reconnected === true ? { reconnected: true } : {}),
       }),
     )
   }

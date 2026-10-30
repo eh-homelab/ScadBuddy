@@ -17,7 +17,7 @@ import {
   TimeoutFailure,
   workflowInfo,
 } from '@temporalio/workflow'
-import { ASK_USER } from '../../gate/entry.js'
+import { ASK_USER, WAIT_FOR_USER } from '../../gate/entry.js'
 import { END_SIGNAL, INTERRUPT_SIGNAL } from '../../gate/names.js'
 import type { Owner, ServerEvent } from '../../sessions/protocol.js'
 import type { RuntimeSettings } from '../../sessions/runtimeSettings.js'
@@ -34,6 +34,7 @@ import {
   type OpenInputAnswer,
   type OpenInputArgs,
   type SendAnswer,
+  type TabReconnectedArgs,
   type WithdrawInputArgs,
   type SessionStart,
   type SessionTurnInput,
@@ -53,6 +54,7 @@ import {
   SESSION_SETTINGS_ACTIVITY,
   SESSION_TURN_ACTIVITY,
   SHUTTING_DOWN_FAILURE,
+  TAB_RECONNECTED_UPDATE,
   TURN_QUERY,
   WITHDRAW_INPUT_UPDATE,
 } from './names.js'
@@ -70,6 +72,7 @@ import {
 //   open_input (Update, a call of the running turn)  <- new (§5.4): SessionGate.open
 //   withdraw_input (Update, a call it gave up on)    <- new: SessionGate.cancelCall
 //   owner_changed (Signal, a handoff)                <- new (§5.6): SessionGate.setOwner
+//   tab_reconnected (Update, the session's tab is back) <- new (#5003): SessionGate.reconnected
 //
 // Not here: `fork_point` (forking an AgentSession session is refused until phase 6) and
 // `segment_context` (no segment runner).
@@ -115,6 +118,7 @@ const ownerChangedSignal = defineSignal<[{ owner: Owner }]>(OWNER_CHANGED_SIGNAL
 const turnQuery = defineQuery<string | null>(TURN_QUERY)
 const openInputUpdate = defineUpdate<OpenInputAnswer, [OpenInputArgs]>(OPEN_INPUT_UPDATE)
 const withdrawInputUpdate = defineUpdate<boolean, [WithdrawInputArgs]>(WITHDRAW_INPUT_UPDATE)
+const tabReconnectedUpdate = defineUpdate<number, [TabReconnectedArgs?]>(TAB_RECONNECTED_UPDATE)
 
 /** `gate.settings` read as each turn starts (Task 5.3). */
 const GATE_SETTINGS_PATCH = 'agent-session-gate-settings'
@@ -122,6 +126,12 @@ const GATE_SETTINGS_PATCH = 'agent-session-gate-settings'
 const END_WHILE_FINISHING_PATCH = 'agent-session-end-while-finishing'
 /** A kept home that is full when the turn arrives moves the turn at no cost to its placements, once (#3443). */
 const FULL_HOME_PATCH = 'agent-session-full-home'
+/**
+ * An attention request may name `on_timeout` `wait` or `stop` (#5003): the turn acts on its
+ * timeout, so the entry records what it will do. Asked only of such a request, which no earlier
+ * history opened (its turns answered every attention request NO_PARKS).
+ */
+const ATTENTION_TIMEOUTS_PATCH = 'agent-session-attention-timeouts'
 const THE_TURN_ENDED = 'the turn ended'
 
 type Activities = Record<string, (input?: unknown) => Promise<unknown>>
@@ -214,8 +224,9 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     owner: start.owner,
     creator: start.creator,
     host,
-    kindOf: (tool: string) => (tool === ASK_USER || tool === 'wait_for_user' ? 'answer' : 'approval'),
+    kindOf: (tool: string) => (tool === ASK_USER || tool === WAIT_FOR_USER ? 'answer' : 'approval'),
     taskQueue: TASK_QUEUE,
+    onTimeout: () => patched(ATTENTION_TIMEOUTS_PATCH),
   })
   gate.install()
 
@@ -273,6 +284,9 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       },
     },
   )
+  // Between turns there is no tab wait to end, and the gate finds none: no validator, so the hub's
+  // process never needs to know whether a turn runs.
+  setHandler(tabReconnectedUpdate, (args?: TabReconnectedArgs) => gate.reconnected(args?.request_id))
   setHandler(withdrawInputUpdate, ({ tool_use_id, reason }: WithdrawInputArgs) => gate.cancelCall(tool_use_id, reason), {
     validator: ({ turn_id }: WithdrawInputArgs) => {
       if (!runs(turn_id)) throw stale(turn_id)
