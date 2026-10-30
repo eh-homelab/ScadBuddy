@@ -2,8 +2,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { BUILTIN_SOURCES } from '../../access/model.js'
 import { sourceEnabled } from '../../access/resolve.js'
-import type { AccessReader, AccessWriter } from '../../access/store.js'
-import type { AuditContext } from '../../audit/log.js'
+import type { AccessReader } from '../../access/store.js'
 import { OWN_PLUGIN_DIR } from '../../harness/ownPlugin.js'
 import type { PackageFileEntry } from './files.js'
 import { OWN_PLUGIN_NAME, type PackageReview, vetPackage } from './vet.js'
@@ -135,8 +134,8 @@ async function view(access: AccessReader, b: BuiltIn): Promise<BuiltInPackageVie
 }
 
 export class BuiltInPackages {
-  private readonly access: AccessReader & AccessWriter
-  constructor(access: AccessReader & AccessWriter) {
+  private readonly access: AccessReader
+  constructor(access: AccessReader) {
     this.access = access
   }
 
@@ -147,12 +146,5 @@ export class BuiltInPackages {
   async get(name: string): Promise<BuiltInPackageView | undefined> {
     const b = builtInNamed(name)
     return b ? view(this.access, b) : undefined
-  }
-
-  async setEnabled(name: string, enabled: boolean, context: AuditContext): Promise<BuiltInPackageView | undefined> {
-    const b = builtInNamed(name)
-    if (!b) return undefined
-    await this.access.setEnabled(b.source, enabled, context)
-    return view(this.access, b)
   }
 }

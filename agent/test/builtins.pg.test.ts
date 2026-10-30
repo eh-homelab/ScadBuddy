@@ -349,13 +349,13 @@ describe.skipIf(skip !== undefined)(`ScadBuddy's own plugin in ai_access${skip ?
     const access = new AccessStore(db.sql)
     const packages = new BuiltInPackages(access)
     expect(await ownPluginEnabled(access)).toBe(true)
-    expect((await packages.setEnabled(OWN_PLUGIN_NAME, false, { actor: UI_ACTOR, surface: 'http' }))?.enabled).toBe(false)
+    await access.setEnabled(BUILTIN_SOURCES.ownPlugin, false, { actor: UI_ACTOR, surface: 'http' })
     expect(await db.sql`SELECT source, item, access FROM ai_access WHERE source = ${BUILTIN_SOURCES.ownPlugin}`).toEqual([
       { source: BUILTIN_SOURCES.ownPlugin, item: '*', access: 'off' },
     ])
     expect(await ownPluginEnabled(access)).toBe(false)
     expect((await packages.get(OWN_PLUGIN_NAME))?.enabled).toBe(false)
-    await packages.setEnabled(OWN_PLUGIN_NAME, true, { actor: UI_ACTOR, surface: 'http' })
+    await access.setEnabled(BUILTIN_SOURCES.ownPlugin, true, { actor: UI_ACTOR, surface: 'http' })
     expect(await ownPluginEnabled(access)).toBe(true)
   })
 })

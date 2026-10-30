@@ -14,8 +14,6 @@ export type AccessWriter = {
   /** A tool or built-in takes a tier or `off`; a hook, skill or subagent `on` or `off` (checkItem). */
   setItem(source: string, item: string, access: Access, context?: AuditContext): Promise<void>
   resetItem(source: string, item: string, context?: AuditContext): Promise<void>
-  /** `resetItem` in one statement, only while the row holds `only`: a concurrent write of another access is kept. */
-  resetItemIf(source: string, item: string, only: ToolAccess, context?: AuditContext): Promise<void>
   setEnabled(source: string, enabled: boolean, context?: AuditContext): Promise<void>
   replaceTools(source: string, tools: Readonly<Record<string, ToolAccess>>, context?: AuditContext): Promise<void>
   /** `replaceTools` for several sources in one transaction; a source whose rows would not change is left alone. */
@@ -97,13 +95,11 @@ type Edit =
   | { source: string; kind: 'items'; items: Readonly<Record<string, string | null>> }
   | { source: string; kind: 'replace'; tools: Readonly<Record<string, ToolAccess>> }
   | { source: string; kind: 'forget' }
-  | { source: string; kind: 'resetIf'; item: string; only: ToolAccess }
 
 /** `rows` (of any sources) as they stand after `edit`. */
 function applyEdit(rows: readonly AccessRow[], edit: Edit, by: string): AccessRow[] {
   const mine = (r: AccessRow): boolean => r.source === edit.source
   if (edit.kind === 'forget') return rows.filter((r) => !mine(r))
-  if (edit.kind === 'resetIf') return rows.filter((r) => !(mine(r) && r.item === edit.item && r.access === edit.only))
   if (edit.kind === 'replace') {
     const kept = rows.filter((r) => !mine(r) || r.item === SOURCE_ITEM)
     return [...kept, ...Object.entries(edit.tools).map(([item, access]) => ({ source: edit.source, item, access, updated_by: by }))]
@@ -127,10 +123,6 @@ function shape(rows: readonly AccessRow[], source: string): string {
 
 async function runEdit(tx: TransactionSql, edit: Edit, by: string): Promise<void> {
   if (edit.kind === 'forget') return forgetSource(tx, edit.source)
-  if (edit.kind === 'resetIf') {
-    await tx`DELETE FROM ai_access WHERE source = ${edit.source} AND item = ${edit.item} AND access = ${edit.only}`
-    return
-  }
   if (edit.kind === 'replace') return writeTools(tx, edit.source, edit.tools, by)
   for (const [item, access] of Object.entries(edit.items)) {
     if (access === null) await tx`DELETE FROM ai_access WHERE source = ${edit.source} AND item = ${item}`
@@ -175,15 +167,6 @@ export class AccessStore implements AccessReader, AccessWriter {
     checkSource(source)
     if (item === '' || item === SOURCE_ITEM) throw new AccessError(`${JSON.stringify(item)} is not a tool name`)
     await this.write(context, [{ source, kind: 'items', items: { [item]: null } }], () => `${source}/${item} reset`)
-  }
-
-  async resetItemIf(source: string, item: string, only: ToolAccess, context?: AuditContext): Promise<void> {
-    checkSource(source)
-    if (item === '' || item === SOURCE_ITEM) throw new AccessError(`${JSON.stringify(item)} is not a tool name`)
-    // Under the row's lock: with no row holding `only` there is nothing to send or record.
-    await this.write(context, [{ source, kind: 'resetIf', item, only }], () => `${source}/${item} reset if ${JSON.stringify(only)}`, {
-      skipUnchanged: true,
-    })
   }
 
   async setEnabled(source: string, enabled: boolean, context?: AuditContext): Promise<void> {
