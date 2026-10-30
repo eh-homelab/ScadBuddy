@@ -668,9 +668,8 @@ class SegmentCalls:
         call = str(data.get("tool_use_id") or tool_use_id or "")
         if not call or self._workflows(name):
             if not call and self._judge is not None and name in access.CALL_TOOLS:
-                return await self._judged(
-                    self._judge, name, data
-                )  # judged whatever Claude Code sends
+                # judged whatever Claude Code sends
+                return await self._judged(self._judge, name, data)
             return {}
         event: dict[str, Any] = {
             "type": "tool_call",

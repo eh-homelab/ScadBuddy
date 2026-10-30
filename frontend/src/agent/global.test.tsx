@@ -4,7 +4,8 @@ import { Route, Routes, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { Button } from '../components/ui/button'
 import { Dialog, DialogContent, DialogTitle } from '../components/ui/dialog'
-import { resolveLocation } from '../pages/settings/registry'
+import { registerSections } from '../pages/settings/areas'
+import { resolveLocation, SECTION_REGISTRY } from '../pages/settings/registry'
 import { renderPage } from '../test/utils'
 import { bridge } from './bridge'
 import { USER_ONLY } from './dom'
@@ -203,6 +204,28 @@ describe('global tools', () => {
       expect(answer).toEqual({ ok: true, result: { route: '/settings/general#connection' } })
     } finally {
       vi.useRealTimers()
+    }
+  })
+
+  it('answers a same-area hash move as soon as the sections load, not after the full wait (#5023)', async () => {
+    renderShell()
+    await waitFor(() => expect(bridge.liveNames()).toContain('navigate'))
+    await bridge.call('navigate', { route: '/settings/general' })
+
+    registerSections([])
+    vi.useFakeTimers()
+    try {
+      let answer: unknown
+      const pending = bridge.call('navigate', { route: '/settings/general#connection' }).then((value) => (answer = value))
+      await vi.advanceTimersByTimeAsync(100)
+      expect(answer).toBeUndefined()
+      registerSections(SECTION_REGISTRY)
+      await vi.advanceTimersByTimeAsync(50)
+      expect(answer).toEqual({ ok: true, result: { route: '/settings/general#connection' } })
+      await pending
+    } finally {
+      vi.useRealTimers()
+      registerSections(SECTION_REGISTRY)
     }
   })
 
