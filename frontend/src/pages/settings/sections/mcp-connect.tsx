@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useState } from 'react'
 import { useAiAvailability } from '../../../agent/chat/availability'
 import { api } from '../../../api/client'
 import type { McpAuthMode } from '../../../api/mcpTokens'
@@ -31,15 +31,20 @@ function Snippet() {
   const token = useMintedMcpToken()
   // The last mode read, kept while a new read is under way, so the snippet never goes
   // and comes back when Auth mode saves (#781).
-  const known = useRef<{ mode: McpAuthMode | null } | undefined>(undefined)
-  if (auth.data) known.current = { mode: auth.data.mode }
-  else if (failed && fallback.data !== undefined) known.current = { mode: fallback.data }
+  const [known, setKnown] = useState<{ mode: McpAuthMode | null } | undefined>(undefined)
+  const read = auth.data
+    ? { mode: auth.data.mode }
+    : failed && fallback.data !== undefined
+      ? { mode: fallback.data }
+      : undefined
+  if (read && read.mode !== known?.mode) setKnown(read)
   // Nothing until the mode is first known, so a header never shows and then goes (#781).
-  if (!known.current) return null
+  const shown = read ?? known
+  if (!shown) return null
   return (
     <McpConnectSnippet
       publicUrl={settings.public_url}
-      authMode={known.current.mode}
+      authMode={shown.mode}
       token={token ?? undefined}
     />
   )
