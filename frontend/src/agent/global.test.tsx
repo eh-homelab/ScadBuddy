@@ -236,15 +236,19 @@ describe('global tools', () => {
 
     registerSections([])
     vi.useFakeTimers()
+    let pending: Promise<unknown> | undefined
     try {
       // No timer is advanced: an answer that waited for the Settings sections would still be
       // pending after the flush, and the test says so at once instead of hanging.
       let answer: unknown
-      const pending = bridge.call('navigate', { route: '/#top' }).then((value) => (answer = value))
+      pending = bridge.call('navigate', { route: '/#top' }).then((value) => (answer = value))
       await vi.advanceTimersByTimeAsync(0)
       expect(answer, 'navigate waited for the Settings sections').toEqual({ ok: true, result: { route: '/#top' } })
-      await pending
     } finally {
+      // On a failure the call is still waiting on the fake clock: run its waits out, so it
+      // ends here and logs nothing into a later test.
+      await vi.advanceTimersByTimeAsync(2000)
+      await pending?.catch(() => undefined)
       vi.useRealTimers()
       registerSections(SECTION_REGISTRY)
     }
