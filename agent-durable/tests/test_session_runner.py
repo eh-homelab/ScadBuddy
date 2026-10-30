@@ -2389,19 +2389,9 @@ def test_own_plugin_copies_are_swept(tmp_path: Path) -> None:
     assert sorted(later) == sorted([used.name, ".tmp-live"])
 
 
-async def _skill_approved_then_denied(
-    temporal_env: WorkflowEnvironment,
-    agent_db: Conn,
-    connect: Connect,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    skill_input: dict[str, Any],
-    payload_dir: Path | None = None,
-) -> tuple[list[dict[str, Any]], WorkflowHistory]:
-    """The bundled Claude Code calls Skill with ``skill_input`` twice in a turn whose allowed
-    package names Skill (no row: outward); the first wait at the gate is approved, the
-    second denied. Answers the main thread's last tool results and the session's history."""
-    root = (payload_dir or tmp_path) / "plugins"
+def _skill_package(connect: Connect, root: Path) -> StandInTools:
+    """Stages a package ``notes`` with one skill under ``root`` and answers the stand-in that
+    offers it to the turn with Skill named (so, no row: outward)."""
     staging = root / "staging" / "notes"
     (staging / "skills" / "jot").mkdir(parents=True)
     (staging / "skills" / "jot" / "SKILL.md").write_text("---\nname: jot\n---\nJot.\n")
@@ -2420,6 +2410,34 @@ async def _skill_approved_then_denied(
             "items": ["skill:jot"],
         }
     ]
+    return stand_in
+
+
+def _claude_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An empty Claude config dir and home for the bundled Claude Code; the cwd it runs in."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    return cwd
+
+
+async def _skill_approved_then_denied(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    skill_input: dict[str, Any],
+    payload_dir: Path | None = None,
+) -> tuple[list[dict[str, Any]], WorkflowHistory]:
+    """The bundled Claude Code calls Skill with ``skill_input`` twice in a turn whose allowed
+    package names Skill (no row: outward); the first wait at the gate is approved, the
+    second denied. Answers the main thread's last tool results and the session's history."""
+    root = (payload_dir or tmp_path) / "plugins"
+    stand_in = _skill_package(connect, root)
     main: list[list[dict[str, Any]]] = []
     call = {"name": "Skill", "input": skill_input}
 
@@ -2431,12 +2449,7 @@ async def _skill_approved_then_denied(
         return {"tool_use": call} if len(results) < 2 else {"text": "All done."}
 
     fake = FakeAnthropic(reply).start()
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
-    monkeypatch.setenv("HOME", str(home))
-    cwd = tmp_path / "cwd"
-    cwd.mkdir()
+    cwd = _claude_home(tmp_path, monkeypatch)
     try:
         await insert_gateway(agent_db, KEK, fake.url)
         runner = ScadBuddyRunner(
@@ -2563,24 +2576,7 @@ async def test_a_gate_that_raises_in_a_real_segment_refuses_the_call(
     """#5017 security review, end to end: the bundled Claude Code's Skill call, whose gate
     raises, is refused, never run."""
     root = tmp_path / "plugins"
-    staging = root / "staging" / "notes"
-    (staging / "skills" / "jot").mkdir(parents=True)
-    (staging / "skills" / "jot" / "SKILL.md").write_text("---\nname: jot\n---\nJot.\n")
-    digest = hash_tree(staging)
-    hex_ = digest.removeprefix("sha256:")
-    (root / "staging").rename(root / hex_)
-    stand_in = StandInTools(connect)
-    stand_in.turn_packages = [
-        {
-            "name": "notes",
-            "dir": f"{hex_}/notes",
-            "content_hash": digest,
-            "allowed": True,
-            "builtin_tools": ["Skill"],
-            "named_builtins": ["Skill"],
-            "items": ["skill:jot"],
-        }
-    ]
+    stand_in = _skill_package(connect, root)
 
     async def raises(self: CallAccess, data: Any) -> dict[str, Any]:
         raise RuntimeError("the gate broke")
@@ -2597,12 +2593,7 @@ async def test_a_gate_that_raises_in_a_real_segment_refuses_the_call(
         return {"tool_use": call} if not results else {"text": "All done."}
 
     fake = FakeAnthropic(reply).start()
-    home = tmp_path / "home"
-    home.mkdir()
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
-    monkeypatch.setenv("HOME", str(home))
-    cwd = tmp_path / "cwd"
-    cwd.mkdir()
+    cwd = _claude_home(tmp_path, monkeypatch)
     try:
         await insert_gateway(agent_db, KEK, fake.url)
         runner = ScadBuddyRunner(
