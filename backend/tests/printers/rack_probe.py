@@ -17,17 +17,32 @@ and counts only a change it saw after the printer took this job:
 - layer 1 counts only after the job reported a ``layer_num`` reset: 0, or lower than
   the baseline's.
 
-It ends (`done`) once the job is past layer 1 with at least one rack fetch seen, and
-fails on a fetch the mapping does not name, a ``print_error`` other than the
-baseline's, or the job pausing (``PAUSE``) or ending (``FAILED``/``FINISH``) before that.
+A fetch proves the mapping only when the printer had a choice (#5005). The run of
+2026-10-30 sent every rack hotend that fit the plate (16 to 20), and the H2C fetched
+each in turn (16, 17, 18, 19, 20, 16) and was still at layer 0 after 20 min: a printer
+that ignored the mapping could have fetched the same. So the probe also takes
+``excluded``, the rack hotends that fit one of the plate's rack groups but that the pick
+does not send (`excluded_hotends`), and the test refuses a pick with none
+(`proof_problem`). A fetch of an excluded hotend fails at once.
+
+It ends (`done`) once the job has fetched every rack hotend the mapping sends (except
+the one mounted at the baseline, which may never leave the toolhead) and no other: the
+pre-print sequence. It needs no layer 1, which a plate of several rack groups reaches
+only after 20 min or more. With ``layer1`` it also waits for the job's layer 1, so a
+fetch later in the pre-print is watched too. It fails on a fetch the mapping does not
+name, a ``print_error`` other than the baseline's, or the job pausing (``PAUSE``) or
+ending (``FAILED``/``FINISH``) before that.
 """
 
 from __future__ import annotations
 
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from scadbuddy.bambuddy.models import NozzleRackSlot
 from scadbuddy.printers.nozzle_mapping import RACK_POSITION_BASE, RACK_POSITIONS
+from scadbuddy.rack.rank import RackGroup, eligible, rack_positions
 
 #: The rack hotends' physical ids (16 to 21); ``tar_id`` holds others too.
 RACK_IDS = frozenset(RACK_POSITION_BASE + p for p in RACK_POSITIONS)
@@ -70,6 +85,46 @@ def fetch_problem(baseline: dict[str, Any], sent: frozenset[int]) -> str | None:
     return None
 
 
+def skip_positions(rack: Sequence[NozzleRackSlot], skip: Collection[int]) -> list[NozzleRackSlot]:
+    """``rack`` with the hotends at rack positions ``skip`` (1-6) given no diameter, so
+    no group fits them and the pick leaves them out. Each keeps its id, so the carriage's
+    hotend still fills its own position (`rank.rack_positions`)."""
+    hidden = {id(entry) for position, entry in rack_positions(rack).items() if position in skip}
+    return [
+        entry.model_copy(update={"nozzle_diameter": ""}) if id(entry) in hidden else entry
+        for entry in rack
+    ]
+
+
+def excluded_hotends(
+    rack: Sequence[NozzleRackSlot], groups: Sequence[RackGroup], sent: frozenset[int]
+) -> frozenset[int]:
+    """The rack hotends (`RACK_IDS`) that fit one of ``groups`` but are not ``sent``: the
+    ones a printer that ignored the mapping could have fetched instead. ``rack`` is the
+    printer's own, before `skip_positions`: a skipped hotend still fits. Only a hotend
+    with a serial counts: an empty mount reads ``N/A`` (`NozzleRackSlot.serial_number`)
+    and may still report a diameter (`fixtures/lan-report-h2c.json`, id 17)."""
+    return frozenset(
+        RACK_POSITION_BASE + position
+        for position, entry in rack_positions(rack).items()
+        if RACK_POSITION_BASE + position not in sent
+        and entry.serial_number
+        and any(eligible(entry, g.nozzle_diameter, g.volume_type) for g in groups)
+    )
+
+
+def proof_problem(sent: frozenset[int], excluded: frozenset[int]) -> str | None:
+    """Why the fetches of this pick cannot prove the mapping, or ``None``: it sends every
+    rack hotend that fits the plate, so any order of fetches is one the mapping names."""
+    if excluded:
+        return None
+    return (
+        f"the pick sends {sorted(n for n in sent if n in RACK_IDS)}, every rack hotend "
+        "that fits the plate, so no fetch can show the printer obeyed it: use a plate of "
+        "fewer rack groups, or leave a position out with SCADBUDDY_TEST_PRINTER_RACK_SKIP"
+    )
+
+
 def idle_problem(baseline: dict[str, Any], name: str) -> str | None:
     """Why the printer must not be started now, or ``None``: it is printing (or paused),
     the probe's name is already on it, or it holds an error outside a failed job."""
@@ -89,6 +144,10 @@ class RackProbe:
     name: str
     baseline: dict[str, Any]
     sent: frozenset[int]
+    #: Rack hotends that fit the plate but are not sent (`excluded_hotends`).
+    excluded: frozenset[int] = frozenset()
+    #: Also wait for the job's layer 1, not only the pre-print fetches.
+    layer1: bool = False
     #: A report named the job: the printer took it, so it is the probe's to stop.
     taken: bool = False
     started: bool = False
@@ -105,8 +164,15 @@ class RackProbe:
         self._baseline_error = _int(self.baseline.get("print_error")) or 0
 
     @property
+    def wanted(self) -> frozenset[int]:
+        """The rack hotends the job must fetch: every one sent but the mounted one."""
+        return frozenset(n for n in self.sent if n in RACK_IDS) - {self._mounted}
+
+    @property
     def done(self) -> bool:
-        return self.started and self.reset and (self.layer or 0) >= 1 and bool(self.fetched)
+        if not (self.started and self.excluded and self.wanted <= set(self.fetched)):
+            return False
+        return not self.layer1 or (self.reset and (self.layer or 0) >= 1)
 
     def feed(self, report: dict[str, Any]) -> list[str]:
         """Take one report; return what it showed (for ``-s``). Raises `ProbeError`."""
@@ -144,6 +210,11 @@ class RackProbe:
             elif target in RACK_IDS:
                 self.fetched.append(target)
                 shown.append(f"fetching rack hotend {target}")
+                if target in self.excluded:
+                    raise ProbeError(
+                        f"fetched {target}, which the mapping leaves out: sent "
+                        f"{sorted(self.sent)}, excluded {sorted(self.excluded)}"
+                    )
                 if target not in self.sent:
                     raise ProbeError(f"fetched {target}, sent {sorted(self.sent)}")
         layer = _int(report.get("layer_num"))
@@ -166,10 +237,15 @@ class RackProbe:
             )
             return f"{seen}, never in {sorted(STARTED_STATES)}"
         gaps = []
+        if not self.excluded:
+            gaps.append("no rack hotend left out, so no fetch proves the mapping")
         if not self.fetched:
             gaps.append(f"no rack fetch (tar_id stayed {self._last_tar})")
-        if not self.reset:
-            gaps.append(f"no layer_num reset (baseline {self._baseline_layer})")
-        elif (self.layer or 0) < 1:
-            gaps.append("not yet RUNNING layer 1")
+        elif unfetched := self.wanted - set(self.fetched):
+            gaps.append(f"not yet fetched {sorted(unfetched)} (fetched {self.fetched})")
+        if self.layer1:
+            if not self.reset:
+                gaps.append(f"no layer_num reset (baseline {self._baseline_layer})")
+            elif (self.layer or 0) < 1:
+                gaps.append("not yet RUNNING layer 1")
         return f"{'; '.join(gaps) or 'nothing'} (last {self.state})"
