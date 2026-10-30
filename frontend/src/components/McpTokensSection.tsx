@@ -5,7 +5,7 @@ import type { McpToken, McpTokenTier, MintedMcpToken } from '../api/mcpTokens'
 import { copyText, selectContents } from '../lib/clipboard'
 import { timeAgo } from '../lib/format'
 import { useMcpAuthVersion } from '../lib/mcpAuthChanges'
-import { setMintedMcpToken } from '../lib/mcpMintedToken'
+import { setMintedMcpToken, setTokensCardAuthMode } from '../lib/mcpMintedToken'
 import { useAsync } from '../lib/useAsync'
 import {
   AlertDialog,
@@ -159,6 +159,12 @@ export function McpTokensSection() {
 
   const list = listState.data
   const authMode = auth.data?.mode ?? list?.auth_mode ?? null
+  // Shared with the Connect snippet once known, so it asks for the mode no second time (#781).
+  const resolvedMode = auth.data ? auth.data.mode : list ? list.auth_mode : undefined
+  useEffect(() => {
+    setTokensCardAuthMode(resolvedMode)
+  }, [resolvedMode])
+  useEffect(() => () => setTokensCardAuthMode(undefined), [])
 
   async function create(event: FormEvent) {
     event.preventDefault()

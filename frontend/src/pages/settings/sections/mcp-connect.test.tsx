@@ -130,6 +130,35 @@ describe('Connect snippet section', () => {
     await waitFor(() => expect(snippet()).not.toContain('Authorization'))
   })
 
+  it("takes the Tokens card's mode and asks for none of its own while the card is on the page (#781)", async () => {
+    setMcpAuthMode('bearer')
+    renderSettingsSection(
+      <>
+        <McpAccessTokens />
+        <McpConnect />
+      </>,
+      { route },
+    )
+    await waitFor(() => expect(snippet()).toContain('Authorization'))
+    const read = vi.spyOn(api, 'getMcpAuth')
+    setMcpAuthMode('disabled')
+    act(() => mcpAuthChanged())
+    await waitFor(() => expect(snippet()).not.toContain('Authorization'))
+    // The card's read alone: the snippet made none.
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads the mode itself when the Tokens card is not on the page (#781)', async () => {
+    setMcpAuthMode('bearer')
+    renderSettingsSection(<McpConnect />, { route })
+    await waitFor(() => expect(snippet()).toContain('Authorization'))
+    const read = vi.spyOn(api, 'getMcpAuth')
+    setMcpAuthMode('disabled')
+    act(() => mcpAuthChanged())
+    await waitFor(() => expect(snippet()).not.toContain('Authorization'))
+    expect(read).toHaveBeenCalledTimes(1)
+  })
+
   it('falls back to the mode the token list reports when the auth read fails', async () => {
     setMcpAuthMode('disabled')
     vi.spyOn(api, 'getMcpAuth').mockRejectedValue(new Error('down'))

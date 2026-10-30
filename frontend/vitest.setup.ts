@@ -7,6 +7,7 @@ import { server } from './src/mocks/server'
 import { resetDisplayUnit } from './src/lib/units'
 import { resetRealtime } from './src/lib/realtime'
 import { resetAiAvailability } from './src/agent/chat/availability'
+import { resetMcpMinted } from './src/lib/mcpMintedToken'
 import { clearToasts } from './src/lib/toast'
 import { FakeIntersectionObserver, resetIntersections } from './src/test/intersection'
 import { resending } from './src/test/resend'
@@ -81,6 +82,7 @@ afterEach(async () => {
   resetDisplayUnit()
   resetRealtime()
   resetAiAvailability()
+  resetMcpMinted()
   resetIntersections()
   // #2372 — the assistant panel remembers per tab; every test starts in a fresh one.
   window.sessionStorage.clear()

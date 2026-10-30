@@ -4,7 +4,7 @@ import { api } from '../../../api/client'
 import type { McpAuthMode } from '../../../api/mcpTokens'
 import { McpConnectSnippet } from '../../../components/McpConnectSnippet'
 import { useMcpAuthVersion } from '../../../lib/mcpAuthChanges'
-import { useMintedMcpToken } from '../../../lib/mcpMintedToken'
+import { useMintedMcpToken, useTokensCardAuthMode } from '../../../lib/mcpMintedToken'
 import { useAsync } from '../../../lib/useAsync'
 import { useLoadedSettings } from '../cache'
 import { Section } from '../controls'
@@ -21,9 +21,12 @@ function Snippet() {
   const settings = useLoadedSettings()
   // The mode as Auth mode last saved it (#1921).
   const authVersion = useMcpAuthVersion()
-  const auth = useAsync(() => api.getMcpAuth(), [authVersion])
+  // The Tokens card's mode when it is on the page; this section reads its own only without it.
+  const shared = useTokensCardAuthMode()
+  const own = shared === undefined
+  const auth = useAsync(() => (own ? api.getMcpAuth() : Promise.resolve(null)), [authVersion, own])
   // A failed read falls back to the mode the token list carries, as the Tokens card does.
-  const failed = auth.error !== undefined
+  const failed = own && auth.error !== undefined
   const fallback = useAsync(
     () => (failed ? api.listMcpTokens().then((list) => list.auth_mode) : Promise.resolve(null)),
     [authVersion, failed],
@@ -32,7 +35,9 @@ function Snippet() {
   // The last mode read, kept while a new read is under way, so the snippet never goes
   // and comes back when Auth mode saves (#781).
   const [known, setKnown] = useState<{ mode: McpAuthMode | null } | undefined>(undefined)
-  const read = auth.data
+  const read = shared
+    ? shared
+    : auth.data
     ? { mode: auth.data.mode }
     : failed && fallback.data !== undefined
       ? { mode: fallback.data }
