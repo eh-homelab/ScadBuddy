@@ -118,10 +118,14 @@ export class PendingProjection {
     return row !== undefined
   }
 
-  /** Whether the session has a pending `tab_disconnected` entry (#5003): an AgentSession turn waiting for its tab. */
+  /**
+   * Whether an AgentSession session has a pending `tab_disconnected` entry (#5003): its turn waits
+   * for its tab. Only `runtime = 'unified'`: DurableSession's workflow has no `tab_reconnected`.
+   */
   async waitsForTab(sessionId: string): Promise<boolean> {
     const [row] = await this.#sql<{ n: number }[]>`
-      SELECT 1 AS n FROM ai_pending_input WHERE session_id = ${sessionId}::uuid AND attention->>'reason' = 'tab_disconnected' LIMIT 1`
+      SELECT 1 AS n FROM ai_pending_input p JOIN ai_sessions s ON s.id = p.session_id AND s.runtime = 'unified'
+      WHERE p.session_id = ${sessionId}::uuid AND p.attention->>'reason' = 'tab_disconnected' LIMIT 1`
     return row !== undefined
   }
 

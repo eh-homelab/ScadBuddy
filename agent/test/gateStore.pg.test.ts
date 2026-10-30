@@ -366,7 +366,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
                    parent_principal, outside_reason, hops
             FROM ai_pending_input ORDER BY request_id`,
           responses: await s`
-            SELECT request_id, session_id, kind, outcome, response, response_hash, responder, reason, hops, tool
+            SELECT request_id, session_id, kind, outcome, response, response_hash, responder, reason, hops
             FROM ai_input_responses ORDER BY request_id`,
           events: (await s<{ session_id: string; seq: string; event: string }[]>`
             SELECT session_id, seq, event FROM ai_session_events ORDER BY session_id, seq`).map((r) => ({ ...r })),

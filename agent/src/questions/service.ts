@@ -750,7 +750,10 @@ export class QuestionService {
    * ATTENTION_RATE_LIMIT, a browser call's tab wait against TAB_WAIT_RATE_LIMIT, each counting
    * this table's rows (as `gate` does) and the gate's `wait_for_user` entries, open
    * (`ai_pending_input`) or resolved (`ai_input_responses`), a tab wait's call id
-   * `tab:<tool_use id>`. Undefined when it may be asked; else the refusal the model reads,
+   * `tab:<tool_use id>` (TurnHost's; any other entry is a model's own request, a DurableSession's
+   * `wait_for_user` among them, whatever its reason, as a classic row is told apart by its tool;
+   * agent-durable records no `tool` on its responses, so its resolved ones are not counted).
+   * Undefined when it may be asked; else the refusal the model reads,
    * audited as `gate` audits one. The count holds `gate`'s lock, but the entry is written
    * after it, by the workflow: two requests raised at once may both pass at the limit.
    */

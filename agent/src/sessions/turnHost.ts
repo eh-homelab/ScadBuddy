@@ -721,6 +721,7 @@ export class TurnHost {
     for (const call of calls) {
       if (call.tool === WAIT_FOR_USER) {
         const attended = await this.#attended(call)
+        // The turn ends there, as an interrupt ends it: a later parked call is neither run nor told, as a Stop runs none.
         if (attended.stop !== undefined) return { text: '', stop: attended.stop }
         said.push(attended.text)
       } else said.push(await this.#outcome(id, call, signal, heartbeat))
