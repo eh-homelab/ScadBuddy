@@ -4,7 +4,7 @@ import { z } from 'zod'
 import { UI_ACTOR } from '../audit/writes.js'
 import { OriginConfigError, type OriginPolicy, parseCidr, parseCidrList } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './httpRequest.js'
+import type { SettingsRepo } from './module.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/durable-subagents: where a durable segment's subagents reach
@@ -186,7 +186,7 @@ export function registerDurableSubagentsRoutes(app: Hono, deps: DurableSubagents
   })
 }
 
-/** Settings → Assistant's durable subagents. `deps.settings` is declared in routes/httpRequest.ts. */
+/** Settings → Assistant's durable subagents. `deps.settings` is declared in routes/module.ts. */
 export const route: RouteModule = {
   register(app, deps) {
     registerDurableSubagentsRoutes(app, {

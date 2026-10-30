@@ -862,10 +862,10 @@ so a name re-pointed between check and connect reaches nothing new.
   call itself is also a `tool_call` row, whose input summary is scrubbed like any
   other (`Authorization` and `Cookie` headers are blanked by name).
 - **On by default, and a user-only switch.** The `ai_access` row (`builtin:http`, `*`)
-  (spec §4.2, `agent/src/routes/httpRequest.ts`); anything but a stored `off` is on. It is set through
-  `PUT /api/v1/ai/settings/http-request` ([`agent/src/routes/httpRequest.ts`](../../agent/src/routes/httpRequest.ts)),
+  (spec §4.2); anything but a stored `off` is on. It is set through
+  `PUT /api/v1/ai/capabilities/builtin:http` (`agent/src/routes/capabilities.ts`),
   behind `uiRequestProblem` like the other AI settings writes, and the write is audited
-  as a `settings` row. Settings → Tools & plugins shows it.
+  as a `settings` row. The old `/api/v1/ai/settings/http-request` route is gone (#4828). Settings → Tools & plugins shows it.
 
 ## Workflow scripts (#2393)
 

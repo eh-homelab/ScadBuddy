@@ -1,6 +1,6 @@
 import { z } from 'zod'
 import type { Sql, TransactionSql } from 'postgres'
-import type { SettingsRepo } from '../routes/httpRequest.js'
+import type { SettingsRepo } from '../routes/module.js'
 import type { WarmSessions } from './warm.js'
 
 // The session-runtime settings (unified runtime spec 2026-10-13 §13, plan Task

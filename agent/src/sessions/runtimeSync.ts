@@ -1,4 +1,4 @@
-import type { SettingsRepo } from '../routes/httpRequest.js'
+import type { SettingsRepo } from '../routes/module.js'
 import { readRuntimeSettings, resizeOnNotify, RUNTIME_DEFAULTS, type RuntimeSettings, runtimeResizer, SETTINGS_CHANNEL } from './runtimeSettings.js'
 import type { WarmSessions } from './warm.js'
 import { evictOnNotify, WARM_EVICT_CHANNEL } from './warmEvict.js'

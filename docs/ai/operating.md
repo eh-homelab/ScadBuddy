@@ -1450,8 +1450,9 @@ Settings → Tools & plugins reads and writes `ai_access` through seven agent ro
 Session turns get an `http_request` tool ("curl"; `agent/src/harness/httpRequest.ts`)
 unless Settings → Tools & plugins turns it off. It is on by default; the
 switch is the `ai_access` row (`builtin:http`, `*`) (`off` turns it off),
-written by `PUT /api/v1/ai/settings/http-request`
-([`agent/src/routes/httpRequest.ts`](../../agent/src/routes/httpRequest.ts)). The turn's tool
+written by `PUT /api/v1/ai/capabilities/builtin:http`
+([`agent/src/routes/capabilities.ts`](../../agent/src/routes/capabilities.ts)); the old
+`/api/v1/ai/settings/http-request` route is gone (#4828). The turn's tool
 list is fixed when the turn starts (`agent/src/sessions/turnRunner.ts`), so turning the
 tool on or off changes what the next turn offers. The access of each call is read per
 call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.

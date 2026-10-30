@@ -1,6 +1,7 @@
 import type { Hono } from 'hono'
 import type { AppDeps, Probe } from '../app.js'
 import { DEFAULT_MCP_AUTH, type McpAuthSettings } from '../auth/authenticate.js'
+import type { AuditContext } from '../audit/log.js'
 
 /**
  * A group of HTTP routes. Each `routes/<name>.ts` that exports `route` is registered by
@@ -26,4 +27,17 @@ export function ready(deps: AppDeps): Probe {
 /** How /mcp is authenticated, read per request; the default with no /mcp endpoint. */
 export function mcpAuthOf(deps: AppDeps): () => McpAuthSettings | Promise<McpAuthSettings> {
   return deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH)
+}
+
+export type SettingsRepo = {
+  get<T>(key: string): Promise<T | undefined>
+  /** `context` says who wrote it, for the audit row (credentials.ts SettingsStore.set). */
+  set(key: string, value: unknown, context: AuditContext): Promise<void>
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /** `ai_settings` (credentials.ts SettingsStore); the settings routes (session limits #790, routes/sessionLimits.ts, ...) answer 503 without it. */
+    settings?: SettingsRepo | undefined
+  }
 }

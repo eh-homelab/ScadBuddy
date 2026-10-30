@@ -4,7 +4,7 @@ import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { SESSION_MODES, type SessionMode, sessionModeOf, SETTING_SESSION_MODE } from '../sessions/manager.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './httpRequest.js'
+import type { SettingsRepo } from './module.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/session-mode (spec 2026-10-01 §6.1, plan 5d): the mode a new
@@ -93,7 +93,7 @@ export function registerSessionModeRoutes(app: Hono, deps: SessionModeRouteDeps)
 
 const NO_SESSIONS = 'durable sessions need the database and Temporal; this agent service has neither'
 
-/** Settings → Assistant's default session mode. `deps.settings` is declared in routes/httpRequest.ts. */
+/** Settings → Assistant's default session mode. `deps.settings` is declared in routes/module.ts. */
 export const route: RouteModule = {
   register(app, deps) {
     registerSessionModeRoutes(app, {

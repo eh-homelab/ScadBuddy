@@ -14,7 +14,7 @@ import {
   SETTING_RENDER_LIMITS,
 } from '../tools/renderLimits.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './httpRequest.js'
+import type { SettingsRepo } from './module.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/render-limits: how many of the agent's renders run at

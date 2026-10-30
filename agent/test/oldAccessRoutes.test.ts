@@ -31,6 +31,8 @@ describe('the old access routes are gone (#4828)', () => {
   it.each([
     ['GET', '/api/v1/ai/settings/printer-camera'],
     ['PUT', '/api/v1/ai/settings/printer-camera'],
+    ['GET', '/api/v1/ai/settings/http-request'],
+    ['PUT', '/api/v1/ai/settings/http-request'],
   ])('%s %s answers 404 and stores nothing', async (method, path) => {
     const { app: a, rows } = app()
     const res = await a.request(path, { method, headers: UI, ...(method === 'PUT' ? { body: JSON.stringify({ enabled: false }) } : {}) })

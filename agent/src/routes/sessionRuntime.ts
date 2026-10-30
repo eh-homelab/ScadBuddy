@@ -3,7 +3,7 @@ import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { readRuntimeSettings, type RuntimeSettings, RuntimePutBody } from '../sessions/runtimeSettings.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './httpRequest.js'
+import type { SettingsRepo } from './module.js'
 import type { SettingsWriter } from './mcpAuthMode.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -80,7 +80,7 @@ export function registerSessionRuntimeRoutes(app: Hono, deps: SessionRuntimeRout
   })
 }
 
-/** The session runtime settings. `deps.settings` is declared in routes/httpRequest.ts, `deps.aiSettings` in routes/mcpAuthMode.ts. */
+/** The session runtime settings. `deps.settings` is declared in routes/module.ts, `deps.aiSettings` in routes/mcpAuthMode.ts. */
 export const route: RouteModule = {
   register(app, deps) {
     registerSessionRuntimeRoutes(app, {

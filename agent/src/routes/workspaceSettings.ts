@@ -9,7 +9,7 @@ import {
   WORKSPACE_MAX_SETTING,
 } from '../workspace/store.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './httpRequest.js'
+import type { SettingsRepo } from './module.js'
 import type { SettingsWriter } from './mcpAuthMode.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -129,7 +129,7 @@ export function registerWorkspaceSettingsRoutes(app: Hono, deps: WorkspaceSettin
   })
 }
 
-/** The workspace caps. `deps.settings` is declared in routes/httpRequest.ts, `deps.aiSettings` in routes/mcpAuthMode.ts. */
+/** The workspace caps. `deps.settings` is declared in routes/module.ts, `deps.aiSettings` in routes/mcpAuthMode.ts. */
 export const route: RouteModule = {
   register(app, deps) {
     registerWorkspaceSettingsRoutes(app, {

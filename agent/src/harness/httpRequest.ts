@@ -17,7 +17,7 @@ import type { RiskTier, TierResolver } from './permissions.js'
 // with `tools: []` (options.ts: no Bash, no WebFetch) and refuses plugins that
 // start a process (plugins.ts). An in-process SDK MCP server, added to a session's
 // turn unless `builtin:http` is switched off, or its item is `off`, in `ai_access`
-// (#2171, routes/httpRequest.ts; on by default).
+// (#2171, access/capabilities.ts; on by default).
 //
 // REACH IS OPEN, decided by the owner on 2026-09-30 (#827): the internet, the
 // LAN, private ranges, `*.internal` names and plain `http:` to any host. There

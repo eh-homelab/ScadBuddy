@@ -514,7 +514,7 @@ const sessions =
         ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
         packageServers: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { record: true, access: accessResolver }),
         // The http_request tool (#827): on for a turn unless `builtin:http` is
-        // switched off in ai_access (routes/httpRequest.ts, #2171).
+        // switched off in ai_access (#2171).
         httpRequest: {},
         // The workspace http_request's save_to_workspace writes, and a fork copies (#2329).
         ...(workspace ? { workspace } : {}),

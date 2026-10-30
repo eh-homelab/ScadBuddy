@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 import { originPolicy } from '../src/http/origins.js'
-import type { SettingsRepo } from '../src/routes/httpRequest.js'
+import type { SettingsRepo } from '../src/routes/module.js'
 import { registerSessionModeRoutes, SESSION_MODE_PATH } from '../src/routes/sessionMode.js'
 import { SETTING_SESSION_MODE } from '../src/sessions/manager.js'
 
