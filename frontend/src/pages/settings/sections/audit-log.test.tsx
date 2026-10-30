@@ -10,9 +10,23 @@ vi.mock('../../../agent/chat/availability', () => ({
   useAiAvailability: () => availability,
 }))
 
+// The arrow-key test needs a second log; the module's list gets one only while it runs.
+const extraLog = vi.hoisted(() => ({ on: false }))
+vi.mock('../../../components/audits/logs', async (importOriginal) => {
+  const original = await importOriginal<{ AUDIT_LOGS: readonly unknown[] }>()
+  return {
+    get AUDIT_LOGS() {
+      return extraLog.on
+        ? [...original.AUDIT_LOGS, { value: 'other', label: 'Other log', Component: () => <p>other log body</p> }]
+        : original.AUDIT_LOGS
+    },
+  }
+})
+
 describe('Audit log', () => {
   afterEach(() => {
     availability.available = true
+    extraLog.on = false
   })
 
   it('links to the Activity page for background jobs (spec §3.2)', async () => {
@@ -32,25 +46,16 @@ describe('Audit log', () => {
   })
 
   it('moves between tabs with the arrow keys', async () => {
-    const extra = {
-      value: 'other',
-      label: 'Other log',
-      Component: () => <p>other log body</p>,
-    }
-    ;(AUDIT_LOGS as unknown as unknown[]).push(extra)
-    try {
-      renderSettingsSection(<AuditLog />, { route: '/settings/audits' })
-      const first = await screen.findByRole('tab', { name: 'AI activity' })
-      const user = userEvent.setup()
-      await user.click(first)
-      await user.keyboard('{ArrowRight}')
-      const second = screen.getByRole('tab', { name: 'Other log' })
-      await waitFor(() => expect(second).toHaveAttribute('aria-selected', 'true'))
-      expect(second).toHaveFocus()
-      expect(screen.getByRole('tabpanel', { name: 'Other log' })).toHaveTextContent('other log body')
-    } finally {
-      ;(AUDIT_LOGS as unknown as unknown[]).pop()
-    }
+    extraLog.on = true
+    renderSettingsSection(<AuditLog />, { route: '/settings/audits' })
+    const first = await screen.findByRole('tab', { name: 'AI activity' })
+    const user = userEvent.setup()
+    await user.click(first)
+    await user.keyboard('{ArrowRight}')
+    const second = screen.getByRole('tab', { name: 'Other log' })
+    await waitFor(() => expect(second).toHaveAttribute('aria-selected', 'true'))
+    expect(second).toHaveFocus()
+    expect(screen.getByRole('tabpanel', { name: 'Other log' })).toHaveTextContent('other log body')
   })
 
   it('shows the logs as tabs, even with one (#781)', async () => {
