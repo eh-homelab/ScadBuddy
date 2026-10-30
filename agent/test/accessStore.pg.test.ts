@@ -1,7 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AccessError, AccessStore } from '../src/access/store.js'
-import { BuiltInTools } from '../src/plugins/builtInTools.js'
-import { OWN_PLUGIN_NAME } from '../src/plugins/packages/vet.js'
 import type { Database } from '../src/db.js'
 import type { AuditContext } from '../src/audit/log.js'
 import { MemoryAudit } from './support/memoryAudit.js'
@@ -203,22 +201,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
     expect(await store.rows([SCAD, 'builtin:browser'])).toMatchObject([{ source: SCAD, item: 'get_model', access: 'outward' }])
   })
 
-  it('BuiltInTools.update writes both registry sources in one transaction', async () => {
-    const tools = new BuiltInTools(store)
-    const set = tools.named(OWN_PLUGIN_NAME)!
-    await tools.update(set, { tool_tiers: { get_model: 'outward' } }, ctx)
+  it('replaceToolsOf writes both registry sources in one transaction', async () => {
+    await store.replaceToolsOf({ [SCAD]: { get_model: 'outward' }, 'builtin:browser': {} }, ctx)
     await db.sql.unsafe(`
       CREATE FUNCTION test_refuse_browser() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN RAISE EXCEPTION 'refused for the test'; END $$;
       CREATE TRIGGER test_refuse_browser BEFORE INSERT ON ai_access
         FOR EACH ROW WHEN (NEW.source = 'builtin:browser') EXECUTE FUNCTION test_refuse_browser();`)
-    await expect(tools.update(set, { tool_tiers: {}, disabled_tools: ['list_models', 'browser_click'] }, ctx)).rejects.toThrow(/refused for the test/)
+    await expect(
+      store.replaceToolsOf({ [SCAD]: { list_models: 'off' }, 'builtin:browser': { browser_click: 'off' } }, ctx),
+    ).rejects.toThrow(/refused for the test/)
     expect(await store.rows([SCAD, 'builtin:browser'])).toMatchObject([{ source: SCAD, item: 'get_model', access: 'outward' }])
   })
 
   it('an access write writes none of the old ai_settings keys (#4828)', async () => {
-    const tools = new BuiltInTools(store)
-    await tools.update(tools.named(OWN_PLUGIN_NAME)!, { tool_tiers: { get_model: 'outward' }, disabled_tools: ['list_models'] }, ctx)
+    await store.replaceToolsOf({ [SCAD]: { get_model: 'outward', list_models: 'off' } }, ctx)
     await store.setItem(SCAD, 'get_printer_camera', 'off', ctx)
     await store.setEnabled('builtin:http', false, ctx)
     await store.setEnabled('builtin:own-plugin', false, ctx)
@@ -227,11 +224,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
     ).toEqual([])
   })
 
-  it('a built-in patch while builtin:browser is off writes no browser tool rows', async () => {
+  it('replacing the scadbuddy tools while builtin:browser is off leaves the browser rows alone', async () => {
     await store.setItem('builtin:browser', 'browser_click', 'outward', ctx)
     await store.setEnabled('builtin:browser', false, ctx)
-    const tools = new BuiltInTools(store)
-    await tools.update(tools.named(OWN_PLUGIN_NAME)!, { disabled_tools: ['list_models'] }, ctx)
+    await store.replaceToolsOf({ [SCAD]: { list_models: 'off' } }, ctx)
     expect(await store.rows([SCAD, 'builtin:browser'])).toEqual([
       { source: 'builtin:browser', item: '*', access: 'off', updated_by: 'browser:browser' },
       { source: 'builtin:browser', item: 'browser_click', access: 'outward', updated_by: 'browser:browser' },

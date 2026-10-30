@@ -375,7 +375,6 @@ describe.skipIf(!TEST_DATABASE_URL)(
             name: 'hindsight',
             url: 'https://hs.example/mcp/bank-1/',
             secret: `Bearer ${TOKEN}`,
-            tool_tiers: { recall: 'read' },
           }),
         )
         expect(created.status).toBe(201)
@@ -388,7 +387,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
           auth: { header: 'Authorization', last4: TOKEN.slice(-4) },
           usable: true,
           problem: null,
-          tool_tiers: { recall: 'read' },
+          tool_tiers: {},
         })
 
         const list = await a.request('/api/v1/ai/plugins', { headers: READ })
@@ -397,9 +396,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const one = await a.request('/api/v1/ai/plugins/hindsight', { headers: READ })
         bodies.push(await one.text())
 
-        const patched = await a.request('/api/v1/ai/plugins/hindsight', json('PATCH', { enabled: true }))
-        expect(patched.status).toBe(200)
-        bodies.push(await patched.text())
+        // The switch is the capabilities API's (spec §4.6); the store enables it here.
+        await store.update('hindsight', { enabled: true }, kek)
+        const enabled = await a.request('/api/v1/ai/plugins/hindsight', { headers: READ })
+        bodies.push(await enabled.text())
         expect(JSON.parse(bodies.at(-1)!)).toMatchObject({ enabled: true })
 
         const tested = await a.request('/api/v1/ai/plugins/hindsight/test', { method: 'POST', headers: UI })
@@ -416,6 +416,23 @@ describe.skipIf(!TEST_DATABASE_URL)(
         expect((await a.request('/api/v1/ai/plugins/hindsight', { method: 'DELETE', headers: UI })).status).toBe(204)
         expect((await a.request('/api/v1/ai/plugins/hindsight', { headers: READ })).status).toBe(404)
         expect((await a.request('/api/v1/ai/plugins/hindsight', { method: 'DELETE', headers: UI })).status).toBe(404)
+      })
+
+      it('refuses the old access fields on POST and PATCH: /capabilities is the way (#4828)', async () => {
+        const { app: a } = app()
+        const old = [{ tool_tiers: { a: 'read' } }, { disabled_tools: ['b'] }, { enabled: false }, { enabled: true }]
+        for (const extra of old) {
+          const res = await a.request('/api/v1/ai/plugins', json('POST', { name: 'mem', url: 'https://hs.example/mcp', ...extra }))
+          expect(res.status, JSON.stringify(extra)).toBe(400)
+        }
+        expect(await store.list()).toEqual([])
+        expect((await a.request('/api/v1/ai/plugins', json('POST', { name: 'mem', url: 'https://hs.example/mcp' }))).status).toBe(201)
+        const before = await db.sql`SELECT item, access, updated_by, updated_at::text AS t FROM ai_access ORDER BY source, item`
+        for (const extra of old) {
+          const res = await a.request('/api/v1/ai/plugins/mem', json('PATCH', extra))
+          expect(res.status, JSON.stringify(extra)).toBe(400)
+        }
+        expect(await db.sql`SELECT item, access, updated_by, updated_at::text AS t FROM ai_access ORDER BY source, item`).toEqual(before)
       })
 
       it('answers 400 / 409 with the reason', async () => {

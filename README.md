@@ -1294,19 +1294,19 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     takes `off` or `outward` only. When two tools end up with the same name,
     both are hidden from the model and fixed `off`, and the test marks them
     `collision`.
-  - `tool_tiers` and `disabled_tools` stay on `POST /plugins` and
-    `PATCH /plugins/{name}` until #781. They write `ai_access` only. The old
-    `ai_plugins` columns are no longer written, and #5014 drops them. The page
-    itself writes through `/api/v1/ai/capabilities` (below and
+  - A plugin's switch, tiers and disabled tools are not fields of `POST /plugins`
+    or `PATCH /plugins/{name}` (a body that names one answers 400, #4828). They are
+    `ai_access` rows, changed through `/api/v1/ai/capabilities` (below and
     [`docs/ai/operating.md`, "The capabilities API"](docs/ai/operating.md#the-capabilities-api)).
-  - New plugins start disabled (`enabled: true` on create is refused). Run
-    the test, review the tools, then turn the plugin's source switch on.
+    The old `ai_plugins` columns are no longer written, and #5014 drops them.
+  - New plugins start disabled. Run the test, review the tools, then turn the
+    plugin's source switch on.
 
   | Route | |
   |---|---|
   | `GET /api/v1/ai/plugins`, `GET …/{name}` | list, one |
-  | `POST /api/v1/ai/plugins` | register (disabled): `name`, `url`, optional `auth_header` (default `Authorization`), `secret`, `tool_tiers`, `disabled_tools` |
-  | `PATCH /api/v1/ai/plugins/{name}` | change any of those but `name`, and `enabled`; `secret: null` removes the header |
+  | `POST /api/v1/ai/plugins` | register (disabled): `name`, `url`, optional `auth_header` (default `Authorization`), `secret` |
+  | `PATCH /api/v1/ai/plugins/{name}` | change `url`, `auth_header` or `secret` (`secret: null` removes the header) |
   | `DELETE /api/v1/ai/plugins/{name}` | remove |
   | `POST /api/v1/ai/plugins/{name}/test` | through the forwarder: connect, one `tools/list` (10 s timeout), and report each tool with its harness name and tier |
   | `/api/v1/ai/capabilities` and its six sub-routes | Settings → Tools & plugins (#2171): every source with its tools and their access; a source's switch, a tool's access, its reset, its details, and `POST …/{source}/refresh` (the test above, which also stores the listing). See [`docs/ai/operating.md`, "The capabilities API"](docs/ai/operating.md#the-capabilities-api) |
@@ -1324,9 +1324,12 @@ the backend on `http://127.0.0.1:8080` (§4.3).
          "secret": "Bearer <token>"}'
   curl -sS -X POST http://127.0.0.1:8081/api/v1/ai/plugins/memory/test \
     -H 'Origin: http://127.0.0.1:8081'
-  curl -sS -X PATCH http://127.0.0.1:8081/api/v1/ai/plugins/memory \
+  curl -sS -X PUT http://127.0.0.1:8081/api/v1/ai/capabilities/remote:memory/items/search \
     -H 'Origin: http://127.0.0.1:8081' -H 'Content-Type: application/json' \
-    -d '{"tool_tiers": {"search": "read"}, "enabled": true}'
+    -d '{"access": "read"}'
+  curl -sS -X PUT http://127.0.0.1:8081/api/v1/ai/capabilities/remote:memory \
+    -H 'Origin: http://127.0.0.1:8081' -H 'Content-Type: application/json' \
+    -d '{"enabled": true}'
   ```
 
   **Hindsight** (the motivating example, #297). Its docs give a per-bank MCP
