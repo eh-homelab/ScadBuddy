@@ -44,6 +44,8 @@ const shared = {
   loads: 0,
   /** Bumped when the last hook unmounts: nothing started before it is applied. */
   epoch: 0,
+  /** Bumped by each write's answer (`replace`): a load read before it is not applied. */
+  writes: 0,
 }
 
 const asError = (caught: unknown) => (caught instanceof Error ? caught : new Error(String(caught)))
@@ -90,18 +92,22 @@ function poll(): void {
 /**
  * Reads the tree. A mount joins a read already under way, so sections mounted together read once;
  * a `reload` (after an install or an approval) reads afresh, and only the latest read is applied.
+ * A read that a write overtook is not applied, as it may predate the write: the tree is read again.
  */
 function load(join: boolean): Promise<void> {
   if (join && shared.loading) return shared.loading
   const seq = ++shared.loads
   const epoch = shared.epoch
+  const writes = shared.writes
   set({ loading: true, polls: 0, pollError: null })
   const latest = () => seq === shared.loads && epoch === shared.epoch
   const done = aiCapabilities
     .list()
     .then(
       (all) => {
-        if (latest()) set({ all, error: null })
+        if (!latest()) return
+        if (writes !== shared.writes) return load(false)
+        set({ all, error: null })
       },
       (caught: unknown) => {
         if (latest()) set({ error: asError(caught) })
@@ -162,7 +168,10 @@ export function useCapabilities(filter: (source: SourceView) => boolean): {
 } {
   const tree = useSyncExternalStore(subscribe, snapshot)
   useEffect(mount, [])
-  const replace = useCallback((source: SourceView) => set({ all: replaced(shared.tree.all, source) }), [])
+  const replace = useCallback((source: SourceView) => {
+    shared.writes += 1
+    set({ all: replaced(shared.tree.all, source) })
+  }, [])
   const reload = useCallback(() => load(false), [])
   const sources = useMemo(() => tree.all.filter(filter), [tree.all, filter])
   const stalled = anyChecking(tree.all) && tree.polls >= POLL_DELAYS.length

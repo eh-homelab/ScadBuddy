@@ -361,6 +361,40 @@ describe('useCapabilities', () => {
       expect(result.current.sources[0]!.enabled).toBe(false)
     })
 
+    it("a write while a reload is under way is not undone by the reload's answer", async () => {
+      // The agent's state: a reload after an install answers the tree as it was when read.
+      let enabled = true
+      let hold: Promise<void> | undefined
+      let release: (() => void) | undefined
+      let reads = 0
+      server.use(
+        http.get('/api/v1/ai/capabilities', async () => {
+          reads += 1
+          const answer = HttpResponse.json({ sources: [source({ id: 'package:x', kind: 'package', title: 'x', enabled }, 1)] })
+          if (reads === 2) {
+            hold = new Promise<void>((resolve) => (release = resolve))
+            await hold
+          }
+          return answer
+        }),
+      )
+      const { result } = renderHook(() => useCapabilities(() => true))
+      await waitFor(() => expect(result.current.sources).toHaveLength(1))
+      let reloaded: Promise<void> | undefined
+      act(() => void (reloaded = result.current.reload()))
+      await waitFor(() => expect(release).toBeDefined())
+      // The switch is written while the reload's read is under way.
+      enabled = false
+      act(() => result.current.replace({ ...result.current.sources[0]!, enabled: false }))
+      release!()
+      await act(async () => reloaded)
+      expect(result.current.sources[0]!.enabled).toBe(false)
+      // Its answer was dropped and the tree read again, after the write.
+      await waitFor(() => expect(reads).toBe(3))
+      await waitFor(() => expect(result.current.loading).toBe(false))
+      expect(result.current.sources[0]!.enabled).toBe(false)
+    })
+
     it('stops once unmounted', async () => {
       const reads = serve(Infinity)
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
