@@ -80,6 +80,9 @@ const packageSource = (name: string) => `package:${name}`
 const namesItems = (review: PackageReview) =>
   review.described !== undefined && review.local_servers !== undefined && review.hooks.every((h) => h.id !== undefined)
 
+/** A server of `pkg` that a turn starts itself (an allowed package's local one). */
+const localServer = (pkg: PluginPackage, server: string) => pkg.allow_refused && (pkg.review.local_servers ?? []).includes(server)
+
 /**
  * The hook ids the current pin has, to mark a re-pin's new ones: the package source's hook items
  * and the current review's ids. `null` when they cannot be told (no source, or an older review
@@ -566,7 +569,14 @@ function ListTools({ source, onChange }: { source: SourceView; onChange: (source
           {error}
         </span>
       )}
-      <Button size="sm" variant="outline" onClick={() => void list()} disabled={busy} aria-busy={busy}>
+      <Button
+        size="sm"
+        variant="outline"
+        aria-label={`List tools (${source.title})`}
+        onClick={() => void list()}
+        disabled={busy}
+        aria-busy={busy}
+      >
         {busy && <Spinner />}
         List tools
       </Button>
@@ -613,12 +623,12 @@ function PackageCard({
   }
 
   const fetched = pkg.source
-  /** A write's answer; the package's own switch is its Enabled badge too (a refused package's row stays on). */
-  const sourceChanged = (next: SourceView) => {
-    onSource(next)
-    const enabled = next.enabled || next.problem !== null
-    if (next.id === packageSource(pkg.name) && enabled !== pkg.enabled) onChange({ ...pkg, enabled })
-  }
+  const sourceChanged = onSource
+  /**
+   * The badge follows the package's switch as its source reads it, whoever wrote it (a refused
+   * package's row stays on); before the source is read, the package's own `enabled`.
+   */
+  const enabled = source ? source.enabled || source.problem !== null : pkg.enabled
   return (
     <li aria-label={`Plugin package ${pkg.name}`}>
       <Card size="sm">
@@ -626,7 +636,7 @@ function PackageCard({
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-sm font-medium">{pkg.name}</span>
             {pkg.review.version && <span className="sb-num text-xs text-muted-foreground">v{pkg.review.version}</span>}
-            {pkg.enabled ? (
+            {enabled ? (
               <Badge tone="ok">Enabled</Badge>
             ) : pkg.approved ? (
               <Badge tone="muted">Approved, disabled</Badge>
@@ -739,7 +749,10 @@ function PackageCard({
               <SourceCard
                 source={source}
                 onChange={sourceChanged}
-                childExtra={(child) => <ListTools source={child} onChange={sourceChanged} />}
+                childExtra={(child) =>
+                  // An allowed package's local server is started only by a turn: its tools are never listed here.
+                  localServer(pkg, child.title) ? null : <ListTools source={child} onChange={sourceChanged} />
+                }
               />
               {!namesItems(pkg.review) && source.items.length === 0 && source.children.length === 0 && (
                 <p className="mt-1 text-xs text-muted-foreground">

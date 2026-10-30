@@ -344,6 +344,26 @@ describe('PluginPackagesPanel', () => {
     expect(await within(card).findByText('Approved, disabled')).toBeInTheDocument()
   })
 
+  it("offers no List tools on a local server, which only a turn starts", async () => {
+    seedStoredPackage('local', { review: { mcp_servers: [], local_servers: ['tool'] }, allow_refused: true })
+    const { user } = renderPage(<PluginPackagesPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin package local' })
+    const tool = within(await openSource(user, card, 'local')).getByRole('region', { name: 'Source tool' })
+    expect(within(tool).getByRole('switch', { name: 'Enabled (tool)' })).toBeInTheDocument()
+    expect(within(tool).queryByRole('button', { name: /^List tools/ })).not.toBeInTheDocument()
+  })
+
+  it("follows the package's switch written elsewhere on its badge", async () => {
+    seedStoredPackage('greeter')
+    renderPage(<PluginPackagesPanel />)
+    const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
+    await within(card).findByRole('region', { name: 'Source greeter' })
+    expect(within(card).getByText('Enabled', { selector: '[data-slot="badge"]' })).toBeInTheDocument()
+    // The in-page agent switches it off (#4208); the page's next read shows it.
+    await aiCapabilities.setEnabled('package:greeter', false)
+    expect(await within(card).findByText('Approved, disabled')).toBeInTheDocument()
+  })
+
   it('offers no switch before approval', async () => {
     const { user } = renderPage(<PluginPackagesPanel />)
     await screen.findByText('No plugin packages installed.')
@@ -381,7 +401,7 @@ describe('PluginPackagesPanel', () => {
     const card = await screen.findByRole('listitem', { name: 'Plugin package greeter' })
     const source = await openSource(user, card)
     const mem = within(source).getByRole('region', { name: 'Source mem' })
-    const list = within(mem).getByRole('button', { name: 'List tools' })
+    const list = within(mem).getByRole('button', { name: 'List tools (mem)' })
     expect(isUserOnly(list)).toBe(false)
     await user.click(list)
     await user.click(within(mem).getByRole('button', { name: 'mem' }))
@@ -451,7 +471,7 @@ describe('PluginPackagesPanel', () => {
     for (const select of within(source).getAllByRole('combobox')) expect(isUserOnly(select)).toBe(false)
     const mem = within(source).getByRole('region', { name: 'Source mem' })
     expect(isUserOnly(within(mem).getByRole('switch', { name: 'Enabled (mem)' }))).toBe(false)
-    expect(isUserOnly(within(mem).getByRole('button', { name: 'List tools' }))).toBe(false)
+    expect(isUserOnly(within(mem).getByRole('button', { name: 'List tools (mem)' }))).toBe(false)
 
     await user.type(within(card).getByLabelText('Re-pin to branch, tag or commit'), 'v2')
     await user.click(within(card).getByRole('button', { name: 'Fetch re-pin' }))

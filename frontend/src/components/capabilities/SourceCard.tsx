@@ -8,6 +8,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Input } from '@/components/ui/input'
 import { matches, summarize } from './access'
 import { ItemRow } from './ItemRow'
+import { usePollStatus } from './useCapabilities'
 
 /** A source with more items than this gets a filter. */
 const FILTER_ABOVE = 8
@@ -27,6 +28,7 @@ export function SourceCard({
   childExtra,
   children,
   parentProblem = null,
+  parentChecking = false,
 }: {
   source: SourceView
   /** A source after a write: this card's or a nested one's, so replace it by id (`useCapabilities.replace`). */
@@ -35,9 +37,14 @@ export function SourceCard({
   /** What each nested source's header holds besides its switch (a package server's "List tools"), at any depth. */
   childExtra?: (source: SourceView) => ReactNode
   children?: ReactNode
-  /** The problem the source above already shows: not said again. */
+  /** The problem the source above already shows: not said again, and not this source's own row. */
   parentProblem?: string | null
+  /** The source above is checking too, and says so itself when the page stops asking. */
+  parentChecking?: boolean
 }) {
+  const poll = usePollStatus()
+  /** Its own problem (not one it carries from the source above) leaves its own row on. */
+  const ownProblem = source.problem !== null && source.problem !== parentProblem
   const [open, setOpen] = useState(false)
   const [filter, setFilter] = useState('')
   const [busy, setBusy] = useState(false)
@@ -72,7 +79,7 @@ export function SourceCard({
               <SwitchField
                 label="Enabled"
                 ariaLabel={`Enabled (${source.title})`}
-                checked={source.enabled || source.problem !== null}
+                checked={source.enabled || ownProblem}
                 onCheckedChange={(on) => void setEnabled(on)}
                 disabled={busy}
                 busy={busy}
@@ -82,10 +89,21 @@ export function SourceCard({
           </div>
         </div>
         <p className="text-xs text-muted-foreground">{summarize(source)}</p>
-        {source.problem !== null && source.problem !== parentProblem && (
+        {ownProblem && (
           <p role="note" className="text-xs [overflow-wrap:anywhere] text-warn">
             {source.problem}
           </p>
+        )}
+        {source.checking && !parentChecking && poll.stalled && (
+          <div className="flex flex-wrap items-center gap-2">
+            <p role="status" className="text-xs [overflow-wrap:anywhere] text-muted-foreground">
+              {`Still checking whether "${source.title}" can load.`}
+              {poll.pollError !== null && ` The last read failed: ${poll.pollError}`}
+            </p>
+            <Button size="sm" variant="outline" aria-label={`Retry (${source.title})`} onClick={poll.retry}>
+              Retry
+            </Button>
+          </div>
         )}
         {error !== null && (
           <p role="alert" className="text-xs text-warn">
@@ -117,6 +135,7 @@ export function SourceCard({
               headerExtra={childExtra?.(child)}
               childExtra={childExtra}
               parentProblem={source.problem}
+              parentChecking={source.checking}
             />
           ))}
         </CollapsibleContent>

@@ -8,7 +8,7 @@ import type { ItemView, SourceView } from '../../api/capabilities'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { SourceCard } from './SourceCard'
-import { POLL_MAX, POLL_MS, useCapabilities } from './useCapabilities'
+import { POLL_DELAYS, useCapabilities } from './useCapabilities'
 
 function tool(n: number, over: Partial<ItemView> = {}): ItemView {
   return {
@@ -54,6 +54,18 @@ function source(over: Partial<SourceView> = {}, count = 10): SourceView {
 function Harness({ start }: { start: SourceView }) {
   const [shown, setShown] = useState(start)
   return <SourceCard source={shown} onChange={setShown} />
+}
+
+/** The tree as a section shows it: each source on its card. */
+function Polled() {
+  const { sources, replace } = useCapabilities(() => true)
+  return (
+    <>
+      {sources.map((s) => (
+        <SourceCard key={s.id} source={s} onChange={replace} />
+      ))}
+    </>
+  )
 }
 
 const card = (title: string) => screen.getByRole('region', { name: `Source ${title}` })
@@ -176,6 +188,26 @@ describe('SourceCard', () => {
     expect(screen.queryByText(problem)).toBeNull()
   })
 
+  it("a server's switch under a refused package reads its own state, and switches back on (#4757)", async () => {
+    const problem = 'plugin package greeter is not loaded: skills/hello/SKILL.md changed since it was approved'
+    const child = source({ id: 'package:greeter/mcp:mem', kind: 'package_server', title: 'mem', switchable: true, enabled: false, problem }, 1)
+    const refused = source({ id: 'package:greeter', kind: 'package', title: 'greeter', enabled: false, switchable: true, problem, children: [child] }, 1)
+    let sent: unknown
+    server.use(
+      http.put('/api/v1/ai/capabilities/:source', async ({ request }) => {
+        sent = await request.json()
+        return HttpResponse.json({ ...child, enabled: true })
+      }),
+    )
+    const { user } = renderPage(<Harness start={refused} />)
+    await user.click(screen.getByRole('button', { name: 'greeter' }))
+    const toggle = screen.getByRole('switch', { name: 'Enabled (mem)' })
+    expect(toggle).not.toBeChecked()
+    await user.click(toggle)
+    expect(sent).toEqual({ enabled: true })
+    await waitFor(() => expect(screen.getByRole('switch', { name: 'Enabled (mem)' })).toBeChecked())
+  })
+
   it('puts the extra for each nested source in its header', async () => {
     const child = source({ id: 'package:x/mcp:s', kind: 'package_server', title: 'Child server' }, 1)
     const { user } = renderPage(
@@ -217,43 +249,116 @@ describe('useCapabilities', () => {
   describe('while a source is checking (#4757)', () => {
     afterEach(() => vi.useRealTimers())
 
-    /** Serves the list with `package:x`'s child checking for the first `checkingReads` reads. */
-    function serve(checkingReads: number) {
+    /** Serves the list with `package:x`'s child checking for the first `checkingReads` reads; `fail` reads after the first answer 500. */
+    function serve(checkingReads: number, fail = false) {
       let reads = 0
       server.use(
         http.get('/api/v1/ai/capabilities', () => {
           reads += 1
+          if (fail && reads > 1) return HttpResponse.json({ detail: 'agent restarting' }, { status: 500 })
           const child = source({ id: 'package:x/mcp:s', kind: 'package_server', title: 's', checking: reads <= checkingReads }, 1)
-          return HttpResponse.json({ sources: [source({ id: 'package:x', kind: 'package', title: 'x', children: [child] }, 1)] })
+          return HttpResponse.json({ sources: [source({ id: 'package:x', kind: 'package', title: 'x', checking: reads <= checkingReads, children: [child] }, 1)] })
         }),
       )
       return () => reads
     }
     const tick = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms))
     const checking = (sources: SourceView[]) => sources[0]?.children[0]?.checking
+    const total = POLL_DELAYS.reduce((a, b) => a + b, 0)
 
-    it('reads again, and stops once it settles', async () => {
-      const reads = serve(2)
+    it('reads again with back-off, and stops once it settles', async () => {
+      const reads = serve(3)
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
       const { result } = renderHook(() => useCapabilities(() => true))
       await tick(0)
       expect(checking(result.current.sources)).toBe(true)
-      await tick(POLL_MS)
+      await tick(POLL_DELAYS[0]!)
       expect(reads()).toBe(2)
-      await tick(POLL_MS)
+      // The next wait is longer: nothing is read at the first delay again.
+      await tick(POLL_DELAYS[0]!)
+      expect(reads()).toBe(2)
+      await tick(POLL_DELAYS[1]! - POLL_DELAYS[0]!)
       expect(reads()).toBe(3)
+      await tick(POLL_DELAYS[2]!)
+      expect(reads()).toBe(4)
       expect(checking(result.current.sources)).toBe(false)
-      await tick(POLL_MS * 5)
+      await tick(total)
+      expect(reads()).toBe(4)
+      expect(result.current.stalled).toBe(false)
+    })
+
+    it('waits about two minutes in all, never more than 10 s at a time', () => {
+      expect(Math.max(...POLL_DELAYS)).toBe(10_000)
+      expect(POLL_DELAYS[0]).toBe(1000)
+      expect(total).toBeGreaterThanOrEqual(110_000)
+      expect(total).toBeLessThanOrEqual(130_000)
+    })
+
+    it('gives up after its last wait, says so, and Retry starts again', async () => {
+      const reads = serve(Infinity)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      renderPage(<Polled />)
+      await tick(0)
+      await tick(total + 30_000)
+      expect(reads()).toBe(1 + POLL_DELAYS.length)
+      const line = screen.getByText('Still checking whether "x" can load.')
+      expect(line).toBeInTheDocument()
+      // Said once, on the package, not again on its checking server.
+      expect(screen.getAllByText(/^Still checking whether/)).toHaveLength(1)
+      const retry = screen.getByRole('button', { name: 'Retry (x)' })
+      expect(isUserOnly(retry)).toBe(false)
+      await act(async () => retry.click())
+      await tick(0)
+      expect(reads()).toBe(2 + POLL_DELAYS.length)
+      expect(screen.queryByText('Still checking whether "x" can load.')).toBeNull()
+      await tick(POLL_DELAYS[0]!)
+      expect(reads()).toBe(3 + POLL_DELAYS.length)
+    })
+
+    it('says why the last read failed when it gives up', async () => {
+      serve(Infinity, true)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      renderPage(<Polled />)
+      await tick(0)
+      await tick(total + 30_000)
+      expect(screen.getByText(/^Still checking whether "x" can load\. The last read failed: .*agent restarting/)).toBeInTheDocument()
+    })
+
+    it('reads once per wait however many sections ask', async () => {
+      const reads = serve(Infinity)
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+      renderHook(() => {
+        useCapabilities((s) => s.kind === 'builtin')
+        useCapabilities((s) => s.kind === 'remote')
+        useCapabilities((s) => s.kind === 'package')
+      })
+      await tick(0)
+      expect(reads()).toBe(1)
+      await tick(POLL_DELAYS[0]!)
+      expect(reads()).toBe(2)
+      await tick(POLL_DELAYS[1]!)
       expect(reads()).toBe(3)
     })
 
-    it('gives up after POLL_MAX reads', async () => {
-      const reads = serve(Infinity)
+    it('a write while a read is under way is not undone by its answer', async () => {
+      let release: (() => void) | undefined
+      let reads = 0
+      server.use(
+        http.get('/api/v1/ai/capabilities', async () => {
+          reads += 1
+          if (reads === 2) await new Promise<void>((resolve) => (release = resolve))
+          return HttpResponse.json({ sources: [source({ id: 'package:x', kind: 'package', title: 'x', checking: true, enabled: true }, 1)] })
+        }),
+      )
       vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-      renderHook(() => useCapabilities(() => true))
+      const { result } = renderHook(() => useCapabilities(() => true))
       await tick(0)
-      for (let i = 0; i < POLL_MAX + 3; i++) await tick(POLL_MS)
-      expect(reads()).toBe(1 + POLL_MAX)
+      await tick(POLL_DELAYS[0]!)
+      expect(reads).toBe(2)
+      act(() => result.current.replace({ ...result.current.sources[0]!, enabled: false }))
+      release!()
+      await tick(0)
+      expect(result.current.sources[0]!.enabled).toBe(false)
     })
 
     it('stops once unmounted', async () => {
@@ -262,7 +367,7 @@ describe('useCapabilities', () => {
       const { unmount } = renderHook(() => useCapabilities(() => true))
       await tick(0)
       unmount()
-      await tick(POLL_MS * 3)
+      await tick(total)
       expect(reads()).toBe(1)
     })
   })
