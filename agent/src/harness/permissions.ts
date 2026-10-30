@@ -1,4 +1,4 @@
-import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
+import type { CanUseTool, HookCallback, HookCallbackMatcher, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
 import { toolOffReason } from '../access/items.js'
 import type { LiveAccess } from '../access/live.js'
 import { screenedText } from '../browser/origins.js'
@@ -259,6 +259,40 @@ async function decideLive(
   return decision
 }
 
+/** The refusal for a call whose decision threw (#5018). */
+export function uncheckedMessage(toolName: string): string {
+  return `${toolName} is refused: its access could not be checked.`
+}
+
+/** Logs only the error's type: its message may carry the call's input. */
+function logRefusal(seam: string, toolName: string, err: unknown): void {
+  const type = err instanceof Error ? err.name : typeof err
+  console.error(`${seam}: deciding ${toolName} failed (${type}); the call is refused`)
+}
+
+/**
+ * `decideLive`, failing closed (#5018): a resolver, guard, access read or ledger that
+ * throws refuses the call. Measured on SDK 0.3.310 with its Claude Code 2.1.310
+ * (test/run.test.ts): a PreToolUse hook that throws is passed over and the call goes on
+ * to canUseTool, so a hook that throws must not be the one that decides.
+ */
+async function decideChecked(
+  seam: string,
+  toolName: string,
+  tierOf: TierResolver,
+  input: unknown,
+  guard: InputGuard | undefined,
+  live: LiveSeam | undefined,
+  toolUseId: string | undefined,
+): Promise<ToolDecision> {
+  try {
+    return await decideLive(toolName, tierOf, input, guard, live, toolUseId)
+  } catch (err) {
+    logRefusal(seam, toolName, err)
+    return { decision: 'deny', tier: 'outward', reason: uncheckedMessage(toolName) }
+  }
+}
+
 export function makeCanUseTool(
   tierOf: TierResolver,
   onDecision?: DecisionListener,
@@ -267,9 +301,9 @@ export function makeCanUseTool(
   prepare?: ApprovalPreparer,
   live?: LiveSeam,
 ): CanUseTool {
-  return async (toolName, input, options): Promise<PermissionResult> => {
+  const canUseTool: CanUseTool = async (toolName, input, options): Promise<PermissionResult> => {
     // The live tier first, so `prepare` runs only for a call that parks by it (#4442).
-    const decision = await decideLive(toolName, tierOf, input, guard, live, options.toolUseID)
+    const decision = await decideChecked('canUseTool', toolName, tierOf, input, guard, live, options.toolUseID)
     onDecision?.(toolName, decision)
     // The SDK passes the input to the tool from `updatedInput` when set; an
     // allowed call gets its own input back unchanged, unless the guard rewrote it.
@@ -304,6 +338,15 @@ export function makeCanUseTool(
       }
     }
   }
+  // Whatever else throws (a listener) refuses the call too (#5018).
+  return async (toolName, input, options) => {
+    try {
+      return await canUseTool(toolName, input, options)
+    } catch (err) {
+      logRefusal('canUseTool', toolName, err)
+      return { behavior: 'deny', message: uncheckedMessage(toolName) }
+    }
+  }
 }
 
 export function makePreToolUseHook(
@@ -313,30 +356,54 @@ export function makePreToolUseHook(
   guard?: InputGuard,
   live?: LiveSeam,
 ): HookCallbackMatcher {
+  const hook: HookCallback = async (input) => {
+    if (input.hook_event_name !== 'PreToolUse') return {}
+    const decision = await decideChecked(
+      'PreToolUse',
+      input.tool_name,
+      tierOf,
+      input.tool_input,
+      guard,
+      live,
+      input.tool_use_id,
+    )
+    if (decision.decision === 'allow') return {}
+    if (decision.decision === 'needs_approval' && gate) {
+      // Force the prompt; canUseTool parks the call and reports the decision.
+      return {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse' as const,
+          permissionDecision: 'ask' as const,
+          permissionDecisionReason: decision.reason,
+        },
+      }
+    }
+    onDecision?.(input.tool_name, decision)
+    return {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse' as const,
+        permissionDecision: 'deny' as const,
+        permissionDecisionReason:
+          decision.decision === 'deny' ? decision.reason : noGateMessage(decision.reason),
+      },
+    }
+  }
   return {
     hooks: [
-      async (input) => {
-        if (input.hook_event_name !== 'PreToolUse') return {}
-        const decision = await decideLive(input.tool_name, tierOf, input.tool_input, guard, live, input.tool_use_id)
-        if (decision.decision === 'allow') return {}
-        if (decision.decision === 'needs_approval' && gate) {
-          // Force the prompt; canUseTool parks the call and reports the decision.
+      // Whatever else throws (a listener) refuses the call too (#5018).
+      async (input, toolUseId, options) => {
+        try {
+          return await hook(input, toolUseId, options)
+        } catch (err) {
+          const toolName = input.hook_event_name === 'PreToolUse' ? input.tool_name : 'the tool'
+          logRefusal('PreToolUse', toolName, err)
           return {
             hookSpecificOutput: {
               hookEventName: 'PreToolUse' as const,
-              permissionDecision: 'ask' as const,
-              permissionDecisionReason: decision.reason,
+              permissionDecision: 'deny' as const,
+              permissionDecisionReason: uncheckedMessage(toolName),
             },
           }
-        }
-        onDecision?.(input.tool_name, decision)
-        return {
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse' as const,
-            permissionDecision: 'deny' as const,
-            permissionDecisionReason:
-              decision.decision === 'deny' ? decision.reason : noGateMessage(decision.reason),
-          },
         }
       },
     ],

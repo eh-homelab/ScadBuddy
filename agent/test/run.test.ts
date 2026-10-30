@@ -409,6 +409,58 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     expect(result.permission_denials.map((d) => d.tool_name)).toEqual(['mcp__stub__print'])
   })
 
+  // #5018: a decision that throws must refuse the call. On #5017 a raising hook callback
+  // made Claude Code run the call (the Python SDK); here the tier resolver throws for the
+  // one tool the turn calls.
+  it('refuses a call whose tier resolver throws, in the hook and in canUseTool (#5018)', async () => {
+    script = (r) =>
+      lastContent(r).includes('tool_result')
+        ? { text: 'Refused.' }
+        : { toolUse: { name: 'mcp__stub__echo', input: { text: 'hi' } } }
+    const decisions: [string, ToolDecision][] = []
+    const { result } = await collect({
+      paths: { stateDir },
+      credential: gateway(),
+      prompt: 'Echo hi',
+      model: 'claude-sonnet-4-5',
+      mcpServers: { stub: stubServer() },
+      tierOf: (name) => {
+        if (name === 'mcp__stub__echo') throw new Error('tier table unavailable')
+        return tiers[name]
+      },
+      onDecision: (name, d) => decisions.push([name, d]),
+    })
+    expect(handled).toEqual([])
+    expect(decisions.map(([name, d]) => [name, d.decision])).toEqual([['mcp__stub__echo', 'deny']])
+    const followUp = fake.messageCalls().at(-1)
+    expect(followUp && lastContent(followUp)).toMatch(/mcp__stub__echo is refused: its access could not be checked/)
+    expect(result.permission_denials.map((d) => d.tool_name)).toEqual(['mcp__stub__echo'])
+  })
+
+  // Measured before the fix (#5018): Claude Code passed over the throwing hook, and
+  // canUseTool, whose resolver answered, ran the call.
+  it('refuses a call whose resolver throws only in the hook, though canUseTool would allow it (#5018)', async () => {
+    script = (r) =>
+      lastContent(r).includes('tool_result')
+        ? { text: 'Refused.' }
+        : { toolUse: { name: 'mcp__stub__echo', input: { text: 'hi' } } }
+    let calls = 0
+    const { result } = await collect({
+      paths: { stateDir },
+      credential: gateway(),
+      prompt: 'Echo hi',
+      model: 'claude-sonnet-4-5',
+      mcpServers: { stub: stubServer() },
+      tierOf: (name) => {
+        calls += 1
+        if (calls === 1) throw new Error('tier table unavailable')
+        return tiers[name]
+      },
+    })
+    expect(handled).toEqual([])
+    expect(result.permission_denials.map((d) => d.tool_name)).toEqual(['mcp__stub__echo'])
+  })
+
   it('makes a built-in tool impossible: a scripted Bash call never runs', async () => {
     script = (r) =>
       lastContent(r).includes('tool_result')
