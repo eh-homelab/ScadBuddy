@@ -23,14 +23,14 @@ describe('McpConnectSnippet (#1910)', () => {
         },
       },
     })
-    expect(screen.getByText(/Create a token below/)).toBeInTheDocument()
+    expect(screen.getByText(/Create a token under Tokens/)).toBeInTheDocument()
   })
 
   it('fills in a token just minted', () => {
     renderPage(<McpConnectSnippet publicUrl="https://scadbuddy.example" authMode="bearer" token="sbmcp_abc" />)
     expect(code()).toContain("--header 'Authorization: Bearer sbmcp_abc'")
     expect(desktop().mcpServers.scadbuddy.env).toEqual({ SCADBUDDY_AUTH: 'Bearer sbmcp_abc' })
-    expect(screen.queryByText(/Create a token below/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Create a token under Tokens/)).not.toBeInTheDocument()
   })
 
   it('keeps the header while OIDC is on: bearer tokens still work', () => {

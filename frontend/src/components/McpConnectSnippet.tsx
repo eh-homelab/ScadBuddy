@@ -74,7 +74,7 @@ export function McpConnectSnippet({ publicUrl, authMode, token }: Props) {
     <div className="space-y-3" data-testid="mcp-snippet">
       <p className="text-sm font-medium">Connect Claude</p>
       <p className="text-xs text-muted-foreground">
-        {header && !token && <>Create a token below, then paste it where the snippet says {PLACEHOLDER}. </>}
+        {header && !token && <>Create a token under Tokens, then paste it where the snippet says {PLACEHOLDER}. </>}
         {!header && <>Authentication is off, so the snippets send no token. </>}
         For ScadBuddy&rsquo;s skills and subagents too, install the{' '}
         <a href={PLUGIN_DOC} {...NEW_TAB} className="text-primary underline">
