@@ -555,8 +555,7 @@ Assistant setting. Asked to press one, the assistant is told to ask you instead
 Other Claude clients reach ScadBuddy's tools at `https://<your ScadBuddy>/mcp` (plain
 HTTP is refused, except on loopback). They sign in with a token from **Settings → MCP access →
 Tokens** ([operating.md §4.1](ai/operating.md#41-mcp-access-tokens)),
-or through your identity provider when the operator has turned on **MCP sign-in
-(OIDC)** ([operating.md §6a](ai/operating.md#6a-mcp-sign-in-with-oidc)).
+or through your identity provider when the operator has turned on **OIDC sign-in** ([operating.md §6a](ai/operating.md#6a-mcp-sign-in-with-oidc)).
 
 1. Under **Settings → MCP access → Tokens**, give the token a name ("Claude Desktop on my laptop"),
    an **Access** level (Read, Write or Outward) and an expiry, and press **Create

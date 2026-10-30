@@ -182,7 +182,7 @@ export function McpAuthSection({ onSaved }: Props) {
                 >
                   OIDC sign-in is on, so it overrides the choice below: every call needs an OIDC
                   sign-in or an access token. The choice below is stored, and applies once OIDC is
-                  turned off in &ldquo;MCP sign-in (OIDC)&rdquo;.
+                  turned off in MCP access &rarr; OIDC sign-in.
                   {current.configured_mode === 'disabled' && (
                     <span className="mt-1 block text-warn" data-testid="mcp-auth-oidc-disabled">
                       The stored choice allows calls without a token: turning OIDC off will let
