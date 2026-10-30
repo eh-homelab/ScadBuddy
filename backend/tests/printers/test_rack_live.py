@@ -23,8 +23,14 @@ cheapest, since the H2C's pre-print fetches each mapped hotend in turn (the 2026
 plate's five took about 19 min, still at layer 0). Bambuddy's ``print_queue`` items 374
 (one filament, ``nozzle_mapping [18]``) and 367 (two rack groups, ``[18, 1, 1, 20, …]``)
 were such plates (`fixtures/rack-project-file.json`). Or leave rack positions (1-6) out
-of the pick with ``SCADBUDDY_TEST_PRINTER_RACK_SKIP`` (comma-separated), e.g. the
-position of the mounted hotend, or one that the ranking would choose.
+of the pick with ``SCADBUDDY_TEST_PRINTER_RACK_SKIP`` (comma-separated).
+
+A hotend left out shows only that the printer *had* a choice. A pick that is also what
+the printer would choose with no ``nozzle_mapping`` passes without proving anything,
+and the test cannot read that choice. So move the pick off the likely default: run
+``_DRY=1`` once with no skip, then skip the positions it picked (and the mounted
+hotend's, if it fits). The pick then sends hotends that neither the ranking nor a
+printer that keeps the mounted hotend would take first.
 
 It passes once the job has fetched every rack hotend the mapping sends (the mounted one
 excepted) and none other, then stops the print: the pre-print sequence is the verdict, so
@@ -88,7 +94,8 @@ FILE = os.environ.get("SCADBUDDY_TEST_PRINTER_FILE", "")
 AMS = os.environ.get("SCADBUDDY_TEST_PRINTER_AMS", "")
 SKIP = os.environ.get("SCADBUDDY_TEST_PRINTER_RACK_SKIP", "")
 LAYER1 = os.environ.get("SCADBUDDY_TEST_PRINTER_LAYER1") == "1"
-WAIT = float(os.environ.get("SCADBUDDY_TEST_PRINTER_WAIT") or START_WAIT)
+# Parsed in the test, so a bad value fails only the run that uses it, not collection.
+WAIT = os.environ.get("SCADBUDDY_TEST_PRINTER_WAIT", "")
 
 
 @pytest.fixture
@@ -103,6 +110,10 @@ def printer() -> dict[str, str]:
     reason="starts a print: opt in with SCADBUDDY_TEST_PRINTER_PRINT=1 (or _DRY=1), _FILE and _AMS",
 )
 async def test_a_rack_print_uses_the_hotends_sent(printer: dict[str, str]) -> None:
+    try:
+        wait = float(WAIT or START_WAIT)
+    except ValueError:
+        pytest.fail(f"SCADBUDDY_TEST_PRINTER_WAIT={WAIT!r} is not a number of seconds")
     lan = LanPrinter(**printer, cert_sha256=fetch_cert_sha256(printer["host"]))
     # Unique per run, so no earlier job (an earlier probe's among them) carries it.
     name = f"scadbuddy-rack-probe-{int(time.time())}"
@@ -156,14 +167,14 @@ async def test_a_rack_print_uses_the_hotends_sent(printer: dict[str, str]) -> No
     )
     try:
         # The command goes out on the reading connection, so no report after it is missed.
-        async with asyncio.timeout(WAIT):
+        async with asyncio.timeout(wait):
             async for report in lan.reports(command=command):
                 for line in probe.feed(report.print):
                     print(line)
                 if probe.done:
                     break
     except TimeoutError:
-        pytest.fail(f"not verified within {WAIT:g} s: {probe.missing()}")
+        pytest.fail(f"not verified within {wait:g} s: {probe.missing()}")
     finally:
         # Only the probe's own job: a refused start leaves whatever ran before untouched.
         if probe.taken:
@@ -172,3 +183,5 @@ async def test_a_rack_print_uses_the_hotends_sent(printer: dict[str, str]) -> No
     print(
         f"rack hotends fetched: {probe.fetched}; left out {sorted(excluded)}; layer {probe.layer}"
     )
+    if not LAYER1:
+        print("pre-print not watched past the last fetch sent (LAYER1=1 watches it all)")
