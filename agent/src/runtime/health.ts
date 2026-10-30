@@ -59,8 +59,11 @@ export function workerHealthApp(deps: WorkerHealthDeps): Hono {
   return app
 }
 
-/** temporal.api.enums.v1.TaskQueueType: WORKFLOW 1, ACTIVITY 2. */
-export type PolledQueue = { name: string; type: 1 | 2 }
+/**
+ * temporal.api.enums.v1.TaskQueueType: WORKFLOW 1, ACTIVITY 2. `started: false`: this process
+ * never started its worker on the queue (a missing database, KEK or Temporal; the start log says).
+ */
+export type PolledQueue = { name: string; type: 1 | 2; started?: boolean }
 const DESCRIBE_DEADLINE_MS = 3_000
 
 /**
@@ -72,17 +75,20 @@ export async function queuesPolled(
   queues: readonly PolledQueue[],
   identity: string,
 ): Promise<string | undefined> {
-  const now = Date.now()
+  const unstarted = queues.find((q) => q.started === false)
+  if (unstarted) return `this process started no worker on "${unstarted.name}"; its start log says why`
   try {
     for (const queue of queues) {
-      const { pollers } = await client.withDeadline(now + DESCRIBE_DEADLINE_MS, () =>
+      // Each call its own deadline and clock: a slow first answer leaves the rest their full time.
+      const asked = Date.now()
+      const { pollers } = await client.withDeadline(asked + DESCRIBE_DEADLINE_MS, () =>
         client.workflowService.describeTaskQueue({
           namespace: client.options.namespace,
           taskQueue: { name: queue.name },
           taskQueueType: queue.type,
         }),
       )
-      if (!(pollers ?? []).some((p) => p.identity === identity && now - seenAtMs(p.lastAccessTime) < HOST_FRESH_MS)) {
+      if (!(pollers ?? []).some((p) => p.identity === identity && Date.now() - seenAtMs(p.lastAccessTime) < HOST_FRESH_MS)) {
         return `this worker does not poll Temporal's "${queue.name}" queue yet`
       }
     }
