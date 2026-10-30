@@ -106,7 +106,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`a new session's readiness follows the flag$
     expect(await asked(undefined)).toEqual(['agent/1'])
   })
 
-  it('is the three AgentSession queues with the flag set', async () => {
-    expect(await asked(true)).toEqual(['agent-sessions/1', 'agent-tools/2', 'agent-sessions.here/2'])
+  it('is the two shared AgentSession queues with the flag set (the session hosts come from liveHosts)', async () => {
+    expect(await asked(true)).toEqual(['agent-sessions/1', 'agent-tools/2'])
   })
 })

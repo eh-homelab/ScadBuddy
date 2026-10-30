@@ -749,7 +749,7 @@ The text these phases replace (the 2026-10-13 Phases 6–9, which put every turn
 and deleted `agent-durable/`) is in git history at `4c130e08b`. What changed, and why, is spec
 §14 (PR #4771) and spec §14.7 (this rewrite).
 
-**Built on, not redone.** Three pieces of work by session `92109e29` carry part of this work. Each
+**Built on, not redone.** Three items by session `92109e29` (two merged PRs and one follow-up issue) carry part of this plan. Each
 step below that needs one says so under **Depends on**.
 
 | PR | Issue | What it gives this plan |
@@ -938,8 +938,8 @@ Spec §14.3: same image, two entrypoints. #4773's audit (§14.5) is answered in 
 
 **As built (2026-10-30):** the role switch is `agent/src/runtime/role.ts` `roleParts`, read
 in place in `main.ts`, and `runtime/health.ts` is the worker's server; the wiring stays in
-`main.ts` rather than moving to `runtime/workers.ts` and `runtime/http.ts`, to keep the diff
-off the open #5001's hunks there (Step 6.3 rewrites that wiring anyway). `/readyz` waits for
+`main.ts` rather than moving to `runtime/workers.ts` and `runtime/http.ts`, so this diff is
+the role switch alone (Step 6.3 rewrites that wiring anyway). `/readyz` waits for
 all four of the worker's queues, its `agent-tools.<hostname>` too. The last test above waits
 on #5003: an `AgentSession` turn opens no tab wait yet (`TurnHost` answers `NO_PARKS`), so
 there is no park to resolve; that park is built before Step 6.3.
