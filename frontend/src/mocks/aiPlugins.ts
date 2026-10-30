@@ -391,9 +391,9 @@ export const aiPluginHandlers = [
     const plugin = state.remote.get(String(params.name))
     if (!plugin) return undefined
     const body = (await request.json()) as RemotePluginPatch & Record<string, unknown>
-    // The agent's schema is strict: a switch, tiers or disabled tools are /capabilities' (#4828).
+    // As the agent's route (#4828): a switch, tiers or disabled tools are /capabilities'.
     for (const key of ['enabled', 'tool_tiers', 'disabled_tools']) {
-      if (key in body) return detail(400, `${key}: Unrecognized key (use /api/v1/ai/capabilities)`)
+      if (key in body) return detail(400, `${key} is not a field of /plugins (#4828): change a switch, a tier or a disabled tool with PUT /api/v1/ai/capabilities/<source> (remote:<name> or builtin:<source>)`)
     }
     const next: RemotePlugin = {
       ...plugin,

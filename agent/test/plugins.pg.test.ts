@@ -424,6 +424,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         for (const extra of old) {
           const res = await a.request('/api/v1/ai/plugins', json('POST', { name: 'mem', url: 'https://hs.example/mcp', ...extra }))
           expect(res.status, JSON.stringify(extra)).toBe(400)
+          expect(((await res.json()) as { detail: string }).detail).toContain('/api/v1/ai/capabilities')
         }
         expect(await store.list()).toEqual([])
         expect((await a.request('/api/v1/ai/plugins', json('POST', { name: 'mem', url: 'https://hs.example/mcp' }))).status).toBe(201)
@@ -431,6 +432,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         for (const extra of old) {
           const res = await a.request('/api/v1/ai/plugins/mem', json('PATCH', extra))
           expect(res.status, JSON.stringify(extra)).toBe(400)
+          expect(((await res.json()) as { detail: string }).detail).toContain('/api/v1/ai/capabilities')
         }
         expect(await db.sql`SELECT item, access, updated_by, updated_at::text AS t FROM ai_access ORDER BY source, item`).toEqual(before)
       })

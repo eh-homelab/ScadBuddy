@@ -195,7 +195,9 @@ describe('/api/v1/ai/plugins with built-ins', () => {
   ])('answers 400 for %s: /capabilities is the way to change a built-in tool (#4828)', async (_label, body) => {
     const { settings, values } = memorySettings()
     const { access, rows } = memoryAccess()
-    expect((await patch(app(settings, remoteRepo(), access), 'scadbuddy', body)).status).toBe(400)
+    const res = await patch(app(settings, remoteRepo(), access), 'scadbuddy', body)
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { detail: string }).detail).toContain('/api/v1/ai/capabilities')
     expect(values.size).toBe(0)
     expect(rows).toEqual([])
   })

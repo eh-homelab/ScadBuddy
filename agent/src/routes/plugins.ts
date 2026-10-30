@@ -113,9 +113,19 @@ export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
   }
 }
 
+/** Fields these routes had until #4828: a plugin's switch, tiers and disabled tools are `ai_access` rows now. */
+const ACCESS_FIELDS = ['enabled', 'tool_tiers', 'disabled_tools'] as const
+
 async function parseBody<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer<T> | string> {
   try {
-    return schema.parse(await c.req.json())
+    const json: unknown = await c.req.json()
+    if (typeof json === 'object' && json !== null) {
+      const old = ACCESS_FIELDS.find((key) => Object.hasOwn(json, key))
+      if (old !== undefined) {
+        return `${old} is not a field of /plugins (#4828): change a switch, a tier or a disabled tool with PUT /api/v1/ai/capabilities/<source> (remote:<name> or builtin:<source>)`
+      }
+    }
+    return schema.parse(json)
   } catch (err) {
     return err instanceof z.ZodError
       ? err.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ')
@@ -216,6 +226,7 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
       if (body.url !== undefined || body.auth_header !== undefined || body.secret !== undefined) {
         return isBuiltIn(c, set.name, 'given a URL, an auth header or a secret: it runs inside the agent')
       }
+      // Nothing is left to patch on a built-in: the answer is its view.
       return c.json(await deps.builtIns.view(set))
     }
     try {
