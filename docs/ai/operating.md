@@ -880,7 +880,7 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   (`builtin:own-plugin`, `*`), is `off`; [`agent/src/access/model.ts`](../../agent/src/access/model.ts)). A browser (Playwright MCP) is not built in
   any more; it is added as a remote plugin ([headless-browser.md](headless-browser.md)).
   Settings sets that switch on the source "ScadBuddy skills and subagents" (#4757).
-  `PATCH` with `{ enabled }` still sets the same row for one release (#4828), and the page
+  `PATCH` with `{ enabled }` still sets the same row for one release (#781), and the page
   no longer calls it; approve, re-pin and `DELETE` answer 409. An
   install whose package names one answers 409 with `built_in: true` instead of
   refusing it, and Settings shows that as a notice.
@@ -1382,11 +1382,13 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   `ai_plugins` `enabled`, `tool_tiers` and `disabled_tools`. Migration
   `agent/src/db/migrations/20261026T2200Z_access.sql` made the table.
   `20261026T2201Z_access_copy.sql` copied the old values into it (`updated_by` is
-  `migration:2171`). Its two triggers, created before the copy, mirror an older replica's
-  write of `ai_plugins` or of the four `ai_settings` keys into `ai_access` during a rolling
-  deploy. The new code also writes those keys, old key first and then `ai_access`, in one
-  transaction (`agent/src/access/legacy.ts`). Both go next release (#4828). A later migration drops the old
-  columns (spec §4.3).
+  `migration:2171`). `20261030T1020Z_access_drop_mirrors.sql` (#4828) dropped the two mirror
+  triggers and deleted the four `ai_settings` keys. The agent writes `ai_access` only. The
+  `ai_plugins` columns stay in the schema, unread and unwritten, until a follow-up
+  migration drops them. Rolling the agent back past #4838 is not supported: that build
+  reads the deleted keys as absent, which means on. The copied `migration:2171` rows stay.
+  See [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql)
+  and [`20261030T1020Z_access_drop_mirrors.sql`](../../agent/src/db/migrations/20261030T1020Z_access_drop_mirrors.sql).
 - The printer camera is the access of `get_printer_camera` (`builtin:scadbuddy`): `off`
   replaces the old switch (spec §4.2; `agent/src/routes/printerCamera.ts`, #1911). The
   route `PUT /api/v1/ai/settings/printer-camera` writes that row.
@@ -1420,8 +1422,7 @@ Settings → Tools & plugins reads and writes `ai_access` through seven agent ro
   bridge (#4208).
 - Built-in writes go through `AccessStore` (`agent/src/access/store.ts`), which audits
   them and sends the warm eviction. Remote writes go through `PluginRepo`
-  (`agent/src/plugins/registry.ts` `setToolAccess`) for one release (until #4828), so the
-  `ai_plugins` columns an older replica reads stay right. They record the writer in
+  (`agent/src/plugins/registry.ts` `setToolAccess`) under the plugin's row lock. They record the writer in
   `ai_access.updated_by` (`browser:browser` from the page, `updatedBy` in
   `agent/src/access/store.ts`) and are not audited, as remote plugin writes are not.
 - A remote tool's label is its MCP `title`, else `annotations.title`, else its name

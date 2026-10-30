@@ -12,7 +12,10 @@ export function isToolAccess(v: unknown): v is ToolAccess {
 
 /** The item that stands for a whole source: its access is `on` or `off`. */
 export const SOURCE_ITEM = '*'
-/** `updated_by` of the rows migration 20261026T2201Z_access_copy.sql wrote. */
+/**
+ * `updated_by` of the rows migration 20261026T2201Z_access_copy.sql copied. A closed set:
+ * nothing has written it since 20261030T1020Z_access_drop_mirrors.sql dropped the mirror triggers (#4828).
+ */
 export const MIGRATED_BY = 'migration:2171'
 
 export const BUILTIN_SOURCES = {

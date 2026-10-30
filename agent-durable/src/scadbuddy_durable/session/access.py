@@ -20,7 +20,8 @@ TOOL_ACCESS = ("off", "read", "write", "outward")
 _TIERS = ("read", "write", "outward")
 # The item that stands for a whole source: its access is `on` or `off`.
 SOURCE_ITEM = "*"
-# `updated_by` of the rows migration 20261026T2201Z_access_copy.sql wrote.
+# `updated_by` of the rows migration 20261026T2201Z_access_copy.sql copied. A closed set:
+# nothing has written it since 20261030T1020Z_access_drop_mirrors.sql dropped the mirror triggers (#4828).
 MIGRATED_BY = "migration:2171"
 BROWSER_SOURCE = "builtin:browser"
 REGISTRY_SOURCES = ("builtin:scadbuddy", BROWSER_SOURCE)
@@ -50,7 +51,8 @@ def _rank(tier: str) -> int:
 def tool_access(declared: str, row: AccessRow | None, *, migrated_raises_only: bool) -> str:
     """A tool's effective access: the row's when it holds one, else the declared tier. With
     ``migrated_raises_only`` (a registry source), a row the migration copied counts only when
-    it is ``off`` or above ``declared``: the old registry overrides could only raise."""
+    it is ``off`` or above ``declared``: the old registry overrides could only raise. Kept for
+    good: a copied tier the old code ignored must not start to lower a tool's gate (#4828)."""
     if row is None or row.access not in TOOL_ACCESS:
         return declared
     if migrated_raises_only and row.updated_by == MIGRATED_BY and row.access != "off":
