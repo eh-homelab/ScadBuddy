@@ -93,22 +93,28 @@ export interface CapabilityProvider {
   resetItem(source: string, item: string, context: AuditContext): Promise<void>
   details(source: string, item: string): Promise<ItemDetails | undefined>
   refresh?(source: string): Promise<{ test: PluginTest; source: SourceView }>
+  /** The source a child source (a package's server) is under, so its switch folds in when the child is asked for by id. */
+  parentOf?(source: string): string | undefined
 }
 
 const ACCESS_WORDS = (kind: ItemKind): string => ITEM_ACCESS[kind].join(', ')
 
 /**
  * `view` with its source's switch on its items (#4757): while it, or the source above it
- * (`offBy`), is switched off, every item reads `off`, saying why unless the item has a reason
- * of its own (a renamed tool's, one off through another entry's row), which stays.
- * `own_access` keeps what the item's row gives.
+ * (`offBy`), is switched off, every item reads `off`, saying so. An item whose own access is
+ * already off keeps its own reason (one off through another entry's row); any other reason (a
+ * renamed tool's, which `allowed` still shows) gives way. `own_access` keeps what the item's row gives.
  */
 function switched(view: SourceView, offBy?: SourceView): SourceView {
   const off = offBy ?? (view.enabled ? undefined : view)
   const items =
     off === undefined
       ? view.items
-      : view.items.map((item) => ({ ...item, access: 'off' as const, reason: item.reason ?? `Off while "${off.title}" is switched off` }))
+      : view.items.map((item) => ({
+          ...item,
+          access: 'off' as const,
+          reason: item.own_access === 'off' && item.reason !== null ? item.reason : `Off while "${off.title}" is switched off`,
+        }))
   return { ...view, items, children: view.children.map((child) => switched(child, off)) }
 }
 
@@ -136,8 +142,9 @@ export class Capabilities {
   }
 
   async setItem(id: string, item: string, access: Access, context: AuditContext): Promise<SourceView> {
-    const { provider, source } = await this.found(id)
-    const view = this.item(source, item)
+    // The item as its provider answers it: a refusal gives the item's own reason, not its source's switch.
+    const { provider, own } = await this.found(id)
+    const view = this.item(own, item)
     if (!ITEM_ACCESS[view.kind].includes(access)) {
       throw new CapabilityError(`a ${view.kind} takes ${ACCESS_WORDS(view.kind)}, not ${JSON.stringify(access)}`, 400)
     }
@@ -151,8 +158,8 @@ export class Capabilities {
   }
 
   async resetItem(id: string, item: string, context: AuditContext): Promise<SourceView> {
-    const { provider, source } = await this.found(id)
-    this.refuseFixed(this.item(source, item))
+    const { provider, own } = await this.found(id)
+    this.refuseFixed(this.item(own, item))
     await provider.resetItem(id, item, context)
     return this.source(id)
   }
@@ -173,7 +180,9 @@ export class Capabilities {
   async refresh(id: string): Promise<{ test: PluginTest; source: SourceView }> {
     const { provider } = await this.found(id)
     if (provider.refresh === undefined) throw new CapabilityError(`"${id}" lists no tools to refresh`, 409)
-    return provider.refresh(id)
+    const { test } = await provider.refresh(id)
+    // The source as the tree shows it after the refresh, its switches folded in.
+    return { test, source: (await this.found(id)).source }
   }
 
   private provider(id: string): CapabilityProvider {
@@ -182,11 +191,21 @@ export class Capabilities {
     return provider
   }
 
-  private async found(id: string): Promise<{ provider: CapabilityProvider; source: SourceView }> {
+  /** `source` as the tree shows it, its switches folded in; `own` as its provider answers it. */
+  private async found(id: string): Promise<{ provider: CapabilityProvider; source: SourceView; own: SourceView }> {
     const provider = this.provider(id)
-    const source = await provider.get(id)
-    if (source === undefined) throw new CapabilityError(`no source "${id}"`, 404)
-    return { provider, source: switched(source) }
+    const parentId = provider.parentOf?.(id)
+    if (parentId !== undefined) {
+      // A child answered alone has only its own switch: take it from its folded parent.
+      const parent = await provider.get(parentId)
+      const own = parent?.children.find((c) => c.id === id)
+      const source = parent && switched(parent).children.find((c) => c.id === id)
+      if (own === undefined || source === undefined) throw new CapabilityError(`no source "${id}"`, 404)
+      return { provider, source, own }
+    }
+    const own = await provider.get(id)
+    if (own === undefined) throw new CapabilityError(`no source "${id}"`, 404)
+    return { provider, source: switched(own), own }
   }
 
   private item(source: SourceView, item: string): ItemView {

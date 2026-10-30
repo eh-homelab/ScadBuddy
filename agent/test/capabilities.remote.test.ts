@@ -195,7 +195,8 @@ describe('remote MCP plugins as capability sources', () => {
     const { caps, setToolAccess } = setup({ listings: { 'remote:hs': listing([{ name: 'files.list', annotations: { readOnlyHint: true } }]) } })
     const view = item(await caps.source('remote:hs'), 'files.list')
     const reason = 'Claude Code renames this tool, so it cannot take a tier: it asks first, or is off'
-    expect(view).toMatchObject({ harness_name: 'mcp__hs__files_list', allowed: ['off', 'outward'], reason, fixed: null, own_access: 'outward' })
+    // The plugin is off: the switch's reason shows; a refusal still gives the tool's own.
+    expect(view).toMatchObject({ harness_name: 'mcp__hs__files_list', allowed: ['off', 'outward'], reason: 'Off while "hs" is switched off', fixed: null, own_access: 'outward' })
     expect(await refusal(caps.setItem('remote:hs', 'files.list', 'read', ctx))).toEqual({ status: 409, message: reason })
     expect(setToolAccess).not.toHaveBeenCalled()
     await caps.setItem('remote:hs', 'files.list', 'off', ctx)

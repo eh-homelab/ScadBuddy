@@ -3,7 +3,7 @@ import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from '../audit/log.js
 import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { LEGACY_SOURCES, legacySettings, type RegistryTool } from './legacy.js'
 import { type Access, itemKindIn } from './items.js'
-import { type AccessRow, isToolAccess, SOURCE_ITEM, type ToolAccess } from './model.js'
+import { type AccessRow, BUILTIN_SOURCES, isToolAccess, SOURCE_ITEM, type ToolAccess } from './model.js'
 
 export type AccessReader = {
   rows(sources: readonly string[]): Promise<AccessRow[]>
@@ -33,6 +33,12 @@ const SOURCE_RE = /^(builtin:(scadbuddy|browser|http|own-plugin)|remote:[a-z][a-
 
 function checkSource(source: string): void {
   if (!SOURCE_RE.test(source)) throw new AccessError(`unknown access source ${JSON.stringify(source)}`)
+}
+
+/** A source's `*` switch: every source has one but builtin:scadbuddy, whose tools no switch turns off. */
+export function checkSwitch(source: string): void {
+  checkSource(source)
+  if (source === BUILTIN_SOURCES.scadbuddy) throw new AccessError(`${JSON.stringify(source)} has no switch`)
 }
 
 function checkTool(item: string, access: unknown): asserts access is ToolAccess {
@@ -190,7 +196,7 @@ export class AccessStore implements AccessReader, AccessWriter {
   }
 
   async setEnabled(source: string, enabled: boolean, context?: AuditContext): Promise<void> {
-    checkSource(source)
+    checkSwitch(source)
     const access = enabled ? 'on' : 'off'
     await this.write(context, [{ source, kind: 'items', items: { [SOURCE_ITEM]: access } }], () => `${source}/${SOURCE_ITEM} = ${JSON.stringify(access)}`)
   }

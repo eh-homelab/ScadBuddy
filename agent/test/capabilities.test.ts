@@ -5,7 +5,7 @@ import { z } from 'zod'
 import type { AuditContext } from '../src/audit/log.js'
 import { Capabilities, CapabilityError, type CapabilityProvider, type ItemView, type SourceView } from '../src/access/capabilities.js'
 import { BUILTIN_SOURCES, MIGRATED_BY } from '../src/access/model.js'
-import { builtInProviders } from '../src/access/providers.js'
+import { builtInProviders, ownPluginItems } from '../src/access/providers.js'
 import { HTTP_TOOL_DESCRIPTION } from '../src/harness/httpRequest.js'
 import { BUILT_INS, reviewOf } from '../src/plugins/packages/builtins.js'
 import { BROWSER_ORIGINS_PATH } from '../src/routes/browserOrigins.js'
@@ -40,6 +40,40 @@ async function status(p: Promise<unknown>): Promise<number> {
     throw err
   }
   return 0
+}
+
+function fakeProvider(sources: readonly SourceView[]): CapabilityProvider {
+  const all = sources.flatMap((s) => [s, ...s.children])
+  return {
+    owns: (id) => all.some((s) => s.id === id) || id.startsWith('package:'),
+    list: async () => [...sources],
+    get: async (id) => all.find((s) => s.id === id),
+    setEnabled: async () => {},
+    setItem: async () => {},
+    resetItem: async () => {},
+    details: async (id, i) => {
+      const found = all.find((s) => s.id === id)?.items.find((x) => x.id === i)
+      return found && { item: found, input_schema: null, output_schema: null, annotations: null, raw: null, omitted: [] }
+    },
+  }
+}
+
+/** A package `p` (on or off) with one server child `s`, whose tool `grep` is read. */
+function parentAndChild(enabled: boolean) {
+  const grep: ItemView = { id: 'grep', kind: 'tool', name: 'grep', harness_name: 'mcp__plugin_p_s__grep', label: 'grep', description: null, default: 'outward', default_note: null, suggested: null, access: 'read', own_access: 'read', overridden: true, missing: false, allowed: null, fixed: null, reason: null }
+  const child: SourceView = { id: 'package:p/mcp:s', kind: 'package_server', title: 's', enabled: true, switchable: true, options_route: null, listed_at: null, truncated: false, items: [grep], children: [] }
+  const parent: SourceView = { id: 'package:p', kind: 'package', title: 'p', enabled, switchable: true, options_route: null, listed_at: null, truncated: false, items: [], children: [child] }
+  const fake = fakeProvider([parent])
+  const setItem = vi.fn(async () => {})
+  const provider: CapabilityProvider = {
+    ...fake,
+    // The child alone, as a provider answers it: its own switch, nothing of its parent's.
+    get: async (id) => (id === 'package:p' ? parent : id === 'package:p/mcp:s' ? child : undefined),
+    parentOf: (id) => (id.startsWith('package:p/mcp:') ? 'package:p' : undefined),
+    setItem,
+    refresh: async () => ({ test: {} as never, source: child }),
+  }
+  return { caps: new Capabilities([provider]), setItem }
 }
 
 afterEach(() => {
@@ -232,6 +266,16 @@ describe('the capabilities tree', () => {
     })
   })
 
+  it("lists the own plugin's commands as skill items, one per name with its skills", () => {
+    const review = { ...reviewOf(BUILT_INS[0]!), skills: ['scadbuddy:a'], commands: ['scadbuddy:a', 'scadbuddy:cmd'], agents: ['scadbuddy:x'], described: { 'skill:a': 'A', 'skill:cmd': 'C' } }
+    const items = ownPluginItems(review, [{ source: BUILTIN_SOURCES.ownPlugin, item: 'skill:cmd', access: 'off', updated_by: 'browser:browser' }])
+    expect(items.map((i) => [i.id, i.kind, i.harness_name, i.description, i.access])).toEqual([
+      ['skill:a', 'skill', 'scadbuddy:a', 'A', 'on'],
+      ['skill:cmd', 'skill', 'scadbuddy:cmd', 'C', 'off'],
+      ['subagent:x', 'subagent', 'scadbuddy:x', null, 'on'],
+    ])
+  })
+
   it('switches an own-plugin skill off and back to its default (the row goes)', async () => {
     const { caps, rows } = setup()
     const off = await caps.setItem(BUILTIN_SOURCES.ownPlugin, 'skill:print', 'off', ctx)
@@ -255,6 +299,54 @@ describe('the capabilities tree', () => {
     expect(await status(caps.setItem(BUILTIN_SOURCES.ownPlugin, 'subagent:model-author', 'outward', ctx))).toBe(400)
     expect(await status(caps.setItem(BUILTIN_SOURCES.browser, 'browser_click', 'on', ctx))).toBe(400)
     expect(rows).toEqual([])
+  })
+
+  it('builtin:scadbuddy reads enabled whatever a stray * row says', async () => {
+    const { caps } = setup([{ source: BUILTIN_SOURCES.scadbuddy, item: '*', access: 'off', updated_by: 'browser:browser' }])
+    const own = await caps.source(BUILTIN_SOURCES.scadbuddy)
+    expect(own.enabled).toBe(true)
+    expect(item(own, 'get_x')).toMatchObject({ access: 'read', reason: null })
+  })
+
+  it("an item's own reason that explains off stays; any other gives way to the switch", () => {
+    // Through a fake provider: the built-in items carry no reason of their own.
+    const base = { kind: 'tool', label: 'x', description: null, default: 'outward', default_note: null, suggested: null, missing: false, allowed: null, fixed: null } as const
+    const renamed: ItemView = { ...base, id: 'a.b', name: 'a.b', harness_name: 'mcp__p__a_b', access: 'outward', own_access: 'outward', overridden: false, allowed: ['off', 'outward'], reason: 'renamed' }
+    const offAs: ItemView = { ...base, id: 'c_d', name: 'c_d', harness_name: 'mcp__p__c_d', access: 'off', own_access: 'off', overridden: true, reason: 'Off because "c.d" is off' }
+    const source: SourceView = { id: 'remote:p', kind: 'remote', title: 'p', enabled: false, switchable: true, options_route: null, listed_at: null, truncated: false, items: [renamed, offAs], children: [] }
+    const caps = new Capabilities([fakeProvider([source])])
+    return caps.source('remote:p').then((view) => {
+      expect(item(view, 'a.b')).toMatchObject({ access: 'off', own_access: 'outward', reason: 'Off while "p" is switched off', allowed: ['off', 'outward'] })
+      expect(item(view, 'c_d')).toMatchObject({ access: 'off', reason: 'Off because "c.d" is off' })
+    })
+  })
+
+  it('a child of a switched-off parent reads off by its own id, keeping own_access', async () => {
+    const { caps, setItem } = parentAndChild(false)
+    const child = await caps.source('package:p/mcp:s')
+    expect(child.id).toBe('package:p/mcp:s')
+    expect(item(child, 'grep')).toMatchObject({ access: 'off', own_access: 'read', reason: 'Off while "p" is switched off' })
+    const written = await caps.setItem('package:p/mcp:s', 'grep', 'write', ctx)
+    expect(setItem).toHaveBeenCalledTimes(1)
+    expect(item(written, 'grep')).toMatchObject({ access: 'off', own_access: 'read' })
+    const refreshed = await caps.refresh('package:p/mcp:s')
+    expect(item(refreshed.source, 'grep')).toMatchObject({ access: 'off', own_access: 'read' })
+    const details = await caps.details('package:p/mcp:s', 'grep')
+    expect(details.item).toMatchObject({ access: 'off', own_access: 'read' })
+  })
+
+  it('a child of a parent that is on reads its own access; a child its parent lacks is 404', async () => {
+    const { caps } = parentAndChild(true)
+    expect(item(await caps.source('package:p/mcp:s'), 'grep')).toMatchObject({ access: 'read', own_access: 'read', reason: null })
+    expect(await status(caps.source('package:p/mcp:gone'))).toBe(404)
+  })
+
+  it('refresh answers a switched-off source folded', async () => {
+    const tool: ItemView = { id: 't', kind: 'tool', name: 't', harness_name: 'mcp__p__t', label: 't', description: null, default: 'outward', default_note: null, suggested: null, access: 'outward', own_access: 'outward', overridden: false, missing: false, allowed: null, fixed: null, reason: null }
+    const source: SourceView = { id: 'remote:p', kind: 'remote', title: 'p', enabled: false, switchable: true, options_route: null, listed_at: null, truncated: false, items: [tool], children: [] }
+    const provider = { ...fakeProvider([source]), refresh: async () => ({ test: {} as never, source }) }
+    const { source: answered } = await new Capabilities([provider]).refresh('remote:p')
+    expect(item(answered, 't')).toMatchObject({ access: 'off', own_access: 'outward' })
   })
 
   it('refuses to switch builtin:scadbuddy (409)', async () => {

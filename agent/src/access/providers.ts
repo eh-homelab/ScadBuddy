@@ -5,7 +5,7 @@ import { ALL_TOOLS } from '../tools/index.js'
 import { listExternal } from '../tools/manifest.js'
 import type { Tool } from '../tools/registry.js'
 import { BUILT_INS, reviewOf } from '../plugins/packages/builtins.js'
-import { OWN_PLUGIN_NAME } from '../plugins/packages/vet.js'
+import { OWN_PLUGIN_NAME, type PackageReview } from '../plugins/packages/vet.js'
 import { harnessToolName, PluginError, type PluginRepo, type PluginSummary, toolPrefix } from '../plugins/registry.js'
 import { describeTools, type PluginTest, type PluginToolView } from '../plugins/testConnection.js'
 import { type Access, CapabilityError, type CapabilityProvider, type ItemDetails, type ItemView, type SourceView } from './capabilities.js'
@@ -87,11 +87,11 @@ function httpItem(rows: readonly AccessRow[]): ItemView {
 const OWN_PLUGIN = BUILT_INS.find((b) => b.name === OWN_PLUGIN_NAME)!
 
 /**
- * The own plugin's items (#4757): one per skill and subagent its review lists (as the
- * harness names them, `scadbuddy:<name>`), on by default, `off` with its row.
+ * The own plugin's items (#4757): one per skill, command and subagent its review lists (as the
+ * harness names them, `scadbuddy:<name>`), on by default, `off` with its row. A command is a
+ * skill item, as the call rule judges it (vet.ts `itemsOf`): one item per name with a skill.
  */
-function ownPluginItems(rows: readonly AccessRow[]): ItemView[] {
-  const review = reviewOf(OWN_PLUGIN)
+export function ownPluginItems(review: PackageReview, rows: readonly AccessRow[]): ItemView[] {
   const prefix = `${OWN_PLUGIN_NAME}:`
   const of = (kind: 'skill' | 'subagent', harnessName: string): ItemView => {
     const name = harnessName.startsWith(prefix) ? harnessName.slice(prefix.length) : harnessName
@@ -117,7 +117,8 @@ function ownPluginItems(rows: readonly AccessRow[]): ItemView[] {
       reason: null,
     }
   }
-  return [...review.skills.map((s) => of('skill', s)), ...review.agents.map((a) => of('subagent', a))]
+  const skills = [...new Set([...review.skills, ...review.commands])]
+  return [...skills.map((s) => of('skill', s)), ...review.agents.map((a) => of('subagent', a))]
 }
 
 /** AccessError (the store refused the write) as a 400. */
@@ -138,12 +139,13 @@ export function builtInProviders(deps: { access: AccessReader & AccessWriter; to
     let items: ItemView[] = []
     if (isRegistrySource(spec.id)) items = tools.filter((t) => registrySource(t.name) === spec.id).map((t) => registryItem(t, rows))
     else if (spec.id === BUILTIN_SOURCES.http) items = [httpItem(rows)]
-    else if (spec.id === BUILTIN_SOURCES.ownPlugin) items = ownPluginItems(rows)
+    else if (spec.id === BUILTIN_SOURCES.ownPlugin) items = ownPluginItems(reviewOf(OWN_PLUGIN), rows)
     return {
       id: spec.id,
       kind: 'builtin',
       title: spec.title,
-      enabled: sourceEnabled(spec.id, rows),
+      // A source with no switch is on: the gates read no `*` row for it, and the store refuses one.
+      enabled: !spec.switchable || sourceEnabled(spec.id, rows),
       switchable: spec.switchable,
       options_route: spec.options_route,
       listed_at: null,

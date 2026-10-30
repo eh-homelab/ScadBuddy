@@ -69,6 +69,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
     expect(await store.rows(['remote:mem'])).toMatchObject([{ item: '*', access: 'on' }])
   })
 
+  it("refuses a '*' row for builtin:scadbuddy, which has no switch (400)", async () => {
+    await expect(store.setEnabled(SCAD, false, ctx)).rejects.toBeInstanceOf(AccessError)
+    expect(await store.rows([SCAD])).toEqual([])
+  })
+
   it("replaceTools replaces every tool row of the source and leaves '*'", async () => {
     await store.setEnabled('remote:mem', false, ctx)
     await store.setItem('remote:mem', 'a', 'read', ctx)

@@ -1,4 +1,4 @@
-import { type AccessReader, type AccessWriter, checkItem } from '../../src/access/store.js'
+import { type AccessReader, type AccessWriter, checkItem, checkSwitch } from '../../src/access/store.js'
 import { type AccessRow, SOURCE_ITEM } from '../../src/access/model.js'
 
 /** An in-memory AccessStore for tests with no Postgres; `reads.n` counts `rows()` calls. */
@@ -38,6 +38,7 @@ export function memoryAccess(initial: AccessRow[] = []): { access: AccessReader 
       drop((r) => !(r.source === source && r.item === item && r.access === only))
     },
     async setEnabled(source, enabled, context) {
+      checkSwitch(source)
       put(source, SOURCE_ITEM, enabled ? 'on' : 'off', by(context))
     },
     async replaceTools(source, tools, context) {
