@@ -75,7 +75,7 @@ export function cutName(text: string): string {
 /**
  * The longest skill or subagent name, frontmatter or item, a package may have, in UTF-16 units
  * (#4757 Task 6 re-review R7): a longer one is a fatal vet problem (plugins/packages/vet.ts
- * `nameBoundProblems`), so no approval allows it and a pin approved before it is not loaded.
+ * `listingProblems`), so no approval allows it and a pin approved before it is not loaded.
  * So no name is ever cut before the call rule compares it: an alias key is the whole name.
  */
 export const ALIAS_KEY_CAP = 1024

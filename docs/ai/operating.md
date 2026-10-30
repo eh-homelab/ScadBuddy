@@ -926,7 +926,8 @@ wait for a human: the Temporal plugin refuses any other in `tool_activities`
 ([`_check_tool_activities`](https://github.com/temporalio/ai-integrations/blob/b1cf3848b15ad5cd1f009bd19524e3f751140439/python/claude_agent_sdk/src/temporalio/claude_agent_sdk/_workflow.py#L73-L97)).
 A durable turn offers those two and decides each call by its access as it is then: `off`
 refuses it, `read` or `write` runs it, `outward` parks it for approval (#4757, "Items and
-switches" below). The agent provides the
+switches" below). Skill, Agent and Task run inside the segment (see "Items and
+switches"). The agent provides the
 others as the `builtin` turn tools (`agent/src/builtins/`, #2393), named
 `builtin__<Name>`, each at its access (unset is outward) and parked like any outward turn tool, and the turn's system
 prompt names them (`turnServers.ts` `builtinNote`, carried as the listing's `system_note`):
@@ -1055,13 +1056,14 @@ user sets them in Settings → Tools & plugins → Packages
   (the `claude` binary that SDK 0.3.310 bundles, read with `strings -n 20`; the comment on
   `skills` in `vet.ts`).
 - **Names over 1024 UTF-16 units are refused.** A skill or subagent name, or a frontmatter
-  `name`, longer than `ALIAS_KEY_CAP` (1024) is a fatal vet problem (`nameBoundProblems`):
+  `name`, longer than `ALIAS_KEY_CAP` (1024) is a fatal vet problem (`listingProblems` in `vet.ts`):
   no approval allows it. A pin approved before this check, with such a name, stops loading
   until it is re-pinned. So the call rule below never compares a cut name.
 - **Listing budgets.** One package's items and aliases may take at most 256 KiB of UTF-8
   (`LISTING_ITEMS_BUDGET`), else vet refuses it. All of a turn's packages may take at most
-  1 MiB (`LISTING_PACKAGES_BUDGET`, half Temporal's payload limit). Past that, the next
-  package in name order is not loaded, and the turn says so. `loadPackagesForRun`
+  1 MiB (`LISTING_PACKAGES_BUDGET`, half Temporal's payload limit). Packages are taken in
+  name order: one that would take the total past 1 MiB is not loaded, and the turn says
+  so; the others still are. `loadPackagesForRun`
   ([`install.ts`](../../agent/src/plugins/packages/install.ts)) decides this once for
   classic and durable turns, so both leave out the same packages.
 - **The derived copy.** A turn loads a copy of each package that leaves out its http

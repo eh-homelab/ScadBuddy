@@ -119,13 +119,22 @@ test.describe('Tools & plugins (#2171)', () => {
     await page.reload()
     await expect(enabled).not.toBeChecked()
     await source.getByRole('button', { name: 'Your browser tab', exact: true }).click()
-    await expect(source).toContainText('Off while "Your browser tab" is switched off')
-    await expect(source.getByRole('combobox', { name: /^Access of browser_click/ })).toHaveText('write (default)')
+    const reason = 'Off while "Your browser tab" is switched off'
+    const selects = source.getByRole('combobox', { name: /^Access of / })
+    await expect(source.getByText(reason, { exact: true })).toHaveCount(await selects.count())
+    const click = source.getByRole('combobox', { name: /^Access of browser_click/ })
+    await expect(click).toHaveText('write (default)')
+    // The reason is the select's description too, so a screen reader hears it with the choice.
+    await expect(click).toHaveAccessibleDescription(new RegExp(reason))
 
     await enabled.click()
     await expect(enabled).toBeChecked()
+    await expect(source).not.toContainText(reason)
+    await expect(click).not.toHaveAccessibleDescription(new RegExp(reason))
     await page.reload()
     await expect(enabled).toBeChecked()
+    await source.getByRole('button', { name: 'Your browser tab', exact: true }).click()
+    await expect(source).not.toContainText(reason)
   })
 
   test('turns a ScadBuddy subagent off and resets it', async ({ page }) => {
@@ -160,6 +169,8 @@ test.describe('Tools & plugins (#2171)', () => {
     await section.getByLabel('Repository URL').fill('https://git.example/greeter.git')
     await section.getByRole('button', { name: 'Fetch and review' }).click()
     const card = section.getByRole('listitem', { name: 'Plugin package greeter' })
+    await expect(card.getByRole('button', { name: 'Approve…' })).toBeVisible()
+    expect(await bridgeCall(page, 'click', { role: 'button', name: 'Approve…' })).toMatchObject({ ok: false, error: { code: 'refused' } })
     await card.getByRole('button', { name: 'Approve…' }).click()
     const dialog = page.getByRole('dialog', { name: 'Approve greeter' })
     await dialog.getByRole('checkbox').check()
