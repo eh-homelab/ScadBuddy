@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { TOOLS } from '../../agent/catalog'
 import {
   AREAS,
   foldIdsOf,
@@ -135,5 +136,11 @@ describe('registry', () => {
       expect(SECTION_REGISTRY.find((s) => s.id === section)?.area, anchor).toBe(area)
       expect(settingsTarget(`#${anchor}`)).toEqual({ area, hash: `#${section}` })
     }
+  })
+})
+
+describe('the navigate tool', () => {
+  it("names every area in the navigate tool's description", () => {
+    for (const { id } of AREAS) expect(TOOLS.navigate.description).toContain(`"/settings/${id}"`)
   })
 })
