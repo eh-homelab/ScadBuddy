@@ -212,10 +212,44 @@ function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry
   }
 }
 
-/** A package stored under `name` (e.g. a built-in's, as before built-ins were listed), approved and enabled. */
-export function seedStoredPackage(name: string): void {
+const packageListeners = new Set<() => void>()
+
+/** Calls `listener` after each change to the packages, whichever route made it (the capabilities mock saves then). */
+export function onPackagesChange(listener: () => void): void {
+  packageListeners.add(listener)
+}
+
+function changed(): void {
+  for (const listener of packageListeners) listener()
+}
+
+function putPackage(name: string, pkg: PluginPackage): void {
+  state.packages.set(name, pkg)
+  changed()
+}
+
+function dropPackage(name: string): boolean {
+  const had = state.packages.delete(name)
+  if (had) changed()
+  return had
+}
+
+/** Puts back the installed packages a reload kept (the capabilities mock's sessionStorage copy); tells no listener. */
+export function restorePackages(packages: readonly PluginPackage[]): void {
+  for (const pkg of packages) state.packages.set(pkg.name, pkg)
+}
+
+/**
+ * A package stored under `name` (e.g. a built-in's, as before built-ins were listed), approved
+ * and enabled: greeter's pin, with `patch` over it (its review's fields, `allow_refused`, `enabled`).
+ */
+export function seedStoredPackage(
+  name: string,
+  patch: { review?: Partial<PackageReview>; allow_refused?: boolean; enabled?: boolean } = {},
+): void {
   const greeter = packageFor('https://git.example/greeter.git', 'HEAD', 'git') as PluginPackage
-  state.packages.set(name, { ...greeter, name, approved: true, approved_at: now(), enabled: true })
+  const { review, ...rest } = patch
+  putPackage(name, { ...greeter, name, approved: true, approved_at: now(), enabled: true, ...rest, review: { ...greeter.review, ...review } })
 }
 
 /**
@@ -294,13 +328,6 @@ export function packageList(): ListedPackage[] {
   return [...state.builtIns.values(), ...state.packages.values()]
 }
 
-const packageListeners = new Set<() => void>()
-
-/** Calls `listener` after each package switch, whichever route made it (the capabilities mock saves then). */
-export function onPackageSwitch(listener: () => void): void {
-  packageListeners.add(listener)
-}
-
 /**
  * Switches a package, a built-in one included, as the agent's `PackageRepo.setEnabled` (and,
  * for ScadBuddy's own, its `builtin:own-plugin` `*` row) do; an unapproved pin is refused with
@@ -312,14 +339,14 @@ export function setPackageEnabled(name: string, enabled: boolean): ListedPackage
   if (builtIn) {
     next = { ...builtIn, enabled }
     state.builtIns.set(name, next)
+    changed()
   } else {
     const pkg = state.packages.get(name)
     if (!pkg) return undefined
     if (enabled && !pkg.approved) return 'approve the pin before enabling the package'
     next = { ...pkg, enabled }
-    state.packages.set(name, next)
+    putPackage(name, next)
   }
-  for (const listener of packageListeners) listener()
   return next
 }
 
@@ -394,7 +421,7 @@ export const aiPluginHandlers = [
     if (state.packages.has(found.name)) {
       return detail(409, `a plugin package named "${found.name}" is already installed; re-pin it instead`)
     }
-    state.packages.set(found.name, found)
+    putPackage(found.name, found)
     return HttpResponse.json(found, { status: 201 })
   }),
 
@@ -426,12 +453,12 @@ export const aiPluginHandlers = [
         allow_refused,
         pending: null,
       }
-      state.packages.set(pkg.name, next)
+      putPackage(pkg.name, next)
       return HttpResponse.json(next)
     }
     if (body.commit_sha === pkg.commit_sha && body.content_hash === pkg.content_hash) {
       const next = { ...pkg, approved: true, approved_at: pkg.approved_at ?? now(), allow_refused }
-      state.packages.set(pkg.name, next)
+      putPackage(pkg.name, next)
       return HttpResponse.json(next)
     }
     return detail(409, 'the commit and content hash do not match the pin under review')
@@ -467,7 +494,7 @@ export const aiPluginHandlers = [
         diff: { added, removed, changed: ['.claude-plugin/plugin.json', 'skills/hello/SKILL.md'] },
       },
     }
-    state.packages.set(pkg.name, next)
+    putPackage(pkg.name, next)
     return HttpResponse.json(next)
   }),
 
@@ -475,7 +502,7 @@ export const aiPluginHandlers = [
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
     const next = { ...pkg, pending: null }
-    state.packages.set(pkg.name, next)
+    putPackage(pkg.name, next)
     return HttpResponse.json(next)
   }),
 
@@ -483,7 +510,7 @@ export const aiPluginHandlers = [
     if (state.builtIns.has(String(params.name)) && !state.packages.has(String(params.name))) {
       return detail(409, `"${String(params.name)}" is built in: it cannot be removed. Disable it instead.`, { built_in: true })
     }
-    if (!state.packages.delete(String(params.name))) return detail(404, 'no such plugin package')
+    if (!dropPackage(String(params.name))) return detail(404, 'no such plugin package')
     return new HttpResponse(null, { status: 204 })
   }),
 ]

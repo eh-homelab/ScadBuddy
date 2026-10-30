@@ -109,6 +109,8 @@ export interface PackageReview {
   /** `id` names its access row, `hook:<event>:<id>`; absent in a review stored before #4757. */
   hooks: { event: string; type: string; url?: string; id?: string; matcher?: string }[]
   mcp_servers: { name: string; type: string; url: string }[]
+  /** Every other server it declares, by name: a local (stdio) one, offered only with `allow_refused` (#4757); absent in an older review. */
+  local_servers?: string[]
   files: string[]
   /**
    * What the vetting refuses (a command hook, a hooks module, a local MCP server, ...).

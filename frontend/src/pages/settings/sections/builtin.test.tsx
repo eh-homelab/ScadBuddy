@@ -5,7 +5,7 @@ import { isUserOnly } from '../../../agent/dom'
 import { aiPlugins } from '../../../api/aiPlugins'
 import { aiCapabilities } from '../../../api/capabilities'
 import { server } from '../../../mocks/server'
-import { accessName, choose } from '../../../test/select'
+import { accessName, choose, optionsOf } from '../../../test/select'
 import { enter, renderSettingsSection } from '../testing'
 import { Component as BuiltIn } from './builtin'
 
@@ -159,6 +159,9 @@ describe('Built-in (#2171)', () => {
     for (const name of ['authoring', 'customize', 'print', 'model-author', 'print-analyst']) {
       expect(within(own).getByRole('combobox', { name: accessName(name) })).toHaveTextContent('on')
     }
+    // A skill or a subagent is on or off, nothing between (spec §4.1).
+    expect(await optionsOf(user, within(own).getByRole('combobox', { name: accessName('authoring') }))).toEqual(['off', 'on (default)'])
+    expect(await optionsOf(user, within(own).getByRole('combobox', { name: accessName('model-author') }))).toEqual(['off', 'on (default)'])
     expect(within(own).getByText('scadbuddy:model-author')).toBeInTheDocument()
     expect(within(own).getByText(/^Creates and iterates on ScadBuddy OpenSCAD templates/)).toBeVisible()
     expect(within(own).getByText(/^How to write and edit ScadBuddy OpenSCAD templates/)).toBeVisible()

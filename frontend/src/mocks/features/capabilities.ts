@@ -16,7 +16,16 @@ import {
   type RefreshResult,
   type SourceView,
 } from '../../api/capabilities'
-import { onPackageSwitch, packageList, remotePluginList, setPackageEnabled, setRemotePluginAccess, toolsFor } from '../aiPlugins'
+import {
+  onPackagesChange,
+  packageList,
+  remotePluginList,
+  resetAiPluginMocks,
+  restorePackages,
+  setPackageEnabled,
+  setRemotePluginAccess,
+  toolsFor,
+} from '../aiPlugins'
 
 /**
  * #2171 — the agent's capabilities tree (`/api/v1/ai/capabilities`, agent/src/routes/capabilities.ts,
@@ -33,8 +42,14 @@ import { onPackageSwitch, packageList, remotePluginList, setPackageEnabled, setR
  * A source switched off reads every item `off`, saying so, its `own_access` kept (agent
  * `switched`). The rules the UI depends on are kept: choosing the default resets; an access the
  * kind does not take is 400; a fixed item, an access outside `allowed` and a switch on a source
- * without one are 409; an unknown source or item is 404. Load checks are not mocked: an enabled,
- * approved package loads unless it is named as a built-in, and no two servers collide.
+ * without one are 409; an unknown source or item is 404.
+ *
+ * Load checks as the agent's `stateOf`: a package named as a built-in, or given a problem
+ * (`setPackageProblem`), is refused at load; the first read of an approved, enabled pin answers
+ * `checking` (each pin once, so the next read settles), as does a package held there
+ * (`setPackageChecking`). Servers whose names a turn would carry alike collide; a name holding
+ * `__` is not offered; an allowed package's `local_servers` are children whose tools are never
+ * listed here. Installed packages are kept in sessionStorage with the rest.
  */
 
 const base = '/api/v1/ai/capabilities'
@@ -85,6 +100,14 @@ const state = {
   listed: new Set<string>(),
   /** Package servers refreshed at least once, by source id. */
   listedServers: new Set<string>(),
+  /** `<name>@<content hash>` of each pin a read has answered `checking` for once. */
+  checkedPins: new Set<string>(),
+  /** Pins answered `checking` by the read in progress, settled once it answers. */
+  checkingNow: new Set<string>(),
+  /** Packages held at `checking` (`setPackageChecking`). */
+  holdChecking: new Set<string>(),
+  /** Packages refused at load, by name (`setPackageProblem`). */
+  problems: new Map<string, string>(),
 }
 
 /**
@@ -101,16 +124,25 @@ type Stored = {
   listed_servers?: string[]
   /** The built-in packages' switches (the own plugin's is `builtin:own-plugin`'s). */
   built_ins?: Record<string, boolean>
+  /** The installed packages (`../aiPlugins.ts` keeps them only in the page). */
+  packages?: PluginPackage[]
+  checked_pins?: string[]
   remote: Record<string, { tool_tiers: Record<string, RiskTier>; disabled_tools: string[]; enabled: boolean }>
 }
 
+/** While `load` puts the state back, the package listener must not save a half-restored copy. */
+let loading = false
+
 function save(): void {
+  if (loading) return
   const stored: Stored = {
     rows: [...state.rows],
     enabled: [...state.enabled],
     listed: [...state.listed],
     listed_servers: [...state.listedServers],
     built_ins: Object.fromEntries(packageList().filter(isBuiltIn).map((p) => [p.name, p.enabled])),
+    packages: packageList().filter((p): p is PluginPackage => !isBuiltIn(p)),
+    checked_pins: [...state.checkedPins],
     remote: Object.fromEntries(
       remotePluginList().map((p) => [p.name, { tool_tiers: p.tool_tiers, disabled_tools: p.disabled_tools, enabled: p.enabled }]),
     ),
@@ -130,6 +162,18 @@ function load(): void {
     return
   }
   if (stored === null) return
+  loading = true
+  try {
+    restore(stored)
+  } finally {
+    loading = false
+  }
+}
+
+function restore(stored: Stored): void {
+  // The packages first: a read prunes the rows of a package it does not have.
+  restorePackages(stored.packages ?? [])
+  for (const pin of stored.checked_pins ?? []) state.checkedPins.add(pin)
   for (const [k, access] of stored.rows) state.rows.set(k, access)
   for (const [id, on] of stored.enabled) state.enabled.set(id, on)
   for (const name of stored.listed) state.listed.add(name)
@@ -147,11 +191,38 @@ export function seedBuiltInRow(source: string, item: string, access: Access): vo
   save()
 }
 
-export function reset(): void {
+function clearState(): void {
   state.rows.clear()
   state.enabled.clear()
   state.listed.clear()
   state.listedServers.clear()
+  state.checkedPins.clear()
+  state.checkingNow.clear()
+  state.holdChecking.clear()
+  state.problems.clear()
+}
+
+/** For a test: the page reloaded, so only what sessionStorage keeps comes back. */
+export function reloadMockState(): void {
+  clearState()
+  resetAiPluginMocks()
+  load()
+}
+
+/** For a test: holds `name` at `checking` (the agent's load check not done), or lets it settle. */
+export function setPackageChecking(name: string, on: boolean): void {
+  if (on) state.holdChecking.add(name)
+  else state.holdChecking.delete(name)
+}
+
+/** For a test: `name` refused at load with `problem` (install.ts `packageLoadCheck`'s text), or not. */
+export function setPackageProblem(name: string, problem: string | null): void {
+  if (problem === null) state.problems.delete(name)
+  else state.problems.set(name, problem)
+}
+
+export function reset(): void {
+  clearState()
   try {
     sessionStorage.removeItem(STORAGE_KEY)
   } catch {
@@ -159,8 +230,8 @@ export function reset(): void {
   }
 }
 load()
-// A package switched through `PATCH /plugin-packages` is kept too.
-onPackageSwitch(save)
+// A package installed, approved, switched or removed through `/plugin-packages` is kept too.
+onPackagesChange(save)
 
 const key = (source: string, item: string) => `${source}\u0000${item}`
 const detail = (status: number, text: string) => HttpResponse.json({ detail: text }, { status })
@@ -422,15 +493,66 @@ function installed(): PluginPackage[] {
   return packages
 }
 
-type LoadState = { kind: 'off' } | { kind: 'problem'; problem: string } | { kind: 'loads' }
+type LoadState = { kind: 'off' } | { kind: 'problem'; problem: string } | { kind: 'checking' } | { kind: 'loads' }
 
-/** The agent's `stateOf`, without a load check: off, refused (why), or loads. */
+const checkingReason = (pkg: string) => `Checking whether "${pkg}" can load…`
+const pinOf = (pkg: PluginPackage) => `${pkg.name}@${pkg.content_hash}`
+
+/** The agent's `stateOf`: off, refused at load (why), not yet checked, or loads. */
 function loadState(pkg: PluginPackage): LoadState {
   if (!pkg.enabled || !pkg.approved) return { kind: 'off' }
   if (packageList().some((p) => isBuiltIn(p) && p.name === pkg.name)) {
     return { kind: 'problem', problem: `plugin package ${pkg.name} was not loaded: "${pkg.name}" is built in; remove the installed package` }
   }
+  const problem = state.problems.get(pkg.name)
+  if (problem !== undefined) return { kind: 'problem', problem }
+  if (state.holdChecking.has(pkg.name)) return { kind: 'checking' }
+  // A pin this read is the first to see is not checked yet; the read after it settles.
+  const pin = pinOf(pkg)
+  if (!state.checkedPins.has(pin) || state.checkingNow.has(pin)) {
+    state.checkingNow.add(pin)
+    return { kind: 'checking' }
+  }
   return { kind: 'loads' }
+}
+
+/** Ends a read: the pins it answered `checking` for are checked from the next one. */
+function settleChecks(): void {
+  if (state.checkingNow.size === 0) return
+  for (const pin of state.checkingNow) state.checkedPins.add(pin)
+  state.checkingNow.clear()
+  save()
+}
+
+/** The servers a review says a turn offers: its http ones, and its local ones while allowed (the agent's `reviewServers`). */
+function reviewServers(pkg: PluginPackage): { server: string; local: boolean }[] {
+  const out: { server: string; local: boolean }[] = []
+  for (const { name } of pkg.review.mcp_servers) if (!out.some((s) => s.server === name)) out.push({ server: name, local: false })
+  if (pkg.allow_refused) for (const name of pkg.review.local_servers ?? []) if (!out.some((s) => s.server === name)) out.push({ server: name, local: true })
+  return out
+}
+
+/**
+ * Why each of `pkg`'s servers is not offered, by source id: a name another loading package's
+ * server carries too (the agent's `serverCollisions`), or one holding `__`.
+ */
+function blockedServers(pkg: PluginPackage): Map<string, string> {
+  const mayLoad = installed().filter((p) => ['loads', 'checking'].includes(loadState(p).kind))
+  const all = mayLoad.flatMap((p) => reviewServers(p).map(({ server }) => ({ pkg: p.name, server })))
+  const blocked = new Map<string, string>()
+  for (const { server } of reviewServers(pkg)) {
+    const name = serverName(pkg.name, server)
+    // The name's owners among the packages a turn may load; it collides when two or more carry it.
+    const owners = all.filter((o, i) => serverName(o.pkg, o.server) === name && all.findIndex((p) => p.pkg === o.pkg && p.server === o.server) === i)
+    const others = owners.length > 1 ? owners.filter((o) => !(o.pkg === pkg.name && o.server === server)) : []
+    if (others.length > 0) {
+      const named = others.map((o) => `"${o.server}" of plugin package ${o.pkg}`).join(', ')
+      blocked.set(serverSource(pkg.name, server), `Its server is named ${name}, as ${named} ${others.length === 1 ? 'is' : 'are'}, so none of them is offered`)
+    } else if (name.includes('__')) {
+      blocked.set(serverSource(pkg.name, server), `plugin package ${pkg.name}: MCP server "${server}" has a name that cannot be offered`)
+    }
+  }
+  return blocked
 }
 
 /** The agent's `unoffered`: forced off, saying why. */
@@ -495,11 +617,21 @@ function serverRows(pkg: string, server: string): ToolRows {
 function packageView(pkg: PluginPackage): SourceView {
   const loaded = loadState(pkg)
   const problem = loaded.kind === 'problem' ? loaded.problem : null
-  const notLoaded = (items: ItemView[]) => (problem === null ? items : unoffered(items, problem))
-  const children = [...new Set(pkg.review.mcp_servers.map((s) => s.name))].map((server): SourceView => {
+  const checking = loaded.kind === 'checking'
+  // The agent's `notLoaded`: refused, forced off; not yet checked, off for now, each keeping its own access.
+  const notLoaded = (items: ItemView[]) =>
+    problem !== null
+      ? unoffered(items, problem)
+      : checking
+        ? items.map((i) => ({ ...i, access: 'off' as const, reason: checkingReason(pkg.name) }))
+        : items
+  const blocked = blockedServers(pkg)
+  const children = reviewServers(pkg).map(({ server, local }): SourceView => {
     const id = serverSource(pkg.name, server)
     const rows = serverRows(pkg.name, server)
-    const listed = state.listedServers.has(id)
+    const listed = !local && state.listedServers.has(id)
+    const reason = blocked.get(id)
+    const tools = listedItems(rows, listed ? toolsFor(rows) : [])
     return {
       id,
       kind: 'package_server',
@@ -510,8 +642,8 @@ function packageView(pkg: PluginPackage): SourceView {
       listed_at: listed ? LISTED_AT : null,
       truncated: false,
       problem,
-      checking: false,
-      items: notLoaded(listedItems(rows, listed ? toolsFor(rows) : [])),
+      checking,
+      items: notLoaded(reason === undefined ? tools : unoffered(tools, reason)),
       children: [],
     }
   })
@@ -519,14 +651,14 @@ function packageView(pkg: PluginPackage): SourceView {
     id: packageSource(pkg.name),
     kind: 'package',
     title: pkg.name,
-    // Off when switched off, unapproved or refused at load.
-    enabled: loaded.kind === 'loads',
+    // Off when switched off, unapproved or refused at load; while unchecked, on with its items off.
+    enabled: loaded.kind === 'loads' || checking,
     switchable: pkg.approved,
     options_route: null,
     listed_at: null,
     truncated: false,
     problem,
-    checking: false,
+    checking,
     items: notLoaded(packageItems(pkg, packageSource(pkg.name))),
     children,
   }
@@ -679,11 +811,17 @@ function details(id: string, item: string): ItemDetails {
 function refreshServer(source: SourceView): RefreshResult {
   const { pkg, server } = parse(source.id)
   const match = packageOf(source)
+  if (reviewServers(match).some((s) => s.server === server && s.local)) {
+    throw new Refusal(409, `"${source.id}" is started only by a turn, so its tools are not listed here`)
+  }
   if (!match.approved) throw new Refusal(409, 'approve the pin before listing its servers')
   const loaded = loadState(match)
   if (loaded.kind === 'off') throw new Refusal(409, `"${packageSource(pkg)}" is switched off; switch it on to list its tools`)
   if (loaded.kind === 'problem') throw new Refusal(409, loaded.problem)
+  if (loaded.kind === 'checking') throw new Refusal(409, `${checkingReason(pkg)} Try again shortly`)
   if (!(state.enabled.get(source.id) ?? true)) throw new Refusal(409, `"${source.id}" is switched off; switch it on to list its tools`)
+  const reason = blockedServers(match).get(source.id)
+  if (reason !== undefined) throw new Refusal(409, reason)
   state.listedServers.add(source.id)
   const rows = serverRows(pkg, server!)
   const test: RefreshResult['test'] = {
@@ -723,6 +861,8 @@ function answer(run: () => unknown, writes = false) {
   } catch (err) {
     if (err instanceof Refusal) return detail(err.status, err.message)
     throw err
+  } finally {
+    settleChecks()
   }
 }
 
@@ -746,7 +886,7 @@ const isAccess = (v: unknown): v is Access => typeof v === 'string' && ['off', '
 const param = (value: unknown) => String(value)
 
 export const handlers = [
-  http.get(base, () => HttpResponse.json({ sources: tree() })),
+  http.get(base, () => answer(() => ({ sources: tree() }))),
 
   http.get(`${base}/:source`, ({ params }) => answer(() => found(param(params.source)))),
 

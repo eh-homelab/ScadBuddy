@@ -55,6 +55,8 @@ describe('aiCapabilities', () => {
 
   it("the mock's package sources read the package's state, as GET /plugin-packages has it", async () => {
     seedStoredPackage('greeter')
+    // The first read of a new pin answers checking (the agent's load check); the next one settles.
+    expect((await aiCapabilities.list()).find((s) => s.id === 'package:greeter')?.checking).toBe(true)
     const pkg = (await aiCapabilities.list()).find((s) => s.id === 'package:greeter')!
     expect(pkg).toMatchObject({ kind: 'package', enabled: true, switchable: true, problem: null })
     expect(pkg.items.map((i) => [i.id, i.access])).toEqual([

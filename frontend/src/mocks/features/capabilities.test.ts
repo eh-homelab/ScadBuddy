@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { aiPlugins } from '../../api/aiPlugins'
-import { setListedToolNames, setRemotePluginAccess } from '../aiPlugins'
+import { GREETER_V1, seedStoredPackage, setListedToolNames, setRemotePluginAccess } from '../aiPlugins'
 import { aiCapabilities } from '../../api/capabilities'
 import { summarize } from '../../components/capabilities/access'
-import { seedBuiltInRow } from './capabilities'
+import { reloadMockState, seedBuiltInRow, setPackageChecking, setPackageProblem } from './capabilities'
 import type { ApiError } from '../../api/client'
 
 describe('capabilities mock (#2171)', () => {
@@ -108,5 +108,112 @@ describe('capabilities mock (#2171)', () => {
     const http = await aiCapabilities.setItem('builtin:http', 'http_request', 'read')
     expect(http.items[0]).toMatchObject({ access: 'read', overridden: true })
     expect((await aiCapabilities.resetItem('builtin:http', 'http_request')).items[0]).toMatchObject({ access: null, overridden: false })
+  })
+
+  describe('package sources (#4757)', () => {
+    const MEM = { name: 'mem', type: 'http', url: 'https://mcp.example/mcp/' }
+    const source = (id: string) => aiCapabilities.source(id)
+    const refused = (run: Promise<unknown>) => run.then(() => undefined, (e: unknown) => ({ status: (e as ApiError).status, detail: (e as ApiError).detail }))
+    /** The first read of a new pin answers checking; this one settles it. */
+    const settled = async (id: string) => {
+      await source(id)
+      return source(id)
+    }
+
+    it('keeps an installed package and its rows across a reload', async () => {
+      await aiPlugins.installPackage({ kind: 'git', url: 'https://git.example/greeter.git' })
+      await aiPlugins.approvePackage('greeter', GREETER_V1.commit, GREETER_V1.hash)
+      await aiCapabilities.setEnabled('package:greeter', true)
+      await settled('package:greeter')
+      await aiCapabilities.setItem('package:greeter', 'skill:hello', 'off')
+
+      reloadMockState()
+
+      expect((await aiPlugins.listPackages()).find((p) => p.name === 'greeter')).toMatchObject({ approved: true, enabled: true })
+      const after = await source('package:greeter')
+      expect(after.items.find((i) => i.id === 'skill:hello')).toMatchObject({ access: 'off', own_access: 'off', overridden: true })
+      expect(after.checking).toBe(false)
+    })
+
+    it("answers a new pin's first read checking, as the agent's load check does, and the next one settles", async () => {
+      seedStoredPackage('greeter')
+      const first = await source('package:greeter')
+      expect(first).toMatchObject({ enabled: true, checking: true, problem: null })
+      expect(first.items.find((i) => i.id === 'skill:hello')).toMatchObject({
+        access: 'off',
+        own_access: 'on',
+        reason: 'Checking whether "greeter" can load…',
+        fixed: null,
+      })
+      expect(first.children[0]).toMatchObject({ id: 'package:greeter/mcp:mem', checking: true })
+      const second = await source('package:greeter')
+      expect(second.checking).toBe(false)
+      expect(second.items.find((i) => i.id === 'skill:hello')).toMatchObject({ access: 'on', reason: null })
+
+      setPackageChecking('greeter', true)
+      expect((await source('package:greeter')).checking).toBe(true)
+      expect(await refused(aiCapabilities.refresh('package:greeter/mcp:mem'))).toEqual({
+        status: 409,
+        detail: 'Checking whether "greeter" can load… Try again shortly',
+      })
+      setPackageChecking('greeter', false)
+      expect((await source('package:greeter')).checking).toBe(false)
+    })
+
+    it('a package refused at load keeps its row on, reads not enabled with the problem, and still switches off', async () => {
+      seedStoredPackage('greeter')
+      const problem = 'plugin package greeter is not loaded: skills/hello/SKILL.md changed since it was approved'
+      setPackageProblem('greeter', problem)
+      const view = await source('package:greeter')
+      expect(view).toMatchObject({ enabled: false, switchable: true, problem, checking: false })
+      expect(view.items.every((i) => i.access === 'off' && i.own_access === 'off' && i.fixed?.reason === problem && i.reason === problem)).toBe(true)
+      expect(view.children[0]).toMatchObject({ problem })
+      expect((await aiPlugins.listPackages()).find((p) => p.name === 'greeter')?.enabled).toBe(true)
+      expect(await refused(aiCapabilities.refresh('package:greeter/mcp:mem'))).toEqual({ status: 409, detail: problem })
+
+      await aiCapabilities.setEnabled('package:greeter', false)
+      expect((await aiPlugins.listPackages()).find((p) => p.name === 'greeter')?.enabled).toBe(false)
+    })
+
+    it('servers whose names a turn carries alike are fixed off, both, with the reason', async () => {
+      seedStoredPackage('greet.er', { review: { mcp_servers: [MEM] } })
+      seedStoredPackage('greet_er', { review: { mcp_servers: [MEM] } })
+      seedBuiltInRow('package:greet.er/mcp:mem', 'recall', 'read')
+      const view = (await settled('package:greet.er')).children[0]!
+      const reason = 'Its server is named plugin_greet_er_mem, as "mem" of plugin package greet_er is, so none of them is offered'
+      expect(view.items).toEqual([expect.objectContaining({ id: 'recall', missing: true, access: 'off', own_access: 'off', fixed: { access: 'off', reason }, reason })])
+      expect(await refused(aiCapabilities.refresh('package:greet.er/mcp:mem'))).toEqual({ status: 409, detail: reason })
+      expect(await refused(aiCapabilities.refresh('package:greet_er/mcp:mem'))).toEqual({
+        status: 409,
+        detail: 'Its server is named plugin_greet_er_mem, as "mem" of plugin package greet.er is, so none of them is offered',
+      })
+
+      // A package switched off is not loaded, so the other's name is its own again.
+      await aiCapabilities.setEnabled('package:greet_er', false)
+      const { source: listed } = await aiCapabilities.refresh('package:greet.er/mcp:mem')
+      expect(listed.items.find((i) => i.id === 'recall')).toMatchObject({ access: 'read', fixed: null, harness_name: 'mcp__plugin_greet_er_mem__recall' })
+    })
+
+    it('a server whose name would hold __ is not offered', async () => {
+      seedStoredPackage('odd', { review: { mcp_servers: [{ ...MEM, name: '_x' }] } })
+      await settled('package:odd')
+      expect(await refused(aiCapabilities.refresh('package:odd/mcp:_x'))).toEqual({
+        status: 409,
+        detail: 'plugin package odd: MCP server "_x" has a name that cannot be offered',
+      })
+    })
+
+    it("an allowed package's local servers are children whose tools are never listed here", async () => {
+      seedStoredPackage('local', { review: { mcp_servers: [], local_servers: ['tool'] }, allow_refused: true })
+      seedStoredPackage('strict', { review: { mcp_servers: [], local_servers: ['tool'] } })
+      expect((await settled('package:local')).children.map((c) => [c.id, c.enabled, c.switchable])).toEqual([['package:local/mcp:tool', true, true]])
+      expect((await settled('package:strict')).children).toEqual([])
+      expect(await refused(aiCapabilities.refresh('package:local/mcp:tool'))).toEqual({
+        status: 409,
+        detail: '"package:local/mcp:tool" is started only by a turn, so its tools are not listed here',
+      })
+      const off = await aiCapabilities.setEnabled('package:local/mcp:tool', false)
+      expect(off).toMatchObject({ id: 'package:local/mcp:tool', enabled: false })
+    })
   })
 })
