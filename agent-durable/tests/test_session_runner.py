@@ -48,13 +48,14 @@ from temporalio.claude_agent_sdk import (
 )
 from temporalio.claude_agent_sdk._events import _EMIT, emit
 from temporalio.claude_agent_sdk.testing import Final, HistoryItem, ScriptedClaude, ToolCall
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowHistory
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment, WorkflowEnvironment
 
 from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.credentials import Credential, credential_aad
 from scadbuddy_durable.gate.names import PENDING_INPUT_QUERY, RESPOND_UPDATE
+from scadbuddy_durable.payload_store import OFFLOAD_BYTES, external_storage
 from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
 from scadbuddy_durable.session import access, models, tools
 from scadbuddy_durable.session import runner as runner_module
@@ -143,20 +144,30 @@ class Recording:
         return self.scripted
 
 
-async def _client(env: WorkflowEnvironment, connect: Connect) -> Client:
+async def _client(
+    env: WorkflowEnvironment, connect: Connect, payload_dir: Path | None = None
+) -> Client:
+    """The worker's client; with ``payload_dir``, its External Storage too, as the worker
+    has whenever SCADBUDDY_PAYLOAD_DIR is set (worker.py ``connect_client``)."""
     return await Client.connect(
         env.client.service_client.config.target_host,
         namespace=env.client.namespace,
-        data_converter=data_converter(PgPayloadKeys(connect, KEK)),
+        data_converter=data_converter(
+            PgPayloadKeys(connect, KEK), external_storage(payload_dir) if payload_dir else None
+        ),
     )
 
 
 @contextlib.asynccontextmanager
 async def running(
-    env: WorkflowEnvironment, connect: Connect, runner: Any, stand_in: StandInTools | None = None
+    env: WorkflowEnvironment,
+    connect: Connect,
+    runner: Any,
+    stand_in: StandInTools | None = None,
+    payload_dir: Path | None = None,
 ) -> AsyncIterator[tuple[Client, str]]:
     tools.use_manifest(MANIFEST)
-    client = await _client(env, connect)
+    client = await _client(env, connect, payload_dir)
     queue = f"agent-{uuid.uuid4().hex[:8]}"
     async with (
         build_worker(client, connect, runner, task_queue=queue),
@@ -2081,12 +2092,13 @@ async def test_a_packages_builtin_skill_is_read_per_call(agent_db: Conn, connect
 SKILL_CALL = {"tool_name": "Skill", "tool_input": {"skill": "anything"}, "tool_use_id": "t1"}
 
 
-async def test_an_outward_call_whose_input_is_over_the_cap_is_refused_unasked(
+async def test_an_outward_call_over_the_cap_is_refused_unasked_only_without_offloading(
     connect: Connect,
 ) -> None:
-    """#4757 final review M3: an input too large to put in the session's history is refused
-    with a plain reason before the Update is sent, never failed as one that could not be
-    asked for; one at the cap is asked about."""
+    """#4757 final review M3: with no External Storage to take it out of history, an input
+    over the cap is refused with a plain reason before the Update is sent, never failed as
+    one that could not be asked for; one at the cap is asked about. #5000: with External
+    Storage (``input_max=None``) the same input is asked about, as in a classic turn."""
     parked: list[str] = []
 
     async def park(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
@@ -2105,6 +2117,9 @@ async def test_an_outward_call_whose_input_is_over_the_cap_is_refused_unasked(
     assert parked == []
     assert await judge({"tool_name": "Agent", "tool_input": at_cap, "tool_use_id": "t2"}) == {}
     assert parked == ["t2"]
+    offloaded = CallAccess(connect, [], {"Agent": ["notes"]}, park, input_max=None).check
+    assert await offloaded({"tool_name": "Agent", "tool_input": over, "tool_use_id": "t3"}) == {}
+    assert parked == ["t2", "t3"]
 
 
 async def test_a_park_that_never_answers_is_refused_at_the_hooks_own_deadline(
@@ -2323,17 +2338,19 @@ def test_own_plugin_copies_are_swept(tmp_path: Path) -> None:
     assert sorted(later) == sorted([used.name, ".tmp-live"])
 
 
-async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_approved(
+async def _skill_approved_then_denied(
     temporal_env: WorkflowEnvironment,
     agent_db: Conn,
     connect: Connect,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Review round 2, end to end: the bundled Claude Code calls Skill twice in a turn whose
-    allowed package names Skill (no row: outward). Each call waits at the gate in the
-    segment's hook; the first, approved, runs; the second, denied, is refused with why."""
-    root = tmp_path / "plugins"
+    skill_input: dict[str, Any],
+    payload_dir: Path | None = None,
+) -> tuple[list[dict[str, Any]], WorkflowHistory]:
+    """The bundled Claude Code calls Skill with ``skill_input`` twice in a turn whose allowed
+    package names Skill (no row: outward); the first wait at the gate is approved, the
+    second denied. Answers the main thread's last tool results and the session's history."""
+    root = (payload_dir or tmp_path) / "plugins"
     staging = root / "staging" / "notes"
     (staging / "skills" / "jot").mkdir(parents=True)
     (staging / "skills" / "jot" / "SKILL.md").write_text("---\nname: jot\n---\nJot.\n")
@@ -2353,7 +2370,7 @@ async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_ap
         }
     ]
     main: list[list[dict[str, Any]]] = []
-    call = {"name": "Skill", "input": {"skill": "scadbuddy:print"}}
+    call = {"name": "Skill", "input": skill_input}
 
     def reply(body: dict[str, Any]) -> dict[str, Any]:
         if "Skill" not in [t.get("name") for t in body.get("tools") or []]:
@@ -2380,7 +2397,10 @@ async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_ap
             make_runner=ClaudeAgentSdkRunner,
             own_plugin_root=str(tmp_path / "own"),
         )
-        async with running(temporal_env, connect, runner, stand_in) as (client, queue):
+        async with running(temporal_env, connect, runner, stand_in, payload_dir) as (
+            client,
+            queue,
+        ):
             sid = await insert_session(agent_db)
             handle = await start_session(client, sid, queue)
             try:
@@ -2411,15 +2431,66 @@ async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_ap
                     if decision == "approve":
                         await until(lambda: _seen_results(main, 1), timeout=120)
                 assert await settled(connect, sid, timeout=180) == "idle"
+                history = await handle.fetch_history()
             finally:
                 await handle.terminate()
     finally:
         fake.close()
         await asyncio.sleep(0)
-    first, second = next(r for r in reversed(main) if len(r) >= 2)
+    return next(r for r in reversed(main) if len(r) >= 2), history
+
+
+def _segment_attempts(history: WorkflowHistory) -> list[int]:
+    """Each activity attempt the history started: a segment retried would run a call again."""
+    return [
+        e.activity_task_started_event_attributes.attempt
+        for e in history.events
+        if e.HasField("activity_task_started_event_attributes")
+    ]
+
+
+async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_approved(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 2, end to end: each call waits at the gate in the segment's hook; the
+    first, approved, runs; the second, denied, is refused with why."""
+    results, _ = await _skill_approved_then_denied(
+        temporal_env, agent_db, connect, tmp_path, monkeypatch, {"skill": "scadbuddy:print"}
+    )
+    first, second = results
     assert not first.get("is_error"), first
     assert second.get("is_error") is True
     assert "denied" in _text_of(second), _text_of(second)
+
+
+async def test_an_outward_package_skill_over_the_offload_size_parks_and_runs_once_approved(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#5000, end to end: a Skill call whose input is over OFFLOAD_BYTES (once refused
+    unasked) parks as a classic turn's does; the worker's External Storage keeps the input
+    out of history. Approved, it runs once (one segment attempt, one result); denied, it is
+    refused with why."""
+    payloads = tmp_path / "payloads"
+    big = {"skill": "scadbuddy:print", "args": "a long brief " + "q" * (OFFLOAD_BYTES * 2)}
+    results, history = await _skill_approved_then_denied(
+        temporal_env, agent_db, connect, tmp_path, monkeypatch, big, payloads
+    )
+    first, second = results
+    assert not first.get("is_error"), first
+    assert second.get("is_error") is True
+    assert "denied" in _text_of(second), _text_of(second)
+    assert "too large" not in _text_of(second)
+    assert all(attempt == 1 for attempt in _segment_attempts(history))
+    assert b"qqqq" not in b"".join(e.SerializeToString() for e in history.events)
+    assert any(d.name.startswith("session-") for d in payloads.iterdir())  # stored there
 
 
 async def _seen_results_async(main: list[list[dict[str, Any]]], n: int) -> bool:

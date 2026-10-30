@@ -1144,6 +1144,17 @@ user sets them in Settings → Tools & plugins → Packages
   - Skill, Agent and Task as built-ins run inside the segment: an outward call parks
     through the segment runner's hook and the workflow's `builtin_call` Update, behind the
     same patch. So an outward package built-in parks for approval in both modes.
+    A large input parks too (#5000). The Update's argument goes through the client's
+    data converter, and Temporal's External Storage moves every payload at or over
+    `OFFLOAD_BYTES` (128 KiB) out of history
+    ([`payload_store.py`](../../agent-durable/src/scadbuddy_durable/payload_store.py)).
+    In temporalio 1.34.0, `_build_update_workflow_execution_request` in
+    `temporalio/client/_impl.py` encodes the arguments with `DataConverter.encode`, and
+    that step stores the large ones. History then holds a reference only.
+    `test_a_hooked_call_over_the_offload_size_parks_with_history_holding_a_reference`
+    in `agent-durable/tests/test_session_workflow.py` measures this on a dev server.
+    Only a worker without `SCADBUDDY_PAYLOAD_DIR` (so with no packages) still refuses an
+    input over 128 KiB unasked (`BUILTIN_CALL_INPUT_MAX`), so its history stays bounded.
 - **Package servers.** Each server is a child source `package:<name>/mcp:<server>`,
   on by default while the package is approved. A server switched off is hidden at turn
   start and refused per call, fail closed: by the forwarder

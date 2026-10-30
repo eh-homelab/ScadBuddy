@@ -1010,8 +1010,12 @@ class CallAccess:
         builtins: Mapping[str, Sequence[str]] | None = None,
         park: ParkCall | None = None,
         release: ReleaseCall | None = None,
+        input_max: int | None = BUILTIN_CALL_INPUT_MAX,
     ) -> None:
         self._connect = connect
+        # The most input bytes the gate is asked about (#5000): None when the worker's client
+        # keeps large payloads out of history (External Storage), so any input parks.
+        self._input_max = input_max
         # Ends a call's gate entry when its segment ends first (re-review R5).
         self._release = release
         # Calls asked of the gate and not yet answered.
@@ -1054,12 +1058,11 @@ class CallAccess:
         if self._park is None or not call:
             return _deny(f"{tool} needs approval, and it could not be asked for")
         tool_input = data.get("tool_input") or {}
-        size = len(
+        if self._input_max is not None and self._input_max < len(
             json.dumps(tool_input, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        )
-        if size > BUILTIN_CALL_INPUT_MAX:
+        ):
             return _deny(
-                f"{tool}'s input is over {BUILTIN_CALL_INPUT_MAX} bytes, too large to ask the"
+                f"{tool}'s input is over {self._input_max} bytes, too large to ask the"
                 " user about, so the call is refused; make it shorter"
             )
         self._waiting.add(call)
@@ -1542,10 +1545,20 @@ class ScadBuddyRunner:
             else None,
             packages,
         )
-        park, release = segment_gate(
-            activity.client(), workflow_id, activity.info().workflow_run_id or ""
+        client = activity.client()
+        park, release = segment_gate(client, workflow_id, activity.info().workflow_run_id or "")
+        # With External Storage (SCADBUDDY_PAYLOAD_DIR, which a package needs anyway), the
+        # builtin_call Update's argument leaves history as every large payload does (#5000):
+        # any input parks, as a classic turn's does. Without it, the cap keeps history bounded.
+        offloads = client.data_converter.external_storage is not None
+        gate = CallAccess(
+            self._connect,
+            call_plugins,
+            call_builtins_of(packages),
+            park,
+            release,
+            input_max=None if offloads else BUILTIN_CALL_INPUT_MAX,
         )
-        gate = CallAccess(self._connect, call_plugins, call_builtins_of(packages), park, release)
         calls = SegmentCalls(list(inp.tool_activities), gate.check)
         extra["hooks"] = merged_hooks(extra.get("hooks"), calls.hooks())
         try:
