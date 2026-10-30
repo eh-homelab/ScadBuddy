@@ -7,7 +7,7 @@ test.describe('AI activity in Settings (#258)', () => {
 
   test('lists the audit log, filters it, and saves the retention', async ({ page }) => {
     await page.goto('/settings/audits')
-    const section = page.getByRole('region', { name: 'AI activity' })
+    const section = page.getByRole('tabpanel', { name: 'AI activity' })
     await expect(section).toBeVisible()
 
     const entries = section.getByRole('list', { name: 'AI activity entries' }).getByTestId('audit-entry')

@@ -30,7 +30,7 @@
 ## Decisions (recorded here, from the spec and #781)
 
 1. **Audits is the Settings area `audits`, not a `/audits` page.** #781 named a separate page as the leading option. Spec §3.2 (written later, and folding in #781) puts it in Settings. No `/audits` route was ever shipped, so there is nothing to redirect from.
-2. **Tabs: one section, `audit-log`, with a tab per log.** The logs are `AUDIT_LOGS: readonly { value: string; label: string; Component: ComponentType }[]` in `sections/audit-log.tsx`, with one entry `{ value: 'ai-activity', label: 'AI activity', Component: AiActivityLog }`. A second log is one more entry. The selected tab is local state (default: the first entry), not in the URL. The `/activity` link sits above the tabs, outside any tab panel.
+2. **Tabs: one section, `audit-log`, with a tab per log.** The logs are `AUDIT_LOGS: readonly [AuditLog, ...AuditLog[]]` (a non-empty tuple; `AuditLog` is `{ value: string; label: string; Component: ComponentType }`) in `components/audits/logs.ts`, with one entry `{ value: 'ai-activity', label: 'AI activity', Component: AiActivityLog }`. A second log is one more entry. The selected tab is local state (default: the first entry), not in the URL. The `/activity` link sits above the tabs, outside any tab panel.
 3. **Connect snippet: its own section `mcp-connect`, order 40, title "Connect snippet", `hideWhenEmpty`, gated on `ai.available`.** It reads `public_url` from `useLoadedSettings()`, and it reads the auth mode itself (`api.getMcpAuth()` keyed on `useMcpAuthVersion()`, as `McpTokensSection` does). A token just minted still fills it until Done (today's #1910 behaviour). The token comes through `lib/mcpMintedToken.ts`. That store is cleared on Done and when the Tokens card unmounts, so the plaintext lives no longer than it does today. The snippet's hint changes from "Create a token below" to "Create a token under Tokens".
 4. **The AI activity log moves** from `components/assistant/AiAuditSection.tsx` to `components/audits/AiActivityLog.tsx` (export `AiActivityLog`), and its test moves with it (`git mv`). #781 says the tests move with it. Behaviour does not change.
 5. **"Old routes retired"** means this: no code, test name or doc still points at a pre-area name. That covers "Settings → AI activity", "MCP access tokens" as a section name, "MCP authentication", "MCP sign-in (OIDC)" and the old file path. Old *addresses* are not removed: they stay redirects (spec §3.1). No `/settings#…` hash outside `registry.ts` names an old anchor on main (checked with grep at `0d040c6ce`).
@@ -55,7 +55,8 @@
 | `frontend/src/pages/settings/sections/mcp-access-tokens.tsx` | `<McpTokensSection />` without `publicUrl`; drop `useLoadedSettings`. |
 | `frontend/src/pages/settings/sections/mcp-connect.tsx` (+ `.test.tsx`) | Create: the Connect snippet section. |
 | `frontend/src/components/audits/AiActivityLog.tsx` (+ `.test.tsx`) | Moved from `components/assistant/AiAuditSection.tsx` (+ test). |
-| `frontend/src/pages/settings/sections/audit-log.tsx` (+ test) | `AUDIT_LOGS` and the tabs. |
+| `frontend/src/pages/settings/sections/audit-log.tsx` (+ test) | the tabs (hidden while the assistant is unavailable). |
+| `frontend/src/components/audits/logs.ts` | `AUDIT_LOGS`. |
 | `frontend/src/pages/settings/SettingsShell.tsx` (+ test) | The not-set-up notice. |
 | `frontend/src/pages/settings/registry.test.ts` | The §3.2 table gains `mcp-connect`. A new test ties `AREAS` to the `navigate` description. |
 | `frontend/src/agent/catalog.ts`, `agent/src/tools/browser.ts`, `agent/test/browserTools.test.ts` | `navigate` names every area route. |
@@ -107,7 +108,7 @@
 
 **Interfaces:**
 - Consumes: `AiActivityLog` (Task 2).
-- Produces: `export const AUDIT_LOGS: readonly { value: string; label: string; Component: ComponentType }[]`.
+- Produces: `export const AUDIT_LOGS: readonly [AuditLog, ...AuditLog[]]` in `components/audits/logs.ts` (new file).
 
 - [ ] **Step 1: Write the failing tests** in `audit-log.test.tsx`:
   - `it('shows the logs as tabs, even with one (#781)')`: `getByRole('tablist', { name: 'Audit logs' })` holds tabs whose names are exactly `['AI activity']`. That tab has `aria-selected="true"`. `getByRole('tabpanel', { name: 'AI activity' })` contains `findByRole('list', { name: 'AI activity entries' })`.

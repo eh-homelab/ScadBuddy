@@ -1,7 +1,9 @@
-import { screen, within } from '@testing-library/react'
+import { screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { renderSettingsSection } from '../testing'
-import { AUDIT_LOGS, Component as AuditLog } from './audit-log'
+import { AUDIT_LOGS } from '../../../components/audits/logs'
+import { Component as AuditLog } from './audit-log'
 
 const availability = vi.hoisted(() => ({ available: true }))
 vi.mock('../../../agent/chat/availability', () => ({
@@ -20,6 +22,35 @@ describe('Audit log', () => {
     expect(within(section).getByRole('link', { name: 'Activity page' })).toHaveAttribute('href', '/activity')
     const panel = screen.getByRole('tabpanel', { name: 'AI activity' })
     expect(within(panel).queryByRole('link', { name: 'Activity page' })).toBeNull()
+  })
+
+  it('names the log once: the panel has the tab name, the card no region of its own', async () => {
+    renderSettingsSection(<AuditLog />, { route: '/settings/audits' })
+    const panel = await screen.findByRole('tabpanel', { name: 'AI activity' })
+    await within(panel).findByRole('list', { name: 'AI activity entries' })
+    expect(within(panel).queryByRole('region')).toBeNull()
+  })
+
+  it('moves between tabs with the arrow keys', async () => {
+    const extra = {
+      value: 'other',
+      label: 'Other log',
+      Component: () => <p>other log body</p>,
+    }
+    ;(AUDIT_LOGS as unknown as unknown[]).push(extra)
+    try {
+      renderSettingsSection(<AuditLog />, { route: '/settings/audits' })
+      const first = await screen.findByRole('tab', { name: 'AI activity' })
+      const user = userEvent.setup()
+      await user.click(first)
+      await user.keyboard('{ArrowRight}')
+      const second = screen.getByRole('tab', { name: 'Other log' })
+      await waitFor(() => expect(second).toHaveAttribute('aria-selected', 'true'))
+      expect(second).toHaveFocus()
+      expect(screen.getByRole('tabpanel', { name: 'Other log' })).toHaveTextContent('other log body')
+    } finally {
+      ;(AUDIT_LOGS as unknown as unknown[]).pop()
+    }
   })
 
   it('shows the logs as tabs, even with one (#781)', async () => {
@@ -43,6 +74,7 @@ describe('Audit log', () => {
     renderSettingsSection(<AuditLog />, { route: '/settings/audits' })
     const section = await screen.findByRole('region', { name: 'Audit log' })
     expect(within(section).getByRole('link', { name: 'Activity page' })).toHaveAttribute('href', '/activity')
+    expect(within(section).queryByRole('tablist')).toBeNull()
     // The AI card keeps its own gate.
     expect(within(section).queryByRole('list', { name: 'AI activity entries' })).toBeNull()
     expect(document.getElementById('ai-audit-heading')).toBeNull()
