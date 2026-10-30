@@ -66,7 +66,6 @@ export interface RemotePluginCreate {
 
 export interface RemotePluginPatch {
   url?: string
-  enabled?: boolean
   auth_header?: string | null
   secret?: string | null
 }
@@ -283,8 +282,6 @@ export const aiPlugins = {
       `/plugin-packages/${seg(name)}/approve`,
       json('POST', allow_refused ? { commit_sha, content_hash, allow_refused } : { commit_sha, content_hash }),
     ),
-  setPackageEnabled: <T extends ListedPackage = PluginPackage>(name: string, enabled: boolean) =>
-    request<T>(`/plugin-packages/${seg(name)}`, json('PATCH', { enabled })),
   repinPackage: (name: string, ref?: string) =>
     command<PluginPackage>(`/ai/plugin-packages/${seg(name)}/repin`, json('POST', ref ? { ref } : {}), '/ai/operations'),
   discardRepin: (name: string) =>
