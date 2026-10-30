@@ -44,19 +44,19 @@ describe('whether a durable session can start now', () => {
   })
 })
 
-// A unified session (AgentSession, spec 2026-10-13 §5.1-5.2) needs three queues polled: the
-// `agent-sessions` workflow queue, the shared `agent-tools` activity queue (acquire_worker) and
-// this replica's own session host queue; agent-durable's `agent` is not one of them.
+// A unified session (AgentSession, spec 2026-10-13 §5.1-5.2) needs the `agent-sessions` workflow
+// queue and the shared `agent-tools` activity queue (acquire_worker) polled, and at least one live
+// session host anywhere (`liveHostQueues`): the API's process hosts none of its own (§14.3, plan
+// Step 6.1), so its own queue is never asked for. agent-durable's `agent` is not one of them.
 describe('whether a unified session can start now', () => {
-  const HOST = 'agent-sessions.replica-a'
   const NEEDED = [
     { queue: 'agent-sessions', type: 1 },
     { queue: 'agent-tools', type: 2 },
-    { queue: HOST, type: 2 },
   ]
 
-  function unified(missing: { queue: string; type: number } | undefined, options: { host?: string | null } = {}) {
+  function unified(missing: { queue: string; type: number } | undefined, options: { hosts?: string[] | Error } = {}) {
     const asked: string[] = []
+    let listed = 0
     const client = {
       options: { namespace: 'default' },
       withDeadline: <R>(_deadline: number, fn: () => Promise<R>) => fn(),
@@ -68,14 +68,19 @@ describe('whether a unified session can start now', () => {
         },
       },
     } as unknown as Client
-    const host = options.host === null ? {} : { sessionHostQueue: options.host ?? HOST }
-    return { t: new DurableTurns({ client, sql: {} as Sql, events: {} as EventLog, ...host }), asked }
+    const hosts = options.hosts ?? ['agent-sessions.worker-a']
+    const liveHosts = () => {
+      listed++
+      return hosts instanceof Error ? Promise.reject(hosts) : Promise.resolve(new Set(hosts))
+    }
+    return { t: new DurableTurns({ client, sql: {} as Sql, events: {} as EventLog, liveHosts }), asked, listed: () => listed }
   }
 
-  it('is ready with fresh pollers on the three queues, and never asks about `agent`', async () => {
-    const { t, asked } = unified(undefined)
+  it('is ready with fresh pollers on both shared queues and a live session host, and never asks about `agent`', async () => {
+    const { t, asked, listed } = unified(undefined)
     expect(await t.unready('unified')).toBeUndefined()
     expect(asked).toEqual(NEEDED.map((n) => `${n.queue}/${n.type}`))
+    expect(listed()).toBe(1)
   })
 
   it.each(NEEDED)('is not ready without a fresh poller on $queue (type $type)', async (missing) => {
@@ -83,10 +88,14 @@ describe('whether a unified session can start now', () => {
     expect(await t.unready('unified')).toMatch(new RegExp(`polls Temporal's "${missing.queue}" queue`))
   })
 
-  it('is not ready on a replica that serves no session host queue', async () => {
-    const { t, asked } = unified(undefined, { host: null })
-    expect(await t.unready('unified')).toMatch(/no session host worker/)
-    expect(asked).toEqual([])
+  it('is not ready while no session host polls anywhere, though this process hosts none itself', async () => {
+    const { t } = unified(undefined, { hosts: [] })
+    expect(await t.unready('unified')).toMatch(/no session host worker \(agent-sessions\.<identity>\) polls Temporal/)
+  })
+
+  it('is not ready when the session hosts cannot be listed', async () => {
+    const { t } = unified(undefined, { hosts: new Error('unavailable') })
+    expect(await t.unready('unified')).toBe('Temporal did not answer')
   })
 
   it('keeps the durable answer apart: `agent` is still what a DurableSession needs', async () => {

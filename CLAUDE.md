@@ -696,6 +696,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed) and the
   backend's `SCADBUDDY_TEMPORAL_ADDRESS`, `_NAMESPACE` and `_SEARCH_ATTRIBUTES`. No AI
   env vars; AI settings live in the database.
+  `SCADBUDDY_AGENT_ROLE` (#2726 Step 6.1; `all` by default, `api`, `worker`) picks what
+  `main.ts` starts (`src/runtime/role.ts` `roleParts`): `api` is the HTTP half and polls
+  only its own `agent-tools.<hostname>` (browser calls for its tabs), so it runs no
+  `AgentSession` turn; `worker` runs the turn workers and serves only
+  `src/runtime/health.ts` (`/healthz`, `/readyz`). `test/agentRole.temporal.test.ts` runs
+  one of each on one dev server; a change to what a turn reaches in-process must keep it.
   `src/app.ts` is the Hono server (`/healthz` and `/mcp`). Every other route group is a
   `src/routes/<name>.ts` that exports `route` (`routes/module.ts`) and is found without
   an edit to `app.ts`: among them `credentials.ts` (`/api/v1/ai/credentials`),

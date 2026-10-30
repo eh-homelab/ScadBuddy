@@ -12,7 +12,9 @@ import { createApp } from './app.js'
 import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { approvalGrantCheck, FailClosedTokenStore, liveTokenTiers, PostgresTokenStore } from './auth/tokens.js'
-import { loadConfig } from './config.js'
+import { ConfigError, loadConfig } from './config.js'
+import { type PolledQueue, queuesPolled, workerHealthApp } from './runtime/health.js'
+import { roleParts } from './runtime/role.js'
 import { BrowserOrigins } from './browser/store.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
@@ -135,7 +137,17 @@ const TURN_ABORT_WAIT_MS = 5_000
 /** How often audit rows past their retention are deleted (audit/log.ts). */
 const AUDIT_RETENTION_SWEEP_MS = 60 * 60_000
 
-const config = loadConfig()
+let config: ReturnType<typeof loadConfig>
+try {
+  config = loadConfig()
+} catch (err) {
+  // A bad variable (an unknown SCADBUDDY_AGENT_ROLE among them) stops the process, naming it.
+  if (!(err instanceof ConfigError)) throw err
+  console.error(err.message)
+  process.exit(1)
+}
+// What this process starts (runtime/role.ts, plan Step 6.1): the HTTP half, the turn workers, or both.
+const role = roleParts(config.agentRole)
 
 // Before listening: a mounted, empty state volume must get its `claude/` and
 // `work/` back, and an unwritable one should stop the pod here, visibly.
@@ -276,7 +288,7 @@ const tabRelay = database
 void tabRelay?.releaseAll()
 // /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts), on
 // the listener's connection: made before start(), so its first LISTEN covers it.
-const mcpRelay = database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
+const mcpRelay = role.http && database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
@@ -356,7 +368,7 @@ const workspaceBytesStatus = workspace
 // Once migrations have applied: say where the files go (once, the cause when refused), and move
 // the files written before #4789 (or while the backend kept no blobs) to blobs; what is left is
 // retried at the next start.
-if (database && workspace && workspaceBytesStatus) {
+if (role.http && database && workspace && workspaceBytesStatus) {
   void database
     .ready()
     .then(async (ready) => {
@@ -387,7 +399,7 @@ if (credentials && kek.ok) {
   toolServices.secrets = async () =>
     (await credentials.revealAll(key)).flatMap((row) => (row.credential ? [row.credential.secret] : []))
 }
-const stopWorkspaceSweep = workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
+const stopWorkspaceSweep = !role.http ? undefined : workspace?.startSweeper(WORKSPACE_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('workspace sweep failed:', (err as Error).message),
 })
@@ -449,7 +461,7 @@ const backgroundTasks =
 const runtime = await readStartSettings({ database, settings }, console.log)
 if (database && !dataKeys) console.warn('sessions: no secret key, so no session transcript can be written; sessions cannot run')
 // Seals the transcripts written before sealing, in the background once migrations have applied; a failure is retried at the next start.
-if (database && dataKeys) {
+if (role.http && database && dataKeys) {
   void database
     .ready()
     .then(async (ready) => {
@@ -458,7 +470,7 @@ if (database && dataKeys) {
       if (sealed || deleted) console.log(`session transcripts: sealed ${sealed} row(s); deleted ${deleted} of forgotten sessions`)
     })
     .catch((err: unknown) => console.error('session transcripts: sealing the existing rows failed; retried at the next start:', (err as Error).message))
-} else if (database) {
+} else if (role.http && database) {
   console.warn('session transcripts: no secret key, so the existing rows are not sealed')
 }
 // Automatic Hindsight memory's hook knobs: one value for classic turns (SessionManager)
@@ -541,34 +553,34 @@ if (sessions) toolServices.sessions = sessions
 // chat socket and sessions_send read them; unsent ones expire and are swept.
 const attachments = sessions && database ? new AttachmentStore(database.sql) : undefined
 if (attachments) toolServices.attachments = attachments
-const stopAttachmentSweep = attachments?.startSweeper(ATTACHMENT_SWEEP_MS, {
+const stopAttachmentSweep = !role.http ? undefined : attachments?.startSweeper(ATTACHMENT_SWEEP_MS, {
   log: (message) => console.error(message),
 })
 // The LISTEN consumer that calls EventLog.wake() for other replicas' `session.*`.
 const stopSessionWake =
   sessions && events && sessionEvents ? followSessionEvents(events, sessions.events, sessionEvents.replica) : undefined
-const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
+const stopSweeper = !role.http ? undefined : sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', sweepErrorText(err)),
 })
 // Questions past `question_expiry_seconds` whose turn is gone (spec §6.6): cancelled, never answered.
-const stopQuestionSweeper = sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, {
+const stopQuestionSweeper = !role.http ? undefined : sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('question expiry sweep failed:', (err as Error).message),
 })
 // A flow run's call whose hop at its starting session is over goes to the person (#2482).
-const stopEscalationSweeper = sessions?.escalations.startSweeper(APPROVAL_SWEEP_MS, {
+const stopEscalationSweeper = !role.http ? undefined : sessions?.escalations.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('escalation hop sweep failed:', (err as Error).message),
 })
 // Now and every 30 s: sessions whose turn died without finishing (a SIGKILL,
 // or a restart that closed the pool under it) say so and stop claiming to run.
-const stopReaper = sessions?.startReaper(SESSION_REAP_MS, {
+const stopReaper = !role.http ? undefined : sessions?.startReaper(SESSION_REAP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('session lease reaper failed:', (err as Error).message),
 })
 // Audit rows older than `audit_retention_days` (ai_settings) are deleted hourly.
-const stopRetention = audit?.startRetention(AUDIT_RETENTION_SWEEP_MS, {
+const stopRetention = !role.http ? undefined : audit?.startRetention(AUDIT_RETENTION_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('audit retention sweep failed:', (err as Error).message),
 })
@@ -585,7 +597,7 @@ if (temporal) Runtime.install({ shutdownSignals: [] })
 const operationStore = temporal ? new OperationStore(temporal.sql) : undefined
 const commandKinds = pluginPackages ? packageKinds({ packages: pluginPackages, installer: packageInstaller }) : []
 // The agent's activity kinds are its command kinds (spec 2026-10-09 §4), read by the backend.
-if (database && commandKinds.length > 0) {
+if (role.http && database && commandKinds.length > 0) {
   void database
     .ready()
     .then(async (ok) => {
@@ -630,7 +642,7 @@ if (database) {
 }
 // The payload keys of sessions whose row is gone (#3317): a durable fork whose workflow could not
 // start; and of browser calls a cancel or a lost caller left (#4780). Every hour, once the database is ready.
-if (database) {
+if (role.http && database) {
   const sweep = () =>
     void database
       .ready()
@@ -668,7 +680,7 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
   : undefined
 // A parked call holds on its entry's row, woken by `scadbuddy_input` on the event bus's connection (§5.4).
 const turnHost =
-  temporal && sessions
+  role.sessionHost && temporal && sessions
     ? new TurnHost({
         core: sessions.turnCore,
         sql: temporal.sql,
@@ -811,7 +823,7 @@ const background =
       })
     : undefined
 const temporalWorker =
-  temporal && operationStore && turnToolDeps && durableToolDeps
+  role.sharedWorkers && temporal && operationStore && turnToolDeps && durableToolDeps
     ? AgentWorker.start({
         address: temporal.address,
         namespace: config.temporalNamespace,
@@ -868,11 +880,13 @@ const temporalWorker =
 // else unversioned like the agent's other workers. `session_settings` is a local activity, so it
 // is served here. `session_turn` is Task 5.2's, on the host worker.
 const sessionWorker =
-  temporal && settings
+  role.sharedWorkers && temporal && settings
     ? AgentWorker.start({
         address: temporal.address,
         namespace: config.temporalNamespace,
         taskQueue: SESSION_QUEUE,
+        // Polled as this replica, so its /readyz finds it (runtime/health.ts `queuesPolled`).
+        identity: workerIdentity(replicaIdentity()),
         activities: { [SESSION_SETTINGS_ACTIVITY]: () => readRuntimeSettings(settings) },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId } } : {}),
@@ -945,14 +959,13 @@ if (sessions && temporalClient && payloadKeys && database) {
     sql: database.sql,
     events: sessions.events,
     audit,
-    // This replica's host for AgentSession turns, which a unified session's readiness checks (§5.2).
-    ...(hostWorkers?.sessions ? { sessionHostQueue: SESSION_HOST_QUEUE } : {}),
+    // A unified session is ready while some replica hosts its turns (§5.2), this one or a worker's (§14.3).
   })
 }
 // Every 30 s, beside the lease reaper: durable sessions left `running` whose workflow
 // has ended or never started (#2001); a durable turn takes no lease.
 const stopDurableSweep =
-  sessions && temporalClient && database
+  role.http && sessions && temporalClient && database
     ? new DurableRunningSweep({ sql: database.sql, events: sessions.events, describe: durableDescriber(temporalClient) }).start(
         SESSION_REAP_MS,
         {
@@ -963,7 +976,7 @@ const stopDurableSweep =
     : undefined
 // Every 30 s: ai_pending_input rows whose workflow run ended without resolving them.
 const stopOrphanSweep =
-  sessions && temporalClient
+  role.http && sessions && temporalClient
     ? new PendingInputSweep({ sql: database!.sql, describe: temporalDescriber(temporalClient), events: sessions.events, audit }).start(
         APPROVAL_SWEEP_MS,
         {
@@ -1007,7 +1020,9 @@ const commands =
       })
     : undefined
 
-const app = createApp({
+const app = !role.http
+  ? undefined
+  : createApp({
   database,
   backend: () => backendReachable(backend),
   ...(workspaceBytesStatus ? { workspaceBytes: workspaceBytesStatus } : {}),
@@ -1041,7 +1056,8 @@ const app = createApp({
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
   tabs,
-  ...(temporalWorker ? { temporal: () => temporalWorker.state() } : {}),
+  // The shared agent-tools worker's state; an `api` process has its own host queue's instead.
+  ...(temporalWorker ? { temporal: () => temporalWorker.state() } : hostWorkers ? { temporal: () => hostWorkers.pinned.state() } : {}),
   commands,
   remoteAddress: (c) => {
     try {
@@ -1082,6 +1098,35 @@ const app = createApp({
   },
   mcpOidc: { repo: oidcRepo, provider: oidcProvider, publicUrl: config.publicUrl },
 })
+// A worker process (SCADBUDDY_AGENT_ROLE=worker) serves only its health on the same port
+// (runtime/health.ts): /readyz once Temporal lists it on every queue it polls.
+const health = role.http
+  ? undefined
+  : workerHealthApp({
+      ...(database ? { database } : {}),
+      kek,
+      workers: () =>
+        Object.fromEntries(
+          (
+            [
+              [TASK_QUEUE, temporalWorker],
+              [SESSION_QUEUE, sessionWorker],
+              [HOST_QUEUE, hostWorkers?.pinned],
+              [SESSION_HOST_QUEUE, hostWorkers?.sessions],
+            ] as const
+          ).flatMap(([queue, worker]) => (worker ? [[queue, worker.state()]] : [])),
+        ),
+      ready: () => {
+        if (!temporalClient) return Promise.resolve('SCADBUDDY_TEMPORAL_ADDRESS and SCADBUDDY_DATABASE_URL are needed to run turns')
+        const queues: PolledQueue[] = [
+          { name: SESSION_QUEUE, type: 1 },
+          { name: TASK_QUEUE, type: 2 },
+          { name: HOST_QUEUE, type: 2 },
+          { name: SESSION_HOST_QUEUE, type: 2 },
+        ]
+        return queuesPolled(temporalClient, queues, workerIdentity(replicaIdentity()))
+      },
+    })
 
 // The chat socket (routes/chat.ts). A frame is one panel message; CHAT_FRAME_MAX
 // covers the largest (a 32k-character message with its page context). Images are
@@ -1090,11 +1135,11 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: CHAT_FRAME_MAX })
 const stopHeartbeat = startHeartbeat(wss)
 
 traceListener(PORT)
-const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT, websocket: { server: wss } }, (info) => {
+const server = serve({ fetch: (app ?? health!).fetch, hostname: '0.0.0.0', port: PORT, websocket: { server: wss } }, (info) => {
   console.log(
-    `scadbuddy-agent listening on :${info.port}; backend ${config.backendUrl}; ` +
+    `scadbuddy-agent (role ${config.agentRole}) listening on :${info.port}; backend ${config.backendUrl}; ` +
       `database ${database ? 'configured' : 'not configured (AI disabled)'}; ` +
-      `credential writes from ${config.publicUrl ?? 'loopback only (SCADBUDDY_PUBLIC_URL unset)'}`,
+      (app ? `credential writes from ${config.publicUrl ?? 'loopback only (SCADBUDDY_PUBLIC_URL unset)'}` : 'health only'),
   )
 })
 
@@ -1156,7 +1201,7 @@ async function stop(): Promise<void> {
       // down append their final session.status/session.done, and publish them,
       // before closeDatabase runs; within the same deadline (#802).
       await sessions?.settled()
-      await app.close()
+      await app?.close()
       resources.close()
       await events?.close()
     },

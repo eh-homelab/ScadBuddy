@@ -41,7 +41,7 @@ import { type FakeAnthropic, type RecordedRequest, type Reply, REPLY_COST_USD, s
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
-import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
 import { dumpThenCleanUp, dumpWorkflow } from './support/workflowDump.js'
 
 // Session affinity (unified runtime spec 2026-10-13 §5.2, plan Task 5.2) end to end: AgentSession
@@ -337,7 +337,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
         }),
       ...options.extra,
     })
-    r.m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: r.m.events, sessionHostQueue: hostQueue })
+    r.m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: r.m.events, liveHosts: polledHosts(env.client, hostQueue) })
     r.turnHost = new TurnHost({
       core: r.m.turnCore,
       sql: options.turnHostSql ? options.turnHostSql(pool.sql) : pool.sql,

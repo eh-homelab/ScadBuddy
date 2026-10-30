@@ -42,7 +42,7 @@ import { MemoryCredentials } from './support/memoryCredentials.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
-import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
 
 // A park that outlasts its hold releases the process (unified runtime spec 2026-10-13 §5.4
 // "Release" and "Continue after a release", plan Task 5.4), end to end: AgentSession on a
@@ -181,7 +181,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
           },
         }),
     })
-    m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: m.events, sessionHostQueue: hostQueue })
+    m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: m.events, liveHosts: polledHosts(env.client, hostQueue) })
     m.durable = new DurableGate(env.client, { timeoutMs: 30_000 })
     const listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
     listener.start()

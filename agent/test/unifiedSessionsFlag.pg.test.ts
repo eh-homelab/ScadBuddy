@@ -97,7 +97,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`a new session's readiness follows the flag$
       },
     } as unknown as Client
     const m = manager({ sql: db.sql, paths: await tempPaths() })
-    m.durableTurns = new DurableTurns({ client, sql: db.sql, events: m.events, sessionHostQueue: 'agent-sessions.here' })
+    m.durableTurns = new DurableTurns({ client, sql: db.sql, events: m.events, liveHosts: () => Promise.resolve(new Set(['agent-sessions.here'])) })
     expect(await m.durableUnready()).toBeUndefined()
     return queues
   }

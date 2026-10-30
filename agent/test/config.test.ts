@@ -15,6 +15,7 @@ describe('loadConfig', () => {
       temporalNamespace: 'scadbuddy',
       temporalSearchAttributes: false,
       payloadDir: undefined,
+      agentRole: 'all',
     })
   })
 
@@ -32,6 +33,7 @@ describe('loadConfig', () => {
         SCADBUDDY_TEMPORAL_NAMESPACE: 'scadbuddy-dev',
         SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: 'true',
         SCADBUDDY_PAYLOAD_DIR: '/data/payloads',
+        SCADBUDDY_AGENT_ROLE: 'worker',
       }),
     ).toEqual({
       databaseUrl: 'postgresql://u:p@db:5432/scadbuddy',
@@ -45,6 +47,7 @@ describe('loadConfig', () => {
       temporalNamespace: 'scadbuddy-dev',
       temporalSearchAttributes: true,
       payloadDir: '/data/payloads',
+      agentRole: 'worker',
     })
   })
 
@@ -71,6 +74,19 @@ describe('loadConfig', () => {
   ])('refuses a malformed %j', (env, message) => {
     expect(() => loadConfig(env)).toThrow(ConfigError)
     expect(() => loadConfig(env)).toThrow(message)
+  })
+
+  // Spec 2026-10-13 §14.3, plan Step 6.1: one image, run as the HTTP half, the worker half or both.
+  it.each(['all', 'api', 'worker'] as const)('reads the role %s', (role) => {
+    expect(loadConfig({ SCADBUDDY_AGENT_ROLE: role }).agentRole).toBe(role)
+    expect(loadConfig({ SCADBUDDY_AGENT_ROLE: ` ${role} ` }).agentRole).toBe(role)
+  })
+
+  it('refuses any other role, naming it', () => {
+    expect(() => loadConfig({ SCADBUDDY_AGENT_ROLE: 'workers' })).toThrow(ConfigError)
+    expect(() => loadConfig({ SCADBUDDY_AGENT_ROLE: 'workers' })).toThrow(
+      'SCADBUDDY_AGENT_ROLE must be all, api or worker, not "workers"',
+    )
   })
 
   it('treats blank values as unset', () => {

@@ -12,6 +12,7 @@ import type { Tier } from '../auth/principal.js'
 import type { FlowTurn } from '../tools/registry.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
 import { TASK_QUEUE } from '../temporal/names.js'
+import { liveHostQueues } from '../temporal/session/affinity.js'
 import { SESSION_QUEUE, UNIFIED_SESSIONS_SETTING, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
 import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow } from './durableSweep.js'
@@ -186,10 +187,11 @@ export type DurableTurnsDeps = {
   /** Tests only: a queue other than `agent-tools`, where `acquire_worker` runs. */
   toolsQueue?: string
   /**
-   * This replica's session host queue (`agent-sessions.<identity>`, spec 2026-10-13 §5.2), when it
-   * serves AgentSession's turns; without it a unified session is not ready here.
+   * The session host queues (`agent-sessions.<identity>`, spec 2026-10-13 §5.2) that poll now, on
+   * any replica: a unified session is ready only while there is one. `liveHostQueues` by default;
+   * the API's process (`SCADBUDDY_AGENT_ROLE=api`, §14.3) hosts none itself.
    */
-  sessionHostQueue?: string
+  liveHosts?: () => Promise<ReadonlySet<string>>
   /** Where a Stop records the approvals it cancels on a session whose workflow is gone (#4018). */
   audit?: AuditSink | undefined
   /** How long send waits for the `send_message` Update to be accepted (default 10 s); past it the outcome is unknown and the claim is kept. */
@@ -221,7 +223,7 @@ export class DurableTurns {
   readonly #taskQueue: string
   readonly #sessionQueue: string
   readonly #toolsQueue: string
-  readonly #sessionHostQueue: string | undefined
+  readonly #liveHosts: () => Promise<ReadonlySet<string>>
   readonly #sendTimeoutMs: number
   readonly #ready = new Map<SessionRuntime, { until: number; why: string | undefined }>()
   readonly #describe: DescribeSession
@@ -236,7 +238,7 @@ export class DurableTurns {
     this.#taskQueue = deps.taskQueue ?? DURABLE_TASK_QUEUE
     this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
     this.#toolsQueue = deps.toolsQueue ?? TASK_QUEUE
-    this.#sessionHostQueue = deps.sessionHostQueue
+    this.#liveHosts = deps.liveHosts ?? (() => liveHostQueues(deps.client))
     this.#sendTimeoutMs = deps.sendTimeoutMs ?? 10_000
     this.#describe = deps.describe ?? durableDescriber(deps.client)
   }
@@ -254,9 +256,9 @@ export class DurableTurns {
    *
    * - `durable` (DurableSession): agent-durable's workflow worker on `agent`.
    * - `unified` (AgentSession, spec 2026-10-13 §5.1-5.2): the `agent-sessions` workflow worker;
-   *   the shared `agent-tools` activity worker, where `acquire_worker` places the turn; and this
-   *   replica's own `agent-sessions.<identity>`, the turn's host. Another replica's host queue
-   *   cannot be listed without knowing its identity; this one's stands for the build serving turns.
+   *   the shared `agent-tools` activity worker, where `acquire_worker` places the turn; and at
+   *   least one session host, `agent-sessions.<identity>`, on any replica (`liveHosts`). The
+   *   process that sends may host none: the API's (§14.3, plan Step 6.1) runs no turn.
    *
    * An answer from Temporal is reused for READY_TTL_MS, no answer for UNANSWERED_TTL_MS, so one
    * blip does not refuse explicit durable starts for long. Only a poller seen within
@@ -272,19 +274,19 @@ export class DurableTurns {
         if (!(await this.#polled(this.#taskQueue, WORKFLOW_TASK_QUEUE))) {
           why = `no durable session worker (agent-durable) polls Temporal's "${this.#taskQueue}" queue`
         }
-      } else if (!this.#sessionHostQueue) {
-        why = 'this agent service runs no session host worker (agent-sessions.<identity>), so it cannot place a unified session\'s turns'
       } else {
         const needed: [string, number, string][] = [
           [this.#sessionQueue, WORKFLOW_TASK_QUEUE, 'session workflow worker'],
           [this.#toolsQueue, ACTIVITY_TASK_QUEUE, 'agent-tools worker'],
-          [this.#sessionHostQueue, ACTIVITY_TASK_QUEUE, 'session host worker'],
         ]
         for (const [queue, type, what] of needed) {
           if (!(await this.#polled(queue, type))) {
             why = `no ${what} polls Temporal's "${queue}" queue`
             break
           }
+        }
+        if (!why && (await this.#liveHosts()).size === 0) {
+          why = 'no session host worker (agent-sessions.<identity>) polls Temporal, so no replica can run a unified session\'s turns'
         }
       }
     } catch {

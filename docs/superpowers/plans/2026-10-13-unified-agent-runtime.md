@@ -936,6 +936,14 @@ Spec §14.3: same image, two entrypoints. #4773's audit (§14.5) is answered in 
   - a forget from `api` closes `worker`'s warm process;
   - a tab that drops and comes back resolves the turn's `tab_disconnected` park.
 
+**As built (2026-10-30):** the role switch is `agent/src/runtime/role.ts` `roleParts`, read
+in place in `main.ts`, and `runtime/health.ts` is the worker's server; the wiring stays in
+`main.ts` rather than moving to `runtime/workers.ts` and `runtime/http.ts`, to keep the diff
+off the open #5001's hunks there (Step 6.3 rewrites that wiring anyway). `/readyz` waits for
+all four of the worker's queues, its `agent-tools.<hostname>` too. The last test above waits
+on #5003: an `AgentSession` turn opens no tab wait yet (`TurnHost` answers `NO_PARKS`), so
+there is no park to resolve; that park is built before Step 6.3.
+
 **Rollout:** the default is `all`, so nothing changes in prod until Step 6.2.
 
 **Depends on:** #4806 (the `bridge.tab` host worker and the cross-pod browser test).
