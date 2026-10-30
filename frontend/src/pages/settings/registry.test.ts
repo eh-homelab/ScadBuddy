@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { TOOLS } from '../../agent/catalog'
 import {
@@ -142,5 +144,10 @@ describe('registry', () => {
 describe('the navigate tool', () => {
   it("names every area in the navigate tool's description", () => {
     for (const { id } of AREAS) expect(TOOLS.navigate.description).toContain(`"/settings/${id}"`)
+  })
+
+  it("names every area in the agent's navigate description (agent/src/tools/browser.ts)", () => {
+    const source = readFileSync(resolve(process.cwd(), '../agent/src/tools/browser.ts'), 'utf8')
+    for (const { id } of AREAS) expect(source).toContain(`"/settings/${id}"`)
   })
 })

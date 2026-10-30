@@ -250,6 +250,20 @@ describe('SettingsShell (#2171)', () => {
     expect(screen.queryByText(/Nothing here until/)).toBeNull()
   })
 
+  it.each(['unavailable', 'unreachable'] as const)(
+    'shows no "nothing here" notice on an emptied agent-served area while the assistant is %s',
+    async (state) => {
+      Object.assign(availability, { available: false, state })
+      const withGhostMcp: readonly SettingsSection[] = [
+        ...fakes,
+        { id: 'ghost-mcp', area: 'mcp', title: 'Ghost MCP', order: 10, Component: GhostMcp, hideWhenEmpty: true },
+      ]
+      renderSettingsShell(withGhostMcp, { route: '/settings/mcp' })
+      await screen.findByRole('status')
+      expect(screen.queryByText(/Nothing here until/)).toBeNull()
+    },
+  )
+
   it('scrolls the pane to the top on an area switch', async () => {
     const { user, container } = renderSettingsShell(fakes)
     await screen.findByLabelText('Alpha')
