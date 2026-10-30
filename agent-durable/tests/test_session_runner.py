@@ -2476,8 +2476,8 @@ async def test_an_outward_package_skill_over_the_offload_size_parks_and_runs_onc
 ) -> None:
     """#5000, end to end: a Skill call whose input is over OFFLOAD_BYTES (once refused
     unasked) parks as a classic turn's does; the worker's External Storage keeps the input
-    out of history. Approved, it runs once (one segment attempt, one result); denied, it is
-    refused with why."""
+    out of history (the Update's argument is a reference). Approved, it runs once (one
+    segment attempt, one result); denied, it is refused with why."""
     payloads = tmp_path / "payloads"
     big = {"skill": "scadbuddy:print", "args": "a long brief " + "q" * (OFFLOAD_BYTES * 2)}
     results, history = await _skill_approved_then_denied(
@@ -2489,8 +2489,17 @@ async def test_an_outward_package_skill_over_the_offload_size_parks_and_runs_onc
     assert "denied" in _text_of(second), _text_of(second)
     assert "too large" not in _text_of(second)
     assert all(attempt == 1 for attempt in _segment_attempts(history))
-    assert b"qqqq" not in b"".join(e.SerializeToString() for e in history.events)
-    assert any(d.name.startswith("session-") for d in payloads.iterdir())  # stored there
+    # Each builtin_call Update's argument is a reference to the stored input, and no event
+    # holds a payload over the threshold (the input is sealed, so its text never shows).
+    inputs = [
+        e.workflow_execution_update_accepted_event_attributes.accepted_request.input
+        for e in history.events
+        if e.HasField("workflow_execution_update_accepted_event_attributes")
+    ]
+    args = [p for i in inputs if i.name == BUILTIN_CALL_UPDATE for p in i.args.payloads]
+    assert len(args) == 2
+    assert all(len(a.external_payloads) == 1 and a.ByteSize() < 4096 for a in args)
+    assert max(e.ByteSize() for e in history.events) < OFFLOAD_BYTES + 4096
 
 
 async def _seen_results_async(main: list[list[dict[str, Any]]], n: int) -> bool:

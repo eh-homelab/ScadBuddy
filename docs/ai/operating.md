@@ -1148,9 +1148,13 @@ user sets them in Settings → Tools & plugins → Packages
     data converter, and Temporal's External Storage moves every payload at or over
     `OFFLOAD_BYTES` (128 KiB) out of history
     ([`payload_store.py`](../../agent-durable/src/scadbuddy_durable/payload_store.py)).
-    In temporalio 1.34.0, `_build_update_workflow_execution_request` in
-    `temporalio/client/_impl.py` encodes the arguments with `DataConverter.encode`, and
-    that step stores the large ones. History then holds a reference only.
+    In temporalio 1.34.0 (the version `agent-durable/uv.lock` pins),
+    `_build_update_workflow_execution_request` in
+    [`temporalio/client/_impl.py`](https://github.com/temporalio/sdk-python/blob/1.34.0/temporalio/client/_impl.py)
+    encodes the arguments with `DataConverter.encode` in
+    [`temporalio/converter/_data_converter.py`](https://github.com/temporalio/sdk-python/blob/1.34.0/temporalio/converter/_data_converter.py).
+    That step seals each payload, then stores the large ones. History then holds a
+    reference only.
     `test_a_hooked_call_over_the_offload_size_parks_with_history_holding_a_reference`
     in `agent-durable/tests/test_session_workflow.py` measures this on a dev server.
     Only a worker without `SCADBUDDY_PAYLOAD_DIR` (so with no packages) still refuses an

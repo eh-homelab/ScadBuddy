@@ -1682,7 +1682,6 @@ async def test_a_hooked_call_over_the_offload_size_parks_with_history_holding_a_
     [arg] = accepted.args.payloads
     assert len(arg.external_payloads) == 1 and arg.ByteSize() < 4096  # a reference only
     assert max(e.ByteSize() for e in history.events) < OFFLOAD_BYTES + 4096
-    assert b"qqqq" not in b"".join(e.SerializeToString() for e in history.events)
     assert any((harness.payload_dir / f"session-{sid}").iterdir())
     await _replays(harness, handle)
 

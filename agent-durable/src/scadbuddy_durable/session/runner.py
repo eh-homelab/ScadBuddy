@@ -1058,9 +1058,10 @@ class CallAccess:
         if self._park is None or not call:
             return _deny(f"{tool} needs approval, and it could not be asked for")
         tool_input = data.get("tool_input") or {}
-        if self._input_max is not None and self._input_max < len(
+        size = len(
             json.dumps(tool_input, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        ):
+        )
+        if self._input_max is not None and size > self._input_max:
             return _deny(
                 f"{tool}'s input is over {self._input_max} bytes, too large to ask the"
                 " user about, so the call is refused; make it shorter"
