@@ -1,9 +1,10 @@
 import { screen, waitFor } from '@testing-library/react'
-import { useState } from 'react'
-import { Route, Routes } from 'react-router'
+import { useEffect, useState } from 'react'
+import { Route, Routes, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { Button } from '../components/ui/button'
 import { Dialog, DialogContent, DialogTitle } from '../components/ui/dialog'
+import { resolveLocation } from '../pages/settings/registry'
 import { renderPage } from '../test/utils'
 import { bridge } from './bridge'
 import { USER_ONLY } from './dom'
@@ -58,12 +59,24 @@ function Form({ onSend }: { onSend: () => void }) {
   )
 }
 
+/** Settings' redirect, as SettingsShell makes it (resolveLocation). */
+function FakeSettings() {
+  const { pathname, hash } = useLocation()
+  const navigate = useNavigate()
+  const target = resolveLocation(pathname, hash)
+  const address = `/settings/${target.area}${target.hash}`
+  useEffect(() => {
+    if (`${pathname}${hash}` !== address) void navigate(address, { replace: true })
+  }, [pathname, hash, address, navigate])
+  return <h1>Settings</h1>
+}
+
 function renderShell(onSend = vi.fn()) {
   renderPage(
     <Shell>
       <Routes>
         <Route path="/" element={<Form onSend={onSend} />} />
-        <Route path="/settings" element={<h1>Settings</h1>} />
+        <Route path="/settings/*" element={<FakeSettings />} />
       </Routes>
     </Shell>,
   )
@@ -168,7 +181,7 @@ describe('global tools', () => {
 
     expect(await bridge.call('navigate', { route: '/settings' })).toEqual({
       ok: true,
-      result: { route: '/settings' },
+      result: { route: '/settings/general' },
     })
     expect(screen.getByRole('heading', { name: 'Settings' })).toBeInTheDocument()
 
@@ -181,15 +194,28 @@ describe('global tools', () => {
   it('answers a hash-only move at once, with the hash (#781)', async () => {
     renderShell()
     await waitFor(() => expect(bridge.liveNames()).toContain('navigate'))
-    await bridge.call('navigate', { route: '/settings' })
+    await bridge.call('navigate', { route: '/settings/general' })
 
-    const started = Date.now()
-    expect(await bridge.call('navigate', { route: '/settings#mcp-connect' })).toEqual({
-      ok: true,
-      result: { route: '/settings#mcp-connect' },
-    })
-    expect(Date.now() - started).toBeLessThan(500)
+    vi.useFakeTimers()
+    try {
+      // No timer is advanced: an answer that waited would still be pending.
+      const answer = await bridge.call('navigate', { route: '/settings/general#connection' })
+      expect(answer).toEqual({ ok: true, result: { route: '/settings/general#connection' } })
+    } finally {
+      vi.useRealTimers()
+    }
   })
+
+  it.each(['/settings/library', '/settings'])(
+    'waits for Settings to redirect a section of another area, from %s (#781)',
+    async (start) => {
+      renderShell()
+      await waitFor(() => expect(bridge.liveNames()).toContain('navigate'))
+      await bridge.call('navigate', { route: start })
+      const answer = await bridge.call('navigate', { route: `${start}#connection` })
+      expect(answer).toEqual({ ok: true, result: { route: '/settings/general#connection' } })
+    },
+  )
 
   it('snapshots the route, dialogs, fields, errors and interactive elements', async () => {
     renderShell()

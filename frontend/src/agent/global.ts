@@ -11,6 +11,7 @@ import {
   roleOf,
   setControlValue,
 } from './dom'
+import { resolveLocation } from '../pages/settings/registry'
 import { fillableOf, type Fillable } from './fillable'
 import { touch, waitFor } from './highlight'
 import { AgentToolError } from './types'
@@ -78,6 +79,16 @@ function findOne(role: string, name: string, index: number | undefined): Element
  * before React renders it. The browser and memory histories both expose it; `fallback`
  * for a navigator that does not.
  */
+/** A hash-only move that the page leaves where it is (#781). */
+function staysPut(target: string, from: string): boolean {
+  const at = target.indexOf('#')
+  if (at === -1 || target.slice(0, at) !== from) return false
+  const pathname = from.split('?')[0]
+  if (!pathname.startsWith('/settings')) return true
+  const hash = target.slice(at)
+  return `${pathname}${hash}` === `/settings/${resolveLocation(pathname, hash).area}${hash}`
+}
+
 function historyRoute(navigator: object, fallback: string): string {
   const { location } = navigator as { location?: { pathname: string; search: string } }
   return location ? createPath({ pathname: location.pathname, search: location.search }) : fallback
@@ -114,8 +125,10 @@ export function useGlobalAgentTools() {
       await navigate(checkRoute(target))
       if (target === from) return { route: from }
       // The tab's route has no hash, so a move to a section of the page it is on never
-      // changes it: the answer is the target, with its hash, and nothing is waited for (#781).
-      if (target.includes('#') && target.slice(0, target.indexOf('#')) === from) return { route: target }
+      // changes it: the answer is the target, with its hash, and nothing is waited for
+      // (#781). Not when Settings redirects the address (a section of another area, an
+      // old anchor, a bare "/settings"): the router then lands elsewhere.
+      if (staysPut(target, from)) return { route: target }
       // Wait for the router to commit, so the next call sees the new page's tools. A
       // redirect (an unknown path lands on "/") still counts as having moved.
       // One that redirects straight back to where it started never changes it, so the
@@ -130,7 +143,9 @@ export function useGlobalAgentTools() {
         },
         { timeout: 1000, what: 'the route to change' },
       ).catch(() => current.current)
-      return { route: landed }
+      // Where a hash ended up is the history's (Settings rewrites it with the area).
+      const hash = target.includes('#') ? ((navigator as { location?: { hash: string } }).location?.hash ?? '') : ''
+      return { route: `${landed}${hash}` }
     },
 
     snapshot: () => bridge.snapshot(),
