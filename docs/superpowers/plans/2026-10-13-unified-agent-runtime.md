@@ -1,8 +1,8 @@
 # Unified agent runtime Implementation Plan
 
 > **Phases 6–9 rewritten 2026-10-29** against spec §14 (PR #4771), spec §14.7 and the
-> requirements R1–R7 of #4773. Phases 1–5 are merged and stand. The user reviews this plan,
-> and the decisions Q1–Q11 under "Phases 6–9", before any task in Phases 6–9 starts.
+> requirements R1–R7 of #4773. Phases 1–5 are merged and stand. On 2026-10-30 the user
+> decided Q1–Q11 under "Phases 6–9": every recommendation, as written (session `5e4d4b2b`).
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -749,14 +749,14 @@ The text these phases replace (the 2026-10-13 Phases 6–9, which put every turn
 and deleted `agent-durable/`) is in git history at `4c130e08b`. What changed, and why, is spec
 §14 (PR #4771) and spec §14.7 (this rewrite).
 
-**Built on, not redone.** Three open PRs by session `92109e29` carry part of this work. Each
+**Built on, not redone.** Three pieces of work by session `92109e29` carry part of this work. Each
 step below that needs one says so under **Depends on**.
 
 | PR | Issue | What it gives this plan |
 |---|---|---|
-| #4806 (draft) | #4780 | A `browser_*` call reaches the tab's pod through Temporal: a `BridgeCall` workflow whose one activity, `bridge.tab`, runs on the queue of the pod that holds the tab (`ai_tab_owners`). A turn on a worker pod can then drive a tab connected to an API pod. |
+| #4806 (merged 2026-10-29) | #4780 | A `browser_*` call reaches the tab's pod through Temporal: a `BridgeCall` workflow whose one activity, `bridge.tab`, runs on the queue of the pod that holds the tab (`ai_tab_owners`). A turn on a worker pod can then drive a tab connected to an API pod. |
 | #4868 (issue, after #4806 ships for one release) | #4868 | Drops `PgTabRelay` and `ai_bridge_messages`. Nothing here waits for it. |
-| #4812 (draft) | #4789 | Workspace file bytes in the blob store, sealed per session, with per-file keys wrapped under each session's key, so a fork copies no bytes. R7 of #4773 is this PR. |
+| #4812 (merged 2026-10-29) | #4789 | Workspace file bytes in the blob store, sealed per session, with per-file keys wrapped under each session's key, so a fork copies no bytes. R7 of #4773 is this PR. |
 
 **Where the four open issues close.**
 
@@ -767,10 +767,10 @@ step below that needs one says so under **Depends on**.
 | #2745 (tiers and manifest from the agent) | Step 8.1, which removes `SCADBUDDY_DURABLE_TOOLS_JSON`, its manifest load in `agent-durable/.../worker.py` and the image's `tools.json` copy | Step 8.1's `agent-durable` start test without the variable |
 | #4772 (a durable session's conversation is only in its workflow) | Step 7.2, closed by hand with the backfill's zero report linked (the PR says `Refs #4772`, because the fix is complete only once the backfill has run) | Step 6.3 stops new `DurableSession`s; Step 7.2's migration tests |
 
-### Decisions the user must make
+### Decisions Q1–Q11 (decided 2026-10-30)
 
-Each has a recommendation. A step that depends on one says so; nothing that depends on an
-open decision starts before it is made.
+On 2026-10-30 the user approved every recommendation below as written, in session
+`5e4d4b2b`. A step that depends on one names it.
 
 - **Q1. How a ScadBuddy tool call reaches its activity (R1).** R1 says the turn sends each
   call to its `AgentSession` as an Update, and the workflow schedules the activity. Temporal
@@ -790,6 +790,7 @@ open decision starts before it is made.
     execution of its own, so neither Update limit applies to it.
   - Alternative: R1 as written, with a turn refusing its 11th parallel call and ending at a
     call budget below 2000.
+  - **Decided 2026-10-30** (the user, in session `5e4d4b2b`): the recommendation, one `ToolCall` workflow per call, id `session-<uuid>-call-<tool_use_id>`, on `agent-tools`, sealed under the session's key.
 - **Q2. WebFetch and WebSearch (R2).** R2 asks for Claude Code's own built-ins. Claude Code's
   own WebFetch skips the egress check: measured in #2684, a call to `127.0.0.1:9` tried to
   connect (`agent/src/builtins/web.ts` header). **Recommended:** keep ScadBuddy's egress-checked
@@ -800,12 +801,14 @@ open decision starts before it is made.
   **unverified** that WebFetch's own fetch takes it). The same page says Claude Code's WebFetch
   also calls `api.anthropic.com` for a domain safety check unless `skipWebFetchPreflight` is
   set, which a gateway credential (R4) would have to allow for.
+  - **Decided 2026-10-30** (the user, in session `5e4d4b2b`): the recommendation, keep ScadBuddy's egress-checked `WebFetch` and `WebSearch` as the one exception.
 - **Q3. Which native built-ins every session gets, at what default access (R2).**
   **Recommended:** a new access source `builtin:claude-code` in #2171's model (spec
   2026-10-18 §4.2) with `Read`, `Glob`, `Grep` and the task list at `read`; `Write`, `Edit`
   and `NotebookEdit` at `write`, confined to the session directory by the `PreToolUse` seam;
   `Bash` and `PowerShell` at `outward` (each call waits for a person). An `allow_refused`
   package's `builtinTools` then only switch items on; they no longer decide what exists.
+  - **Decided 2026-10-30** (the user, in session `5e4d4b2b`): the recommendation, the access source `builtin:claude-code`, with the defaults above.
 - **Q4. Bash isolation (R2).** Native `Bash` runs in the worker pod. Its environment is only
   what the SDK's `env` gives it (`run.ts`: `env` "REPLACES the subprocess environment
   entirely"), but its file system holds the KEK mount (`/etc/scadbuddy/kek`) and, with R3,
@@ -818,6 +821,7 @@ open decision starts before it is made.
   Step 9.6 turns `Bash` on, measure that sandbox in the worker image, with reads denied
   outside the session directory. If it cannot run in the worker pod, `Bash` and `PowerShell`
   stay `off` by default, and a sandbox pod (#779) is the follow-up.
+  - **Decided 2026-10-30** (the user, in session `5e4d4b2b`): the recommendation, measure Claude Code's sandbox in the worker image before Step 9.6 turns `Bash` on; if it cannot run there, `Bash` and `PowerShell` stay `off` and a sandbox pod (#779) follows.
 - **Q5. The session directory (R3) against the blob store (R7).** **Recommended:**
   `SessionFiles` (blob store, #4812) stays the record; the NFS directory
   `Scadbuddy/sessions/<id>/` is a working copy, filled from `SessionFiles` when a placement
@@ -826,6 +830,7 @@ open decision starts before it is made.
   directory stale; the next placement refreshes it. So a pod that dies mid-turn loses at
   most that turn's unsynced writes, which the restart message already tells the model to
   check.
+  - **Decided 2026-10-30** (the user, in session `5e4d4b2b`): the recommendation, `SessionFiles` stays the record; the NFS directory is a working copy.
 - **Q6. The local gateway (R4).** **Recommended:** a loopback proxy in the worker process
   (`agent/src/gateway/`). Each spawn gets `ANTHROPIC_BASE_URL=http://127.0.0.1:<port>/t/<token>`
   and `ANTHROPIC_AUTH_TOKEN=<token>`, a random token per process that the proxy maps to the
@@ -833,11 +838,13 @@ open decision starts before it is made.
   each request's spend against the session, so a request made by a `Bash` command with the
   token is still counted in the budget. The credential never enters Claude Code's
   environment.
+  - **Decided 2026-10-30** (the user, in session `5e4d4b2b`): the recommendation, a loopback proxy in the worker process, `agent/src/gateway/`.
 - **Q7. `ai_pending_input` as the record (R5).** **Recommended:** yes, keeping the gate's
   public shape (spec §3 non-goals). `open_input` writes the row first; `respond` writes the
   decision row in its transaction and then sends the `respond` Update as a wake-up; the
   workflow keeps only request ids and timers, and on each wake or timer reads the rows
   through an activity. A lost Update is recovered by the timer's read.
+  - **Decided 2026-10-30** (the user, in session `5e4d4b2b`): the recommendation, yes, `ai_pending_input` is the record, with the gate's public shape kept.
 - **Q8. Fork (#4212 against spec §6.3).** Spec §6.3 copies the transcript into the child,
   re-sealed. The user's rule is copy-on-write: a fork points at its parent and copies on
   write, never duplicating transcripts or events. **Recommended:** Step 6.5: the child's
@@ -845,19 +852,23 @@ open decision starts before it is made.
   key, then its own; forgetting a parent that has live forks first copies the referenced
   range into each child (the parent's deletion is the write). The events and workspace parts
   stay #4212's and #4812's.
+  - **Decided 2026-10-30** (the user, in session `5e4d4b2b`): the recommendation, Step 6.5's copy-on-write read through the cut.
 - **Q9. `scadbuddy-agent-durable` after Phase 8.** With `session/` gone the Python worker
   serves nothing. **Recommended:** keep `agent-durable/` and its CI job (its reusable parts
   stay tested, spec §14.4), and scale the clusters Deployment to zero in Step 8.3, until a
   Python workload exists. The vector files stay while `codec.py`, `secrets.py` and `gate/`
   read them.
+  - **Decided 2026-10-30** (the user, in session `5e4d4b2b`): the recommendation, keep `agent-durable/` and its CI job, and scale the Deployment to zero in Step 8.3.
 - **Q10. #2171 delivery step 6 (PR #4201 spec §4.5).** Its "agent + agent-durable" half
   changes the loopback `routes/subagentMcp.ts`, which Step 8.2 deletes. **Recommended:** drop
   that half; #2660 closes through this epic (Step 8.1), and §4.5's "subagents park like the
   main agent" already holds for an in-process subagent, whose calls pass `canUseTool`.
+  - **Decided 2026-10-30** (the user, in session `5e4d4b2b`): the recommendation, drop the "agent + agent-durable" half.
 - **Q11. Existing cron tasks (R6).** **Recommended:** a start-time pass converts every active
   cron row's `BackgroundTask` workflow into a Schedule (create the Schedule by the task's id,
   then terminate the old workflow; idempotent), rather than waiting up to
   `CRON_EXPIRY_MS` (7 days, `background/schedule.ts`) for them to lapse.
+  - **Decided 2026-10-30** (the user, in session `5e4d4b2b`): the recommendation, a start-time pass converts every active cron row into a Schedule.
 
 ---
 
@@ -1531,7 +1542,8 @@ that Deployment is `RollingUpdate` from Step 6.2 on.
   - D4 → 5.1;
   - D6 → Phase 11;
   - D7 → Phase 3.
-- **Decisions Q1–Q11** are open (under "Phases 6–9"); the steps that depend on each name it.
+- **Decisions Q1–Q11** were made by the user on 2026-10-30 (session `5e4d4b2b`), each as
+  recommended (under "Phases 6–9"); the steps that depend on each name it.
 - **The user's standing rules, checked:** turns run in a worker Deployment of their own (Steps 6.1–6.2);
   `agent-durable/` stays and only its turn retires (Phase 8); every tool works in every
   session, and nothing is documented as a gap (Steps 6.3 and 9.2–9.6); forks are
