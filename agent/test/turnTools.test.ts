@@ -919,6 +919,34 @@ describe('package servers and remote plugins in a durable turn (#4757)', () => {
     }
   })
 
+  // #4757 final re-review 1: refused in the one shared sentence, though its forwarder no longer lists it.
+  it('a remote plugin tool switched off mid-turn is refused at its tier check (not parked) and its call', async () => {
+    const mcp = await startFakeMcp({})
+    const forwarder = await PluginForwarder.start()
+    const disabledTools: string[] = []
+    try {
+      const deps: TurnToolsDeps = {
+        sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+        servers: turnServers({
+          remotePlugins: async () =>
+            forwardForRun({ plugins: [{ plugin: { name: 'mem', url: mcp.url, toolTiers: {}, disabledTools: [...disabledTools] }, address: '127.0.0.1' }], problems: [] }, forwarder),
+        }),
+        approvals: { approved: async () => true },
+      }
+      const activities = turnToolActivities(deps)
+      const tier = () => env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'mem__recall', input: { query: 'q' } })
+      expect(await tier()).toMatchObject({ tier: 'outward' })
+      disabledTools.push('recall')
+      const OFF = toolOffReason('mcp__mem__recall')
+      expect(await tier()).toEqual({ tier: 'write', declared: 'outward', refused: OFF })
+      expect((await failure(env('turn:mem__recall', 'tool-toolu_x').run(turnToolActivity(deps), { query: 'q' }))).message).toBe(OFF)
+      expect(mcp.calls).toEqual([])
+    } finally {
+      await forwarder.close()
+      await mcp.close()
+    }
+  })
+
   it("a package server's read tool shows its fixed tier in the transcript", async () => {
     const source = packageServerSource('notes', 'api')
     const t = await packageTurn({ rows: [{ source, item: 'recall', access: 'read', updated_by: 'test' }] })

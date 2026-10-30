@@ -234,6 +234,8 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         // each call; the listed tier is the transcript's label only.
         mayPark: () => true,
         fixedTier: (name) => (browser?.covers(name) && name.endsWith('__browser_navigate') ? undefined : tierOf(name)),
+        // Refused at the tier check in the one sentence, though its forwarder no longer lists them (#4757 final re-review 1).
+        ...(plugin.disabledTools.length ? { offTools: new Set(plugin.disabledTools) } : {}),
         ...browserParts,
         ...keptRoute(keep),
       })
