@@ -961,7 +961,7 @@ describe("a package's MCP servers on ai_access (#2171)", () => {
       try {
         await client.callTool({ name: 'a', arguments: { text: '1' } })
         rows.push({ source: packageServerSource('notes', 'api'), item: '*', access: 'off', updated_by: 'test' })
-        await expect(client.callTool({ name: 'a', arguments: { text: '2' } })).rejects.toThrow(/ScadBuddy: api of plugin package notes is switched off/)
+        await expect(client.callTool({ name: 'a', arguments: { text: '2' } })).rejects.toThrow('ScadBuddy: mcp__plugin_notes_api__a is disabled in Settings → Tools & plugins; the user can turn it back on there')
         rows.length = 0
         state.fail = true
         await expect(client.callTool({ name: 'a', arguments: { text: '3' } })).rejects.toThrow(/could not be read; the call is refused/)

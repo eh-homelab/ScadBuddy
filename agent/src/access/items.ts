@@ -225,3 +225,13 @@ export function offItemReason(off: OffCallItem): string {
   const what = off.item === SOURCE_ITEM ? owner : `${itemKindOf(off.item)} "${off.item.slice(off.item.indexOf(':') + 1)}" of ${owner}`
   return `${what} is switched off in Settings → Tools & plugins; the user can turn it back on there`
 }
+
+/**
+ * The one sentence a call of a tool switched off in Settings is refused with, by the name
+ * Claude Code gives it (`mcp__<server>__<tool>`, or a built-in's own), in a classic turn's
+ * seam, a durable turn's tier check and call, and the forwarder. agent-durable's `TOOL_OFF`
+ * says the same (the `refusals` vector pins the text).
+ */
+export function toolOffReason(harnessName: string): string {
+  return `${harnessName} is disabled in Settings → Tools & plugins; the user can turn it back on there`
+}

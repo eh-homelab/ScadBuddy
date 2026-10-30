@@ -11,6 +11,7 @@ import base64
 import contextlib
 import dataclasses
 import hashlib
+import json
 import os
 import shutil
 import time
@@ -60,6 +61,7 @@ from scadbuddy_durable.session import runner as runner_module
 from scadbuddy_durable.session.events import translate
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
+    BUILTIN_CALL_INPUT_MAX,
     BUILTIN_CALL_UPDATE,
     BUILTIN_RELEASE_UPDATE,
     PARK_DEADLINE_S,
@@ -2080,6 +2082,32 @@ async def test_a_packages_builtin_skill_is_read_per_call(agent_db: Conn, connect
 
 
 SKILL_CALL = {"tool_name": "Skill", "tool_input": {"skill": "anything"}, "tool_use_id": "t1"}
+
+
+async def test_an_outward_call_whose_input_is_over_the_cap_is_refused_unasked(
+    connect: Connect,
+) -> None:
+    """#4757 final review M3: an input too large to put in the session's history is refused
+    with a plain reason before the Update is sent, never failed as one that could not be
+    asked for; one at the cap is asked about."""
+    parked: list[str] = []
+
+    async def park(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        parked.append(call)
+        return {"go": True, "reason": None}
+
+    judge = CallAccess(connect, [], {"Agent": ["notes"]}, park).check
+    fixed = len(json.dumps({"subagent_type": "x", "prompt": ""}, separators=(",", ":")).encode())
+    at_cap = {"subagent_type": "x", "prompt": "p" * (BUILTIN_CALL_INPUT_MAX - fixed)}
+    over = {"subagent_type": "x", "prompt": "p" * (BUILTIN_CALL_INPUT_MAX - fixed + 1)}
+    refused = await judge({"tool_name": "Agent", "tool_input": over, "tool_use_id": "t1"})
+    assert refused["hookSpecificOutput"]["permissionDecisionReason"] == (
+        f"Agent's input is over {BUILTIN_CALL_INPUT_MAX} bytes, too large to ask the user"
+        " about, so the call is refused; make it shorter"
+    )
+    assert parked == []
+    assert await judge({"tool_name": "Agent", "tool_input": at_cap, "tool_use_id": "t2"}) == {}
+    assert parked == ["t2"]
 
 
 async def test_a_park_that_never_answers_is_refused_at_the_hooks_own_deadline(

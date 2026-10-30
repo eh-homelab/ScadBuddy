@@ -84,7 +84,7 @@ export type ForwardOptions = {
    * Why every `tools/call` is refused now, read at each call (#4757: a package server
    * switched off), or undefined. A read that fails refuses the call.
    */
-  callCheck?: () => Promise<string | undefined>
+  callCheck?: (tool: string) => Promise<string | undefined>
 }
 
 export type Registration = {
@@ -118,7 +118,7 @@ type Route = {
   ledgerId: string
   filterTools: boolean
   maxResponseBytes: number | undefined
-  callCheck: (() => Promise<string | undefined>) | undefined
+  callCheck: ((tool: string) => Promise<string | undefined>) | undefined
   /** Harness names hidden because two or more tools share them (learned from tools/list). */
   collided: Set<string>
   /** The requests this route has forwarded whose responses are rewritten, on whichever stream they arrive. */
@@ -487,7 +487,7 @@ export class PluginForwarder {
           let refusal = callRefusal(route, m.params.name)
           if (refusal === undefined && route.callCheck) {
             try {
-              refusal = await route.callCheck()
+              refusal = await route.callCheck(m.params.name)
             } catch {
               refusal = `the access of plugin ${route.plugin.name} could not be read; the call is refused`
             }

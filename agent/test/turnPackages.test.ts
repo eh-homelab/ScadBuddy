@@ -497,13 +497,19 @@ describe("a package's MCP servers: their switch and their names (#4757)", () => 
     expect(forwarded.problems).toEqual(['plugin package a_b: MCP server "s" is named plugin_a_b_s, as "s" of plugin package a.b is, so none of them is offered'])
   })
 
-  it('a local server switched off is not started', async () => {
+  it('a local server switched off is not started: it is known, its calls refused', async () => {
     const pkg = { ...(await fakePackage({ mcpServers: { local: { command: 'node', args: ['s.mjs'] } } })), allowed: true }
     const { access } = memoryAccess([off('notes', 'local')])
     const problems: string[] = []
     const switches = await serverAccess([pkg], new AccessResolver(access))
     expect(switches.get(packageServerSource('notes', 'local'))).toEqual({ enabled: false, toolTiers: {}, disabledTools: [] })
-    expect(localPackageServers([pkg], problems, switches)).toEqual([])
+    const [known, ...rest] = localPackageServers([pkg], problems, switches)
+    expect(rest).toEqual([])
+    expect(known).toMatchObject({ name: 'plugin_notes_local', unlisted: true })
+    await expect(known!.connect()).rejects.toThrow(/switched off/)
+    expect(await known!.refusal!('mcp__plugin_notes_local__look')).toBe(
+      'mcp__plugin_notes_local__look is disabled in Settings → Tools & plugins; the user can turn it back on there',
+    )
     expect(problems).toEqual([])
     // On by default.
     expect(localPackageServers([pkg], problems, await serverAccess([pkg], new AccessResolver(memoryAccess().access))).map((s) => s.name)).toEqual([
@@ -550,9 +556,11 @@ describe("a package's MCP servers: their switch and their names (#4757)", () => 
     })
     expect(await env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'plugin_notes_local__wipe', input: {} })).toMatchObject({
       tier: 'write',
-      refused: expect.stringContaining('tool "wipe" of plugin plugin_notes_local is switched off'),
+      refused: 'mcp__plugin_notes_local__wipe is disabled in Settings → Tools & plugins; the user can turn it back on there',
     })
-    await expect(env('turn:plugin_notes_local__wipe').run(turnToolActivity(deps), {})).rejects.toThrow(/tool "wipe" of plugin plugin_notes_local is switched off/)
+    await expect(env('turn:plugin_notes_local__wipe').run(turnToolActivity(deps), {})).rejects.toThrow(
+      'mcp__plugin_notes_local__wipe is disabled in Settings → Tools & plugins; the user can turn it back on there',
+    )
     expect(await env('turn:plugin_notes_local__look').run(turnToolActivity(deps), {})).toBe('look')
     expect(calls).toEqual(['look'])
   })

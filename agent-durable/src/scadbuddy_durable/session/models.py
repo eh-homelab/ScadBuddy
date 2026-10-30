@@ -30,6 +30,10 @@ HOOKED_WAIT_S = 50 * 60
 #: The hook's own deadline on that wait: past the gate's timer, below the activity's hour,
 #: so a gate that never answers refuses the call rather than letting it run (re-review R2).
 PARK_DEADLINE_S = HOOKED_WAIT_S + 5 * 60
+#: A hooked call's input goes into the session's history whole (``builtin_call``): one over
+#: this many bytes (as JSON, UTF-8) is refused before it is asked about (#4757 final review
+#: M3). It is payload_store.py ``OFFLOAD_BYTES``, from which a payload leaves history.
+BUILTIN_CALL_INPUT_MAX = 128 * 1024
 # What the segment runner reads from its workflow: the turn's images (Ruling 5) and the
 # system prompt's append (SegmentContext).
 SEGMENT_CONTEXT_QUERY = "segment_context"

@@ -1,7 +1,8 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { type AccessRow, MIGRATED_BY, registrySource, type StoredOverrides, TOOL_ACCESS } from '../src/access/model.js'
-import { ALIAS_KEY_CAP, type CallPlugin, type ItemKind, itemKindIn, offCallItem, offItemReason } from '../src/access/items.js'
+import { type AccessRow, MIGRATED_BY, packageSource, registrySource, type StoredOverrides, TOOL_ACCESS, type ToolAccess } from '../src/access/model.js'
+import { ALIAS_KEY_CAP, type CallPlugin, type ItemKind, itemKindIn, offCallItem, offItemReason, toolOffReason } from '../src/access/items.js'
+import { builtinAccessOf } from '../src/plugins/packages/derived.js'
 import { UNICODE_DOUBT } from '../src/access/unicodeDoubt.js'
 import { registryOverrides, sourceEnabled } from '../src/access/resolve.js'
 import { AccessResolver } from '../src/access/resolver.js'
@@ -19,6 +20,8 @@ type SourceVector = { name: string; source: string; rows: AccessRow[]; expect: b
 type ItemKindVector = { source: string; item: string; expect: ItemKind }
 /** One Skill, Agent or Task call (#4757): the item it names that is off, or null. */
 type CallVector = { name: string; tool: string; input: unknown; plugins: CallPlugin[]; rows: AccessRow[]; expect: { source: string; item: string; reason: string } | null }
+/** A package built-in's access across the packages naming it, the strictest winning (#4757 final review M1). */
+type BuiltinVector = { name: string; builtin: string; packages: string[]; rows: AccessRow[]; expect: ToolAccess }
 type Vectors = {
   tool_access: string[]
   item_kinds: ItemKindVector[]
@@ -27,6 +30,9 @@ type Vectors = {
   registry: RegistryVector[]
   sources: SourceVector[]
   calls: CallVector[]
+  builtins: BuiltinVector[]
+  /** The words a call switched off in Settings is refused with, in every mode (#4757 final review M2). */
+  refusals: { tool_off: { name: string; reason: string } }
   /** Node's own unassigned (`\\p{Cn}`) code point ranges and `UNICODE_DOUBT` (Task 6 re-review R6): agent-durable's `Cn` must be exactly their union. */
   unicode: { node: string; cn: [number, number][]; doubt: [number, number][] }
 }
@@ -294,6 +300,17 @@ function build(): Vectors {
       { name: 'a name at the alias bound called qualified, upper case and dashed', tool: 'Agent', input: { subagent_type: `pa:${AT_CAP.replaceAll('_', '-').toUpperCase()}` }, plugins: [PA_AT_CAP], rows: [row(PA, 'subagent:deep', 'off')], expect: off(PA, 'subagent:deep') },
       { name: 'a name at the alias bound with one more letter is another name', tool: 'Agent', input: { subagent_type: `${AT_CAP}x` }, plugins: [PA_AT_CAP], rows: [row(PA, 'subagent:deep', 'off')], expect: null },
     ],
+    builtins: [
+      { name: 'off in one package, write in another: off', builtin: 'Bash', packages: ['pa', 'pb'], rows: [row(PA, 'builtin:Bash', 'off'), row(PB, 'builtin:Bash', 'write')], expect: 'off' },
+      { name: 'write in one package, unset in another: outward', builtin: 'Bash', packages: ['pa', 'pb'], rows: [row(PA, 'builtin:Bash', 'write')], expect: 'outward' },
+      { name: 'read in one package, write in another: write', builtin: 'Bash', packages: ['pa', 'pb'], rows: [row(PA, 'builtin:Bash', 'read'), row(PB, 'builtin:Bash', 'write')], expect: 'write' },
+      { name: 'lowered in its one package', builtin: 'Read', packages: ['pa'], rows: [row(PA, 'builtin:Read', 'read')], expect: 'read' },
+      { name: 'an on row holds no tier: outward', builtin: 'Bash', packages: ['pa'], rows: [row(PA, 'builtin:Bash', 'on')], expect: 'outward' },
+      { name: "another built-in's row is ignored", builtin: 'Bash', packages: ['pa'], rows: [row(PA, 'builtin:Grep', 'off')], expect: 'outward' },
+      { name: 'a row of a package that does not name it is ignored', builtin: 'Bash', packages: ['pa'], rows: [row(PB, 'builtin:Bash', 'off')], expect: 'outward' },
+      { name: 'no packages: outward', builtin: 'Bash', packages: [], rows: [], expect: 'outward' },
+    ],
+    refusals: { tool_off: { name: 'mcp__plugin_pa_srv__search', reason: toolOffReason('mcp__plugin_pa_srv__search') } },
   }
 }
 
@@ -342,6 +359,17 @@ describe('access vectors', () => {
     const found = offCallItem(v.tool, v.input, v.plugins, v.rows)
     expect(found ? { ...found, reason: offItemReason(found) } : null).toEqual(v.expect)
   })
+
+  // The three implementations of the strictest-built-in rule: the seam's, the durable listing's and agent-durable's.
+  it.each(built.builtins)('built-in: $name', async (v) => {
+    const reader: AccessReader = { rows: async (sources) => v.rows.filter((r) => sources.includes(r.source)), row: async () => undefined }
+    const resolver = new AccessResolver(reader)
+    expect(await resolver.builtin(v.builtin, v.packages)).toBe(v.expect)
+    const loaded = v.packages.map((name) => ({ name, contentHash: '', dir: '', allowed: true, builtinTools: [v.builtin] }))
+    expect(builtinAccessOf(v.builtin, loaded, await resolver.packageAccess(v.packages.map(packageSource)))).toBe(v.expect)
+  })
+
+  it('says a switched-off call in one sentence', () => expect(toolOffReason(built.refusals.tool_off.name)).toBe(built.refusals.tool_off.reason))
 
   it('holds a name exactly at the alias bound', () => expect(AT_CAP.length).toBe(ALIAS_KEY_CAP))
 

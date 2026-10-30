@@ -6829,5 +6829,147 @@
       ],
       "expect": null
     }
-  ]
+  ],
+  "builtins": [
+    {
+      "name": "off in one package, write in another: off",
+      "builtin": "Bash",
+      "packages": [
+        "pa",
+        "pb"
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "builtin:Bash",
+          "access": "off",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "package:pb",
+          "item": "builtin:Bash",
+          "access": "write",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "off"
+    },
+    {
+      "name": "write in one package, unset in another: outward",
+      "builtin": "Bash",
+      "packages": [
+        "pa",
+        "pb"
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "builtin:Bash",
+          "access": "write",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "outward"
+    },
+    {
+      "name": "read in one package, write in another: write",
+      "builtin": "Bash",
+      "packages": [
+        "pa",
+        "pb"
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "builtin:Bash",
+          "access": "read",
+          "updated_by": "browser:browser"
+        },
+        {
+          "source": "package:pb",
+          "item": "builtin:Bash",
+          "access": "write",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "write"
+    },
+    {
+      "name": "lowered in its one package",
+      "builtin": "Read",
+      "packages": [
+        "pa"
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "builtin:Read",
+          "access": "read",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "read"
+    },
+    {
+      "name": "an on row holds no tier: outward",
+      "builtin": "Bash",
+      "packages": [
+        "pa"
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "builtin:Bash",
+          "access": "on",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "outward"
+    },
+    {
+      "name": "another built-in's row is ignored",
+      "builtin": "Bash",
+      "packages": [
+        "pa"
+      ],
+      "rows": [
+        {
+          "source": "package:pa",
+          "item": "builtin:Grep",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "outward"
+    },
+    {
+      "name": "a row of a package that does not name it is ignored",
+      "builtin": "Bash",
+      "packages": [
+        "pa"
+      ],
+      "rows": [
+        {
+          "source": "package:pb",
+          "item": "builtin:Bash",
+          "access": "off",
+          "updated_by": "browser:browser"
+        }
+      ],
+      "expect": "outward"
+    },
+    {
+      "name": "no packages: outward",
+      "builtin": "Bash",
+      "packages": [],
+      "rows": [],
+      "expect": "outward"
+    }
+  ],
+  "refusals": {
+    "tool_off": {
+      "name": "mcp__plugin_pa_srv__search",
+      "reason": "mcp__plugin_pa_srv__search is disabled in Settings → Tools & plugins; the user can turn it back on there"
+    }
+  }
 }

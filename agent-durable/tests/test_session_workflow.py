@@ -9,7 +9,9 @@ before ``tool-access-2171`` (#2171), payloads unsealed; it is never re-recorded.
 ``test_a_package_built_in_parks_runs_once_approved_and_the_runner_gets_the_package``,
 recorded the same way on the code before ``builtin-access-4757`` (#4757). ``skill.json`` is
 ``test_an_outward_package_skill_parks_and_runs_once_approved``'s, recorded the same way when
-the hooked built-in path was added (#4757), to keep it replaying.
+the hooked built-in path was added (#4757), to keep it replaying. ``bash_access.json`` is
+``test_an_off_bash_is_refused_then_an_outward_one_parks_and_runs_once_approved``'s, recorded
+the same way under ``builtin-access-4757`` (an engine-parked Bash: off, then outward).
 """
 
 from __future__ import annotations
@@ -1464,6 +1466,47 @@ async def test_bash_off_is_refused_and_lowered_runs_unasked(
         [entry] = await _parked(handle)
         assert (entry["kind"], entry["tool"]) == ("approval", "Bash")
         await _replays(harness, handle)
+
+
+def _bash_twice(prompt: str, history: list[HistoryItem]) -> ToolCall | Final:
+    """Calls Bash, then Bash again, then ends."""
+    if len(history) < 2:
+        return ToolCall("Bash", {"command": "make notes"})
+    return Final("done")
+
+
+async def test_an_off_bash_is_refused_then_an_outward_one_parks_and_runs_once_approved(
+    harness: Harness, agent_db: Conn, connect: Connect
+) -> None:
+    """#4757 final review M4: ``bash_access.json`` is this history, recorded under
+    builtin-access-4757: builtin_tier answers off (refused in a classic turn's words), then
+    outward (an approval entry; it runs once approved)."""
+    harness.stand_in.turn_packages = [NOTES_PACKAGE]
+    harness.stand_in.builtin_answers = ["off", "outward"]
+    await harness.agent.shutdown()
+    harness.claude = ScriptedClaude(_bash_twice)
+    async with harness.restart_agent():
+        sid, handle = await harness.session(agent_db)
+        await send(handle, "run it")
+        [entry] = await _parked(handle)
+        assert (entry["kind"], entry["tool"]) == ("approval", "Bash")
+        context = await handle.query(SEGMENT_CONTEXT_QUERY, result_type=SegmentContext)
+        assert list(context.replaced.values()) == [
+            "Bash is disabled in Settings → Tools & plugins; the user can turn it back on there"
+        ]
+        await handle.execute_update(
+            RESPOND_UPDATE, _respond(entry, {"kind": "approval", "decision": "approve"})
+        )
+        assert await settled(connect, sid) == "idle"
+        assert harness.stand_in.builtin_asked == [{"tool": "Bash", "packages": ["notes"]}] * 2
+        await _replays(harness, handle)
+
+
+async def test_a_bash_turn_under_builtin_access_from_its_fixture_replays(harness: Harness) -> None:
+    """``bash_access.json``: the history of
+    test_an_off_bash_is_refused_then_an_outward_one_parks_and_runs_once_approved."""
+    path = Path(__file__).parent / "fixtures" / "durable_session_histories" / "bash_access.json"
+    await _replay(harness, WorkflowHistory.from_json("bash", path.read_text(encoding="utf-8")))
 
 
 async def test_builtin_tier_failing_parks_after_three_attempts(

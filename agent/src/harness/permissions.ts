@@ -1,4 +1,5 @@
 import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthropic-ai/claude-agent-sdk'
+import { toolOffReason } from '../access/items.js'
 import type { LiveAccess } from '../access/live.js'
 import { screenedText } from '../browser/origins.js'
 import type { SeamLedger } from './seamLedger.js'
@@ -248,7 +249,7 @@ async function decideLive(
   if (access === 'off' || typeof access === 'object') {
     const tier = tierOf(toolName, input) ?? 'outward'
     // An item a Skill, Agent or Task call names is said by its own sentence (access/items.ts `offItemReason`).
-    const reason = typeof access === 'object' ? access.off : `${toolName} is disabled in Settings → Tools & plugins; the user can turn it back on there`
+    const reason = typeof access === 'object' ? access.off : toolOffReason(toolName)
     return { decision: 'deny', tier, reason }
   }
   const resolve: TierResolver = access === undefined ? tierOf : () => access

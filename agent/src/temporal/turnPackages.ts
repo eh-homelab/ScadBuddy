@@ -7,7 +7,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { declaredConfigs } from '../harness/plugins.js'
 import { hashTree, PackageContentError } from '../plugins/packages/hash.js'
 import type { LoadedPackage } from '../plugins/packages/install.js'
-import { skillItem, subagentItem } from '../access/items.js'
+import { skillItem, subagentItem, toolOffReason } from '../access/items.js'
 import { packageServerSource } from '../access/model.js'
 import {
   collidingServerNames,
@@ -210,10 +210,26 @@ async function connectStdio(config: McpConfig, root: string): Promise<Client> {
 }
 
 /**
+ * A package server known but switched off in Settings → Tools & plugins (#4757 final review
+ * M2): not listed, never connected to, each call refused in a classic turn's words.
+ */
+export function switchedOffServer(name: string): TurnServer {
+  return {
+    name,
+    connect: () => Promise.reject(new Error(`${name} is switched off in Settings → Tools & plugins`)),
+    tierOf: () => 'write',
+    refusal: async (harnessName) => toolOffReason(harnessName),
+    unlisted: true,
+  }
+}
+
+/**
  * The local MCP servers of the packages approved with `allow_refused`, as turn servers;
  * their http servers come through the forwarder instead (turnServers.ts). A server
- * switched off in `access` (by `packageServerSource`; one missing from it too) is not
- * started, nor one whose name another package server carries (`collidingServerNames`).
+ * switched off in `access` (by `packageServerSource`) is not started: it is known, its
+ * calls refused in a classic turn's words (`switchedOffServer`, #4757 final review M2).
+ * One missing from `access` is not started either, nor one whose name another package
+ * server carries (`collidingServerNames`).
  * A tool's tier is its stored one, else outward; a tool set off is `offTools`.
  */
 export function localPackageServers(
@@ -238,7 +254,11 @@ export function localPackageServers(
           continue
         }
         const stored = access.get(packageServerSource(pkg.name, server))
-        if (!stored?.enabled) continue
+        if (!stored) continue
+        if (!stored.enabled) {
+          servers.push(switchedOffServer(name))
+          continue
+        }
         const tiers = pluginTierResolver([{ name, toolTiers: stored.toolTiers }])
         const tierOf = (harnessName: string) => tiers(harnessName) ?? 'outward'
         servers.push({

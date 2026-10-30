@@ -111,6 +111,7 @@ from scadbuddy_durable.session import access, subagents
 from scadbuddy_durable.session.fallback import classify, credentials_fault
 from scadbuddy_durable.session.models import (
     BUDGET_EXHAUSTED,
+    BUILTIN_CALL_INPUT_MAX,
     BUILTIN_CALL_UPDATE,
     BUILTIN_RELEASE_UPDATE,
     PARK_DEADLINE_S,
@@ -1050,12 +1051,19 @@ class CallAccess:
         call = str(data.get("tool_use_id") or "")
         if self._park is None or not call:
             return _deny(f"{tool} needs approval, and it could not be asked for")
+        tool_input = data.get("tool_input") or {}
+        size = len(
+            json.dumps(tool_input, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        )
+        if size > BUILTIN_CALL_INPUT_MAX:
+            return _deny(
+                f"{tool}'s input is over {BUILTIN_CALL_INPUT_MAX} bytes, too large to ask the"
+                " user about, so the call is refused; make it shorter"
+            )
         self._waiting.add(call)
         try:
             # The hook's own deadline (re-review R2): a gate that never answers refuses it.
-            answer = await asyncio.wait_for(
-                self._park(call, tool, data.get("tool_input") or {}), PARK_DEADLINE_S
-            )
+            answer = await asyncio.wait_for(self._park(call, tool, tool_input), PARK_DEADLINE_S)
         except TimeoutError:
             logger.warning("%s was not decided by the hook's deadline", tool)
             await self._release_one(call)

@@ -104,3 +104,17 @@ def test_unassigned_here_is_unassigned_in_node_or_in_its_doubt_table() -> None:
     here = points(_cn_ranges())
     assert node <= here, f"assigned here, unassigned in Node {unicode['node']}"
     assert here - node == doubt
+
+
+@pytest.mark.parametrize("vector", VECTORS["builtins"], ids=lambda v: v["name"])
+def test_builtins(vector: dict[str, Any]) -> None:
+    """agent/src/access/resolver.ts ``builtin`` and derived.ts ``builtinAccessOf``: the
+    strictest of each naming package's access, the same answer (#4757 final review M1)."""
+    got = access.builtin_access(vector["builtin"], vector["packages"], _rows(vector["rows"]))
+    assert got == vector["expect"]
+
+
+def test_a_switched_off_call_is_refused_in_the_agents_words() -> None:
+    """items.ts ``toolOffReason`` (#4757 final review M2)."""
+    vector = VECTORS["refusals"]["tool_off"]
+    assert access.TOOL_OFF.format(vector["name"]) == vector["reason"]

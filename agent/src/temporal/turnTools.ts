@@ -11,6 +11,7 @@ import type { Tier } from '../auth/principal.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
 import { GUARD_DEADLINE_MS, type GuardVerdict, judgeInput, type RiskTier, tierAfter, within as withinMs } from '../harness/permissions.js'
 import { harnessToolName } from '../plugins/registry.js'
+import { toolOffReason } from '../access/items.js'
 import { redact } from '../secrets.js'
 import type { Owner } from '../sessions/protocol.js'
 import { turnPrincipal } from '../tools/harness.js'
@@ -98,11 +99,17 @@ export type TurnServer = {
    */
   guard?(harnessName: string, input: unknown): Promise<GuardVerdict | undefined>
   /**
-   * Why its calls are refused now, read at each tier check and each call (#4757: a package
-   * server switched off in Settings → Tools & plugins), or undefined. A read that fails
-   * refuses the call, at the tier check (so it never parks) and at the call.
+   * Why a call of the tool (its harness name) is refused now, read at each tier check and
+   * each call (#4757: a package server or a served built-in switched off in Settings → Tools
+   * & plugins), or undefined. A read that fails refuses the call, at the tier check (so it
+   * never parks) and at the call.
    */
-  refusal?(): Promise<string | undefined>
+  refusal?(harnessName: string): Promise<string | undefined>
+  /**
+   * Known, but offering nothing now (#4757 final review M2: a package server switched off):
+   * left out of the listing, never connected to, its calls refused by `refusal`.
+   */
+  unlisted?: true
   /**
    * Its tools set off in Settings → Tools & plugins, by their own (bare) names (#4757: a
    * local package server's): left out of the listing and refused on call, as the
@@ -429,13 +436,17 @@ function serverOf(set: TurnServers, name: string) {
   return found
 }
 
+/** Why a tool its server is in the build for no longer lists is refused. */
+const unlistedReason = (name: string, server: string) => `${name} is not offered any more by ${server}`
+
 /**
  * The tool a turn tool's name names now, or a non-retryable refusal saying why not. A
  * call (`use: 'call'`) on a kept server lists it on the session's kept client, which it
  * then runs on; a tier check uses that client's list only if this replica holds one, so
- * a replica the calls are not pinned to keeps none.
+ * a replica the calls are not pinned to keeps none. `tool` is undefined where the server
+ * no longer lists it.
  */
-async function resolve(
+async function lookup(
   deps: TurnToolsDeps,
   context: Pick<TurnContext, 'session' | 'flow'>,
   set: TurnServers,
@@ -456,8 +467,15 @@ async function resolve(
     tools = held?.tools ?? (await listed(server, signal, true))
   }
   const found = tools.find((t) => t.name === parts.tool)
-  if (!found) throw ApplicationFailure.nonRetryable(`${name} is not offered any more by ${server.name}`, TOOL_ERROR)
-  return { server, tool: found.tool, harnessName: `mcp__${server.name}__${parts.tool}`, client }
+  return { server, tool: found?.tool, harnessName: `mcp__${server.name}__${parts.tool}`, client }
+}
+
+/** `lookup`, refused (non-retryable) where the server no longer lists the tool. */
+async function resolve(...args: Parameters<typeof lookup>) {
+  const found = await lookup(...args)
+  const { tool } = found
+  if (!tool) throw ApplicationFailure.nonRetryable(unlistedReason(args[3], found.server.name), TOOL_ERROR)
+  return { ...found, tool }
 }
 
 /** Who a call runs as, with which tiers and under which approval: a durable session's turn, or a flow run's starter. */
@@ -535,7 +553,7 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         // Listed side by side, each within LIST_TIMEOUT_MS: a plugin that stalls is
         // reported and left out, never the whole listing's deadline.
         const listings = await Promise.all(
-          set.servers.map(async (server) => {
+          set.servers.filter((server) => !server.unlisted).map(async (server) => {
             try {
               const bounded = AbortSignal.any([signal, AbortSignal.timeout(deps.listTimeoutMs ?? LIST_TIMEOUT_MS)])
               const target = keptTarget(deps, { session }, server)
@@ -602,12 +620,20 @@ export function turnToolActivities(deps: TurnToolsDeps): Record<string, (input: 
         const present = caller.context.flow === undefined ? findServer(set, tool) : serverOf(set, tool)
         if (!present) return { tier: 'write', declared: 'outward', refused: goneReason(tool) }
         const named = present.server
-        const off = await refusalOf(named)
-        if (off !== undefined) return { tier: 'write', declared: 'outward', refused: off, ...(pinned(deps, named) ? { task_queue: deps.hostQueue! } : {}) }
-        const { server, harnessName, tool: found } = await resolve(deps, caller.context, set, tool, signal, 'tier')
         // A flow takes its call's queue from here, since it lists nothing (turn_tools).
-        const queue = pinned(deps, server) ? { task_queue: deps.hostQueue! } : {}
-        if (isOffTool(server, found.name)) return { tier: 'write', declared: 'outward', refused: offToolReason(server, found.name), ...queue }
+        const queue = pinned(deps, named) ? { task_queue: deps.hostQueue! } : {}
+        const offName = `mcp__${named.name}__${present.parts.tool}`
+        const off = await refusalOf(named, offName)
+        if (off !== undefined) return { tier: 'write', declared: 'outward', refused: off, ...queue }
+        // A tool set off, or one the server no longer lists (#4757 final review I1: an http
+        // package server's tool its forwarder now hides), is refused the same way.
+        if (isOffTool(named, present.parts.tool)) return { tier: 'write', declared: 'outward', refused: toolOffReason(offName), ...queue }
+        const { server, harnessName, tool: found } = await lookup(deps, caller.context, set, tool, signal, 'tier')
+        if (!found) {
+          if (caller.context.flow !== undefined) throw ApplicationFailure.nonRetryable(unlistedReason(tool, server.name), TOOL_ERROR)
+          return { tier: 'write', declared: 'outward', refused: unlistedReason(tool, server.name), ...queue }
+        }
+        if (isOffTool(server, found.name)) return { tier: 'write', declared: 'outward', refused: toolOffReason(harnessName), ...queue }
         const verdict = server.guard ? await judgeInput(server.guard.bind(server), harnessName, input) : undefined
         // A refused call is not parked, since no approval could run it: its call refuses
         // it with the reason (turnToolActivity). It is answered as not outward; `refused`
@@ -629,13 +655,10 @@ function isOffTool(server: TurnServer, raw: string): boolean {
   return off.has(raw) || [...off].some((d) => harnessToolName(d) === name)
 }
 
-const offToolReason = (server: TurnServer, raw: string) =>
-  `tool "${raw}" of plugin ${server.name} is switched off in Settings → Tools & plugins; the user can turn it back on there`
-
-/** Why `server` refuses its calls now; a refusal read that fails refuses them too (fail closed). */
-async function refusalOf(server: TurnServer): Promise<string | undefined> {
+/** Why `server` refuses a call of the tool now; a refusal read that fails refuses it too (fail closed). */
+async function refusalOf(server: TurnServer, harnessName: string): Promise<string | undefined> {
   try {
-    return await server.refusal?.()
+    return await server.refusal?.(harnessName)
   } catch {
     return `${server.name}: could not read the server's switch, so the call is refused`
   }
@@ -683,9 +706,10 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         })
       // Its server's switch first: a server switched off is not listed (turnServers.ts).
       const { parts, server: named } = serverOf(set, name)
-      const off = await refusalOf(named)
+      const offName = `mcp__${named.name}__${parts.tool}`
+      const off = (await refusalOf(named, offName)) ?? (isOffTool(named, parts.tool) ? toolOffReason(offName) : undefined)
       if (off !== undefined) {
-        await record(named.tierOf(`mcp__${named.name}__${parts.tool}`, input), 'refused', off)
+        await record(named.tierOf(offName, input), 'refused', off)
         throw ApplicationFailure.nonRetryable(off, TOOL_ERROR)
       }
       const { server, tool, harnessName, client: keptClient } = await resolve(deps, caller.context, set, name, signal, 'call')
@@ -695,7 +719,7 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
         await record(tier, 'refused', message)
         throw ApplicationFailure.nonRetryable(message, type)
       }
-      if (isOffTool(server, tool.name)) await refuse(offToolReason(server, tool.name), TOOL_ERROR)
+      if (isOffTool(server, tool.name)) await refuse(toolOffReason(harnessName), TOOL_ERROR)
       if (verdict && 'deny' in verdict) await refuse(verdict.deny, TOOL_ERROR)
       if (!principal.tiers.includes(tier)) {
         const who = caller.context.flow ? "this flow run's starter" : "this session's turn"

@@ -1125,8 +1125,11 @@ user sets them in Settings → Tools & plugins → Packages
   ([`agent/src/plugins/forwarder.ts`](../../agent/src/plugins/forwarder.ts)), by
   `turn_tool_tier` and by the turn activity
   ([`agent/src/temporal/turnTools.ts`](../../agent/src/temporal/turnTools.ts)). A read
-  that fails refuses the call. An allowed package's local (stdio) servers take the same
-  switch and stored tool access in both runtimes (`localPackageServers` in
+  that fails refuses the call. Every path refuses it in one sentence, a classic turn's
+  (`toolOffReason` in [`agent/src/access/items.ts`](../../agent/src/access/items.ts)). A
+  tool set off, a served built-in switched off, or a tool its server no longer lists is
+  refused at `turn_tool_tier`, never parked. An allowed package's local (stdio) servers
+  take the same switch and stored tool access in both runtimes (`localPackageServers` in
   `turnPackages.ts`; a classic copy leaves an off one out). Their tools are not listed on
   the page, since that would start the package's process outside a turn; until set, they
   are `outward`. "List tools" lists an http server's tools
@@ -1156,6 +1159,9 @@ items until it is replaced. Roll the agent before agent-durable:
   packages are left out of durable turns until agent-durable rolls (fail closed).
 - A listing from a pre-#4757 agent names no items, so a new durable worker lets an off
   package skill load until that agent is replaced.
+- An older agent-durable has no `own_off` and no `CallAccess`. A skill or subagent of
+  ScadBuddy's own plugin that is switched off on the new page still loads and runs in
+  durable turns until agent-durable rolls. A classic turn refuses it at once.
 
 Settings has an "Assistant plugins" area with two sections: "Plugin packages"
 ([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))

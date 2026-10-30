@@ -1,3 +1,4 @@
+import { toolOffReason } from '../../access/items.js'
 import { packageServerSource } from '../../access/model.js'
 import type { AccessResolver } from '../../access/resolver.js'
 import { declaredConfigs, noCommand } from '../../harness/plugins.js'
@@ -49,6 +50,8 @@ export type PackageServers = {
   plugins: HarnessPlugin[]
   /** Each of `plugins`, in order: its package and server, whose ai_access source the seam reads per call (access/live.ts). */
   servers: { name: string; pkg: string; server: string }[]
+  /** The servers known and switched off (#4757 final review M2), refused in a classic turn's words rather than unknown. */
+  off?: { name: string; pkg: string; server: string }[]
   /** Each server's `pluginEndpoint` (its declared URL and header), in `plugins` order. */
   endpoints?: PluginEndpoint[]
   problems: string[]
@@ -182,9 +185,10 @@ export async function packageServerConfigs(
   loaded: readonly LoadedPackage[],
   resolve: Resolver,
   access?: Pick<AccessResolver, 'plugin' | 'enabled'>,
-): Promise<{ configs: PackageServerConfig[]; problems: string[] }> {
+): Promise<{ configs: PackageServerConfig[]; problems: string[]; off: { name: string; pkg: string; server: string }[] }> {
   const configs: PackageServerConfig[] = []
   const problems: string[] = []
+  const off: { name: string; pkg: string; server: string }[] = []
   const colliding = collidingServerNames(loaded)
   for (const { pkg, server, config, local } of offeredServers(loaded)) {
     if (local) continue
@@ -200,7 +204,10 @@ export async function packageServerConfigs(
       continue
     }
     const source = packageServerSource(pkg.name, server)
-    if (access && !(await access.enabled(source))) continue
+    if (access && !(await access.enabled(source))) {
+      off.push({ name, pkg: pkg.name, server })
+      continue
+    }
     const headers = isRecord(config.headers)
       ? Object.entries(config.headers).filter((e): e is [string, string] => typeof e[1] === 'string')
       : []
@@ -234,7 +241,7 @@ export async function packageServerConfigs(
     const { toolTiers, disabledTools } = access ? await access.plugin(source) : { toolTiers: {}, disabledTools: [] }
     configs.push({ pkg: pkg.name, server, name, plugin: { name, url, ...(header ? { header } : {}), toolTiers, disabledTools }, address })
   }
-  return { configs, problems }
+  return { configs, problems, off }
 }
 
 /** Each package's http servers as remote plugins, registered with the forwarder; `release()` when the run ends. */
@@ -245,13 +252,13 @@ export async function forwardPackageServers(
   options: Pick<ForwardOptions, 'record'> & { access?: Pick<AccessResolver, 'plugin' | 'enabled'> } = {},
 ): Promise<PackageServers> {
   const { access, ...forwardOptions } = options
-  const { configs, problems } = await packageServerConfigs(loaded, resolve, access)
+  const { configs, problems, off } = await packageServerConfigs(loaded, resolve, access)
   // Its `*` switch at each call, on every path that reaches it (#4757): a classic or
   // durable turn's, a flow's. A read that fails refuses the call (forwarder.ts).
   const routeOptions = ({ pkg, server, name }: PackageServerConfig): ForwardOptions => {
     const source = packageServerSource(pkg, server)
     const callCheck = access
-      ? async () => ((await access.enabled(source)) ? undefined : `${server} of plugin package ${pkg} is switched off in Settings → Tools & plugins`)
+      ? async (tool: string) => ((await access.enabled(source)) ? undefined : toolOffReason(`mcp__${name}__${harnessToolName(tool)}`))
       : undefined
     return { ledgerId: packageLedgerId(name), ...(callCheck ? { callCheck } : {}) }
   }
@@ -272,6 +279,7 @@ export async function forwardPackageServers(
       disabledTools: plugin.disabledTools,
     })),
     servers: configs.map(({ name, pkg, server }) => ({ name, pkg, server })),
+    off,
     endpoints: configs.map(({ plugin }) => pluginEndpoint(plugin)),
     problems,
     secrets,
