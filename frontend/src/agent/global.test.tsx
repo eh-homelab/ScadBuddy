@@ -237,9 +237,13 @@ describe('global tools', () => {
     registerSections([])
     vi.useFakeTimers()
     try {
-      // No timer is advanced: an answer that waited for the Settings sections would still be pending.
-      const answer = await bridge.call('navigate', { route: '/#top' })
-      expect(answer).toEqual({ ok: true, result: { route: '/#top' } })
+      // No timer is advanced: an answer that waited for the Settings sections would still be
+      // pending after the flush, and the test says so at once instead of hanging.
+      let answer: unknown
+      const pending = bridge.call('navigate', { route: '/#top' }).then((value) => (answer = value))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(answer, 'navigate waited for the Settings sections').toEqual({ ok: true, result: { route: '/#top' } })
+      await pending
     } finally {
       vi.useRealTimers()
       registerSections(SECTION_REGISTRY)
