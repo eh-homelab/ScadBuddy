@@ -43,7 +43,8 @@ import { ready, type RouteModule } from './module.js'
 //
 // A plugin's switch, tiers and disabled tools are not fields of POST or PATCH (#4828):
 // they are `ai_access` rows, changed through /api/v1/ai/capabilities (spec §4.6). A body
-// that names one is refused by the strict schema (400).
+// that names one is refused by `parseBody`'s ACCESS_FIELDS pre-check (400); the strict
+// schema refuses any other unknown field.
 
 export type PluginRouteDeps = {
   /** Undefined when there is no database (spec §9). */
@@ -226,8 +227,14 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
       if (body.url !== undefined || body.auth_header !== undefined || body.secret !== undefined) {
         return isBuiltIn(c, set.name, 'given a URL, an auth header or a secret: it runs inside the agent')
       }
-      // Nothing is left to patch on a built-in: the answer is its view.
-      return c.json(await deps.builtIns.view(set))
+      // Nothing is left to patch on a built-in: a switch, a tier or a disabled tool is an
+      // `ai_access` row, so the PATCH is refused as a no-op (#5016).
+      return c.json(
+        {
+          detail: `"${set.name}" is built in and has no field to patch here: change its switch, a tier or a disabled tool with PUT /api/v1/ai/capabilities/<source>`,
+        },
+        400,
+      )
     }
     try {
       if (body.url !== undefined) await assertEndpointAllowed(normalisePluginUrl(body.url), resolveHost)

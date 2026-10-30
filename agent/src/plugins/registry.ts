@@ -184,6 +184,12 @@ export type PluginSummary = {
   kekId: string | null
 }
 
+/**
+ * The routes never pass `enabled`, `tool_tiers` or `disabled_tools` (#4828: they are
+ * `ai_access` rows, refused by the routes). The one writer in `src/` is
+ * `access/providers.ts` `setEnabled`, which patches `enabled` and nothing else; the tier
+ * fields are for tests that seed a plugin's access in one call.
+ */
 export type PluginCreate = {
   name: string
   url: string
@@ -194,7 +200,10 @@ export type PluginCreate = {
   disabled_tools?: string[]
 }
 
-/** Omitted fields are kept. `secret: null` removes the auth header and its value. */
+/**
+ * Omitted fields are kept. `secret: null` removes the auth header and its value. The access
+ * fields (`enabled`, `tool_tiers`, `disabled_tools`) are as on `PluginCreate`.
+ */
 export type PluginPatch = {
   url?: string
   enabled?: boolean

@@ -202,6 +202,16 @@ describe('/api/v1/ai/plugins with built-ins', () => {
     expect(rows).toEqual([])
   })
 
+  it('answers 400 to an empty PATCH of a built-in, naming /capabilities (#5016)', async () => {
+    const { settings, values } = memorySettings()
+    const { access, rows } = memoryAccess()
+    const res = await patch(app(settings, remoteRepo(), access), 'scadbuddy', {})
+    expect(res.status).toBe(400)
+    expect(((await res.json()) as { detail: string }).detail).toContain('/api/v1/ai/capabilities')
+    expect(values.size).toBe(0)
+    expect(rows).toEqual([])
+  })
+
   it('answers 409 built_in to add, remove, test or re-point a built-in', async () => {
     const { settings, values } = memorySettings()
     const { access, rows } = memoryAccess()

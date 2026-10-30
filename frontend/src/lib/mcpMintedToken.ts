@@ -24,30 +24,37 @@ export function useMintedMcpToken(): string | null {
   )
 }
 
-// The Auth mode the Tokens card resolved, while it is mounted: the Connect snippet uses it
-// in place of reading the mode a second time, and reads for itself only without the card.
-let authMode: { mode: McpAuthMode | null } | undefined
+// The Tokens card, while it is mounted: `undefined` is no card on the page. With a card,
+// `mode` is the Auth mode it resolved, or `undefined` until it knows. The Connect snippet
+// uses that mode in place of reading it a second time, and reads for itself only without
+// the card (#5016).
+type TokensCard = { mode: McpAuthMode | null | undefined }
+let card: TokensCard | undefined
 const authListeners = new Set<() => void>()
 
-export function setTokensCardAuthMode(next: McpAuthMode | null | undefined): void {
-  const value = next === undefined ? undefined : { mode: next }
-  if (value?.mode === authMode?.mode && Boolean(value) === Boolean(authMode)) return
-  authMode = value
+export function setTokensCard(next: TokensCard | undefined): void {
+  if (next?.mode === card?.mode && Boolean(next) === Boolean(card)) return
+  card = next
   for (const listener of authListeners) listener()
 }
 
-export function useTokensCardAuthMode(): { mode: McpAuthMode | null } | undefined {
+/** Whether a Tokens card is mounted now, read when a load runs, not when it rendered. */
+export function tokensCardMounted(): boolean {
+  return card !== undefined
+}
+
+export function useTokensCard(): TokensCard | undefined {
   return useSyncExternalStore(
     (listener) => {
       authListeners.add(listener)
       return () => authListeners.delete(listener)
     },
-    () => authMode,
+    () => card,
   )
 }
 
 /** For tests: forget everything the store holds, so one test's token never reaches the next. */
 export function resetMcpMinted(): void {
   token = null
-  authMode = undefined
+  card = undefined
 }
