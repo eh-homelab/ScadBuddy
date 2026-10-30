@@ -68,7 +68,7 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
     credentialId: 'c1',
     credentialUpdatedAt: '1',
     model: MODEL,
-    ownPlugin: false,
+    ownPlugin: null,
     plugins: [],
     packageHashes: [],
     allowedPackageHashes: [],

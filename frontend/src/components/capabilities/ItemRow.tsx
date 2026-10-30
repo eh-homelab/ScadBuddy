@@ -28,6 +28,7 @@ export function ItemRow({
 }) {
   const selectId = useId()
   const statusId = useId()
+  const noteId = useId()
   const [pending, setPending] = useState<Access | null>(null)
   /** The last lowering asked about, kept while the dialog closes. */
   const [asked, setAsked] = useState<Access>('off')
@@ -102,7 +103,7 @@ export function ItemRow({
             className="w-48"
             id={selectId}
             aria-label={accessName}
-            aria-describedby={statusId}
+            aria-describedby={note !== null ? `${statusId} ${noteId}` : statusId}
             value={shown}
             onValueChange={choose}
             choices={choicesOf(item)}
@@ -116,7 +117,11 @@ export function ItemRow({
         </div>
       </div>
       {item.default_note !== null && <p className="text-xs text-muted-foreground">{item.default_note}</p>}
-      {note !== null && <p className="text-xs text-muted-foreground">{note}</p>}
+      {note !== null && (
+        <p id={noteId} className="text-xs text-muted-foreground">
+          {note}
+        </p>
+      )}
       {item.suggested !== null && item.suggested !== shown && (
         <p className="text-xs text-muted-foreground">{`server suggests ${item.suggested}`}</p>
       )}

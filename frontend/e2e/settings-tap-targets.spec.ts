@@ -41,7 +41,14 @@ for (const [width, height] of [
       await page.setViewportSize({ width, height })
       await page.goto(`/settings/${area}`)
       if (area === 'system') await expect(page.getByRole('table', { name: 'Deployment values' })).toBeAttached()
-      if (area === 'tools') await expect(page.getByRole('listitem', { name: 'Built-in plugin scadbuddy' })).toBeAttached({ timeout: 20_000 })
+      if (area === 'tools') {
+        await expect(page.getByRole('region', { name: 'Source ScadBuddy skills and subagents' })).toBeAttached({ timeout: 20_000 })
+        // An installed package, so its card, its files and its rows (#4757) are measured too.
+        const packages = page.getByRole('region', { name: 'Plugin packages' })
+        await packages.getByLabel('Repository URL').fill('https://git.example/greeter.git')
+        await packages.getByRole('button', { name: 'Fetch and review' }).click()
+        await expect(packages.getByRole('region', { name: 'Source greeter' })).toBeAttached()
+      }
       if (area !== 'system' && area !== 'tools') await expect(page.getByRole('region').locator('visible=true').first()).toBeVisible()
       // The shell keeps the other areas mounted but hidden, so only the visible folds open.
       // Open every fold, a plugin package's files (#1029) included, so what is inside one is
@@ -53,7 +60,10 @@ for (const [width, height] of [
         const fold = folds.nth(i)
         if ((await fold.getAttribute('aria-expanded')) === 'false') await fold.click()
       }
-      if (area === 'tools') await expect(page.getByRole('list', { name: 'Files to read in scadbuddy' })).toBeVisible()
+      if (area === 'tools') {
+        await expect(page.getByRole('list', { name: 'Files to read in greeter' })).toBeVisible()
+        await expect(page.getByRole('combobox', { name: 'Access of hello' })).toBeVisible()
+      }
       expect(await smallTargets(page)).toEqual([])
     })
   }

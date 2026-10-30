@@ -4,7 +4,7 @@ import { bridgeCall } from './bridge'
 /**
  * #297 — Settings → Plugin packages and Plugin endpoints, against the msw stand-ins for
  * the agent service (`src/mocks/aiPlugins.ts`). Install from git, review each part,
- * approve the exact commit and hash, enable, re-pin with a diff, remove; a refused
+ * approve the exact commit and hash, switch on, set a skill off, re-pin with a diff, remove; a refused
  * package lists its problems; and the in-page agent cannot approve or install.
  */
 
@@ -15,7 +15,7 @@ const V2 = '7a8b9c0d1e2f3a4b5c6d7e8f90a1b2c3d4e5f607'
 test.describe('assistant plugins in Settings (#297)', () => {
   test.skip(!!process.env.E2E_BASE_URL, 'msw-backed; the agent service is not in the real stack yet')
 
-  test('installs, reviews, approves the exact pin, enables, re-pins with a diff and removes', async ({ page }) => {
+  test('installs, reviews, approves the exact pin, enables, sets a skill off, re-pins with a diff and removes', async ({ page }) => {
     await page.goto('/settings/tools')
     const section = page.getByRole('region', { name: 'Plugin packages' })
     await expect(section.getByText('No plugin packages installed.')).toBeVisible()
@@ -57,8 +57,26 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await dialog.getByRole('button', { name: 'Approve this pin' }).click()
     await expect(dialog).toBeHidden()
 
-    await card.getByRole('button', { name: 'Enable' }).click()
-    await expect(card.getByText('Enabled', { exact: true })).toBeVisible()
+    // The package's own switch (#4757), on its capabilities source.
+    const source = card.getByRole('region', { name: 'Source greeter' })
+    await source.getByRole('switch', { name: 'Enabled (greeter)' }).click()
+    await expect(card.locator('[data-slot="badge"]', { hasText: /^Enabled$/ })).toBeVisible()
+
+    // Each skill is an item of the source; lowering one off asks one line (#4757).
+    await source.getByRole('button', { name: 'greeter', exact: true }).click()
+    const hello = source.getByRole('combobox', { name: 'Access of hello' })
+    await expect(hello).toHaveText('on (default)')
+    await hello.click()
+    await page.getByRole('listbox').getByRole('option', { name: 'off', exact: true }).click()
+    await page.getByRole('alertdialog', { name: 'Lower hello?' }).getByRole('button', { name: 'Lower to off' }).click()
+    await expect(hello).toHaveText('off')
+
+    // Stored, not only shown: a reload reads the switch and the item back.
+    await page.reload()
+    await expect(card.locator('[data-slot="badge"]', { hasText: /^Enabled$/ })).toBeVisible()
+    await expect(source.getByRole('switch', { name: 'Enabled (greeter)' })).toBeChecked()
+    await source.getByRole('button', { name: 'greeter', exact: true }).click()
+    await expect(hello).toHaveText('off')
 
     await card.getByLabel('Re-pin to branch, tag or commit').fill('v2')
     await card.getByRole('button', { name: 'Fetch re-pin' }).click()
@@ -73,7 +91,7 @@ test.describe('assistant plugins in Settings (#297)', () => {
     await repin.getByRole('checkbox').check()
     await repin.getByRole('button', { name: 'Approve this pin' }).click()
     await expect(card.getByText(V2, { exact: true })).toBeVisible()
-    await expect(card.getByText('Enabled', { exact: true })).toBeVisible()
+    await expect(card.locator('[data-slot="badge"]', { hasText: /^Enabled$/ })).toBeVisible()
 
     await card.getByRole('button', { name: 'Remove' }).click()
     await page.getByRole('alertdialog', { name: 'Remove greeter?' }).getByRole('button', { name: 'Remove package' }).click()

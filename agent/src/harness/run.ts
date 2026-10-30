@@ -180,6 +180,11 @@ export type HarnessRun = {
    * disabled tools go in `disallowedTools`.
    */
   remotePlugins?: HarnessPlugin[]
+  /**
+   * Further tools removed from the model's context (`disallowedTools`): a local package
+   * server's tools set off in Settings → Tools & plugins (#4757), by harness name.
+   */
+  disallowedTools?: string[]
   /** Maps each tool to its risk tier; tools it does not know are `outward`. */
   tierOf?: TierResolver
   /**
@@ -449,7 +454,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     ),
     permissionMode: 'default',
   }
-  const disallowed = [...remote.disallowedTools, ...(policy?.disallowed ?? [])]
+  const disallowed = [...new Set([...remote.disallowedTools, ...(policy?.disallowed ?? []), ...(run.disallowedTools ?? [])])]
   if (disallowed.length) options.disallowedTools = disallowed
   if (run.model !== undefined) options.model = run.model
   if (run.effort !== undefined) options.effort = run.effort
@@ -506,7 +511,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   // and connects to an http one itself: around the forwarder (redirects, OAuth discovery,
   // the name resolved again; plugins/forwarder.ts "WHY"). So no plugin loaded then may
   // declare one: a package's are stripped from the copy it loads and forwarded instead
-  // (plugins/packages/mcp.ts `withoutRemoteServers`, #2320).
+  // (plugins/packages/derived.ts `derivedPackage`, #2320).
   if (options.strictMcpConfig === false) {
     for (const p of [...(run.ownPlugin !== undefined ? [run.ownPlugin] : []), ...(run.pluginPaths ?? []), ...(run.allowedPluginPaths ?? [])]) {
       if (declaresRemoteServers(p)) {

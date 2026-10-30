@@ -57,10 +57,15 @@ const REVIEW_V1: PackageReview = {
   skills: ['greeter:hello'],
   commands: ['greeter:wave'],
   agents: ['greeter:helper'],
-  hooks: [{ event: 'Stop', type: 'prompt' }],
+  hooks: [{ event: 'Stop', type: 'prompt', id: '0f1e2d3c4b5a6978' }],
   mcp_servers: [{ name: 'mem', type: 'http', url: 'https://mcp.example/mcp/' }],
   files: ['.claude-plugin/plugin.json', '.mcp.json', 'README.md', 'agents/helper.md', 'commands/wave.md', 'hooks/hooks.json', 'skills/hello/SKILL.md'],
   refused: [],
+  described: {
+    'skill:hello': 'Says hello to the user.',
+    'skill:wave': 'Waves at the user.',
+    'subagent:helper': 'Helps with greetings.',
+  },
 }
 const REVIEW_SHELL: PackageReview = {
   name: 'shell',
@@ -69,16 +74,20 @@ const REVIEW_SHELL: PackageReview = {
   skills: ['shell:status'],
   commands: [],
   agents: [],
-  hooks: [{ event: 'Stop', type: 'command' }],
+  hooks: [{ event: 'Stop', type: 'command', id: '8a7b6c5d4e3f2a1b' }],
   mcp_servers: [],
   files: ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'skills/status/SKILL.md'],
   refused: SHELL_PROBLEMS,
   builtin_tools: ['Bash'],
+  described: { 'skill:status': 'Shows the status of the working tree.' },
 }
 const REVIEW_V2: PackageReview = {
   ...REVIEW_V1,
   version: '2.0.0',
   skills: ['greeter:bye', 'greeter:hello'],
+  // Stop is kept (its id with it); UserPromptSubmit is new since v1.
+  hooks: [...REVIEW_V1.hooks, { event: 'UserPromptSubmit', type: 'prompt', id: '1a2b3c4d5e6f7081' }],
+  described: { ...REVIEW_V1.described, 'skill:bye': 'Says goodbye to the user.' },
   files: [...REVIEW_V1.files.filter((f) => f !== 'README.md'), 'skills/bye/SKILL.md'].sort(),
 }
 
@@ -89,6 +98,19 @@ interface State {
 }
 
 const state: State = { remote: new Map(), packages: new Map(), builtIns: new Map() }
+
+const OWN_DESCRIBED: Record<string, string> = {
+  'skill:authoring':
+    'How to write and edit ScadBuddy OpenSCAD templates (model.scad) so the customizer, the per-colour print parts and the fonts come out right. Use when creating, editing, reviewing or debugging a .scad template for ScadBuddy, or when a render shows the wrong font, the wrong colours, open parts or unexpected parameters. Also covers FDM design rules (hole and fit clearance, wall thickness, overhangs, bridges) and OpenSCAD pitfalls (coincident faces, use vs include, leftover modifiers).',
+  'skill:customize':
+    'Drive the ScadBuddy customizer for a template - read its parameter schema and presets, choose values, render and inspect the preview, check the plate fit, and keep the result as an output. Use when asked to make, tweak or preview a customized model (a keychain with a name, a box of a given size) on a ScadBuddy instance.',
+  'skill:print':
+    "Print a ScadBuddy output through Bambuddy - read the dialog's choices, pick a spool per slot, the nozzle size, quality and plate, options and project, run it with the user's approval, and follow its progress. Use when asked to print, send, queue or slice a generated model, or to explain why a print was refused or failed.",
+  'subagent:model-author':
+    'Creates and iterates on ScadBuddy OpenSCAD templates in a tight edit, render, inspect loop. Use when a user wants a new template, a change to an existing one, or a render problem fixed (wrong font, open parts, missing colours, bad customizer parameters).',
+  'subagent:print-analyst':
+    "Runs a print-analyzer session on a ScadBuddy print job, checking the geometry, materials, plate and Bambuddy history against the job's base print request, and returns cited diagnostics and proposed setting diffs. It never sends or prints. Use before a print, or when asked why a print might fail or what settings to change.",
+}
 
 const emptyReview = { commands: [], hooks: [], mcp_servers: [], refused: [], builtin_tools: [] }
 function builtIns(): BuiltInPluginPackage[] {
@@ -105,6 +127,8 @@ function builtIns(): BuiltInPluginPackage[] {
         skills: ['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print'],
         agents: ['scadbuddy:model-author', 'scadbuddy:print-analyst'],
         files: ['.claude-plugin/plugin.json', 'agents/model-author.md', 'skills/authoring/SKILL.md'],
+        // The frontmatter descriptions of plugins/scadbuddy/ (vet.ts `described`).
+        described: OWN_DESCRIBED,
       },
       approved: true,
       enabled: true,
@@ -190,17 +214,51 @@ function packageFor(url: string, ref: string, kind: 'git' | 'marketplace', entry
   }
 }
 
-/** A package stored under `name` (e.g. a built-in's, as before built-ins were listed), approved and enabled. */
-export function seedStoredPackage(name: string): void {
+const packageListeners = new Set<() => void>()
+
+/** Calls `listener` after each change to the packages, whichever route made it (the capabilities mock saves then). */
+export function onPackagesChange(listener: () => void): void {
+  packageListeners.add(listener)
+}
+
+function changed(): void {
+  for (const listener of packageListeners) listener()
+}
+
+function putPackage(name: string, pkg: PluginPackage): void {
+  state.packages.set(name, pkg)
+  changed()
+}
+
+function dropPackage(name: string): boolean {
+  const had = state.packages.delete(name)
+  if (had) changed()
+  return had
+}
+
+/** Puts back the installed packages a reload kept (the capabilities mock's sessionStorage copy); tells no listener. */
+export function restorePackages(packages: readonly PluginPackage[]): void {
+  for (const pkg of packages) state.packages.set(pkg.name, pkg)
+}
+
+/**
+ * A package stored under `name` (e.g. a built-in's, as before built-ins were listed), approved
+ * and enabled: greeter's pin, with `patch` over it (its review's fields, `allow_refused`, `enabled`).
+ */
+export function seedStoredPackage(
+  name: string,
+  patch: { review?: Partial<PackageReview>; allow_refused?: boolean; enabled?: boolean } = {},
+): void {
   const greeter = packageFor('https://git.example/greeter.git', 'HEAD', 'git') as PluginPackage
-  state.packages.set(name, { ...greeter, name, approved: true, approved_at: now(), enabled: true })
+  const { review, ...rest } = patch
+  putPackage(name, { ...greeter, name, approved: true, approved_at: now(), enabled: true, ...rest, review: { ...greeter.review, ...review } })
 }
 
 /**
  * The tools a test lists for `plugin`: `recall` (suggested read), `retain`, `files.list`, which
  * Claude Code renames, and `notes.get` and `notes_get`, which share one harness name (a collision).
  */
-export function toolsFor(plugin: RemotePlugin): PluginTest['tools'] {
+export function toolsFor(plugin: Pick<RemotePlugin, 'tool_prefix' | 'tool_tiers' | 'disabled_tools'>): PluginTest['tools'] {
   const names = listedTools
   const harnessOf = (tool: string) => tool.replace(/[^A-Za-z0-9_-]/g, '_')
   const disabled = new Set(plugin.disabled_tools.map(harnessOf))
@@ -263,6 +321,37 @@ export function setRemotePluginAccess(
   })
 }
 
+/**
+ * Every package as `GET /plugin-packages` lists it: the built-ins first, then the installed
+ * ones. The capabilities mock (`features/capabilities.ts`) reads its package sources, and the
+ * own plugin's switch, from here on every request, so both routes read one state.
+ */
+export function packageList(): ListedPackage[] {
+  return [...state.builtIns.values(), ...state.packages.values()]
+}
+
+/**
+ * Switches a package, a built-in one included, as the agent's `PackageRepo.setEnabled` (and,
+ * for ScadBuddy's own, its `builtin:own-plugin` `*` row) do; an unapproved pin is refused with
+ * the store's 409 detail, returned. Answers the package after it.
+ */
+export function setPackageEnabled(name: string, enabled: boolean): ListedPackage | string | undefined {
+  const builtIn = state.builtIns.get(name)
+  let next: ListedPackage
+  if (builtIn) {
+    next = { ...builtIn, enabled }
+    state.builtIns.set(name, next)
+    changed()
+  } else {
+    const pkg = state.packages.get(name)
+    if (!pkg) return undefined
+    if (enabled && !pkg.approved) return 'approve the pin before enabling the package'
+    next = { ...pkg, enabled }
+    putPackage(name, next)
+  }
+  return next
+}
+
 /** ScadBuddy's own tool sets (#1953); their routes are `features/builtInToolSets.ts`. */
 const BUILT_IN_SETS = new Set(['scadbuddy'])
 
@@ -317,9 +406,7 @@ export const aiPluginHandlers = [
   }),
 
   // ---- plugin packages
-  http.get(`${base}/plugin-packages`, () =>
-    HttpResponse.json<ListedPackage[]>([...state.builtIns.values(), ...state.packages.values()]),
-  ),
+  http.get(`${base}/plugin-packages`, () => HttpResponse.json<ListedPackage[]>(packageList())),
 
   http.post(`${base}/plugin-packages`, async ({ request }) => {
     await delay(150)
@@ -336,7 +423,7 @@ export const aiPluginHandlers = [
     if (state.packages.has(found.name)) {
       return detail(409, `a plugin package named "${found.name}" is already installed; re-pin it instead`)
     }
-    state.packages.set(found.name, found)
+    putPackage(found.name, found)
     return HttpResponse.json(found, { status: 201 })
   }),
 
@@ -368,31 +455,22 @@ export const aiPluginHandlers = [
         allow_refused,
         pending: null,
       }
-      state.packages.set(pkg.name, next)
+      putPackage(pkg.name, next)
       return HttpResponse.json(next)
     }
     if (body.commit_sha === pkg.commit_sha && body.content_hash === pkg.content_hash) {
       const next = { ...pkg, approved: true, approved_at: pkg.approved_at ?? now(), allow_refused }
-      state.packages.set(pkg.name, next)
+      putPackage(pkg.name, next)
       return HttpResponse.json(next)
     }
     return detail(409, 'the commit and content hash do not match the pin under review')
   }),
 
   http.patch(`${base}/plugin-packages/:name`, async ({ params, request }) => {
-    const builtIn = state.builtIns.get(String(params.name))
-    if (builtIn) {
-      const { enabled } = (await request.json()) as { enabled: boolean }
-      const next = { ...builtIn, enabled }
-      state.builtIns.set(builtIn.name, next)
-      return HttpResponse.json(next)
-    }
-    const pkg = state.packages.get(String(params.name))
-    if (!pkg) return detail(404, 'no such plugin package')
     const { enabled } = (await request.json()) as { enabled: boolean }
-    if (enabled && !pkg.approved) return detail(409, 'approve the pin before enabling the package')
-    const next = { ...pkg, enabled }
-    state.packages.set(pkg.name, next)
+    const next = setPackageEnabled(String(params.name), enabled)
+    if (next === undefined) return detail(404, 'no such plugin package')
+    if (typeof next === 'string') return detail(409, next)
     return HttpResponse.json(next)
   }),
 
@@ -415,10 +493,10 @@ export const aiPluginHandlers = [
         commit_sha: found.commit_sha,
         content_hash: found.content_hash,
         review: found.review,
-        diff: { added, removed, changed: ['.claude-plugin/plugin.json', 'skills/hello/SKILL.md'] },
+        diff: { added, removed, changed: ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'skills/hello/SKILL.md'] },
       },
     }
-    state.packages.set(pkg.name, next)
+    putPackage(pkg.name, next)
     return HttpResponse.json(next)
   }),
 
@@ -426,7 +504,7 @@ export const aiPluginHandlers = [
     const pkg = state.packages.get(String(params.name))
     if (!pkg) return detail(404, 'no such plugin package')
     const next = { ...pkg, pending: null }
-    state.packages.set(pkg.name, next)
+    putPackage(pkg.name, next)
     return HttpResponse.json(next)
   }),
 
@@ -434,7 +512,7 @@ export const aiPluginHandlers = [
     if (state.builtIns.has(String(params.name)) && !state.packages.has(String(params.name))) {
       return detail(409, `"${String(params.name)}" is built in: it cannot be removed. Disable it instead.`, { built_in: true })
     }
-    if (!state.packages.delete(String(params.name))) return detail(404, 'no such plugin package')
+    if (!dropPackage(String(params.name))) return detail(404, 'no such plugin package')
     return new HttpResponse(null, { status: 204 })
   }),
 ]

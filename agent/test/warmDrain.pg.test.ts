@@ -47,7 +47,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`closing a warm process${TEST_DATABASE_URL ?
         credentialId: 'c1',
         credentialUpdatedAt: '1',
         model: null,
-        ownPlugin: false,
+        ownPlugin: null,
         plugins: [],
         packageHashes: [],
         allowedPackageHashes: [],

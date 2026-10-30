@@ -2,7 +2,8 @@ import type { Sql, TransactionSql } from 'postgres'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from '../audit/log.js'
 import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { LEGACY_SOURCES, legacySettings, type RegistryTool } from './legacy.js'
-import { type AccessRow, isToolAccess, SOURCE_ITEM, type ToolAccess } from './model.js'
+import { type Access, itemKindIn } from './items.js'
+import { type AccessRow, BUILTIN_SOURCES, isToolAccess, SOURCE_ITEM, type ToolAccess } from './model.js'
 
 export type AccessReader = {
   rows(sources: readonly string[]): Promise<AccessRow[]>
@@ -11,7 +12,8 @@ export type AccessReader = {
 }
 
 export type AccessWriter = {
-  setItem(source: string, item: string, access: ToolAccess, context?: AuditContext): Promise<void>
+  /** A tool or built-in takes a tier or `off`; a hook, skill or subagent `on` or `off` (checkItem). */
+  setItem(source: string, item: string, access: Access, context?: AuditContext): Promise<void>
   resetItem(source: string, item: string, context?: AuditContext): Promise<void>
   /** `resetItem` in one statement, only while the row holds `only`: a concurrent write of another access is kept. */
   resetItemIf(source: string, item: string, only: ToolAccess, context?: AuditContext): Promise<void>
@@ -33,10 +35,38 @@ function checkSource(source: string): void {
   if (!SOURCE_RE.test(source)) throw new AccessError(`unknown access source ${JSON.stringify(source)}`)
 }
 
+/** A source's `*` switch: every source has one but builtin:scadbuddy, whose tools no switch turns off. */
+export function checkSwitch(source: string): void {
+  checkSource(source)
+  if (source === BUILTIN_SOURCES.scadbuddy) throw new AccessError(`${JSON.stringify(source)} has no switch`)
+}
+
 function checkTool(item: string, access: unknown): asserts access is ToolAccess {
   if (item === '' || item === SOURCE_ITEM) throw new AccessError(`${JSON.stringify(item)} is not a tool name`)
   if (!isToolAccess(access)) throw new AccessError(`a tool takes off, read, write or outward, not ${JSON.stringify(access)}`)
 }
+
+/**
+ * One item's write as the model allows it (#4757, spec §4.1). Only a package's own source and
+ * the own plugin hold skills, subagents, hooks and built-ins (items.ts `itemKindIn`); every
+ * other item is a tool, whatever its name. A tool or built-in takes off, read, write or
+ * outward; a hook, skill or subagent on or off. A named item needs its name, and a hook
+ * `hook:<event>:<16 hex>`.
+ */
+export function checkItem(source: string, item: string, access: unknown): asserts access is Access {
+  const kind = itemKindIn(source, item)
+  if (kind === 'tool') {
+    checkTool(item, access)
+    return
+  }
+  if (kind === 'hook' ? !HOOK_RE.test(item) : item.indexOf(':') === item.length - 1) {
+    throw new AccessError(`${JSON.stringify(item)} is not a ${kind} item`)
+  }
+  if (kind === 'builtin') checkTool(item, access)
+  else if (access !== 'on' && access !== 'off') throw new AccessError(`a ${kind} takes on or off, not ${JSON.stringify(access)}`)
+}
+
+const HOOK_RE = /^hook:[^:]+:[0-9a-f]{16}$/
 
 /** `<actor.kind>:<actor.id>`; `system` without a context. */
 export function updatedBy(context?: AuditContext): string {
@@ -144,9 +174,9 @@ export class AccessStore implements AccessReader, AccessWriter {
     return row
   }
 
-  async setItem(source: string, item: string, access: ToolAccess, context?: AuditContext): Promise<void> {
+  async setItem(source: string, item: string, access: Access, context?: AuditContext): Promise<void> {
     checkSource(source)
-    checkTool(item, access)
+    checkItem(source, item, access)
     await this.write(context, [{ source, kind: 'items', items: { [item]: access } }], () => `${source}/${item} = ${JSON.stringify(access)}`)
   }
 
@@ -166,7 +196,7 @@ export class AccessStore implements AccessReader, AccessWriter {
   }
 
   async setEnabled(source: string, enabled: boolean, context?: AuditContext): Promise<void> {
-    checkSource(source)
+    checkSwitch(source)
     const access = enabled ? 'on' : 'off'
     await this.write(context, [{ source, kind: 'items', items: { [SOURCE_ITEM]: access } }], () => `${source}/${SOURCE_ITEM} = ${JSON.stringify(access)}`)
   }

@@ -71,10 +71,14 @@ with workflow.unsafe.imports_passed_through():
         RespondRequest,
         validate_respond,
     )
+    from scadbuddy_durable.session import access
     from scadbuddy_durable.session import tools as manifest
     from scadbuddy_durable.session.models import (
         BUDGET_EXHAUSTED,
+        BUILTIN_CALL_UPDATE,
+        BUILTIN_RELEASE_UPDATE,
         FORK_POINT_QUERY,
+        HOOKED_WAIT_S,
         MAX_SEGMENTS,
         MESSAGE_MAX,
         PROJECTS_QUEUE,
@@ -112,6 +116,17 @@ TOOL_TIER = "tool_tier"
 TURN_TOOLS_PATCH = "turn-tools-2320"
 # The built-ins a package may name that run as their own activities, so a call can park.
 ENGINE_PARKED = frozenset({"Bash", "PowerShell"})
+# agent/src/temporal/toolTier.ts (#4757): a package built-in's access as it is now, the
+# strictest of the packages that name it. Under builtin-access-4757 each engine-parked call
+# asks it first: off refuses the call, read or write lets it through, outward parks.
+BUILTIN_TIER = "builtin_tier"
+BUILTIN_ACCESS_PATCH = "builtin-access-4757"
+# A classic turn's words for a tool switched off (agent harness/permissions.ts decideLive).
+BUILTIN_OFF = access.TOOL_OFF
+# Skill, Agent and Task as a package's built-ins: they run inside the segment, so the
+# segment runner's hook asks the gate (BUILTIN_CALL_UPDATE) and waits. Their approval waits
+# at most HOOKED_WAIT_S, inside the segment's own hour (models.SEGMENT_TIMEOUT).
+HOOKED_BUILTINS = frozenset({"Skill", "Agent", "Task"})
 TURN_TOOLS_TIMEOUT = timedelta(minutes=2)
 # #2581: a session's plugin calls are pinned to the replica that listed them, which keeps
 # its MCP client on each plugin (agent temporal/sessionClients.ts), so a stateful plugin
@@ -308,6 +323,9 @@ class DurableSession:
         self._parked: dict[str, Parked] = {}
         self._seen: set[str] = set()
         self._parks: list[asyncio.Task[None]] = []
+        # Calls the segment runner's hook parked (BUILTIN_CALL_UPDATE), by tool_use id: None
+        # until decided, then (go, approver). The plugin knows nothing of them.
+        self._hooked: dict[str, tuple[bool, str | None] | None] = {}
         self._task: asyncio.Task[str] | None = None
         # From a message's acceptance until its turn's finish_turn has run: the plugin's
         # run() returns before the gate is drained and the turn is written (review of #1958).
@@ -578,6 +596,14 @@ class DurableSession:
                     self._seen.add(call["id"])
                     self._parks.append(asyncio.create_task(self._park_or_refuse(call)))
 
+    def _decide(self, call_id: str, go: bool, *, approver: str | None) -> None:
+        """The plugin's ``decide``, or, for a call the segment's hook parked, its answer."""
+        if call_id in self._hooked:
+            if self._hooked[call_id] is None:
+                self._hooked[call_id] = (go, approver)
+            return
+        self._agent.decide(call_id, go, approver=approver)
+
     async def _park_or_refuse(self, call: dict[str, Any]) -> None:
         """A call that could not be described or opened is refused to the model, never
         left undecided: the turn would wait on it until an interrupt (review of #1958)."""
@@ -595,7 +621,7 @@ class DurableSession:
                 # in place of the plugin's rejection, since no person rejected it.
                 self._turn.replaced[str(call["id"])] = why
             with contextlib.suppress(ValueError):
-                self._agent.decide(str(call["id"]), False, approver="scadbuddy")
+                self._decide(str(call["id"]), False, approver="scadbuddy")
 
     async def _park(self, call: dict[str, Any]) -> None:
         sid = self._start.session_id
@@ -605,10 +631,23 @@ class DurableSession:
             "answer" if self._kinds.get(name) == "answer" else "approval"
         )
         author = self._turn.author if self._turn else self._start.owner
+        hooked = str(call["id"]) in self._hooked
+        if (name in ENGINE_PARKED or hooked) and workflow.patched(BUILTIN_ACCESS_PATCH):
+            tier = await self._builtin_tier(name, hooked=hooked)
+            if tier == "off":
+                if self._turn is not None:
+                    # Refused by Settings, not by a person: the model is told so in place of
+                    # the plugin's rejection, as a classic turn tells it.
+                    self._turn.replaced[str(call["id"])] = BUILTIN_OFF.format(name)
+                self._decide(str(call["id"]), False, approver="scadbuddy")
+                return
+            if tier in ("read", "write"):
+                self._decide(str(call["id"]), True, approver="scadbuddy")
+                return
         if name in self._turn_tools and not await self._outward(name, call):
             # A read or write call (an http GET, a plugin tool tiered read) goes straight
             # through, as the permission seam lets it; its activity checks the tier again.
-            self._agent.decide(str(call["id"]), True, approver="scadbuddy")
+            self._decide(str(call["id"]), True, approver="scadbuddy")
             return
         if self._per_call and kind == "approval" and name in self._kinds:
             # A registry tool, decided by its access as it is now (#2171 §4.4). Not outward
@@ -620,7 +659,7 @@ class DurableSession:
                 tier = "outward"  # no answer, or one with no known tier: ask
             manifest.gate_call(self._tools[name], self._by_name[name], tier)
             if access is not None and (access.get("disabled") is True or tier != "outward"):
-                self._agent.decide(str(call["id"]), True, approver="scadbuddy")
+                self._decide(str(call["id"]), True, approver="scadbuddy")
                 return
         summary, input_hash = "", None
         if kind == "approval":
@@ -664,7 +703,7 @@ class DurableSession:
                 ):
                     # Inside the run's grant (spec 2026-10-11 §3.3): no entry, nobody
                     # asked; the tool's activity checks the grant again as it runs.
-                    self._agent.decide(str(call["id"]), True, approver=f"grant:{grant_id}")
+                    self._decide(str(call["id"]), True, approver=f"grant:{grant_id}")
                     return
             elif verdict is not None:
                 grant_timeout = int(verdict.get("timeout_s") or 0)
@@ -700,7 +739,7 @@ class DurableSession:
             # The script said so (spec §4.3): refused at once, never parked.
             if self._turn is not None:
                 self._turn.refusals[str(call["id"])] = refusal(name, rid, "flow_denied", reason)
-            self._agent.decide(str(call["id"]), False, approver=f"flow:{flow.run_id}")
+            self._decide(str(call["id"]), False, approver=f"flow:{flow.run_id}")
             return
         try:
             built = build_entry(
@@ -716,12 +755,15 @@ class DurableSession:
             )
         except MalformedAnswerInputError:
             # Refused to the model, never parked (Ruling 9); the error is not kept.
-            self._agent.decide(str(call["id"]), False, approver="scadbuddy")
+            self._decide(str(call["id"]), False, approver="scadbuddy")
             return
         hop: dict[str, Any] = {}
         if kind == "approval":
             # A flow turn's call outside the grant waits as the run's own calls do.
             timeout = grant_timeout or self._settings.approval_expiry_s
+            if str(call["id"]) in self._hooked:
+                # The segment waits for it: within its hour.
+                timeout = min(timeout, HOOKED_WAIT_S)
             if escalation and flow is not None:
                 hop = {"flow_run_id": flow.run_id, "hop": "person"}
                 if outside is not None:
@@ -875,11 +917,39 @@ class DurableSession:
             return None
         return now
 
+    async def _builtin_tier(self, name: str, *, hooked: bool = False) -> str | None:
+        """An engine-parked built-in's access as it is now (builtin_tier), over the turn's
+        packages that name it; None when the agent did not answer (an older one has no such
+        activity), and the call then parks: fail toward asking."""
+        try:
+            answer = await workflow.execute_activity(
+                BUILTIN_TIER,
+                {
+                    "tool": name,
+                    "packages": [
+                        p.name
+                        for p in self._packages
+                        if name in p.builtin_tools or (hooked and name in p.named_builtins)
+                    ],
+                },
+                task_queue=TOOLS_QUEUE,
+                start_to_close_timeout=SHORT,
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3, non_retryable_error_types=["UnknownSession", "ToolError"]
+                ),
+                result_type=dict,
+            )
+        except FailureError:
+            return None
+        tier = answer.get("tier") if isinstance(answer, dict) else None
+        return tier if isinstance(tier, str) else None
+
     async def _outward(self, name: str, call: dict[str, Any]) -> bool:
         """Whether a turn tool's call is outward, by its input (turn_tool_tier). Only a
-        tool listed as may_park is asked about, so one the agent cannot tier (its plugin
-        did not answer, or is gone) parks: fail toward asking. Its activity still refuses
-        a call whose tool is gone, saying why."""
+        tool listed as may_park is asked about. A tool whose server is gone from the turn
+        (switched off, removed, its name now another's) is answered refused, not outward,
+        so it does not park; one the agent cannot tier (its plugin did not answer) parks:
+        fail toward asking. Its activity still refuses a call whose tool is gone, saying why."""
         try:
             tiered = await workflow.execute_activity(
                 TURN_TOOL_TIER,
@@ -947,7 +1017,7 @@ class DurableSession:
         # The turn may have ended while resolve_input ran (an interrupt): the call then
         # waits no more, and its row is already right (review of #1958).
         with contextlib.suppress(ValueError):
-            self._agent.decide(parked.call_id, go, approver=responder.get("id"))
+            self._decide(parked.call_id, go, approver=responder.get("id"))
         return written
 
     async def _cancel_parked(self, reason: str, *, bounded: bool = False) -> bool:
@@ -1046,10 +1116,77 @@ class DurableSession:
         except RespondRefused as refused:
             raise _refused(refused.code, str(refused)) from None
         assert parked is not None
+        if parked.call_id in self._hooked:
+            if self._hooked[parked.call_id] is not None:
+                raise _refused("stale", f"{request.request_id} is no longer waiting")
+            return  # the segment's hook waits on it, not the plugin
         try:
             self._agent.validate_decision(parked.call_id)
         except ValueError:
             raise _refused("stale", f"{request.request_id} is no longer waiting") from None
+
+    @workflow.update(name=BUILTIN_CALL_UPDATE)
+    async def builtin_call(self, args: dict[str, Any]) -> dict[str, Any]:
+        """A Skill, Agent or Task call an allowed package's built-in makes outward, asked by
+        the segment runner's hook while the call waits there (#4757): through the gate as an
+        engine-parked built-in goes (``_park``: its access again, then an approval entry with
+        the same request id, panel entry and timer), answered once decided. The call runs only
+        on ``go``; a refusal's reason is a classic turn's words."""
+        call_id = str(args["call_id"])
+        tool = str(args["tool"])
+        tool_input = args["input"]
+        if not workflow.patched(BUILTIN_ACCESS_PATCH) or self._turn is None:
+            return {"go": False, "reason": f"{tool} could not be asked about: no turn is running"}
+        turn = self._turn
+        self._hooked[call_id] = None
+        try:
+            await self._park_or_refuse({"id": call_id, "name": tool, "input": tool_input})
+            await workflow.wait_condition(lambda: self._hooked.get(call_id) is not None)
+            decided = self._hooked[call_id]
+        finally:
+            self._hooked.pop(call_id, None)
+        go = decided is not None and decided[0]
+        reason = turn.replaced.pop(call_id, None) or turn.refusals.pop(call_id, None)
+        return {"go": go, "reason": None if go else reason or f"{tool} was not approved"}
+
+    @builtin_call.validator
+    def _validate_builtin_call(self, args: dict[str, Any]) -> None:
+        """What is refused before it is accepted, so it leaves no history (re-review R3)."""
+        call_id = args.get("call_id") if isinstance(args, dict) else None
+        if (
+            not isinstance(args, dict)
+            or args.get("tool") not in HOOKED_BUILTINS
+            or not isinstance(call_id, str)
+            or not call_id
+            or call_id in self._hooked
+            or call_id in self._seen
+            or not isinstance(args.get("input"), dict)
+        ):
+            raise ValueError("not a Skill, Agent or Task call this session can ask about")
+
+    @workflow.update(name=BUILTIN_RELEASE_UPDATE)
+    async def builtin_release(self, args: dict[str, Any]) -> None:
+        """The segment that asked about ``call_id`` ended before it was decided (re-review R5):
+        its entry is cancelled and leaves the panel, as an interrupt cancels one; a decision
+        that came first stands."""
+        call_id = str(args["call_id"])
+
+        def placed() -> bool:
+            decided = self._hooked.get(call_id, False) is not None
+            return decided or any(p.call_id == call_id and p.opened for p in self._parked.values())
+
+        await workflow.wait_condition(placed)
+        for parked in [p for p in self._parked.values() if p.call_id == call_id]:
+            if parked.entry.state == "pending":
+                await self._resolve(parked, "cancelled", SYSTEM, None, "its segment ended")
+        if call_id in self._hooked and self._hooked[call_id] is None:
+            self._hooked[call_id] = (False, "scadbuddy")
+
+    @builtin_release.validator
+    def _validate_builtin_release(self, args: dict[str, Any]) -> None:
+        call_id = args.get("call_id") if isinstance(args, dict) else None
+        if not isinstance(call_id, str) or self._hooked.get(call_id, False) is not None:
+            raise ValueError("no hooked call waits under that id")
 
     @workflow.update(name=CANCEL_INPUT_UPDATE)
     async def cancel_input(self, args: dict[str, Any]) -> str:

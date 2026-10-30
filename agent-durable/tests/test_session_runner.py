@@ -11,13 +11,17 @@ import base64
 import contextlib
 import dataclasses
 import hashlib
+import json
 import os
+import shutil
+import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 from claude_agent_sdk import HookMatcher, ProcessError, ResultError
 from fake_anthropic import FakeAnthropic
@@ -52,8 +56,20 @@ from scadbuddy_durable.codec import PgPayloadKeys, data_converter
 from scadbuddy_durable.credentials import Credential, credential_aad
 from scadbuddy_durable.gate.names import PENDING_INPUT_QUERY, RESPOND_UPDATE
 from scadbuddy_durable.secrets import Kek, kek_from_base64, seal_bytes
-from scadbuddy_durable.session import tools
-from scadbuddy_durable.session.models import BUDGET_EXHAUSTED, ImageRef
+from scadbuddy_durable.session import access, models, tools
+from scadbuddy_durable.session import runner as runner_module
+from scadbuddy_durable.session.events import translate
+from scadbuddy_durable.session.models import (
+    BUDGET_EXHAUSTED,
+    BUILTIN_CALL_INPUT_MAX,
+    BUILTIN_CALL_UPDATE,
+    BUILTIN_RELEASE_UPDATE,
+    PARK_DEADLINE_S,
+    SEGMENT_TIMEOUT,
+    ImageRef,
+    TurnPackage,
+)
+from scadbuddy_durable.session.package_hash import hash_tree
 from scadbuddy_durable.session.runner import (
     DURABLE_PREFIX,
     IMAGE_TOO_LARGE,
@@ -62,15 +78,22 @@ from scadbuddy_durable.session.runner import (
     PLUGIN_REJECTION,
     VIEW_IMAGES_TOOL,
     VIEW_TOOL_IMAGES_TOOL,
+    CallAccess,
     HeldText,
     Image,
     ScadBuddyRunner,
     SegmentCalls,
     TurnSettings,
+    call_builtins_of,
+    call_plugins_of,
     image_problem,
     image_size,
     merged_hooks,
+    own_call_plugin,
+    own_plugin_copy,
     same_subagent,
+    segment_gate,
+    sweep_own_plugin_copies,
     tool_images_loader,
     view_tool_images_tool,
     with_refusals,
@@ -582,11 +605,18 @@ async def _segment_options(
     *,
     plugin_dir: str | None = None,
     agent: tuple[str | None, str | None, str | None] | None = None,
+    agents_dir: str | None = None,
 ) -> dict[str, Any]:
     await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
     recording = Recording()
     runner = ScadBuddyRunner(
-        connect, KEK, cwd=str(tmp_path), plugin_dir=plugin_dir, make_runner=recording
+        connect,
+        KEK,
+        cwd=str(tmp_path),
+        plugin_dir=plugin_dir,
+        agents_dir=agents_dir,
+        own_plugin_root=str(tmp_path / "own"),
+        make_runner=recording,
     )
     async with running(temporal_env, connect, runner) as (client, queue):
         sid = await insert_session(agent_db)
@@ -1650,3 +1680,754 @@ async def test_a_refused_credential_is_noted_but_never_disabled_unconfirmed(
     first = (await _health(agent_db))["http://127.0.0.1:9"]
     assert first[0] == "active"
     assert first[3] is not None and "401" in first[3]
+
+
+# ---- #4757: the own plugin's items, and Skill and Agent calls by access ----
+
+REPO = Path(__file__).resolve().parents[2]
+OWN_SKILLS = REPO / "plugins" / "scadbuddy" / "skills"
+OWN_AGENTS = REPO / "plugins" / "scadbuddy" / "agents"
+# The first line of print-analyst.md's prompt: a request that holds it is the subagent's.
+SUBAGENT_PROMPT = "You run one print-analyzer session"
+
+
+def _own_plugin(tmp_path: Path) -> Path:
+    """The image's layout: the own plugin's skills in a folder named scadbuddy."""
+    plugin = tmp_path / "scadbuddy"
+    plugin.mkdir()
+    (plugin / "skills").symlink_to(OWN_SKILLS)
+    return plugin
+
+
+def _results(body: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        b
+        for m in body.get("messages") or []
+        if isinstance(m.get("content"), list)
+        for b in m["content"]
+        if b.get("type") == "tool_result"
+    ]
+
+
+def _text_of(result: dict[str, Any]) -> str:
+    content = result.get("content")
+    if isinstance(content, list):
+        return "".join(str(c.get("text", "")) for c in content if isinstance(c, dict))
+    return str(content)
+
+
+async def _two_calls(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    call: dict[str, Any],
+    off: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The bundled Claude Code makes ``call`` twice in one segment; between the two, the
+    own plugin's ``off`` item is switched off. Answers the main thread's tool results and
+    the session's events."""
+    cur = await agent_db.execute("SHOW search_path")
+    row = await cur.fetchone()
+    assert row is not None
+    url, search_path = os.environ["SCADBUDDY_TEST_DATABASE_URL"], row[0]
+    main: list[list[dict[str, Any]]] = []
+
+    def switch_off() -> None:
+        with psycopg.connect(url, autocommit=True, options=f"-c search_path={search_path}") as c:
+            c.execute(
+                "INSERT INTO ai_access (source, item, access, updated_by)"
+                " VALUES ('builtin:own-plugin', %s, 'off', 'browser:browser')",
+                (off,),
+            )
+
+    def reply(body: dict[str, Any]) -> dict[str, Any]:
+        names = [t.get("name") for t in body.get("tools") or []]
+        if call["name"] not in names or SUBAGENT_PROMPT in str(body.get("system")):
+            return {"text": "ok"}  # Claude Code's own side requests, and the subagent's
+        results = _results(body)
+        main.append(results)
+        if len(results) == 0:
+            return {"tool_use": call}
+        if len(results) == 1:
+            switch_off()
+            return {"tool_use": call}
+        return {"text": "All done."}
+
+    fake = FakeAnthropic(reply).start()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    try:
+        await insert_gateway(agent_db, KEK, fake.url)
+        runner = ScadBuddyRunner(
+            connect,
+            KEK,
+            cwd=os.path.realpath(cwd),
+            plugin_dir=str(_own_plugin(tmp_path)),
+            subagent_url="http://127.0.0.1:9/mcp",
+            agents_dir=str(OWN_AGENTS),
+            make_runner=ClaudeAgentSdkRunner,
+            own_plugin_root=str(tmp_path / "own"),
+        )
+        async with running(temporal_env, connect, runner) as (client, queue):
+            sid = await insert_session(agent_db)
+            await agent_db.execute(
+                "UPDATE ai_sessions SET durable_turn_id = %s WHERE id = %s",
+                (str(uuid.uuid4()), sid),
+            )
+            handle = await start_session(client, sid, queue)
+            try:
+                await send(handle, "go")
+                assert await settled(connect, sid, timeout=180) == "idle"
+            finally:
+                await handle.terminate()
+        log = await events(agent_db, sid)
+    finally:
+        fake.close()
+        await asyncio.sleep(0)
+    final = next(r for r in reversed(main) if len(r) >= 2)
+    # The panel sees each call end, the refused one too.
+    opened = {e["id"] for e in log if e["type"] == "tool.call"}
+    ended = {e["id"] for e in log if e["type"] == "tool.result"}
+    assert len(opened) >= 2 and opened <= ended, (opened, ended)
+    return final, log
+
+
+async def test_a_skill_set_off_mid_segment_is_refused_on_its_next_call(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4757: the first Skill call runs; the skill is switched off; the next call of it in
+    the same segment is refused, naming the item as a classic turn names it."""
+    (first, second), _ = await _two_calls(
+        temporal_env,
+        agent_db,
+        connect,
+        tmp_path,
+        monkeypatch,
+        {"name": "Skill", "input": {"skill": "scadbuddy:print"}},
+        "skill:print",
+    )
+    assert not first.get("is_error"), first
+    assert second.get("is_error") is True
+    assert (
+        'skill "print" of ScadBuddy\'s own plugin is switched off in Settings → Tools & plugins'
+        in _text_of(second)
+    )
+
+
+async def test_a_subagent_set_off_mid_segment_is_refused_on_its_next_call(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (first, second), _ = await _two_calls(
+        temporal_env,
+        agent_db,
+        connect,
+        tmp_path,
+        monkeypatch,
+        {
+            "name": "Agent",
+            "input": {
+                "subagent_type": "print-analyst",
+                "description": "Analyse",
+                "prompt": "Analyse the print.",
+            },
+        },
+        "subagent:print-analyst",
+    )
+    assert not first.get("is_error"), first
+    assert second.get("is_error") is True
+    assert 'subagent "print-analyst" of ScadBuddy\'s own plugin is switched off' in _text_of(second)
+
+
+async def test_a_call_is_refused_when_access_cannot_be_read(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """Fail closed: the segment's call hook refuses a Skill or Agent call whose rows cannot
+    be read, and lets every other tool past it."""
+    options = await _segment_options(
+        temporal_env, agent_db, connect, tmp_path, plugin_dir=str(_own_plugin(tmp_path))
+    )
+    [matcher] = options["extra_options"]["hooks"]["PreToolUse"]
+    [check] = matcher.hooks
+    calls = check.__self__
+    call = {"tool_name": "Skill", "tool_input": {"skill": "print"}, "tool_use_id": "t1"}
+    assert await check(call, "t1", None) == {}
+
+    @contextlib.asynccontextmanager
+    async def broken() -> AsyncIterator[Conn]:
+        raise OSError("the database is away")
+        yield  # pragma: no cover
+
+    calls._judge.__self__._connect = broken
+    published: list[dict[str, Any]] = []
+    token = _EMIT.set(published.append)
+    try:
+        denied = await check({**call, "tool_use_id": "t2"}, "t2", None)
+        assert (
+            await check({"tool_name": "Bash", "tool_input": {}, "tool_use_id": "t3"}, "t3", None)
+            == {}
+        )
+    finally:
+        _EMIT.reset(token)
+    output = denied["hookSpecificOutput"]
+    assert (output["hookEventName"], output["permissionDecision"]) == ("PreToolUse", "deny")
+    assert output["permissionDecisionReason"] == (
+        "Skill is refused: its Settings → Tools & plugins entry cannot be read"
+    )
+    # The refused call ends as it is refused; the Bash call runs on.
+    assert [(e["type"], e["id"]) for e in published] == [
+        ("tool_call", "t2"),
+        ("tool_result", "t2"),
+        ("tool_call", "t3"),
+    ]
+    assert published[1]["status"] == "failed"
+
+
+def test_own_plugin_copy_leaves_out_off_skill_and_subagent(tmp_path: Path) -> None:
+    plugin = tmp_path / "scadbuddy"
+    shutil.copytree(OWN_SKILLS, plugin / "skills")
+    (plugin / "agents").mkdir()
+    (plugin / "agents" / "helper.md").write_text("---\nname: aide\ndescription: d\n---\nHelp.\n")
+    (plugin / "agents" / "other.md").write_text("---\nname: other\ndescription: d\n---\nO.\n")
+    root = tmp_path / "own"
+    off = frozenset({"skill:print", "subagent:aide"})
+    copy = Path(own_plugin_copy(str(plugin), off, str(root)))
+    # Named after the plugin's folder, under the copy's own hash.
+    assert copy.name == "scadbuddy"
+    assert copy.parent.name == hash_tree(copy).removeprefix("sha256:")
+    assert sorted(p.name for p in (copy / "skills").iterdir()) == ["authoring", "customize"]
+    assert [p.name for p in (copy / "agents").iterdir()] == ["other.md"]
+    assert (plugin / "skills" / "print").is_dir()  # the plugin itself is left as it is
+    # A copy already there is kept once it hashes to its name, replaced once it does not.
+    assert own_plugin_copy(str(plugin), off, str(root)) == str(copy)
+    (copy / "skills" / "authoring" / "SKILL.md").write_text("TAMPERED-4757")
+    again = Path(own_plugin_copy(str(plugin), off, str(root)))
+    assert again == copy
+    assert "TAMPERED-4757" not in (again / "skills" / "authoring" / "SKILL.md").read_text()
+
+
+async def test_own_plugin_loads_as_it_is_with_nothing_off(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    plugin = _own_plugin(tmp_path)
+    assert own_plugin_copy(str(plugin), frozenset(), str(tmp_path / "own")) == str(plugin)
+    # An off row for an item the plugin does not have changes nothing.
+    assert own_plugin_copy(str(plugin), frozenset({"skill:gone"}), str(tmp_path / "o")) == str(
+        plugin
+    )
+    on = await _segment_options(temporal_env, agent_db, connect, tmp_path, plugin_dir=str(plugin))
+    assert on["extra_options"]["plugins"] == [{"type": "local", "path": str(plugin)}]
+
+
+async def test_an_off_skill_loads_the_own_plugin_without_it(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    plugin = _own_plugin(tmp_path)
+    await agent_db.execute(
+        "INSERT INTO ai_access (source, item, access, updated_by)"
+        " VALUES ('builtin:own-plugin', 'skill:print', 'off', 'browser:browser')"
+    )
+    options = await _segment_options(
+        temporal_env, agent_db, connect, tmp_path, plugin_dir=str(plugin)
+    )
+    [loaded] = options["extra_options"]["plugins"]
+    assert loaded["path"] != str(plugin)
+    assert Path(loaded["path"]).name == "scadbuddy"
+    assert not (Path(loaded["path"]) / "skills" / "print").exists()
+    assert (Path(loaded["path"]) / "skills" / "authoring" / "SKILL.md").is_file()
+
+
+async def test_off_subagent_is_not_defined_inline(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    await insert_gateway(agent_db, KEK, "http://127.0.0.1:9")
+    await agent_db.execute(
+        "INSERT INTO ai_access (source, item, access, updated_by)"
+        " VALUES ('builtin:own-plugin', 'subagent:print-analyst', 'off', 'browser:browser')"
+    )
+    recording = Recording()
+    runner = ScadBuddyRunner(
+        connect,
+        KEK,
+        cwd=str(tmp_path),
+        plugin_dir=str(_own_plugin(tmp_path)),
+        subagent_url="http://127.0.0.1:9/mcp",
+        agents_dir=str(OWN_AGENTS),
+        make_runner=recording,
+        own_plugin_root=str(tmp_path / "own"),
+    )
+    async with running(temporal_env, connect, runner) as (client, queue):
+        sid = await insert_session(agent_db)
+        await agent_db.execute(
+            "UPDATE ai_sessions SET durable_turn_id = %s WHERE id = %s", (str(uuid.uuid4()), sid)
+        )
+        handle = await start_session(client, sid, queue)
+        try:
+            await send(handle, "hi")
+            assert await settled(connect, sid) == "idle"
+        finally:
+            await handle.terminate()
+    [made] = recording.made
+    assert sorted(made["extra_options"]["agents"]) == ["model-author"]
+
+
+def test_own_call_plugin_names_its_items_as_the_agent_does(tmp_path: Path) -> None:
+    plugin = own_call_plugin(str(_own_plugin(tmp_path)), str(OWN_AGENTS))
+    assert (plugin.name, plugin.source) == ("scadbuddy", "builtin:own-plugin")
+    assert plugin.items == (
+        "skill:authoring",
+        "skill:customize",
+        "skill:print",
+        "subagent:model-author",
+        "subagent:print-analyst",
+    )
+
+
+# ---- #4757 Task 6 review, fix round 1 ----
+
+
+def test_call_plugins_put_the_packages_before_the_own_plugin(tmp_path: Path) -> None:
+    """I1: the classic turn's order (turnRunner.ts callPlugins), so the first plugin that
+    refuses, and so the reason, is the same in both runtimes."""
+    own = own_call_plugin(str(_own_plugin(tmp_path)), str(OWN_AGENTS))
+    pkg = TurnPackage("pa", f"{'1' * 64}/pa", "sha256:" + "1" * 64, items=["skill:print"])
+    plugins = call_plugins_of(own, [pkg])
+    assert [p.name for p in plugins] == ["pa", "scadbuddy"]
+    rows = [
+        access.AccessRow("builtin:own-plugin", "skill:print", "off", "browser:browser"),
+        access.AccessRow("package:pa", "skill:print", "off", "browser:browser"),
+    ]
+    off = access.off_call_item("Skill", {"skill": "print"}, plugins, rows)
+    assert off == access.OffCallItem("package:pa", "skill:print")
+
+
+def test_own_call_plugin_keeps_a_frontmatter_name_over_the_cap_whole(tmp_path: Path) -> None:
+    """m1: alias keys are whole frontmatter names, as the classic call rule has them."""
+    plugin = _own_plugin(tmp_path)
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    over = "deep-" * 40
+    (agents / "deep.md").write_text(f"---\nname: {over}\ndescription: d\n---\nD.\n")
+    assert own_call_plugin(str(plugin), str(agents)).aliases == {
+        f"subagent:{over}": ("subagent:deep",)
+    }
+
+
+async def test_a_packages_builtin_skill_is_read_per_call(agent_db: Conn, connect: Connect) -> None:
+    """I2 (Task 5 review M4), and review round 2: an allowed package that names Skill gives
+    every Skill call that built-in's access, read as each call is made, as a classic turn's
+    seam does: off refuses it, read or write runs it, outward (or no row, outward as in
+    classic) parks it at the gate, running it only once approved."""
+    parked: list[tuple[str, str, Any]] = []
+    answers: list[dict[str, Any]] = []
+
+    async def park(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        parked.append((call, tool, tool_input))
+        return answers.pop(0)
+
+    judge = CallAccess(connect, [], {"Skill": ["notes"]}, park).check
+    call = {"tool_name": "Skill", "tool_input": {"skill": "anything"}, "tool_use_id": "t1"}
+
+    async def set_tier(tier: str) -> None:
+        await agent_db.execute(
+            "INSERT INTO ai_access (source, item, access, updated_by)"
+            " VALUES ('package:notes', 'builtin:Skill', %s, 'browser:browser')"
+            " ON CONFLICT (source, item) DO UPDATE SET access = EXCLUDED.access",
+            (tier,),
+        )
+
+    # No row: outward, parked; approved, it runs.
+    answers.append({"go": True, "reason": None})
+    assert await judge(call) == {}
+    assert parked == [("t1", "Skill", {"skill": "anything"})]
+    # Denied: refused with the gate's reason.
+    answers.append({"go": False, "reason": "the user denied it"})
+    denied = await judge(call)
+    assert denied["hookSpecificOutput"]["permissionDecisionReason"] == "the user denied it"
+    await set_tier("read")
+    assert await judge(call) == {}
+    await set_tier("write")
+    assert await judge(call) == {}
+    await set_tier("off")
+    off = await judge(call)
+    assert off["hookSpecificOutput"]["permissionDecisionReason"] == (
+        "Skill is disabled in Settings → Tools & plugins; the user can turn it back on there"
+    )
+    assert len(parked) == 2  # neither read, write nor off was parked
+    # A tool no package names is never parked.
+    assert await judge({"tool_name": "Agent", "tool_input": {"subagent_type": "x"}}) == {}
+    # Outward with no gate to ask, or a gate that fails: refused (fail closed).
+    await set_tier("outward")
+    alone = await CallAccess(connect, [], {"Skill": ["notes"]}).check(call)
+    assert "could not be asked for" in alone["hookSpecificOutput"]["permissionDecisionReason"]
+
+    async def broken(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        raise RuntimeError("away")
+
+    failed = await CallAccess(connect, [], {"Skill": ["notes"]}, broken).check(call)
+    assert failed["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+SKILL_CALL = {"tool_name": "Skill", "tool_input": {"skill": "anything"}, "tool_use_id": "t1"}
+
+
+async def test_an_outward_call_whose_input_is_over_the_cap_is_refused_unasked(
+    connect: Connect,
+) -> None:
+    """#4757 final review M3: an input too large to put in the session's history is refused
+    with a plain reason before the Update is sent, never failed as one that could not be
+    asked for; one at the cap is asked about."""
+    parked: list[str] = []
+
+    async def park(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        parked.append(call)
+        return {"go": True, "reason": None}
+
+    judge = CallAccess(connect, [], {"Agent": ["notes"]}, park).check
+    fixed = len(json.dumps({"subagent_type": "x", "prompt": ""}, separators=(",", ":")).encode())
+    at_cap = {"subagent_type": "x", "prompt": "p" * (BUILTIN_CALL_INPUT_MAX - fixed)}
+    over = {"subagent_type": "x", "prompt": "p" * (BUILTIN_CALL_INPUT_MAX - fixed + 1)}
+    refused = await judge({"tool_name": "Agent", "tool_input": over, "tool_use_id": "t1"})
+    assert refused["hookSpecificOutput"]["permissionDecisionReason"] == (
+        f"Agent's input is over {BUILTIN_CALL_INPUT_MAX} bytes, too large to ask the user"
+        " about, so the call is refused; make it shorter"
+    )
+    assert parked == []
+    assert await judge({"tool_name": "Agent", "tool_input": at_cap, "tool_use_id": "t2"}) == {}
+    assert parked == ["t2"]
+
+
+async def test_a_park_that_never_answers_is_refused_at_the_hooks_own_deadline(
+    connect: Connect, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task 6 re-review R2: a gate that never answers refuses the call at the hook's own
+    deadline, past the gate's timer and below the segment's hour, and the hook's matcher
+    outlasts it, so Claude Code never times the hook out and runs the call unasked."""
+    assert models.HOOKED_WAIT_S < PARK_DEADLINE_S < SEGMENT_TIMEOUT.total_seconds()
+    [matcher] = SegmentCalls([]).hooks()["PreToolUse"]
+    assert matcher.timeout is not None and matcher.timeout > SEGMENT_TIMEOUT.total_seconds()
+    monkeypatch.setattr(runner_module, "PARK_DEADLINE_S", 0.2)
+    released: list[str] = []
+
+    async def never(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def release(call: str) -> None:
+        released.append(call)
+
+    out = await CallAccess(connect, [], {"Skill": ["notes"]}, never, release).check(SKILL_CALL)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "was not decided in time" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert released == ["t1"]
+
+
+async def test_a_call_still_waiting_when_its_segment_ends_is_released(connect: Connect) -> None:
+    """Task 6 re-review R5: the segment's end releases every call still waiting at the gate,
+    so its panel entry is cancelled rather than left pending with nothing to run."""
+    entered = asyncio.Event()
+    released: list[str] = []
+
+    async def waits(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    async def release(call: str) -> None:
+        released.append(call)
+
+    gate = CallAccess(connect, [], {"Skill": ["notes"]}, waits, release)
+    task = asyncio.ensure_future(gate.check(SKILL_CALL))
+    await entered.wait()
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+    await gate.release_waiting()
+    await gate.release_waiting()  # once only
+    assert released == ["t1"]
+
+    async def answers(call: str, tool: str, tool_input: Any) -> dict[str, Any]:
+        return {"go": True}
+
+    decided = CallAccess(connect, [], {"Skill": ["notes"]}, answers, release)
+    assert await decided.check(SKILL_CALL) == {}
+    await decided.release_waiting()
+    assert released == ["t1"]  # a decided call is not released
+
+
+async def test_the_segments_gate_updates_its_own_run() -> None:
+    """Task 6 re-review R4: the hook's Updates name the run the segment belongs to."""
+    seen: list[tuple[str, str | None, str, Any]] = []
+
+    class Handle:
+        def __init__(self, wid: str, run_id: str | None) -> None:
+            self.wid, self.run_id = wid, run_id
+
+        async def execute_update(self, name: str, arg: Any, **_kw: Any) -> Any:
+            seen.append((self.wid, self.run_id, name, arg))
+            return {"go": True, "reason": None}
+
+    class FakeClient:
+        def get_workflow_handle(self, wid: str, *, run_id: str | None = None) -> Handle:
+            return Handle(wid, run_id)
+
+    park, release = segment_gate(FakeClient(), "session-1", "run-7")  # type: ignore[arg-type]
+    assert await park("t1", "Skill", {"skill": "x"}) == {"go": True, "reason": None}
+    await release("t1")
+    assert seen == [
+        (
+            "session-1",
+            "run-7",
+            BUILTIN_CALL_UPDATE,
+            {"call_id": "t1", "tool": "Skill", "input": {"skill": "x"}},
+        ),
+        ("session-1", "run-7", BUILTIN_RELEASE_UPDATE, {"call_id": "t1"}),
+    ]
+
+
+def test_builtin_access_is_the_strictest_of_the_packages_naming_it() -> None:
+    rows = [
+        access.AccessRow("package:a", "builtin:Skill", "read", "b"),
+        access.AccessRow("package:b", "builtin:Skill", "write", "b"),
+        access.AccessRow("package:c", "builtin:Skill", "bogus", "b"),
+    ]
+    assert access.builtin_access("Skill", ["a", "b"], rows) == "write"
+    assert access.builtin_access("Skill", ["a", "c"], rows) == "outward"  # no tier: outward
+    assert access.builtin_access("Skill", [], rows) == "outward"
+
+
+async def test_the_call_hook_names_a_packages_builtins_from_its_listing(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """I2: the runner hands the call hook each allowed package's named built-ins (before the
+    listing's switched-off filter), so one off at turn start and back on mid-turn reads right."""
+    pkg = TurnPackage(
+        "notes", "x", "sha256:" + "0" * 64, allowed=True, builtin_tools=[], named_builtins=["Skill"]
+    )
+    other = TurnPackage("plain", "y", "sha256:" + "0" * 64, named_builtins=["Skill"])
+    assert call_builtins_of([pkg, other]) == {"Skill": ["notes"]}
+    old = TurnPackage("old", "z", "sha256:" + "0" * 64, allowed=True, builtin_tools=["Agent"])
+    assert call_builtins_of([old]) == {"Agent": ["old"]}  # a listing from an older agent
+
+
+async def test_a_call_without_a_tool_use_id_is_judged_too() -> None:
+    """m2: fail closed whatever Claude Code sends."""
+    asked: list[Any] = []
+
+    async def judge(data: Any) -> dict[str, Any]:
+        asked.append(data)
+        return {"hookSpecificOutput": {"permissionDecision": "deny"}}
+
+    started: Any = SegmentCalls([], judge).hooks()["PreToolUse"][0].hooks[0]
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        answer = await started({"tool_name": "Skill", "tool_input": {"skill": "x"}}, None, None)
+    finally:
+        _EMIT.reset(token)
+    assert answer["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert len(asked) == 1 and seen == []
+
+
+async def test_a_workflow_agents_type_switched_off_runs_as_no_subagent(
+    temporal_env: WorkflowEnvironment, agent_db: Conn, connect: Connect, tmp_path: Path
+) -> None:
+    """I3: a Workflow agent's chat whose type is an off subagent does not run as it, from the
+    next segment on; on, it does."""
+    plugin = str(_own_plugin(tmp_path))
+
+    async def options() -> dict[str, Any]:
+        await agent_db.execute("DELETE FROM ai_credentials")
+        made = await _segment_options(
+            temporal_env,
+            agent_db,
+            connect,
+            tmp_path,
+            plugin_dir=plugin,
+            agent=(None, None, "print-analyst"),
+            agents_dir=str(OWN_AGENTS),
+        )
+        return dict(made["extra_options"])
+
+    assert (await options())["extra_args"] == {"agent": "print-analyst"}
+    await agent_db.execute(
+        "INSERT INTO ai_access (source, item, access, updated_by)"
+        " VALUES ('builtin:own-plugin', 'subagent:print-analyst', 'off', 'browser:browser')"
+    )
+    assert "extra_args" not in await options()
+    await agent_db.execute("UPDATE ai_access SET item = '*' WHERE source = 'builtin:own-plugin'")
+    assert "extra_args" not in await options()
+
+
+async def test_a_failed_own_plugin_copy_tells_the_session(tmp_path: Path) -> None:
+    """m4: as a classic turn says it (a plugin_unavailable error event), not only a log line."""
+    plugin = _own_plugin(tmp_path)
+    blocked = tmp_path / "blocked"
+    blocked.write_text("a file, not a folder")
+    runner = ScadBuddyRunner(
+        None,  # type: ignore[arg-type]
+        KEK,
+        cwd=str(tmp_path),
+        plugin_dir=str(plugin),
+        own_plugin_root=str(blocked / "own"),
+    )
+    settings = TurnSettings(
+        long_edge=1, model=None, own_plugin=True, own_off=frozenset({"skill:print"})
+    )
+    seen: list[dict[str, Any]] = []
+    token = _EMIT.set(seen.append)
+    try:
+        assert runner._own_plugin("session-x", settings) is None
+    finally:
+        _EMIT.reset(token)
+    [event] = seen
+    assert event["type"] == "plugin_unavailable"
+    assert event["message"].startswith("ScadBuddy's own plugin was not loaded: ")
+    [panel] = translate("s", event, {})
+    assert (panel["type"], panel["code"]) == ("error", "plugin_unavailable")
+    assert panel["message"] == event["message"]
+
+
+def test_own_plugin_copies_are_swept(tmp_path: Path) -> None:
+    """m5: as the agent sweeps its package copies (turnPackages.ts sweepPackageCopies): a copy
+    no segment used for a week, and a half-made one after an hour; a used one is kept."""
+    plugin = tmp_path / "scadbuddy"
+    shutil.copytree(OWN_SKILLS, plugin / "skills")
+    root = tmp_path / "own"
+    used = Path(own_plugin_copy(str(plugin), frozenset({"skill:print"}), str(root))).parent
+    stale = root / ("e" * 64)
+    (stale / "scadbuddy").mkdir(parents=True)
+    half = root / ".tmp-dead"
+    half.mkdir()
+    fresh = root / ".tmp-live"
+    fresh.mkdir()
+    now = time.time()
+    week = 7 * 24 * 3600
+    os.utime(stale, (now - week - 60, now - week - 60))
+    os.utime(half, (now - 3700, now - 3700))
+    os.utime(used, (now - week - 60, now - week - 60))
+    # Using a copy touches it, and the sweep runs before it is used.
+    assert Path(own_plugin_copy(str(plugin), frozenset({"skill:print"}), str(root))).parent == used
+    assert sorted(p.name for p in root.iterdir()) == sorted([used.name, ".tmp-live"])
+    later = sweep_own_plugin_copies(str(root), now + week + 120)
+    assert sorted(later) == sorted([used.name, ".tmp-live"])
+
+
+async def test_an_outward_package_skill_parks_in_a_real_segment_and_runs_once_approved(
+    temporal_env: WorkflowEnvironment,
+    agent_db: Conn,
+    connect: Connect,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review round 2, end to end: the bundled Claude Code calls Skill twice in a turn whose
+    allowed package names Skill (no row: outward). Each call waits at the gate in the
+    segment's hook; the first, approved, runs; the second, denied, is refused with why."""
+    root = tmp_path / "plugins"
+    staging = root / "staging" / "notes"
+    (staging / "skills" / "jot").mkdir(parents=True)
+    (staging / "skills" / "jot" / "SKILL.md").write_text("---\nname: jot\n---\nJot.\n")
+    digest = hash_tree(staging)
+    hex_ = digest.removeprefix("sha256:")
+    (root / "staging").rename(root / hex_)
+    stand_in = StandInTools(connect)
+    stand_in.turn_packages = [
+        {
+            "name": "notes",
+            "dir": f"{hex_}/notes",
+            "content_hash": digest,
+            "allowed": True,
+            "builtin_tools": ["Skill"],
+            "named_builtins": ["Skill"],
+            "items": ["skill:jot"],
+        }
+    ]
+    main: list[list[dict[str, Any]]] = []
+    call = {"name": "Skill", "input": {"skill": "scadbuddy:print"}}
+
+    def reply(body: dict[str, Any]) -> dict[str, Any]:
+        if "Skill" not in [t.get("name") for t in body.get("tools") or []]:
+            return {"text": "ok"}
+        results = _results(body)
+        main.append(results)
+        return {"tool_use": call} if len(results) < 2 else {"text": "All done."}
+
+    fake = FakeAnthropic(reply).start()
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(home))
+    monkeypatch.setenv("HOME", str(home))
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    try:
+        await insert_gateway(agent_db, KEK, fake.url)
+        runner = ScadBuddyRunner(
+            connect,
+            KEK,
+            cwd=os.path.realpath(cwd),
+            plugin_dir=str(_own_plugin(tmp_path)),
+            package_root=str(root),
+            make_runner=ClaudeAgentSdkRunner,
+            own_plugin_root=str(tmp_path / "own"),
+        )
+        async with running(temporal_env, connect, runner, stand_in) as (client, queue):
+            sid = await insert_session(agent_db)
+            handle = await start_session(client, sid, queue)
+            try:
+                await send(handle, "go")
+                for decision in ("approve", "deny"):
+                    entries: list[dict[str, Any]] = []
+
+                    async def parked() -> bool:
+                        nonlocal entries
+                        entries = [
+                            e
+                            for e in await handle.query(PENDING_INPUT_QUERY)
+                            if e["tool"] == "Skill"
+                        ]
+                        return bool(entries)
+
+                    await until(parked, timeout=120)
+                    [entry] = entries
+                    await handle.execute_update(
+                        RESPOND_UPDATE,
+                        {
+                            "request_id": entry["id"],
+                            "response": {"kind": "approval", "decision": decision},
+                            "responder": {"kind": "browser", "id": "browser", "label": "You"},
+                            "role": "browser",
+                        },
+                    )
+                    if decision == "approve":
+                        await until(lambda: _seen_results(main, 1), timeout=120)
+                assert await settled(connect, sid, timeout=180) == "idle"
+            finally:
+                await handle.terminate()
+    finally:
+        fake.close()
+        await asyncio.sleep(0)
+    first, second = next(r for r in reversed(main) if len(r) >= 2)
+    assert not first.get("is_error"), first
+    assert second.get("is_error") is True
+    assert "denied" in _text_of(second), _text_of(second)
+
+
+async def _seen_results_async(main: list[list[dict[str, Any]]], n: int) -> bool:
+    return any(len(r) >= n for r in main)
+
+
+def _seen_results(main: list[list[dict[str, Any]]], n: int) -> Any:
+    return _seen_results_async(main, n)

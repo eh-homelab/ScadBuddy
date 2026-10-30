@@ -69,6 +69,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
     expect(await store.rows(['remote:mem'])).toMatchObject([{ item: '*', access: 'on' }])
   })
 
+  it("refuses a '*' row for builtin:scadbuddy, which has no switch (400)", async () => {
+    await expect(store.setEnabled(SCAD, false, ctx)).rejects.toBeInstanceOf(AccessError)
+    expect(await store.rows([SCAD])).toEqual([])
+  })
+
   it("replaceTools replaces every tool row of the source and leaves '*'", async () => {
     await store.setEnabled('remote:mem', false, ctx)
     await store.setItem('remote:mem', 'a', 'read', ctx)
@@ -95,7 +100,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
 
   it("refuses on for a tool, a tier for '*', and an unknown source with AccessError", async () => {
     const refusals = [
-      () => store.setItem(SCAD, 'get_model', 'on' as never, ctx),
+      () => store.setItem(SCAD, 'get_model', 'on', ctx),
       () => store.setItem(SCAD, '*', 'read', ctx),
       () => store.setItem('bogus:x', 'a', 'read', ctx),
       () => store.setEnabled('remote:Bad Name', true, ctx),
@@ -109,6 +114,56 @@ describe.skipIf(!TEST_DATABASE_URL)(`AccessStore${TEST_DATABASE_URL ? '' : ` (sk
       expect((err as AccessError).status).toBe(400)
     }
     expect(await db.sql`SELECT 1 FROM ai_access`).toHaveLength(0)
+  })
+
+  it('stores on for a package skill and the own plugin\'s subagent', async () => {
+    await store.setItem('package:pk', 'skill:review', 'on', ctx)
+    await store.setItem('builtin:own-plugin', 'subagent:printer', 'on', ctx)
+    await store.setItem('package:pk', 'hook:PreToolUse:0123456789abcdef', 'off', ctx)
+    await store.setItem('package:pk', 'builtin:Bash', 'write', ctx)
+    expect(await store.rows(['package:pk', 'builtin:own-plugin'])).toEqual([
+      { source: 'builtin:own-plugin', item: 'subagent:printer', access: 'on', updated_by: 'browser:browser' },
+      { source: 'package:pk', item: 'builtin:Bash', access: 'write', updated_by: 'browser:browser' },
+      { source: 'package:pk', item: 'hook:PreToolUse:0123456789abcdef', access: 'off', updated_by: 'browser:browser' },
+      { source: 'package:pk', item: 'skill:review', access: 'on', updated_by: 'browser:browser' },
+    ])
+  })
+
+  it('refuses on for a tool, a tier for a hook, and on outside a package (400)', async () => {
+    const refusals = [
+      () => store.setItem(SCAD, 'get_model', 'on', ctx),
+      () => store.setItem('package:pk/mcp:srv', 'search', 'on', ctx),
+      () => store.setItem('package:pk', 'hook:PreToolUse:0123456789abcdef', 'read', ctx),
+      () => store.setItem('package:pk', 'skill:review', 'outward', ctx),
+      () => store.setItem('builtin:own-plugin', 'subagent:printer', 'write', ctx),
+      () => store.setItem('package:pk', 'builtin:Bash', 'on', ctx),
+      () => store.setItem(SCAD, 'skill:review', 'on', ctx),
+      () => store.setItem('remote:hs', 'skill:x', 'on', ctx),
+      // Review M2: a named item needs its name, and a hook its 16 hex digits.
+      () => store.setItem('package:pk', 'skill:', 'on', ctx),
+      () => store.setItem('package:pk', 'builtin:', 'read', ctx),
+      () => store.setItem('package:pk', 'hook:PreToolUse:xyz', 'off', ctx),
+      () => store.setItem('package:pk', 'hook::0123456789abcdef', 'off', ctx),
+    ]
+    for (const refuse of refusals) {
+      const err = await refuse().catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(AccessError)
+      expect((err as AccessError).status).toBe(400)
+    }
+    expect(await db.sql`SELECT 1 FROM ai_access`).toHaveLength(0)
+  })
+
+  // Review I1: only a package's own source and the own plugin hold named items; elsewhere a
+  // name with a prefix is a tool's, and takes a tool's access.
+  it('a tool named like an item, outside a package, takes a tool access', async () => {
+    await store.setItem('remote:hs', 'skill:x', 'off', ctx)
+    await store.setItem('remote:hs', 'subagent:y', 'outward', ctx)
+    await store.setItem('package:pk/mcp:srv', 'skill:x', 'read', ctx)
+    expect((await store.rows(['remote:hs', 'package:pk/mcp:srv'])).map((r) => `${r.source}/${r.item}=${r.access}`)).toEqual([
+      'package:pk/mcp:srv/skill:x=read',
+      'remote:hs/skill:x=off',
+      'remote:hs/subagent:y=outward',
+    ])
   })
 
   it('audits each write as a settings row', async () => {

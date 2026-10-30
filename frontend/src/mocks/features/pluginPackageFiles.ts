@@ -41,6 +41,11 @@ const GREETER_V1: Record<string, string | Uint8Array> = {
 const GREETER_V2: Record<string, string | Uint8Array> = {
   ...Object.fromEntries(Object.entries(GREETER_V1).filter(([p]) => p !== 'README.md')),
   'skills/bye/SKILL.md': '---\nname: bye\ndescription: Says goodbye.\n---\n\nSay goodbye.\n',
+  'hooks/hooks.json': JSON.stringify(
+    { hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'Greeted?' }] }], UserPromptSubmit: [{ hooks: [{ type: 'prompt', prompt: 'Polite?' }] }] } },
+    null,
+    2,
+  ),
 }
 const FILES: Record<string, Record<string, string | Uint8Array>> = {
   greeter: GREETER_V1,

@@ -106,8 +106,11 @@ export interface PackageReview {
   skills: string[]
   commands: string[]
   agents: string[]
-  hooks: { event: string; type: string; url?: string }[]
+  /** `id` names its access row, `hook:<event>:<id>`; absent in a review stored before #4757. */
+  hooks: { event: string; type: string; url?: string; id?: string; matcher?: string }[]
   mcp_servers: { name: string; type: string; url: string }[]
+  /** Every other server it declares, by name: a local (stdio) one, offered only with `allow_refused` (#4757); absent in an older review. */
+  local_servers?: string[]
   files: string[]
   /**
    * What the vetting refuses (a command hook, a hooks module, a local MCP server, ...).
@@ -116,6 +119,9 @@ export interface PackageReview {
   refused?: string[]
   /** The Claude Code built-ins its skills and subagents name, offered while the pin is allowed. */
   builtin_tools?: string[]
+  /** Each item's id (`skill:<name>` for a skill or command, `subagent:<name>`) to its frontmatter description (#4757). */
+  described?: Record<string, string | null>
+  // `aliases` (vet.ts `PackageReview.aliases`) is left out on purpose: the browser never reads it.
 }
 
 export interface FileDiff {

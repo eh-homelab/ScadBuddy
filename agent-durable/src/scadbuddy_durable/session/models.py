@@ -19,6 +19,21 @@ TOOLS_QUEUE = "agent-tools"
 # default, as TOOLS_QUEUE is the agent tools queue's.
 PROJECTS_QUEUE = "projects"
 SEND_MESSAGE_UPDATE = "send_message"
+#: The segment runner's call hook asks the gate about a Skill, Agent or Task call that an
+#: allowed package's built-in makes outward (#4757): parked as an engine-parked built-in is,
+#: its answer ``{"go": bool, "reason": str | None}`` once decided.
+BUILTIN_CALL_UPDATE = "builtin_call"
+#: Ends a call the hook asked about whose segment ended before it was decided (re-review R5).
+BUILTIN_RELEASE_UPDATE = "builtin_release"
+#: A hooked call's approval waits at most this long (its timer), inside the segment's hour.
+HOOKED_WAIT_S = 50 * 60
+#: The hook's own deadline on that wait: past the gate's timer, below the activity's hour,
+#: so a gate that never answers refuses the call rather than letting it run (re-review R2).
+PARK_DEADLINE_S = HOOKED_WAIT_S + 5 * 60
+#: A hooked call's input goes into the session's history whole (``builtin_call``): one over
+#: this many bytes (as JSON, UTF-8) is refused before it is asked about (#4757 final review
+#: M3). It is payload_store.py ``OFFLOAD_BYTES``, from which a payload leaves history.
+BUILTIN_CALL_INPUT_MAX = 128 * 1024
 # What the segment runner reads from its workflow: the turn's images (Ruling 5) and the
 # system prompt's append (SegmentContext).
 SEGMENT_CONTEXT_QUERY = "segment_context"
@@ -173,6 +188,15 @@ class TurnPackage:
     # Approved with allow_refused: loaded as it is, with the built-ins it names.
     allowed: bool = False
     builtin_tools: list[str] = field(default_factory=list)
+    # Its skills and subagents (``skill:<name>``, ``subagent:<name>``) and their aliases, from
+    # the loaded pin (#4757): the segment runner refuses a Skill or Agent call naming an off
+    # one (access.py ``off_call_item``), the aliases keyed by whole frontmatter names, for
+    # matching only. A listing from an older agent has neither.
+    items: list[str] = field(default_factory=list)
+    aliases: dict[str, list[str]] = field(default_factory=dict)
+    # The built-ins it names, before the listing leaves out the switched-off ones
+    # (``builtin_tools``): a Skill, Agent or Task call reads their access per call.
+    named_builtins: list[str] = field(default_factory=list)
 
 
 @dataclass

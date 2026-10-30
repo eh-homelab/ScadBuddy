@@ -1,9 +1,10 @@
 import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { Sql } from 'postgres'
-import { BUILTIN_SOURCES } from '../access/model.js'
+import { toolOffReason } from '../access/items.js'
+import { BUILTIN_SOURCES, packageServerSource, packageSource } from '../access/model.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
-import type { AccessResolver } from '../access/resolver.js'
+import type { AccessResolver, PackageAccess } from '../access/resolver.js'
 import type { AuditSink } from '../audit/log.js'
 import { BACKGROUND_BUILTINS, BUILTIN_SERVER, builtinServer, PROVIDED } from '../builtins/server.js'
 import type { BackgroundTasks } from '../background/service.js'
@@ -24,11 +25,12 @@ import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
-import type { PackageServers } from '../plugins/packages/mcp.js'
+import { collidingServerNames, type PackageServers, serverAccess, unofferedLocalServers } from '../plugins/packages/mcp.js'
+import { builtinAccessOf, builtinsOffOf, packageOmitted } from '../plugins/packages/derived.js'
 import { pluginTierResolver } from '../plugins/registry.js'
 import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
 import type { SessionFiles } from '../workspace/store.js'
-import { localPackageServers, sharePackage, unparkableBuiltins } from './turnPackages.js'
+import { localPackageServers, sharePackage, switchedOffServer, unparkableBuiltins } from './turnPackages.js'
 import { turnToolName } from './turnTools.js'
 import {
   connectHttp,
@@ -98,8 +100,11 @@ export async function sweepTurnDirs(root: string, sql: Sql, now = Date.now()): P
 export type TurnServerDeps = {
   /** The enabled remote plugins through the loopback forwarder (main.ts `remotePlugins`). */
   remotePlugins?: (() => Promise<PluginsForRun>) | undefined
-  /** Tool access (#2171, ai_access): http_request's switch and tier. Defaults without it. */
-  access?: Pick<AccessResolver, 'entry'> | undefined
+  /**
+   * Tool access (#2171, ai_access): http_request's switch and tier, each package server's
+   * switch, and what each package has off (#4757). Defaults without it.
+   */
+  access?: Pick<AccessResolver, 'entry' | 'enabled' | 'pluginSources' | 'packageAccess'> | undefined
   /**
    * The headless browser's lists and the sessions' approved origins (#982,
    * browser/store.ts): the remote plugins' browser_* calls are judged by them, as a
@@ -172,6 +177,25 @@ export function builtinNote(names: readonly string[]): string {
   )
 }
 
+/** A plugin's MCP session kept for the durable session, on a forwarder route of its own (#2581). */
+function keptRoute(keep: ReturnType<NonNullable<PluginsForRun['keep']>>): Pick<TurnServer, 'keep'> {
+  if (!keep) return {}
+  return {
+    keep: {
+      fingerprint: keep.fingerprint,
+      connect: async () => {
+        const route = keep.register()
+        try {
+          return { client: await connectHttp(route.url), release: route.release }
+        } catch (err) {
+          route.release()
+          throw err
+        }
+      },
+    },
+  }
+}
+
 export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Promise<TurnServers> {
   return async (context) => {
     const servers: TurnServer[] = []
@@ -205,27 +229,15 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         // Its forwarder URL is new each run; its tools change with what Settings disabled.
         listingKey: JSON.stringify(plugin.disabledTools),
         tierOf,
-        // A browser call's tier depends on the page it opens (#982): any may park.
-        mayPark: (name) => browser?.covers(name) === true || tierOf(name) === 'outward',
+        // Any may park (#4757): a tier raised to outward later in the turn is asked about, and
+        // a browser call's tier depends on the page it opens (#982). `turn_tool_tier` decides
+        // each call; the listed tier is the transcript's label only.
+        mayPark: () => true,
         fixedTier: (name) => (browser?.covers(name) && name.endsWith('__browser_navigate') ? undefined : tierOf(name)),
+        // Refused at the tier check in the one sentence, though its forwarder no longer lists them (#4757 final re-review 1).
+        ...(plugin.disabledTools.length ? { offTools: new Set(plugin.disabledTools) } : {}),
         ...browserParts,
-        // Its MCP session is kept for the durable session, on its own route (#2581).
-        ...(keep
-          ? {
-              keep: {
-                fingerprint: keep.fingerprint,
-                connect: async () => {
-                  const route = keep.register()
-                  try {
-                    return { client: await connectHttp(route.url), release: route.release }
-                  } catch (err) {
-                    route.release()
-                    throw err
-                  }
-                },
-              },
-            }
-          : {}),
+        ...keptRoute(keep),
       })
     }
     const http = deps.httpRequest
@@ -298,6 +310,16 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       let offered = loaded.loaded
       // One binding for both branches: the listing and a call decide on the same root (#3523).
       const { root, localRoot } = deps.packages!
+      // What each package has off and each server's switch and stored tools, in one read
+      // each per listing or call (#4757): what the shared copies leave out, the built-ins
+      // offered and their tiers, as a classic turn reads them.
+      const itemAccess: ReadonlyMap<string, PackageAccess> = deps.access
+        ? await deps.access.packageAccess(loaded.loaded.map((p) => packageSource(p.name)))
+        : new Map()
+      const switches = await serverAccess(loaded.loaded, deps.access)
+      const colliding = collidingServerNames(loaded.loaded)
+      const unoffered = unofferedLocalServers(loaded.loaded)
+      const builtinsOff = builtinsOffOf(loaded.loaded, itemAccess)
       if (context.listing) {
         shared = []
         const failed = new Set<string>()
@@ -310,7 +332,7 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
             continue
           }
           try {
-            const turnPackage = await sharePackage(pkg, root, localRoot)
+            const turnPackage = await sharePackage(pkg, root, localRoot, packageOmitted(pkg.name, itemAccess, switches, colliding, unoffered), builtinsOff)
             const dark = unparkableBuiltins(turnPackage, provided)
             if (dark.length) {
               problems.push(
@@ -334,10 +356,14 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       // Otherwise a call (not a listing) builds every loaded package's servers: a share
       // that threw is known only by sharing again, so for that one the listing is the
       // guard, since a call can only name a tool the listing offered (#2620).
-      servers.push(...localPackageServers(offered, problems))
-      const named = [...new Set(offered.filter((p) => p.allowed).flatMap((p) => p.builtinTools))].filter((n) => provided.has(n)).sort()
+      servers.push(...localPackageServers(offered, problems, switches))
+      // Every served built-in a package names, and of those the ones on: one switched off is
+      // not offered, and its call (a listing from before) is refused in a classic turn's words
+      // (#4757 final review I1), the server kept for it even when none is on.
+      const known = [...new Set(offered.filter((p) => p.allowed).flatMap((p) => p.builtinTools))].filter((n) => provided.has(n)).sort()
+      const named = known.filter((n) => !builtinsOff.has(n))
       const builtins = deps.builtins
-      if (named.length && builtins) {
+      if (known.length && builtins) {
         const files = { files: builtins.files, ws: { kind: 'session' as const, sessionId: context.session } }
         const web = {
           nested: builtins.nested(context),
@@ -364,29 +390,53 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
         servers.push({
           name: BUILTIN_SERVER,
           connect: () => connectInProcess(() => builtinServer(named, () => ({ files, web, background }))),
-          // Every package built-in is outward, as in a classic turn (run.ts `builtinTools`).
-          tierOf: () => 'outward',
+          // Each by its access across the packages naming it, as a classic turn's seam reads it
+          // (resolver.ts `builtin`). One that is off is refused (`refusal`) before its tier is
+          // read, answered as a refused call is (not outward).
+          tierOf: (harnessName) => {
+            const access = builtinAccessOf(harnessName.slice(`mcp__${BUILTIN_SERVER}__`.length), offered, itemAccess)
+            return access === 'off' ? 'write' : access
+          },
+          refusal: async (harnessName) =>
+            builtinsOff.has(harnessName.slice(`mcp__${BUILTIN_SERVER}__`.length)) ? toolOffReason(harnessName) : undefined,
           mayPark: () => true,
           callIds: true,
+          ...(named.length ? {} : { unlisted: true as const }),
         })
-        notes.push(builtinNote(named))
+        if (named.length) notes.push(builtinNote(named))
       }
       // As a remote plugin's: the forwarder URL, which carries its token, is a secret too.
       forwardedPackages = await deps.packages!.forward(offered)
       problems.push(...forwardedPackages.problems)
       secrets.push(...forwardedPackages.secrets)
+      const access = deps.access ?? DEFAULT_ACCESS
       for (const plugin of forwardedPackages.plugins) {
         browserPlugins.push(plugin.name)
         // Its tiers from ai_access (#2171), an unlisted tool outward, as a remote plugin's above.
         const tiers = pluginTierResolver([plugin])
+        const tierOf = (name: string) => tiers(name) ?? 'outward'
+        const at = forwardedPackages.servers.find((s) => s.name === plugin.name)
         servers.push({
           name: plugin.name,
           connect: () => connectHttp(plugin.url),
           listingKey: JSON.stringify(plugin.disabledTools),
-          tierOf: (name) => tiers(name) ?? 'outward',
+          tierOf,
+          // As a remote plugin's: any may park, the listed tier is the transcript's label only.
+          mayPark: () => true,
+          fixedTier: (name) => (browser?.covers(name) && name.endsWith('__browser_navigate') ? undefined : tierOf(name)),
+          ...keptRoute(forwardedPackages.keep?.(plugin.name)),
+          // Its `*` switch at each tier check and call (#4757); a server not found is refused.
+          refusal: async (harnessName) => {
+            if (!at) return `${plugin.name} is not a known package server`
+            return (await access.enabled(packageServerSource(at.pkg, at.server))) ? undefined : toolOffReason(harnessName)
+          },
+          // Refused at the tier check, though its forwarder no longer lists them (#4757 final review I1).
+          ...(plugin.disabledTools.length ? { offTools: new Set(plugin.disabledTools) } : {}),
           ...browserParts,
         })
       }
+      // Known and switched off (#4757 final review M2): refused in a classic turn's words, never connected to.
+      for (const off of forwardedPackages.off ?? []) servers.push(switchedOffServer(off.name))
     }
     return {
       servers,

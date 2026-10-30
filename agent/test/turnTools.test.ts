@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
@@ -7,12 +7,19 @@ import { MockActivityEnvironment } from '@temporalio/testing'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { browserGuard } from '../src/browser/guard.js'
-import type { PluginsForRun } from '../src/plugins/forwarder.js'
+import { forwardForRun, PluginForwarder, type PluginsForRun } from '../src/plugins/forwarder.js'
+import { hashTree } from '../src/plugins/packages/hash.js'
+import type { LoadedPackage, PackagesForRun } from '../src/plugins/packages/install.js'
+import { forwardPackageServers, type PackageServers } from '../src/plugins/packages/mcp.js'
+import { SessionClients } from '../src/temporal/sessionClients.js'
+import { startFakeMcp } from './support/fakeMcp.js'
 import type { AuditEntry } from '../src/audit/log.js'
 import type { Tier } from '../src/auth/principal.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import type { Owner } from '../src/sessions/protocol.js'
-import { type AccessRow, BUILTIN_SOURCES } from '../src/access/model.js'
+import { type AccessRow, BUILTIN_SOURCES, packageServerSource, packageSource } from '../src/access/model.js'
+import { toolOffReason } from '../src/access/items.js'
+import type { SessionFiles } from '../src/workspace/store.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { memoryAccess } from './support/memoryAccess.js'
 import { HTTP_READ_TOOL, HTTP_SERVER, HTTP_TOOL } from '../src/harness/httpRequest.js'
@@ -29,6 +36,7 @@ import {
   MAX_TURN_TOOL_NAME,
   type TurnContext,
   type TurnServer,
+  type ListedTools,
   type TurnToolsDeps,
   type TurnToolsResult,
 } from '../src/temporal/turnTools.js'
@@ -41,6 +49,7 @@ const BROWSER: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 const BEARER: Owner = { kind: 'bearer', id: 'token:7', label: 'MCP token' }
 const SECRET = 'sk-plugin-header-0123456789'
 const FLOW = '7c2d9a10-3b4e-4f5a-8b6c-1d2e3f4a5b6c'
+const noPackageServers = async (): Promise<PackageServers> => ({ plugins: [], servers: [], problems: [], secrets: [], terminate: async () => {}, release: () => {} })
 
 /**
  * An `sql` for a test that saves no http body: a call (a read) throws, and so does any
@@ -111,6 +120,7 @@ function harness(
     flowBlobs?: TurnToolsDeps['flowBlobs']
     lapsed?: (requestId: string, inputHash: string | undefined) => boolean
     callIds?: boolean
+    refusal?: () => Promise<string | undefined>
   } = {},
 ) {
   const contexts: TurnContext[] = []
@@ -131,6 +141,7 @@ function harness(
     ...(options.fixedTier ? { fixedTier: options.fixedTier } : {}),
     ...(options.pinned ? { pinned: true } : {}),
     ...(options.callIds ? { callIds: true } : {}),
+    ...(options.refusal ? { refusal: options.refusal } : {}),
   }
   const deps: TurnToolsDeps = {
     sessions: { ownerOf: async (id) => (id === SESSION ? (owner as never) : undefined) },
@@ -193,6 +204,64 @@ async function failure(promise: Promise<unknown>): Promise<ApplicationFailure> {
   expect(err).toBeInstanceOf(ApplicationFailure)
   return err as ApplicationFailure
 }
+
+// #4757 security review: a package server switched off is refused at each tier check and
+// each call, in a durable turn and a flow run alike, and a failed read of its switch never
+// lets a call through.
+describe('a turn tool whose server refuses its calls (#4757)', () => {
+  const OFF = 'api of plugin package notes is switched off in Settings → Tools & plugins'
+
+  it.each([
+    ['a durable turn', `session-${SESSION}`, 'tool-toolu_approved'],
+    ['a flow run', `flow-${FLOW}`, 'tool-flow_approved'],
+  ])('%s: turn_tool_tier answers refused (not parked) and the call is refused', async (_what, workflowId, activityId) => {
+    const state = { off: false }
+    const h = harness({ refusal: async () => (state.off ? OFF : undefined) })
+    const tier = () => env(TURN_TOOL_TIER_ACTIVITY, 'tier-1', workflowId).run(h.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__post', input: { method: 'POST', body: 'x' } })
+    const call = () => env('turn:notes__post', activityId, workflowId).run(h.call, { method: 'POST', body: 'x' })
+    expect(await tier()).toMatchObject({ tier: 'outward' })
+    state.off = true
+    expect(await tier()).toEqual({ tier: 'write', declared: 'outward', refused: OFF })
+    const refused = await failure(call())
+    expect(refused.message).toBe(OFF)
+    expect(h.calls).toEqual([])
+    expect(h.audits).toEqual([expect.objectContaining({ outcome: 'refused', detail: OFF })])
+  })
+
+  // Fix round 2: a failed read answers refused at the tier check, so the call never parks
+  // for an approval that could not run it, and the call is refused (fail closed).
+  it('a switch that cannot be read is answered refused at the tier check and refuses the call', async () => {
+    const h = harness({ refusal: () => Promise.reject(new Error('db down')) })
+    const why = "notes: could not read the server's switch, so the call is refused"
+    expect(await env(TURN_TOOL_TIER_ACTIVITY, 'tier-1').run(h.activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'notes__post', input: { method: 'POST', body: 'x' } })).toEqual({
+      tier: 'write',
+      declared: 'outward',
+      refused: why,
+    })
+    const refused = await failure(env('turn:notes__post', 'tool-toolu_approved').run(h.call, { method: 'POST', body: 'x' }))
+    expect(refused.message).toBe(why)
+    expect(h.calls).toEqual([])
+  })
+
+  it("turnServers reads a package server's switch at each refusal check", async () => {
+    const { access, rows } = memoryAccess()
+    const forward = async () => ({
+      plugins: [{ name: 'plugin_notes_api', url: 'http://127.0.0.1:9/p/x', toolTiers: {}, disabledTools: [] }],
+      servers: [{ name: 'plugin_notes_api', pkg: 'notes', server: 'api' }],
+      problems: [],
+      secrets: [],
+      terminate: async () => {},
+      release: () => {},
+    })
+    const load = async () => ({ paths: [], allowedPaths: [], builtinTools: [], loaded: [], problems: [], release: () => {} })
+    const build = turnServers({ access: new AccessResolver(access), packages: { load, root: undefined, localRoot: os.tmpdir(), forward } })
+    const set = await build({ session: SESSION, owner: BROWSER, signal: new AbortController().signal, listing: false })
+    const server = set.servers.find((x) => x.name === 'plugin_notes_api')!
+    expect(await server.refusal!('mcp__plugin_notes_api__x')).toBeUndefined()
+    rows.push({ source: 'package:notes/mcp:api', item: '*', access: 'off', updated_by: 'browser:browser' })
+    expect(await server.refusal!('mcp__plugin_notes_api__x')).toBe(toolOffReason('mcp__plugin_notes_api__x'))
+  })
+})
 
 describe('turn tools in a durable session', () => {
   it('lists each server tool by the name Claude Code gives it, and says which may park', async () => {
@@ -279,7 +348,7 @@ describe('turn tools in a durable session', () => {
     expect(await tier({ method: 'POST', body: '' })).toEqual({ tier: 'outward', declared: 'outward' })
   })
 
-  it("labels and parks a remote plugin's tools by their Settings tier, an unlisted one outward (#2838)", async () => {
+  it("labels a remote plugin's tools by their Settings tier, an unlisted one outward (#2838)", async () => {
     const forwarded: PluginsForRun = {
       plugins: [
         {
@@ -303,7 +372,8 @@ describe('turn tools in a durable session', () => {
     const notes = servers.find((s) => s.name === 'notes')!
     const tier = (tool: string) => notes.fixedTier?.(`mcp__notes__${tool}`)
     expect([tier('search'), tier('save'), tier('delete')]).toEqual(['read', 'write', 'outward'])
-    expect(['search', 'save', 'delete'].map((t) => notes.mayPark?.(`mcp__notes__${t}`))).toEqual([false, false, true])
+    // Any may park (#4757): a tier raised to outward later in the turn is asked about.
+    expect(['search', 'save', 'delete'].map((t) => notes.mayPark?.(`mcp__notes__${t}`))).toEqual([true, true, true])
     expect(notes.tierOf('mcp__notes__delete', {})).toBe('outward')
   })
 
@@ -757,5 +827,314 @@ describe('saved http bodies on this pod (#2496)', () => {
     await removeTurnDir(root, `flow-${FLOW}`)
     await removeTurnDir(root, '..')
     expect(await readdir(root)).toEqual([])
+  })
+})
+
+// #4757: a package server's and a remote plugin's tools may all park in a durable turn, so
+// a tier raised to outward mid-turn is asked about; the listing shows the tier for the
+// transcript only, and a package server keeps its MCP session as a remote plugin does.
+describe('package servers and remote plugins in a durable turn (#4757)', () => {
+  const loopback = async () => ['127.0.0.1']
+  const GONE = (tool: string) => `${tool} is not offered any more: its plugin or setting was turned off`
+
+  async function notesPackage(url: string, name = 'notes', server = 'api'): Promise<LoadedPackage> {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'turn-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'notes' }))
+    await writeFile(path.join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { [server]: { type: 'http', url } } }))
+    return { name, contentHash: (await hashTree(dir)).hash, dir, allowed: false, builtinTools: [] }
+  }
+
+  async function packageTurn(options: { sessions?: boolean; rows?: AccessRow[]; name?: string } = {}) {
+    const mcp = await startFakeMcp({ ...(options.sessions ? { sessions: true } : {}) })
+    const forwarder = await PluginForwarder.start()
+    const loaded = [await notesPackage(mcp.url, options.name)]
+    const store = memoryAccess(options.rows ?? [])
+    const resolver = new AccessResolver(store.access)
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const load = async (): Promise<PackagesForRun> => ({ paths: loaded.map((p) => p.dir), allowedPaths: [], builtinTools: [], loaded: [...loaded], problems: [], release: () => {} })
+    const clients = new SessionClients<ListedTools>()
+    const deps: TurnToolsDeps = {
+      sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+      servers: turnServers({
+        access: resolver,
+        packages: { load, root, localRoot: root, forward: (loaded) => forwardPackageServers(loaded, forwarder, loopback, { access: resolver }) },
+      }),
+      approvals: { approved: async () => true },
+      hostQueue: 'agent-tools.host-1',
+      clients,
+    }
+    const activities = turnToolActivities(deps)
+    return {
+      mcp,
+      loaded,
+      rows: store.rows,
+      list: async () => ((await env(TURN_TOOLS_ACTIVITY).run(activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult).tools,
+      tier: (tool: string) => env(TURN_TOOL_TIER_ACTIVITY, 'tier-1').run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool, input: { query: 'q' } }),
+      call: (tool: string) => env(`turn:${tool}`, `tool-${Math.random()}`).run(turnToolActivity(deps), { query: 'q' }),
+      close: async () => {
+        await clients.closeAll()
+        await forwarder.close()
+        await mcp.close()
+      },
+    }
+  }
+
+  it('a package server tool raised to outward mid-turn parks on its next durable call', async () => {
+    const source = packageServerSource('notes', 'api')
+    const t = await packageTurn({ rows: [{ source, item: 'recall', access: 'read', updated_by: 'test' }] })
+    try {
+      const recall = (await t.list()).find((x) => x.name === 'plugin_notes_api__recall')!
+      expect(recall.may_park).toBe(true)
+      expect(await t.tier('plugin_notes_api__recall')).toMatchObject({ tier: 'read' })
+      t.rows.splice(0, t.rows.length, { source, item: 'recall', access: 'outward', updated_by: 'test' })
+      expect(await t.tier('plugin_notes_api__recall')).toMatchObject({ tier: 'outward' })
+    } finally {
+      await t.close()
+    }
+  })
+
+  it('a remote plugin tool raised to outward mid-turn parks on its next durable call', async () => {
+    const mcp = await startFakeMcp({})
+    const forwarder = await PluginForwarder.start()
+    const tiers: Record<string, RiskTier> = { recall: 'read' }
+    try {
+      const deps: TurnToolsDeps = {
+        sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+        servers: turnServers({
+          remotePlugins: async () =>
+            forwardForRun({ plugins: [{ plugin: { name: 'mem', url: mcp.url, toolTiers: { ...tiers }, disabledTools: [] }, address: '127.0.0.1' }], problems: [] }, forwarder),
+        }),
+      }
+      const activities = turnToolActivities(deps)
+      const { tools } = (await env(TURN_TOOLS_ACTIVITY).run(activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+      expect(tools.find((x) => x.name === 'mem__recall')).toMatchObject({ may_park: true, tier: 'read' })
+      const tier = () => env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'mem__recall', input: { query: 'q' } })
+      expect(await tier()).toMatchObject({ tier: 'read' })
+      tiers.recall = 'outward'
+      expect(await tier()).toMatchObject({ tier: 'outward' })
+    } finally {
+      await forwarder.close()
+      await mcp.close()
+    }
+  })
+
+  // #4757 final re-review 1: refused in the one shared sentence, though its forwarder no longer lists it.
+  it('a remote plugin tool switched off mid-turn is refused at its tier check (not parked) and its call', async () => {
+    const mcp = await startFakeMcp({})
+    const forwarder = await PluginForwarder.start()
+    const disabledTools: string[] = []
+    try {
+      const deps: TurnToolsDeps = {
+        sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+        servers: turnServers({
+          remotePlugins: async () =>
+            forwardForRun({ plugins: [{ plugin: { name: 'mem', url: mcp.url, toolTiers: {}, disabledTools: [...disabledTools] }, address: '127.0.0.1' }], problems: [] }, forwarder),
+        }),
+        approvals: { approved: async () => true },
+      }
+      const activities = turnToolActivities(deps)
+      const tier = () => env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'mem__recall', input: { query: 'q' } })
+      expect(await tier()).toMatchObject({ tier: 'outward' })
+      disabledTools.push('recall')
+      const OFF = toolOffReason('mcp__mem__recall')
+      expect(await tier()).toEqual({ tier: 'write', declared: 'outward', refused: OFF })
+      expect((await failure(env('turn:mem__recall', 'tool-toolu_x').run(turnToolActivity(deps), { query: 'q' }))).message).toBe(OFF)
+      expect(mcp.calls).toEqual([])
+    } finally {
+      await forwarder.close()
+      await mcp.close()
+    }
+  })
+
+  it("a package server's read tool shows its fixed tier in the transcript", async () => {
+    const source = packageServerSource('notes', 'api')
+    const t = await packageTurn({ rows: [{ source, item: 'recall', access: 'read', updated_by: 'test' }] })
+    try {
+      const tools = await t.list()
+      expect(tools.find((x) => x.name === 'plugin_notes_api__recall')).toMatchObject({ may_park: true, tier: 'read' })
+      expect(tools.find((x) => x.name === 'plugin_notes_api__retain')).toMatchObject({ may_park: true, tier: 'outward' })
+    } finally {
+      await t.close()
+    }
+  })
+
+  // #4757 final review M2: in a classic turn's words (harness/permissions.ts decideLive).
+  it('a package server switched off after the listing is refused at its tier check (not parked) and its call', async () => {
+    const t = await packageTurn()
+    const OFF = toolOffReason('mcp__plugin_notes_api__recall')
+    try {
+      expect((await t.list()).map((x) => x.name)).toContain('plugin_notes_api__recall')
+      t.rows.push({ source: packageServerSource('notes', 'api'), item: '*', access: 'off', updated_by: 'test' })
+      expect(await t.list()).toEqual([])
+      expect(await t.tier('plugin_notes_api__recall')).toEqual({ tier: 'write', declared: 'outward', refused: OFF })
+      expect((await failure(t.call('plugin_notes_api__recall'))).message).toBe(OFF)
+      expect(t.mcp.calls).toEqual([])
+    } finally {
+      await t.close()
+    }
+  })
+
+  // #4757 final review I1: the forwarder no longer lists it, which parked it before.
+  it('an http package server tool set off after the listing is refused at its tier check (not parked) and its call', async () => {
+    const t = await packageTurn()
+    const OFF = toolOffReason('mcp__plugin_notes_api__recall')
+    try {
+      expect((await t.list()).map((x) => x.name)).toContain('plugin_notes_api__recall')
+      t.rows.push({ source: packageServerSource('notes', 'api'), item: 'recall', access: 'off', updated_by: 'test' })
+      expect((await t.list()).map((x) => x.name)).not.toContain('plugin_notes_api__recall')
+      expect(await t.tier('plugin_notes_api__recall')).toEqual({ tier: 'write', declared: 'outward', refused: OFF, task_queue: 'agent-tools.host-1' })
+      expect((await failure(t.call('plugin_notes_api__recall'))).message).toBe(OFF)
+      expect(t.mcp.calls).toEqual([])
+    } finally {
+      await t.close()
+    }
+  })
+
+  // #4757 final review I1: a tool its server no longer lists is refused, never parked.
+  it('a tool its server no longer lists is refused at its tier check, not parked', async () => {
+    const t = await packageTurn()
+    try {
+      expect(await t.tier('plugin_notes_api__no_such')).toEqual({
+        tier: 'write',
+        declared: 'outward',
+        refused: 'plugin_notes_api__no_such is not offered any more by plugin_notes_api',
+        task_queue: 'agent-tools.host-1',
+      })
+    } finally {
+      await t.close()
+    }
+  })
+
+  // #4757 final review M2: a local server known but switched off is refused in the same words, never started.
+  it('a local package server switched off is refused at its tier check and its call, never started', async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'turn-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'notes' }))
+    await writeFile(path.join(dir, '.mcp.json'), JSON.stringify({ mcpServers: { local: { command: path.join(dir, 'no-such-binary') } } }))
+    const loaded: LoadedPackage[] = [{ name: 'notes', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools: [] }]
+    const store = memoryAccess([{ source: packageServerSource('notes', 'local'), item: '*', access: 'off', updated_by: 'test' }])
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const load = async (): Promise<PackagesForRun> => ({ paths: [], allowedPaths: [dir], builtinTools: [], loaded, problems: [], release: () => {} })
+    const reported: string[][] = []
+    const deps: TurnToolsDeps = {
+      sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+      servers: turnServers({ access: new AccessResolver(store.access), packages: { load, root, localRoot: root, forward: noPackageServers } }),
+      approvals: { approved: async () => true },
+      report: async (_session, problems) => {
+        reported.push([...problems])
+      },
+    }
+    const activities = turnToolActivities(deps)
+    const OFF = toolOffReason('mcp__plugin_notes_local__recall')
+    const listed = (await env(TURN_TOOLS_ACTIVITY).run(activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    expect(listed.tools).toEqual([])
+    expect(reported).toEqual([])
+    expect(await env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'plugin_notes_local__recall', input: {} })).toEqual({
+      tier: 'write',
+      declared: 'outward',
+      refused: OFF,
+    })
+    expect((await failure(env('turn:plugin_notes_local__recall', 'tool-toolu_x').run(turnToolActivity(deps), {}))).message).toBe(OFF)
+  })
+
+  // #4757 final review I1: a classic turn's seam refuses it in these words (resolver.ts `builtin` is off).
+  it.each([
+    ['its one built-in', ['Grep']],
+    ['one of two built-ins', ['Grep', 'Read']],
+  ])('a served built-in switched off after the listing is refused at its tier check, not parked (%s)', async (_what, builtinTools) => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'turn-pkg-'))
+    await mkdir(path.join(dir, '.claude-plugin'))
+    await writeFile(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'notes' }))
+    const loaded: LoadedPackage[] = [{ name: 'notes', contentHash: (await hashTree(dir)).hash, dir, allowed: true, builtinTools }]
+    const store = memoryAccess([])
+    const root = await mkdtemp(path.join(os.tmpdir(), 'turn-share-'))
+    const load = async (): Promise<PackagesForRun> => ({ paths: [], allowedPaths: [dir], builtinTools, loaded, problems: [], release: () => {} })
+    const nested = { ask: async () => '', search: async () => ({ text: '' }) }
+    const deps: TurnToolsDeps = {
+      sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+      servers: turnServers({
+        access: new AccessResolver(store.access),
+        packages: { load, root, localRoot: root, forward: noPackageServers },
+        builtins: { files: {} as SessionFiles, nested: () => nested },
+      }),
+      approvals: { approved: async () => true },
+    }
+    const activities = turnToolActivities(deps)
+    const tier = () => env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'builtin__Grep', input: { pattern: 'x' } })
+    const listed = (await env(TURN_TOOLS_ACTIVITY).run(activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>)) as TurnToolsResult
+    expect(listed.tools.map((x) => x.name)).toContain('builtin__Grep')
+    expect(await tier()).toMatchObject({ tier: 'outward' })
+    store.rows.push({ source: packageSource('notes'), item: 'builtin:Grep', access: 'off', updated_by: 'test' })
+    const OFF = toolOffReason('mcp__builtin__Grep')
+    expect(await tier()).toEqual({ tier: 'write', declared: 'outward', refused: OFF })
+    expect((await failure(env('turn:builtin__Grep', 'tool-toolu_x').run(turnToolActivity(deps), { pattern: 'x' }))).message).toBe(OFF)
+  })
+
+  it('a server whose name another package takes mid-turn is refused at its tier check, not parked', async () => {
+    const t = await packageTurn({ name: 'n.x' })
+    try {
+      expect((await t.list()).map((x) => x.name)).toContain('plugin_n_x_api__recall')
+      t.loaded.push(await notesPackage(t.mcp.url, 'n_x'))
+      expect(await t.tier('plugin_n_x_api__recall')).toEqual({ tier: 'write', declared: 'outward', refused: GONE('plugin_n_x_api__recall') })
+      expect((await failure(t.call('plugin_n_x_api__recall'))).message).toBe(GONE('plugin_n_x_api__recall'))
+      expect(t.mcp.calls).toEqual([])
+    } finally {
+      await t.close()
+    }
+  })
+
+  it("a server re-pinned to a name with '__' is refused at its tier check, not parked", async () => {
+    const t = await packageTurn()
+    try {
+      expect((await t.list()).map((x) => x.name)).toContain('plugin_notes_api__recall')
+      t.loaded.splice(0, 1, await notesPackage(t.mcp.url, 'notes', 'api__v2'))
+      expect(await t.list()).toEqual([])
+      expect(await t.tier('plugin_notes_api__recall')).toEqual({ tier: 'write', declared: 'outward', refused: GONE('plugin_notes_api__recall') })
+    } finally {
+      await t.close()
+    }
+  })
+
+  it('a remote plugin removed mid-turn is refused at its tier check; back again, its outward call still needs an approval', async () => {
+    const mcp = await startFakeMcp({})
+    const forwarder = await PluginForwarder.start()
+    const state = { on: true }
+    try {
+      const deps: TurnToolsDeps = {
+        sessions: { ownerOf: async (id) => (id === SESSION ? (BROWSER as never) : undefined) },
+        servers: turnServers({
+          remotePlugins: async () =>
+            forwardForRun(
+              { plugins: state.on ? [{ plugin: { name: 'mem', url: mcp.url, toolTiers: {}, disabledTools: [] }, address: '127.0.0.1' }] : [], problems: [] },
+              forwarder,
+            ),
+        }),
+        approvals: { approved: async () => false },
+      }
+      const activities = turnToolActivities(deps)
+      const tier = () => env(TURN_TOOL_TIER_ACTIVITY).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool: 'mem__recall', input: { query: 'q' } })
+      expect(await tier()).toMatchObject({ tier: 'outward' })
+      state.on = false
+      expect(await tier()).toEqual({ tier: 'write', declared: 'outward', refused: GONE('mem__recall') })
+      state.on = true
+      expect((await failure(env('turn:mem__recall', 'tool-toolu_x').run(turnToolActivity(deps), { query: 'q' }))).type).toBe('NotApproved')
+      expect(mcp.calls).toEqual([])
+    } finally {
+      await forwarder.close()
+      await mcp.close()
+    }
+  })
+
+  it("a package server's MCP session is kept across calls like a remote plugin's (#2581)", async () => {
+    const t = await packageTurn({ sessions: true })
+    try {
+      await t.list()
+      expect(await t.call('plugin_notes_api__recall')).toContain('remembered: q')
+      expect(await t.call('plugin_notes_api__recall')).toContain('remembered: q')
+      expect(t.mcp.issued).toHaveLength(1)
+    } finally {
+      await t.close()
+    }
   })
 })

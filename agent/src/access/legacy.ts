@@ -1,6 +1,6 @@
 import { RISK_TIERS, type RiskTier } from '../harness/permissions.js'
 import { type AccessRow, BUILTIN_SOURCES } from './model.js'
-import { registryOverrides, sourceEnabled } from './resolve.js'
+import { itemOverrides, sourceEnabled } from './resolve.js'
 
 // #2171 (#4756), rolling deploy: the ai_settings keys an older replica still reads and writes.
 // The new code writes them from ai_access's rows (access/store.ts), in the same transaction
@@ -27,7 +27,8 @@ export function legacySettings(
 ): { key: string; value: unknown; absent: unknown }[] {
   const out: { key: string; value: unknown; absent: unknown }[] = []
   if (tools && (touched.has(BUILTIN_SOURCES.scadbuddy) || touched.has(BUILTIN_SOURCES.browser))) {
-    const overrides = registryOverrides(tools, rows)
+    // Per tool only: a `*` switch folded in would be mirrored back as per-tool rows.
+    const overrides = itemOverrides(tools, rows)
     const risk = new Map(tools.map((t) => [t.name, t.risk]))
     const tool_tiers: Record<string, RiskTier> = {}
     for (const [tool, tier] of Object.entries(overrides.tool_tiers)) {

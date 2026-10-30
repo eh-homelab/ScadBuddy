@@ -854,7 +854,9 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   `scadbuddy`, ScadBuddy's own plugin (on unless its source switch, `ai_access` row
   (`builtin:own-plugin`, `*`), is `off`; [`agent/src/access/model.ts`](../../agent/src/access/model.ts)). A browser (Playwright MCP) is not built in
   any more; it is added as a remote plugin ([headless-browser.md](headless-browser.md)).
-  `PATCH` with `{ enabled }` sets that row; approve, re-pin and `DELETE` answer 409. An
+  Settings sets that switch on the source "ScadBuddy skills and subagents" (#4757).
+  `PATCH` with `{ enabled }` still sets the same row for one release (#4828), and the page
+  no longer calls it; approve, re-pin and `DELETE` answer 409. An
   install whose package names one answers 409 with `built_in: true` instead of
   refusing it, and Settings shows that as a notice.
 
@@ -870,7 +872,7 @@ other Settings writes
 | `GET /`, `GET /:name` | The pin, the review (skills as `<name>:<skill>`, commands, agents, hooks, MCP servers, files), and any pending re-pin with its file diff. |
 | `GET /:name/files`, `GET /:name/file?path=` (each with `pending=true` for the re-pin's) | Every file of the pin with its size, and one file's content for Settings to show before approval (#1029). Only a path in the pin's own file list is read, from the cached copy that hashes to the pin (fetched again when it does not; never vetted for loading, so a refused package can be read). Text is cut at 64 KiB unless `full=true`; a file that is not UTF-8 is `binary` with no `content`. A built-in's files are read from the image. |
 | `POST /:name/approve` with `{ "commit_sha", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
-| `PATCH /:name` with `{ "enabled" }` | Enables an approved pin only; the table enforces this with a `CHECK` too. |
+| `PATCH /:name` with `{ "enabled" }` | Enables an approved pin only; the table enforces this with a `CHECK` too. The same switch is the package source's, `PUT /api/v1/ai/capabilities/package:<name>` (#4757), which Settings uses. |
 | `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin. The current pin keeps loading until the pending one is approved. |
 | `DELETE /:name/pending`, `DELETE /:name` | Drop the pending re-pin; uninstall and evict the cache. |
 
@@ -899,15 +901,16 @@ Before #2320, Claude Code started none of them, because `strictMcpConfig` was on
 URL and their one header (at most one) are checked as a remote plugin's registration is
 (`normalisePluginUrl`, `validateHeaderName`, `validateSecret`), and `X-Forwarded-*` and
 `Proxy-*` are refused. Claude Code loads every package without its own http entries: a
-copy under `<state dir>/plugins-local/<hash>/` whose `.mcp.json` and manifest keep only
-local servers (`withoutRemoteServers`). A query that reads plugins' MCP configs (with
+copy under `<state dir>/plugins-local/<hex>/<name>/` whose `.mcp.json` and manifest keep only
+local servers, and that leaves out what the user switched off (`derivedPackage`, see
+"Items and switches" below). A query that reads plugins' MCP configs (with
 `strictMcpConfig` off, for an allowed package) refuses any
 loaded plugin that still declares an http server (`harness/run.ts`). An allowed
 package's local servers still start as declared.
 
 **Durable sessions (#2320).** A durable turn's Claude Code runs in the `agent-durable`
 container, so the agent copies each loaded package to the payload volume both sidecars
-mount, `<SCADBUDDY_PAYLOAD_DIR>/plugins/<content hash>/`, once per hash, when the turn
+mount, `<SCADBUDDY_PAYLOAD_DIR>/plugins/<hex>/<name>/`, once per hash, when the turn
 lists its tools (`turn_tools`,
 [`agent/src/temporal/turnPackages.ts`](../../agent/src/temporal/turnPackages.ts)). The
 segment runner hashes that copy again (`agent-durable/.../session/package_hash.py`, the
@@ -921,9 +924,12 @@ package's folder with `PATH`, `HOME` and its declared `env`. Of the built-ins an
 package names, only `Bash` and `PowerShell` can run as the engine's own activities, and so
 wait for a human: the Temporal plugin refuses any other in `tool_activities`
 ([`_check_tool_activities`](https://github.com/temporalio/ai-integrations/blob/b1cf3848b15ad5cd1f009bd19524e3f751140439/python/claude_agent_sdk/src/temporalio/claude_agent_sdk/_workflow.py#L73-L97)).
-A durable turn offers those two and parks each call for approval. The agent provides the
+A durable turn offers those two and decides each call by its access as it is then: `off`
+refuses it, `read` or `write` runs it, `outward` parks it for approval (#4757, "Items and
+switches" below). Skill, Agent and Task run inside the segment (see "Items and
+switches"). The agent provides the
 others as the `builtin` turn tools (`agent/src/builtins/`, #2393), named
-`builtin__<Name>`, each outward and parked like any turn tool, and the turn's system
+`builtin__<Name>`, each at its access (unset is outward) and parked like any outward turn tool, and the turn's system
 prompt names them (`turnServers.ts` `builtinNote`, carried as the listing's `system_note`):
 
 - `Read`, `Write`, `Edit`, `Glob`, `Grep` and `NotebookEdit` act on the session's
@@ -1029,6 +1035,134 @@ on the volume and its own `plugins-local/` copies that nothing has touched for 7
 and copies left half-made for an hour (`sweepPackageCopies`, #2395; a copy is moved aside and checked again before it goes, so a turn sharing it at that moment keeps it). An enabled package
 is shared again at its next turn.
 
+### Items and switches (#4757)
+
+Each part of a package is an item of its capabilities source `package:<name>`, with its
+own `ai_access` row (spec
+[§4.2](../superpowers/specs/2026-10-18-settings-and-tool-access-design.md), §4.4). The
+user sets them in Settings → Tools & plugins → Packages
+([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx)).
+
+- **Item ids come from the source**, as the runtime keys them
+  ([`agent/src/access/items.ts`](../../agent/src/access/items.ts),
+  `packageItems` in [`agent/src/plugins/packages/vet.ts`](../../agent/src/plugins/packages/vet.ts)):
+  `skill:<name>`, `subagent:<name>` (a nested agent is `dir:name`),
+  `hook:<event>:<id>` and `builtin:<Tool>`. A hook's id is the first 16 hex digits of the
+  sha256 of the canonical JSON of its event, matcher and handler (`hookId`). Two
+  byte-identical hooks under one event and matcher share one id and one access. A package
+  that is one skill (no `skills` path) is the skill `rootSkillName(<package name>)`.
+- **Commands are skill items.** Claude Code runs a plugin's slash command through the Skill
+  tool, so a skill and a command of one name are one item. Measured on Claude Code 2.1.310
+  (the `claude` binary that SDK 0.3.310 bundles, read with `strings -n 20`; the comment on
+  `skills` in `vet.ts`).
+- **Names over 1024 UTF-16 units are refused.** A skill or subagent name, or a frontmatter
+  `name`, longer than `ALIAS_KEY_CAP` (1024) is a fatal vet problem (`listingProblems` in `vet.ts`):
+  no approval allows it. A pin approved before this check, with such a name, stops loading
+  until it is re-pinned. So the call rule below never compares a cut name.
+- **Listing budgets.** One package's items and aliases may take at most 256 KiB of UTF-8
+  (`LISTING_ITEMS_BUDGET`), else vet refuses it. All of a turn's packages may take at most
+  1 MiB (`LISTING_PACKAGES_BUDGET`, half Temporal's payload limit). Packages are taken in
+  name order: one that would take the total past 1 MiB is not loaded, and the turn says
+  so; the others still are. `loadPackagesForRun`
+  ([`install.ts`](../../agent/src/plugins/packages/install.ts)) decides this once for
+  classic and durable turns, so both leave out the same packages.
+- **The derived copy.** A turn loads a copy of each package that leaves out its http
+  servers and every hook, skill, subagent and local server that is off
+  (`derivedPackage` in [`agent/src/plugins/packages/derived.ts`](../../agent/src/plugins/packages/derived.ts)).
+  The copy is first checked against the pin's hash, then made, then named by its own hash:
+  `<root>/<hex>/<package name>`. So two turns with different access to one pin each get
+  their own copy. The folder carries the package name because Claude Code 2.1.310 names a
+  root skill with no frontmatter `name`, and a plugin with no manifest name, by its folder
+  (the same `strings` read, comment at the top of `derived.ts`). A copy already there is
+  kept only while it hashes to the fresh copy. A durable turn shares the same layout on
+  the payload volume (`sharePackage`,
+  [`agent/src/temporal/turnPackages.ts`](../../agent/src/temporal/turnPackages.ts)), and
+  the segment runner hashes it again before it loads it (`session/package_hash.py`).
+- **Re-pins.** A row is kept while the new pin has its item. A hook keeps its id, and so its
+  access, while its event, matcher and handler do not change. A changed or new hook gets a
+  new id, so it is back at its default (`on`), and the re-pin's review marks it "New since
+  you last reviewed". `pruneStaleRows`
+  ([`agent/src/plugins/packages/store.ts`](../../agent/src/plugins/packages/store.ts)) runs
+  in every package write's transaction. It deletes the rows of items and servers the pin
+  lost, and the listings of servers it lost. A review stored by an older vet cannot name
+  its items, so for it no item row is deleted. Rows an older replica's approval leaves go
+  with the next write to that package by this code; there is no sweep.
+- **Skill, Agent and Task calls are judged per call, in both runtimes.** A call that names
+  a skill or subagent that is off, or one of a package that is switched off, is refused
+  from its next call. A classic turn refuses it at the permission seam
+  ([`agent/src/access/live.ts`](../../agent/src/access/live.ts)). A durable turn refuses it
+  in the segment runner's own `PreToolUse` hook (`CallAccess` in
+  `agent-durable/src/scadbuddy_durable/session/runner.py`), which reads `ai_access` per
+  call and refuses the call when the read fails. One rule (`offCallItem`,
+  `off_call_item`) is pinned for both languages by the `calls` set of
+  `agent/test/fixtures/access-vectors.json`. The call's name is read as Claude Code
+  2.1.310 reads it (the comments on `calledName` and `agentTypeForm` in `items.ts`):
+  - Skill: trimmed by JavaScript's `trim()` set, one leading `/` dropped, then matched
+    exactly, by name or alias.
+  - Agent and Task: matched exactly; else every subagent whose name is equal after NFKC,
+    lower case and without white space, dashes or underscores. The call is refused when
+    any match it reaches is off.
+- **Hooks change per turn, in both runtimes.** No SDK option drops one plugin hook from a
+  running query (spec §2), so a hook switched off is left out of the next turn's copy.
+- **Built-ins.** For a pin approved with `allow_refused`, each Claude Code built-in it
+  names is an item `builtin:<Tool>`, with a tool's access. Where several packages of the
+  turn name one built-in, the strictest wins (`off` > `outward` > `write` > `read`), and a
+  package that names it with no row counts as `outward` (`strictest` in `items.ts`). Each
+  call takes its access as it is then:
+  - A classic turn decides at the permission seam.
+  - A durable turn asks the `builtin_tier` activity
+    ([`agent/src/temporal/toolTier.ts`](../../agent/src/temporal/toolTier.ts)) for `Bash`
+    and `PowerShell`, at most 3 attempts, then parks
+    (`agent-durable/src/scadbuddy_durable/session/workflow.py`, behind
+    `workflow.patched("builtin-access-4757")`). The other built-ins are the `builtin` turn
+    tools, judged by the turn server's tier.
+  - Skill, Agent and Task as built-ins run inside the segment: an outward call parks
+    through the segment runner's hook and the workflow's `builtin_call` Update, behind the
+    same patch. So an outward package built-in parks for approval in both modes.
+- **Package servers.** Each server is a child source `package:<name>/mcp:<server>`,
+  on by default while the package is approved. A server switched off is hidden at turn
+  start and refused per call, fail closed: by the forwarder
+  ([`agent/src/plugins/forwarder.ts`](../../agent/src/plugins/forwarder.ts)), by
+  `turn_tool_tier` and by the turn activity
+  ([`agent/src/temporal/turnTools.ts`](../../agent/src/temporal/turnTools.ts)). A read
+  that fails refuses the call. Every path refuses it in one sentence, a classic turn's
+  (`toolOffReason` in [`agent/src/access/items.ts`](../../agent/src/access/items.ts)). A
+  tool set off, a served built-in switched off, or a tool its server no longer lists is
+  refused at `turn_tool_tier`, never parked. An allowed package's local (stdio) servers
+  take the same switch and stored tool access in both runtimes (`localPackageServers` in
+  `turnPackages.ts`; a classic copy leaves an off one out). Their tools are not listed on
+  the page, since that would start the package's process outside a turn; until set, they
+  are `outward`. "List tools" lists an http server's tools
+  (`POST /api/v1/ai/capabilities/{source}/refresh`).
+- **Server names.** Claude Code names a package server's tools after
+  `plugin_<package>_<server>`. Two servers that give one name are both refused, and so is
+  one whose name holds `__`, which splits a tool name: "…has a name that cannot be
+  offered" ([`agent/src/plugins/packages/mcp.ts`](../../agent/src/plugins/packages/mcp.ts)
+  `collisionProblem`, `unofferableNameProblem`).
+- **Capabilities.** A source's switch folds onto its items: while it is off, each item
+  reads `off`, saying why, and keeps its own choice in `own_access`
+  ([`agent/src/access/capabilities.ts`](../../agent/src/access/capabilities.ts) `switched`).
+  A package that a turn would not load reads off, with `problem` saying why (refused at
+  load, past the listing budget, named as a built-in). One whose load check has not
+  answered yet reads `checking`, with every item off
+  ([`agent/src/access/packageProvider.ts`](../../agent/src/access/packageProvider.ts)
+  `stateOf`). The page reads the tree again while anything is `checking`, after 1, 2, 4
+  and 8 s, then every 10 s, 125 s in all; then it says "Still checking…" with a Retry
+  button (`POLL_DELAYS` in
+  [`frontend/src/components/capabilities/useCapabilities.ts`](../../frontend/src/components/capabilities/useCapabilities.ts)).
+
+**Rolling deploy.** Every write lands in `ai_access` or `ai_plugin_packages`, which old
+and new replicas read, so none is lost. An older replica ignores the new switches and
+items until it is replaced. Roll the agent before agent-durable:
+
+- An older agent-durable refuses the `<hex>/<name>` folders the new agent shares, so
+  packages are left out of durable turns until agent-durable rolls (fail closed).
+- A listing from a pre-#4757 agent names no items, so a new durable worker lets an off
+  package skill load until that agent is replaced.
+- An older agent-durable has no `own_off` and no `CallAccess`. A skill or subagent of
+  ScadBuddy's own plugin that is switched off on the new page still loads and runs in
+  durable turns until agent-durable rolls. A classic turn refuses it at once.
+
 Settings has an "Assistant plugins" area with two sections: "Plugin packages"
 ([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))
 and "Plugins", the list of `/api/v1/ai/plugins`
@@ -1049,8 +1183,10 @@ Adding, removing,
 testing or re-pointing a built-in answers 409 with `built_in: true`.
 You install, review, approve and re-pin packages there. The approval dialog shows the
 full commit SHA and content hash, and you must tick a confirmation before it sends
-exactly those values. Every control that writes is user-only (`USER_ONLY`), so the
-in-page agent's `click` and `fill` refuse it. The area follows the assistant's
+exactly those values. Install, approve, re-pin and remove are user-only (`USER_ONLY`), so
+the in-page agent's `click` and `fill` refuse them: they decide which code is trusted. A
+package's switch and its items' selects are not, as every access control on the page is
+not (#4208). The area follows the assistant's
 availability (`useAiAvailability()`), so it is hidden in production builds until the
 agent service is deployed.
 
@@ -1177,9 +1313,24 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
 - One row per (`source`, `item`). The sources are `builtin:scadbuddy`, `builtin:browser`,
   `builtin:http`, `builtin:own-plugin`, `remote:<name>`, `package:<name>` and
   `package:<name>/mcp:<server>` (`agent/src/access/model.ts`).
-- Item `*` is the source switch: `on` or `off`. Built-in sources are on until turned off.
-  Remote plugins and packages are off until turned on (`enabledByDefault` in
-  `agent/src/access/resolve.ts`).
+- Item `*` is the source switch: `on` or `off`. Built-in sources and package servers
+  (`package:<name>/mcp:<server>`) are on until turned off; a server is offered only while
+  its package is approved and enabled. Remote plugins are off until turned on
+  (`enabledByDefault` in `agent/src/access/resolve.ts`). A package's own switch is not a
+  `*` row: it is `ai_plugin_packages.enabled`, served as the package source's `enabled`
+  (#4757, [`agent/src/access/packageProvider.ts`](../../agent/src/access/packageProvider.ts)).
+- `builtin:browser`'s switch holds at every gate (#4757): while it is off, every browser
+  tool is `off` at the classic seam, on `/mcp`, in durable turns and in flow runs
+  (`registryOverrides` in `agent/src/access/resolve.ts`; `BROWSER_SOURCE` in
+  `agent-durable/src/scadbuddy_durable/session/access.py`).
+- In `package:<name>` and `builtin:own-plugin`, an item's kind is its prefix
+  (`agent/src/access/items.ts`): `skill:<name>`, `subagent:<name>` and
+  `hook:<event>:<id>` take `on` or `off`; `builtin:<Tool>` takes a tool's access. A
+  plugin's commands are `skill:` items, since Claude Code runs them through the Skill
+  tool (measured on Claude Code 2.1.310; see §9, "Items and switches"). A built-in named
+  by several packages of a turn takes the strictest of their accesses, and a package that
+  names it with no row counts as `outward`. So this rule is stricter than a tool's: an
+  unset built-in asks first.
 - Any other item is a tool, with `off`, `read`, `write` or `outward`. A tool with no row has
   its declared tier. The user may set it above or below that tier, with one exception.
   On the registry sources (`builtin:scadbuddy`, `builtin:browser`), a row that the copy
@@ -1191,6 +1342,10 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
 - `on` is also allowed on a single item, but only in `package:*` sources and in
   `builtin:own-plugin` (its skills, subagents and hooks). The table's CHECK enforces this
   (`agent/src/db/migrations/20261026T2200Z_access.sql`).
+- A source's switch folds onto its items when they are read: while it is off, each reads
+  `access: off` with a reason, and `own_access` keeps the item's own choice, which its
+  select shows and edits and Reset resets (`switched` in `agent/src/access/capabilities.ts`).
+  A write sets the item's own row; it may be written while its source is off.
 - Only overrides are stored. The resolver reads the rows at each call, so a change applies
   from the next call, in either direction, also in a turn or flow run under way
   (spec §4.4; `agent/src/access/resolver.ts`).
@@ -1219,13 +1374,13 @@ Settings → Tools & plugins reads and writes `ai_access` through seven agent ro
 
 | Route | |
 |---|---|
-| `GET /api/v1/ai/capabilities` | `{ sources }`: every source with its items (`id`, `kind`, `name`, `harness_name`, `label`, `description`, `default`, `access`, `overridden`, `allowed`, `fixed`, …), its `enabled` and `switchable`, its `options_route` and, for a remote plugin, `listed_at` |
+| `GET /api/v1/ai/capabilities` | `{ sources }`: every source with its items (`id`, `kind`, `name`, `harness_name`, `label`, `description`, `default`, `access`, `own_access`, `overridden`, `allowed`, `fixed`, `reason`, …), its `enabled` and `switchable`, its `problem` and `checking` (a package's load check), its `children` (a package's servers), its `options_route` and, for a remote plugin or a package server, `listed_at`. The sources are the four built-ins, each remote plugin, and each installed package `package:<name>` with a child `package:<name>/mcp:<server>` per server; a package is `switchable` only once its pin is approved |
 | `GET /api/v1/ai/capabilities/{source}` | one source |
 | `PUT /api/v1/ai/capabilities/{source}` | `{ "enabled": true\|false }`: the source switch (item `*`); 409 on a source that is not `switchable` |
 | `GET /api/v1/ai/capabilities/{source}/items/{item}` | the item with its input and output schemas, annotations, the raw listed entry and what the caps `omitted` |
-| `PUT /api/v1/ai/capabilities/{source}/items/{item}` | `{ "access": … }`: `off`, `read`, `write` or `outward` for a tool. Choosing the default deletes the row. 400 on an access the kind does not take, 409 on a `fixed` item or one outside `allowed` |
+| `PUT /api/v1/ai/capabilities/{source}/items/{item}` | `{ "access": … }`: `off`, `read`, `write` or `outward` for a tool or a built-in; `on` or `off` for a hook, skill or subagent. Choosing the default deletes the row. 400 on an access the kind does not take, 409 on a `fixed` item or one outside `allowed` |
 | `DELETE /api/v1/ai/capabilities/{source}/items/{item}` | back to the default |
-| `POST /api/v1/ai/capabilities/{source}/refresh` | `{ test, source }`: a remote plugin's connection test (without its `tools`: they are the source's items) and its source after it. A good test stores the listing (`testAndList` in `agent/src/routes/plugins.ts`, shared with `POST /plugins/{name}/test`, one at a time per plugin across replicas; a second is 429 with `Retry-After`, as is a fifth test at once on one replica; 503 when the database is unreachable). 409 on a source that lists no tools |
+| `POST /api/v1/ai/capabilities/{source}/refresh` | `{ test, source }`: a remote plugin's connection test (without its `tools`: they are the source's items) and its source after it. A good test stores the listing (`testAndList` in `agent/src/routes/plugins.ts`, shared with `POST /plugins/{name}/test`, one at a time per plugin across replicas; a second is 429 with `Retry-After`, as is a fifth test at once on one replica; 503 when the database is unreachable). For a package's http server (#4757), the same test through the forwarder, stored in `ai_tool_listings` (`listPackageServer` in `agent/src/plugins/packages/listing.ts`); refused, with no connection, for a server a turn would not offer (its package off, unapproved, not loadable or still `checking`, the server switched off, or its name refused; `listingRefusal` in `agent/src/access/packageProvider.ts`), and 409 for a local server, which only a turn starts. 409 on a source that lists no tools |
 
 - A source or item id is one percent-encoded path segment (`remote%3Ahindsight`). An
   unknown one is 404. Every other write answers the source as it is after the write.

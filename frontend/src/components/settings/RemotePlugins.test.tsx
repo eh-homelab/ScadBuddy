@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { isUserOnly } from '../../agent/dom'
 import { aiPlugins, type RemotePlugin } from '../../api/aiPlugins'
 import { aiCapabilities, type RefreshResult } from '../../api/capabilities'
-import { setListedToolNames, setRemotePluginProblem } from '../../mocks/aiPlugins'
+import { setListedToolNames, setRemotePluginAccess, setRemotePluginProblem } from '../../mocks/aiPlugins'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { RemotePluginsPanel } from './RemotePlugins'
@@ -84,6 +84,8 @@ describe('RemotePluginsPanel', () => {
   })
 
   it('tests the connection, then lists each tool with its access (a renamed tool offers off and outward)', async () => {
+    // Switched on: while it is off, every row says that instead of its own reason (#4757).
+    setRemotePluginAccess('hindsight', { enabled: true })
     const { user } = renderPage(<RemotePluginsPanel />)
     const card = await endpoint()
     await tested(user, card)

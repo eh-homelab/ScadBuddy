@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
@@ -16,10 +17,24 @@ import { FetchError, GitFetcher } from '../src/plugins/packages/git.js'
 import { normaliseGitUrl, normaliseRepoPath, validateRef, validateSource } from '../src/plugins/packages/source.js'
 import type { PackagePin } from '../src/plugins/packages/store.js'
 import { isInside } from '../src/harness/plugins.js'
-import { capProblems, frontmatter, isAllowlistedTool, markdownIn, skillNames, toolNames, vetPackage } from '../src/plugins/packages/vet.js'
+import {
+  capProblems,
+  frontmatter,
+  cutName,
+  hookId,
+  HOOK_URL_CAP,
+  isAllowlistedTool,
+  markdownIn,
+  packageItems,
+  skillNames,
+  toolNames,
+  vetPackage,
+} from '../src/plugins/packages/vet.js'
 import { PluginError } from '../src/plugins/registry.js'
 import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import { type Files, gitMissing, gitRepo, GREETER, localFetcher, resolver, type TestRepo } from './support/gitRepo.js'
+import { LISTING_CAPS } from '../src/access/listings.js'
+import { ALIAS_KEY_CAP } from '../src/access/items.js'
 import { packageServerSource } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import { harnessTierOf } from '../src/harness/run.js'
@@ -304,6 +319,199 @@ describe('vetting a package', () => {
   })
 })
 
+describe("a package's items (#4757)", () => {
+  const STOP = { type: 'prompt', prompt: 'Did the user get greeted? $ARGUMENTS' }
+  const hooksFile = (groups: unknown) => ({ 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: groups } }) })
+  const sha16 = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16)
+
+  it('gives each hook an id from its event, matcher and handler', () => {
+    const plain = vetPackage(tree(GREETER)).review!.hooks
+    // Canonical JSON: keys sorted at every level, no whitespace, an absent matcher left out.
+    const expected = sha16(JSON.stringify({ event: 'Stop', handler: { prompt: STOP.prompt, type: 'prompt' } }))
+    expect(plain).toEqual([{ event: 'Stop', type: 'prompt', id: expected }])
+    expect(hookId('Stop', undefined, STOP)).toBe(expected)
+
+    const matched = vetPackage(tree({ ...GREETER, ...hooksFile([{ matcher: 'Bash', hooks: [{ ...STOP, timeout: 30 }] }]) })).review!.hooks
+    expect(matched).toEqual([
+      { event: 'Stop', type: 'prompt', matcher: 'Bash', id: sha16(`{"event":"Stop","handler":{"prompt":${JSON.stringify(STOP.prompt)},"timeout":30,"type":"prompt"},"matcher":"Bash"}`) },
+    ])
+    expect(matched[0]!.id).toMatch(/^[0-9a-f]{16}$/)
+    expect(hookId('Stop', 'Bash', { ...STOP, timeout: 30 })).toBe(matched[0]!.id)
+    expect(hookId('SubagentStop', 'Bash', { ...STOP, timeout: 30 })).not.toBe(matched[0]!.id)
+    expect(hookId('Stop', 'Read', { ...STOP, timeout: 30 })).not.toBe(matched[0]!.id)
+  })
+
+  it("a hook's id ignores key order and whitespace", () => {
+    const pretty = vetPackage(
+      tree({
+        ...GREETER,
+        'hooks/hooks.json': `{\n  "hooks": {\n    "Stop": [ { "hooks": [ { "prompt": ${JSON.stringify(STOP.prompt)},\n "type": "prompt" } ] } ]\n  }\n}\n`,
+      }),
+    ).review!.hooks
+    expect(pretty[0]!.id).toBe(vetPackage(tree(GREETER)).review!.hooks[0]!.id)
+    expect(hookId('Stop', { b: 1, a: [2, { d: 3, c: 4 }] }, STOP)).toBe(hookId('Stop', { a: [2, { c: 4, d: 3 }], b: 1 }, { prompt: STOP.prompt, type: 'prompt' }))
+  })
+
+  it('refuses a hook url past the cap and stores none, while the egress check sees it whole', () => {
+    const url = `https://hooks.example/${'u'.repeat(HOOK_URL_CAP)}`
+    const v = vetPackage(tree({ ...GREETER, ...hooksFile([{ hooks: [{ type: 'http', url }] }]) }))
+    const hook = v.review!.hooks[0]!
+    expect(hook.url).toBeUndefined()
+    expect(hook.id).toBe(hookId('Stop', undefined, { type: 'http', url }))
+    expect(v.review!.cut).toEqual(['hooks/hooks.json Stop url'])
+    expect(v.review!.refused).toEqual([`hooks/hooks.json: Stop http hook url is longer than ${HOOK_URL_CAP} characters`])
+    expect(v.fatal).toEqual([])
+    expect(v.endpoints).toContainEqual({ what: 'hooks/hooks.json Stop hook', url })
+    const atCap = `https://hooks.example/${'u'.repeat(HOOK_URL_CAP - 'https://hooks.example/'.length)}`
+    expect(vetPackage(tree({ ...GREETER, ...hooksFile([{ hooks: [{ type: 'http', url: atCap }] }]) })).review!.hooks[0]!.url).toBe(atCap)
+  })
+
+  it('names each cut once, however many hooks it hits', () => {
+    const event = 'E'.repeat(300)
+    const url = `https://hooks.example/${'u'.repeat(HOOK_URL_CAP)}`
+    const hook = { matcher: 'm'.repeat(2_000), hooks: [{ type: 'http', url }] }
+    const review = vetPackage(tree({ ...GREETER, 'hooks/hooks.json': JSON.stringify({ hooks: { [event]: [hook, hook] } }) })).review!
+    expect(review.hooks).toHaveLength(2)
+    const shown = cutName(event)
+    expect(shown).toBe('E'.repeat(LISTING_CAPS.name))
+    expect(review.cut).toEqual([`hooks/hooks.json ${shown} event`, `hooks/hooks.json ${shown} matcher`, `hooks/hooks.json ${shown} url`])
+  })
+
+  it("a hook's id changes with its url", () => {
+    const http = (url: string) => vetPackage(tree({ ...GREETER, ...hooksFile([{ hooks: [{ type: 'http', url }] }]) })).review!.hooks[0]!
+    const a = http('https://hooks.example/a')
+    const b = http('https://hooks.example/b')
+    expect(a.url).toBe('https://hooks.example/a')
+    expect(a.id).not.toBe(b.id)
+  })
+
+  it('two byte-identical hooks share an id', () => {
+    const hooks = vetPackage(tree({ ...GREETER, ...hooksFile([{ hooks: [STOP] }, { hooks: [STOP] }]) })).review!.hooks
+    expect(hooks).toHaveLength(2)
+    expect(hooks[0]!.id).toMatch(/^[0-9a-f]{16}$/)
+    expect(hooks[0]!.id).toBe(hooks[1]!.id)
+  })
+
+  it("records each skill's and subagent's frontmatter description", () => {
+    const review = vetPackage(
+      tree({ ...GREETER, 'skills/bare/SKILL.md': 'No frontmatter.\n', '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', commands: { shout: { content: '---\ndescription: Shouts.\n---\nShout.\n' } } }) }),
+    ).review!
+    expect(review.described).toEqual({
+      'skill:hello': 'Greets the user by name.',
+      'skill:bare': null,
+      'skill:shout': 'Shouts.',
+      'subagent:helper': 'Helps.',
+    })
+    expect(vetPackage(tree(GREETER)).review!.described).toEqual({
+      'skill:hello': 'Greets the user by name.',
+      'skill:wave': 'Waves.',
+      'subagent:helper': 'Helps.',
+    })
+  })
+
+  it('keeps a skill and a subagent of one name apart, each with its own description', () => {
+    const review = vetPackage(
+      tree({ ...GREETER, 'skills/x/SKILL.md': '---\ndescription: Formats code.\n---\n', 'agents/x.md': '---\ndescription: Deletes branches.\n---\n' }),
+    ).review!
+    expect(review.described!['skill:x']).toBe('Formats code.')
+    expect(review.described!['subagent:x']).toBe('Deletes branches.')
+  })
+
+  it('caps the package text a review stores, and names what it cut', () => {
+    const long = 'd'.repeat(10_000)
+    const v = vetPackage(
+      tree({
+        ...GREETER,
+        'skills/x/SKILL.md': `---\ndescription: ${long}\n---\n`,
+        'agents/y.md': `---\nname: ${'n'.repeat(200)}\n---\n`,
+        'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ matcher: 'm'.repeat(2_000), hooks: [STOP] }], ['E'.repeat(300)]: [{ hooks: [STOP] }] } }),
+      }),
+    )
+    const review = v.review!
+    expect(review.described!['skill:x']).toBe('d'.repeat(LISTING_CAPS.description))
+    expect(review.hooks[0]!.matcher).toBe('m'.repeat(LISTING_CAPS.title))
+    // The id is the hook's own, uncut: a cut never makes two hooks one.
+    expect(review.hooks[0]!.id).toBe(hookId('Stop', 'm'.repeat(2_000), STOP))
+    expect(review.hooks[1]!.event).toBe('E'.repeat(LISTING_CAPS.name))
+    expect(packageItems(tree({ 'hooks/hooks.json': JSON.stringify({ hooks: { ['E'.repeat(300)]: [{ hooks: [STOP] }] } }) }), {}).hooks[0]!.event).toBe(
+      'E'.repeat(LISTING_CAPS.name),
+    )
+    expect(Object.keys(review.aliases!)).toEqual([`subagent:${'n'.repeat(LISTING_CAPS.name)}`])
+    expect(review.cut).toEqual(['skill:x description', 'subagent:y name', 'hooks/hooks.json Stop matcher', `hooks/hooks.json ${'E'.repeat(LISTING_CAPS.name)} event`])
+    // A frontmatter name past the cap is refused (allowable): a cut name could not match a call.
+    expect(review.refused!.join('\n')).toMatch(/agents\/y\.md: frontmatter "name" is longer than 128 characters/)
+  })
+
+  it('packageItems finds a manifest-named skill directory and a nested subagent file', () => {
+    const root = tree({
+      ...GREETER,
+      '.claude-plugin/plugin.json': JSON.stringify({ name: 'greeter', skills: ['./extra/solo'] }),
+      'extra/solo/SKILL.md': '---\ndescription: Alone.\n---\n',
+      'agents/review/deep.md': '---\ndescription: Reviews deeply.\n---\n',
+    })
+    const items = packageItems(root, { name: 'greeter', skills: ['./extra/solo'] })
+    expect(Object.fromEntries(items.skills)).toEqual({ hello: ['skills/hello'], solo: ['extra/solo'], wave: ['commands/wave.md'] })
+    expect(Object.fromEntries(items.subagents)).toEqual({ helper: 'agents/helper.md', 'review:deep': 'agents/review/deep.md' })
+    expect(items.hooks).toEqual([{ id: hookId('Stop', undefined, STOP), event: 'Stop', where: 'hooks/hooks.json' }])
+    expect(vetPackage(root).review!.agents).toEqual(['greeter:helper', 'greeter:review:deep'])
+  })
+
+  it('lists a command as a skill item, one with a skill of its name', () => {
+    const files = { ...GREETER, 'commands/hello.md': '---\ndescription: Says hello as a command.\n---\n' }
+    const items = packageItems(tree(files), {})
+    expect(items.skills.get('hello')).toEqual(['skills/hello', 'commands/hello.md'])
+    expect(items.skills.get('wave')).toEqual(['commands/wave.md'])
+    const inline = { name: 'greeter', commands: { shout: { content: 'Shout.' } } }
+    expect(packageItems(tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify(inline) }), inline).skills.get('shout')).toEqual([
+      '.claude-plugin/plugin.json#commands.shout',
+    ])
+    // One description per name: the skill's.
+    expect(vetPackage(tree(files)).review!.described!['skill:hello']).toBe('Greets the user by name.')
+  })
+
+  it("records a subagent's frontmatter name where it differs from its file", () => {
+    const root = tree({
+      ...GREETER,
+      'agents/review/deep.md': '---\nname: deep-review\ndescription: Reviews deeply.\n---\n',
+      'skills/hi/SKILL.md': '---\nname: greet\ndescription: Hi.\n---\n',
+    })
+    expect(Object.fromEntries(packageItems(root, {}).aliases)).toEqual({ 'subagent:deep-review': ['subagent:review:deep'], 'skill:greet': ['skill:hi'] })
+    expect(vetPackage(root).review!.aliases).toEqual({ 'subagent:deep-review': ['subagent:review:deep'], 'skill:greet': ['skill:hi'] })
+    expect(vetPackage(tree(GREETER)).review!.aliases).toEqual({})
+  })
+
+  it("keeps aliases per kind: a subagent's name never names a skill", () => {
+    const root = tree({
+      ...GREETER,
+      'agents/review/deep.md': '---\nname: deep-review\n---\n',
+      'skills/deep-review/SKILL.md': '---\ndescription: A real skill.\n---\n',
+    })
+    const aliases = packageItems(root, {}).aliases
+    expect(aliases.get('subagent:deep-review')).toEqual(['subagent:review:deep'])
+    expect(aliases.has('skill:deep-review')).toBe(false)
+  })
+
+  it('records every item that declares one name, not the first', () => {
+    const root = tree({
+      ...GREETER,
+      'agents/a.md': '---\nname: twin\n---\n',
+      'agents/b.md': '---\nname: twin\n---\n',
+      // Skill dir `a` calls itself `b` while a skill dir `b` exists: a call `b` checks both.
+      'skills/a/SKILL.md': '---\nname: b\n---\n',
+      'skills/b/SKILL.md': '---\nname: b\n---\n',
+    })
+    const aliases = packageItems(root, {}).aliases
+    expect(aliases.get('subagent:twin')).toEqual(['subagent:a', 'subagent:b'])
+    expect(aliases.get('skill:b')).toEqual(['skill:a'])
+  })
+
+  it("names a manifest hook file as a path relative to the root, without './'", () => {
+    const manifest = { name: 'greeter', hooks: ['./hooks/extra.json'] }
+    const root = tree({ ...GREETER, '.claude-plugin/plugin.json': JSON.stringify(manifest), 'hooks/extra.json': JSON.stringify({ hooks: { Stop: [{ hooks: [STOP] }] } }) })
+    expect(packageItems(root, manifest).hooks.map((h) => h.where)).toEqual(['hooks/hooks.json', 'hooks/extra.json'])
+  })
+})
+
 describe('containment of manifest paths', () => {
   it('isInside is a path-boundary test, not a string prefix', () => {
     const root = path.join(os.tmpdir(), 'pkg', 'greeter')
@@ -462,6 +670,26 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
 
     const allowed = await loadPackagesForRun({ enabledPins: () => Promise.resolve([{ ...pin, allowRefused: true }]) }, installer)
     expect(allowed).toMatchObject({ paths: [], allowedPaths: [installer.cacheDir(pin)], problems: [] })
+  })
+
+  it('never loads a pin approved before the name bound, allowed or not, and says so (Task 6 re-review R7)', async () => {
+    repos.greeter = gitRepo(GREETER)
+    const source = validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })
+    const base = pinOf(await installer.prepare(source))
+    const deep = `---\nname: ${'deep_'.repeat(220)}\ndescription: d\n---\nD.\n`
+    const commit = repos.greeter.commitFiles({ 'agents/deep.md': deep })
+    await expect(installer.prepare(source)).rejects.toThrow(`longer than ${ALIAS_KEY_CAP}`)
+    // The pin an older replica would have approved: the same files, hashed as they are.
+    const tree = mkdtempSync(path.join(os.tmpdir(), 'pkg-tree-'))
+    temps.push(tree)
+    for (const [rel, text] of Object.entries({ ...GREETER, 'agents/deep.md': deep })) {
+      mkdirSync(path.dirname(path.join(tree, rel)), { recursive: true })
+      writeFileSync(path.join(tree, rel), text)
+    }
+    const pin = { ...base, commit, contentHash: (await hashTree(tree)).hash, allowRefused: true }
+    const loaded = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin]) }, installer)
+    expect(loaded).toMatchObject({ paths: [], allowedPaths: [], loaded: [] })
+    expect(loaded.problems.join()).toMatch(new RegExp(`greeter was not loaded: .*longer than ${ALIAS_KEY_CAP}`))
   })
 
   it('refuses outright what no approval can allow', async () => {
@@ -706,6 +934,44 @@ describe("a package's MCP servers on ai_access (#2171)", () => {
       const plain = await forwardPackageServers([pkg], forwarder, async () => ['127.0.0.1'])
       expect(plain.plugins[0]).toMatchObject({ toolTiers: {}, disabledTools: [] })
       plain.release()
+    } finally {
+      await forwarder.close()
+      await mcp.close()
+    }
+  })
+
+  // #4757 security review: the forwarder refuses every call of a switched-off server, on
+  // whichever path reaches it, and a failed read of the switch refuses the call too.
+  it("the forwarder refuses a call while the server's `*` is off, and when the switch cannot be read", async () => {
+    const mcp = await startFakeMcp({ extraTools: ['a'] })
+    const forwarder = await PluginForwarder.start()
+    try {
+      const dir = tree({
+        '.claude-plugin/plugin.json': JSON.stringify({ name: 'notes' }),
+        '.mcp.json': JSON.stringify({ mcpServers: { api: { type: 'http', url: mcp.url } } }),
+      })
+      const pkg = { name: 'notes', contentHash: (await hashTree(dir)).hash, dir, allowed: false, builtinTools: [] }
+      const { access, rows } = memoryAccess()
+      const state = { fail: false }
+      const resolver = new AccessResolver({
+        rows: (sources) => (state.fail ? Promise.reject(new Error('db down')) : access.rows(sources)),
+      })
+      const servers = await forwardPackageServers([pkg], forwarder, async () => ['127.0.0.1'], { access: resolver })
+      const client = await connectHttp(servers.plugins[0]!.url)
+      try {
+        await client.callTool({ name: 'a', arguments: { text: '1' } })
+        rows.push({ source: packageServerSource('notes', 'api'), item: '*', access: 'off', updated_by: 'test' })
+        await expect(client.callTool({ name: 'a', arguments: { text: '2' } })).rejects.toThrow('ScadBuddy: mcp__plugin_notes_api__a is disabled in Settings → Tools & plugins; the user can turn it back on there')
+        rows.length = 0
+        state.fail = true
+        await expect(client.callTool({ name: 'a', arguments: { text: '3' } })).rejects.toThrow(/could not be read; the call is refused/)
+        state.fail = false
+        await client.callTool({ name: 'a', arguments: { text: '4' } })
+        expect(mcp.calls).toEqual(['a:1', 'a:4'])
+      } finally {
+        await client.close()
+        servers.release()
+      }
     } finally {
       await forwarder.close()
       await mcp.close()

@@ -146,14 +146,16 @@ describe('remote MCP plugins as capability sources', () => {
         default: 'outward',
         default_note: null,
         suggested: 'read',
-        access: 'outward',
+        // The plugin is off until switched on: every tool reads off, keeping its own access.
+        access: 'off',
+        own_access: 'outward',
         overridden: false,
         missing: false,
         allowed: null,
         fixed: null,
-        reason: null,
+        reason: 'Off while "hs" is switched off',
       },
-      expect.objectContaining({ id: 'retain', label: 'retain', description: 'Stores a memory', suggested: null, access: 'outward' }),
+      expect.objectContaining({ id: 'retain', label: 'retain', description: 'Stores a memory', suggested: null, access: 'off', own_access: 'outward' }),
     ])
   })
 
@@ -167,7 +169,7 @@ describe('remote MCP plugins as capability sources', () => {
     })
     const source = await caps.source('remote:hs')
     expect(source.listed_at).toBeNull()
-    expect(source.items.map((i) => [i.id, i.label, i.description, i.access, i.overridden, i.missing])).toEqual([
+    expect(source.items.map((i) => [i.id, i.label, i.description, i.own_access, i.overridden, i.missing])).toEqual([
       ['drop_bank', 'drop_bank', null, 'off', true, true],
       ['recall', 'recall', null, 'read', true, true],
     ])
@@ -193,7 +195,8 @@ describe('remote MCP plugins as capability sources', () => {
     const { caps, setToolAccess } = setup({ listings: { 'remote:hs': listing([{ name: 'files.list', annotations: { readOnlyHint: true } }]) } })
     const view = item(await caps.source('remote:hs'), 'files.list')
     const reason = 'Claude Code renames this tool, so it cannot take a tier: it asks first, or is off'
-    expect(view).toMatchObject({ harness_name: 'mcp__hs__files_list', allowed: ['off', 'outward'], reason, fixed: null, access: 'outward' })
+    // The plugin is off: the switch's reason shows; a refusal still gives the tool's own.
+    expect(view).toMatchObject({ harness_name: 'mcp__hs__files_list', allowed: ['off', 'outward'], reason: 'Off while "hs" is switched off', fixed: null, own_access: 'outward' })
     expect(await refusal(caps.setItem('remote:hs', 'files.list', 'read', ctx))).toEqual({ status: 409, message: reason })
     expect(setToolAccess).not.toHaveBeenCalled()
     await caps.setItem('remote:hs', 'files.list', 'off', ctx)
@@ -239,11 +242,11 @@ describe('remote MCP plugins as capability sources', () => {
     expect(item(await caps.source('remote:hs'), 'recall')).toMatchObject({ access: 'off', overridden: true })
     await caps.setItem('remote:hs', 'recall', 'read', ctx)
     expect(await repo.get('hs')).toMatchObject({ disabled_tools: [], tool_tiers: { recall: 'read' } })
-    expect(item(await caps.source('remote:hs'), 'recall')).toMatchObject({ access: 'read', overridden: true })
+    expect(item(await caps.source('remote:hs'), 'recall')).toMatchObject({ own_access: 'read', overridden: true })
     // Its default, outward, is a reset.
     await caps.setItem('remote:hs', 'recall', 'outward', ctx)
     expect(await repo.get('hs')).toMatchObject({ disabled_tools: [], tool_tiers: {} })
-    expect(item(await caps.source('remote:hs'), 'recall')).toMatchObject({ access: 'outward', overridden: false })
+    expect(item(await caps.source('remote:hs'), 'recall')).toMatchObject({ own_access: 'outward', overridden: false })
   })
 
   it("passes the UI's context to setToolAccess", async () => {
@@ -254,6 +257,22 @@ describe('remote MCP plugins as capability sources', () => {
     expect(setToolAccess).toHaveBeenLastCalledWith('hs', 'retain', null, ctx)
     await caps.setItem('remote:hs', 'retain', 'read', ctx)
     expect(rows).toEqual([{ source: 'remote:hs', item: 'retain', access: 'read', updated_by: 'browser:browser' }])
+  })
+
+  it('a remote tool reads off while its plugin is switched off', async () => {
+    const { caps } = setup({
+      rows: [
+        { source: 'remote:hs', item: SOURCE_ITEM, access: 'on', updated_by: 'browser:browser' },
+        { source: 'remote:hs', item: 'retain', access: 'read', updated_by: 'browser:browser' },
+      ],
+    })
+    const on = await caps.source('remote:hs')
+    expect(item(on, 'retain')).toMatchObject({ access: 'read', own_access: 'read', reason: null })
+    const off = await caps.setEnabled('remote:hs', false, ctx)
+    expect(item(off, 'retain')).toMatchObject({ access: 'off', own_access: 'read', overridden: true, reason: 'Off while "hs" is switched off' })
+    expect(item(off, 'recall')).toMatchObject({ access: 'off', own_access: 'outward', overridden: false })
+    const [listed] = await caps.tree()
+    expect(item(listed!, 'retain')).toMatchObject({ access: 'off', own_access: 'read' })
   })
 
   it('switching the source on calls update({ enabled: true })', async () => {
@@ -277,7 +296,7 @@ describe('remote MCP plugins as capability sources', () => {
     })
     expect(item(source, 'a.b')).toMatchObject({ missing: true, access: 'off' })
     await caps.resetItem('remote:hs', 'a.b', ctx)
-    expect(item(await caps.source('remote:hs'), 'a_b')).toMatchObject({ access: 'outward', overridden: false, reason: null })
+    expect(item(await caps.source('remote:hs'), 'a_b')).toMatchObject({ own_access: 'outward', overridden: false })
   })
 
   it('an unknown plugin is 404', async () => {

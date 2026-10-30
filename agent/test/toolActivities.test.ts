@@ -21,6 +21,8 @@ import { PendingActionStore } from '../src/tools/pending.js'
 import { printTools } from '../src/tools/print.js'
 import { defineTool, json, runToolWithOutcome, ToolError, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { BACKEND, services } from './helpers/mcp.js'
+import { AccessResolver } from '../src/access/resolver.js'
+import { memoryAccess } from './support/memoryAccess.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), run in
 // @temporalio/testing's MockActivityEnvironment (spec §8).
@@ -134,7 +136,26 @@ async function failure(promise: Promise<unknown>): Promise<ApplicationFailure> {
 
 describe('tool activities', () => {
   it("registers one activity per tool, under its name, a flow's tier activity (#2704) and a durable call's (#2171)", () => {
-    expect(Object.keys(harness().activities).sort()).toEqual(['boom', 'flow_tool_tier', 'send', 'slow', 'tool_tier', 'whoami'])
+    expect(Object.keys(harness().activities).sort()).toEqual(['boom', 'builtin_tier', 'flow_tool_tier', 'send', 'slow', 'tool_tier', 'whoami'])
+  })
+
+  it('builtin_tier answers the stricter access of the packages it is given, an unset one outward', async () => {
+    const { access } = memoryAccess([
+      { source: 'package:a', item: 'builtin:Bash', access: 'write', updated_by: 'browser:b' },
+      { source: 'package:c', item: 'builtin:Bash', access: 'read', updated_by: 'browser:b' },
+      { source: 'package:d', item: 'builtin:Bash', access: 'off', updated_by: 'browser:b' },
+    ])
+    const tier = harness({ access: new AccessResolver(access) }).activities.builtin_tier!
+    // A names Bash at write, B names it unset: outward, as a classic turn's seam answers.
+    expect(await env().run(tier, { tool: 'Bash', packages: ['a', 'b'] })).toEqual({ tier: 'outward' })
+    expect(await env().run(tier, { tool: 'Bash', packages: ['a', 'c'] })).toEqual({ tier: 'write' })
+    expect(await env().run(tier, { tool: 'Bash', packages: ['c'] })).toEqual({ tier: 'read' })
+    expect(await env().run(tier, { tool: 'Bash', packages: ['a', 'd'] })).toEqual({ tier: 'off' })
+    expect(await env().run(tier, { tool: 'Bash', packages: [] })).toEqual({ tier: 'outward' })
+    // Without a resolver every built-in is outward.
+    expect(await env().run(harness().activities.builtin_tier!, { tool: 'Bash', packages: ['c'] })).toEqual({ tier: 'outward' })
+    expect((await failure(env().run(tier, { tool: 'Bash' }))).type).toBe('ToolError')
+    expect((await failure(env().run(tier, { tool: 'Bash', packages: [1] }))).type).toBe('ToolError')
   })
 
   it("runs the tool as the session's owner, in the session, and returns its content", async () => {

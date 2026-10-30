@@ -15,7 +15,7 @@ import {
 } from './source.js'
 import type { PackagePin, PackageRepo, PreparedPackage } from './store.js'
 import { builtInNamed } from './builtins.js'
-import { capProblems, type Endpoint, vetPackage } from './vet.js'
+import { capProblems, type Endpoint, itemsOfPlugin, LISTING_PACKAGES_BUDGET, listedPackageSize, type PackageReview, vetPackage } from './vet.js'
 
 // Installing a plugin package, and turning its pin back into a directory for a
 // harness run (issue #297, "Installing a plugin"; the SDK "loads plugins by
@@ -378,6 +378,19 @@ export class PackageInstaller {
     return this.serial(pin.name, async () => readFile(path.join(await this.verifiedCopy(pin), rel)))
   }
 
+  /**
+   * `pin`'s review vetted from its cached copy (#4757), read only: undefined unless a copy that
+   * hashes to the pin is already cached. Nothing is fetched, made current or pruned, and no
+   * allow rule applies (a review needs no allowance). Runs in the package's queue, as `readFile`.
+   */
+  review(pin: PackagePin): Promise<PackageReview | undefined> {
+    return this.serial(pin.name, async () => {
+      const dir = this.cacheDir(pin)
+      if (!(await this.cacheMatches(dir, pin))) return undefined
+      return vetPackage(dir, pin.name).review
+    })
+  }
+
   /** The cached directory of `pin` when every file hashes to it, else fetched again at the pinned commit. */
   private async verifiedCopy(pin: PackagePin): Promise<string> {
     const dir = this.cacheDir(pin)
@@ -478,7 +491,9 @@ export type PackagesForRun = {
 /**
  * The enabled packages for one harness run, each materialised and verified.
  * A package that cannot be loaded is left out and named in `problems`; the run
- * goes ahead without it (as for remote MCP plugins, registry.ts).
+ * goes ahead without it (as for remote MCP plugins, registry.ts). So is one that would take
+ * the turn's packages past `LISTING_PACKAGES_BUDGET` (#4757 Task 6 re-review R9), in the
+ * pins' order (by name): both runtimes load through here, so both leave out the same ones.
  */
 export async function loadPackagesForRun(
   store: Pick<PackageRepo, 'enabledPins'>,
@@ -490,6 +505,7 @@ export async function loadPackagesForRun(
   const problems: string[] = []
   const releases: (() => void)[] = []
   const loaded: LoadedPackage[] = []
+  let listed = 0
   for (const pin of await store.enabledPins()) {
     // A package stored under a built-in's name before builtins.ts (a reserved name
     // was allowable) would shadow the built-in: never loaded, only removable.
@@ -499,6 +515,13 @@ export async function loadPackagesForRun(
     }
     try {
       const { dir, release, builtinTools: wanted } = await installer.acquire(pin)
+      const size = listedPackageSize(pin.name, itemsOfPlugin(dir, pin.name), pin.allowRefused ? wanted : [])
+      if (listed + size > LISTING_PACKAGES_BUDGET) {
+        release()
+        problems.push(`plugin package ${pin.name} was not loaded: the turn's packages would take more than ${LISTING_PACKAGES_BUDGET} bytes of its listing with it`)
+        continue
+      }
+      listed += size
       if (pin.allowRefused) {
         allowedPaths.push(dir)
         for (const tool of wanted) builtinTools.add(tool)
@@ -542,4 +565,103 @@ export async function warmPackages(
   const run = await loadPackagesForRun(store, installer)
   run.release()
   return run.problems
+}
+
+/** Rejects after `ms`: a read Settings waits on is held to a short time. */
+function within<T>(ms: number, work: Promise<T>, what: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} took more than ${ms} ms`)), ms)
+  })
+  return Promise.race([work, late]).finally(() => clearTimeout(timer))
+}
+
+/**
+ * `pin`'s review vetted from its cached copy (#4757), for one stored by an older vet: read only
+ * (`PackageInstaller.review`), within `waitMs`. Rejects when no verified copy is cached yet.
+ */
+export async function verifiedReview(installer: Pick<PackageInstaller, 'review'>, pin: PackagePin, waitMs = 2_000): Promise<PackageReview> {
+  const review = await within(waitMs, installer.review(pin), `reading the review of plugin package ${pin.name}`)
+  if (!review) throw new PluginError(`plugin package ${pin.name} has no verified copy cached yet`, 503)
+  return review
+}
+
+/**
+ * What a turn would make of the enabled packages now (#4757). `problems`: each one it would not
+ * load (refused at load, past the listing budget, named as a built-in), with why; `checking`:
+ * each one not yet checked (a fetch into an empty cache, a pin set that changed), which counts
+ * as not loadable until the check says so.
+ */
+export type LoadCheck = { problems: ReadonlyMap<string, string>; checking: ReadonlySet<string> }
+
+const pinKey = (p: PackagePin): string => JSON.stringify([p.name, p.contentHash, p.allowRefused === true])
+
+/**
+ * `LoadCheck` of the enabled pins, read with `loadPackagesForRun` as a turn loads them, and kept
+ * while the enabled pins are the same, at most `maxAgeMs` (only an endpoint's egress answer may
+ * go stale meanwhile). A read that takes longer than `waitMs`, or fails, answers the last
+ * finished read for the pins it covers (same name, hash and allowance) and `checking` for the
+ * rest: an unknown state is never shown as loadable.
+ */
+export function packageLoadCheck(
+  store: Pick<PackageRepo, 'enabledPins'>,
+  installer: Pick<PackageInstaller, 'acquire'>,
+  options: { maxAgeMs?: number; waitMs?: number } = {},
+): () => Promise<LoadCheck> {
+  const maxAgeMs = options.maxAgeMs ?? 60_000
+  const waitMs = options.waitMs ?? 2_000
+  type Done = { pins: ReadonlySet<string>; problems: ReadonlyMap<string, string> }
+  let kept: { key: string; at: number; done: Promise<Done> } | undefined
+  let last: Done = { pins: new Set(), problems: new Map() }
+  return async () => {
+    const pins = await store.enabledPins()
+    const key = JSON.stringify(pins.map(pinKey))
+    if (!kept || kept.key !== key || performance.now() - kept.at >= maxAgeMs) {
+      const done = (async (): Promise<Done> => {
+        const run = await loadPackagesForRun({ enabledPins: () => Promise.resolve(pins) }, installer)
+        run.release()
+        const loaded = new Set(run.loaded.map((p) => p.name))
+        const problems = new Map<string, string>()
+        for (const { name } of pins) {
+          if (loaded.has(name)) continue
+          const said = run.problems.find((p) => p.startsWith(`plugin package ${name} was not loaded:`))
+          problems.set(name, said ?? `plugin package ${name} was not loaded`)
+        }
+        return { pins: new Set(pins.map(pinKey)), problems }
+      })()
+      kept = { key, at: performance.now(), done }
+      done.then(
+        (d) => {
+          last = d
+        },
+        () => {
+          if (kept?.done === done) kept = undefined
+        },
+      )
+    }
+    let timer: NodeJS.Timeout | undefined
+    const waited = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), waitMs)
+    })
+    let done: Done | undefined
+    try {
+      done = await Promise.race([kept.done, waited])
+    } catch {
+      // A failed read answers as one that has not finished.
+      done = undefined
+    } finally {
+      clearTimeout(timer)
+    }
+    const known = done ?? last
+    const problems = new Map<string, string>()
+    const checking = new Set<string>()
+    for (const pin of pins) {
+      if (!known.pins.has(pinKey(pin))) checking.add(pin.name)
+      else {
+        const problem = known.problems.get(pin.name)
+        if (problem !== undefined) problems.set(pin.name, problem)
+      }
+    }
+    return { problems, checking }
+  }
 }

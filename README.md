@@ -1230,6 +1230,15 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   one gets Microsoft's Playwright MCP server, deployed beside ScadBuddy and added
   as a plugin endpoint below
   ([`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)).
+- **Plugin packages (#297, #4757)**: a Claude plugin (skills, subagents, hooks,
+  `.mcp.json`) fetched from git at a pinned commit and approved by exact commit and
+  content hash. You install, approve and re-pin a package, and set its items, in
+  Settings → Tools & plugins → Packages: its switch, each hook, skill (its commands
+  among them) and subagent `on` or `off`, each built-in an allowed package names, and
+  each of its MCP servers with its tools. A change applies from the next call, in classic
+  and durable turns alike; a hook changes from the next turn. See
+  [`docs/ai/operating.md` §9](docs/ai/operating.md#9-plugin-packages-297), "Items and
+  switches".
 - **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
   harness". A plugin is a remote MCP server, stored in Postgres (`ai_plugins`,
   no files) and managed through `/api/v1/ai/plugins` (below). The session

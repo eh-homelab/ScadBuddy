@@ -23,7 +23,7 @@ function assembly(): AssembledTurn {
       credentialId: 'c1',
       credentialUpdatedAt: '1',
       model: null,
-      ownPlugin: false,
+      ownPlugin: null,
       plugins: [],
       packageHashes: [],
       allowedPackageHashes: [],

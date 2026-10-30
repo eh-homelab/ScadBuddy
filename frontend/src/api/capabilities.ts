@@ -36,9 +36,14 @@ export interface ItemView {
   default: Access | null
   default_note: string | null
   suggested: Access | null
-  /** The effective access; `null` only when `default` is `null` and no row takes effect. */
+  /**
+   * The effective access: `off` while the item's source, or the source above it, is switched
+   * off; `null` only when `default` is `null` and no row takes effect.
+   */
   access: Access | null
-  /** A stored row takes effect. */
+  /** The item's own access, its source's switch not folded in: what its select shows and edits, and Reset resets. */
+  own_access: Access | null
+  /** The item's own stored row takes effect. */
   overridden: boolean
   /** Stored access for a tool the last listing does not name. */
   missing: boolean
@@ -62,6 +67,10 @@ export interface SourceView {
   listed_at: string | null
   /** The stored listing is not every tool the source has. */
   truncated: boolean
+  /** Why a turn does not load it although it is switched on (a package refused at load, #4757); its items say it too. */
+  problem: string | null
+  /** Whether a turn would load it is not known yet (#4757): its items read off meanwhile; read the source again shortly. */
+  checking: boolean
   items: ItemView[]
   children: SourceView[]
 }

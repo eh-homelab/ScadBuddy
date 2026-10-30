@@ -1,7 +1,10 @@
+import { createHash } from 'node:crypto'
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { isMap, isNode, isScalar, parseDocument, visit } from 'yaml'
 import { declaredConfigs, hookEvents, isInside, isOutsideProblem, noCommand, pluginProblems } from '../../harness/plugins.js'
+import { ALIAS_KEY_CAP, type CallPlugin, cutName, skillItem, subagentItem } from '../../access/items.js'
+import { LISTING_CAPS, storableCut } from '../../access/listings.js'
 import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 
 // Vetting a plugin PACKAGE (issue #297, "Review before enable"), on top of the
@@ -66,7 +69,11 @@ import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 // symlinks and submodules, the content hash, and the egress check on every
 // URL the package declares.
 
-export type ReviewHook = { event: string; type: string; url?: string }
+/**
+ * `id` is `hookId`'s: its access row is `hook:<event>:<id>` (#4757). Always set by this
+ * vetting; absent only in a review stored before it. `matcher` is its group's, when a string.
+ */
+export type ReviewHook = { event: string; type: string; url?: string; id?: string; matcher?: string }
 export type ReviewMcpServer = { name: string; type: string; url: string }
 
 /** What Settings shows before the admin approves a pin. */
@@ -80,6 +87,13 @@ export type PackageReview = {
   agents: string[]
   hooks: ReviewHook[]
   mcp_servers: ReviewMcpServer[]
+  /**
+   * Every other server the package declares, by name (#4757): a local (stdio) one, which loads
+   * only with `allow_refused`, or one no turn offers. With `mcp_servers`, every server a
+   * `package:<name>/mcp:<server>` row may be for (store.ts `pruneStaleRows`). Absent in an
+   * older review.
+   */
+  local_servers?: string[]
   /** Every Markdown and JSON file, for the admin to read. */
   files: string[]
   /**
@@ -94,6 +108,21 @@ export type PackageReview = {
    * `builtinTools`). Absent in an older review.
    */
   builtin_tools?: string[]
+  /**
+   * Each item's id (`skill:<name>` for a skill or a command, `subagent:<name>`) to its
+   * frontmatter `description`, cut to `LISTING_CAPS.description` (#4757). A skill and a
+   * command of one name are one item: the skill's description, else the command's.
+   * Absent in an older review.
+   */
+  described?: Record<string, string | null>
+  /**
+   * `PackageItems.aliases`: per kind, a frontmatter `name` to every item declaring it
+   * (`subagent:deep-review` → [`subagent:review:deep`]). Claude Code's `subagent_type` is
+   * the frontmatter name. Absent in an older review.
+   */
+  aliases?: Record<string, string[]>
+  /** What the caps cut from this review (`skill:x description`, `hooks/hooks.json Stop matcher`). */
+  cut?: string[]
 }
 
 export type Endpoint = { what: string; url: string }
@@ -319,14 +348,40 @@ function checkMarkdown(rel: string, text: string, problems: string[], builtins: 
   }
 }
 
-function hookHandlers(config: unknown): { event: string; handler: unknown }[] {
+/**
+ * JSON with every object's keys sorted, no whitespace, and values as `JSON.stringify`
+ * prints them (an `undefined` member left out, one in an array `null`). Not
+ * `gate/canonical.ts`, which refuses numbers: a hook's `timeout` is one.
+ */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map((v) => (v === undefined ? 'null' : canonicalJson(v))).join(',')}]`
+  if (isRecord(value)) {
+    const members = Object.keys(value)
+      .sort()
+      .filter((k) => value[k] !== undefined)
+      .map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`)
+    return `{${members.join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+/**
+ * A hook's id (#4757): the first 16 hex digits of the sha256 of the canonical JSON of
+ * `{ event, matcher, handler }`. Two byte-identical hooks share one, so one access covers both.
+ */
+export function hookId(event: string, matcher: unknown, handler: unknown): string {
+  return createHash('sha256').update(canonicalJson({ event, matcher, handler })).digest('hex').slice(0, 16)
+}
+
+function hookHandlers(config: unknown): { event: string; matcher: unknown; handler: unknown }[] {
   const { events } = hookEvents(config)
   if (!isRecord(events)) return []
-  const out: { event: string; handler: unknown }[] = []
+  const out: { event: string; matcher: unknown; handler: unknown }[] = []
   for (const [event, groups] of Object.entries(events)) {
     for (const group of Array.isArray(groups) ? groups : [groups]) {
       const handlers = isRecord(group) ? group.hooks : undefined
-      for (const handler of Array.isArray(handlers) ? handlers : [handlers]) out.push({ event, handler })
+      const matcher = isRecord(group) ? group.matcher : undefined
+      for (const handler of Array.isArray(handlers) ? handlers : [handlers]) out.push({ event, matcher, handler })
     }
   }
   return out
@@ -337,49 +392,322 @@ function mcpEntries(map: unknown): [string, unknown][] {
   return isRecord(servers) ? Object.entries(servers) : []
 }
 
-export function skillNames(root: string, manifest: Record<string, unknown>): string[] {
+/**
+ * The name of the skill a package root is (#4757): its package name with every character
+ * outside `[A-Za-z0-9_-]` as `-`. Claude Code 2.1.310 (SDK 0.3.310's bundled `claude`,
+ * function `_7t`, read with `strings -n 20`) names a skills path that is itself a skill by
+ * its frontmatter `name`, else by `basename(dir)`, with that replacement. A loaded copy's
+ * folder is named after the package (derived.ts), so this is the name Claude Code gives a
+ * root skill with no frontmatter `name`, and one key, whatever folder the review was built
+ * in; a frontmatter `name` is an alias of it.
+ */
+export function rootSkillName(packageName: string): string {
+  return packageName.replace(/[^a-zA-Z0-9_-]/g, '-')
+}
+
+/** The package's name for its root skill: the manifest's, else `fallbackName`, else the folder's. */
+function packageNameOf(root: string, manifest: Record<string, unknown>, fallbackName: string | undefined): string {
+  return typeof manifest.name === 'string' ? manifest.name : (fallbackName ?? path.basename(root))
+}
+
+/**
+ * Each skill's name to its directory, relative to `root` (`.` for a package that is one
+ * skill, named `rootSkillName`). The root is a skill without being listed only when the
+ * manifest's `skills` is falsy and there is no `skills` path at all, as Claude Code 2.1.310
+ * loads it (the plugin loader's `if(Se.skills){…}else if(!St&&…)`, `St` being whether
+ * `<root>/skills` exists; read as `_7t` above).
+ */
+function skillDirs(root: string, manifest: Record<string, unknown>, fallbackName?: string): Map<string, string> {
+  const rootName = rootSkillName(packageNameOf(root, manifest, fallbackName))
   const dirs = ['skills', ...(Array.isArray(manifest.skills) ? manifest.skills : [manifest.skills])]
     .filter((d): d is string => typeof d === 'string')
     .map((d) => d.replace(/^\.\/+/, '').replace(/\/+$/, '') || '.')
-  const names = new Set<string>()
+  const out = new Map<string, string>()
+  const add = (name: string, dir: string) => {
+    if (!out.has(name)) out.set(name, path.relative(root, dir) || '.')
+  }
   for (const dir of dirs) {
     const abs = path.resolve(root, dir)
     if (!isInside(root, abs) || !existsSync(abs) || !statSync(abs).isDirectory()) continue
     if (existsSync(path.join(abs, 'SKILL.md')) && dir !== 'skills') {
-      names.add(path.basename(dir === '.' ? root : abs))
+      add(dir === '.' ? rootName : path.basename(abs), abs)
       continue
     }
     for (const entry of readdirSync(abs, { withFileTypes: true })) {
-      if (entry.isDirectory() && existsSync(path.join(abs, entry.name, 'SKILL.md'))) names.add(entry.name)
+      if (entry.isDirectory() && existsSync(path.join(abs, entry.name, 'SKILL.md'))) add(entry.name, path.join(abs, entry.name))
     }
   }
-  if (names.size === 0 && manifest.skills === undefined && existsSync(path.join(root, 'SKILL.md'))) {
-    names.add(path.basename(root))
+  if (!manifest.skills && !existsSync(path.join(root, 'skills')) && existsSync(path.join(root, 'SKILL.md'))) {
+    add(rootName, root)
   }
-  return [...names].sort()
+  return out
 }
 
-export function markdownIn(root: string, value: unknown, fallback: string, recursive: boolean): string[] {
+export function skillNames(root: string, manifest: Record<string, unknown>, fallbackName?: string): string[] {
+  return [...skillDirs(path.resolve(root), manifest, fallbackName).keys()].sort()
+}
+
+/** Each Markdown item's name (a nested one `<dir>:<name>` when `recursive`) to its file, relative to `root`. */
+function markdownFiles(root: string, value: unknown, fallback: string, recursive: boolean): Map<string, string> {
   const entries = value === undefined ? [fallback] : Array.isArray(value) ? value : [value]
-  const out = new Set<string>()
+  const out = new Map<string, string>()
+  const add = (name: string, file: string) => {
+    if (!out.has(name)) out.set(name, path.relative(root, file))
+  }
   for (const entry of entries) {
     if (typeof entry !== 'string') continue
     const rel = entry.replace(/^\.\/+/, '').replace(/\/+$/, '')
     const abs = path.resolve(root, rel)
     if (abs === root || !isInside(root, abs) || !existsSync(abs)) continue
     if (statSync(abs).isFile()) {
-      if (rel.endsWith('.md')) out.add(rel.replace(/\.md$/, '').split('/').pop()!)
+      if (rel.endsWith('.md')) add(rel.replace(/\.md$/, '').split('/').pop()!, abs)
       continue
     }
     const walk = (dir: string, prefix: string) => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
-        if (e.isFile() && e.name.endsWith('.md')) out.add(`${prefix}${e.name.slice(0, -3)}`)
+        if (e.isFile() && e.name.endsWith('.md')) add(`${prefix}${e.name.slice(0, -3)}`, path.join(dir, e.name))
         else if (e.isDirectory() && recursive) walk(path.join(dir, e.name), `${prefix}${e.name}:`)
       }
     }
     walk(abs, '')
   }
-  return [...out].sort()
+  return out
+}
+
+export function markdownIn(root: string, value: unknown, fallback: string, recursive: boolean): string[] {
+  return [...markdownFiles(path.resolve(root), value, fallback, recursive).keys()].sort()
+}
+
+/** Where an inline command (`plugin.json` `commands.<name>.content`) lives, in `packageItems`. */
+export const inlineCommandAt = (name: string): string => `.claude-plugin/plugin.json#commands.${name}`
+
+/** Each command's name to its file (relative to `root`) or its `inlineCommandAt`. */
+function commandFiles(root: string, manifest: Record<string, unknown>): Map<string, string> {
+  if (!isRecord(manifest.commands)) return markdownFiles(root, manifest.commands, 'commands', false)
+  return new Map(Object.keys(manifest.commands).map((name) => [name, inlineCommandAt(name)]))
+}
+
+/** A frontmatter key's one string value; undefined when absent, not one string, or unreadable. */
+function frontmatterValue(text: string | undefined, key: string): string | undefined {
+  if (text === undefined) return undefined
+  try {
+    const values = frontmatter(text)?.get(key)
+    return values?.length === 1 ? values[0] : undefined
+  } catch (err) {
+    if (err instanceof FrontmatterError) return undefined // checkMarkdown refuses it
+    throw err
+  }
+}
+
+function readText(root: string, rel: string): string | undefined {
+  try {
+    return readFileSync(path.join(root, rel), 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
+/** What one package may make a review store: `LISTING_CAPS`, as a remote listing (#4757). */
+const DESCRIPTION_CAP = LISTING_CAPS.description
+const NAME_CAP = LISTING_CAPS.name
+const MATCHER_CAP = LISTING_CAPS.title
+/** A hook url longer than this is refused (allowable), never stored cut: a cut url is another endpoint. */
+export const HOOK_URL_CAP = 2_048
+
+// A name as a review stores it (an alias key, a hook event): the one cut the call rule's
+// alias lookup uses too (access/items.ts `offCallItem`).
+export { cutName }
+
+/** `text` cut to `max` and made storable; `what` joins `cut` (once) when it was longer. */
+function capped(text: string, max: number, what: string, cut: string[]): string {
+  if (text.length > max && !cut.includes(what)) cut.push(what)
+  return storableCut(text, max)
+}
+
+/** Temporal's default limit on one payload (a durable turn's `turn_tools` result is one). */
+export const TEMPORAL_PAYLOAD_LIMIT = 2 * 1024 * 1024
+/**
+ * The most all of a turn's packages may take in a durable turn's listing, in UTF-8 bytes (#4757
+ * Task 6 re-review R9): half Temporal's payload limit, the rest left for the tools and notes. A
+ * package past it is not loaded, in classic and durable alike, in the order they load, and said
+ * (install.ts `loadPackagesForRun`, `listedPackageSize`).
+ */
+export const LISTING_PACKAGES_BUDGET = 1024 * 1024
+/**
+ * The most one package's items and aliases may take in a turn's listing, in UTF-8 bytes (#4757
+ * Task 6 re-review R1, R9): a package over it is refused at vet, no approval can allow it, and a
+ * pin already approved is neither loaded nor shared (temporal/turnPackages.ts `sharePackage`).
+ */
+export const LISTING_ITEMS_BUDGET = 256 * 1024
+
+/** What `items` take in a turn's listing (`TurnPackage.items` and `.aliases`), in UTF-8 bytes. */
+export function listedItemsSize(items: PackageItems): number {
+  const ids = [...[...items.skills.keys()].map(skillItem), ...[...items.subagents.keys()].map(subagentItem)]
+  return Buffer.byteLength(JSON.stringify({ items: ids, aliases: Object.fromEntries(items.declared) }))
+}
+
+/**
+ * The most a loaded package can take of a durable turn's listing (temporal/turnTools.ts
+ * `TurnPackage`, with every item: a copy that leaves some out takes less), in UTF-8 bytes. Read
+ * from the pin, so a classic turn and a durable one count each package alike.
+ */
+export function listedPackageSize(name: string, items: PackageItems, builtinTools: readonly string[]): number {
+  const hex = 'f'.repeat(64)
+  const ids = [...[...items.skills.keys()].map(skillItem), ...[...items.subagents.keys()].map(subagentItem)]
+  const listed = {
+    name,
+    dir: `${hex}/${name}`,
+    content_hash: `sha256:${hex}`,
+    allowed: false,
+    builtin_tools: builtinTools,
+    items: ids,
+    aliases: Object.fromEntries(items.declared),
+    named_builtins: builtinTools,
+  }
+  return Buffer.byteLength(JSON.stringify(listed))
+}
+
+/**
+ * Why `items` cannot be listed whole, or none (#4757 Task 6 re-review R7, R1): a skill or subagent
+ * name, frontmatter or item, longer than `ALIAS_KEY_CAP`, or more than `LISTING_ITEMS_BUDGET` in
+ * all. Fatal at vet, so no name is ever cut before the call rule compares it.
+ */
+export function listingProblems(items: PackageItems): string[] {
+  const long = [...items.skills.keys(), ...items.subagents.keys(), ...[...items.declared.keys()].map((k) => k.slice(k.indexOf(':') + 1))]
+    .filter((n) => n.length > ALIAS_KEY_CAP)
+  const out = long.length ? [`${long.length} skill or subagent name${long.length === 1 ? ' is' : 's are'} longer than ${ALIAS_KEY_CAP} characters`] : []
+  const size = listedItemsSize(items)
+  if (size > LISTING_ITEMS_BUDGET) out.push(`its skill and subagent names take ${size} bytes of a turn's listing, more than ${LISTING_ITEMS_BUDGET}`)
+  return out
+}
+
+/** A manifest path entry as a path relative to the root (`./hooks/x.json` is `hooks/x.json`); `plugin.json hooks` as it is. */
+function configAt(where: string): string {
+  return where.startsWith('plugin.json ') ? where : path.posix.normalize(where.replaceAll('\\', '/')).replace(/^(\.\/)+/, '')
+}
+
+export type PackageItems = {
+  /**
+   * Each skill item's name to where it lives, relative to the root, the skill first:
+   *   - a skill's directory, or `.` when the package root is the skill (never delete `.`),
+   *     keyed `rootSkillName(<package name>)` whatever the folder is called;
+   *   - a command's file (`commands/wave.md`), or `inlineCommandAt(<name>)` for a
+   *     manifest's inline command; its name is an untrusted key that may hold `.`, `#` or
+   *     `/`, so compare with `inlineCommandAt`, never parse it.
+   * A command is a skill item: Claude Code invokes a slash command through the Skill tool,
+   * measured on Claude Code 2.1.310 (SDK 0.3.310's bundled `claude`, `strings -n 20 … |
+   * grep 'invoke it via the Skill tool'`: "If it's a slash command, invoke it via the Skill
+   * tool"; frontmatter `disable-model-invocation`: "If true, the model cannot invoke this
+   * via the Skill tool; only users can type the slash command"). So a skill and a command
+   * of one name are one item.
+   */
+  skills: Map<string, string[]>
+  /** Each subagent's name (`review:deep` for `agents/review/deep.md`) to its file. */
+  subagents: Map<string, string>
+  /**
+   * Each hook handler with the config it is in: `hooks/hooks.json`, a manifest path entry
+   * relative to the root (`./hooks/x.json` is `hooks/x.json`), or `plugin.json hooks` for
+   * one written inline in the manifest. A repeat keeps its id. `event` is cut to the name cap.
+   */
+  hooks: { id: string; event: string; where: string }[]
+  /**
+   * Per kind, each frontmatter `name` that differs from its item's name to every item that
+   * declares it: `skill:<declared>` → `skill:<item>`s, `subagent:<declared>` →
+   * `subagent:<item>`s. A call naming `<declared>` is refused when the direct item or any
+   * target is off. A command's frontmatter `name` is not read: nothing measured shows that
+   * Claude Code names a command by it (its file or manifest key names it).
+   */
+  aliases: Map<string, string[]>
+  /**
+   * `aliases` keyed by each frontmatter `name` whole, never cut: what the loaded pin says, for
+   * the call rule (access/items.ts `offCallItem`), so a name over the cap is still matched.
+   */
+  declared: Map<string, string[]>
+}
+
+/** Where each of the package's items lives (#4757), so a derived copy can leave one out. */
+export function packageItems(root: string, manifest: Record<string, unknown>, fallbackName?: string): PackageItems {
+  return itemsOf(path.resolve(root), manifest, fallbackName).items
+}
+
+/**
+ * `packageItems` of the plugin at `root`, read from its files as it is loaded (#4757): the
+ * call rule's items and aliases (access/items.ts `CallPlugin`) for a plugin loaded as it is,
+ * so a review stored before them cannot leave a name out.
+ */
+export function itemsOfPlugin(root: string, packageName: string): PackageItems {
+  return packageItems(root, declaredConfigs(path.resolve(root)).manifest, packageName)
+}
+
+/** A loaded plugin as the call rule sees it (access/items.ts `CallPlugin`): its items, and its aliases by whole frontmatter name. */
+export function callPluginOf(name: string, source: string, items: PackageItems): CallPlugin {
+  return {
+    name,
+    source,
+    items: [...[...items.skills.keys()].map(skillItem), ...[...items.subagents.keys()].map(subagentItem)],
+    // The whole frontmatter names, never a review's cut ones.
+    aliases: Object.fromEntries(items.declared),
+  }
+}
+
+type ItemsRead = {
+  items: PackageItems
+  /** Item id (`skill:<name>`, `subagent:<name>`) to its description, capped. */
+  described: Map<string, string | null>
+  cut: string[]
+  problems: string[]
+}
+
+function itemsOf(root: string, manifest: Record<string, unknown>, fallbackName?: string): ItemsRead {
+  const cut: string[] = []
+  const problems: string[] = []
+  const described = new Map<string, string | null>()
+  const aliases = new Map<string, string[]>()
+  const declaredAliases = new Map<string, string[]>()
+  const describe = (id: string, description: string | undefined) => {
+    if (described.get(id)) return
+    described.set(id, description === undefined ? null : capped(description, DESCRIPTION_CAP, `${id} description`, cut))
+  }
+  const alias = (file: string, text: string | undefined, id: string, kind: (n: string) => string) => {
+    const declared = frontmatterValue(text, 'name')
+    if (declared === undefined || kind(declared) === id) return
+    if (declared.length > NAME_CAP) problems.push(`${file}: frontmatter "name" is longer than ${NAME_CAP} characters`)
+    const key = kind(capped(declared, NAME_CAP, `${id} name`, cut))
+    aliases.set(key, [...(aliases.get(key) ?? []), id])
+    declaredAliases.set(kind(declared), [...(declaredAliases.get(kind(declared)) ?? []), id])
+  }
+
+  const skills = new Map<string, string[]>()
+  for (const [name, dir] of skillDirs(root, manifest, fallbackName)) {
+    const file = path.join(dir, 'SKILL.md')
+    const text = readText(root, file)
+    skills.set(name, [dir])
+    describe(skillItem(name), frontmatterValue(text, 'description'))
+    alias(file, text, skillItem(name), skillItem)
+  }
+  const inline = isRecord(manifest.commands) ? manifest.commands : {}
+  for (const [name, at] of commandFiles(root, manifest)) {
+    const def = inline[name]
+    const text = isRecord(def) ? (typeof def.content === 'string' ? def.content : undefined) : readText(root, at)
+    const description = isRecord(def) && typeof def.description === 'string' ? def.description : frontmatterValue(text, 'description')
+    skills.set(name, [...(skills.get(name) ?? []), at])
+    describe(skillItem(name), description)
+  }
+  const subagents = new Map<string, string>()
+  for (const [name, file] of markdownFiles(root, manifest.agents, 'agents', true)) {
+    const text = readText(root, file)
+    subagents.set(name, file)
+    describe(subagentItem(name), frontmatterValue(text, 'description'))
+    alias(file, text, subagentItem(name), subagentItem)
+  }
+  const hooks = declaredConfigs(root).hooks.flatMap(({ where, config }) =>
+    hookHandlers(config).map(({ event, matcher, handler }) => ({
+      id: hookId(event, matcher, handler),
+      event: cutName(event),
+      where: configAt(where),
+    })),
+  )
+  return { items: { skills, subagents, hooks, aliases, declared: declaredAliases }, described, cut, problems }
 }
 
 /** Vets the package at `root` (a materialised copy) and builds its review. `fallbackName` is used without a manifest name. */
@@ -429,29 +757,46 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
     }
   }
 
+  const items = itemsOf(abs, m, fallbackName)
+  problems.push(...items.problems)
+  for (const problem of listingProblems(items.items)) {
+    fatal.push(problem)
+    problems.push(problem)
+  }
+  const cut = [...items.cut]
   const hooks: ReviewHook[] = []
   for (const { where, config } of declared.hooks) {
-    for (const { event, handler } of hookHandlers(config)) {
+    for (const { event, matcher, handler } of hookHandlers(config)) {
       const type = isRecord(handler) && typeof handler.type === 'string' ? handler.type : 'command'
-      const hook: ReviewHook = { event, type }
+      // The id is the hook's own, uncut; what the review shows (and says of it) is capped.
+      const shown = cutName(event)
+      if (event.length > NAME_CAP) cut.push(`${where} ${shown} event`)
+      const hook: ReviewHook = { event: shown, type: capped(type, NAME_CAP, `${where} ${shown} type`, cut), id: hookId(event, matcher, handler) }
+      if (typeof matcher === 'string') hook.matcher = capped(matcher, MATCHER_CAP, `${where} ${shown} matcher`, cut)
       if (!PACKAGE_HOOK_EVENTS.has(event)) {
         problems.push(
-          `${where}: a ${event} hook is not allowed in a plugin package; it may decide or rewrite a tool call, or it is not known`,
+          `${where}: a ${shown} hook is not allowed in a plugin package; it may decide or rewrite a tool call, or it is not known`,
         )
       }
       if (type === 'mcp_tool') {
-        problems.push(`${where}: ${event} has an mcp_tool hook, which calls a tool outside the approval seam`)
+        problems.push(`${where}: ${shown} has an mcp_tool hook, which calls a tool outside the approval seam`)
       } else if (type === 'http' && isRecord(handler)) {
         const dollars = dollarFields(handler)
         if (dollars.length) {
-          problems.push(`${where}: ${event} http hook references a variable ($) in ${dollars.join(', ')}`)
+          problems.push(`${where}: ${shown} http hook references a variable ($) in ${dollars.join(', ')}`)
         }
-        if (handler.allowedEnvVars !== undefined) problems.push(`${where}: ${event} http hook sets allowedEnvVars`)
+        if (handler.allowedEnvVars !== undefined) problems.push(`${where}: ${shown} http hook sets allowedEnvVars`)
         if (typeof handler.url === 'string') {
-          hook.url = handler.url
-          endpoints.push({ what: `${where} ${event} hook`, url: handler.url })
+          if (handler.url.length > HOOK_URL_CAP) {
+            // The egress check still sees the whole url; the review keeps none.
+            problems.push(`${where}: ${shown} http hook url is longer than ${HOOK_URL_CAP} characters`)
+            cut.push(`${where} ${shown} url`)
+          } else {
+            hook.url = handler.url
+          }
+          endpoints.push({ what: `${where} ${shown} hook`, url: handler.url })
         } else {
-          problems.push(`${where}: ${event} http hook has no url`)
+          problems.push(`${where}: ${shown} http hook has no url`)
         }
       }
       hooks.push(hook)
@@ -459,8 +804,10 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
   }
 
   const mcpServers: ReviewMcpServer[] = []
+  const serverNames: string[] = []
   for (const { where, map } of declared.mcp) {
     for (const [server, config] of mcpEntries(map)) {
+      serverNames.push(server)
       if (!isRecord(config)) continue // pluginProblems reports it
       const dollars = dollarFields(config)
       if (dollars.length) {
@@ -484,7 +831,7 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
         name,
         description: typeof m.description === 'string' ? m.description : null,
         version: typeof m.version === 'string' ? m.version : null,
-        skills: skillNames(abs, m).map((s) => `${name}:${s}`),
+        skills: skillNames(abs, m, fallbackName).map((s) => `${name}:${s}`),
         commands: [
           ...markdownIn(abs, isRecord(m.commands) ? [] : m.commands, 'commands', false),
           ...(isRecord(m.commands) ? Object.keys(m.commands) : []),
@@ -494,8 +841,12 @@ export function vetPackage(root: string, fallbackName?: string): Vetting {
         agents: markdownIn(abs, m.agents, 'agents', true).map((a) => `${name}:${a}`),
         hooks,
         mcp_servers: mcpServers,
+        local_servers: [...new Set(serverNames)].filter((s) => !mcpServers.some((m) => m.name === s)).sort(),
         files: files.filter((f) => /\.(md|json)$/i.test(f)),
         builtin_tools: [...builtins].sort(),
+        described: Object.fromEntries(items.described),
+        aliases: Object.fromEntries(items.items.aliases),
+        cut: [...new Set(cut)],
       }
     : undefined
 

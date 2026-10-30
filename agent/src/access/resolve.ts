@@ -19,8 +19,25 @@ export function toolAccess(declared: RiskTier, row: AccessRow | undefined, migra
   return row.access
 }
 
-/** The registry tools' overrides: every effective tier that differs from the tool's own, and every `off`. */
+/**
+ * The registry tools' overrides as the gates apply them: `itemOverrides`, with every
+ * browser tool `off` while `builtin:browser` is switched off (#4757).
+ */
 export function registryOverrides(tools: readonly { name: string; risk: RiskTier }[], rows: readonly AccessRow[]): StoredOverrides {
+  const overrides = itemOverrides(tools, rows)
+  if (sourceEnabled(BUILTIN_SOURCES.browser, rows)) return overrides
+  const browser = (name: string): boolean => registrySource(name) === BUILTIN_SOURCES.browser
+  const tool_tiers = Object.create(null) as Record<string, RiskTier>
+  for (const [name, tier] of Object.entries(overrides.tool_tiers)) if (!browser(name)) tool_tiers[name] = tier
+  const disabled = new Set([...overrides.disabled_tools, ...tools.map((t) => t.name).filter(browser)])
+  return { tool_tiers, disabled_tools: [...disabled].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)) }
+}
+
+/**
+ * Each registry tool's own access, no source switch folded in: every effective tier that
+ * differs from the tool's own, and every `off`. What the legacy key holds (access/legacy.ts).
+ */
+export function itemOverrides(tools: readonly { name: string; risk: RiskTier }[], rows: readonly AccessRow[]): StoredOverrides {
   // No prototype: a tool named `__proto__` is an own key, as in agent-durable's dict.
   const tool_tiers = Object.create(null) as Record<string, RiskTier>
   const disabled_tools: string[] = []
@@ -47,10 +64,16 @@ export function pluginOverrides(source: string, rows: readonly AccessRow[]): { t
   return { toolTiers, disabledTools: disabledTools.sort() }
 }
 
-/** Built-in sources are on until turned off; remote plugins and packages are off until turned on. */
+/**
+ * Built-in sources and package servers are on until turned off (a server is offered while
+ * its package is approved and enabled, `ai_plugin_packages.enabled`); remote plugins and
+ * packages are off until turned on.
+ */
 export function enabledByDefault(source: string): boolean {
-  return source.startsWith('builtin:')
+  return source.startsWith('builtin:') || PACKAGE_SERVER_RE.test(source)
 }
+
+const PACKAGE_SERVER_RE = /^package:.+\/mcp:.+$/
 
 /** The source's `*` row when it is `on` or `off`, else its default. */
 export function sourceEnabled(source: string, rows: readonly AccessRow[]): boolean {

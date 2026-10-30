@@ -28,7 +28,8 @@ import { turnPrincipal } from '../tools/harness.js'
 import { FLOW_IMAGES_MAX, type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
 import { FLOW_TOOL_TIER_ACTIVITY, flowToolTierActivity } from './flowTools.js'
-import { TOOL_TIER_ACTIVITY, toolTierActivity } from './toolTier.js'
+import { BUILTIN_TIER_ACTIVITY, builtinTier, TOOL_TIER_ACTIVITY, toolTierActivity } from './toolTier.js'
+import type { AccessResolver } from '../access/resolver.js'
 import { type SessionFiles, withWorkspaceSize } from '../workspace/store.js'
 
 // Every tool as an activity on `agent-tools` (spec 2026-10-01 §6.3, #1055), registered
@@ -178,6 +179,8 @@ export type ToolActivityDeps = {
    * (#4442 gate re-review), one more try than waits; RESOLVE_BACKOFF_MS when undefined.
    */
   resolveBackoffMs?: readonly number[]
+  /** Tool access (#4757): a package built-in's, which `builtin_tier` answers; every built-in `outward` without it. */
+  access?: Pick<AccessResolver, 'builtin'> | undefined
 }
 
 export type ToolActivity = (input: unknown) => Promise<unknown>
@@ -328,6 +331,8 @@ export function toolActivities(tools: readonly Tool[], deps: ToolActivityDeps): 
     [FLOW_TOOL_TIER_ACTIVITY]: flowToolTierActivity(tools, deps.services),
     // A durable session asks each of ScadBuddy's own tools' tier from here per call (#2171).
     [TOOL_TIER_ACTIVITY]: toolTierActivity(tools, deps.services),
+    // And an engine-parked package built-in's access per call (Bash, PowerShell; #4757).
+    [BUILTIN_TIER_ACTIVITY]: builtinTier({ access: deps.access }) as ToolActivity,
   }
 }
 

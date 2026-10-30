@@ -201,3 +201,25 @@ def test_a_manifest_tier_that_is_no_tier_runs_at_most_once() -> None:
     assert by_name["odd_tool"].retry_policy.maximum_attempts == 1
     tools.apply_overrides(by_name, [odd], {"odd_tool": "read"}, set())
     assert by_name["odd_tool"].retry_policy.maximum_attempts == 1
+
+
+def test_browser_switch_off_disables_browser_tools() -> None:
+    """#4757: ``builtin:browser`` ``*`` off disables every ``browser_*`` tool, whatever its row."""
+    b = "builtin:browser"
+    manifest = [
+        *MANIFEST,
+        tools.ManifestEntry("browser_click", "Clicks.", {"type": "object"}, "write", None),
+        tools.ManifestEntry("browser_status", "Status.", {"type": "object"}, "read", None),
+    ]
+    rows = [AccessRow(b, "browser_click", "outward", BY), AccessRow(S, "print_output", "read", BY)]
+    assert tools.sanitise_overrides(manifest, rows) == (
+        {"browser_click": "outward", "print_output": "read"},
+        [],
+    )
+    off = [*rows, AccessRow(b, "*", "off", BY)]
+    assert tools.sanitise_overrides(manifest, off) == (
+        {"print_output": "read"},
+        ["browser_click", "browser_status"],
+    )
+    on = [*rows, AccessRow(b, "*", "on", BY)]
+    assert tools.sanitise_overrides(manifest, on) == tools.sanitise_overrides(manifest, rows)

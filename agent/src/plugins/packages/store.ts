@@ -1,4 +1,6 @@
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
+import { builtinItem, itemKindIn, skillItem, subagentItem } from '../../access/items.js'
+import { packageSource } from '../../access/model.js'
 import { notifyWarmEvict } from '../../sessions/warmEvict.js'
 import { PluginError } from '../registry.js'
 import { diffFiles, type FileDiff, type FileList } from './hash.js'
@@ -157,6 +159,86 @@ function pin(row: Row): PackagePin {
   }
 }
 
+/** Where `package:<name>`'s servers' sources start: compared with `starts_with`, never `LIKE` (a name may hold `_`). */
+const serverPrefix = (name: string): string => `${packageSource(name)}/mcp:`
+
+/** Every `ai_access` row and `ai_tool_listings` row of `package:<name>` and its servers (#4757). */
+async function forgetPackage(tx: TransactionSql, name: string): Promise<void> {
+  const source = packageSource(name)
+  await tx`DELETE FROM ai_access WHERE source = ${source} OR starts_with(source, ${serverPrefix(name)})`
+  await tx`DELETE FROM ai_tool_listings WHERE source = ${source} OR starts_with(source, ${serverPrefix(name)})`
+}
+
+/** The servers `review` declares, by name; undefined for a review stored without `local_servers`. */
+function declaredServers(review: PackageReview): Set<string> | undefined {
+  if (review.local_servers === undefined) return undefined
+  return new Set([...review.mcp_servers.map((s) => s.name), ...review.local_servers])
+}
+
+/**
+ * Whether `review` names a package's items as this code keys them: one written by an older vet
+ * (no `described`, or a hook without an id) may name a root skill by its vet folder, not
+ * `rootSkillName`, and cannot tell a kept hook from a lost one (#4757 Task 7 review I1).
+ */
+function namesItems(review: PackageReview): boolean {
+  return review.described !== undefined && review.hooks.every((h) => h.id !== undefined)
+}
+
+/**
+ * Deletes what `package:<name>` stores for items `review` (the pin current after the write)
+ * no longer has (#4757): a skill or command (`skill:`), a subagent, a built-in and a hook
+ * (by its id), and the rows and listings of the servers it no longer declares. A root skill
+ * keyed by an old folder name (`skill:pkg`) goes too: the review names it `rootSkillName`.
+ * What the review cannot tell is kept: no item row for an older vet's review (`namesItems`),
+ * no built-in's without `builtin_tools`, no server's without `local_servers`. Runs in every
+ * write's transaction, so rows an older replica's approval left go with the next write to the
+ * package vetted by this code. Returns whether it deleted anything.
+ *
+ * An access write for a lost item that commits after the read below (it does not lock the
+ * package row) leaves its row until the next write: harmless, since it is for an item the pin
+ * no longer has, and a kept item's row is never deleted here, so no write is lost.
+ */
+export async function pruneStaleRows(tx: TransactionSql, name: string, review: PackageReview): Promise<boolean> {
+  let deleted = false
+  if (namesItems(review)) {
+    const source = packageSource(name)
+    const bare = (qualified: string) => (qualified.startsWith(`${name}:`) ? qualified.slice(name.length + 1) : qualified)
+    const kept = new Set([
+      ...[...review.skills, ...review.commands].map((s) => skillItem(bare(s))),
+      ...review.agents.map((a) => subagentItem(bare(a))),
+      ...(review.builtin_tools ?? []).map(builtinItem),
+    ])
+    const hookIds = new Set(review.hooks.map((h) => h.id!))
+    const stale = (item: string): boolean => {
+      const kind = itemKindIn(source, item)
+      if (kind === 'tool') return false
+      if (kind === 'hook') return !hookIds.has(item.slice(item.lastIndexOf(':') + 1))
+      if (kind === 'builtin' && review.builtin_tools === undefined) return false
+      return !kept.has(item)
+    }
+    const rows = await tx<{ item: string }[]>`SELECT item FROM ai_access WHERE source = ${source}`
+    const items = rows.map((r) => r.item).filter(stale)
+    if (items.length) {
+      await tx`DELETE FROM ai_access WHERE source = ${source} AND item IN ${tx(items)}`
+      deleted = true
+    }
+  }
+
+  const declared = declaredServers(review)
+  if (declared === undefined) return deleted
+  const prefix = serverPrefix(name)
+  const sources = await tx<{ source: string }[]>`
+    SELECT source FROM ai_access WHERE starts_with(source, ${prefix})
+    UNION SELECT source FROM ai_tool_listings WHERE starts_with(source, ${prefix})`
+  const gone = sources.map((r) => r.source).filter((s) => !declared.has(s.slice(prefix.length)))
+  if (gone.length) {
+    await tx`DELETE FROM ai_access WHERE source IN ${tx(gone)}`
+    await tx`DELETE FROM ai_tool_listings WHERE source IN ${tx(gone)}`
+    deleted = true
+  }
+  return deleted
+}
+
 /** The package store as routes and the run loader see it. */
 export type PackageRepo = {
   list(): Promise<PackageView[]>
@@ -203,21 +285,25 @@ export class PackageStore implements PackageRepo {
   }
 
   async create(p: PreparedPackage): Promise<PackageView> {
-    const rows = await this.sql<Row[]>`
+    return this.sql.begin(async (tx) => {
+      const rows = await tx<Row[]>`
       INSERT INTO ai_plugin_packages (name, source_kind, source_url, source_ref, marketplace_entry, fetch_url,
                                       fetch_path, commit_sha, content_hash, files, review)
       VALUES (${p.review.name}, ${p.source.kind}, ${p.source.url}, ${p.source.ref},
               ${p.source.kind === 'marketplace' ? p.source.entry : null}, ${p.fetchUrl}, ${p.fetchPath},
-              ${p.commit}, ${p.contentHash}, ${this.sql.json(p.files)}, ${this.sql.json(p.review)})
+              ${p.commit}, ${p.contentHash}, ${tx.json(p.files)}, ${tx.json(p.review)})
       ON CONFLICT (name) DO NOTHING
       RETURNING *`
-    const row = rows[0]
-    if (!row) {
-      throw new PluginError(`a plugin package named "${p.review.name}" is already installed; re-pin it instead`, 409)
-    }
-    // A warm Claude Code loaded the packages of its time (spec 2026-10-13 §5.3): every write here tells the caches (sessions/warmEvict.ts).
-    await notifyWarmEvict(this.sql, '*')
-    return view(row)
+      const row = rows[0]
+      if (!row) {
+        throw new PluginError(`a plugin package named "${p.review.name}" is already installed; re-pin it instead`, 409)
+      }
+      // What an older replica's remove left: a re-install starts at the defaults.
+      await forgetPackage(tx, row.name)
+      // A warm Claude Code loaded the packages of its time (spec 2026-10-13 §5.3): every write here tells the caches (sessions/warmEvict.ts).
+      await notifyWarmEvict(tx, '*')
+      return view(row)
+    })
   }
 
   async setPending(name: string, p: PreparedPackage): Promise<PackageView> {
@@ -242,21 +328,25 @@ export class PackageStore implements PackageRepo {
           pending_files = ${tx.json(p.files)}, pending_review = ${tx.json(p.review)}, updated_at = now()
         WHERE name = ${name}
         RETURNING *`
+      await pruneStaleRows(tx, name, row!.review)
       await notifyWarmEvict(tx, '*')
       return view(row!)
     })
   }
 
   async discardPending(name: string): Promise<PackageView> {
-    const [row] = await this.sql<Row[]>`
-      UPDATE ai_plugin_packages SET pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,
-        pending_commit_sha = NULL, pending_content_hash = NULL,
-        pending_files = NULL, pending_review = NULL, updated_at = now()
-      WHERE name = ${name}
-      RETURNING *`
-    if (!row) throw new PluginError(`no plugin package named "${name}"`, 404)
-    await notifyWarmEvict(this.sql, '*')
-    return view(row)
+    return this.sql.begin(async (tx) => {
+      const [row] = await tx<Row[]>`
+        UPDATE ai_plugin_packages SET pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,
+          pending_commit_sha = NULL, pending_content_hash = NULL,
+          pending_files = NULL, pending_review = NULL, updated_at = now()
+        WHERE name = ${name}
+        RETURNING *`
+      if (!row) throw new PluginError(`no plugin package named "${name}"`, 404)
+      await pruneStaleRows(tx, name, row.review)
+      await notifyWarmEvict(tx, '*')
+      return view(row)
+    })
   }
 
   async approve(name: string, commit: string, contentHash: string, allowRefused = false): Promise<PackageView> {
@@ -296,13 +386,18 @@ export class PackageStore implements PackageRepo {
             pending_files = NULL, pending_review = NULL, updated_at = now()
           WHERE name = ${name}
           RETURNING *`
+        await pruneStaleRows(tx, name, row!.review)
         await notifyWarmEvict(tx, '*')
         return view(row!)
       }
-      if (current.approved_at !== null && current.allow_refused === allow) return view(current)
+      if (current.approved_at !== null && current.allow_refused === allow) {
+        if (await pruneStaleRows(tx, name, current.review)) await notifyWarmEvict(tx, '*')
+        return view(current)
+      }
       const [row] = await tx<Row[]>`
         UPDATE ai_plugin_packages SET approved_at = now(), allow_refused = ${allow}, updated_at = now()
         WHERE name = ${name} RETURNING *`
+      await pruneStaleRows(tx, name, row!.review)
       await notifyWarmEvict(tx, '*')
       return view(row!)
     })
@@ -317,16 +412,20 @@ export class PackageStore implements PackageRepo {
       }
       const [row] = await tx<Row[]>`
         UPDATE ai_plugin_packages SET enabled = ${enabled}, updated_at = now() WHERE name = ${name} RETURNING *`
+      await pruneStaleRows(tx, name, row!.review)
       await notifyWarmEvict(tx, '*')
       return view(row!)
     })
   }
 
   async delete(name: string): Promise<boolean> {
-    const rows = await this.sql`DELETE FROM ai_plugin_packages WHERE name = ${name}`
-    if (rows.count === 0) return false
-    await notifyWarmEvict(this.sql, '*')
-    return true
+    return this.sql.begin(async (tx) => {
+      const rows = await tx`DELETE FROM ai_plugin_packages WHERE name = ${name}`
+      if (rows.count === 0) return false
+      await forgetPackage(tx, name)
+      await notifyWarmEvict(tx, '*')
+      return true
+    })
   }
 
   async enabledPins(): Promise<PackagePin[]> {

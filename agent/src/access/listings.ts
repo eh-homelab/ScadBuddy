@@ -1,7 +1,7 @@
 import type { Sql, TransactionSql } from 'postgres'
 import type { LockClient, LockLease } from '../db.js'
 import { z } from 'zod'
-import { remoteSource } from './model.js'
+import { packageServerSource, remoteSource } from './model.js'
 
 // The tools a remote source listed (#2171, #778), kept in `ai_tool_listings`: each
 // `tools/list` entry once, as the server sent it, with only what a cap removed taken
@@ -71,6 +71,11 @@ function clean(value: unknown, lost: { keys: boolean }): unknown {
 /** The first `max` code units, not ending in half a surrogate pair. */
 function cut(text: string, max: number): string {
   return text.slice(0, max).toWellFormed()
+}
+
+/** `text` cut to `max` code units and made storable: what a package review keeps (vet.ts). */
+export function storableCut(text: string, max: number): string {
+  return storable(cut(text, max))
 }
 
 function otherKeys(raw: Record<string, unknown>): string[] {
@@ -227,6 +232,28 @@ export class ToolListings {
    * (db.ts `createLockClient`), never on the shared pool, which a test therefore never waits on.
    */
   async exclusive<T>(name: string, fn: (put: PluginListingPut) => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
+    return this.#held(`scadbuddy:ai_tool_listings:test:${name}`, () =>
+      fn((url, tools, options) => this.#putIfCurrent(name, url, tools, options.truncated ?? false)),
+    )
+  }
+
+  /**
+   * `exclusive` for package `pkg`'s server `server` (#4757): its listing is stored under
+   * `package:<pkg>/mcp:<server>` only while the package is still pinned to the content hash
+   * listed (`PackageListingPut`).
+   */
+  async exclusiveServer<T>(
+    pkg: string,
+    server: string,
+    fn: (put: PackageListingPut) => Promise<T>,
+  ): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
+    // A remote plugin's name holds no `:`, so the two kinds of key never meet.
+    return this.#held(`scadbuddy:ai_tool_listings:test:${packageServerSource(pkg, server)}`, () =>
+      fn((contentHash, tools, options) => this.#putIfPinned(pkg, server, contentHash, tools, options.truncated ?? false)),
+    )
+  }
+
+  async #held<T>(key: string, fn: () => Promise<T>): Promise<{ value: T } | 'busy' | 'full' | 'unreachable'> {
     let lease: LockLease | undefined
     try {
       lease = await this.#locks.take()
@@ -235,8 +262,7 @@ export class ToolListings {
       return 'unreachable'
     }
     if (!lease) return 'full'
-    // A 64-bit hash of the name: two names may share a key, which only costs a spurious `busy` and a retry.
-    const key = `scadbuddy:ai_tool_listings:test:${name}`
+    // A 64-bit hash of the key: two keys may share one, which only costs a spurious `busy` and a retry.
     // Unhealthy unless shown otherwise: a connection whose lock state is unknown is never reused.
     let healthy = false
     try {
@@ -252,7 +278,7 @@ export class ToolListings {
         return 'busy'
       }
       try {
-        return { value: await fn((url, tools, options) => this.#putIfCurrent(name, url, tools, options.truncated ?? false)) }
+        return { value: await fn() }
       } finally {
         // A failed unlock retires the connection (lease.done) and leaves the test's own answer.
         healthy = await lease.sql`SELECT pg_advisory_unlock(hashtextextended(${key}, 0))`.then(
@@ -266,6 +292,16 @@ export class ToolListings {
     } finally {
       lease.done(healthy)
     }
+  }
+
+  // Under the package row's lock, as #putIfCurrent: a delete or a re-pin approved since the listing wins.
+  async #putIfPinned(pkg: string, server: string, contentHash: string, tools: readonly StoredTool[], truncated: boolean): Promise<boolean> {
+    return this.#sql.begin(async (tx) => {
+      const [row] = await tx`SELECT 1 FROM ai_plugin_packages WHERE name = ${pkg} AND content_hash = ${contentHash} FOR UPDATE`
+      if (!row) return false
+      await upsert(tx, packageServerSource(pkg, server), tools, truncated)
+      return true
+    })
   }
 
   // One short transaction on the shared pool, after the test and still under its lock.
@@ -285,6 +321,12 @@ export class ToolListings {
  * False: nothing stored. `truncated`: not every tool the source has (a `nextCursor`, or entries dropped).
  */
 export type PluginListingPut = (url: string, tools: readonly StoredTool[], options: { truncated?: boolean }) => Promise<boolean>
+
+/**
+ * Stores a package server's listing only while its package is still pinned to `contentHash`,
+ * the one listed (#4757). False: nothing stored.
+ */
+export type PackageListingPut = (contentHash: string, tools: readonly StoredTool[], options: { truncated?: boolean }) => Promise<boolean>
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err))
 

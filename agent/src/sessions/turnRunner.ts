@@ -12,7 +12,9 @@ import path from 'node:path'
 import type { SDKMessage, SessionStore } from '@anthropic-ai/claude-agent-sdk'
 import { type Context, ROOT_CONTEXT } from '@opentelemetry/api'
 import { NoUsableCredentialError, type PooledCredential } from '../harness/fallback.js'
-import { BUILTIN_SOURCES, type ToolAccess } from '../access/model.js'
+import { type AccessRow, BUILTIN_SOURCES, packageServerSource, packageSource, type ToolAccess } from '../access/model.js'
+import { type CallPlugin, offCallItem, subagentItem } from '../access/items.js'
+import type { PackageAccess } from '../access/resolver.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
 import { liveAccess } from '../access/live.js'
 import { SeamLedger } from '../harness/seamLedger.js'
@@ -25,7 +27,10 @@ import { createMemoryHooks, HindsightClient, hindsightTarget, type MemoryHooks, 
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { PluginEndpoint, PluginsForRun } from '../plugins/forwarder.js'
 import type { PackagesForRun } from '../plugins/packages/install.js'
-import { type PackageServers, withoutRemoteServers } from '../plugins/packages/mcp.js'
+import { builtinsOffOf, derivedPackage, omitsAny, omittedOf, packageOmitted } from '../plugins/packages/derived.js'
+import { collidingServerNames, localServers, type PackageServers, serverAccess, type ServerAccess, unofferableNameProblem, unofferedLocalServers } from '../plugins/packages/mcp.js'
+import { callPluginOf, itemsOfPlugin, OWN_PLUGIN_NAME, type PackageItems } from '../plugins/packages/vet.js'
+import { harnessToolName, toolPrefix } from '../plugins/registry.js'
 import type { CheckedPlugin } from '../plugins/registry.js'
 import { withSpan } from '../telemetry/trace.js'
 import { TurnTrace } from '../telemetry/turn.js'
@@ -89,7 +94,8 @@ export type FingerprintParts = {
   /** A Workflow agent's chat (background/workflowAgents.ts): its own effort and subagent definition. */
   effort: string | null
   agentType: string | null
-  ownPlugin: boolean
+  /** The own plugin's loaded path (its derived copy's when something in it is off, #4757); null when not loaded. */
+  ownPlugin: string | null
   /** Each plugin's configured endpoint, header version, tool tiers and disabled tools (forwarder.ts `pluginEndpoint`). */
   plugins: PluginEndpoint[]
   packageHashes: string[]
@@ -197,6 +203,7 @@ export class TurnRunner {
     'builtinTools',
     'ownPlugin',
     'remotePlugins',
+    'disallowedTools',
     'memoryHooks',
     'traceHooks',
     'stderr',
@@ -235,6 +242,7 @@ export class TurnRunner {
     builtinTools: 'builtinTools',
     ownPlugin: 'ownPlugin',
     remotePlugins: 'plugins',
+    disallowedTools: 'disabledTools', // a local package server's tools set off (#4757)
     browser: 'plugins', // judges the remote plugins' browser_* calls; reads the lists and approvals per call
     memoryHooks: 'slot',
     traceHooks: 'slot',
@@ -309,35 +317,99 @@ export class TurnRunner {
       // inside the run, not under this span.
       const memory = hindsight ? await phase('memory', () => this.memoryHooks(hindsight, secrets, session)) : undefined
       // Settings → plugin packages may switch it off: its source in ai_access (plugins/packages/builtins.ts).
-      const ownPlugin =
+      let ownPlugin =
         this.deps.ownPlugin !== undefined && (await access.enabled(BUILTIN_SOURCES.ownPlugin))
           ? this.deps.ownPlugin
           : undefined
       const packagePlugins = this.deps.packagePlugins
       packages = packagePlugins ? await phase('packages', () => packagePlugins()) : undefined
-      // Each loaded directory's package, by the path Claude Code is handed (a stripped copy's too).
+      const loadedPackages = packages?.loaded ?? []
+      // What is switched off in each package and the own plugin, and each package server's
+      // switch, in one read each (#4757): what the copies below leave out.
+      // No read at all for a turn with neither.
+      const itemSources = [...loadedPackages.map((p) => packageSource(p.name)), ...(ownPlugin !== undefined ? [BUILTIN_SOURCES.ownPlugin] : [])]
+      const itemAccess = this.deps.access && itemSources.length ? await this.deps.access.packageAccess(itemSources) : new Map<string, PackageAccess>()
+      const switches = loadedPackages.length ? await serverAccess(loadedPackages, this.deps.access) : new Map<string, ServerAccess>()
+      const colliding = collidingServerNames(loadedPackages)
+      const unoffered = unofferedLocalServers(loadedPackages)
+      const localRoot = path.join(this.deps.paths.stateDir, 'plugins-local')
+      /** The built-ins the allowed packages name that no turn offers: `off` across them. */
+      const builtinsOff = builtinsOffOf(loadedPackages, itemAccess)
+      // A local server no turn can offer is left out of its copy, and said, as a durable turn says it.
+      const problems: string[] = unoffered.map(({ pkg, server }) => unofferableNameProblem(pkg, server))
+      /** The own plugin's items when its copy was made (read from its source); else read below. */
+      let ownItems: PackageItems | undefined
+      // The own plugin as a copy without what is off; with nothing off, as it is. One that
+      // cannot be made is not loaded, and said: never loaded with an off item in it.
+      if (ownPlugin !== undefined) {
+        const omitted = omittedOf(itemAccess.get(BUILTIN_SOURCES.ownPlugin), new Map())
+        if (omitsAny(omitted)) {
+          try {
+            const copy = await derivedPackage(ownPlugin, undefined, localRoot, omitted, OWN_PLUGIN_NAME)
+            ownPlugin = copy.dir
+            ownItems = copy.items
+          } catch (err) {
+            problems.push(`ScadBuddy's own plugin was not loaded: ${(err as Error).message}`)
+            ownPlugin = undefined
+          }
+        }
+      }
+      // Each loaded directory's package and the hash of what Claude Code is handed, by its path.
       const packageNames = new Map<string, string>()
+      const loadedHashes = new Map<string, string>()
+      /** What each loaded pin holds (derived.ts `derivedPackage`), for the call rule. */
+      const loadedItems = new Map<string, PackageItems>()
       if (packages) {
-        // Loaded without their own http MCP servers, which come through the forwarder
-        // below: a query with strictMcpConfig off would start them itself (run.ts).
+        // Loaded as their derived copies: without their own http MCP servers, which come
+        // through the forwarder below (a query with strictMcpConfig off would start them
+        // itself, run.ts), and without what is switched off, the local servers whose names
+        // another package's server carries among it.
         const loaded = packages
-        const problems = [...loaded.problems]
-        // A package that cannot be stripped is left out and said, as one that cannot be loaded.
-        const stripped = async (dir: string): Promise<string | undefined> => {
+        problems.push(...loaded.problems)
+        // A package that cannot be copied is left out and said, as one that cannot be loaded.
+        const derived = async (dir: string): Promise<string | undefined> => {
           const pkg = loaded.loaded.find((p) => p.dir === dir)
           if (!pkg) return dir
           try {
-            const loadedDir = await withoutRemoteServers(dir, pkg.contentHash, path.join(this.deps.paths.stateDir, 'plugins-local'))
-            packageNames.set(loadedDir, pkg.name)
-            return loadedDir
+            const copy = await derivedPackage(dir, pkg.contentHash, localRoot, packageOmitted(pkg.name, itemAccess, switches, colliding, unoffered), pkg.name)
+            packageNames.set(copy.dir, pkg.name)
+            loadedHashes.set(pkg.dir, copy.contentHash ?? pkg.contentHash)
+            loadedItems.set(pkg.dir, copy.items)
+            return copy.dir
           } catch (err) {
             problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
             return undefined
           }
         }
-        const kept = async (dirs: readonly string[]) => (await Promise.all(dirs.map(stripped))).filter((d): d is string => d !== undefined)
-        packages = { ...loaded, paths: await kept(loaded.paths), allowedPaths: await kept(loaded.allowedPaths), problems }
+        const kept = async (dirs: readonly string[]) => (await Promise.all(dirs.map(derived))).filter((d): d is string => d !== undefined)
+        packages = {
+          ...loaded,
+          paths: await kept(loaded.paths),
+          allowedPaths: await kept(loaded.allowedPaths),
+          builtinTools: loaded.builtinTools.filter((n) => !builtinsOff.has(n)),
+          problems,
+        }
       }
+      // The local servers Claude Code starts for the allowed packages (#4757): each tool set
+      // off is removed from the model's context, and each call reads its access (live below).
+      const inTurn = loadedPackages.filter((p) => loadedHashes.has(p.dir))
+      const allowedLoaded = inTurn.filter((p) => p.allowed)
+      const local = localServers(loadedPackages).filter(
+        ({ pkg, server }) => allowedLoaded.some((p) => p.name === pkg) && switches.get(packageServerSource(pkg, server))?.enabled !== false,
+      )
+      const localOff = local.flatMap(({ name, pkg, server }) =>
+        (switches.get(packageServerSource(pkg, server))?.disabledTools ?? []).map((tool) => `${toolPrefix(name)}${harnessToolName(tool)}`),
+      )
+      // The plugins a Skill, Agent or Task call may name, their items from the loaded pins
+      // (never a stored review's), so each call is refused when it names one that is off.
+      const callPlugins: CallPlugin[] = [
+        ...inTurn.map((p) => callPluginOf(p.name, packageSource(p.name), loadedItems.get(p.dir)!)),
+        ...(ownPlugin !== undefined ? [callPluginOf(OWN_PLUGIN_NAME, BUILTIN_SOURCES.ownPlugin, ownItems ?? itemsOfPlugin(this.deps.ownPlugin!, OWN_PLUGIN_NAME))] : []),
+      ]
+      const callBuiltins = [...new Set(allowedLoaded.flatMap((p) => p.builtinTools))].map((name) => ({
+        name,
+        packages: allowedLoaded.filter((p) => p.builtinTools.includes(name)).map((p) => p.name),
+      }))
       // Every package's http MCP servers, through the forwarder like a remote
       // plugin's (#2320); Claude Code loads the packages without them (above).
       packageServers =
@@ -354,7 +426,9 @@ export class TurnRunner {
             access: liveAccess(this.deps.access, {
               tools: this.deps.tools ?? [],
               remote: (forwarded?.plugins ?? []).map((p) => p.name),
-              packageServers: packageServers?.servers ?? [],
+              packageServers: [...(packageServers?.servers ?? []), ...local],
+              plugins: callPlugins,
+              builtins: callBuiltins,
             }),
             ledger,
           }
@@ -376,13 +450,13 @@ export class TurnRunner {
         this.deps.stderr?.(`${problem}\n`)
         await unavailable(problem)
       }
-      for (const problem of [...(packages?.problems ?? []), ...(packageServers?.problems ?? [])]) {
+      for (const problem of [...problems, ...(packageServers?.problems ?? [])]) {
         this.deps.stderr?.(`${problem}\n`)
         await unavailable(problem)
       }
       const pluginPaths = [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])]
       const allowedPluginPaths = packages?.allowedPaths ?? []
-      const loadedPackages = packages
+      const forRun = packages
       /** The in-process MCP servers this turn gives Claude Code (`run.mcpServers`), for pluginCheck. */
       let inProcessServers: string[] = []
       const pluginCheck = async (message: SDKMessage) => {
@@ -394,7 +468,7 @@ export class TurnRunner {
         if (ownPlugin !== undefined && !loaded.has(path.resolve(ownPlugin))) {
           await unavailable("ScadBuddy's own plugin was not loaded by Claude Code: its skills and subagents are unavailable")
         }
-        for (const dir of [...(loadedPackages?.paths ?? []), ...allowedPluginPaths]) {
+        for (const dir of [...(forRun?.paths ?? []), ...allowedPluginPaths]) {
           if (!loaded.has(path.resolve(dir))) {
             await unavailable(`plugin package ${packageNames.get(dir) ?? path.basename(path.dirname(dir))} was not loaded by Claude Code`)
           }
@@ -436,7 +510,20 @@ export class TurnRunner {
       )
       // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
       const model = session.agentModel ?? settingModel
-      const agentDefinition = session.agentType ? (await loadAgentDefinitions())[session.agentType] : undefined
+      // Not while that subagent, or the own plugin, is switched off (#4757 Task 6 review I3): the
+      // chat's next turn runs as no subagent rather than as one Settings turned off.
+      const ownCall = callPlugins.find((p) => p.source === BUILTIN_SOURCES.ownPlugin)
+      const ownOff: AccessRow[] = [...(itemAccess.get(BUILTIN_SOURCES.ownPlugin)?.off.subagents ?? [])].map((n) => ({
+        source: BUILTIN_SOURCES.ownPlugin,
+        item: subagentItem(n),
+        access: 'off',
+        updated_by: '',
+      }))
+      const typeOff =
+        session.agentType != null &&
+        this.deps.ownPlugin !== undefined &&
+        (ownCall === undefined || offCallItem('Agent', { subagent_type: session.agentType }, [ownCall], ownOff) !== undefined)
+      const agentDefinition = session.agentType && !typeOff ? (await loadAgentDefinitions())[session.agentType] : undefined
       // The http_request tool (#827): on unless `builtin:http` is switched off, or its
       // item is `off`, in ai_access (#2171); an item set to a tier is its tier. Its
       // saved bodies live in Postgres, so any replica serves them (#2374), and it
@@ -586,6 +673,7 @@ export class TurnRunner {
           : {}),
         ...(ownPlugin !== undefined ? { ownPlugin } : {}),
         ...(remotePlugins.length ? { remotePlugins } : {}),
+        disallowedTools: localOff,
         // Shaped like any turn's memory hooks (the same config gives the same
         // events, matchers and timeouts); each runs the current turn's own.
         ...(memory ? { memoryHooks: slotHooks(memory.hooks('', '').hooks, slot, (turn) => turn.memory?.hooks) } : {}),
@@ -601,17 +689,20 @@ export class TurnRunner {
         model: run.model ?? null,
         effort: run.effort ?? null,
         agentType: run.agent?.name ?? null,
-        ownPlugin: ownPlugin !== undefined,
+        // What was loaded: the own plugin's path names its copy's hash when something in it is off.
+        ownPlugin: ownPlugin ?? null,
         // Each plugin's configured endpoint and header version, never the loopback
         // URL this assembly registered (forwarder.ts `pluginEndpoint`).
         plugins: [...(forwarded?.endpoints ?? []), ...(packageServers?.endpoints ?? [])],
-        packageHashes: (packages?.loaded ?? []).map((p) => p.contentHash),
-        allowedPackageHashes: (packages?.loaded ?? []).filter((p) => p.allowed).map((p) => p.contentHash),
+        // What Claude Code is handed: each derived copy's hash, which moves with what is off in it.
+        packageHashes: loadedPackages.map((p) => loadedHashes.get(p.dir) ?? p.contentHash),
+        allowedPackageHashes: loadedPackages.filter((p) => p.allowed).map((p) => loadedHashes.get(p.dir) ?? p.contentHash),
         tiers: principal.tiers ? [...principal.tiers] : null,
         owner: `${session.owner.kind}:${session.owner.id}`,
         systemAppend: run.systemPromptAppend ?? '',
         // Settings → Tools & plugins' disabled built-ins; each plugin's own are in its `plugins` entry.
-        disabledTools: [...(builtIn?.disallowed ?? [])],
+        // And each local package server's tools set off (#4757).
+        disabledTools: [...(builtIn?.disallowed ?? []), ...localOff],
         raisedTiers: [...(builtIn?.raised ?? [])],
         httpRequest: http !== undefined,
         httpTier: httpAccess?.access ?? null,

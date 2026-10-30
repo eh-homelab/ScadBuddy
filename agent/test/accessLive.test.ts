@@ -4,8 +4,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { HookInput } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import { liveAccess } from '../src/access/live.js'
-import { type AccessRow, BUILTIN_SOURCES, packageServerSource, registrySource, remoteSource, SOURCE_ITEM } from '../src/access/model.js'
+import { liveAccess, type LiveTurn } from '../src/access/live.js'
+import type { CallPlugin } from '../src/access/items.js'
+import { type AccessRow, BUILTIN_SOURCES, packageServerSource, packageSource, registrySource, remoteSource, SOURCE_ITEM } from '../src/access/model.js'
 import { AccessResolver } from '../src/access/resolver.js'
 import type { AccessReader } from '../src/access/store.js'
 import { createBackendClient } from '../src/api/backend.js'
@@ -51,7 +52,7 @@ const base: HarnessRun = {
 const approveAll: ApprovalGate = async (request) => ({ approved: true, input: request.input })
 
 /** A turn over `reader`: its policy read now (the turn's start), and the live seam over the same store. */
-async function turnOver(reader: AccessReader, run: Partial<HarnessRun> = {}, tools: readonly Tool[] = ALL_TOOLS) {
+async function turnOver(reader: AccessReader, run: Partial<HarnessRun> = {}, tools: readonly Tool[] = ALL_TOOLS, turn: Partial<LiveTurn> = {}) {
   const ledger = new SeamLedger()
   const policy = await new BuiltInTools(reader).policy()
   const wired = harnessTools(services(), tools)
@@ -59,14 +60,14 @@ async function turnOver(reader: AccessReader, run: Partial<HarnessRun> = {}, too
     ...base,
     tierOf: wired.tierOf,
     builtInPolicy: policy,
-    live: { access: liveAccess(new AccessResolver(reader, tools), { tools, remote: ['hs'], packageServers: [] }), ledger },
+    live: { access: liveAccess(new AccessResolver(reader, tools), { tools, remote: ['hs'], packageServers: [], plugins: [], builtins: [], ...turn }), ledger },
     ...run,
   })
   const ask = (name: string, toolUseID = 't', input: Record<string, unknown> = {}) =>
     options.canUseTool!(name, input, { signal, toolUseID, requestId: 'r' })
-  const hook = (name: string, toolUseId = 'toolu_1') =>
+  const hook = (name: string, toolUseId = 'toolu_1', input: Record<string, unknown> = {}) =>
     options.hooks!.PreToolUse![0]!.hooks[0]!(
-      { hook_event_name: 'PreToolUse', tool_name: name, tool_input: {}, tool_use_id: toolUseId, session_id: 's', transcript_path: '/dev/null', cwd: '/tmp' } as HookInput,
+      { hook_event_name: 'PreToolUse', tool_name: name, tool_input: input, tool_use_id: toolUseId, session_id: 's', transcript_path: '/dev/null', cwd: '/tmp' } as HookInput,
       toolUseId,
       { signal },
     )
@@ -227,6 +228,8 @@ describe('liveAccess', () => {
       tools: [readTool],
       remote: ['hs'],
       packageServers: [{ name: 'plugin_pkg_srv', pkg: 'pkg', server: 'srv' }],
+      plugins: [],
+      builtins: [],
     })
     expect(await read(OWN(readTool.name))).toBe('read')
     expect(await read('mcp__hs__recall')).toBe('outward')
@@ -242,6 +245,144 @@ describe('liveAccess', () => {
     await access.setEnabled(remoteSource('hs'), false)
     expect(await read('mcp__hs__recall')).toBe('off')
     for (const name of ['Skill', 'Agent', 'Bash', OWN(outwardTool.name), 'mcp__other__x']) expect(await read(name)).toBeUndefined()
+  })
+})
+
+describe('Skill, Agent and the built-ins by access per call (#4757)', () => {
+  const PA = packageSource('pa')
+  const PB = packageSource('pb')
+  // `pa`'s agents/review/deep.md declares `name: deep-review`; the own plugin is loaded.
+  const plugins: CallPlugin[] = [
+    { name: 'pa', source: PA, items: ['skill:jot', 'skill:wave', 'subagent:review:deep'], aliases: { 'subagent:deep-review': ['subagent:review:deep'] } },
+    { name: 'scadbuddy', source: BUILTIN_SOURCES.ownPlugin, items: ['skill:jot', 'subagent:model-author', 'subagent:printer'], aliases: {} },
+  ]
+  // The own plugin's Skill and Agent tools are read (run.ts `ownPluginTierOf`); a package built-in outward.
+  const tierOf: HarnessRun['tierOf'] = (name) => (['Skill', 'Agent', 'Task'].includes(name) ? 'read' : undefined)
+  const bash = (packages: string[]): Partial<LiveTurn> => ({ builtins: [{ name: 'Bash', packages }] })
+  const command = { command: 'ls' }
+
+  it('refuses a Skill call naming a skill set off mid-turn', async () => {
+    const { access } = memoryAccess()
+    const { ask, hook } = await turnOver(access, { tierOf }, ALL_TOOLS, { plugins })
+    expect(await ask('Skill', 't', { skill: 'pa:jot' })).toMatchObject({ behavior: 'allow' })
+    await access.setItem(PA, 'skill:jot', 'off')
+    // One sentence naming the item, not the Skill tool (#4757 review I1).
+    const said = 'skill "jot" of plugin package pa is switched off in Settings → Tools & plugins; the user can turn it back on there'
+    expect(await ask('Skill', 't', { skill: 'pa:jot' })).toMatchObject({ behavior: 'deny', message: said })
+    expect(await ask('Skill', 't', { skill: 'jot' })).toMatchObject({ behavior: 'deny', message: said })
+    expect(await hook('Skill', 'toolu_s', { skill: 'pa:jot' })).toMatchObject({ hookSpecificOutput: { permissionDecision: 'deny', permissionDecisionReason: said } })
+    // The own plugin's skill of that name is its own item.
+    expect(await ask('Skill', 't', { skill: 'scadbuddy:jot' })).toMatchObject({ behavior: 'allow' })
+  })
+
+  it('refuses an Agent call naming a subagent set off, qualified or not', async () => {
+    const { access } = memoryAccess([row(BUILTIN_SOURCES.ownPlugin, 'subagent:model-author', 'off')])
+    const { ask } = await turnOver(access, { tierOf }, ALL_TOOLS, { plugins })
+    for (const name of ['scadbuddy:model-author', 'model-author']) {
+      expect(await ask('Agent', 't', { subagent_type: name, prompt: 'p' })).toMatchObject({
+        behavior: 'deny',
+        message: `subagent "model-author" of ScadBuddy's own plugin is switched off in Settings → Tools & plugins; the user can turn it back on there`,
+      })
+      expect(await ask('Task', 't', { subagent_type: name, prompt: 'p' })).toMatchObject({ behavior: 'deny' })
+    }
+    expect(await ask('Agent', 't', { subagent_type: 'scadbuddy:printer', prompt: 'p' })).toMatchObject({ behavior: 'allow' })
+  })
+
+  it('refuses an Agent call naming a subagent by its frontmatter name', async () => {
+    const { access } = memoryAccess([row(PA, 'subagent:review:deep', 'off')])
+    const { ask } = await turnOver(access, { tierOf }, ALL_TOOLS, { plugins })
+    expect(await ask('Agent', 't', { subagent_type: 'pa:deep-review', prompt: 'p' })).toMatchObject({ behavior: 'deny' })
+    expect(await ask('Agent', 't', { subagent_type: 'deep-review', prompt: 'p' })).toMatchObject({ behavior: 'deny' })
+  })
+
+  it('refuses a Skill call naming a command set off', async () => {
+    // A command is a skill item: Claude Code invokes a slash command through the Skill tool (vet.ts `PackageItems`).
+    const { access } = memoryAccess([row(PA, 'skill:wave', 'off')])
+    const { ask } = await turnOver(access, { tierOf }, ALL_TOOLS, { plugins })
+    expect(await ask('Skill', 't', { skill: 'pa:wave' })).toMatchObject({ behavior: 'deny' })
+  })
+
+  it('refuses a Skill or Agent call once its whole plugin is switched off mid-turn', async () => {
+    const { access } = memoryAccess()
+    const { ask } = await turnOver(access, { tierOf }, ALL_TOOLS, { plugins })
+    expect(await ask('Agent', 't', { subagent_type: 'scadbuddy:printer', prompt: 'p' })).toMatchObject({ behavior: 'allow' })
+    await access.setEnabled(BUILTIN_SOURCES.ownPlugin, false)
+    expect(await ask('Agent', 't', { subagent_type: 'scadbuddy:printer', prompt: 'p' })).toMatchObject({
+      behavior: 'deny',
+      message: "ScadBuddy's own plugin is switched off in Settings → Tools & plugins; the user can turn it back on there",
+    })
+    expect(await ask('Skill', 't', { skill: 'pa:wave' })).toMatchObject({ behavior: 'allow' })
+    await access.setEnabled(PA, false)
+    expect(await ask('Skill', 't', { skill: 'pa:wave' })).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/^plugin package pa is switched off/) })
+    // A built-in subagent type no plugin has is left to the turn.
+    expect(await ask('Agent', 't', { subagent_type: 'general-purpose', prompt: 'p' })).toMatchObject({ behavior: 'allow' })
+  })
+
+  it('a package naming Agent as a built-in has its access read per call', async () => {
+    const { access } = memoryAccess([row(PA, 'builtin:Agent', 'write')])
+    const read = liveAccess(new AccessResolver(access), { tools: [], remote: [], packageServers: [], plugins, builtins: [{ name: 'Agent', packages: ['pa'] }] })
+    expect(await read('Agent', { subagent_type: 'general-purpose' })).toBe('write')
+    await access.setItem(PA, 'builtin:Agent', 'off')
+    expect(await read('Agent', { subagent_type: 'general-purpose' })).toBe('off')
+    // An off item still refuses, with its sentence.
+    await access.setItem(PA, 'builtin:Agent', 'read')
+    await access.setItem(PA, 'subagent:review:deep', 'off')
+    expect(await read('Agent', { subagent_type: 'pa:deep-review' })).toEqual({ off: expect.stringMatching(/^subagent "review:deep" of plugin package pa/) })
+  })
+
+  it("leaves a Skill call naming an on skill to the turn's tier", async () => {
+    const { access } = memoryAccess([row(PA, 'skill:jot', 'on')])
+    const read = liveAccess(new AccessResolver(access), { tools: [], remote: [], packageServers: [], plugins, builtins: [] })
+    expect(await read('Skill', { skill: 'pa:jot' })).toBeUndefined()
+    expect(await read('Skill', {})).toBeUndefined()
+    const { ask } = await turnOver(access, { tierOf }, ALL_TOOLS, { plugins })
+    expect(await ask('Skill', 't', { skill: 'pa:jot' })).toMatchObject({ behavior: 'allow' })
+  })
+
+  it('a classic Bash call takes the stricter access of the packages naming it', async () => {
+    const { access } = memoryAccess([row(PA, 'builtin:Bash', 'read'), row(PB, 'builtin:Bash', 'write')])
+    const { ask } = await turnOver(access, {}, ALL_TOOLS, bash(['pa', 'pb']))
+    expect(await ask('Bash', 't', command)).toMatchObject({ behavior: 'allow' })
+    await access.setItem(PA, 'builtin:Bash', 'outward')
+    expect(await ask('Bash', 't', command)).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/approval/) })
+    await access.setItem(PB, 'builtin:Bash', 'off')
+    expect(await ask('Bash', 't', command)).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/disabled in Settings/) })
+  })
+
+  it('A names Bash at write, B names it unset: outward in both runtimes', async () => {
+    // The durable half is toolActivities.test.ts `builtin_tier`, over the same rows and packages.
+    const { access } = memoryAccess([row(PA, 'builtin:Bash', 'write')])
+    const read = liveAccess(new AccessResolver(access), { tools: [], remote: [], packageServers: [], plugins: [], ...bash(['pa', 'pb']) } as LiveTurn)
+    expect(await read('Bash', command)).toBe('outward')
+    const { ask } = await turnOver(access, {}, ALL_TOOLS, bash(['pa', 'pb']))
+    expect(await ask('Bash', 't', command)).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/approval/) })
+  })
+
+  it('a lowered Bash runs at its access', async () => {
+    const { access } = memoryAccess([row(PA, 'builtin:Bash', 'write')])
+    const { ask, ledger } = await turnOver(access, {}, ALL_TOOLS, bash(['pa']))
+    expect(await ask('Bash', 'toolu_bash', command)).toMatchObject({ behavior: 'allow' })
+    expect(ledger.tierOf('toolu_bash')).toBe('write')
+    // A built-in the session serves (mcp__builtin__WebFetch) takes its access by the same rule.
+    const read = liveAccess(new AccessResolver(access), {
+      tools: [],
+      remote: [],
+      packageServers: [],
+      plugins: [],
+      builtins: [{ name: 'WebFetch', packages: ['pa'] }],
+    })
+    await access.setItem(PA, 'builtin:WebFetch', 'read')
+    expect(await read('mcp__builtin__WebFetch', {})).toBe('read')
+    expect(await read('WebFetch', {})).toBe('read')
+  })
+
+  it("a local package server's tool takes its stored tier", async () => {
+    const { access } = memoryAccess([row(packageServerSource('pa', 'local'), 'find', 'read')])
+    const { ask } = await turnOver(access, {}, ALL_TOOLS, { packageServers: [{ name: 'plugin_pa_local', pkg: 'pa', server: 'local' }] })
+    expect(await ask('mcp__plugin_pa_local__find')).toMatchObject({ behavior: 'allow' })
+    expect(await ask('mcp__plugin_pa_local__other')).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/approval/) })
+    await access.setEnabled(packageServerSource('pa', 'local'), false)
+    expect(await ask('mcp__plugin_pa_local__find')).toMatchObject({ behavior: 'deny', message: expect.stringMatching(/disabled in Settings/) })
   })
 })
 

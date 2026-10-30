@@ -7,7 +7,18 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { declaredConfigs } from '../harness/plugins.js'
 import { hashTree, PackageContentError } from '../plugins/packages/hash.js'
 import type { LoadedPackage } from '../plugins/packages/install.js'
-import { packageServerName, touch, withoutRemoteServers } from '../plugins/packages/mcp.js'
+import { skillItem, subagentItem, toolOffReason } from '../access/items.js'
+import { packageServerSource } from '../access/model.js'
+import {
+  collidingServerNames,
+  collisionProblem,
+  packageServerName,
+  type ServerAccess,
+  unofferableNameProblem,
+} from '../plugins/packages/mcp.js'
+import { copyPath, derivedPackage, NOTHING_OMITTED, type Omitted, placeCopy, touch } from '../plugins/packages/derived.js'
+import { pluginTierResolver } from '../plugins/registry.js'
+import { listingProblems } from '../plugins/packages/vet.js'
 import { type TurnPackage, type TurnServer } from './turnTools.js'
 
 // Plugin packages in a durable session (#2320). A classic turn hands Claude Code each
@@ -15,7 +26,7 @@ import { type TurnPackage, type TurnServer } from './turnTools.js'
 // its pin and re-hashed for the turn (plugins/packages/install.ts `loadPackagesForRun`).
 // A durable turn's Claude Code runs in the agent-durable container, so:
 //
-//   - each loaded package is copied to `<payload dir>/plugins/<content hash>/`, on the
+//   - each loaded package is copied to `<payload dir>/plugins/<content hash>/<name>/`, on the
 //     volume both sidecars mount, once per content hash (it never changes under that
 //     name), and the turn's listing names it (`TurnPackage`); the segment runner hashes
 //     the copy again before it loads it, as the agent re-hashes its own cache;
@@ -25,7 +36,9 @@ import { type TurnPackage, type TurnServer } from './turnTools.js'
 //     `sharePackage`, and the segment runner refuses a copy that still does), and here
 //     each call goes through the gate. They carry the
 //     names Claude Code gives them (`plugin_<package>_<server>`), so their tiers are
-//     the classic turn's: no package tool is ScadBuddy's, so every one is outward.
+//     the classic turn's: each server's `package:<pkg>/mcp:<server>` rows in ai_access,
+//     a tool with none outward; a server switched off there is not offered, nor any whose
+//     name another package server carries too (#4757).
 //     An http server is reached only through the loopback forwarder, as a remote
 //     plugin is and as a classic turn reaches it (plugins/packages/mcp.ts
 //     `forwardPackageServers`: the egress-checked address, no redirect, no OAuth
@@ -44,40 +57,58 @@ export function sharedName(contentHash: string): string {
 }
 
 /**
- * Copies a loaded package to `root/<hash>` unless a copy that hashes to `<hash>` is
- * already there, and returns its name under `root`. A copy that does not match is
- * replaced: the volume is shared, so it is checked, never trusted. A package that
- * declares an http MCP server is shared without it (`withoutRemoteServers`, made under
- * `localRoot`), named by that copy's own hash: Claude Code in agent-durable would reach
- * it itself, past the forwarder, and the segment runner refuses a copy that declares one.
+ * Copies a loaded package to `root/<hash>/<package name>` unless a copy that hashes to
+ * `<hash>` is already there, and returns it as the turn lists it (`dir` is
+ * `<hash>/<package name>`, under `root`). The folder is named after the package, as the
+ * classic copy is (plugins/packages/derived.ts), so Claude Code names a root skill and a
+ * package with no manifest name alike in both runtimes. A copy that does not match is moved
+ * aside whole and replaced (`placeCopy`): the volume is shared, so it is checked, never
+ * trusted. The source is `derivedPackage`'s, made under `localRoot`: without the package's
+ * http MCP servers, which Claude Code in agent-durable would reach itself, past the
+ * forwarder (the segment runner refuses a copy that declares one), and without what
+ * `omitted` names (#4757: the turn's switched-off skills, subagents, hooks and servers, as a
+ * classic turn's copy leaves them out), named by that copy's own hash, the `content_hash`
+ * listed. Its `builtin_tools` leave out `builtinsOff`, the turn's built-ins switched off
+ * (derived.ts `builtinsOffOf`). A pin approved before vet bounded its names (vet.ts
+ * `listingProblems`) is not shared: its names are never listed cut, nor past the budget.
  */
-export async function sharePackage(pkg: LoadedPackage, root: string, localRoot: string): Promise<TurnPackage> {
-  const source = await withoutRemoteServers(pkg.dir, pkg.contentHash, localRoot)
-  const contentHash = source === pkg.dir ? pkg.contentHash : (await hashTree(source)).hash
+export async function sharePackage(
+  pkg: LoadedPackage,
+  root: string,
+  localRoot: string,
+  omitted: Omitted = NOTHING_OMITTED,
+  builtinsOff: ReadonlySet<string> = new Set(),
+): Promise<TurnPackage> {
+  const source = await derivedPackage(pkg.dir, pkg.contentHash, localRoot, omitted, pkg.name)
+  const unlistable = listingProblems(source.items)
+  if (unlistable.length) throw new Error(unlistable.join('; '))
+  const contentHash = source.contentHash ?? pkg.contentHash
   const name = sharedName(contentHash)
-  const target = path.join(root, name)
+  const target = copyPath(root, contentHash, pkg.name)
   // Its last share, which the sweep keeps it by (sweepPackageCopies): touched before
   // it is checked, so a sweep that takes it after the touch sees the share and puts it back.
-  await touch(target)
+  await touch(path.dirname(target))
   if (!(await matches(target, contentHash))) {
     await mkdir(root, { recursive: true })
     const tmp = path.join(root, `.tmp-${randomUUID()}`)
     try {
-      await cp(source, tmp, { recursive: true, preserveTimestamps: true })
+      await cp(source.dir, tmp, { recursive: true, preserveTimestamps: true })
       if (!(await matches(tmp, contentHash))) throw new Error(`the copy of ${pkg.name} does not hash to its pin`)
-      await rm(target, { recursive: true, force: true })
-      try {
-        await rename(tmp, target)
-      } catch (err) {
-        // Another replica placed it first: fine when it matches.
-        const code = (err as NodeJS.ErrnoException).code
-        if ((code !== 'ENOTEMPTY' && code !== 'EEXIST') || !(await matches(target, contentHash))) throw err
-      }
+      await placeCopy(tmp, target, contentHash)
     } finally {
       await rm(tmp, { recursive: true, force: true })
     }
   }
-  return { name: pkg.name, dir: name, content_hash: contentHash, allowed: pkg.allowed, builtin_tools: [...pkg.builtinTools] }
+  return {
+    name: pkg.name,
+    dir: `${name}/${pkg.name}`,
+    content_hash: contentHash,
+    allowed: pkg.allowed,
+    builtin_tools: pkg.builtinTools.filter((t) => !builtinsOff.has(t)),
+    items: [...[...source.items.skills.keys()].map(skillItem), ...[...source.items.subagents.keys()].map(subagentItem)],
+    aliases: Object.fromEntries(source.items.declared),
+    named_builtins: pkg.allowed ? [...pkg.builtinTools] : [],
+  }
 }
 
 /** A copy is kept this long after the last turn that shared it (#2395). */
@@ -179,21 +210,66 @@ async function connectStdio(config: McpConfig, root: string): Promise<Client> {
 }
 
 /**
- * The local MCP servers of the packages approved with `allow_refused`, as turn servers;
- * their http servers come through the forwarder instead (turnServers.ts).
+ * A package server known but switched off in Settings → Tools & plugins (#4757 final review
+ * M2): not listed, never connected to, each call refused in a classic turn's words.
  */
-export function localPackageServers(loaded: readonly LoadedPackage[], problems: string[]): TurnServer[] {
+export function switchedOffServer(name: string): TurnServer {
+  return {
+    name,
+    connect: () => Promise.reject(new Error(`${name} is switched off in Settings → Tools & plugins`)),
+    tierOf: () => 'write',
+    refusal: async (harnessName) => toolOffReason(harnessName),
+    unlisted: true,
+  }
+}
+
+/**
+ * The local MCP servers of the packages approved with `allow_refused`, as turn servers;
+ * their http servers come through the forwarder instead (turnServers.ts). A server
+ * switched off in `access` (by `packageServerSource`) is not started: it is known, its
+ * calls refused in a classic turn's words (`switchedOffServer`, #4757 final review M2).
+ * One missing from `access` is not started either, nor one whose name another package
+ * server carries (`collidingServerNames`).
+ * A tool's tier is its stored one, else outward; a tool set off is `offTools`.
+ */
+export function localPackageServers(
+  loaded: readonly LoadedPackage[],
+  problems: string[],
+  access: ReadonlyMap<string, ServerAccess>,
+): TurnServer[] {
   const servers: TurnServer[] = []
+  const colliding = collidingServerNames(loaded)
   for (const pkg of loaded) {
     for (const { map } of declaredConfigs(pkg.dir).mcp) {
       for (const [server, config] of entries(map)) {
         if (!pkg.allowed || typeof config.command !== 'string') continue
         const name = packageServerName(pkg.name, server)
         if (name.includes('__')) {
-          problems.push(`plugin package ${pkg.name}: MCP server "${server}" has a name a durable session cannot offer`)
+          problems.push(unofferableNameProblem(pkg.name, server))
           continue
         }
-        servers.push({ name, connect: () => connectStdio(config, pkg.dir), tierOf: () => 'outward' })
+        const collision = collisionProblem(colliding, pkg.name, server)
+        if (collision) {
+          problems.push(collision)
+          continue
+        }
+        const stored = access.get(packageServerSource(pkg.name, server))
+        if (!stored) continue
+        if (!stored.enabled) {
+          servers.push(switchedOffServer(name))
+          continue
+        }
+        const tiers = pluginTierResolver([{ name, toolTiers: stored.toolTiers }])
+        const tierOf = (harnessName: string) => tiers(harnessName) ?? 'outward'
+        servers.push({
+          name,
+          connect: () => connectStdio(config, pkg.dir),
+          tierOf,
+          // Any may park: a tier raised to outward later in the turn is asked about.
+          mayPark: () => true,
+          fixedTier: tierOf,
+          ...(stored.disabledTools.length ? { offTools: new Set(stored.disabledTools) } : {}),
+        })
       }
     }
   }

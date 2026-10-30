@@ -141,6 +141,16 @@ def translate(
                 "summary": status,
             }
         ]
+    if kind == "plugin_unavailable":
+        # A plugin the segment could not load (runner.py), said as a classic turn says it.
+        return [
+            {
+                **base,
+                "type": "error",
+                "code": "plugin_unavailable",
+                "message": str(event.get("message", "")),
+            }
+        ]
     # prompt (the user.turn the agent service wrote), approval_needed (the gate's
     # approval.required, §6.6), retry, continued_as_new; done, error and cancelled are
     # finish_turn's to report.
