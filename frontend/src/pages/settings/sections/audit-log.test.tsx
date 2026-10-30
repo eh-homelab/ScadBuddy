@@ -1,7 +1,7 @@
 import { screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { renderSettingsSection } from '../testing'
-import { Component as AuditLog } from './audit-log'
+import { AUDIT_LOGS, Component as AuditLog } from './audit-log'
 
 const availability = vi.hoisted(() => ({ available: true }))
 vi.mock('../../../agent/chat/availability', () => ({
@@ -18,6 +18,24 @@ describe('Audit log', () => {
     const section = await screen.findByRole('region', { name: 'Audit log' })
     expect(section).toHaveTextContent('Background jobs are on the Activity page.')
     expect(within(section).getByRole('link', { name: 'Activity page' })).toHaveAttribute('href', '/activity')
+    const panel = screen.getByRole('tabpanel', { name: 'AI activity' })
+    expect(within(panel).queryByRole('link', { name: 'Activity page' })).toBeNull()
+  })
+
+  it('shows the logs as tabs, even with one (#781)', async () => {
+    renderSettingsSection(<AuditLog />, { route: '/settings/audits' })
+    const tabs = await screen.findByRole('tablist', { name: 'Audit logs' })
+    const names = within(tabs)
+      .getAllByRole('tab')
+      .map((t) => t.textContent)
+    expect(names).toEqual(['AI activity'])
+    expect(within(tabs).getByRole('tab', { name: 'AI activity' })).toHaveAttribute('aria-selected', 'true')
+    const panel = screen.getByRole('tabpanel', { name: 'AI activity' })
+    expect(await within(panel).findByRole('list', { name: 'AI activity entries' })).toBeInTheDocument()
+  })
+
+  it('builds one tab per entry of AUDIT_LOGS', () => {
+    expect(AUDIT_LOGS.map((l) => l.value)).toEqual(['ai-activity'])
   })
 
   it('shows the Activity link while the assistant is unavailable', async () => {
