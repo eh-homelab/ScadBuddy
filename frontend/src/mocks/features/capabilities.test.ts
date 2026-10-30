@@ -180,6 +180,8 @@ describe('capabilities mock (#2171)', () => {
       seedStoredPackage('greet_er', { review: { mcp_servers: [MEM] } })
       seedBuiltInRow('package:greet.er/mcp:mem', 'recall', 'read')
       const view = (await settled('package:greet.er')).children[0]!
+      // Each package's own first read settles only its own check.
+      await settled('package:greet_er')
       const reason = 'Its server is named plugin_greet_er_mem, as "mem" of plugin package greet_er is, so none of them is offered'
       expect(view.items).toEqual([expect.objectContaining({ id: 'recall', missing: true, access: 'off', own_access: 'off', fixed: { access: 'off', reason }, reason })])
       expect(await refused(aiCapabilities.refresh('package:greet.er/mcp:mem'))).toEqual({ status: 409, detail: reason })
@@ -192,6 +194,22 @@ describe('capabilities mock (#2171)', () => {
       await aiCapabilities.setEnabled('package:greet_er', false)
       const { source: listed } = await aiCapabilities.refresh('package:greet.er/mcp:mem')
       expect(listed.items.find((i) => i.id === 'recall')).toMatchObject({ access: 'read', fixed: null, harness_name: 'mcp__plugin_greet_er_mem__recall' })
+    })
+
+    it("a read of one package leaves another's first-read checking alone", async () => {
+      seedStoredPackage('greeter')
+      seedStoredPackage('other')
+      await source('package:greeter')
+      // `other`'s servers were counted for greeter's collisions, but no read showed `other` yet.
+      expect((await aiCapabilities.list()).find((s) => s.id === 'package:other')?.checking).toBe(true)
+    })
+
+    it('a review from before hook ids lists nothing until its copy is cached, and reads checking while on', async () => {
+      seedStoredPackage('greeter', { review: { hooks: [{ event: 'Stop', type: 'prompt' }], described: undefined } })
+      const on = await settled('package:greeter')
+      expect(on).toMatchObject({ enabled: true, checking: true, items: [], children: [] })
+      await aiCapabilities.setEnabled('package:greeter', false)
+      expect(await source('package:greeter')).toMatchObject({ enabled: false, checking: false, items: [], children: [] })
     })
 
     it('a server whose name would hold __ is not offered', async () => {

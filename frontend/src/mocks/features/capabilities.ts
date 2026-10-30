@@ -49,7 +49,9 @@ import {
  * `checking` (each pin once, so the next read settles), as does a package held there
  * (`setPackageChecking`). Servers whose names a turn would carry alike collide; a name holding
  * `__` is not offered; an allowed package's `local_servers` are children whose tools are never
- * listed here. Installed packages are kept in sessionStorage with the rest.
+ * listed here. A review stored before hook ids and descriptions lists no items and no servers, and
+ * reads `checking` while on, as the agent's does until the pin's copy is cached. Installed packages
+ * are kept in sessionStorage with the rest.
  */
 
 const base = '/api/v1/ai/capabilities'
@@ -498,22 +500,37 @@ type LoadState = { kind: 'off' } | { kind: 'problem'; problem: string } | { kind
 const checkingReason = (pkg: string) => `Checking whether "${pkg}" can load…`
 const pinOf = (pkg: PluginPackage) => `${pkg.name}@${pkg.content_hash}`
 
-/** The agent's `stateOf`: off, refused at load (why), not yet checked, or loads. */
-function loadState(pkg: PluginPackage): LoadState {
+/**
+ * Whether a stored review names its items (the agent's `namesItems`, less `local_servers`, which
+ * the seeds predate). One that does not is read from the verified copy, which the mock never has
+ * cached: it lists nothing, as the agent's does until a turn or a file read caches the copy.
+ */
+const namesItems = (review: PackageReview) => review.described !== undefined && review.hooks.every((h) => h.id !== undefined)
+
+/**
+ * The agent's `stateOf`: off, refused at load (why), not yet checked, or loads. Reads only, so
+ * another package's collision count does not settle this one's first read (`loadState` records).
+ */
+function stateOf(pkg: PluginPackage): LoadState {
   if (!pkg.enabled || !pkg.approved) return { kind: 'off' }
   if (packageList().some((p) => isBuiltIn(p) && p.name === pkg.name)) {
     return { kind: 'problem', problem: `plugin package ${pkg.name} was not loaded: "${pkg.name}" is built in; remove the installed package` }
   }
   const problem = state.problems.get(pkg.name)
   if (problem !== undefined) return { kind: 'problem', problem }
-  if (state.holdChecking.has(pkg.name)) return { kind: 'checking' }
-  // A pin this read is the first to see is not checked yet; the read after it settles.
+  // A review not yet readable is a copy not yet cached: as unknown as an unchecked pin.
+  if (state.holdChecking.has(pkg.name) || !namesItems(pkg.review)) return { kind: 'checking' }
   const pin = pinOf(pkg)
-  if (!state.checkedPins.has(pin) || state.checkingNow.has(pin)) {
-    state.checkingNow.add(pin)
-    return { kind: 'checking' }
-  }
-  return { kind: 'loads' }
+  return !state.checkedPins.has(pin) || state.checkingNow.has(pin) ? { kind: 'checking' } : { kind: 'loads' }
+}
+
+/** `stateOf` for a read that shows `pkg`: a pin this read is the first to see is not checked yet; the read after it settles. */
+function loadState(pkg: PluginPackage): LoadState {
+  const loaded = stateOf(pkg)
+  const pin = pinOf(pkg)
+  const firstRead = !state.holdChecking.has(pkg.name) && namesItems(pkg.review) && !state.checkedPins.has(pin)
+  if (loaded.kind === 'checking' && firstRead) state.checkingNow.add(pin)
+  return loaded
 }
 
 /** Ends a read: the pins it answered `checking` for are checked from the next one. */
@@ -526,6 +543,7 @@ function settleChecks(): void {
 
 /** The servers a review says a turn offers: its http ones, and its local ones while allowed (the agent's `reviewServers`). */
 function reviewServers(pkg: PluginPackage): { server: string; local: boolean }[] {
+  if (!namesItems(pkg.review)) return []
   const out: { server: string; local: boolean }[] = []
   for (const { name } of pkg.review.mcp_servers) if (!out.some((s) => s.server === name)) out.push({ server: name, local: false })
   if (pkg.allow_refused) for (const name of pkg.review.local_servers ?? []) if (!out.some((s) => s.server === name)) out.push({ server: name, local: true })
@@ -537,7 +555,7 @@ function reviewServers(pkg: PluginPackage): { server: string; local: boolean }[]
  * server carries too (the agent's `serverCollisions`), or one holding `__`.
  */
 function blockedServers(pkg: PluginPackage): Map<string, string> {
-  const mayLoad = installed().filter((p) => ['loads', 'checking'].includes(loadState(p).kind))
+  const mayLoad = installed().filter((p) => ['loads', 'checking'].includes(stateOf(p).kind))
   const all = mayLoad.flatMap((p) => reviewServers(p).map(({ server }) => ({ pkg: p.name, server })))
   const blocked = new Map<string, string>()
   for (const { server } of reviewServers(pkg)) {
@@ -581,6 +599,7 @@ function packageItem(fields: ItemFields, source: string): ItemView {
 
 function packageItems(pkg: PluginPackage, source: string): ItemView[] {
   const { review } = pkg
+  if (!namesItems(review)) return []
   const hooks: ItemView[] = []
   for (const hook of review.hooks) {
     // A hook without an id cannot be named by a row: only an older review has one.

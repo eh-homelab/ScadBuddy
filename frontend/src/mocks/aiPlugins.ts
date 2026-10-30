@@ -85,6 +85,8 @@ const REVIEW_V2: PackageReview = {
   ...REVIEW_V1,
   version: '2.0.0',
   skills: ['greeter:bye', 'greeter:hello'],
+  // Stop is kept (its id with it); UserPromptSubmit is new since v1.
+  hooks: [...REVIEW_V1.hooks, { event: 'UserPromptSubmit', type: 'prompt', id: '1a2b3c4d5e6f7081' }],
   described: { ...REVIEW_V1.described, 'skill:bye': 'Says goodbye to the user.' },
   files: [...REVIEW_V1.files.filter((f) => f !== 'README.md'), 'skills/bye/SKILL.md'].sort(),
 }
@@ -491,7 +493,7 @@ export const aiPluginHandlers = [
         commit_sha: found.commit_sha,
         content_hash: found.content_hash,
         review: found.review,
-        diff: { added, removed, changed: ['.claude-plugin/plugin.json', 'skills/hello/SKILL.md'] },
+        diff: { added, removed, changed: ['.claude-plugin/plugin.json', 'hooks/hooks.json', 'skills/hello/SKILL.md'] },
       },
     }
     putPackage(pkg.name, next)
