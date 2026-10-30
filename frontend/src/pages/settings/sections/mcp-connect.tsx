@@ -26,6 +26,8 @@ function Snippet() {
   const shared = card?.mode === undefined ? undefined : { mode: card.mode }
   // Its own read only without the card: with one whose mode is not known yet, wait for it.
   const own = card === undefined
+  // `own` is the card's state at this render; `tokensCardMounted()` is the store's now, at
+  // load time, which also covers a card whose layout effect runs in this same commit (#5021).
   const auth = useAsync(() => (own && !tokensCardMounted() ? api.getMcpAuth() : Promise.resolve(null)), [authVersion, own])
   // A failed read falls back to the mode the token list carries, as the Tokens card does.
   const failed = own && auth.error !== undefined

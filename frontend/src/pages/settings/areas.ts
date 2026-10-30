@@ -53,6 +53,14 @@ export function registerSections(sections: readonly SectionRef[]): void {
   known = sections
 }
 
+/**
+ * Whether the registry has told this module its sections. Until then `known` is empty, so
+ * a call without a `sections` argument resolves legacy anchors only (#5021).
+ */
+export function sectionsLoaded(): boolean {
+  return known.length > 0
+}
+
 export function settingsTarget(hash: string, sections: readonly SectionRef[] = known): SettingsLocation | null {
   const id = sectionId(hash)
   if (Object.hasOwn(LEGACY_ANCHORS, id)) {

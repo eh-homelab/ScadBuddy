@@ -668,7 +668,9 @@ class SegmentCalls:
         call = str(data.get("tool_use_id") or tool_use_id or "")
         if not call or self._workflows(name):
             if not call and self._judge is not None and name in access.CALL_TOOLS:
-                return await self._judged(name, data)  # judged whatever Claude Code sends
+                return await self._judged(
+                    self._judge, name, data
+                )  # judged whatever Claude Code sends
             return {}
         event: dict[str, Any] = {
             "type": "tool_call",
@@ -687,7 +689,7 @@ class SegmentCalls:
         self._open[call] = name
         emit(event)
         if self._judge is not None and name in access.CALL_TOOLS:
-            decision = await self._judged(name, data)
+            decision = await self._judged(self._judge, name, data)
             if decision:
                 self._agents.pop(call, None)
                 self._open.pop(call, None)
@@ -695,13 +697,12 @@ class SegmentCalls:
                 return decision
         return {}
 
-    async def _judged(self, name: str, data: Any) -> dict[str, Any]:
+    async def _judged(self, judge: CallJudge, name: str, data: Any) -> dict[str, Any]:
         """The judge's answer, or a deny when it raises (#5017 security review): Claude Code
         2.1.292 runs a call whose PreToolUse hook callback fails (the SDK answers the hook's
         control request with an error), so an exception here must never reach it."""
-        assert self._judge is not None
         try:
-            return await self._judge(data)
+            return await judge(data)
         except Exception as err:
             logger.warning("%s could not be judged: %s", name, type(err).__name__)
             return _deny(f"{name} is refused: its access could not be checked")

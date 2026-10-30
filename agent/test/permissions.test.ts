@@ -289,6 +289,22 @@ describe('a decision that throws fails closed (#5018)', () => {
     })
   }
 
+  it('carries the tier it had resolved when a later step throws (#5021)', async () => {
+    spy()
+    const seen: ToolDecision[] = []
+    const canUseTool = makeCanUseTool(tierOf, (_n, d) => seen.push(d), undefined, undefined, undefined, throwingLedger)
+    await canUseTool(tool, {}, opts('tier'))
+    expect(seen).toMatchObject([{ decision: 'deny', tier: tiers[tool] }])
+    const guarded: ToolDecision[] = []
+    const hook = makePreToolUseHook(tierOf, (_n, d) => guarded.push(d), undefined, throwingGuard)
+    await hook.hooks[0]!(preToolUse(tool), 'toolu_1', { signal })
+    expect(guarded).toMatchObject([{ decision: 'deny', tier: tiers[tool] }])
+    // Nothing resolved yet: the deny stays outward.
+    const unresolved: ToolDecision[] = []
+    await makeCanUseTool(throwingTier, (_n, d) => unresolved.push(d))(tool, {}, opts('none'))
+    expect(unresolved).toMatchObject([{ decision: 'deny', tier: 'outward' }])
+  })
+
   it('says why, and logs only the error type', async () => {
     spy()
     const canUseTool = makeCanUseTool(throwingTier)
