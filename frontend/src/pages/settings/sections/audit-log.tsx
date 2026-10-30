@@ -1,5 +1,5 @@
 import { Link } from 'react-router'
-import { AiAuditSection } from '../../../components/assistant/AiAuditSection'
+import { AiActivityLog } from '../../../components/audits/AiActivityLog'
 import { Section } from '../controls'
 import type { AreaId } from '../registry'
 
@@ -22,7 +22,7 @@ export function Component() {
         </Link>
         .
       </p>
-      <AiAuditSection />
+      <AiActivityLog />
     </Section>
   )
 }

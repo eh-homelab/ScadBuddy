@@ -20,15 +20,15 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Tip } from './Tip'
+import { Tip } from '../assistant/Tip'
 import { Spinner } from '../ui/spinner'
 
 /**
- * Settings → "AI activity" (#258): the agent service's audit log of AI actions
+ * Settings → Audits → AI activity (#258): the agent service's audit log of AI actions
  * (`GET /api/v1/ai/audit`), newest first, filterable by kind and outcome, with the
  * retention setting. Hidden when AI is off, like the rest of the assistant.
  */
-export function AiAuditSection() {
+export function AiActivityLog() {
   const ai = useAiAvailability()
   if (!ai.available) return null
   return <AuditLogView />

@@ -9,7 +9,7 @@ import { AUDIT_FIXTURES } from '../../mocks/features/audit'
 import { resetMockState } from '../../mocks/handlers'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
-import { AiAuditSection } from './AiAuditSection'
+import { AiActivityLog } from './AiActivityLog'
 
 const availability = vi.hoisted(() => ({ available: true }))
 vi.mock('../../agent/chat/availability', () => ({
@@ -44,10 +44,10 @@ async function pick(name: 'Kind' | 'Outcome', label: string) {
 
 const rows = () => within(screen.getByRole('list', { name: 'AI activity entries' })).getAllByTestId('audit-entry')
 
-describe('AiAuditSection', () => {
+describe('AiActivityLog', () => {
   it('renders nothing when AI is off', () => {
     availability.available = false
-    const { container } = renderPage(<AiAuditSection />)
+    const { container } = renderPage(<AiActivityLog />)
     expect(container).toBeEmptyDOMElement()
   })
 
@@ -78,7 +78,7 @@ describe('AiAuditSection', () => {
         }),
       ),
     )
-    renderPage(<AiAuditSection />)
+    renderPage(<AiActivityLog />)
     await waitFor(() => expect(rows()).toHaveLength(3))
     const [retain, recall, failed] = rows()
     expect(retain).toHaveTextContent('Memory save')
@@ -122,7 +122,7 @@ describe('AiAuditSection', () => {
         }),
       ),
     )
-    renderPage(<AiAuditSection />)
+    renderPage(<AiActivityLog />)
     await waitFor(() => expect(rows()).toHaveLength(2))
     const [get, refused] = rows()
     expect(get).toHaveTextContent('HTTP GET')
@@ -170,7 +170,7 @@ describe('AiAuditSection', () => {
         return new HttpResponse('{"big":true}', { headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
       }),
     )
-    renderPage(<AiAuditSection />)
+    renderPage(<AiActivityLog />)
     await waitFor(() => expect(rows()).toHaveLength(3))
     const [saved, inline, odd] = rows()
     // A button through downloadBlob, never a plain link: Bambuddy's frame drops those.
@@ -208,7 +208,7 @@ describe('AiAuditSection', () => {
       ),
       http.get(`/api/v1/ai/sessions/${SESSION}/http/${SAVED}`, () => new HttpResponse(null, { status: 404 })),
     )
-    renderPage(<AiAuditSection />)
+    renderPage(<AiActivityLog />)
     await waitFor(() => expect(rows()).toHaveLength(1))
     await userEvent.click(screen.getByRole('button', { name: 'Download body' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('no longer kept')
@@ -238,7 +238,7 @@ describe('AiAuditSection', () => {
         }),
       ),
     )
-    renderPage(<AiAuditSection />)
+    renderPage(<AiActivityLog />)
     await waitFor(() => expect(rows()).toHaveLength(4))
     const [failed, cut, mixed, priced] = rows()
     expect(priced).toHaveTextContent('Turn success')
@@ -267,7 +267,7 @@ describe('AiAuditSection', () => {
         }),
       ),
     )
-    renderPage(<AiAuditSection />)
+    renderPage(<AiActivityLog />)
     await waitFor(() => expect(rows()).toHaveLength(2))
     const [fork, approval] = rows()
     expect(fork).toHaveTextContent('Session fork')
@@ -280,7 +280,7 @@ describe('AiAuditSection', () => {
   })
 
   it('lists the log newest first: who, what, tier, outcome and the scrubbed input', async () => {
-    renderPage(<AiAuditSection />)
+    renderPage(<AiActivityLog />)
     await waitFor(() => expect(rows()).toHaveLength(AUDIT_FIXTURES.length))
     const [newest, resource, denied] = rows()
     // An outward call that ran: who ran it and who approved it, on one row.
@@ -305,7 +305,7 @@ describe('AiAuditSection', () => {
     server.events.on('request:start', ({ request }) => {
       if (request.url.includes('/api/v1/ai/audit')) seen.push(new URL(request.url).search)
     })
-    renderPage(<AiAuditSection />)
+    renderPage(<AiActivityLog />)
     await waitFor(() => expect(rows()).toHaveLength(AUDIT_FIXTURES.length))
 
     await pick('Outcome', 'Denied')
@@ -331,7 +331,7 @@ describe('AiAuditSection', () => {
         return HttpResponse.json(body)
       }),
     )
-    const { user } = renderPage(<AiAuditSection />)
+    const { user } = renderPage(<AiActivityLog />)
     await waitFor(() => expect(rows()).toHaveLength(1))
     await user.click(screen.getByRole('button', { name: 'Load older' }))
     await waitFor(() => expect(rows()).toHaveLength(2))
@@ -344,7 +344,7 @@ describe('AiAuditSection', () => {
     server.events.on('request:start', ({ request }) => {
       if (request.method === 'PUT') puts.push(request.url)
     })
-    const { user } = renderPage(<AiAuditSection />)
+    const { user } = renderPage(<AiActivityLog />)
     const field = await screen.findByLabelText('Keep entries for (days)')
     await waitFor(() => expect(field).toHaveValue(90))
 
@@ -368,7 +368,7 @@ describe('AiAuditSection', () => {
         HttpResponse.json({ detail: 'the AI database is unreachable' }, { status: 503 }),
       ),
     )
-    renderPage(<AiAuditSection />)
+    renderPage(<AiActivityLog />)
     expect(await screen.findByRole('alert')).toHaveTextContent('the AI database is unreachable')
   })
 })
