@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { AuditContext } from '../src/audit/log.js'
 import { UI_ACTOR } from '../src/audit/writes.js'
 import { originPolicy } from '../src/http/origins.js'
-import type { SettingsRepo } from '../src/routes/module.js'
+import type { SettingsRepo } from '../src/credentials.js'
 import { registerRenderLimitsRoutes, RENDER_LIMITS_PATH } from '../src/routes/renderLimits.js'
 import { RenderLimiter, SETTING_RENDER_LIMITS, settingsRenderLimits } from '../src/tools/renderLimits.js'
 

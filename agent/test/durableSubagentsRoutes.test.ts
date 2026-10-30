@@ -7,7 +7,7 @@ import {
   SETTING_DURABLE_SUBAGENTS,
   subagentPeers,
 } from '../src/routes/durableSubagents.js'
-import type { SettingsRepo } from '../src/routes/module.js'
+import type { SettingsRepo } from '../src/credentials.js'
 
 // /api/v1/ai/settings/durable-subagents: where a durable segment's subagents reach
 // ScadBuddy's tools, behind the same UI guards as every other AI settings route.

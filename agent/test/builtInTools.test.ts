@@ -15,7 +15,7 @@ import { BUILTIN_SOURCES, MIGRATED_BY, registrySource, type ToolAccess } from '.
 import { BuiltInTools, builtInToolSets, type BuiltInToolSet } from '../src/plugins/builtInTools.js'
 import { BUILT_INS } from '../src/plugins/packages/builtins.js'
 import type { PluginRepo } from '../src/plugins/registry.js'
-import type { SettingsRepo } from '../src/routes/module.js'
+import type { SettingsRepo } from '../src/credentials.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { harnessTools } from '../src/tools/harness.js'

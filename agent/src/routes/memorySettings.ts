@@ -9,7 +9,7 @@ import {
   SETTING_RECALL_MAX_QUERY_CHARS,
 } from '../memory/hindsight.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
-import type { SettingsRepo } from './module.js'
+import type { SettingsRepo } from '../credentials.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/memory: the longest automatic Hindsight recall query, in
@@ -89,7 +89,7 @@ export function registerMemorySettingsRoutes(app: Hono, deps: MemorySettingsRout
   })
 }
 
-/** The automatic memory's recall query cap. `deps.settings` is declared in routes/module.ts. */
+/** The automatic memory's recall query cap. `deps.settings` is declared in app.ts. */
 export const route: RouteModule = {
   register(app, deps) {
     registerMemorySettingsRoutes(app, {

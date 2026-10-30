@@ -1194,9 +1194,8 @@ and "Plugins", the list of `/api/v1/ai/plugins`
 ([`RemotePlugins.tsx`](../../frontend/src/components/settings/RemotePlugins.tsx)): ScadBuddy's
 own tool set first (#1953, `built_in: true`; `scadbuddy` is every registry tool, from
 [`agent/src/plugins/builtInTools.ts`](../../agent/src/plugins/builtInTools.ts)), then the
-remote MCP plugins. A built-in tool's tier can be raised, lowered or the tool disabled (a patch is checked for
-known tools and valid tiers only, in either direction; anything else answers 400:
-`validateOverrides` in `agent/src/plugins/builtInTools.ts`); the overrides are
+remote MCP plugins. A built-in tool's access is changed in Settings → Tools & plugins
+(`/api/v1/ai/capabilities`, below); `PATCH /plugins/{name}` takes none of it (#4828). The overrides are
 `ai_access` rows (`builtin:scadbuddy`, or `builtin:browser` for the browser tools; see
 "Tool access" below), applied at the
 harness seam, on `/mcp` and in the durable `agent-tools` activities. Under the patch
