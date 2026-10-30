@@ -32,7 +32,6 @@ import { commandResponse, NO_COMMANDS } from './operations.js'
 //   GET    /api/v1/ai/plugin-packages/:name/file       ?path=…[&pending=true][&full=true]: one file's content (files.ts)
 //   POST   /api/v1/ai/plugin-packages                  install: fetch, pin, vet → stored UNAPPROVED (201), a command
 //   POST   /api/v1/ai/plugin-packages/:name/approve    approve { commit_sha, content_hash, allow_refused? } as reviewed
-//   PATCH  /api/v1/ai/plugin-packages/:name            { enabled } (an approved pin only)
 //   POST   /api/v1/ai/plugin-packages/:name/repin      fetch { ref } → pending pin + file diff, a command
 //   DELETE /api/v1/ai/plugin-packages/:name/pending    drop the pending re-pin
 //   DELETE /api/v1/ai/plugin-packages/:name            uninstall (and evict the cache)
@@ -51,11 +50,14 @@ import { commandResponse, NO_COMMANDS } from './operations.js'
 // the install with a 422. ScadBuddy's own plugin is answered 409 with
 // `built_in: true`: the harness already loads it (install.ts BuiltInPluginError).
 //
-// The built-in plugins (builtins.ts: ScadBuddy's own) are listed first, with `built_in: true`. PATCH turns one on or off (its
-// setting); approve, re-pin and DELETE answer 409, since it ships with the agent,
+// The built-in plugins (builtins.ts: ScadBuddy's own) are listed first, with `built_in: true`. Approve, re-pin and
+// DELETE answer 409, since it ships with the agent,
 // and an install that names one answers 409 with `built_in: true`. A package
 // stored under a built-in's name before then is never loaded (install.ts
 // `loadPackagesForRun`) and DELETE removes it.
+//
+// A package's or a built-in's switch is not a route here (#4828): it is `ai_access`, changed
+// through /api/v1/ai/capabilities (spec §4.6).
 //
 // The two fetches are commands (spec 2026-10-01 §4.2, #1055): AgentOperation runs them
 // on `agent-tools` (plugins/packages/operations.ts), keyed by the client's
@@ -102,7 +104,6 @@ const ApproveBody = z.strictObject({
   /** Load the pin despite what its review's `refused` lists (store.ts). */
   allow_refused: z.boolean().optional(),
 })
-const PatchBody = z.strictObject({ enabled: z.boolean() })
 const RepinBody = z.strictObject({ ref: z.string().max(200).optional() })
 
 async function parseBody<T extends z.ZodType>(c: Context, schema: T): Promise<z.infer<T> | string> {
@@ -281,24 +282,6 @@ export function registerPluginPackageRoutes(app: Hono, deps: PackageRouteDeps): 
     if (typeof body === 'string') return c.json({ detail: body }, 400)
     try {
       return c.json(await repo.approve(c.req.param('name'), body.commit_sha, body.content_hash, body.allow_refused ?? false))
-    } catch (err) {
-      return refusal(c, err)
-    }
-  })
-
-  app.patch(`${base}/:name`, async (c) => {
-    const repo = await store()
-    if (typeof repo === 'string') return c.json({ detail: repo }, 503)
-    const body = await parseBody(c, PatchBody)
-    if (typeof body === 'string') return c.json({ detail: body }, 400)
-    // Always the built-in: a package stored under its name never loads, so it has no switch.
-    if (builtInNamed(c.req.param('name'))) {
-      if (!deps.builtIns) return c.json({ detail: NO_DATABASE }, 503)
-      const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
-      return c.json(await deps.builtIns.setEnabled(c.req.param('name'), body.enabled, context))
-    }
-    try {
-      return c.json(await repo.setEnabled(c.req.param('name'), body.enabled))
     } catch (err) {
       return refusal(c, err)
     }

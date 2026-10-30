@@ -880,8 +880,8 @@ path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
   (`builtin:own-plugin`, `*`), is `off`; [`agent/src/access/model.ts`](../../agent/src/access/model.ts)). A browser (Playwright MCP) is not built in
   any more; it is added as a remote plugin ([headless-browser.md](headless-browser.md)).
   Settings sets that switch on the source "ScadBuddy skills and subagents" (#4757).
-  `PATCH` with `{ enabled }` still sets the same row for one release (#781), and the page
-  no longer calls it; approve, re-pin and `DELETE` answer 409. An
+  The old `PATCH /plugin-packages/scadbuddy` with `{ enabled }` is gone (#4828); use
+  `PUT /api/v1/ai/capabilities/builtin:own-plugin`. Approve, re-pin and `DELETE` answer 409. An
   install whose package names one answers 409 with `built_in: true` instead of
   refusing it, and Settings shows that as a notice.
 
@@ -897,7 +897,7 @@ other Settings writes
 | `GET /`, `GET /:name` | The pin, the review (skills as `<name>:<skill>`, commands, agents, hooks, MCP servers, files), and any pending re-pin with its file diff. |
 | `GET /:name/files`, `GET /:name/file?path=` (each with `pending=true` for the re-pin's) | Every file of the pin with its size, and one file's content for Settings to show before approval (#1029). Only a path in the pin's own file list is read, from the cached copy that hashes to the pin (fetched again when it does not; never vetted for loading, so a refused package can be read). Text is cut at 64 KiB unless `full=true`; a file that is not UTF-8 is `binary` with no `content`. A built-in's files are read from the image. |
 | `POST /:name/approve` with `{ "commit_sha", "content_hash", "allow_refused"? }` | Approves exactly the pin the review showed. A mismatch is a 409. So is a pin whose `review.refused` is not empty, unless `allow_refused` is `true`: that loads the package as it is, its code running with the Claude credential in its environment ([security.md](security.md#plugin-packages)). |
-| `PATCH /:name` with `{ "enabled" }` | Enables an approved pin only; the table enforces this with a `CHECK` too. The same switch is the package source's, `PUT /api/v1/ai/capabilities/package:<name>` (#4757), which Settings uses. |
+| `PATCH /:name` | Gone (#4828). A package's switch is `PUT /api/v1/ai/capabilities/package:<name>` (#4757), which Settings uses; it enables an approved pin only, and the table enforces this with a `CHECK` too. |
 | `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin. The current pin keeps loading until the pending one is approved. |
 | `DELETE /:name/pending`, `DELETE /:name` | Drop the pending re-pin; uninstall and evict the cache. |
 
