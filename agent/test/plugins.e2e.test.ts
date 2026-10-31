@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -52,14 +53,31 @@ const plugin = (url: string, extra: Partial<RemotePlugin> = {}): RemotePlugin =>
   ...extra,
 })
 
-/** A second server that must never be reached (a redirect or OAuth target). */
-async function trap(): Promise<FakeMcp> {
-  return startFakeMcp({ path: '/never' })
+/**
+ * A second server that must never be reached (a redirect or OAuth target).
+ * The tests point their redirects and `resource_metadata` URLs under `base`,
+ * which holds a random segment, and `reached` keeps only the requests under
+ * it or under `/.well-known/`. A request for any other path came from another
+ * process (#5013): in CI a Claude Code left over from another test sent two
+ * `POST /v1/messages?beta=true` to the port of its closed fake Anthropic, after
+ * the OS had given that port to this trap.
+ */
+type Trap = { base: string; origin: string; reached: () => FakeMcp['requests']; close: () => Promise<void> }
+async function trap(): Promise<Trap> {
+  const prefix = `/never-${randomUUID()}`
+  const server = await startFakeMcp({ path: prefix })
+  const ours = (p: string) => p.startsWith(prefix) || p.startsWith('/.well-known/')
+  return {
+    base: server.url,
+    origin: new URL(server.url).origin,
+    reached: () => server.requests.filter((r) => ours(r.path)),
+    close: () => server.close(),
+  }
 }
 
 describe('plugin connection test, through the forwarder', () => {
   let mcp: FakeMcp
-  let other: FakeMcp
+  let other: Trap
   beforeEach(async () => {
     other = await trap()
   })
@@ -158,7 +176,7 @@ describe('plugin connection test, through the forwarder', () => {
   it('does not follow a redirect: a 307 to another origin fails, and that origin is never contacted', async () => {
     mcp = await startFakeMcp({
       intercept: (_req, res) => {
-        res.writeHead(307, { location: `${other.url.replace('/never', '')}/mcp/bank-1/` }).end()
+        res.writeHead(307, { location: `${other.base}/mcp/bank-1/` }).end()
         return true
       },
     })
@@ -166,7 +184,7 @@ describe('plugin connection test, through the forwarder', () => {
     expect(result.ok).toBe(false)
     expect(result.detail).toMatch(/redirect/)
     expect(mcp.requests.length).toBeGreaterThan(0)
-    expect(other.requests).toEqual([])
+    expect(other.reached()).toEqual([])
   })
 
   it('does not start OAuth discovery: a 401 with resource_metadata fails, and the metadata URL is never fetched', async () => {
@@ -174,7 +192,7 @@ describe('plugin connection test, through the forwarder', () => {
       intercept: (_req, res) => {
         res
           .writeHead(401, {
-            'www-authenticate': `Bearer resource_metadata="${other.url.replace('/never', '')}/.well-known/oauth-protected-resource"`,
+            'www-authenticate': `Bearer resource_metadata="${other.base}/.well-known/oauth-protected-resource"`,
           })
           .end()
         return true
@@ -183,7 +201,7 @@ describe('plugin connection test, through the forwarder', () => {
     const result = await testPlugin(plugin(mcp.url), '127.0.0.1', forwarder, { timeoutMs: 5000 })
     expect(result.ok).toBe(false)
     expect(result.detail).toMatch(/401/)
-    expect(other.requests).toEqual([])
+    expect(other.reached()).toEqual([])
     expect(JSON.stringify(result)).not.toContain(PLUGIN_TOKEN)
   })
 })
@@ -193,7 +211,7 @@ describe.skipIf(cliMissing !== undefined)(
   () => {
     let fake: FakeAnthropic
     let mcp: FakeMcp
-    let other: FakeMcp
+    let other: Trap
     let script: (request: RecordedRequest) => Reply
     let stateDir: string
     let forwarded: PluginsForRun | undefined
@@ -315,7 +333,7 @@ describe.skipIf(cliMissing !== undefined)(
     it('a plugin endpoint that redirects is not connected, and the redirect target is never contacted', async () => {
       const redirecting = await startFakeMcp({
         intercept: (_req, res) => {
-          res.writeHead(307, { location: `${other.url.replace('/never', '')}/mcp/bank-1/` }).end()
+          res.writeHead(307, { location: `${other.base}/mcp/bank-1/` }).end()
           return true
         },
       })
@@ -331,7 +349,9 @@ describe.skipIf(cliMissing !== undefined)(
         })
         expect(initOf(messages)?.find((s) => s.name === 'my-memory')?.status).not.toBe('connected')
         expect(redirecting.requests.length).toBeGreaterThan(0)
-        expect(other.requests).toEqual([])
+        // #5013: what CI saw at this port, from a Claude Code of another test. It is not a followed redirect.
+        await fetch(`${other.origin}/v1/messages?beta=true`, { method: 'POST', body: '{}' })
+        expect(other.reached()).toEqual([])
       } finally {
         await redirecting.close()
       }
