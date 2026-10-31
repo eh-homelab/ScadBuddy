@@ -10,7 +10,7 @@ import type { SessionManager } from '../src/sessions/manager.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { expectPanelAccepts, frontendClientMessages } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { browser, collectUntil, manager, tempPaths } from './support/sessions.js'
+import { browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
 
 // #940 end to end: a browser chat session on the real SDK and its bundled
 // binary (against the local fake Anthropic endpoint) asks AskUserQuestion, the
@@ -42,6 +42,7 @@ describe.skipIf(skip !== undefined)(`questions against the real SDK${skip ? ` (s
   })
   afterEach(async () => {
     stop.abort()
+    await stopManagers()
     await fake.close()
     await drop()
   })

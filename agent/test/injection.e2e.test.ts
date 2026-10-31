@@ -15,7 +15,7 @@ import { PendingActionStore } from '../src/tools/pending.js'
 import { createHarnessServer, SERVER_NAME } from '../src/tools/projections.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { browser, collectUntil, manager, tempPaths } from './support/sessions.js'
+import { browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
 
 // Prompt injection replayed end to end (#258, spec §8.6): a session turn on
 // the real Agent SDK and its bundled Claude Code (pointed at the local fake
@@ -121,6 +121,7 @@ describe.skipIf(skip !== undefined)(`prompt injection against the real SDK${skip
   })
   afterEach(async () => {
     stop.abort()
+    await stopManagers()
     await fake.close()
     await drop()
   })

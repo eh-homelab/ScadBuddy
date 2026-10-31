@@ -14,7 +14,7 @@ import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropi
 import { expectPanelAccepts, frontendChatReducer, frontendClientMessages } from './support/frontendProtocol.js'
 import { type LiveAgent, openPanelSocket, startLiveAgent } from './support/liveAgent.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, browser, manager, tempPaths } from './support/sessions.js'
+import { agentA, browser, manager, stopManagers, tempPaths } from './support/sessions.js'
 
 // The assistant panel's whole path, end to end: the panel's own client
 // messages (frontend protocol.ts `clientMessage`) over a real WebSocket to the
@@ -61,6 +61,7 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
   afterEach(async () => {
     await agent?.close()
     agent = undefined
+    await stopManagers()
     await fake.close()
     for (const pool of pools.splice(0)) await pool.close()
     await drop()
