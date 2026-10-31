@@ -18,7 +18,9 @@ name: Deploy (reusable)
 #      `scadbuddy.eh-homelab.io/*` annotations that record what was deployed.
 #      The agent sidecar's line in the API manifest (#738) is pinned to
 #      `ghcr.io/eh-homelab/scadbuddy-agent:<version>@sha256:<its digest>`, the
-#      same build's agent image, so the two containers never drift apart.
+#      same build's agent image, so the two containers never drift apart; so
+#      is every other file that runs the agent image, found by the image (the
+#      agent's worker Deployment, scadbuddy-agent-worker.yaml, #5037).
 #      Once clusters runs it, the durable sessions worker's line (#1056) is
 #      pinned the same way, to
 #      `ghcr.io/eh-homelab/scadbuddy-agent-durable:<version>@sha256:<its digest>`,
@@ -35,6 +37,9 @@ name: Deploy (reusable)
 #      resource line in clusters/prod/scadbuddy/kustomization.yaml that pulls
 #      in this repo's deploy/grafana dashboard (#988), to the same `revision`,
 #      so the dashboard shown is the one written for the build that serves.
+#      Last, every ScadBuddy image named anywhere under applications/scadbuddy/
+#      or the overlay's directory must be one this run pinned, or the deploy
+#      fails: no Deployment stays behind on an old build unnoticed (#5037).
 #   3. Open ONE PR, "deploy(scadbuddy): <version>", on the fixed branch
 #      `deploy/scadbuddy`, and arm `gh pr merge --auto --squash`. A newer deploy
 #      supersedes an older open one: it closes that PR and replaces the branch.
@@ -105,7 +110,8 @@ env:
   DEPLOY_BRANCH: deploy/scadbuddy
   IMAGE: ghcr.io/eh-homelab/scadbuddy
   # The agent sidecar (#261), built by the same Build Image run under the same
-  # tags, and pinned in $MANIFEST beside the API (#738).
+  # tags, and pinned in $MANIFEST beside the API (#738) and in every other
+  # file that runs it (scadbuddy-agent-worker.yaml, #5037).
   AGENT_IMAGE: ghcr.io/eh-homelab/scadbuddy-agent
   # The durable sessions worker (#1056), same run, same tags, pinned once
   # clusters runs it: in its own Deployment's file, or in $MANIFEST while it
@@ -553,9 +559,35 @@ jobs:
             dashboard=pinned
           }
 
+          # Every string in a YAML file that names a ScadBuddy image (any
+          # ghcr.io/eh-homelab/scadbuddy* package), one per line. Parsed, not
+          # grepped: a comment that quotes an image line does not count, and an
+          # alias counts where it is used.
+          scadbuddy_refs() { # file
+            REF_RE="^${IMAGE//./\\.}([-:@]|\$)" yq eval-all -N \
+              'explode(.) | .. | select(tag == "!!str") | select(test(strenv(REF_RE)))' "$1"
+          }
+          # The files the final check reads: the manifests' directory and the
+          # overlay's, where a kustomize `images:` entry could also name one.
+          scanned() {
+            find "$(dirname "$MANIFEST")" "$(dirname "$KUSTOMIZATION")" -type f \( -name '*.yaml' -o -name '*.yml' \) | sort -u
+          }
+
           manifests=("$MANIFEST")
           pin "$MANIFEST" scadbuddy
           pin_agent "$MANIFEST"
+          # Every other file that runs the agent image, found by the image
+          # rather than by name (#5037): scadbuddy-agent-worker.yaml, the
+          # agent's Temporal workers in a Deployment of their own (#2726 Step
+          # 6.2), runs it beside the API's sidecar on the same queues, so the
+          # two must move together. Each such file gets exactly one line.
+          while IFS= read -r f; do
+            [ "$f" != "$MANIFEST" ] || continue
+            if scadbuddy_refs "$f" | grep -qE "^${AGENT_IMAGE//./\\.}([:@]|\$)"; then
+              pin_agent "$f"
+              manifests+=("$f")
+            fi
+          done < <(scanned)
           pin_agent_durable "$MANIFEST"
           # Its own Deployment (it first ran as a sidecar in $MANIFEST). Once
           # the file exists it must run agent-durable, and $MANIFEST must not:
@@ -605,6 +637,32 @@ jobs:
           else
             echo "::notice::${MANIFEST_PROJECTS} is not in clusters yet; not pinning it"
           fi
+
+          # Nothing left behind (#5037): every ScadBuddy image any scanned file
+          # names must now be one this run pinned. A file the list above does
+          # not know (a new worker's Deployment), a sibling package this
+          # workflow does not resolve, or a second copy of a pin outside its
+          # file fails the deploy here, rather than staying on its old build.
+          # The one exception is a slicer pin kept on purpose (pin_slicer).
+          allowed=("${IMAGE}:${VERSION}@${DIGEST}" "${AGENT_IMAGE}:${VERSION}@${AGENT_DIGEST}")
+          [ "$durable" != pinned ] || allowed+=("${AGENT_DURABLE_IMAGE}:${VERSION}@${AGENT_DURABLE_DIGEST}")
+          [ "$slicer" != pinned ] || allowed+=("${SLICER_IMAGE}:${VERSION}@${SLICER_DIGEST}")
+          stale=0
+          while IFS= read -r f; do
+            refs=$(scadbuddy_refs "$f") \
+              || { echo "::error file=$f::could not parse it to check which ScadBuddy images it runs"; exit 1; }
+            while IFS= read -r ref; do
+              [ -n "$ref" ] || continue
+              ok=false
+              for a in "${allowed[@]}"; do [ "$ref" != "$a" ] || ok=true; done
+              if [ "$slicer" = kept ] && [ "$f" = "$MANIFEST_SLICER" ] && [[ "$ref" == "${SLICER_IMAGE}"[:@]* ]]; then ok=true; fi
+              if [ "$ok" != true ]; then
+                echo "::error file=$f::names ${ref}, which this deploy does not move to ${VERSION}; deploy.reusable.yml must pin this file"
+                stale=1
+              fi
+            done <<< "$refs"
+          done < <(scanned)
+          [ "$stale" -eq 0 ] || exit 1
 
           if git diff --quiet -- "${manifests[@]}"; then
             echo "clusters already pins ${IMAGE}:${VERSION}@${DIGEST}; nothing to deploy"
