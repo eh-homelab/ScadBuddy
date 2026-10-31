@@ -518,6 +518,10 @@ export class TurnHost {
       }
       if (why === 'shutdown') throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: entries.length > 0 })
       if (why !== undefined) throw ApplicationFailure.nonRetryable(`session ${id}'s placement ${attempt} was cut off: ${CUT_TEXT[why]}`, SESSION_GONE)
+      // A process the turn let go (it failed, or was recycled) lands its last appends before the
+      // turn ends, as a classic turn's does: the next turn's claim would fence them out, and its
+      // spawn would then start the session anew over Claude Code's own file of it.
+      await this.#deps.core.warm.landed(id)
       return this.#result(tally, run.secrets)
     } catch (err) {
       core.traced.fail(err)
