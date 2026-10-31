@@ -358,6 +358,24 @@ if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
 else
   fail "agent worker: step failed: $(grep '::error' "$work/log")"
 fi
+# ...in the overlay's directory too, which the step also scans.
+overlay_worker=clusters/prod/scadbuddy/agent-worker.yaml
+extra_path=$overlay_worker
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$agent_pinned" "$overlay_worker" || fail "overlay agent worker: agent image not pinned"
+  grep -q "^files=.*$overlay_worker" "$work/out" || fail "overlay agent worker: not among the changed files"
+else
+  fail "overlay agent worker: step failed: $(grep '::error' "$work/log")"
+fi
+extra_path=$worker_path
+# A file that is not YAML fails the deploy, closed: what it runs cannot be checked.
+extra_content=$'a: [unclosed'
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "unparseable file: step passed, expected an error"
+else
+  grep -q "file=$worker_path::could not parse it" "$work/log" \
+    || fail "unparseable file: wrong error: $(grep '::error' "$work/log")"
+fi
 # ...with exactly one line, as in the API's manifest.
 extra_content=$(deployment scadbuddy-agent-worker "$agent" "$agent")
 if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
