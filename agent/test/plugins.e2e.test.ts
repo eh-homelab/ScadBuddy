@@ -60,7 +60,9 @@ const plugin = (url: string, extra: Partial<RemotePlugin> = {}): RemotePlugin =>
  * it or under `/.well-known/`. A request for any other path came from another
  * process (#5013): in CI a Claude Code left over from another test sent two
  * `POST /v1/messages?beta=true` to the port of its closed fake Anthropic, after
- * the OS had given that port to this trap.
+ * the OS had given that port to this trap. Keep `/.well-known/` in the filter:
+ * a client that ignores `resource_metadata` and probes the origin's own
+ * well-known paths must still fail the test.
  */
 type Trap = { base: string; origin: string; reached: () => FakeMcp['requests']; close: () => Promise<void> }
 async function trap(): Promise<Trap> {
@@ -349,7 +351,8 @@ describe.skipIf(cliMissing !== undefined)(
         })
         expect(initOf(messages)?.find((s) => s.name === 'my-memory')?.status).not.toBe('connected')
         expect(redirecting.requests.length).toBeGreaterThan(0)
-        // #5013: what CI saw at this port, from a Claude Code of another test. It is not a followed redirect.
+        // #5013: a check of `reached()`, not of the product. It sends what CI saw at this port (a Claude Code
+        // of another test), which is not a followed redirect. Keep it after the run, before the assertion.
         await fetch(`${other.origin}/v1/messages?beta=true`, { method: 'POST', body: '{}' })
         expect(other.reached()).toEqual([])
       } finally {
