@@ -40,6 +40,9 @@ name: Deploy (reusable)
 #      Last, every ScadBuddy image named anywhere under applications/scadbuddy/
 #      or the overlay's directory must be one this run pinned, or the deploy
 #      fails: no Deployment stays behind on an old build unnoticed (#5037).
+#      The check parses every *.yaml/*.yml there, so a file that is not
+#      valid YAML (a template, say) fails every deploy, closed on purpose:
+#      what it runs cannot be checked.
 #   3. Open ONE PR, "deploy(scadbuddy): <version>", on the fixed branch
 #      `deploy/scadbuddy`, and arm `gh pr merge --auto --squash`. A newer deploy
 #      supersedes an older open one: it closes that PR and replaces the branch.
@@ -583,7 +586,11 @@ jobs:
           # two must move together. Each such file gets exactly one line.
           while IFS= read -r f; do
             [ "$f" != "$MANIFEST" ] || continue
-            if scadbuddy_refs "$f" | grep -qE "^${AGENT_IMAGE//./\\.}([:@]|\$)"; then
+            # Captured first: `yq | grep -q` under pipefail fails with 141
+            # when grep exits on a match while yq is still writing. A file
+            # that does not parse is the final check's error, not this one's.
+            refs=$(scadbuddy_refs "$f" 2>/dev/null) || continue
+            if grep -qE "^${AGENT_IMAGE//./\\.}([:@]|\$)" <<< "$refs"; then
               pin_agent "$f"
               manifests+=("$f")
             fi
