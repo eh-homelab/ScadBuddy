@@ -54,7 +54,7 @@ const BUILTINS = ['Bash', 'Read', 'Write', 'Edit', 'Glob', 'Grep', 'WebFetch']
 const BROWSER_TOOLS = ALL_TOOLS.filter((t) => t.name.startsWith('browser_'))
 const PLUGIN_TOOLS = ['mcp__my-memory__recall', 'mcp__my-memory__retain']
 
-describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`an AgentSession turn's tools${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`an AgentSession turn's tools${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let forwarder: PluginForwarder
   let fake: FakeAnthropic

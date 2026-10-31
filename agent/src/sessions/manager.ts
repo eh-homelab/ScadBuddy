@@ -899,7 +899,7 @@ const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, cr
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_until END AS offer_until,
   status, title, tags, scope, parent_id, mode, runtime, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
   ${POOL_COST} AS pool_cost_usd, turns,
-  ((turn_id IS NOT NULL AND lease_until > now()) OR durable_turn_id IS NOT NULL) AS turn_active, created_at, updated_at, archived_at`
+  ((turn_id IS NOT NULL AND lease_until > now()) OR (runtime = 'unified' AND durable_turn_id IS NOT NULL)) AS turn_active, created_at, updated_at, archived_at`
 
 function record(row: Row): SessionRecord {
   return {
@@ -2262,7 +2262,7 @@ export class SessionManager {
         ...(classic?.upToMessageId === undefined ? {} : { upToMessageId: classic.upToMessageId }),
       })
       // The SDK transcript's copy: an AgentSession parent's child is one too, from its first turn.
-      const unified = parent.mode === 'durable'
+      const unified = parent.runtime === 'unified'
       child = await this.insert(forkedId, principal, { ...fields, mode: unified ? 'durable' : 'classic', ...(unified ? { runtime: 'unified' as const } : {}) }, insertOptions)
       try {
         // Its workspace files (#2329), so the fork carries on with what the parent had.

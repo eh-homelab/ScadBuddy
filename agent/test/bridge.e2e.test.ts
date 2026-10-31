@@ -58,7 +58,7 @@ async function until<T>(read: () => T | undefined, what: string, timeoutMs = 10_
   }
 }
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the browser bridge over its real socket${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the browser bridge over its real socket${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>

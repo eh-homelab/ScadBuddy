@@ -52,7 +52,7 @@ function conversation(request: RecordedRequest | undefined): string {
   return JSON.stringify(request?.body?.messages ?? [])
 }
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions against the real SDK${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let fake: FakeAnthropic
   let script: (request: RecordedRequest) => Reply

@@ -37,7 +37,7 @@ const GIT_URL = 'https://git.test/greeter.git'
 const skip = !TEST_DATABASE_URL || gitMissing !== undefined
 const why = !TEST_DATABASE_URL ? `${TEST_DATABASE_URL_ENV} is not set` : (gitMissing ?? '')
 
-describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgres${skip ? ` (skipped: ${why})` : ''}`, () => {
+describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgres${skip ? ` (skipped: ${why})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>

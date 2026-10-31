@@ -31,7 +31,7 @@ const ALL = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit', 'WebFetch'
 
 type Content = { type: string; text?: string; data?: string; mimeType?: string }
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a durable turn's built-ins${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a durable turn's built-ins${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>

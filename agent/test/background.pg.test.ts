@@ -42,7 +42,7 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const NOW = new Date('2026-10-13T08:00:30Z')
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's background tasks${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's background tasks${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>

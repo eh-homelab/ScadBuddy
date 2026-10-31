@@ -34,7 +34,7 @@ const JSON_UI = { ...UI, 'content-type': 'application/json' }
 type View = { id: string; archived: boolean; archived_at: string | null; status: string }
 type Result = { isError?: boolean; content: { type: string; text?: string }[] }
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session archive${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session archive${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>
