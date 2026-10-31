@@ -25,7 +25,7 @@ function gate(): { wait: Promise<void>; release: () => void } {
 
 const settle = () => new Promise((r) => setTimeout(r, 150))
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`ChatConnection${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`ChatConnection${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>

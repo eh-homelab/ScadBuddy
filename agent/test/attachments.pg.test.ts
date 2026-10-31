@@ -43,7 +43,7 @@ const URL_ = `https://scadbuddy.example${ATTACHMENTS_PATH}`
 
 const settle = () => new Promise((r) => setTimeout(r, 100))
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`attachments${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`attachments${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>

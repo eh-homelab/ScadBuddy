@@ -51,7 +51,7 @@ function imageTurn(): FakeTurn {
   return { reply: 'Here it is.', before: [toolUse, toolResult] as unknown as SDKMessage[] }
 }
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session images${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session images${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>

@@ -54,7 +54,7 @@ async function until(check: () => boolean | Promise<boolean>, what: string, time
 }
 
 describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
-  `sessions_* tools over /mcp${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`,
+  `sessions_* tools over /mcp${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}${AGENT_SESSIONS_SKIP}`,
   () => {
   agentSessions()
     let db: Database

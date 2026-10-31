@@ -417,6 +417,9 @@ export class TurnHost {
       return rows.length > 0
     }
     // A process of the session's left here by an earlier placement writes under this one now.
+    // `durable_turn_id IS NULL` lets it write between turns: what keeps a stale placement from
+    // writing after a later turn on another replica has ended is that each placement's
+    // `turn_attempt` (run id and cycle) is its own. A change to how attempts are minted must keep that.
     this.#deps.core.warm.refence(id, holdsOrLast)
     const events = this.#deps.core.events
     // The turn's spans are children of the sender's trace, as a classic turn's are (turnCore.ts).

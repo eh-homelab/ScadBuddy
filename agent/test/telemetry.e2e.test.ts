@@ -59,7 +59,7 @@ const LIST_MODELS = ALL_TOOLS.find((t) => t.name === 'list_models')!
 
 type Hit = { path: string; traceparent: string | undefined }
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent tracing against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent tracing against the real SDK${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let fake: FakeAnthropic
   let script: (request: RecordedRequest) => Reply
