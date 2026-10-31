@@ -136,6 +136,22 @@ export class PendingProjection {
     return row
   }
 
+  /** An open entry's trace (#5041): its tool, when it was asked, and the parked call's span context. */
+  async parkTrace(requestId: string): Promise<{ tool: string; createdAt: Date; traceparent: string | null } | undefined> {
+    const [row] = await this.#sql<{ tool: string; created_at: Date; traceparent: string | null }[]>`
+      SELECT tool, created_at, traceparent FROM ai_pending_input WHERE request_id = ${requestId}`
+    return row ? { tool: row.tool, createdAt: row.created_at, traceparent: row.traceparent } : undefined
+  }
+
+  /**
+   * The decision's span on the entry, before the workflow is asked (#5041): resolve_input carries
+   * it to the response row, which the waiting turn reads, so the turn goes on as its child. A
+   * refused decision's is replaced by the next one's.
+   */
+  async markDecision(requestId: string, traceparent: string): Promise<void> {
+    await this.#sql`UPDATE ai_pending_input SET decision_traceparent = ${traceparent} WHERE request_id = ${requestId}`
+  }
+
   /** The session, or undefined when there is none. */
   async session(id: string): Promise<GateSession | undefined> {
     const [row] = await this.#sql<

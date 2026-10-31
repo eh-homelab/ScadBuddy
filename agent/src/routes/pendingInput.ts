@@ -1,3 +1,4 @@
+import { type Span, SpanKind } from '@opentelemetry/api'
 import type { Hono } from 'hono'
 import { z } from 'zod'
 import { ApprovalError, conflictReason } from '../approvals/service.js'
@@ -19,6 +20,7 @@ import { isUuid } from '../harness/stateDirs.js'
 import { BROWSER_USER } from './approvals.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
+import { linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
 
 // GET /api/v1/ai/pending-input (#815; durable-agents spec §6.6, PR #1070): every
 // tool call parked on a person that the browser user may answer, in one shape,
@@ -364,10 +366,15 @@ async function respondDurable(
       "an approval grant is for approving another agent's outward actions, never your own; ask the user in the ScadBuddy UI",
     )
   }
+  // The decision's own trace, as a classic one's (approvals/service.ts `decisionSpan`): a child
+  // of the request that made it, linked to the parked call's span (#5041).
+  const decision = body.kind === 'approval' ? await decisionSpan(sessions, requestId, parsed.sessionId, principal) : undefined
   try {
     const out = await sessions.durable.respond(parsed.sessionId, { request_id: requestId, response: body, responder: principal, role })
+    decision?.setAttribute('scadbuddy.outcome', out.outcome)
     return { id: requestId, kind: out.kind, outcome: out.outcome }
   } catch (err) {
+    if (decision) recordFailure(decision, err)
     if (err instanceof RespondRefusal) {
       // A retry after the run continued as new (#3717): the Update ID is per run, so the
       // new run refuses a decision the old one took. The same decision by the same
@@ -381,7 +388,35 @@ async function respondDurable(
     if (err instanceof WorkflowNotFoundError) throw stale
     if (err instanceof DurableUnavailable) throw new RespondError(503, err.message)
     throw err
+  } finally {
+    decision?.end()
   }
+}
+
+/**
+ * An approval decision's `agent.approval` span, its context written on the entry (#5041); undefined
+ * when the entry is gone. A write that fails leaves the turn's resume a root, never the decision.
+ */
+async function decisionSpan(sessions: SessionManager, requestId: string, sessionId: string, by: Owner): Promise<Span | undefined> {
+  const parked = await sessions.projection.parkTrace(requestId).catch(() => undefined)
+  if (!parked) return undefined
+  const link = linkTo(parked.traceparent)
+  const span = tracer().startSpan('agent.approval', {
+    kind: SpanKind.INTERNAL,
+    ...(link ? { links: [link] } : {}),
+    attributes: {
+      'scadbuddy.approval_id': requestId,
+      'scadbuddy.tool': parked.tool,
+      'scadbuddy.tier': 'outward',
+      'scadbuddy.outcome': 'unknown',
+      'scadbuddy.wait_seconds': Math.max((Date.now() - parked.createdAt.getTime()) / 1000, 0),
+      'scadbuddy.session_id': sessionId,
+      'scadbuddy.decided_by_kind': by.kind,
+    },
+  })
+  const traceparent = traceparentOf(span)
+  if (traceparent) await sessions.projection.markDecision(requestId, traceparent).catch(() => {})
+  return span
 }
 
 /**

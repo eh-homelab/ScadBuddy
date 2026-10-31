@@ -3,6 +3,7 @@ import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
 import { context as otelContext } from '@opentelemetry/api'
 import type { Sql, TransactionSql } from 'postgres'
+import type { GateTrace, ParkTrace } from '../approvals/service.js'
 import { contextFrom } from '../telemetry/trace.js'
 import { turnCostEntry } from '../audit/turn.js'
 import { redact, WAIT_FOR_USER } from '../gate/entry.js'
@@ -173,7 +174,8 @@ function questionsOf(input: unknown): string[] {
 }
 
 /** An entry's response row, as resolve_input (or a grant, or the flow's refusal) wrote it. */
-type Response = HeldRow
+/** The entry's response row, with the decision's span (#5041). */
+type Response = HeldRow & { decision_traceparent?: string | null }
 
 /** What a parked attention request named: its `wait_for_user` input (TurnHost's attention gate). */
 type AttentionInput = { reason?: string; timeout_s?: number; on_timeout?: string }
@@ -435,6 +437,7 @@ export class TurnHost {
           holds: parks,
           secrets: ctx.secrets,
           shown: ctx.shown,
+          trace: ctx.trace,
           asks: ctx.turn.run.questionGate !== undefined,
           // An attention request's timer, or its release, ends the turn as a Stop does: an MCP tool's result cannot.
           endTurn: (why) => {
@@ -518,6 +521,10 @@ export class TurnHost {
       }
       if (why === 'shutdown') throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: entries.length > 0 })
       if (why !== undefined) throw ApplicationFailure.nonRetryable(`session ${id}'s placement ${attempt} was cut off: ${CUT_TEXT[why]}`, SESSION_GONE)
+      // A process the turn let go (it failed, or was recycled) lands its last appends before the
+      // turn ends, as a classic turn's does: the next turn's claim would fence them out, and its
+      // spawn would then start the session anew over Claude Code's own file of it.
+      await this.#deps.core.warm.landed(id)
       return this.#result(tally, run.secrets)
     } catch (err) {
       core.traced.fail(err)
@@ -538,10 +545,11 @@ export class TurnHost {
     holds: Holds
     secrets: () => readonly string[]
     shown: (toolUseId: string, toolName: string, input: Record<string, unknown>) => Promise<void>
+    trace: GateTrace
     asks: boolean
     endTurn: (why: string) => void
   }): TurnGates {
-    const { session, turnId, control, stop, holds, secrets, shown, asks, endTurn } = turn
+    const { session, turnId, control, stop, holds, secrets, shown, trace, asks, endTurn } = turn
     const open = control.openInput
     if (!open) {
       return {
@@ -594,10 +602,21 @@ export class TurnHost {
       // A copy taken now is what runs: the entry's hash is of this input.
       const input = structuredClone(request.input)
       if (request.agentId === undefined) await shown(request.toolUseId, request.toolName, request.input)
+      // The turn's trace, as classic's gate keeps it (approvals/service.ts `gate`): the call's span
+      // and the turn's open segment end once the entry is open, and its span context goes on the
+      // entry for the decision to link to (#5041).
+      const traced = trace.park(request.toolUseId, request.toolName)
+      let entered = false
       let parked
       try {
-        parked = await park({ id: request.toolUseId, name: request.toolName, input }, AbortSignal.any([stop, request.signal]))
+        parked = await park({ id: request.toolUseId, name: request.toolName, input }, AbortSignal.any([stop, request.signal]), {
+          opened: (rid) => {
+            entered = true
+            void this.#traceEntry(rid, traced)
+          },
+        })
       } catch (err) {
+        if (!entered) traced.abandoned()
         // The audit row names the entry the call waited on, as classic's does (approvals/service.ts).
         const waited = parkedAs.get(request.toolUseId)
         const source = waited === undefined ? {} : { approvalId: waited }
@@ -607,9 +626,12 @@ export class TurnHost {
       }
       const { requestId, row, early } = parked
       const outcome = row?.outcome ?? early?.outcome
+      const decision = outcome === 'approved' || outcome === 'denied' || outcome === 'expired' ? outcome : 'cancelled'
+      // Settled at once (a grant, the flow's deny, a read call): nobody was asked, as classic's consumed approval.
+      if (entered) traced.decided({ id: requestId, decision, decisionTraceparent: row?.decision_traceparent ?? null }, outcome === 'approved')
+      else traced.abandoned()
       if (outcome === 'approved') return { approved: true, input, approvalId: requestId, decision: 'approved' }
       const said = row?.responder?.kind === 'flow' && outcome === 'denied' ? 'flow_denied' : (outcome ?? 'cancelled')
-      const decision = outcome === 'denied' || outcome === 'expired' ? outcome : 'cancelled'
       return { approved: false, message: refusal(request.toolName, requestId, said, row?.reason), approvalId: requestId, decision }
     }
     /** A `done` summary is classic's (see the header); every other attention request waits through the workflow (attentionGate.ts). */
@@ -690,8 +712,22 @@ export class TurnHost {
 
   async #row(requestId: string): Promise<Response | undefined> {
     const [row] = await this.#deps.sql<Response[]>`
-      SELECT outcome, response, reason, responder FROM ai_input_responses WHERE request_id = ${requestId}`
+      SELECT outcome, response, reason, responder, decision_traceparent FROM ai_input_responses WHERE request_id = ${requestId}`
     return row
+  }
+
+  /**
+   * The parked call's span context on its entry, then the span and the segment ended (#5041):
+   * the decision links to it, as classic's links to `ai_approvals.traceparent`. Best effort: an
+   * entry the write misses is decided all the same, its decision a root.
+   */
+  async #traceEntry(requestId: string, traced: ParkTrace): Promise<void> {
+    if (traced.traceparent) {
+      await this.#deps.sql`UPDATE ai_pending_input SET traceparent = ${traced.traceparent} WHERE request_id = ${requestId}`.catch((err: unknown) => {
+        this.#deps.core.stderr?.(`parked call ${requestId}: its span context was not recorded: ${describe(err)}\n`)
+      })
+    }
+    traced.parked(requestId)
   }
 
   #pause(requestId: string, signal: AbortSignal): Promise<void> {
