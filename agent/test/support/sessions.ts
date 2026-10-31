@@ -281,6 +281,11 @@ export function manager(deps: Partial<SessionManagerDeps> & Pick<SessionManagerD
 export async function stopManagers(): Promise<void> {
   const managers = [...unstopped]
   unstopped.clear()
+  // The managers stop together, so this takes about 7 s at most whatever their number
+  // (5 s for the aborted turns, then up to sessions/warm.ts DRAIN_MS for the warm
+  // processes): inside the 20 s `hookTimeout` (vitest.config.ts) of the afterEach that
+  // calls it. The leak guard's wait (leakGuard.ts EXIT_WAIT_MS) runs in afterAll, a hook
+  // with a budget of its own.
   await Promise.all(managers.map((m) => m.stopTurns({ graceMs: 0, abortWaitMs: 5_000 })))
 }
 

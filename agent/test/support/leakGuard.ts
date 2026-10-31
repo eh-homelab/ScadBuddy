@@ -9,6 +9,8 @@ import { waitForClaudeCodes } from './claudeProcesses.js'
 // stdin EOF Claude Code exits within about 50 ms (sessions/warm.ts DRAIN_MS),
 // and the SDK sends SIGTERM 2 s after `close()` to one that has not. So the
 // file gets that long and some room, then fails, and the leftovers are killed.
+// It must stay under `hookTimeout` (vitest.config.ts, 20 s), or the hook times
+// out before it can name and kill them.
 const EXIT_WAIT_MS = 10_000
 
 afterAll(async () => {
