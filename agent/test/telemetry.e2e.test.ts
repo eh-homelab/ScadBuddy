@@ -19,6 +19,7 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { exportedText, resetTracing, testTracing, waitForSpan } from './support/tracing.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
 
 // The agent's trace on the real Agent SDK and its bundled Claude Code binary,
 // pointed at the fake Anthropic endpoint, with sessions and approvals in
@@ -57,7 +58,8 @@ const LIST_MODELS = ALL_TOOLS.find((t) => t.name === 'list_models')!
 
 type Hit = { path: string; traceparent: string | undefined }
 
-describe.skipIf(skip !== undefined)(`agent tracing against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent tracing against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let fake: FakeAnthropic
   let script: (request: RecordedRequest) => Reply
   let db: Database
@@ -171,6 +173,8 @@ describe.skipIf(skip !== undefined)(`agent tracing against the real SDK${skip ? 
     script = (r) =>
       lastContent(r).includes('tool_result') ? { text: 'done' } : { toolUse: { name: 'mcp__scadbuddy__ping_backend', input: { job: SENTINEL } } }
     const m = await agent()
+    // The classic gate's park trace (ai_approvals.traceparent); an AgentSession park's is #5041.
+    classicTurns(m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ping it' })
     const [approvalId] = await required(m, session.id, 1)
 
@@ -210,6 +214,8 @@ describe.skipIf(skip !== undefined)(`agent tracing against the real SDK${skip ? 
       return { toolUse: { name: 'mcp__scadbuddy__ping_backend', input: { job: 'a' } } }
     }
     const m = await agent()
+    // The classic gate's park trace (ai_approvals.traceparent); an AgentSession park's is #5041.
+    classicTurns(m)
     const app = routes(m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ping twice' })
     const [first] = await required(m, session.id, 1)

@@ -18,6 +18,7 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { nextResult } from './support/warm.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // How the warm cache follows the settings and evictions when a NOTIFY never
 // arrives (sessions/runtimeSync.ts): the start read, the reconnect and the resync.
@@ -50,7 +51,8 @@ describe('readStartSettings', () => {
   })
 })
 
-describe.skipIf(!TEST_DATABASE_URL)(`the warm cache's resync${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm cache's resync${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let url: string

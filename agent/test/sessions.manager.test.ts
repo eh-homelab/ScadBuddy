@@ -32,6 +32,7 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { agentA, agentB, browser, collectUntil, type FakeTurn, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
 import { warmHarness } from './support/warm.js'
 import { resetTracing, testTracing, waitForSpan } from './support/tracing.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // The manager's own rules against real Postgres, with a scripted stand-in for
 // the SDK so claims, ownership and interrupts are deterministic. The real SDK
@@ -55,9 +56,10 @@ describe('titleFrom', () => {
   })
 })
 
-describe.skipIf(!TEST_DATABASE_URL)(
+describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
   `SessionManager${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`,
   () => {
+  agentSessions()
     let db: Database
     let schema: string
     let url: string
@@ -317,7 +319,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       let release!: () => void
       const hold = new Promise<void>((r) => (release = r))
       const { runner } = scriptedRunner(() => ({ reply: 'done', holdAfterResult: hold }))
-      const m = manager({ sql: db.sql, paths, run: runner })
+      const m = manager({ sql: db.sql, paths, run: runner }, { classic: true })
       const { session } = await m.start(agentA, { origin: 'mcp' })
       const turn = await m.send(session.id, agentA, 'x')
       await collectUntil(await m.attach(session.id, agentA, { signal: stop.signal }), (e) => e.event.type === 'assistant.text.done')
@@ -413,7 +415,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('frees a claim whose replica died once its lease runs out', async () => {
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
-      const m = manager({ sql: db.sql, paths, run: runner })
+      const m = manager({ sql: db.sql, paths, run: runner }, { classic: true })
       const { session } = await m.start(agentA, { origin: 'mcp' })
       // A turn claimed by a replica that is gone: no renewal. Its lease is moved past by
       // hand, not waited out: a short real lease could run out before the first send
@@ -432,7 +434,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('reaps a turn whose lease ran out: it says it stopped, and the session is idle again', async () => {
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ hang: true }))
-      const m = manager({ sql: db.sql, paths, run: runner })
+      const m = manager({ sql: db.sql, paths, run: runner }, { classic: true })
       const dead = (await m.start(agentA, { origin: 'mcp' })).session
       const parked = (await m.start(agentA, { origin: 'mcp' })).session
       const live = (await m.start(agentA, { origin: 'mcp' })).session
@@ -461,7 +463,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await m.reapExpired()).toEqual([])
       // And the session takes a turn again.
       const { runner: ok } = scriptedRunner(() => ({ reply: 'back' }))
-      const after = manager({ sql: db.sql, paths, run: ok })
+      const after = manager({ sql: db.sql, paths, run: ok }, { classic: true })
       expect(await (await after.send(dead.id, agentA, 'hello')).done).toMatchObject({ kind: 'result' })
 
       await m.interrupt(live.id, agentA)
@@ -474,7 +476,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       // No renewals: this replica's turn stops renewing, as a stalled process's does.
       // It still reports what it spent once stopped: the requests were billed (#2981 review).
       const { runner } = scriptedRunner(() => ({ hang: true, resultOnAbortUsd: 0.02 }))
-      const m = manager({ sql: db.sql, paths, run: runner, audit, renewMs: 60_000, leaseMs: 90_000 })
+      const m = manager({ sql: db.sql, paths, run: runner, audit, renewMs: 60_000, leaseMs: 90_000 }, { classic: true })
       const elsewhere = (await m.start(agentA, { origin: 'mcp' })).session
       const here = (await m.start(agentA, { origin: 'mcp' })).session
       // A turn another replica was running, and one running on this replica.
@@ -526,7 +528,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         },
       })
       const { runner } = scriptedRunner(() => ({ hang: true, resultOnAbortUsd: 0.02 }))
-      const m = manager({ sql, paths, run: runner, renewMs: 60_000, stderr: (line) => lines.push(line) })
+      const m = manager({ sql, paths, run: runner, renewMs: 60_000, stderr: (line) => lines.push(line) }, { classic: true })
       const { session } = await m.start(agentA, { origin: 'mcp' })
       const running = await m.send(session.id, agentA, 'long job')
       await db.sql`UPDATE ai_sessions SET lease_until = now() - interval '1 second' WHERE id = ${session.id}`
@@ -553,7 +555,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         },
       })
       const { runner } = scriptedRunner(() => ({ reply: 'nearly done' }))
-      const m = manager({ sql, paths, run: runner, renewMs: 60_000, stderr: (line) => lines.push(line) })
+      const m = manager({ sql, paths, run: runner, renewMs: 60_000, stderr: (line) => lines.push(line) }, { classic: true })
       const { session } = await m.start(agentA, { origin: 'mcp' })
       // Its result is in and finish() has begun: another turn takes the session before
       // its held check, so it goes the no-`held` way with a result to charge.
@@ -591,7 +593,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         },
       })
       const { runner } = scriptedRunner(() => ({ reply: 'nearly done' }))
-      const m = manager({ sql, paths, run: runner, renewMs: 60_000, stderr: (line) => lines.push(line) })
+      const m = manager({ sql, paths, run: runner, renewMs: 60_000, stderr: (line) => lines.push(line) }, { classic: true })
       const { session } = await m.start(agentA, { origin: 'mcp' })
       // Past finish()'s held check, before its release: the approvals cancel runs between
       // the two, so another turn taking the session there sends it the no-`released` way.
@@ -622,7 +624,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const paths = await tempPaths()
       const audit = new MemoryAudit()
       const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
-      const m = manager({ sql: db.sql, paths, run: runner, audit })
+      const m = manager({ sql: db.sql, paths, run: runner, audit }, { classic: true })
       const taken = (await m.start(agentA, { origin: 'mcp' })).session
       const reaped = (await m.start(agentA, { origin: 'mcp' })).session
       // Two turns whose replica stopped renewing their claims.
@@ -687,7 +689,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ reply: 'nearly done' }))
       // No renewals: nothing tells this turn its claim went.
-      const m = manager({ sql: db.sql, paths, run: runner, renewMs: 60_000 })
+      const m = manager({ sql: db.sql, paths, run: runner, renewMs: 60_000 }, { classic: true })
       const { session } = await m.start(agentA, { origin: 'mcp' })
       // Its result is in and runTurn's lost check passed: finish() has begun (its first
       // step is this cancel). Before its own check, another replica's turn takes the
@@ -723,7 +725,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('attributes a dead turn to the local one only when it is that turn (#2981 review)', async () => {
       const paths = await tempPaths()
       const { runner, runs } = scriptedRunner(() => ({ hang: true }))
-      const m = manager({ sql: db.sql, paths, run: runner, renewMs: 60_000 })
+      const m = manager({ sql: db.sql, paths, run: runner, renewMs: 60_000 }, { classic: true })
       const { session } = await m.start(agentA, { origin: 'mcp' })
       const running = await m.send(session.id, agentA, 'long job')
       // The claim the reaper finds is another turn's: this replica's turn is not the one that died.
@@ -744,7 +746,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it("leaves a turn sent after the reap its approval: the reaped turn's own ending cancels nothing (#2981 review)", async () => {
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ hang: true }))
-      const m = manager({ sql: db.sql, paths, run: runner, renewMs: 60_000 })
+      const m = manager({ sql: db.sql, paths, run: runner, renewMs: 60_000 }, { classic: true })
       const { session } = await m.start(agentA, { origin: 'mcp' })
       const running = await m.send(session.id, agentA, 'long job')
       await db.sql`UPDATE ai_sessions SET lease_until = now() - interval '1 second' WHERE id = ${session.id}`
@@ -784,7 +786,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const held = new Promise<void>((resolve) => (release = resolve))
       const turns: FakeTurn[] = [{ reply: 'nearly done', holdAfterResult: held }, { hang: true }]
       const { runner } = scriptedRunner(() => turns.shift()!)
-      const m = manager({ sql: db.sql, paths, run: runner })
+      const m = manager({ sql: db.sql, paths, run: runner }, { classic: true })
       const finishing = (await m.start(agentA, { origin: 'mcp' })).session
       const stuck = (await m.start(agentA, { origin: 'mcp' })).session
       const first = await m.send(finishing.id, agentA, 'a')
@@ -1180,8 +1182,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
               updatedAt: expect.any(String),
               costUsd: 0,
               budgetUsd: 1,
-              // Plan 5d: the default (durable) ran classic, with no Temporal here.
-              mode: 'classic',
+              // Plan 5d's default, durable: an AgentSession on this file's Temporal (agentSessions()).
+              mode: 'durable',
               offer: null,
             },
           ],
@@ -1315,7 +1317,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       it('an interrupt stops the turn and keeps the process for the next', async () => {
         const paths = await tempPaths()
         const turns: FakeTurn[] = [{ hang: true }, { reply: 'ok' }]
-        const { runner, runs } = scriptedRunner(() => turns.shift()!)
+        const { runner, runs, prompts } = scriptedRunner(() => turns.shift()!)
         const m = manager({ sql: db.sql, paths, run: runner })
         // Each step well inside the test's 20 s: a step that never ends (#4273, seen in CI
         // only) fails naming itself and what the manager held then.
@@ -1327,7 +1329,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
           return Promise.race([p, stuck]).finally(() => clearTimeout(timer))
         }
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'go' })
-        await new Promise((r) => setTimeout(r, 50))
+        // The process has the prompt: a Stop before that ends the turn before it spawns one.
+        await expect.poll(() => prompts.length).toBe(1)
         expect(await step('the interrupt', m.interrupt(session.id, agentA))).toBe(true)
         expect(await step('the interrupted turn', turn!.done)).toEqual({ kind: 'interrupted' })
         expect(m.warm.size()).toBe(1)

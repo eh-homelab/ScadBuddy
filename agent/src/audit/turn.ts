@@ -1,6 +1,7 @@
 import type { ApprovalGate, ApprovalVerdict, RiskTier, TierResolver } from '../harness/permissions.js'
 import type { TurnOutcome } from '../sessions/manager.js'
 import type { ServerEvent } from '../sessions/protocol.js'
+import { isUuid } from '../harness/uuid.js'
 import { unwrapUntrusted } from '../safety/untrusted.js'
 import { withoutWorkspaceSize } from '../workspace/store.js'
 import { type AuditActor, type AuditDeps, type AuditEntry, type AuditOutcome, safeDetail } from './log.js'
@@ -153,7 +154,13 @@ export class TurnAuditor {
       tier: call.tier,
       inputHash: this.audit.hash(call.name, call.input),
       inputSummary: this.audit.summarise(call.name, withoutWorkspaceSize(call.input), secrets),
-      approvalId: verdict?.approvalId,
+      // A classic approval is an ai_approvals id; an AgentSession's is its gate request id
+      // (`durable:…`), which the row carries as `request_id`, as a DurableSession call's does.
+      ...(verdict?.approvalId === undefined
+        ? {}
+        : isUuid(verdict.approvalId)
+          ? { approvalId: verdict.approvalId }
+          : { requestId: verdict.approvalId }),
       outcome,
       ...(outcome === 'ok' ? {} : { detail: safeDetail(summary, secrets) }),
       startedAt: call.startedAt,

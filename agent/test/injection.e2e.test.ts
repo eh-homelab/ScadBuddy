@@ -8,6 +8,7 @@ import { createBackendClient } from '../src/api/backend.js'
 import type { Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { respond } from '../src/routes/pendingInput.js'
 import { UNTRUSTED_CONTENT_POLICY, UNTRUSTED_KEY } from '../src/safety/untrusted.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
@@ -16,6 +17,7 @@ import { createHarnessServer, SERVER_NAME } from '../src/tools/projections.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // Prompt injection replayed end to end (#258, spec §8.6): a session turn on
 // the real Agent SDK and its bundled Claude Code (pointed at the local fake
@@ -78,7 +80,8 @@ msw.events.on('request:start', ({ request }) => {
   if (request.url.startsWith(BACKEND)) backendLog.push(`${request.method} ${new URL(request.url).pathname}`)
 })
 
-describe.skipIf(skip !== undefined)(`prompt injection against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`prompt injection against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let fake: FakeAnthropic
   let script: (request: RecordedRequest) => Reply
   let db: Database
@@ -168,6 +171,11 @@ describe.skipIf(skip !== undefined)(`prompt injection against the real SDK${skip
     return (await audit.list({ limit: 100 })).entries.reverse()
   }
 
+  async function requestIdOf(auditId: string): Promise<string | null | undefined> {
+    const [row] = await db.sql<{ request_id: string | null }[]>`SELECT request_id FROM ai_audit WHERE id = ${auditId}::bigint`
+    return row?.request_id
+  }
+
   async function parked(prompt: string) {
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt })
     const events = await m.attach(session.id, browser, { signal: stop.signal })
@@ -199,7 +207,8 @@ describe.skipIf(skip !== undefined)(`prompt injection against the real SDK${skip
     await new Promise((r) => setTimeout(r, 1000))
     expectExactlyOneRead('GET /api/v1/models/name-keychain/readme')
 
-    await m.approvals.decide(browser, approvalId, false)
+    // The panel's deny (routes/pendingInput.ts `respond`, #815).
+    expect(await respond(m, browser, approvalId, { kind: 'approval', decision: 'deny' })).toMatchObject({ outcome: 'denied' })
     expect(await turn.done).toMatchObject({ kind: 'result' })
     expectExactlyOneRead('GET /api/v1/models/name-keychain/readme')
 
@@ -213,14 +222,16 @@ describe.skipIf(skip !== undefined)(`prompt injection against the real SDK${skip
       surface: 'harness',
       actor: browser,
       session_id: session.id,
-      approval_id: approvalId,
       input_summary: '{"slug":"name-keychain"}',
       input_hash: m.approvals.hash('mcp__scadbuddy__delete_model', { slug: 'name-keychain' }),
     })
     expect(calls[1]?.duration_ms).toBeGreaterThanOrEqual(1000)
-    expect(rows.filter((r) => r.kind === 'approval').map((r) => [r.action, r.outcome, r.approval_id])).toEqual([
-      ['denied', 'denied', approvalId],
-    ])
+    // The call's row names the gate request it waited on (an AgentSession park's id, `durable:…`).
+    expect(await requestIdOf(calls[1]!.id)).toBe(approvalId)
+    // The decision's own row, joined to the call's on the request id.
+    const decisions = rows.filter((r) => r.kind === 'approval')
+    expect(decisions.map((r) => [r.action, r.outcome])).toEqual([['denied', 'denied']])
+    expect(await requestIdOf(decisions[0]!.id)).toBe(approvalId)
     expect(JSON.stringify(rows)).not.toContain(TOKEN)
   }, 90_000)
 
@@ -249,8 +260,10 @@ describe.skipIf(skip !== undefined)(`prompt injection against the real SDK${skip
       ['mcp__scadbuddy__get_source', 'ok'],
       ['mcp__scadbuddy__print_output', 'refused'],
     ])
-    expect(calls[1]).toMatchObject({ approval_id: approvalId, tier: 'outward', detail: expect.any(String) })
-    const [approval] = await m.approvals.list(browser, { sessionId: session.id })
-    expect(approval).toMatchObject({ id: approvalId, decision: 'cancelled' })
+    expect(calls[1]).toMatchObject({ tier: 'outward', detail: expect.any(String) })
+    expect(await requestIdOf(calls[1]!.id)).toBe(approvalId)
+    // The entry ended with the turn: nothing approved it.
+    const [entry] = await db.sql<{ outcome: string }[]>`SELECT outcome FROM ai_input_responses WHERE request_id = ${approvalId}`
+    expect(entry?.outcome).not.toBe('approved')
   }, 90_000)
 })

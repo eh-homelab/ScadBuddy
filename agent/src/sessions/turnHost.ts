@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
+import { context as otelContext } from '@opentelemetry/api'
 import type { Sql, TransactionSql } from 'postgres'
+import { contextFrom } from '../telemetry/trace.js'
 import { turnCostEntry } from '../audit/turn.js'
 import { redact, WAIT_FOR_USER } from '../gate/entry.js'
 import { refusal } from '../gate/refusal.js'
@@ -406,12 +408,22 @@ export class TurnHost {
         : await tx`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt} AND durable_turn_id = ${turnId} FOR UPDATE`
       return rows.length > 0
     }
+    const holdsOrLast = async (tx: TransactionSql) => {
+      const rows = await tx`
+        SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_attempt = ${attempt}
+          AND (durable_turn_id = ${turnId} OR durable_turn_id IS NULL) FOR SHARE`
+      return rows.length > 0
+    }
+    // A process of the session's left here by an earlier placement writes under this one now.
+    this.#deps.core.warm.refence(id, holdsOrLast)
     const events = this.#deps.core.events
-    const core: CoreTurn = new CoreTurn(this.#deps.core, {
+    // The turn's spans are children of the sender's trace, as a classic turn's are (turnCore.ts).
+    const sender = contextFrom(input.message?.traceparent, otelContext.active())
+    const core: CoreTurn = otelContext.with(sender, () => new CoreTurn(this.#deps.core, {
       session,
       turnId,
       principal,
-      userText: input.message?.text ?? text,
+      userText: input.message?.words ?? input.message?.text ?? text,
       signal: controller.signal,
       interrupt: () => controller.abort(new Error('the turn was interrupted')),
       gates: (ctx) =>
@@ -432,8 +444,11 @@ export class TurnHost {
       // The prompt goes in right after the acquire.
       onAcquired: ({ entry }) => {
         entries.push(entry)
-        // Its transcript appends only while this placement holds the turn.
-        this.#deps.core.warm.fence(entry, (tx) => holds(tx, 'share'))
+        // Its transcript appends only while this placement holds the turn, or is the session's
+        // last placement and no turn runs: what Claude Code writes as it exits between turns
+        // (`last-prompt`, `cost-state`, warm.ts DRAIN_MS) lands as a classic process's does,
+        // and never once another turn has the session.
+        this.#deps.core.warm.fence(entry, (tx) => holdsOrLast(tx))
         if (fenced()) void this.#deps.core.warm.cut(entry, 'the placement was cut off')
         control.heartbeat({ pushed: true })
       },
@@ -448,7 +463,7 @@ export class TurnHost {
         if (written) events.committed(id, batch, written)
         return written !== undefined
       },
-    })
+    }))
     // The fence: still the row's placement and turn, and what it has spent so far written. A
     // Stop's flag (DurableTurns.interrupt) ends the turn here, on this tick: the workflow's
     // Signal is the backstop.
@@ -503,6 +518,10 @@ export class TurnHost {
       }
       if (why === 'shutdown') throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: entries.length > 0 })
       if (why !== undefined) throw ApplicationFailure.nonRetryable(`session ${id}'s placement ${attempt} was cut off: ${CUT_TEXT[why]}`, SESSION_GONE)
+      // A process the turn let go (it failed, or was recycled) lands its last appends before the
+      // turn ends, as a classic turn's does: the next turn's claim would fence them out, and its
+      // spawn would then start the session anew over Claude Code's own file of it.
+      await this.#deps.core.warm.landed(id)
       return this.#result(tally, run.secrets)
     } catch (err) {
       core.traced.fail(err)
@@ -583,8 +602,11 @@ export class TurnHost {
       try {
         parked = await park({ id: request.toolUseId, name: request.toolName, input }, AbortSignal.any([stop, request.signal]))
       } catch (err) {
-        if (holds.released.aborted) return { approved: false, message: RELEASED_CALL, interrupt: true }
-        if (stop.aborted || request.signal.aborted) return { approved: false, message: 'The turn is stopping; nothing was run.' }
+        // The audit row names the entry the call waited on, as classic's does (approvals/service.ts).
+        const waited = parkedAs.get(request.toolUseId)
+        const source = waited === undefined ? {} : { approvalId: waited }
+        if (holds.released.aborted) return { approved: false, message: RELEASED_CALL, interrupt: true, ...source }
+        if (stop.aborted || request.signal.aborted) return { approved: false, message: 'The turn is stopping; nothing was run.', ...source }
         return { approved: false, message: `${request.toolName} could not be put to the user for approval (${describe(err)}), so it was not run.` }
       }
       const { requestId, row, early } = parked
@@ -870,6 +892,8 @@ class Spend {
   readonly id: string
   #written = 0
   #chain: Promise<void> = Promise.resolve()
+  /** Set by `settled`: the end's write takes over, so a flush from a fence tick still in flight writes nothing. */
+  #closed = false
 
   constructor(sql: Sql, id: string) {
     this.sql = sql
@@ -879,7 +903,7 @@ class Spend {
   flush(runningUsd: number): void {
     this.#chain = this.#chain.then(async () => {
       const delta = runningUsd - this.#written
-      if (delta <= 0) return
+      if (this.#closed || delta <= 0) return
       const [row] = await this.sql<{ id: string }[]>`
         UPDATE ai_sessions SET cost_usd = cost_usd + ${delta}, unpriced_cost_usd = unpriced_cost_usd + ${delta}, updated_at = now()
         WHERE id = ${this.id}
@@ -888,9 +912,10 @@ class Spend {
     }).catch(() => {})
   }
 
-  /** What was written, once the writes in flight have landed. */
+  /** What was written, once the writes in flight have landed; no flush writes after it. */
   async settled(): Promise<number> {
     await this.#chain
+    this.#closed = true
     return this.#written
   }
 }

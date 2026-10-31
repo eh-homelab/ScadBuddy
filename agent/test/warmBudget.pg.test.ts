@@ -7,6 +7,7 @@ import { PostgresSessionStore } from '../src/sessions/store.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
 import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // One session's turns alternating between two replicas, each with a warm
 // process of its own (spec 2026-10-13 §5.3 "budget", §6.6). Every spawn is
@@ -15,7 +16,8 @@ import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.j
 // moved; each turn's recorded cost is its own; and both replicas refuse a send
 // once the budget is spent.
 
-describe.skipIf(!TEST_DATABASE_URL)(`the budget across alternating replicas${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the budget across alternating replicas${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   beforeEach(async () => {

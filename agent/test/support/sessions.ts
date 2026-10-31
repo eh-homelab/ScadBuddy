@@ -8,6 +8,7 @@ import type { HarnessRun } from '../../src/harness/run.js'
 import { SessionManager, type SessionManagerDeps } from '../../src/sessions/manager.js'
 import type { Owner } from '../../src/sessions/protocol.js'
 import { testPayloadKeys } from './payloadKeys.js'
+import { serveManager } from './agentSessions.js'
 
 export const browser: Owner = { kind: 'browser', id: 'browser', label: 'You' }
 export const agentA: Owner = { kind: 'bearer', id: 'token:a', label: 'Agent A' }
@@ -257,7 +258,16 @@ export async function tempPaths(): Promise<{ stateDir: string }> {
 /** Every manager `manager()` made that `stopManagers()` has not stopped yet. */
 const unstopped = new Set<SessionManager>()
 
-export function manager(deps: Partial<SessionManagerDeps> & Pick<SessionManagerDeps, 'sql' | 'paths'>): SessionManager {
+/**
+ * A manager over the test's database. In a describe that called `agentSessions()`
+ * (support/agentSessions.ts) its sessions run on AgentSession on that file's Temporal dev
+ * server, unless `classic` keeps it to the in-process turn (a test of that turn's own lease,
+ * reaper or approvals).
+ */
+export function manager(
+  deps: Partial<SessionManagerDeps> & Pick<SessionManagerDeps, 'sql' | 'paths'>,
+  options: { classic?: boolean } = {},
+): SessionManager {
   const m = new SessionManager({
     credentials: fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
     renewMs: 50,
@@ -265,6 +275,7 @@ export function manager(deps: Partial<SessionManagerDeps> & Pick<SessionManagerD
     payloadKeys: testPayloadKeys(deps.sql),
     ...deps,
   })
+  if (!options.classic) serveManager(m, deps)
   unstopped.add(m)
   return m
 }

@@ -9,6 +9,7 @@ import { WARM_SPAN } from '../src/telemetry/turn.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { PARENT_SPAN_ID, resetTracing, TRACE_ID, TRACEPARENT, testTracing, waitForSpan } from './support/tracing.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
 
 // The turn's trace against a real SessionManager, without the SDK: the chat
 // socket's first frame carries the browser's traceparent (spec 2026-10-01 §4),
@@ -16,7 +17,8 @@ import { PARENT_SPAN_ID, resetTracing, TRACE_ID, TRACEPARENT, testTracing, waitF
 
 const spans = testTracing()
 
-describe.skipIf(!TEST_DATABASE_URL)(`turn tracing${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`turn tracing${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let m: SessionManager
@@ -158,6 +160,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`turn tracing${TEST_DATABASE_URL ? '' : ` (s
   })
 
   it('a turn whose finish throws ends its span failed with the class', async () => {
+    // The in-process turn's own finish().
+    classicTurns(m)
     vi.spyOn(m as unknown as { finish: () => Promise<never> }, 'finish').mockRejectedValue(new TypeError('finish failed'))
     const connection = new ChatConnection(m, () => {})
     await connection.open()

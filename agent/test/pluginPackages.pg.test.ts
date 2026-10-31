@@ -23,6 +23,7 @@ import { InlineCommands } from './support/commands.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // Plugin packages (#297) against real Postgres: the pin lifecycle in
 // `ai_plugin_packages` (install → approve → enable, re-pin with a diff), the
@@ -36,7 +37,8 @@ const GIT_URL = 'https://git.test/greeter.git'
 const skip = !TEST_DATABASE_URL || gitMissing !== undefined
 const why = !TEST_DATABASE_URL ? `${TEST_DATABASE_URL_ENV} is not set` : (gitMissing ?? '')
 
-describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` : ''}`, () => {
+describe.skipIf((skip) || AGENT_SESSIONS_SKIP !== '')(`plugin packages on Postgres${skip ? ` (skipped: ${why})` : ''}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let store: PackageStore

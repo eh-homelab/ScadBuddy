@@ -12,9 +12,10 @@ import { STALE_TAB_IMAGES } from '../src/sessions/clientProtocol.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { expectPanelAccepts, frontendChatReducer, frontendClientMessages } from './support/frontendProtocol.js'
-import { type LiveAgent, openPanelSocket, startLiveAgent } from './support/liveAgent.js'
+import { type LiveAgent, openPanelSocket, respondAsPanel, startLiveAgent } from './support/liveAgent.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, stopManagers, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // The assistant panel's whole path, end to end: the panel's own client
 // messages (frontend protocol.ts `clientMessage`) over a real WebSocket to the
@@ -41,7 +42,8 @@ type Frame = Record<string, unknown>
 const PNG_1X1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=', 'base64')
 const JPEG_HEAD = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1])
 
-describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the chat socket against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let fake: FakeAnthropic
   let script: (request: RecordedRequest) => Reply
   let db: Database
@@ -95,7 +97,7 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
   const lastContent = (r: RecordedRequest) => JSON.stringify(r.body?.messages?.at(-1)?.content ?? '')
   const is = (type: string) => (f: Frame) => f.type === type
 
-  it('runs a whole turn from the panel: page context to the model, an outward call parked, approved over the socket, run', async () => {
+  it('runs a whole turn from the panel: page context to the model, an outward call parked, approved by the panel, run', async () => {
     script = (r) => {
       const last = lastContent(r)
       if (last.includes('tool_result')) return { text: last.includes('printing') ? 'Sent it to the printer.' : 'Not sent.' }
@@ -138,7 +140,8 @@ describe.skipIf(skip !== undefined)(`the chat socket against the real SDK${skip 
     await watcher.until(is('approval.required'))
 
     const mark = panel.frames.length
-    panel.send(clientMessage({ type: 'approval.decision', sessionId, id: required.id as string, approve: true }))
+    // The panel answers through the pending-input route, as frontend agent/respond.ts does (#815).
+    expect(await respondAsPanel(agent, required.id as string, { kind: 'approval', decision: 'approve' })).toMatchObject({ status: 200 })
     const rest = await panel.until((f) => f.type === 'session.status' && f.status === 'idle', { from: mark })
     expect(rest.find(is('approval.resolved'))).toMatchObject({ id: required.id, approved: true, by: browser })
     expect(rest.find(is('tool.result'))).toMatchObject({ ok: true })

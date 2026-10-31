@@ -64,7 +64,7 @@ import { PostgresSessionStore } from './store.js'
 import { userPrompt, type UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
-import type { DurableTurns, ForkedAgent } from './durable.js'
+import type { DurableTurns, ForkedAgent, SessionRuntime } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
 import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
@@ -513,6 +513,11 @@ export type SessionRecord = {
   parentId: string | null
   /** `classic` runs in this service's harness, `durable` as a DurableSession workflow; set at insert. */
   mode: SessionMode
+  /**
+   * The workflow a durable session runs as (`ai_sessions.runtime`, durable.ts): AgentSession
+   * (`unified`), DurableSession (`durable`), or null until its first send picks one.
+   */
+  runtime: SessionRuntime | null
   maxTurns: number
   /** The budget this session spends from, shared with its forks and its parent's lineage (#823). */
   budgetUsd: number
@@ -872,6 +877,7 @@ type Row = {
   scope: Record<string, unknown>
   parent_id: string | null
   mode: SessionMode
+  runtime: SessionRuntime | null
   max_turns: number
   budget_usd: number
   cost_usd: number
@@ -891,9 +897,9 @@ const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, cr
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_id END AS offer_id,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_label END AS offer_label,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_until END AS offer_until,
-  status, title, tags, scope, parent_id, mode, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
+  status, title, tags, scope, parent_id, mode, runtime, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
   ${POOL_COST} AS pool_cost_usd, turns,
-  (turn_id IS NOT NULL AND lease_until > now()) AS turn_active, created_at, updated_at, archived_at`
+  ((turn_id IS NOT NULL AND lease_until > now()) OR durable_turn_id IS NOT NULL) AS turn_active, created_at, updated_at, archived_at`
 
 function record(row: Row): SessionRecord {
   return {
@@ -911,6 +917,7 @@ function record(row: Row): SessionRecord {
     scope: row.scope,
     parentId: row.parent_id,
     mode: row.mode,
+    runtime: row.runtime,
     maxTurns: row.max_turns,
     budgetUsd: row.budget_usd,
     costUsd: row.pool_cost_usd,
@@ -1278,6 +1285,8 @@ export class SessionManager {
       scope: Record<string, unknown>
       parentId: string | null
       mode: SessionMode
+      /** Fixed now rather than at the first send: a fork of an AgentSession session is one too. */
+      runtime?: SessionRuntime
     },
     options: { rateLimited?: boolean; budgetOf?: SessionRecord } = {},
   ): Promise<SessionRecord> {
@@ -1289,10 +1298,10 @@ export class SessionManager {
     const insert = async (sql: Sql) => {
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-                                 status, title, tags, scope, parent_id, mode, max_turns, budget_usd, budget_root_id)
+                                 status, title, tags, scope, parent_id, mode, runtime, max_turns, budget_usd, budget_root_id)
         VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
                 ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
-                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${fields.mode}, ${maxTurns}, ${budgetUsd},
+                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${fields.mode}, ${fields.runtime ?? null}, ${maxTurns}, ${budgetUsd},
                 ${from ? sql`(SELECT coalesce(budget_root_id, id) FROM ai_sessions WHERE id = ${from.id})` : null})`
     }
     if (options.rateLimited) {
@@ -2191,8 +2200,12 @@ export class SessionManager {
     const startedAt = new Date()
     const fresh = options.freshBudget === true && principal.kind === 'browser'
     const parent = await this.get(id, principal)
-    // A durable parent's conversation is its workflow's (#2688), read before anything is written.
-    const durable = parent.mode === 'durable' ? await this.durableForkPoint(parent, options.upTo) : undefined
+    // A DurableSession parent's conversation is its workflow's (#2688), read before anything is
+    // written. Any other's is its transcript in ai_session_entries: a classic session's, and an
+    // AgentSession's, whose turns write it as a classic turn does (turnHost.ts). A durable session
+    // whose first send has not run has no workflow (`runtime` is set by that send), so no
+    // conversation either: the transcript's check says so.
+    const durable = parent.runtime === 'durable' ? await this.durableForkPoint(parent, options.upTo) : undefined
     let classic: { transcript: SessionStoreEntry[]; upToMessageId: string | undefined } | undefined
     let history: ServerEvent[] | undefined
     if (durable) {
@@ -2248,8 +2261,9 @@ export class SessionManager {
         title,
         ...(classic?.upToMessageId === undefined ? {} : { upToMessageId: classic.upToMessageId }),
       })
-      // A classic fork copies the SDK transcript, which only a classic session has.
-      child = await this.insert(forkedId, principal, { ...fields, mode: 'classic' }, insertOptions)
+      // The SDK transcript's copy: an AgentSession parent's child is one too, from its first turn.
+      const unified = parent.mode === 'durable'
+      child = await this.insert(forkedId, principal, { ...fields, mode: unified ? 'durable' : 'classic', ...(unified ? { runtime: 'unified' as const } : {}) }, insertOptions)
       try {
         // Its workspace files (#2329), so the fork carries on with what the parent had.
         await this.files.copy(id, child.id)

@@ -17,6 +17,7 @@ import { kekFromBase64, SealError } from '../src/secrets.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // The plugin registry (#297) against real Postgres: the store, the routes on
 // top of it, and the session manager loading enabled plugins into a run.
@@ -29,9 +30,10 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 const READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const PUBLIC = () => Promise.resolve(['203.0.113.10'])
 
-describe.skipIf(!TEST_DATABASE_URL)(
+describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
   `plugin registry on Postgres${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`,
   () => {
+  agentSessions()
     let db: Database
     let drop: () => Promise<void>
     let store: PluginStore

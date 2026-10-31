@@ -9,6 +9,7 @@ import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
 
 // /api/v1/ai/sessions (routes/sessions.ts) over a scripted runner: the routes'
 // own behaviour (guard, status codes, the SSE replay). The real SDK path is
@@ -21,7 +22,8 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const JSON_UI = { ...UI, 'content-type': 'application/json' }
 
-describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session routes${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let m: SessionManager
@@ -95,6 +97,8 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
   })
 
   it("takes a new session's mode, says when the default fell back, and refuses an unknown one (plan 5d)", async () => {
+    // The mode setting's own rules, with no Temporal: the in-process turn (plan 5d).
+    classicTurns(m)
     const start = (body: unknown) =>
       app.request('/api/v1/ai/sessions', { method: 'POST', headers: JSON_UI, body: JSON.stringify(body) })
     // No Temporal here: the default (durable) runs classic and says so.
@@ -331,6 +335,8 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
   })
 
   it('settles once the aborted turns have appended their last events (#802)', async () => {
+    // The in-process turn's own shutdown (abortAll, settled).
+    classicTurns(m)
     next = { hang: true }
     const { session } = await m.start(browser, { origin: 'chat', prompt: 'wait' })
     m.abortAll()

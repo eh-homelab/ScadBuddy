@@ -11,6 +11,7 @@ import type { ServerEvent } from '../src/sessions/protocol.js'
 import { frontendClientMessages } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // #1941: the panel uploads an image when it is attached, and a user.message
 // names it by id. The bytes wait in ai_attachments (per owner, an hour at most),
@@ -42,7 +43,8 @@ const URL_ = `https://scadbuddy.example${ATTACHMENTS_PATH}`
 
 const settle = () => new Promise((r) => setTimeout(r, 100))
 
-describe.skipIf(skip !== undefined)(`attachments${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`attachments${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let store: AttachmentStore
@@ -248,13 +250,15 @@ describe.skipIf(skip !== undefined)(`attachments${skip ? ` (skipped: ${skip})` :
 
     it('gives the model the image, names it and its preview in the turn, and moves the bytes into the session', async () => {
       const { id } = await store.put(browser, image)
+      const pushed = prompts.length
       const { out, connection } = await chat({
         type: 'user.message',
         text: 'what is this?',
         context: { route: '/' },
         images: [{ kind: 'attachment', id }],
       })
-      await settle()
+      // The turn's message in the process: its session's workflow placed it (agentSessions()).
+      await expect.poll(() => prompts.length, { timeout: 15_000 }).toBe(pushed + 1)
       connection.close()
       const started = out.find((e) => e.type === 'session.started') as { sessionId: string } | undefined
       expect(started).toBeDefined()
@@ -323,6 +327,7 @@ describe.skipIf(skip !== undefined)(`attachments${skip ? ` (skipped: ${skip})` :
       expect(await db.sql`SELECT 1 FROM ai_attachments WHERE id = ${id}`).toHaveLength(1)
 
       await db.sql`UPDATE ai_sessions SET status = 'idle' WHERE id = ${session.id}`
+      const pushed = prompts.length
       const sent = await chat({
         type: 'user.message',
         sessionId: session.id,
@@ -330,7 +335,7 @@ describe.skipIf(skip !== undefined)(`attachments${skip ? ` (skipped: ${skip})` :
         context: { route: '/' },
         images: [{ kind: 'attachment', id }],
       })
-      await settle()
+      await expect.poll(() => prompts.length, { timeout: 15_000 }).toBe(pushed + 1)
       sent.connection.close()
       expect(images()).toHaveLength(1)
       expect(await db.sql`SELECT 1 FROM ai_attachments WHERE id = ${id}`).toHaveLength(0)

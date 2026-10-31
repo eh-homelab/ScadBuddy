@@ -18,6 +18,7 @@ import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // #790: the session limits in Settings (routes/sessionLimits.ts), raising one
 // session's budget (POST /api/v1/ai/sessions/:id/budget, manager.ts
@@ -30,7 +31,8 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const JSON_UI = { ...UI, 'content-type': 'application/json' }
 
-describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session budget${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let audit: AuditLog
@@ -38,6 +40,7 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
   let m: SessionManager
   let next: FakeTurn
   let runs: ReturnType<typeof scriptedRunner>['runs']
+  let prompts: ReturnType<typeof scriptedRunner>['prompts']
   let app: ReturnType<typeof createApp>
   const failures: unknown[] = []
 
@@ -48,8 +51,9 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
     audit = new AuditLog({ sql: db.sql, settings: () => settings, onError: (err) => failures.push(err) })
     settings = new SettingsStore(db.sql, audit)
     next = { reply: 'hello there', costUsd: 0.4 }
-    const { runner, runs: made } = scriptedRunner(() => next)
+    const { runner, runs: made, prompts: pushed } = scriptedRunner(() => next)
     runs = made
+    prompts = pushed
     m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, settings, audit })
     const deps: AppDeps = {
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
@@ -471,8 +475,10 @@ describe.skipIf(skip !== undefined)(`session budget${skip ? ` (skipped: ${skip})
       const child = await m.fork(parent, browser)
       // The fork's turn is stopped; Claude Code still reports the $0.10 it spent (#1168).
       next = { hang: true, resultOnAbortUsd: 0.1 }
+      const pushed = prompts.length
       const turn = await m.send(child.id, browser, 'go on')
-      await new Promise((r) => setTimeout(r, 50))
+      // Stopped once its prompt is in the process, as a user's Stop of a running turn is.
+      await expect.poll(() => prompts.length).toBe(pushed + 1)
       expect(await m.interrupt(child.id, browser)).toBe(true)
       expect(await turn.done).toEqual({ kind: 'interrupted' })
       expect(await m.get(child.id, browser)).toMatchObject({ ownCostUsd: 0.1 })

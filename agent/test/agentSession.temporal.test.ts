@@ -862,14 +862,15 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await next.done).toMatchObject({ kind: 'result' })
     })
 
-    it('refuses to fork a unified session, whatever its state, writing nothing', async () => {
+    it('forks a unified session from its transcript, as classic does: this stub turn wrote none, so classic`s refusal (plan Step 6.3)', async () => {
       await flag(true)
       const m = await durableManager()
       finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hi' })
       await turn!.done
       const before = await db.sql`SELECT id FROM ai_sessions`
-      await expect(m.fork(session.id, browser)).rejects.toMatchObject({ code: 'invalid', message: expect.stringMatching(/unified runtime.*cannot be forked yet/) })
+      // Its workflow is not asked: the fork reads ai_session_entries (sessions.e2e forks a real one).
+      await expect(m.fork(session.id, browser)).rejects.toMatchObject({ message: expect.stringMatching(/has no transcript to fork yet/) })
       expect(await db.sql`SELECT id FROM ai_sessions`).toHaveLength(before.length)
     })
   })

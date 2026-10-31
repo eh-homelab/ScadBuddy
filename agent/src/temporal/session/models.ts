@@ -18,6 +18,10 @@ export type Message = {
   images: ImageRef[]
   system_append: string | null
   flow?: FlowTurn
+  /** The user's own words, without the page context `text` adds: what memory is recalled against (AgentSession only). */
+  words?: string
+  /** The sender's trace (a browser frame's, an MCP call's), which the turn's spans are children of (AgentSession only). */
+  traceparent?: string
 }
 
 export type SendAnswer = { accepted: boolean; turn_id: string }

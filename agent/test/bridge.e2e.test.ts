@@ -19,6 +19,7 @@ import { type FrontendBridge, type FrontendTabLink, frontendClientMessages, fron
 import { type LiveAgent, openPanelSocket, startLiveAgent } from './support/liveAgent.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { manager, stopManagers, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // The browser bridge end to end (#254): the tab's own code (frontend
 // src/agent/bridge.ts and link.ts, loaded as they are) connects over a real
@@ -57,7 +58,8 @@ async function until<T>(read: () => T | undefined, what: string, timeoutMs = 10_
   }
 }
 
-describe.skipIf(skip !== undefined)(`the browser bridge over its real socket${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the browser bridge over its real socket${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let agent: LiveAgent | undefined

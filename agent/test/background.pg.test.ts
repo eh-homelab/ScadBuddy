@@ -29,6 +29,7 @@ import { managerAgents } from '../src/background/workflowAgents.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, promptText, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // A session's background built-ins (src/background/, builtins/background.ts): the
 // tools' answers, which are Claude Code's (measured on 2.1.296 in a classic turn) where
@@ -41,7 +42,8 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const NOW = new Date('2026-10-13T08:00:30Z')
 
-describe.skipIf(skip !== undefined)(`a session's background tasks${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's background tasks${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let m: SessionManager
