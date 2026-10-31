@@ -30,7 +30,7 @@ import {
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, browser, collectUntil, manager, tempPaths } from './support/sessions.js'
+import { agentA, browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
 
 // Sessions end to end: the real Agent SDK and its bundled Claude Code binary,
 // pointed at the local fake Anthropic endpoint as a gateway (as
@@ -60,7 +60,6 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
   let drop: () => Promise<void>
   let stop: AbortController
   const pools: Database[] = []
-  const replicas: SessionManager[] = []
 
   beforeEach(async () => {
     fake = await startFakeAnthropic((r) => script(r))
@@ -70,8 +69,8 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
   })
   afterEach(async () => {
     stop.abort()
-    // Each replica's warm Claude Code processes (sessions/warm.ts), before the pool they mirror into.
-    await Promise.all(replicas.splice(0).map((m) => m.warm.close()))
+    // Each replica's turns and warm Claude Code processes (sessions/warm.ts), before the pool they mirror into.
+    await stopManagers()
     await fake.close()
     for (const pool of pools.splice(0)) await pool.close()
     await drop()
@@ -83,15 +82,13 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
     await ensureStateDirs(paths)
     const pool = connectDatabase(url, { searchPath: schema })
     pools.push(pool)
-    const m = manager({
+    return manager({
       sql: pool.sql,
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-sessions-test-token' }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       ...extra,
     })
-    replicas.push(m)
-    return m
   }
 
   const allEvents = async (m: SessionManager, id: string): Promise<LoggedEvent[]> => m.events.read(id, 0, 10_000)

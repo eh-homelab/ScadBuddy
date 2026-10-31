@@ -31,6 +31,12 @@ export default defineConfig({
     // Migrates the template every Postgres test's database is copied from, once
     // (#2018; test/support/postgres.ts).
     globalSetup: ['test/support/globalSetup.ts'],
+    // Fails a file that leaves a Claude Code process running (#5030). It walks every
+    // descendant of the worker's pid, so it needs one file per process: `forks`, isolated
+    // (vitest's defaults, pinned here). Files sharing a worker (`threads`, `vmThreads`,
+    // `isolate: false`) would fail, and kill, each other's processes.
     setupFiles: ['test/support/leakGuard.ts'],
+    pool: 'forks',
+    isolate: true,
   },
 })
