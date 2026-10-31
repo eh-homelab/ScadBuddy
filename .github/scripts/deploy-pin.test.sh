@@ -118,6 +118,7 @@ dashboard_line="  - $DASHBOARD_RESOURCE?ref="
 # `run <api-manifest> [worker-manifest] [print-manifest] [projects-manifest]`: a fresh repo, then the
 # step. Output lands in $work/log, and the manifests stay in $work/repo for the checks.
 # With $durable_manifest set, it is written as agent-durable's own Deployment.
+# With $extra_path set, $extra_content is written there (relative to the repo).
 run() {
   rm -rf "$work/repo" && mkdir -p "$work/repo/applications/scadbuddy" "$work/repo/$(dirname "$KUSTOMIZATION")"
   printf '%s\n' "$1" > "$work/repo/$MANIFEST"
@@ -126,6 +127,7 @@ run() {
   [ $# -lt 4 ] || printf '%s\n' "$4" > "$work/repo/$MANIFEST_PROJECTS"
   [ -z "${durable_manifest:-}" ] || printf '%s\n' "$durable_manifest" > "$work/repo/$MANIFEST_AGENT_DURABLE"
   [ -z "${slicer_manifest:-}" ] || printf '%s\n' "$slicer_manifest" > "$work/repo/$MANIFEST_SLICER"
+  [ -z "${extra_path:-}" ] || printf '%s\n' "$extra_content" > "$work/repo/$extra_path"
   [ -z "$overlay" ] || printf '%s\n' "$overlay" > "$work/repo/$KUSTOMIZATION"
   (cd "$work/repo" && git init -q)
   rerun
@@ -341,6 +343,91 @@ else
     || fail "slicer file without its line: wrong error: $(grep '::error' "$work/log")"
 fi
 slicer_manifest=
+
+# 8b. Every other file that runs the agent is pinned too, found by the image
+#     (#5037): the agent's worker Deployment, scadbuddy-agent-worker.yaml.
+worker_path=applications/scadbuddy/scadbuddy-agent-worker.yaml
+extra_path=$worker_path
+extra_content=$(deployment scadbuddy-agent-worker "$agent")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$agent_pinned" "$worker_path" || fail "agent worker: agent image not pinned"
+  has_line "$agent_pinned" "$MANIFEST" || fail "agent worker: sidecar not pinned"
+  grep -q "^files=.*$worker_path" "$work/out" || fail "agent worker: not among the changed files"
+  rerun || fail "agent worker: rerun failed: $(grep '::error' "$work/log")"
+  grep -qx 'unchanged=true' "$work/out" || fail "agent worker: rerun expected unchanged=true"
+else
+  fail "agent worker: step failed: $(grep '::error' "$work/log")"
+fi
+# ...in the overlay's directory too, which the step also scans.
+overlay_worker=clusters/prod/scadbuddy/agent-worker.yaml
+extra_path=$overlay_worker
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$agent_pinned" "$overlay_worker" || fail "overlay agent worker: agent image not pinned"
+  grep -q "^files=.*$overlay_worker" "$work/out" || fail "overlay agent worker: not among the changed files"
+else
+  fail "overlay agent worker: step failed: $(grep '::error' "$work/log")"
+fi
+extra_path=$worker_path
+# A file that is not YAML fails the deploy, closed: what it runs cannot be checked.
+extra_content=$'a: [unclosed'
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "unparseable file: step passed, expected an error"
+else
+  grep -q "file=$worker_path::could not parse it" "$work/log" \
+    || fail "unparseable file: wrong error: $(grep '::error' "$work/log")"
+fi
+# ...with exactly one line, as in the API's manifest.
+extra_content=$(deployment scadbuddy-agent-worker "$agent" "$agent")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "agent worker, two lines: step passed, expected an error"
+else
+  grep -q "file=$worker_path::expected exactly one agent image line, found 2" "$work/log" \
+    || fail "agent worker, two lines: wrong error: $(grep '::error' "$work/log")"
+fi
+# ...and a line the pattern misses (quoted) is an error, not a skipped file.
+extra_content=$(deployment scadbuddy-agent-worker "\"$agent\"")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  fail "agent worker, quoted: step passed, expected an error"
+else
+  grep -q "file=$worker_path::expected exactly one agent image line, found 0" "$work/log" \
+    || fail "agent worker, quoted: wrong error: $(grep '::error' "$work/log")"
+fi
+
+# 8c. Nothing stays behind (#5037): a ScadBuddy image the step does not move,
+#     in any file under the manifests' or the overlay's directory, fails it.
+stale_fails() { # name path content expected-error
+  local name=$1
+  extra_path=$2
+  extra_content=$3
+  if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+    fail "$name: step passed, expected an error"
+  else
+    grep -qF "$4" "$work/log" || fail "$name: wrong error: $(grep '::error' "$work/log")"
+  fi
+}
+not_moved="which this deploy does not move to $VERSION"
+stale_fails "unknown worker of the api image" applications/scadbuddy/scadbuddy-new.yaml \
+  "$(deployment scadbuddy-new "$IMAGE:$old")" "file=applications/scadbuddy/scadbuddy-new.yaml::names $IMAGE:$old, $not_moved"
+stale_fails "unknown sibling image" applications/scadbuddy/scadbuddy-other.yaml \
+  "$(deployment scadbuddy-other "$IMAGE-other:sha-1111111")" "names $IMAGE-other:sha-1111111, $not_moved"
+stale_fails "agent-durable outside its files" applications/scadbuddy/scadbuddy-extra.yaml \
+  "$(deployment scadbuddy-extra "$durable")" "names $durable, $not_moved"
+stale_fails "slicer outside its file" applications/scadbuddy/scadbuddy-extra.yaml \
+  "$(deployment scadbuddy-extra "$slicer_old")" "names $slicer_old, $not_moved"
+stale_fails "an overlay images: entry" clusters/prod/scadbuddy/images.yaml \
+  "$(printf '%s\n' 'images:' "  - name: $IMAGE" "    newName: $IMAGE:sha-1111111")" "names $IMAGE:sha-1111111, $not_moved"
+stale_fails "an alias of an old pin" applications/scadbuddy/scadbuddy-alias.yaml \
+  "$(printf '%s\n' "x: &old $IMAGE:$old" 'y: *old')" "names $IMAGE:$old, $not_moved"
+# A comment that quotes an image line, and another eh-homelab image, are not pins.
+extra_path=applications/scadbuddy/temporal.yaml
+extra_content=$(printf '%s\n' "# image: $IMAGE:$old" "image: ghcr.io/eh-homelab/temporal-server:1.32.1")
+if run "$(deployment scadbuddy "$IMAGE:$old" "$agent")"; then
+  has_line "$pinned" "$MANIFEST" || fail "comment and other image: api image not pinned"
+else
+  fail "comment and other image: step failed: $(grep '::error' "$work/log")"
+fi
+extra_path=
+extra_content=
 
 # `dashboard_fails <name> <expected-error> <overlay-line>...`: the API and agent
 # beside an overlay carrying those lines; the step must fail with that error.
