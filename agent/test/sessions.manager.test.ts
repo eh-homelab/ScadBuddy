@@ -1317,7 +1317,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       it('an interrupt stops the turn and keeps the process for the next', async () => {
         const paths = await tempPaths()
         const turns: FakeTurn[] = [{ hang: true }, { reply: 'ok' }]
-        const { runner, runs } = scriptedRunner(() => turns.shift()!)
+        const { runner, runs, prompts } = scriptedRunner(() => turns.shift()!)
         const m = manager({ sql: db.sql, paths, run: runner })
         // Each step well inside the test's 20 s: a step that never ends (#4273, seen in CI
         // only) fails naming itself and what the manager held then.
@@ -1329,7 +1329,8 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
           return Promise.race([p, stuck]).finally(() => clearTimeout(timer))
         }
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'go' })
-        await new Promise((r) => setTimeout(r, 50))
+        // The process has the prompt: a Stop before that ends the turn before it spawns one.
+        await expect.poll(() => prompts.length).toBe(1)
         expect(await step('the interrupt', m.interrupt(session.id, agentA))).toBe(true)
         expect(await step('the interrupted turn', turn!.done)).toEqual({ kind: 'interrupted' })
         expect(m.warm.size()).toBe(1)

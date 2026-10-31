@@ -587,9 +587,12 @@ export class DurableTurns {
     if (error?.code === 'turn_failed' || status === 'failed') {
       return { kind: 'failed', message: error?.message ?? 'the turn failed' }
     }
-    // The session's own spend, as a classic turn's outcome reports it: the event's is the
-    // lineage's (the meter), which a fork shares with its parent (#823).
-    const [own] = await this.#sql<{ cost_usd: number }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${id}`
+    // An AgentSession's outcome carries the session's own spend, as a classic turn's does: its
+    // event's is the lineage's (the meter), which a fork shares with its parent (#823).
+    // DurableSession's finish_turn writes the outcome's figure in the event.
+    const [row] = await this.#sql<{ cost_usd: number; runtime: SessionRuntime | null }[]>`
+      SELECT cost_usd, runtime FROM ai_sessions WHERE id = ${id}`
+    const own = row?.runtime === 'unified' ? row : undefined
     return {
       kind: 'result',
       // A result subtype classic reports for an end that leaves the session idle (AgentSession carries it, turnHost.ts).
