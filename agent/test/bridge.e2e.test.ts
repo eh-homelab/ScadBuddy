@@ -18,7 +18,7 @@ import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropi
 import { type FrontendBridge, type FrontendTabLink, frontendClientMessages, frontendTabLink } from './support/frontendProtocol.js'
 import { type LiveAgent, openPanelSocket, startLiveAgent } from './support/liveAgent.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { manager, tempPaths } from './support/sessions.js'
+import { manager, stopManagers, tempPaths } from './support/sessions.js'
 
 // The browser bridge end to end (#254): the tab's own code (frontend
 // src/agent/bridge.ts and link.ts, loaded as they are) connects over a real
@@ -78,6 +78,7 @@ describe.skipIf(skip !== undefined)(`the browser bridge over its real socket${sk
     link = undefined
     await agent?.close()
     agent = undefined
+    await stopManagers()
     await fake?.close()
     fake = undefined
     await drop()

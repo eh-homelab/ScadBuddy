@@ -31,5 +31,6 @@ export default defineConfig({
     // Migrates the template every Postgres test's database is copied from, once
     // (#2018; test/support/postgres.ts).
     globalSetup: ['test/support/globalSetup.ts'],
+    setupFiles: ['test/support/leakGuard.ts'],
   },
 })

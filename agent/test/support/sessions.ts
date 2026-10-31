@@ -254,14 +254,34 @@ export async function tempPaths(): Promise<{ stateDir: string }> {
   return { stateDir: await mkdtemp(path.join(os.tmpdir(), 'sessions-')) }
 }
 
+/** Every manager `manager()` made that `stopManagers()` has not stopped yet. */
+const unstopped = new Set<SessionManager>()
+
 export function manager(deps: Partial<SessionManagerDeps> & Pick<SessionManagerDeps, 'sql' | 'paths'>): SessionManager {
-  return new SessionManager({
+  const m = new SessionManager({
     credentials: fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
     renewMs: 50,
     pollMs: 50,
     payloadKeys: testPayloadKeys(deps.sql),
     ...deps,
   })
+  unstopped.add(m)
+  return m
+}
+
+/**
+ * Stops every manager `manager()` made since the last call, as a shutdown does
+ * (`stopTurns`): its turns aborted, then its warm Claude Code processes closed.
+ * A test on the real SDK calls it in its teardown, before it closes the fake
+ * Anthropic and the pool the turns finish in. A process left running (a turn
+ * parked on an approval, an idle warm one) outlived its test, kept its turn
+ * going once the test process was gone, and sent Messages API calls to
+ * whatever server the OS gave the fake's port to next (#5030).
+ */
+export async function stopManagers(): Promise<void> {
+  const managers = [...unstopped]
+  unstopped.clear()
+  await Promise.all(managers.map((m) => m.stopTurns({ graceMs: 0, abortWaitMs: 5_000 })))
 }
 
 /** Collects attach events until `until` matches one (inclusive), or the timeout. */

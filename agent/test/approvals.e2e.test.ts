@@ -16,7 +16,7 @@ import type { Owner } from '../src/sessions/protocol.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { expectPanelAccepts, frontendClientMessages } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, agentB, browser, collectUntil, manager, tempPaths } from './support/sessions.js'
+import { agentA, agentB, browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
 
 // Approvals (#258) end to end: session turns on the real Agent SDK and its
 // bundled Claude Code binary (pointed at the local fake Anthropic endpoint),
@@ -59,6 +59,7 @@ describe.skipIf(skip !== undefined)(`approvals against the real SDK${skip ? ` (s
   })
   afterEach(async () => {
     stop.abort()
+    await stopManagers()
     await fake.close()
     for (const pool of pools.splice(0)) await pool.close()
     await drop()
