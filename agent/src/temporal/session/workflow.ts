@@ -253,14 +253,16 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     start = { ...start, owner }
     gate.setOwner(owner)
   })
-  setHandler(interruptSignal, () => {
+  setHandler(interruptSignal, (arg) => {
     if (!inTurn) return
     // The turn's end is written: the Stop is for the message taken meanwhile, if any.
     if (closing) {
       if (message !== undefined) interruptNext = true
       return
     }
-    interrupted = INTERRUPTED
+    // Who stopped it (`interrupted by <label>`, manager.ts `interrupt`) is what each waiting entry
+    // ends with, as a classic Stop's cancelled calls say (approvals/service.ts `cancelPending`).
+    interrupted = arg?.reason || INTERRUPTED
     // Before the activity starts the flag alone stops the turn; once it runs, the cancel does.
     running?.cancel()
   })

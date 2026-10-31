@@ -7,7 +7,9 @@ import {
   WorkflowUpdateFailedError,
 } from '@temporalio/client'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
+import { context as otelContext, trace } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
+import { traceparentOf } from '../telemetry/trace.js'
 import type { Tier } from '../auth/principal.js'
 import type { FlowTurn } from '../tools/registry.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
@@ -156,6 +158,10 @@ export type DurableMessage = {
   system_append: string | null
   /** A turn a flow run sent (#2481, models.py `FlowTurn`); absent for any other. */
   flow?: FlowTurn
+  /** AgentSession only (temporal/session/models.ts): the user's words, which memory is recalled against. */
+  words?: string
+  /** AgentSession only: the sender's trace, so the turn's spans are its children as a classic turn's are. */
+  traceparent?: string
 }
 type SendAnswer = { accepted: boolean; turn_id: string }
 
@@ -404,6 +410,8 @@ export class DurableTurns {
       max_turns: session.maxTurns,
       system_append: turn.systemAppend,
     }
+    // The sender's context, which a classic turn starts its spans in (turnCore.ts `TurnTrace`).
+    const traceparent = traceparentOf(trace.getSpan(otelContext.active()))
     const message: DurableMessage = {
       turn_id: turn.turnId,
       text: turn.text,
@@ -412,6 +420,9 @@ export class DurableTurns {
       images: sent.map((s) => ({ name: s.name!, mediaType: s.mediaType! })),
       system_append: turn.systemAppend,
       ...(turn.flow ? { flow: { run_id: turn.flow.run_id, call_id: turn.flow.call_id } } : {}),
+      // DurableSession's model takes no such field.
+      ...(runtime === 'unified' ? { words: turn.prompt } : {}),
+      ...(runtime === 'unified' && traceparent ? { traceparent } : {}),
     }
     const unified = runtime === 'unified'
     const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(unified ? SESSION_WORKFLOW : DURABLE_WORKFLOW, {
@@ -459,11 +470,6 @@ export class DurableTurns {
    * count, and the read starts again.
    */
   async forkSource(sessionId: string): Promise<ForkSource | undefined> {
-    // Phase 6 forks an AgentSession session (its transcript is in ai_session_entries, not its workflow).
-    const [row] = await this.#sql<{ runtime: SessionRuntime | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${sessionId}`
-    if (row?.runtime === 'unified') {
-      throw new SessionError('invalid', `session ${sessionId} runs on the unified runtime, which cannot be forked yet; this is not supported until its fork lands`)
-    }
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
     const page = (start: number) =>
       this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
@@ -581,11 +587,14 @@ export class DurableTurns {
     if (error?.code === 'turn_failed' || status === 'failed') {
       return { kind: 'failed', message: error?.message ?? 'the turn failed' }
     }
+    // The session's own spend, as a classic turn's outcome reports it: the event's is the
+    // lineage's (the meter), which a fork shares with its parent (#823).
+    const [own] = await this.#sql<{ cost_usd: number }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${id}`
     return {
       kind: 'result',
       // A result subtype classic reports for an end that leaves the session idle (AgentSession carries it, turnHost.ts).
       subtype: error?.code === 'error_max_budget_usd' || error?.code === 'error_max_turns' ? error.code : 'success',
-      costUsd: result?.costUsd ?? 0,
+      costUsd: own?.cost_usd ?? result?.costUsd ?? 0,
       turns: result?.turns ?? 0,
     }
   }

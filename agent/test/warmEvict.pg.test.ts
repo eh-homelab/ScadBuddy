@@ -11,6 +11,7 @@ import { SETTING_MODEL, SETTING_SESSION_BUDGET_USD, type SessionManager } from '
 import { evictOnNotify, evictsWarmOnWrite, WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // The warm process cache's eviction notifications (unified runtime spec
 // 2026-10-13 §5.3, warmEvict.ts): what each writer sends on the channel, and
@@ -50,7 +51,8 @@ describe('evictsWarmOnWrite', () => {
   })
 })
 
-describe.skipIf(!TEST_DATABASE_URL)(`warm eviction notifications${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`warm eviction notifications${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let m: SessionManager | undefined

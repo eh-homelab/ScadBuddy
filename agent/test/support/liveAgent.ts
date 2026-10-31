@@ -61,6 +61,19 @@ export async function startLiveAgent(sessions: SessionManager, overrides: Partia
   }
 }
 
+/**
+ * Answers a parked call as the panel does (frontend `agent/respond.ts`, #815): `POST
+ * /api/v1/ai/pending-input/{request_id}` from the UI's origin. Returns the status and the body.
+ */
+export async function respondAsPanel(agent: LiveAgent, requestId: string, body: unknown): Promise<{ status: number; body: unknown }> {
+  const res = await fetch(`${agent.url}/api/v1/ai/pending-input/${encodeURIComponent(requestId)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json', origin: agent.origin },
+    body: JSON.stringify(body),
+  })
+  return { status: res.status, body: await res.json() }
+}
+
 /** A panel's end of the chat socket: every frame it received, parsed, in order. */
 export type PanelSocket = {
   frames: Record<string, unknown>[]

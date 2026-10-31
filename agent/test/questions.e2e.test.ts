@@ -5,16 +5,18 @@ import type { Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ASK_USER_QUESTION } from '../src/harness/questions.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
-import { parseClientFrame } from '../src/sessions/clientProtocol.js'
+import { RespondBody, respond } from '../src/routes/pendingInput.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
-import { expectPanelAccepts, frontendClientMessages } from './support/frontendProtocol.js'
+import { expectPanelAccepts, frontendRespondBodies } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // #940 end to end: a browser chat session on the real SDK and its bundled
 // binary (against the local fake Anthropic endpoint) asks AskUserQuestion, the
-// panel's own `question.answer` answers it, and the model reads the answer.
+// panel answers it as it does (`POST /api/v1/ai/pending-input/{id}`, #815), and the model reads
+// the answer.
 
 let cliMissing: string | undefined
 try {
@@ -27,7 +29,8 @@ const skip = cliMissing ?? (TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL
 const TOKEN = 'gw-questions-e2e-token-4444555566667777'
 const QUESTION = 'Approve this issue draft?'
 
-describe.skipIf(skip !== undefined)(`questions against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`questions against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let fake: FakeAnthropic
   let script: (request: RecordedRequest) => Reply
   let db: Database
@@ -94,14 +97,10 @@ describe.skipIf(skip !== undefined)(`questions against the real SDK${skip ? ` (s
     expect(asked.questions[0]?.options[0]?.preview).toBe('## Title\n\nThe body.')
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'waiting_input', turnActive: true })
 
-    // What the panel sends, through the socket's own parser.
-    const { clientMessage } = await frontendClientMessages()
-    const frame = JSON.stringify(
-      clientMessage({ type: 'question.answer', sessionId: session.id, id: asked.id, answers: ['Shorter title please'] }),
-    )
-    const parsed = parseClientFrame(frame)
-    if (!parsed.ok || parsed.value.type !== 'question.answer') throw new Error(`refused: ${JSON.stringify(parsed)}`)
-    await m.questions.answer(browser, parsed.value)
+    // What the panel sends (frontend agent/respond.ts `answerBody`), through the route's own parser.
+    const { answerBody } = await frontendRespondBodies()
+    const body = RespondBody.parse(answerBody(asked.questions, ['Shorter title please'], false))
+    expect(await respond(m, browser, asked.id, body)).toMatchObject({ outcome: 'answered' })
 
     expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(lastContent(fake.messageCalls().at(-1)!)).toContain('Shorter title please')

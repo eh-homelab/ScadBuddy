@@ -5,6 +5,7 @@ import type { Database } from '../src/db.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // #1922: each turn's cost is a `turn` row in the AI audit log, against Postgres
 // with the real audit log. Cost is known per turn (the SDK result's
@@ -22,7 +23,8 @@ const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not se
 const stall = { model: 'claude-sonnet-4-5', usage: { input_tokens: 20_000 }, text: 'Once upon a time' }
 const CUT = 0.06 + (4 * 15) / 1_000_000
 
-describe.skipIf(skip !== undefined)(`turn cost in the audit log${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`turn cost in the audit log${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let audit: AuditLog

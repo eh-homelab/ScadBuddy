@@ -10,6 +10,7 @@ import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // #792: forking from a message (`up_to`, #793), the fork's audit row and its 409, and
 // renaming a session or marking it done (PATCH /api/v1/ai/sessions/:id, #795), over the
@@ -21,7 +22,8 @@ const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not se
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
 const JSON_UI = { ...UI, 'content-type': 'application/json' }
 
-describe.skipIf(skip !== undefined)(`session edits${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session edits${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let audit: AuditLog

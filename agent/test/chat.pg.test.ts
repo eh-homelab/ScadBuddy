@@ -6,6 +6,7 @@ import { event } from '../src/sessions/protocol.js'
 import { frontendClientMessages } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
 
 // ChatConnection against a real SessionManager and event log, for what the
 // socket-level tests cannot time: a socket that closes while the connection
@@ -24,7 +25,8 @@ function gate(): { wait: Promise<void>; release: () => void } {
 
 const settle = () => new Promise((r) => setTimeout(r, 150))
 
-describe.skipIf(skip !== undefined)(`ChatConnection${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`ChatConnection${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let m: SessionManager
@@ -153,6 +155,8 @@ describe.skipIf(skip !== undefined)(`ChatConnection${skip ? ` (skipped: ${skip})
   })
 
   it("passes a new chat's mode, and refuses one on an existing session (plan 5d)", async () => {
+    // The mode setting's own rules, with no Temporal: the in-process turn (plan 5d).
+    classicTurns(m)
     const out: { type: string; sessionId?: string; mode?: string; code?: string }[] = []
     const connection = new ChatConnection(m, (e) => out.push(e as never))
     await connection.open()

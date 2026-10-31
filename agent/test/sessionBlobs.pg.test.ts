@@ -11,6 +11,7 @@ import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // #782: the images a session's tool results carried, stored per session
 // (ai_session_blobs) and served by GET /api/v1/ai/sessions/:id/blobs/:name.
@@ -50,7 +51,8 @@ function imageTurn(): FakeTurn {
   return { reply: 'Here it is.', before: [toolUse, toolResult] as unknown as SDKMessage[] }
 }
 
-describe.skipIf(skip !== undefined)(`session images${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session images${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let m: SessionManager

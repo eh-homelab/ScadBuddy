@@ -31,6 +31,7 @@ import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
 
 // Sessions end to end: the real Agent SDK and its bundled Claude Code binary,
 // pointed at the local fake Anthropic endpoint as a gateway (as
@@ -51,7 +52,8 @@ function conversation(request: RecordedRequest | undefined): string {
   return JSON.stringify(request?.body?.messages ?? [])
 }
 
-describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let fake: FakeAnthropic
   let script: (request: RecordedRequest) => Reply
   let db: Database
@@ -687,8 +689,12 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
   it('keeps a turn stopped by a restart in the transcript, so the next turn on another replica has it', async () => {
     let n = 0
     script = (r) => (conversation(r).includes('kettle') && ++n === 1 ? { hang: true } : { text: `answer ${n}` })
+    // A classic turn's own shutdown: an AgentSession turn moves to a live replica instead
+    // (sessionAffinity.temporal.test.ts, "a dead home is re-acquired after schedule-to-start").
     const a = await replica()
     const b = await replica()
+    classicTurns(a)
+    classicTurns(b)
     const { session, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'remember the word teapot' })
     await turn!.done
     // Turn 2 is still with the "model" when the restart comes (2026-09-30).

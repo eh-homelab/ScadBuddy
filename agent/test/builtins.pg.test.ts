@@ -18,6 +18,7 @@ import { connectInProcess } from '../src/temporal/turnTools.js'
 import { SessionFiles, type WorkspaceRef } from '../src/workspace/store.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // #2393: an allowed package's Claude Code built-ins in a durable turn, as the `builtin`
 // turn tools: the file tools on the session's workspace, the task list, WebFetch through
@@ -30,7 +31,8 @@ const ALL = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit', 'WebFetch'
 
 type Content = { type: string; text?: string; data?: string; mimeType?: string }
 
-describe.skipIf(skip !== undefined)(`a durable turn's built-ins${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a durable turn's built-ins${skip ? ` (skipped: ${skip})` : ''}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let files: SessionFiles

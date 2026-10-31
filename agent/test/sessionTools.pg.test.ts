@@ -21,6 +21,7 @@ import type { HarnessRun } from '../src/harness/run.js'
 import { createBackendClient } from '../src/api/backend.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { BACKEND } from './helpers/mcp.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
 
 // The `sessions_*` tools (#300) end to end: real /mcp clients with bearer
 // tokens, a real SessionManager on Postgres (with a scripted stand-in for the
@@ -52,9 +53,10 @@ async function until(check: () => boolean | Promise<boolean>, what: string, time
   }
 }
 
-describe.skipIf(!TEST_DATABASE_URL)(
+describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
   `sessions_* tools over /mcp${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`,
   () => {
+  agentSessions()
     let db: Database
     let schema: string
     let url: string
@@ -280,7 +282,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     it("takes a new session's mode, and says when the default ran classic (plan 5d)", async () => {
-      const { agent } = await setup()
+      const { agent, sessions } = await setup()
+      // The mode setting's own rules, with no Temporal: the in-process turn (plan 5d).
+      classicTurns(sessions)
       const a = await agent('write')
       const fell = ok<{ session: { mode: string }; mode_fallback?: string }>(await a.call('sessions_start', { title: 'a' }))
       expect(fell.session.mode).toBe('classic')
@@ -314,7 +318,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
 
     it('refuses a send while a turn runs; any watcher may interrupt it', async () => {
       let n = 0
-      const { agent } = await setup(() => (n++ === 0 ? { hang: true } : { reply: 'second' }))
+      const { agent, prompts } = await setup(() => (n++ === 0 ? { hang: true } : { reply: 'second' }))
       const a = await agent('write')
       const { session } = ok<{ session: { id: string; status: string } }>(
         await a.call('sessions_start', { prompt: 'take your time' }),
@@ -323,6 +327,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(errorText(await a.call('sessions_send', { session_id: session.id, text: 'hurry' }))).toMatch(
         /a turn is already running/,
       )
+      // Stopped once it runs in its process: a Stop before the turn is placed ends it unrun.
+      await until(async () => prompts.length === 1, 'the turn to reach its process')
       expect(ok(await a.call('sessions_interrupt', { session_id: session.id }))).toEqual({ interrupted: true })
       await until(async () => ok<{ session: { status: string; running: boolean } }>(
         await a.call('sessions_get', { session_id: session.id }),
