@@ -36,7 +36,7 @@ export const RESOURCE_TYPES = [
   'library',
   'font',
   // Stored settings and remembered choices, by what they are for (`print_options:<scope>[:<key>]`,
-  // `print_choices:<slug>`, `print_choices:library:<file id>`, `bed_type:<printer>`), and a
+  // `print_choices:<slug>`, `print_choices:library:<file id>`, `bed_type:<printer>`, `rack_algorithm:<printer>`), and a
   // registry printer (`printer:<uuid>`, #3823).
   'setting',
   // Bambuddy's own: a project, a library file, a print archive (its id, not a queue item).
@@ -514,6 +514,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   remember_printer_bed_type: (input) => {
     const printer = bambuddyId(input.printer_id)
     return setting(printer ? `bed_type:${printer}` : null)
+  },
+  remember_printer_rack_algorithm: (input) => {
+    const printer = bambuddyId(input.printer_id)
+    return setting(printer ? `rack_algorithm:${printer}` : null)
   },
   // Bambuddy projects and library files.
   create_print_project: (input, result) => {

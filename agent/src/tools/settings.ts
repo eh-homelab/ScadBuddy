@@ -89,7 +89,8 @@ export const settingsTools: Tool[] = [
       'by model id, or "<model id>/<preset id>" with a preset, #1660). A Bambuddy library file\'s entries are ' +
       'keyed "library:<file id>" ' +
       '(#1754). Forget one with remember_model_print_choices (a model\'s by `slug`, a library file\'s by ' +
-      '`library_file_id`, passing nothing else), remember_printer_bed_type or set_print_options.',
+      '`library_file_id`, passing nothing else), remember_printer_bed_type, remember_printer_rack_algorithm ' +
+      '(`printer_rack_algorithms`) or set_print_options.',
     input: z.object({}),
     risk: 'read',
     routes: ['GET /api/v1/settings/remembered'],
