@@ -1541,7 +1541,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     file-tool seam that Step 9.6 adds.
   - The directory holds the files in plaintext (the record's bytes are sealed):
     `forgetSubject` removes the copy on its own pod, and each worker removes, every hour, the
-    directories of sessions whose row is gone. Until Step 9.6 gives
+    directories of sessions whose row is gone. That sweep is what finally removes a copy: the
+    `forget-subject` CLI runs outside the worker's own serialisation, so a turn placed there at
+    that moment can write the directory again.
+  - A write-back at a park or on the minute's timer only offers files. Pruning (strays, capped
+    files) happens at the turn's end, at an eviction and at a placement, so a turn keeps its
+    `.git` or a large intermediate file while it runs. Until Step 9.6 gives
   sessions Claude Code's own file tools, only an `allow_refused` package's built-ins (§9)
   and a Monitor's command use the directory.
 - A session's files go with the session (deleting it, or `forgetSubject`, deletes them,

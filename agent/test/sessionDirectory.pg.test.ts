@@ -285,6 +285,83 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     expect(existsSync(dirs.dirOf(live))).toBe(true)
   })
 
+  it("a write-back during the turn only offers: the turn's dot-files, fifth level and large files stay until its end", async () => {
+    const id = await session()
+    const capped = new SessionFiles(db.sql, { limits: { fileMaxBytes: 1024 } })
+    const dirs = new SessionDirectory(capped, await root())
+    const turn = await dirs.place(id)
+    await mkdir(path.join(turn.dir, '.git'))
+    await writeFile(path.join(turn.dir, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    await mkdir(path.join(turn.dir, 'a', 'b', 'c', 'd'), { recursive: true })
+    await writeFile(path.join(turn.dir, 'a', 'b', 'c', 'd', 'deep.txt'), 'fifth level')
+    await writeFile(path.join(turn.dir, 'big.bin'), Buffer.alloc(2048))
+    await writeFile(path.join(turn.dir, 'notes.txt'), 'synced')
+    // A park, or the minute's sync.
+    const parked = await dirs.writeBack(turn, { prune: false })
+    expect(parked).toMatchObject({ written: ['notes.txt'], strays: 0 })
+    expect(parked.skipped.map((s) => s.code)).toEqual(['too_large'])
+    for (const kept of ['.git/HEAD', 'a/b/c/d/deep.txt', 'big.bin']) expect(existsSync(path.join(turn.dir, kept))).toBe(true)
+    // The turn's end prunes.
+    const end = await dirs.writeBack(turn)
+    expect(end.strays).toBe(2)
+    for (const gone of ['.git', 'a/b/c/d', 'big.bin']) expect(existsSync(path.join(turn.dir, gone))).toBe(false)
+    expect(existsSync(path.join(turn.dir, 'notes.txt'))).toBe(true)
+  })
+
+  it('a monitor that starts before any turn here places the directory first', async () => {
+    const id = await session()
+    await files.write(ws(id), 'input.txt', Buffer.from('from the record'))
+    const dirs = new SessionDirectory(files, await root())
+    const release = dirs.hold(id)
+    await dirs.adopt(id)
+    expect((await stat(dirs.dirOf(id))).mode & 0o777).toBe(0o700)
+    expect(await readFile(path.join(dirs.dirOf(id), 'input.txt'), 'utf8')).toBe('from the record')
+    await writeFile(path.join(dirs.dirOf(id), 'out.log'), 'the monitor wrote this')
+    release()
+    expect(await dirs.evict(id)).toBe(true)
+    expect((await files.read(ws(id), 'out.log'))?.bytes.toString()).toBe('the monitor wrote this')
+  })
+
+  it('a turn whose directory grows past the workspace cap is stopped, and its placement still ends', async () => {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'sessions-'))
+    const scripted = scriptedRunner(() => ({ hang: true }))
+    m = manager({ sql: db.sql, paths: { stateDir }, run: scripted.runner, workspace: files })
+    const { session: started } = await m.start(browser, { origin: 'chat' })
+    const id = started.id
+    const turnId = randomUUID()
+    await db.sql`
+      UPDATE ai_sessions SET status = 'running', mode = 'durable', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
+      WHERE id = ${id}`
+    const dir = await root()
+    const done: unknown[] = []
+    const directory = {
+      place: async () => ({ sessionId: id, dir, base: new Map<string, string>() }),
+      writeBack: async () => ({ written: [], deleted: [], skipped: [], strays: 0, bytes: 0 }),
+      usage: async () => ({ bytes: 10_000, cap: 1_000 }),
+      done: (p: unknown) => {
+        done.push(p)
+      },
+    }
+    const warned: string[] = []
+    const warn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warned.push(args.map(String).join(' '))
+    }
+    try {
+      const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: 20 })
+      const result = await host.run(
+        { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'fill the disk', images: [], system_append: null } },
+        { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
+      )
+      await host.stop({ graceMs: 0, abortWaitMs: 0 })
+      expect(JSON.stringify(result)).toContain('grew past the workspace cap (1000 bytes)')
+    } finally {
+      console.warn = warn
+    }
+    expect(warned.some((w) => w.startsWith('session directory cap:'))).toBe(true)
+    expect(done).toHaveLength(1)
+  })
+
   it("an AgentSession turn runs in the session's directory and writes it back at its end", async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), 'sessions-'))
     const sessionsDir = await root()

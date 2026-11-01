@@ -421,9 +421,14 @@ export class TurnHost {
     const spend = new Spend(sql, id)
     /** The session's working directory as placed for this turn (set just before it runs). */
     let placed: Placement | undefined
-    /** The directory's changes so far, into the workspace: at each park, and at the turn's end; not once cut off. */
-    const sync = async () => {
-      if (placed && !fenced()) await this.#writeBack(placed)
+    /**
+     * The directory's changes so far, into the workspace: at each park and every minute (offers
+     * only, so the turn keeps what it still uses), and at the turn's end (`prune`); not once cut
+     * off. The bytes it found, when it ran.
+     */
+    const sync = async (prune: boolean): Promise<number | undefined> => {
+      if (placed && !fenced()) return this.#writeBack(placed, prune)
+      return undefined
     }
     /**
      * This placement still holds its turn: checked, row locked, in each write's own transaction.
@@ -523,12 +528,22 @@ export class TurnHost {
       if (placed) {
         const checking = placed
         let checks = 0
+        /** The cap as the last check read it (`usage`), which a sync tick measures against. */
+        let lastCap: number | undefined
         capCheck = setInterval(() => {
           checks += 1
-          void this.#deps.directory!.usage(checking).then(
-            ({ bytes, cap }) => {
-              // A long turn with no park still writes back now and then: a lost pod then loses less.
-              if (bytes <= cap && checks % DIR_SYNC_EVERY === 0) void sync()
+          // A long turn with no park still writes back now and then (a lost pod then loses less);
+          // that write-back's own walk measures the directory, so it is walked once a tick.
+          const known = lastCap
+          const measured =
+            checks % DIR_SYNC_EVERY === 0 && known !== undefined
+              ? sync(false).then((bytes) => (bytes === undefined ? undefined : { bytes, cap: known }))
+              : this.#deps.directory!.usage(checking)
+          void measured.then(
+            (usage) => {
+              if (!usage) return
+              const { bytes, cap } = usage
+              lastCap = cap
               if (bytes <= cap || controller.signal.aborted) return
               console.warn(`session directory cap: session ${id}'s working directory holds ${bytes} bytes, past the workspace's ${cap}; the turn is stopped`)
               controller.abort(new Error(`the session's working directory grew past the workspace cap (${cap} bytes)`))
@@ -544,7 +559,7 @@ export class TurnHost {
       } finally {
         clearInterval(capCheck)
         // Not once cut off: the placement that holds the turn now has the directory.
-        await sync()
+        await sync(true)
       }
       clearInterval(fence)
       result = run.result
@@ -609,20 +624,25 @@ export class TurnHost {
     }
   }
 
-  /** The directory's changes written back to the workspace; a failure is logged, and the turn keeps its end. */
-  async #writeBack(placed: Placement): Promise<void> {
+  /**
+   * The directory's changes written back to the workspace, removing what cannot be synced only
+   * when `prune` (the turn's end); the bytes it found. A failure is logged, and the turn keeps its end.
+   */
+  async #writeBack(placed: Placement, prune: boolean): Promise<number | undefined> {
     try {
-      const back = await this.#deps.directory!.writeBack(placed)
+      const back = await this.#deps.directory!.writeBack(placed, { prune })
       const capped = back.skipped.filter((s) => s.code === 'too_large' || s.code === 'quota')
       const other = back.skipped.filter((s) => !capped.includes(s))
       if (capped.length > 0) {
-        console.warn(`session directory cap: session ${placed.sessionId}: ${capped.length} file(s) past the workspace caps were refused and removed: ${capped.map((s) => s.why).join('; ')}`)
+        console.warn(`session directory cap: session ${placed.sessionId}: ${capped.length} file(s) past the workspace caps were refused${prune ? ' and removed' : ''}: ${capped.map((s) => s.why).join('; ')}`)
       }
       if (other.length > 0) {
         console.warn(`session ${placed.sessionId}: ${other.length} file(s) of its working directory were not written back: ${other.map((s) => s.why).join('; ')}`)
       }
+      return back.bytes
     } catch (err) {
       console.error(`session ${placed.sessionId}: its working directory could not be written back: ${describe(err)}`)
+      return undefined
     }
   }
 
@@ -638,7 +658,7 @@ export class TurnHost {
     trace: GateTrace
     asks: boolean
     /** Writes the session's directory back: a parked turn's writes so far outlive the pod. */
-    sync: () => Promise<void>
+    sync: (prune: boolean) => Promise<unknown>
     endTurn: (why: string) => void
   }): TurnGates {
     const { session, turnId, control, stop, holds, secrets, shown, trace, asks, sync, endTurn } = turn
@@ -676,7 +696,7 @@ export class TurnHost {
       holds.held.add(rid)
       options.opened?.(rid)
       // A park may outlast this pod (a release, a shutdown): what the turn wrote so far goes to the workspace first.
-      await sync()
+      await sync(false)
       // Past the hold, the turn lets its process go (§5.4 "Release"); the entry stays open.
       const timer = setTimeout(() => holds.release(), options.holdMs ?? holds.holdMs)
       timer.unref()

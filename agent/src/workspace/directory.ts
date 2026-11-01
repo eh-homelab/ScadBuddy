@@ -77,10 +77,12 @@ export type WriteBack = {
   skipped: { path: string; why: string; code: WorkspaceErrorCode }[]
   /** How many entries that cannot be synced (links, dot-files, past four levels) were removed. */
   strays: number
+  /** The bytes the directory held when it was walked, every entry counted (a link as itself). */
+  bytes: number
 }
 
 /** What a walk found: the regular files at workspace paths, by path, and every other entry (absolute). */
-type Walked = { files: Map<string, string>; strays: string[] }
+type Walked = { files: Map<string, string>; strays: string[]; bytes: number }
 
 function ws(sessionId: string): WorkspaceRef {
   return { kind: 'session', sessionId }
@@ -103,7 +105,7 @@ export async function removeSessionDir(root: string, sessionId: string): Promise
 
 /** Every entry under `dir`, never following a link: the regular files at workspace paths, and the rest. */
 async function walk(dir: string): Promise<Walked> {
-  const out: Walked = { files: new Map(), strays: [] }
+  const out: Walked = { files: new Map(), strays: [], bytes: 0 }
   const visit = async (abs: string, rel: string[]): Promise<void> => {
     let entries
     try {
@@ -117,8 +119,11 @@ async function walk(dir: string): Promise<Walked> {
       const parts = [...rel, entry.name]
       const named = SEGMENT.test(entry.name) && parts.join('/').length <= WORKSPACE_PATH_MAX
       if (named && entry.isDirectory() && parts.length < MAX_SEGMENTS) await visit(at, parts)
-      else if (named && entry.isFile()) out.files.set(parts.join('/'), at)
-      else out.strays.push(at)
+      else {
+        if (named && entry.isFile()) out.files.set(parts.join('/'), at)
+        else out.strays.push(at)
+        out.bytes += entry.isDirectory() ? await sizeOf(at) : await lstat(at).then((st) => st.size, () => 0)
+      }
     }
   }
   await visit(dir, [])
@@ -146,8 +151,18 @@ async function sizeOf(dir: string): Promise<number> {
   return total
 }
 
-/** A regular file's bytes, opened without following a link; undefined when it is gone, or past `max` bytes (`size` then). */
-async function readRegular(abs: string, max: number): Promise<{ bytes: Buffer } | { size: number } | undefined> {
+/** Whether `at` resolves to `inside` or below it (a directory swapped for a link would not). */
+async function within(inside: string, at: string): Promise<boolean> {
+  const [root, real] = await Promise.all([realpath(inside), realpath(at)])
+  return real === root || real.startsWith(root + path.sep)
+}
+
+/**
+ * A regular file's bytes, opened without following a link, and only while its directory still
+ * resolves inside `inside`; undefined when it is gone (or does not), or past `max` bytes (`size` then).
+ */
+async function readRegular(inside: string, abs: string, max: number): Promise<{ bytes: Buffer } | { size: number } | undefined> {
+  if (!(await within(inside, path.dirname(abs)).catch(() => false))) return undefined
   let handle
   try {
     handle = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW)
@@ -177,8 +192,7 @@ async function writeInside(dir: string, rel: string, bytes: Uint8Array): Promise
   }
   // A directory swapped for a link between its check and the open would be followed (O_NOFOLLOW
   // guards the last part only): the parent must still resolve inside `dir`.
-  const [inside, parent] = await Promise.all([realpath(dir), realpath(at)])
-  if (parent !== inside && !parent.startsWith(inside + path.sep)) throw new Error(`${rel} resolves outside the session's directory`)
+  if (!(await within(dir, at))) throw new Error(`${rel} resolves outside the session's directory`)
   const target = path.join(at, parts.at(-1)!)
   const st = await lstat(target).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))
   if (st && !st.isFile()) await rm(target, { recursive: true, force: true })
@@ -281,6 +295,18 @@ export class SessionDirectory {
     }
   }
 
+  /**
+   * A Monitor command is about to run here (`hold` taken first): the directory is placed when this
+   * pod has none of the session's yet, so it is 0700, holds the workspace, and what the command
+   * writes is offered to the record at the next write-back here.
+   */
+  adopt(sessionId: string): Promise<void> {
+    const id = sessionId.toLowerCase()
+    return this.#serial(sessionId, async () => {
+      if (!this.#last.has(id)) await this.#place(sessionId)
+    })
+  }
+
   #unbusy(id: string): void {
     const n = (this.#busy.get(id) ?? 1) - 1
     if (n > 0) this.#busy.set(id, n)
@@ -314,7 +340,7 @@ export class SessionDirectory {
     for (const file of record) {
       if (unsynced.has(file.path)) continue
       const there = found.files.get(file.path)
-      const current = there === undefined ? undefined : await readRegular(there, file.size)
+      const current = there === undefined ? undefined : await readRegular(dir, there, file.size)
       if (current && 'bytes' in current && sha256(current.bytes) === file.sha256) {
         base.set(file.path, file.sha256)
         continue
@@ -342,18 +368,20 @@ export class SessionDirectory {
    * header), and moves the base on to what it synced: a turn writes back at each park and again
    * at its end.
    */
-  writeBack(placement: Placement): Promise<WriteBack> {
-    return this.#serial(placement.sessionId, () => this.#writeBack(placement))
+  writeBack(placement: Placement, options: { prune?: boolean } = {}): Promise<WriteBack> {
+    return this.#serial(placement.sessionId, () => this.#writeBack(placement, options))
   }
 
-  async #writeBack(placement: Placement): Promise<WriteBack> {
+  async #writeBack(placement: Placement, options: { prune?: boolean } = {}): Promise<WriteBack> {
     const { sessionId, dir, base } = placement
-    const out: WriteBack = { written: [], deleted: [], skipped: [], strays: 0 }
     const { fileMaxBytes } = await this.#files.limits()
     const found = await walk(dir)
-    // A file a running Monitor command writes to stays, past a cap too: removing it would leave the
-    // command writing to an unlinked file. The next write-back once it has ended takes it out.
-    const monitored = this.#monitors.has(sessionId.toLowerCase())
+    const out: WriteBack = { written: [], deleted: [], skipped: [], strays: 0, bytes: found.bytes }
+    // Only offers, no removal: a write-back during a turn (`prune: false`, at a park or on the
+    // timer) leaves what the turn still uses (a .git, a fifth level, a large intermediate file),
+    // and so does one while a Monitor command runs (removing a file would leave it writing to an
+    // unlinked one). The turn's last write-back, an eviction and a placement prune.
+    const keepAll = this.#monitors.has(sessionId.toLowerCase()) || options.prune === false
     // Deletions first: what they free counts toward the writes' quota.
     for (const [rel, digest] of [...base].sort(([a], [b]) => a.localeCompare(b))) {
       if (found.files.has(rel)) continue
@@ -368,11 +396,11 @@ export class SessionDirectory {
       }
     }
     for (const [rel, abs] of [...found.files].sort(([a], [b]) => a.localeCompare(b))) {
-      const read = await readRegular(abs, fileMaxBytes)
+      const read = await readRegular(dir, abs, fileMaxBytes)
       if (!read) continue
       if (!('bytes' in read)) {
         out.skipped.push({ path: rel, why: `${rel} is ${read.size} bytes; a workspace file holds at most ${fileMaxBytes}`, code: 'too_large' })
-        if (!monitored) await rm(abs, { force: true })
+        if (!keepAll) await rm(abs, { force: true })
         continue
       }
       const was = base.get(rel)
@@ -388,10 +416,10 @@ export class SessionDirectory {
         // Changed in the record meanwhile: the record wins (the next placement brings it in), so this is not tried again.
         if (err.code === 'conflict') base.set(rel, digest)
         // Past a cap: not kept on this disk either.
-        if (CAPPED.has(err.code) && !monitored) await rm(abs, { force: true })
+        if (CAPPED.has(err.code) && !keepAll) await rm(abs, { force: true })
       }
     }
-    if (!monitored) {
+    if (!keepAll) {
       for (const stray of found.strays) await rm(stray, { recursive: true, force: true })
       out.strays = found.strays.length
     }
@@ -400,7 +428,7 @@ export class SessionDirectory {
 
   /** The bytes the directory holds now, every entry counted (a link as itself), and the workspace cap (`workspace_max_bytes`). */
   async usage(placement: Placement): Promise<{ bytes: number; cap: number }> {
-    const [{ workspaceMaxBytes }, bytes] = await Promise.all([this.#files.limits(), sizeOf(placement.dir)])
+    const [{ workspaceMaxBytes }, { bytes }] = await Promise.all([this.#files.limits(), walk(placement.dir)])
     return { bytes, cap: workspaceMaxBytes }
   }
 

@@ -89,7 +89,7 @@ export type BackgroundActivityDeps = {
    * The session directories (workspace/directory.ts): a running monitor command holds its
    * session's, so the directory is neither evicted nor swept under it.
    */
-  directory?: Pick<SessionDirectory, 'hold'> | undefined
+  directory?: Pick<SessionDirectory, 'hold' | 'adopt'> | undefined
   /** Resolves a WebSocket monitor's host for its egress check. */
   resolve?: Resolver | undefined
   /** The queue a WebSocket monitor runs on: any agent's (`agent-tools` unless set). */
@@ -246,6 +246,11 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
       if (!deps.paths) return { end: { outcome: 'failed', reason: 'this replica runs no monitor commands' }, events: 0 }
       const release = deps.directory?.hold(t.sessionId)
       try {
+        // Placed here first when no turn of the session was (0700, the workspace's files); a
+        // failure leaves the plain directory, whose output is then not written back.
+        await deps.directory?.adopt(t.sessionId).catch((err: unknown) => {
+          console.error(`session ${t.sessionId}: its working directory could not be placed for a monitor: ${err instanceof Error ? err.message : String(err)}`)
+        })
         const cwd = await ensureSessionDir(deps.paths, t.sessionId)
         return await watched(t, deps.store, (signal, onEvent) =>
           runCommand({ command: String(t.spec.command), cwd, timeoutMs: Number(t.spec.timeoutMs), signal, onEvent }),
