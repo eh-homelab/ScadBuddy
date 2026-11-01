@@ -823,18 +823,32 @@ export class PluginStore implements PluginRepo {
     const rows = await this.sql.unsafe<Row[]>(`SELECT ${ALL_COLUMNS} FROM ai_plugins ORDER BY name`)
     const plugins: RemotePlugin[] = []
     const problems: string[] = []
-    for (const row of rows.filter((r) => access(r).enabled)) {
-      try {
-        plugins.push(await this.signIn(row, openPlugin(row, kek), kek))
-      } catch (err) {
-        if (err instanceof SealError) {
-          problems.push(`plugin ${row.name} was not loaded: its secret cannot be opened (${err.message})`)
-        } else if (err instanceof GrantError) {
-          problems.push(`plugin ${row.name} was not loaded: it needs signing in again in Settings (${err.message})`)
-        } else if (err instanceof OAuthError) {
-          problems.push(`plugin ${row.name} was not loaded: its access token could not be renewed (${err.message})`)
-        } else throw err
+    // Together: each signed-in plugin may wait on its token endpoint.
+    const opened = await Promise.all(
+      rows
+        .filter((r) => access(r).enabled)
+        .map(async (row) => {
+          try {
+            return { row, plugin: await this.signIn(row, openPlugin(row, kek), kek), err: undefined }
+          } catch (err) {
+            return { row, plugin: undefined, err: err as unknown }
+          }
+        }),
+    )
+    for (const one of opened) {
+      const { row } = one
+      if (one.plugin) {
+        plugins.push(one.plugin)
+        continue
       }
+      const { err } = one
+      if (err instanceof SealError) {
+        problems.push(`plugin ${row.name} was not loaded: its secret cannot be opened (${err.message})`)
+      } else if (err instanceof GrantError) {
+        problems.push(`plugin ${row.name} was not loaded: it needs signing in again in Settings (${err.message})`)
+      } else if (err instanceof OAuthError) {
+        problems.push(`plugin ${row.name} was not loaded: its access token could not be renewed (${err.message})`)
+      } else throw err
     }
     return { plugins, problems }
   }

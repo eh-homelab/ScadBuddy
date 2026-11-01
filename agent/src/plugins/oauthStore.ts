@@ -57,6 +57,12 @@ import {
 export const FLOW_TTL_MS = 10 * 60_000
 /** An access token with less than this left is refreshed before use. */
 export const EARLY_MS = 60_000
+/**
+ * How long a process serves a cached token before it reads the row again: another process
+ * (the api beside a worker, another replica) may have signed the plugin out, in again, or
+ * marked it, and a token with no expiry would otherwise be served forever.
+ */
+export const RECHECK_MS = 60_000
 
 export const COOKIE = 'sb_plugin_oauth'
 export const OAUTH_PATH = '/api/v1/ai/plugin-oauth'
@@ -76,9 +82,12 @@ export type TokenSource = {
   /**
    * The `Authorization` header to send now. With `refused`, the value the server just answered
    * 401 to: a fresh token is fetched (or another replica's newer one used), and if none can be,
-   * the grant is marked so the person signs in again.
+   * the grant is marked so the person signs in again. A grant signed out or replaced since the
+   * source was made is refused (GrantError): the run that holds it stops using it.
    */
   header(refused?: string): Promise<Header>
+  /** Marks this grant failed (the plugin refused even a renewed token): "Sign in again". */
+  reject(reason: string): Promise<void>
 }
 
 type FlowMeta = {
@@ -185,9 +194,9 @@ export class PluginOAuth {
   private readonly sql: Sql
   private readonly resolve: Resolver
   private readonly now: () => Date
-  /** plugin → this process's last access token. */
-  private readonly cache = new Map<string, { grant: string; value: string; expiresAt: number | null }>()
-  /** plugin → the refresh under way, so a burst of requests waits for one. */
+  /** plugin → this process's last access token, its grant, and when the row was last read. */
+  private readonly cache = new Map<string, { grant: string; value: string; expiresAt: number | null; readAt: number }>()
+  /** plugin and grant → the read or refresh under way, so a burst of requests waits for one. */
   private readonly inflight = new Map<string, Promise<Header>>()
 
   constructor(sql: Sql, options: PluginOAuthOptions = {}) {
@@ -270,15 +279,23 @@ export class PluginOAuth {
   async complete(input: CallbackInput, kek: Kek | undefined): Promise<{ plugin: string }> {
     if (!input.state) throw new OAuthError('the sign-in answer has no state', 400)
     const stateHash = sha256(input.state)
-    // Deleted first: a state is good once, whatever happens next.
-    const [row] = await this.sql<{ plugin: string; plugin_url: string; binding_hash: string | null; meta: FlowMeta; secret_sealed: Buffer; dek_sealed: Buffer; kek_id: string; created_by: string; expires_at: Date }[]>`
-      DELETE FROM ai_plugin_oauth_flows WHERE state_hash = ${stateHash}
-      RETURNING plugin, plugin_url, binding_hash, meta, secret_sealed, dek_sealed, kek_id, created_by, expires_at`
-    if (!row || row.expires_at.getTime() <= this.now().getTime()) {
-      throw new OAuthError('this sign-in is unknown, already used or expired; start it again from Settings', 400)
+    // Deleted first, by its state and the browser's binding: a state is good once, whatever
+    // happens next, and a request without the cookie cannot spend someone else's sign-in.
+    const binding = input.binding ? sha256(input.binding) : ''
+    const [row] = await this.sql<{ plugin: string; plugin_url: string; meta: FlowMeta; secret_sealed: Buffer; dek_sealed: Buffer; kek_id: string; created_by: string; expires_at: Date }[]>`
+      DELETE FROM ai_plugin_oauth_flows WHERE state_hash = ${stateHash} AND binding_hash = ${binding}
+      RETURNING plugin, plugin_url, meta, secret_sealed, dek_sealed, kek_id, created_by, expires_at`
+    if (!row) {
+      const [held] = await this.sql`SELECT 1 FROM ai_plugin_oauth_flows WHERE state_hash = ${stateHash} AND expires_at > ${this.now()}`
+      throw new OAuthError(
+        held
+          ? 'this sign-in was started in another browser; finish it there, or start it again from Settings in this one'
+          : 'this sign-in is unknown, already used or expired; start it again from Settings',
+        400,
+      )
     }
-    if (!row.binding_hash || !input.binding || sha256(input.binding) !== row.binding_hash) {
-      throw new OAuthError('this sign-in was started in another browser; start it again from Settings in this one', 400)
+    if (row.expires_at.getTime() <= this.now().getTime()) {
+      throw new OAuthError('this sign-in is unknown, already used or expired; start it again from Settings', 400)
     }
     const meta = row.meta
     // RFC 9207 before anything else, error responses included: on a mismatch nothing of the answer is shown.
@@ -378,26 +395,46 @@ export class PluginOAuth {
 
   /** The token source for a plugin signed in at `pluginUrl`, for the forwarder. */
   source(plugin: string, pluginUrl: string, grant: string, kek: Kek | undefined): TokenSource {
-    return { grant, header: (refused) => this.header(plugin, pluginUrl, kek, refused) }
+    return {
+      grant,
+      header: (refused) => this.header(plugin, pluginUrl, grant, kek, refused),
+      reject: (reason) => this.mark(plugin, reason, grant),
+    }
   }
 
   /** The `Authorization` header for `plugin` now (see TokenSource.header). Throws GrantError or OAuthError. */
-  async header(plugin: string, pluginUrl: string, kek: Kek | undefined, refused?: string): Promise<Header> {
+  async header(plugin: string, pluginUrl: string, grant: string, kek: Kek | undefined, refused?: string): Promise<Header> {
     const cached = this.cache.get(plugin)
-    if (refused === undefined && cached && (cached.expiresAt === null || cached.expiresAt - EARLY_MS > this.now().getTime())) {
+    const now = this.now().getTime()
+    if (
+      refused === undefined &&
+      cached?.grant === grant &&
+      now - cached.readAt < RECHECK_MS &&
+      (cached.expiresAt === null || cached.expiresAt - EARLY_MS > now)
+    ) {
       return bearer(cached.value)
     }
-    const running = this.inflight.get(plugin)
+    const key = `${plugin}\n${grant}`
+    const running = this.inflight.get(key)
     if (running) {
       const got = await running
       if (refused === undefined || got.value !== refused) return got
     }
-    const next = this.fetchToken(plugin, pluginUrl, kek, refused).finally(() => this.inflight.delete(plugin))
-    this.inflight.set(plugin, next)
+    const next = this.fetchToken(plugin, pluginUrl, grant, kek, refused).finally(() => this.inflight.delete(key))
+    this.inflight.set(key, next)
     return next
   }
 
-  private async fetchToken(plugin: string, pluginUrl: string, kek: Kek | undefined, refused: string | undefined): Promise<Header> {
+  // The row's lock is held across the token endpoint's answer (at most OAUTH_TIMEOUT_MS), so
+  // replicas never spend one refresh token twice. It takes one pool connection per plugin
+  // refreshing at that moment, which one refresh per token lifetime keeps rare.
+  private async fetchToken(
+    plugin: string,
+    pluginUrl: string,
+    grant: string,
+    kek: Kek | undefined,
+    refused: string | undefined,
+  ): Promise<Header> {
     if (!kek) throw new GrantError('no key-encryption key is configured to open the sign-in')
     type Outcome = { header: Header } | { mark: string } | { fail: Error }
     const outcome = await this.sql.begin(async (tx): Promise<Outcome> => {
@@ -405,6 +442,7 @@ export class PluginOAuth {
       if (!row) return { fail: new GrantError('it is not signed in') }
       if (row.status === 'error') return { fail: new GrantError(row.last_error ?? 'its sign-in failed') }
       if (row.plugin_url !== pluginUrl) return { fail: new GrantError('it was signed in at another URL') }
+      if (row.grant_id !== grant) return { fail: new GrantError('it was signed in again or out since this run loaded it') }
       let secret: GrantSecret
       try {
         secret = JSON.parse(openSecret(kek, envelope(row), grantAad(row))) as GrantSecret
@@ -461,7 +499,7 @@ export class PluginOAuth {
       this.cache.delete(plugin)
       throw outcome.fail
     }
-    await this.mark(plugin, outcome.mark)
+    await this.mark(plugin, outcome.mark, grant)
     throw new GrantError(outcome.mark)
   }
 
@@ -470,15 +508,20 @@ export class PluginOAuth {
       grant: row.grant_id,
       value,
       expiresAt: row.access_expires_at ? row.access_expires_at.getTime() : null,
+      readAt: this.now().getTime(),
     })
   }
 
   /** Marks the grant failed with `reason`, shown in Settings until the person signs in again. */
-  async mark(plugin: string, reason: string): Promise<void> {
+  async mark(plugin: string, reason: string, grant?: string): Promise<void> {
     this.cache.delete(plugin)
     await this.sql.begin(async (tx) => {
-      const updated = await tx`
-        UPDATE ai_plugin_oauth SET status = 'error', last_error = ${reason} WHERE plugin = ${plugin} AND status = 'connected'`
+      const updated = grant
+        ? await tx`
+          UPDATE ai_plugin_oauth SET status = 'error', last_error = ${reason}
+          WHERE plugin = ${plugin} AND status = 'connected' AND grant_id = ${grant}`
+        : await tx`
+          UPDATE ai_plugin_oauth SET status = 'error', last_error = ${reason} WHERE plugin = ${plugin} AND status = 'connected'`
       if (updated.count > 0) await notifyWarmEvict(tx, '*')
     })
   }

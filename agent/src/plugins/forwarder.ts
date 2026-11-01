@@ -563,11 +563,17 @@ export class PluginForwarder {
       }
       if (status === 401 && oauth && auth) {
         up.resume()
-        if (retried) return signedOut(new Error('the plugin refused a renewed token (HTTP 401): sign in again in Settings'))
+        if (retried) {
+          const reason = 'the plugin refused a renewed token (HTTP 401): sign in again in Settings'
+          oauth.reject(reason).catch(() => {})
+          return signedOut(new Error(reason))
+        }
         // Once, with a renewed token: the stored one may have been revoked or rotated elsewhere.
         const refused = auth.value
         oauth.header(refused).then(
           (next) => {
+            // The client may have gone while the token was renewed.
+            if (res.destroyed) return
             auth = next
             send(true)
           },

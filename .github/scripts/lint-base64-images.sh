@@ -36,6 +36,7 @@ frontend/src/agent/tabId.ts	return btoa\(binary\)	the bridge tab id: random byte
 backend/scadbuddy/activity/index.py	return base64.urlsafe_b64encode\(raw.encode\(\)\)	the activity list's opaque cursor (created_at|id), not an image
 backend/scadbuddy/orders/store.py	return base64.urlsafe_b64encode\(f"\{at.isoformat\(\)\}\|\{order_id\}".encode\(\)\)	the orders list's opaque cursor (created_at|id), not an image
 backend/scadbuddy/slicing/transfer_token.py	return base64.urlsafe_b64encode\(data\)	the slicer's transfer token (method, key, expiry and its HMAC) as base64url, not an image
+agent/src/plugins/oauth.ts	headers.authorization = .Basic 	RFC 6749 §2.3.1 client_secret_basic: an OAuth client id and secret, not an image
 EOF
 )
 

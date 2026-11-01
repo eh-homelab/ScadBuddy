@@ -96,6 +96,15 @@ describe.skipIf(!TEST_DATABASE_URL)(
       return app.request(path, { headers: { ...CALLBACK, cookie } })
     }
 
+    async function grantOf(): Promise<string> {
+      const [row] = await db.sql<{ grant_id: string }[]>`SELECT grant_id FROM ai_plugin_oauth WHERE plugin = 'github'`
+      return row!.grant_id
+    }
+    /** The header `instance` gives a run that loaded the plugin's current grant. */
+    async function token(instance: PluginOAuth): Promise<string> {
+      return (await instance.source('github', mcp.url, await grantOf(), kek).header()).value
+    }
+
     async function view(): Promise<PluginView> {
       const res = await app.request('/api/v1/ai/plugins/github', { headers: READ })
       return (await res.json()) as PluginView
@@ -152,14 +161,14 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('refreshes an expiring token itself, once across replicas, and rotates the refresh token', async () => {
       await setUp()
       expect((await signIn()).status).toBe(200)
-      const first = (await oauth.header('github', mcp.url, kek)).value
+      const first = await token(oauth)
       clock = new Date(clock.getTime() + 3600_000)
-      const second = (await oauth.header('github', mcp.url, kek)).value
+      const second = await token(oauth)
       expect(second).not.toBe(first)
       expect(auth.tokenRequests.map((f) => f.get('grant_type'))).toEqual(['authorization_code', 'refresh_token'])
       // Another replica reads the renewed token from the row: no second refresh.
       const other = new PluginOAuth(db.sql, { now: () => clock })
-      expect((await other.header('github', mcp.url, kek)).value).toBe(second)
+      expect(await token(other)).toBe(second)
       expect(auth.tokenRequests).toHaveLength(2)
       expect(auth.refresh.size).toBe(1)
     })
@@ -189,9 +198,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const other = await app.request(path, { headers: { ...CALLBACK, cookie: 'sb_plugin_oauth=someone-else' } })
       expect(other.status).toBe(400)
       expect(await other.text()).toMatch(/another browser/)
-      // The state was spent by that refusal.
-      expect((await app.request(path, { headers: { ...CALLBACK, cookie } })).status).toBe(400)
+      expect((await app.request(path, { headers: CALLBACK })).status).toBe(400)
       expect(auth.tokenRequests).toEqual([])
+      // Neither spent it: the browser that opened the link still can, once.
+      expect((await app.request(path, { headers: { ...CALLBACK, cookie } })).status).toBe(200)
+      expect((await app.request(path, { headers: { ...CALLBACK, cookie } })).status).toBe(400)
+      await oauth.forget('github')
+      auth.tokenRequests.length = 0
 
       const again = await toCallback()
       const forged = again.path.replace(/iss=[^&]+/, `iss=${encodeURIComponent('https://evil.example')}`)
@@ -200,6 +213,31 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await res.text()).toMatch(/\(iss\)/)
       expect(auth.tokenRequests).toEqual([])
       expect((await view()).oauth).toBeNull()
+    })
+
+    it('stops serving a cached token in another process once the plugin is signed in again or out', async () => {
+      // No expires_in: the GitHub OAuth-app case, a token that would otherwise be cached forever.
+      await setUp({ registration: true })
+      expect((await signIn()).status).toBe(200)
+      // B, another process (the worker beside the api, another replica), loads and caches the grant.
+      const worker = new PluginOAuth(db.sql, { now: () => clock })
+      const loaded = worker.source('github', mcp.url, await grantOf(), kek)
+      const old = (await loaded.header()).value
+      expect(old).toBe(`Bearer ${auth.issued[0]}`)
+
+      // A signs in again: a run loading the new grant on B gets the new token at once, and B's
+      // old source is refused once B reads the row again (RECHECK_MS).
+      expect((await signIn()).status).toBe(200)
+      const fresh = await token(worker)
+      clock = new Date(clock.getTime() + 61_000)
+      await expect(loaded.header()).rejects.toThrow(/signed in again or out/)
+      expect(fresh).toBe(`Bearer ${auth.issued[1]}`)
+
+      // A signs out: within RECHECK_MS B reads the row again and stops.
+      const current = worker.source('github', mcp.url, await grantOf(), kek)
+      await oauth.forget('github')
+      clock = new Date(clock.getTime() + 61_000)
+      await expect(current.header()).rejects.toThrow(/not signed in/)
     })
 
     it('spends an authorize link once', async () => {
@@ -223,7 +261,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect((await view()).oauth).toMatchObject({ registration: 'configured' })
       // The client secret is sealed with the grant and used for the refresh.
       clock = new Date(clock.getTime() + 28_800_000)
-      await oauth.header('github', mcp.url, kek)
+      await token(oauth)
       expect(auth.tokenRequests[1]?.get('client_secret')).toBe('gh-secret-0123456789')
     })
 
