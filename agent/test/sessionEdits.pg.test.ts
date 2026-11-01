@@ -239,7 +239,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session edi
       expect((await m.get(id, browser)).status).toBe('running')
     })
 
-    it('marks a durable session done and ends its workflow (#1056)', async () => {
+    it('marks a session done and ends its workflow (#1056)', async () => {
       const id = await session(1)
       const ended: string[] = []
       m.durable = { end: (sid: string) => Promise.resolve(void ended.push(sid)) } as unknown as DurableGate
@@ -250,7 +250,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session edi
       expect(ended).toEqual([id])
     })
 
-    it('leaves a durable session as it was when its workflow cannot be told, with 503', async () => {
+    it('leaves a session as it was when its workflow cannot be told, with 503', async () => {
       const id = await session(1)
       m.durable = undefined
       expect((await patch(id, { done: true })).status).toBe(503)
