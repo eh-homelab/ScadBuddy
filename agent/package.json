@@ -40,7 +40,7 @@
     "@temporalio/workflow": "1.24.0",
     "cron-parser": "5.10.2",
     "hono": "^4.13.14",
-    "jose": "^6.2.13",
+    "jose": "^6.2.14",
     "openapi-fetch": "^0.17.0",
     "postgres": "^3.4.9",
     "quickjs-emscripten": "0.32.0",
