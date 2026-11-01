@@ -811,7 +811,7 @@ def test_a_kept_local_preset_slices_with_no_bambuddy(
     copy held."""
     client = native_alone_client
     held = HeldPresetStore(_state(client).projection.pool)
-    _call(client, partial(held.replace, [7], [LocalPresetDetail.model_validate(_local_pla("215"))]))
+    _call(client, partial(held.keep, LocalPresetDetail.model_validate(_local_pla("215"))))
     file_id = _native_upload(client, tmp_path)
     with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as slicer:
         row = _slice(client, file_id, plan=LOCAL_FILAMENT_PLAN)

@@ -18,6 +18,7 @@ from scadbuddy.bambuddy.resolver import NozzleChoice, PrintChoices, resolve
 from scadbuddy.bambuddy.slot_presets import slot_preset_name
 from scadbuddy.bambuddy.trays import tray_spool_id
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.slicing import catalogue as catalogue_module
 from scadbuddy.slicing.catalogue import catalogue_for, native_catalogue
 from scadbuddy.slicing.held_presets import HeldPresetStore, held_row, refresh_held
 from scadbuddy.slicing.presets import build_presets, native_preset_key, needs_bambuddy
@@ -306,6 +307,31 @@ async def test_a_providers_record_naming_a_kept_preset_resolves(kept: Profiles) 
     )
     assert resolved.errors == []
     assert resolved.filament_presets == [PresetRef(source="local", id="7")]
+
+
+async def test_a_providers_record_naming_a_kept_preset_for_any_printer_resolves() -> None:
+    """An empty ``compatible_printers`` declares no restriction (`PresetChoice`), so a
+    kept preset that leaves it empty matches a provider's record too (#4645 review)."""
+    anywhere = PLA.model_copy(update={"compatible_printers": None})
+    profiles = Profiles(PROFILES, held=MemoryHeld(anywhere))
+    records = {"bambuddy": SpoolSnapshot(record_id="16", preset="7")}
+    resolved = resolve(
+        tray(records), tray_plan(), h2c_choices(), await catalogue_for(None, native=profiles), {}
+    )
+    assert resolved.errors == []
+    assert resolved.filament_presets == [PresetRef(source="local", id="7")]
+
+
+async def test_an_edit_replaces_the_flatten_answer_it_had(held: MemoryHeld, kept: Profiles) -> None:
+    """One answer per kept preset, the latest edit's (#4645 review): an edit never adds
+    an entry that lives for the process's life."""
+    await catalogue_for(None, native=kept)
+    before = len(catalogue_module._flattens)
+    for n in range(3):
+        setting = {**PLA.setting, "filament_vendor": [f"V{n}"]}
+        held.docs[7] = PLA.model_copy(update={"setting": setting})
+        await catalogue_for(None, native=kept)
+    assert len(catalogue_module._flattens) == before
 
 
 async def test_a_spools_own_kept_preset_resolves_on_native(kept: Profiles) -> None:

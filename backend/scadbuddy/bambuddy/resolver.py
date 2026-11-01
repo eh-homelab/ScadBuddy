@@ -197,8 +197,11 @@ def _record_preset(catalogue: Catalogue, option: SpoolOption, printer: str) -> P
         if ref is None:
             source: PresetSource = "local" if _is_local_id(record.preset) else "cloud"
             native = catalogue.native_ref(PresetRef(source=source, id=record.preset), "filament")
+            # An empty ``compatible_printers`` declares no restriction (`PresetChoice`),
+            # as a local preset may leave it.
             fits = native is not None and any(
-                row.ref == native and printer in row.compatible_printers
+                row.ref == native
+                and (not row.compatible_printers or printer in row.compatible_printers)
                 for row in catalogue.filament
             )
             ref = native if fits else None

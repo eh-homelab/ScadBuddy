@@ -354,6 +354,8 @@ for the lists and `slicing/values.py` for a process preset's values) and Bambudd
 the table `held_local_presets`). The copy is refreshed off the hot path on the spool
 providers' Schedule (`SpoolRefresh`'s `held_presets_refresh`, behind its patch): a list
 of `/local-presets/`, then a read of each preset new or edited since (its `updated_at`).
+With the refresh off (`spool_overlay_refresh_seconds` 0) the API forgets the copy at its
+start, so a `local` preset is read from Bambuddy again and a native run offers none.
 A native run reads only the copy, and flattens a kept document over the image's tree
 as it does a preset read from Bambuddy (`Profiles.flatten_over`), so the Rust worker
 gets fully resolved files; the slice's key carries each built file's digest, so an edit,

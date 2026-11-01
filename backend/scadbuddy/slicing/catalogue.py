@@ -220,8 +220,9 @@ async def catalogue_for(client: BambuddyClient | None, *, native: Profiles | Non
 
 
 #: Whether each kept preset flattens over a tree, by the tree's root and version and the
-#: preset's id and document digest: answered once per process for each edit of each.
-_flattens: dict[tuple[Path, str, int, str], bool] = {}
+#: preset's id: the document digest it was answered for, and the answer. Only the latest
+#: digest per preset is kept, so an edit replaces its entry rather than adding one.
+_flattens: dict[tuple[Path, str, int], tuple[str, bool]] = {}
 _SLOTS: dict[str, Kind] = {"printer": "machine", "process": "process", "filament": "filament"}
 
 
@@ -238,16 +239,20 @@ async def with_held(image: Catalogue, profiles: Profiles) -> Catalogue:
         return image
     rows = [row for row in await held.rows() if row.preset.preset_type in _SLOTS]
     root, version = profiles.root, await asyncio.to_thread(lambda: profiles.version)
-    unknown = [row for row in rows if (root, version, row.preset.id, row.sha256) not in _flattens]
+    unknown = [
+        row
+        for row in rows
+        if _flattens.get((root, version, row.preset.id), ("", False))[0] != row.sha256
+    ]
     if unknown:
         docs = await held.documents([row.preset.id for row in unknown])
         for row in unknown:
             doc = docs.get(row.preset.id)
             ok = doc is not None and await asyncio.to_thread(_flattens_over, profiles, doc)
-            _flattens[(root, version, row.preset.id, row.sha256)] = ok
+            _flattens[(root, version, row.preset.id)] = (row.sha256, ok)
     offered: dict[str, list[PresetChoice]] = {slot: [] for slot in _SLOTS}
     for row in rows:
-        if not _flattens.get((root, version, row.preset.id, row.sha256)):
+        if _flattens.get((root, version, row.preset.id)) != (row.sha256, True):
             continue
         if is_slot_preset(row.preset.name):
             continue

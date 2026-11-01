@@ -17,7 +17,11 @@ kept, or whose ``updated_at`` moved since (Bambuddy's ``PUT`` rewrites a preset 
 the same id and moves it: :attr:`~scadbuddy.bambuddy.models.LocalPreset.updated_at`). A
 preset gone from the list is forgotten. One whose read fails is kept as it was, under its
 old stamp, so the next refresh reads it again. Without ``bambuddy_url`` it is skipped
-and the copy stays, as a spool provider's rows do.
+and the copy stays, as a spool provider's rows do. With the refresh off
+(``spool_overlay_refresh_seconds`` 0) nothing would keep the copy current, so the API
+forgets it at its start (`slicing/component.py`, #4645 review): a ``local`` preset is
+then read from Bambuddy on every slice again, as before the copy, and a native run
+offers none.
 
 A native slice flattens a kept document over the image's tree (`slicing/presets.py`),
 and its key carries the built file's digest, so an edit, once kept, slices again. A
@@ -105,10 +109,17 @@ class HeldPresetStore:
         """Each kept preset's ``updated_at``, by id."""
         return await asyncio.to_thread(self._stamps)
 
-    async def replace(self, listed: Collection[int], read: Collection[LocalPresetDetail]) -> None:
-        """Keep ``read`` (each written whole) and forget every preset not ``listed``, in
-        one transaction."""
-        await asyncio.to_thread(self._replace, sorted(set(listed)), list(read))
+    async def forget_unlisted(self, listed: Collection[int]) -> None:
+        """Forget every kept preset not ``listed``."""
+        await asyncio.to_thread(self._forget_unlisted, sorted(set(listed)))
+
+    async def keep(self, detail: LocalPresetDetail) -> None:
+        """Keep ``detail``, written whole over what was kept for its id."""
+        await asyncio.to_thread(self._keep, detail)
+
+    async def clear(self) -> None:
+        """Forget every kept preset."""
+        await asyncio.to_thread(self._forget_unlisted, [])
 
     def _rows(self) -> list[HeldRow]:
         with self._pool.connection() as conn:
@@ -132,44 +143,52 @@ class HeldPresetStore:
             found = conn.execute("SELECT id, updated_at FROM held_local_presets").fetchall()
         return {row["id"]: row["updated_at"] for row in found}
 
-    def _replace(self, listed: list[int], read: list[LocalPresetDetail]) -> None:
-        with self._pool.connection() as conn, conn.transaction():
+    def _forget_unlisted(self, listed: list[int]) -> None:
+        with self._pool.connection() as conn:
             conn.execute("DELETE FROM held_local_presets WHERE NOT (id = ANY(%s))", (listed,))
-            for detail in read:
-                conn.execute(
-                    "INSERT INTO held_local_presets (id, preset, updated_at, sha256)"
-                    " VALUES (%s, %s, %s, %s)"
-                    " ON CONFLICT (id) DO UPDATE SET preset = EXCLUDED.preset,"
-                    " updated_at = EXCLUDED.updated_at, sha256 = EXCLUDED.sha256,"
-                    " kept_at = now()",
-                    (
-                        detail.id,
-                        Jsonb(detail.model_dump(mode="json")),
-                        detail.updated_at,
-                        setting_sha256(detail.setting),
-                    ),
-                )
+
+    def _keep(self, detail: LocalPresetDetail) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "INSERT INTO held_local_presets (id, preset, updated_at, sha256)"
+                " VALUES (%s, %s, %s, %s)"
+                " ON CONFLICT (id) DO UPDATE SET preset = EXCLUDED.preset,"
+                " updated_at = EXCLUDED.updated_at, sha256 = EXCLUDED.sha256,"
+                " kept_at = now()",
+                (
+                    detail.id,
+                    Jsonb(detail.model_dump(mode="json")),
+                    detail.updated_at,
+                    setting_sha256(detail.setting),
+                ),
+            )
 
 
 async def refresh_held_presets(store: HeldPresetStore, client: BambuddyClient) -> int:
     """Bring the kept copy up to Bambuddy's local presets (the module's docstring); how
-    many presets were read whole. A failed list changes nothing and raises."""
+    many presets were read whole. A failed list changes nothing and raises. The presets
+    gone from the list are forgotten first, then each one read is kept as soon as it is
+    read, so a refresh cut short by its timeout keeps what it read, and the next goes on
+    from there (its stamps show what is still to read)."""
     listing = await client.local_presets()
     listed = [*listing.printer, *listing.process, *listing.filament]
+    await store.forget_unlisted([row.id for row in listed])
     stamps = await store.stamps()
-    read: list[LocalPresetDetail] = []
+    read = 0
     for row in listed:
         if row.id in stamps and row.updated_at is not None and stamps[row.id] == row.updated_at:
             continue
         try:
-            read.append(await client.local_preset(row.id))
+            detail = await client.local_preset(row.id)
         except ApiError as error:
             if error.status != status.HTTP_404_NOT_FOUND:
                 raise
             # Deleted since the list: forgotten by the next refresh's.
             logger.info("a local preset went while it was kept", extra={"preset_id": row.id})
-    await store.replace([row.id for row in listed], read)
-    return len(read)
+            continue
+        await store.keep(detail)
+        read += 1
+    return read
 
 
 def held_presets_activity(

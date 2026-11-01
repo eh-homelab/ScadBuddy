@@ -5,15 +5,21 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
+from scadbuddy.bambuddy.dispatch import SlicePlan
+from scadbuddy.bambuddy.models import LocalPresetDetail, PresetRef
+from scadbuddy.slicing.component import COMPONENT as SLICING_COMPONENT
 from scadbuddy.slicing.held_presets import HeldPresetStore, refresh_held_presets
+from scadbuddy.slicing.presets import build_presets
+from scadbuddy.slicing.profiles import Profiles
 from tests.conftest import PgPool
-from tests.slicing.conftest import local_preset
+from tests.slicing.conftest import PROFILES, local_preset
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -125,3 +131,67 @@ async def test_a_failed_list_changes_nothing(
     with pytest.raises(Exception):  # noqa: B017 - whatever the client raises, nothing moves
         await refresh_held_presets(store, client)
     assert [row.preset.id for row in await store.rows()] == [1]
+
+
+@respx.mock
+async def test_a_refresh_cut_short_keeps_what_it_read(
+    store: HeldPresetStore, client: BambuddyClient
+) -> None:
+    """Each preset is kept as it is read (#4645 review): a refresh that fails part way
+    keeps the ones before, and the next reads only the rest."""
+    one, two = detail(1, "2026-10-22T10:00:00"), detail(2, "2026-10-22T11:00:00")
+    respx.get(f"{API}/local-presets/").respond(200, json=listing(one, two))
+    respx.get(f"{API}/local-presets/1").respond(200, json=one)
+    respx.get(f"{API}/local-presets/2").respond(500)
+    with pytest.raises(Exception):  # noqa: B017 - whatever the client raises
+        await refresh_held_presets(store, client)
+    assert [row.preset.id for row in await store.rows()] == [1]
+
+    respx.reset()
+    respx.get(f"{API}/local-presets/").respond(200, json=listing(one, two))
+    read = respx.get(f"{API}/local-presets/2").respond(200, json=two)
+    assert await refresh_held_presets(store, client) == 1 and read.call_count == 1
+
+
+@pytest.mark.parametrize(("interval", "kept"), [(0, False), (300, True)])
+async def test_with_the_refresh_off_the_start_forgets_the_copy(
+    store: HeldPresetStore, interval: int, kept: bool
+) -> None:
+    """#4645 review: with ``spool_overlay_refresh_seconds`` 0 nothing keeps the copy
+    current, so the API's start forgets it, and a ``local`` preset is read from Bambuddy
+    again rather than from a copy that only gets older."""
+    await store.keep(LocalPresetDetail.model_validate(detail(1, "2026-10-22T10:00:00")))
+    slicing = SimpleNamespace(
+        held=store,
+        profiles=None,
+        core=SimpleNamespace(
+            settings=SimpleNamespace(spool_overlay_refresh_seconds=interval),
+            settings_store=SimpleNamespace(load=lambda: SimpleNamespace(slicer_backend="native")),
+        ),
+    )
+    run = SLICING_COMPONENT.run
+    assert run is not None
+    async with run(cast(Any, slicing)):
+        pass
+    assert bool(await store.rows()) is kept
+
+
+@respx.mock
+async def test_with_the_copy_forgotten_a_slice_reads_bambuddys_current_document(
+    store: HeldPresetStore, client: BambuddyClient
+) -> None:
+    """What the forgotten copy leaves: Bambuddy's document as it is now, not the kept one."""
+    await store.keep(LocalPresetDetail.model_validate(detail(1, "2026-10-22T10:00:00")))
+    await store.clear()
+    now = detail(1, "2026-10-23T09:00:00", temperature="230")
+    route = respx.get(f"{API}/local-presets/1").respond(200, json=now)
+    plan = SlicePlan(
+        printer_preset=PresetRef(source="standard", id="Test Printer 0.4 nozzle"),
+        process_preset=PresetRef(source="standard", id="leaf"),
+        filament_presets=[PresetRef(source="local", id="1")],
+        filament_colours=["#000000"],
+        bed_type="Textured PEI Plate",
+    )
+    files = await build_presets(plan, Profiles(PROFILES, held=store), client)
+    assert json.loads(files.filaments[0])["nozzle_temperature"] == ["230"]
+    assert route.call_count == 1
