@@ -2,6 +2,7 @@ import { Context } from '@temporalio/activity'
 import { createHash } from 'node:crypto'
 import { WORKSPACE_ROOT } from '../builtins/files.js'
 import type { SessionFiles } from '../workspace/store.js'
+import type { SessionDirectory } from '../workspace/directory.js'
 import type { HarnessPaths } from '../harness/options.js'
 import { ensureSessionDir } from '../harness/stateDirs.js'
 import { TASK_QUEUE } from '../temporal/names.js'
@@ -84,6 +85,11 @@ export type BackgroundActivityDeps = {
   now?: () => Date
   /** Where a classic session's directory is, the cwd a monitor's command runs in. */
   paths?: HarnessPaths | undefined
+  /**
+   * The session directories (workspace/directory.ts): a running monitor command holds its
+   * session's, so the directory is neither evicted nor swept under it.
+   */
+  directory?: Pick<SessionDirectory, 'hold'> | undefined
   /** Resolves a WebSocket monitor's host for its egress check. */
   resolve?: Resolver | undefined
   /** The queue a WebSocket monitor runs on: any agent's (`agent-tools` unless set). */
@@ -238,10 +244,15 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
       const t = await deps.store.get(input.taskId)
       if (!t || t.state !== 'active') return { end: { outcome: 'cancelled' }, events: 0 }
       if (!deps.paths) return { end: { outcome: 'failed', reason: 'this replica runs no monitor commands' }, events: 0 }
-      const cwd = await ensureSessionDir(deps.paths, t.sessionId)
-      return watched(t, deps.store, (signal, onEvent) =>
-        runCommand({ command: String(t.spec.command), cwd, timeoutMs: Number(t.spec.timeoutMs), signal, onEvent }),
-      )
+      const release = deps.directory?.hold(t.sessionId)
+      try {
+        const cwd = await ensureSessionDir(deps.paths, t.sessionId)
+        return await watched(t, deps.store, (signal, onEvent) =>
+          runCommand({ command: String(t.spec.command), cwd, timeoutMs: Number(t.spec.timeoutMs), signal, onEvent }),
+        )
+      } finally {
+        release?.()
+      }
     },
 
     async [BG_MONITOR_WS](input: { taskId: string }): Promise<MonitorResult> {

@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { chmod, lstat, mkdir, open, readdir, rm, stat, utimes } from 'node:fs/promises'
+import { chmod, lstat, mkdir, open, readdir, realpath, rm, stat, utimes } from 'node:fs/promises'
 import path from 'node:path'
 import type { Sql } from 'postgres'
 import { isUuid } from '../harness/uuid.js'
@@ -25,8 +25,12 @@ import { sha256, type SessionFiles, WORKSPACE_PATH_MAX, WorkspaceError, type Wor
 //     from the directory is deleted there, both only while the record still holds the base
 //     (`expectedSha256`); the base then moves on. A record changed meanwhile (a panel upload,
 //     a `workspace_*` write during the turn) wins: the next placement brings it in.
-//   - `evict`, once the session's warm process here has closed (warm.ts `onClosed`): the copy
-//     goes, so the pod's disk holds at most its warm sessions' directories.
+//   - `evict`, once the session's warm process here has closed (warm.ts `onClosed`): what changed
+//     since the last sync is written back, then the copy goes, so the pod's disk holds at most its
+//     warm sessions' directories. Not while a turn is placed in it or a Monitor command runs there
+//     (`hold`, background/activities.ts). A placement here also writes back first what changed
+//     since this pod's last sync (a monitor's output between turns, a file whose write-back
+//     failed), so nothing written here is removed as unrecorded before it was offered.
 //
 // Caps: the workspace's (`workspace_file_max_bytes`, `workspace_max_bytes`). A file the record
 // refuses for its size (`too_large`, `quota`) is removed from the directory at the write-back,
@@ -163,6 +167,10 @@ async function writeInside(dir: string, rel: string, bytes: Uint8Array): Promise
     if (st && !st.isDirectory()) await rm(at, { recursive: true, force: true })
     if (!st || !st.isDirectory()) await mkdir(at, { mode: 0o700 })
   }
+  // A directory swapped for a link between its check and the open would be followed (O_NOFOLLOW
+  // guards the last part only): the parent must still resolve inside `dir`.
+  const [inside, parent] = await Promise.all([realpath(dir), realpath(at)])
+  if (parent !== inside && !parent.startsWith(inside + path.sep)) throw new Error(`${rel} resolves outside the session's directory`)
   const target = path.join(at, parts.at(-1)!)
   const st = await lstat(target).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))
   if (st && !st.isFile()) await rm(target, { recursive: true, force: true })
@@ -190,8 +198,14 @@ export class SessionDirectory {
   readonly #root: string
   /** Each session's operations on its directory, one at a time: a sweep or an eviction never runs into a placement. */
   readonly #chains = new Map<string, Promise<unknown>>()
-  /** The sessions with a turn placed here now (between `place` and `done`): never evicted or swept. */
+  /** The sessions with a turn placed here now (between `place` and `done`), or a monitor command running (`hold`): never evicted or swept. */
   readonly #busy = new Map<string, number>()
+  /**
+   * Each session's last placement here, its base as last synced: the next placement writes back
+   * against it first, so what was written since (a monitor's output between turns, a file whose
+   * write-back failed) reaches the record rather than being removed as unrecorded.
+   */
+  readonly #last = new Map<string, Placement>()
 
   constructor(files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits'>, root: string) {
     this.#files = files
@@ -228,8 +242,29 @@ export class SessionDirectory {
   }
 
   /** The placement's turn has ended here: its directory may be evicted again. */
-  done(placement: Placement): void {
-    this.#unbusy(placement.sessionId.toLowerCase())
+  done(placement: Placement, options: { cutOff?: boolean } = {}): void {
+    const id = placement.sessionId.toLowerCase()
+    // A placement cut off (another holds the turn) never writes back, so nothing later does it for it either.
+    if (options.cutOff && this.#last.get(id) === placement) this.#last.delete(id)
+    this.#unbusy(id)
+  }
+
+  /** The session's copy and what this pod remembers of its last sync, gone. */
+  async #drop(id: string): Promise<void> {
+    this.#last.delete(id)
+    await removeSessionDir(this.#root, id)
+  }
+
+  /** A monitor command runs in the session's directory (background/activities.ts): held until the returned release. */
+  hold(sessionId: string): () => void {
+    const id = sessionId.toLowerCase()
+    this.#busy.set(id, (this.#busy.get(id) ?? 0) + 1)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.#unbusy(id)
+    }
   }
 
   #unbusy(id: string): void {
@@ -240,6 +275,10 @@ export class SessionDirectory {
 
   async #place(sessionId: string): Promise<Placement> {
     const dir = this.dirOf(sessionId)
+    // What changed here since the last sync goes to the record first: compared by sha256 against
+    // that base, so a record changed elsewhere since still wins (expectedSha256).
+    const last = this.#last.get(sessionId.toLowerCase())
+    if (last) await this.#writeBack(last)
     await ensureDir(dir)
     const [record, found] = await Promise.all([this.#files.list(ws(sessionId)), walk(dir)])
     for (const stray of found.strays) await rm(stray, { recursive: true, force: true })
@@ -268,7 +307,9 @@ export class SessionDirectory {
       await writeInside(dir, file.path, read.bytes)
       base.set(file.path, read.sha256)
     }
-    return { sessionId, dir, base }
+    const placement = { sessionId, dir, base }
+    this.#last.set(sessionId.toLowerCase(), placement)
+    return placement
   }
 
   /**
@@ -331,7 +372,7 @@ export class SessionDirectory {
 
   /** Removes the session's directory (forgetSubject). */
   remove(sessionId: string): Promise<void> {
-    return this.#serial(sessionId, () => removeSessionDir(this.#root, sessionId))
+    return this.#serial(sessionId, () => this.#drop(sessionId.toLowerCase()))
   }
 
   /**
@@ -343,7 +384,11 @@ export class SessionDirectory {
     const id = sessionId.toLowerCase()
     return this.#serial(sessionId, async () => {
       if (this.#busy.has(id)) return false
-      await removeSessionDir(this.#root, id)
+      // What was written since the last sync (a monitor's output) goes to the record first; if
+      // that fails, the copy stays for the next placement here to try again.
+      const last = this.#last.get(id)
+      if (last) await this.#writeBack(last)
+      await this.#drop(id)
       return true
     })
   }
@@ -365,8 +410,10 @@ export class SessionDirectory {
         if (live.has(id)) {
           const placedAt = await stat(sessionDirOf(this.#root, id)).then((st) => st.mtimeMs, () => now)
           if (now - placedAt < idleMs) return false
+          const last = this.#last.get(id)
+          if (last) await this.#writeBack(last)
         }
-        await removeSessionDir(this.#root, id)
+        await this.#drop(id)
         return true
       })
       if (gone) removed.push(id)

@@ -286,7 +286,7 @@ void tabRelay?.releaseAll()
 const mcpRelay = role.http && database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
 events?.start()
 const resources = new ResourceHub(events)
-// A session's working directory is under SCADBUDDY_SESSION_DIR when it is set (a worker's NAS share, plan Step 9.5).
+// A session's working directory is under SCADBUDDY_SESSION_DIR when it is set (the worker's own emptyDir, plan Step 9.5).
 const paths = { stateDir: DEFAULT_STATE_DIR, sessionsDir: config.sessionDir }
 // The /mcp auth settings (auth/authenticate.ts `mcpAuthSettings`): `oidc` while
 // `ai_settings.mcp_oidc` is enabled (#262), otherwise the `mcp_auth_mode` and
@@ -826,6 +826,7 @@ const background =
         send: managerSender(sessions),
         tz: agentTimezone(),
         paths,
+        ...(sessionDirectory ? { directory: sessionDirectory } : {}),
         secrets: toolServices.secrets,
         agents: managerAgents(sessions, { access: accessResolver }),
         workspace,

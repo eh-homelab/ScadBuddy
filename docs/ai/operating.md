@@ -1509,13 +1509,15 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   the directory what the workspace holds: it writes each file whose bytes differ and removes
   everything else (a file the workspace no longer holds, what a turn that died never wrote
   back, and every entry that is not a regular file at a workspace path, such as a symlink or a
-  dot-file). At each park and at the turn's end (a released or shut-down turn's too), it
-  writes each changed file back and deletes each removed one, by sha256 against what it
-  last synced, with the source `{kind: "session_dir"}`. A panel upload or a `workspace_*`
-  write during the turn wins over the directory's change to the same file, and reaches the
-  directory at the next turn. A turn cut off because another placement took it writes
-  nothing back. A worker that dies mid-turn loses only that turn's changes since its last
-  park.
+  dot-file). At each park, every minute of a running turn, and at the turn's end (a released
+  or shut-down turn's too), it writes each changed file back and deletes each removed one, by
+  sha256 against what it last synced, with the source `{kind: "session_dir"}`. A placement on
+  the worker that synced last writes back first what changed since, such as a Monitor
+  command's output between turns or a file whose write-back failed, before it removes
+  anything. A panel upload or a `workspace_*` write during the turn wins over the
+  directory's change to the same file, and reaches the directory at the next turn. A turn
+  cut off because another placement took it writes nothing back. A worker that dies
+  mid-turn loses only that turn's changes since its last sync.
   - As built, against Q5: Q5 put the directory on the NAS share. It is a capped emptyDir of
     each worker instead, refilled at every placement, because the copies are plaintext and the
     share's one backup (`nas-share-backup.yaml`, Velero 1.18's kopia fs-backup) carries the
@@ -1526,7 +1528,9 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     every entry that cannot be synced. A turn whose directory grows past `workspace_max_bytes`
     is stopped (checked every 15 s, `DIR_CHECK_MS`). Each refusal logs a line starting
     `session directory cap:`. A session's directory is removed once its warm process on that
-    worker closes, so a worker's disk holds at most `warm_max_per_replica` directories. The
+    worker closes, unless a Monitor command still runs in it, and only after what changed since
+    the last sync is written back. So a worker's disk holds at most `warm_max_per_replica`
+    directories, plus those of running monitors. The
     worker's emptyDir `sizeLimit` must be at least `workspace_max_bytes` times
     `warm_max_per_replica`.
   - Isolation: each directory is 0700 and its files 0600. Nothing is read or written through a

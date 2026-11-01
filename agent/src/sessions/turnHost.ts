@@ -110,6 +110,8 @@ export const INPUT_POLL_MS = 1_000
 const GATE_ASK = 'ask_user'
 /** How often a running turn checks its working directory against the workspace cap. */
 export const DIR_CHECK_MS = 15_000
+/** Every this many checks (each minute), a running turn also writes its directory back. */
+const DIR_SYNC_EVERY = 4
 /** How often a running placement checks that it still holds the turn, and writes what it has spent. */
 export const FENCE_MS = 1_000
 
@@ -520,9 +522,13 @@ export class TurnHost {
       // up to the cap, and the rest removed (directory.ts), so this disk stays bounded.
       if (placed) {
         const checking = placed
+        let checks = 0
         capCheck = setInterval(() => {
+          checks += 1
           void this.#deps.directory!.usage(checking).then(
             ({ bytes, cap }) => {
+              // A long turn with no park still writes back now and then: a lost pod then loses less.
+              if (bytes <= cap && checks % DIR_SYNC_EVERY === 0) void sync()
               if (bytes <= cap || controller.signal.aborted) return
               console.warn(`session directory cap: session ${id}'s working directory holds ${bytes} bytes, past the workspace's ${cap}; the turn is stopped`)
               controller.abort(new Error(`the session's working directory grew past the workspace cap (${cap} bytes)`))
@@ -585,7 +591,7 @@ export class TurnHost {
     } finally {
       clearInterval(fence)
       clearInterval(capCheck)
-      if (placed) this.#deps.directory?.done(placed)
+      if (placed) this.#deps.directory?.done(placed, { cutOff: fenced() })
       control.cancelled.removeEventListener('abort', onCancel)
       core.end(outcome, result)
     }

@@ -10,7 +10,7 @@ import { forgetSubject } from '../src/sessions/forget.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
 import { SessionDirectory } from '../src/workspace/directory.js'
-import { SessionFiles, type WorkspaceRef } from '../src/workspace/store.js'
+import { SessionFiles, WorkspaceError, type WorkspaceRef } from '../src/workspace/store.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner } from './support/sessions.js'
 
@@ -155,6 +155,50 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     // Rebuilt from the record at the next placement.
     const next = await dirs.place(id)
     expect(await readFile(path.join(next.dir, 'sub', 'f.txt'), 'utf8')).toBe('x')
+  })
+
+  it("a monitor's command keeps its directory across the process's eviction, and what it writes between turns reaches the record", async () => {
+    const id = await session()
+    const dirs = new SessionDirectory(files, await root())
+    const turn = await dirs.place(id)
+    await dirs.writeBack(turn)
+    dirs.done(turn)
+    // A Monitor command started in the turn runs on in the directory (background/activities.ts).
+    const release = dirs.hold(id)
+    expect(await dirs.evict(id)).toBe(false)
+    expect(await dirs.sweep(db.sql, 0)).toEqual([])
+    await writeFile(path.join(turn.dir, 'build.log'), 'written by the monitor')
+    // The next turn here: the monitor's output is written back, not removed as unrecorded.
+    const next = await dirs.place(id)
+    expect(await readFile(path.join(next.dir, 'build.log'), 'utf8')).toBe('written by the monitor')
+    expect((await files.read(ws(id), 'build.log'))?.bytes.toString()).toBe('written by the monitor')
+    dirs.done(next)
+    await writeFile(path.join(next.dir, 'tail.log'), 'after the last turn')
+    release()
+    // Once the monitor ends and the process has closed, the eviction writes back first.
+    expect(await dirs.evict(id)).toBe(true)
+    expect((await files.read(ws(id), 'tail.log'))?.bytes.toString()).toBe('after the last turn')
+  })
+
+  it('a file whose write-back failed for a while is written back at the next placement here, not removed', async () => {
+    const id = await session()
+    let down = true
+    const flaky = new Proxy(files, {
+      get(target, prop, receiver) {
+        if (prop === 'write' && down) return () => Promise.reject(new WorkspaceError('unavailable', 'the blob store is down; nothing was written'))
+        const value = Reflect.get(target, prop, receiver) as unknown
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value
+      },
+    })
+    const dirs = new SessionDirectory(flaky, await root())
+    const turn = await dirs.place(id)
+    await writeFile(path.join(turn.dir, 'result.txt'), 'keep me')
+    expect((await dirs.writeBack(turn)).skipped.map((s) => s.code)).toEqual(['unavailable'])
+    dirs.done(turn)
+    down = false
+    const next = await dirs.place(id)
+    expect(await readFile(path.join(next.dir, 'result.txt'), 'utf8')).toBe('keep me')
+    expect((await files.read(ws(id), 'result.txt'))?.bytes.toString()).toBe('keep me')
   })
 
   it('a deletion in the directory is written back, and a panel write during the turn wins over it', async () => {
