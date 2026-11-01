@@ -14,12 +14,13 @@ import { NOT_FOR_FLOWS, UNKNOWN_FLOW } from './toolActivities.js'
 // `flow_session_turn`, which heartbeats until the turn ends and answers with its last
 // message and how many outward calls it made (what a Reset preview counts, §7.4).
 //
-// A flow talks only to a durable session its starter owns: a classic session's turn
-// lives in one agent process, and anyone else's session is not the starter's to drive.
+// A flow talks only to a session its starter owns: anyone else's is not the starter's to
+// drive. Every session runs on a session workflow (plan Step 6.3), a classic one an earlier
+// release left included, whose next turn starts its AgentSession.
 
 export const FLOW_SESSION_CHECK = 'flow_session_check'
 export const FLOW_SESSION_TURN = 'flow_session_turn'
-/** A session a flow may not talk to: unknown, classic, or someone else's. */
+/** A session a flow may not talk to: unknown, or someone else's. */
 export const SESSION_REFUSED = 'SessionRefused'
 /** The turn ended in an error (interrupted, out of budget, failed); its message says which. */
 export const TURN_FAILED = 'TurnFailed'
@@ -31,7 +32,7 @@ export type TurnAnswer = { session_id: string; turn_id: string; text: string; ou
 
 export type FlowSessionDeps = { sql: Sql; flows: FlowRuns | undefined; pollMs?: number }
 
-type Row = { mode: string; owner_kind: Owner['kind']; owner_id: string }
+type Row = { owner_kind: Owner['kind']; owner_id: string }
 
 function refused(message: string): ApplicationFailure {
   return ApplicationFailure.nonRetryable(message, SESSION_REFUSED)
@@ -54,11 +55,10 @@ async function allowed(deps: FlowSessionDeps, what: string, sessionId: unknown):
   // A lookup that throws (the database is away) is left to the activity's retries.
   const starter = deps.flows ? await deps.flows.startedBy(flow, runId) : undefined
   if (starter === undefined) throw ApplicationFailure.nonRetryable(`${what}: no open flow run ${flow} is recorded for this execution`, UNKNOWN_FLOW)
-  const [row] = await deps.sql<Row[]>`SELECT mode, owner_kind, owner_id FROM ai_sessions WHERE id = ${sessionId}::uuid`
+  const [row] = await deps.sql<Row[]>`SELECT owner_kind, owner_id FROM ai_sessions WHERE id = ${sessionId}::uuid`
   if (!row || !sameOwner(starter, { kind: row.owner_kind, id: row.owner_id })) {
     throw refused(`no session ${sessionId} of the person who started this run`)
   }
-  if (row.mode !== 'durable') throw refused(`session ${sessionId} is classic; a flow talks only to a durable session`)
   return sessionId
 }
 

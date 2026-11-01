@@ -19,7 +19,7 @@ import { runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { SessionBlobs } from '../src/sessions/blobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
-import { type SessionManager, type SessionManagerDeps, SETTING_SESSION_MAX_TURNS, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
+import { type SessionManager, type SessionManagerDeps, SETTING_SESSION_MAX_TURNS } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { RESTARTED_PROMPT, TurnHost } from '../src/sessions/turnHost.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
@@ -31,7 +31,6 @@ import type { AcquireInput } from '../src/temporal/session/models.js'
 import {
   ACQUIRE_WORKER_ACTIVITY,
   SESSION_QUEUE,
-  UNIFIED_SESSIONS_SETTING,
   SESSION_SETTINGS_ACTIVITY,
   sessionHostQueue,
 } from '../src/temporal/session/names.js'
@@ -186,7 +185,6 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
     ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     // Set in the database, as no route writes it (unifiedSessionsFlag.pg.test.ts).
-    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(true)})`
     slowCalls = 0
     slowReturned = 0
     slowGate = Promise.resolve()
@@ -318,7 +316,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-affinity-test-token' }),
       settings: {
         get: <T>(key: string) =>
-          Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === SETTING_SESSION_MODE ? 'durable' : options.settings?.[key]) as T),
+          Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : options.settings?.[key]) as T),
       },
       mcpServers: () => ({ stub: createSdkMcpServer({ name: 'stub', tools: [slow] }) }),
       tierOf: (n) => (n === 'mcp__stub__slow' ? 'read' : undefined),
@@ -478,7 +476,6 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
   /** Starts a unified session with its first turn, as the panel does. */
   async function startOn(r: Replica, prompt: string) {
     const started = await r.m.start(browser, { origin: 'chat', prompt })
-    expect(started.modeFallback).toBeUndefined()
     void watch(started.session.id, prompt, started.turn!.done)
     return { id: started.session.id, turn: started.turn! }
   }

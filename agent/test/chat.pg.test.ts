@@ -6,7 +6,7 @@ import { event } from '../src/sessions/protocol.js'
 import { frontendClientMessages } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
-import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // ChatConnection against a real SessionManager and event log, for what the
 // socket-level tests cannot time: a socket that closes while the connection
@@ -154,9 +154,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`ChatConnect
     connection.close()
   })
 
-  it("passes a new chat's mode, and refuses one on an existing session (plan 5d)", async () => {
-    // The mode setting's own rules, with no Temporal: the in-process turn (plan 5d).
-    classicTurns(m)
+  it("takes and ignores a chat's mode, new or existing: every session is an AgentSession (plan Step 6.3)", async () => {
     const out: { type: string; sessionId?: string; mode?: string; code?: string }[] = []
     const connection = new ChatConnection(m, (e) => out.push(e as never))
     await connection.open()
@@ -164,18 +162,18 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`ChatConnect
     await connection.receive(JSON.stringify(clientMessage({ type: 'user.message', text: 'hi', context: { route: '/' }, mode: 'classic' })))
     await settle()
     const started = out.find((e) => e.type === 'session.started') as { sessionId: string; mode?: string; modeFallback?: string }
-    expect(started).toMatchObject({ mode: 'classic' })
+    expect(started).toMatchObject({ mode: 'durable' })
     expect(started).not.toHaveProperty('modeFallback')
-    // Asked for, durable is refused here (no Temporal), not run as classic.
-    await connection.receive(JSON.stringify(clientMessage({ type: 'user.message', text: 'hi', context: { route: '/' }, mode: 'durable' })))
-    const errors = () => out.filter((e) => e.type === 'error')
-    expect(errors()).toEqual([expect.objectContaining({ code: 'unavailable' })])
+    const [row] = await db.sql<{ runtime: string | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${started.sessionId}`
+    expect(row?.runtime).toBe('unified')
+    await expect.poll(async () => (await m.get(started.sessionId, browser)).status).toBe('idle')
     await connection.receive(
       JSON.stringify(
         clientMessage({ type: 'user.message', sessionId: started.sessionId, text: 'more', context: { route: '/' }, mode: 'classic' }),
       ),
     )
-    expect(errors().at(-1)).toMatchObject({ code: 'invalid', sessionId: started.sessionId })
+    await settle()
+    expect(out.filter((e) => e.type === 'error')).toEqual([])
     connection.close()
   })
 })

@@ -314,21 +314,69 @@ async def _resolved(
     if reason:
         resolved["reason"] = reason
     events.append(_event(resolved))
-    # Back to running once nothing of the session is parked any more.
+    # The status follows what of the session is still parked: running once nothing is, else
+    # the kind still waiting (an approval first), as the agent's gate/store.ts ``resolved``.
+    # Read under the session row's lock, so two resolves that overlap cannot each see the
+    # other's entry still there and both leave it waiting (#3685, #5052).
+    await conn.execute("SELECT 1 FROM ai_sessions WHERE id = %s FOR UPDATE", (sid,))
     cur = await conn.execute(
         """
-        UPDATE ai_sessions SET status = 'running', updated_at = now()
-        WHERE id = %s AND status IN ('waiting_approval', 'waiting_input')
-          AND NOT EXISTS (SELECT 1 FROM ai_pending_input WHERE session_id = %s)
-        RETURNING status
+        WITH next AS (
+          SELECT CASE
+            WHEN EXISTS (SELECT 1 FROM ai_pending_input WHERE session_id = %s AND kind = 'approval')
+              THEN 'waiting_approval'
+            WHEN EXISTS (SELECT 1 FROM ai_pending_input WHERE session_id = %s) THEN 'waiting_input'
+            ELSE 'running' END AS status)
+        UPDATE ai_sessions SET status = next.status, updated_at = now() FROM next
+        WHERE id = %s AND ai_sessions.status IN ('waiting_approval', 'waiting_input')
+          AND ai_sessions.status <> next.status
+        RETURNING ai_sessions.status
         """,
-        (sid, sid),
+        (sid, sid, sid),
     )
-    if await cur.fetchone():
-        events.append(_event({"type": "session.status", "sessionId": sid, "status": "running"}))
+    moved = await cur.fetchone()
+    if moved:
+        events.append(_event({"type": "session.status", "sessionId": sid, "status": moved[0]}))
     await _append(conn, sid, events)
     if row["kind"] == "approval":
         await _audit(conn, row, outcome, responder, reason)
+    elif outcome != "answered":
+        await _audit_unanswered(conn, row, outcome, reason)
+
+
+async def _audit_unanswered(
+    conn: psycopg.AsyncConnection[Any],
+    row: dict[str, Any],
+    outcome: Outcome,
+    reason: str | None,
+) -> None:
+    """The ``question`` row for a question nobody answered, as the agent's ``auditUnanswered``
+    (gate/store.ts) writes it: ScadBuddy's own, ``system``. An answer's is the respond route's."""
+    parsed = parse_durable_request_id(row["request_id"])
+    action = outcome if outcome in ("expired", "timed_out") else "cancelled"
+    detail = f"{row['tool']} question {row['request_id']}{': ' + reason if reason else ''}"
+    started: datetime = row["created_at"]
+    await conn.execute(
+        """
+        INSERT INTO ai_audit (kind, action, surface, principal_kind, principal_id, principal_label,
+                              session_id, tool_use_id, tier, request_id, outcome, detail,
+                              started_at, finished_at, duration_ms)
+        VALUES ('question', %s, 'system', %s, %s, %s, %s, %s, 'read', %s, 'refused', %s, %s, now(),
+                GREATEST(0, (extract(epoch FROM now() - %s) * 1000)::int))
+        """,
+        (
+            action,
+            SYSTEM["kind"],
+            SYSTEM["id"],
+            SYSTEM["label"],
+            str(row["session_id"]),
+            parsed[2] if parsed else None,
+            row["request_id"],
+            detail[:500],
+            started,
+            started,
+        ),
+    )
 
 
 async def _audit(

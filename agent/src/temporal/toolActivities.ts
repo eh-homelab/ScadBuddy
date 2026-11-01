@@ -45,14 +45,13 @@ import { type SessionFiles, withWorkspaceSize } from '../workspace/store.js'
 // workflow approved an outward call before scheduling it (§6.4), so it is not
 // prepared again.
 //
-// The session is the workflow's: an activity of `session-<id>` runs as that session,
-// and only when that session is durable (`ai_sessions.mode`, §6.1). A classic
-// session's outward calls park in ai_approvals, so a workflow that borrowed its id
-// must not skip that. A flow run's workflow (`flow-<run id>`, #1057) runs as the run's
+// The session is the workflow's: an activity of `session-<id>` runs as that session.
+// Every session runs on a session workflow (plan Step 6.3), so no session's calls are
+// gated in-process any more and none is refused here by its mode. A flow run's workflow (`flow-<run id>`, #1057) runs as the run's
 // starter, in no session, and a gated call needs a person's decision in the backend's
 // `workflow_run_decisions` (flowRuns.ts). Any other caller is refused.
 
-/** Where a durable session's owner is read; undefined for any other session. */
+/** Where a session's owner is read; undefined when there is no such session. */
 export interface SessionOwners {
   /**
    * The owner, the tiers its current turn was sent with (`ai_sessions.turn_tiers`, #2320),
@@ -78,7 +77,7 @@ export class PgSessionOwners implements SessionOwners {
         durable_turn_id: string | null
       }[]
     >`
-      SELECT owner_kind, owner_id, owner_label, turn_tiers, durable_turn_id FROM ai_sessions WHERE id = ${sessionId} AND mode = 'durable'`
+      SELECT owner_kind, owner_id, owner_label, turn_tiers, durable_turn_id FROM ai_sessions WHERE id = ${sessionId}`
     if (!row) return undefined
     // Only the sender's own tiers, while it still owns the session (a handoff since
     // leaves the new owner its default), and only tiers there are.

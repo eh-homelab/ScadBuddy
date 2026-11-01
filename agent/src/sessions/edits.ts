@@ -45,7 +45,6 @@ export const ARCHIVED_REASON = 'the chat was archived'
 
 type Before = {
   was: string
-  mode: string
   busy: boolean
   parked: boolean
   archived: boolean
@@ -79,7 +78,7 @@ export class SessionEdits {
     let logged: { events: ServerEvent[]; seqs: number[] } | undefined
     const dismissed = await this.deps.sql.begin(async (tx) => {
       const [before] = await tx<Before[]>`
-        SELECT status AS was, mode, archived_at IS NOT NULL AS archived,
+        SELECT status AS was, archived_at IS NOT NULL AS archived,
                -- A turn holds it: a classic claim, or a durable session's running or waiting status.
                (turn_id IS NOT NULL OR status IN ('running', 'waiting_approval', 'waiting_input')) AS busy,
                (EXISTS (SELECT 1 FROM ai_approvals WHERE session_id = ${id} AND decision IS NULL)
@@ -112,7 +111,7 @@ export class SessionEdits {
                updated_at = now()
          WHERE id = ${id}`
       // Told inside the transaction: a workflow that cannot be told leaves the row as it was.
-      if (done && before.mode !== 'classic' && before.was !== 'done') await this.deps.endDurable(id)
+      if (done && before.was !== 'done') await this.deps.endDurable(id)
       // Its warm process on every replica goes with it (spec 2026-10-13 §5.3, warmEvict.ts): sent on commit.
       if ((done && before.was !== 'done') || (archive && !before.archived)) await notifyWarmEvict(tx, id)
       const events: ServerEvent[] = []

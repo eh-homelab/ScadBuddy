@@ -28,7 +28,7 @@ import { roleParts } from '../src/runtime/role.js'
 import { SessionBlobs } from '../src/sessions/blobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
 import { forgetSubject } from '../src/sessions/forget.js'
-import { resolveTabWaits, type SessionManager, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
+import { resolveTabWaits, type SessionManager } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { wireRuntimeSync } from '../src/sessions/runtimeSync.js'
 import { TurnHost } from '../src/sessions/turnHost.js'
@@ -38,7 +38,7 @@ import { acquireActivities, liveHostQueues, releaseActivities } from '../src/tem
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
 import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
-import { SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, sessionHostQueue, UNIFIED_SESSIONS_SETTING } from '../src/temporal/session/names.js'
+import { SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, sessionHostQueue } from '../src/temporal/session/names.js'
 import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
 import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
@@ -125,7 +125,6 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
     fake = await startFakeAnthropic((r) => script(r))
     ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(true)})`
     payloadDir = await mkdtemp(join(tmpdir(), 'agent-role-payloads-'))
     keys = testPayloadKeys(db.sql)
     dataConverter = subjectDataConverter(keys, new FilePayloadStore(payloadDir))
@@ -188,7 +187,7 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
       sql: pool.sql,
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-agent-role-test-token' }),
-      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === SETTING_SESSION_MODE ? 'durable' : undefined) as T) },
+      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       // A browser call as the browser_* tools make it (tools/browser.ts): through this process's hub, for the turn's
       // session; one that finds no tab waits for it on the turn's gate, and is made once more when it is back.
       mcpServers: (session, _principal, extras) => ({
@@ -322,7 +321,6 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
 
   async function startOn(p: AgentProcess, prompt: string) {
     const started = await p.m.start(browser, { origin: 'chat', prompt })
-    expect(started.modeFallback).toBeUndefined()
     return { id: started.session.id, turn: started.turn! }
   }
   const settled = (id: string) => pollUntil(() => client.workflow.getHandle(sessionWorkflowId(id)).query<string | null>('turn'), null)

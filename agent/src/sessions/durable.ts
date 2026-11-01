@@ -15,7 +15,7 @@ import type { FlowTurn } from '../tools/registry.js'
 import { DurableGate, DurableUnavailable, sessionWorkflowId } from '../gate/durable.js'
 import { TASK_QUEUE } from '../temporal/names.js'
 import { liveHostQueues } from '../temporal/session/affinity.js'
-import { SESSION_QUEUE, UNIFIED_SESSIONS_SETTING, SESSION_WORKFLOW } from '../temporal/session/names.js'
+import { SESSION_QUEUE, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
 import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow } from './durableSweep.js'
 import { cancelOrphanedEntries } from '../gate/sweep.js'
@@ -52,11 +52,13 @@ import { event, type Owner, type SentImage, type SessionStatus } from './protoco
 // - handoff: after the owner change is committed, `cancel_input`, best-effort; when
 //   it goes unanswered the `interrupt` Signal ends the parked calls (and the turn).
 //
-// Which workflow runs a session is its `runtime` column, fixed by its first send (unified
-// runtime spec 2026-10-13 §5.1): the setting `unified_sessions = true` starts a NEW
-// session's workflow as AgentSession on `agent-sessions`; every other session, and every one
-// that has run a turn already, is a DurableSession on `agent`, for life. The gate calls, the
-// Updates after the first and the signals are by workflow id, the same for both types.
+// Which workflow runs a session is its `runtime` column (unified runtime spec 2026-10-13
+// §5.1, plan Step 6.3). Every session is an AgentSession on `agent-sessions`: a new one gets
+// `unified` at insert, and a session that has run no DurableSession turn gets it at its first
+// send, a classic one too (its transcript is in ai_session_entries, which the turn resumes).
+// A session whose DurableSession has run a turn (`durable_offset` > 0) keeps going to that
+// workflow, for life, until Step 7.2. The gate calls, the Updates after the first and the
+// signals are by workflow id, the same for both types.
 //
 // The wire shapes are agent-durable's session/models.py (`SessionStart`, `Message`,
 // `ImageRef`, `Owner`). No prompt, image or tool content is logged or traced here.
@@ -206,6 +208,8 @@ export type DurableTurnsDeps = {
   cancelTimeoutMs?: number
   /** Tests only: how Stop describes a gone workflow (default durableDescriber). */
   describe?: DescribeSession
+  /** Run when a Stop ended a lost turn: what a classic one left parked (SessionManager.endClassicLeftovers). */
+  ended?: (sessionId: string) => Promise<unknown>
 }
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
@@ -224,6 +228,7 @@ export class DurableTurns {
   readonly #sql: Sql
   readonly #events: EventLog
   readonly #audit: AuditSink | undefined
+  readonly #ended: ((sessionId: string) => Promise<unknown>) | undefined
   readonly #gate: DurableGate
   readonly #blobs: SessionBlobs
   readonly #taskQueue: string
@@ -239,6 +244,7 @@ export class DurableTurns {
     this.#sql = deps.sql
     this.#events = deps.events
     this.#audit = deps.audit
+    this.#ended = deps.ended
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
     this.#blobs = new SessionBlobs(deps.sql)
     this.#taskQueue = deps.taskQueue ?? DURABLE_TASK_QUEUE
@@ -247,12 +253,6 @@ export class DurableTurns {
     this.#liveHosts = deps.liveHosts ?? (() => liveHostQueues(deps.client))
     this.#sendTimeoutMs = deps.sendTimeoutMs ?? 10_000
     this.#describe = deps.describe ?? durableDescriber(deps.client)
-  }
-
-  /** The runtime a session that has run nothing would get at its first send: the `unified_sessions` flag (spec 2026-10-13 §5.1). */
-  async newRuntime(): Promise<SessionRuntime> {
-    const [row] = await this.#sql<{ value: unknown }[]>`SELECT value FROM ai_settings WHERE key = ${UNIFIED_SESSIONS_SETTING}`
-    return row?.value === true ? 'unified' : 'durable'
   }
 
   /**
@@ -330,15 +330,17 @@ export class DurableTurns {
     // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
     // `archived_at` is tested here too: an archive that commits after the manager's check
     // must not let a turn start on a chat the panel no longer lists (#2118).
-    // The runtime is recorded by the first send: the flag for a session that has run nothing, else DurableSession.
-    const flagged = (await this.newRuntime()) === 'unified'
+    // The runtime is recorded by the first send: AgentSession for a session whose DurableSession
+    // ran nothing, else that DurableSession. Any mode: a classic session goes on as an
+    // AgentSession, once a classic turn still running on an older replica has let its lease go.
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string; runtime: SessionRuntime }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
-       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(),
-         interrupt_requested = false,
-         runtime = coalesce(runtime, CASE WHEN prior.durable_offset = 0 AND $6::boolean THEN 'unified' ELSE 'durable' END)
+       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(), turn_started_at = now(),
+         interrupt_requested = false, turn_id = NULL, lease_until = NULL,
+         runtime = coalesce(runtime, CASE WHEN prior.durable_offset = 0 THEN 'unified' ELSE 'durable' END)
        FROM prior
-       WHERE id = $1 AND mode = 'durable' AND owner_kind = $2 AND owner_id = $3
+       WHERE id = $1 AND owner_kind = $2 AND owner_id = $3
+         AND (turn_id IS NULL OR lease_until <= now())
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
          AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
        RETURNING prior.prior_status, prior.durable_offset, ai_sessions.runtime`,
@@ -350,7 +352,6 @@ export class DurableTurns {
         turn.tiers ? this.#sql.json({ by: { kind: turn.author.kind, id: turn.author.id }, tiers: [...turn.tiers] }) : null,
         // The running turn (#2320).
         turn.turnId,
-        flagged,
       ],
     )
     if (!claimed) return undefined
@@ -660,6 +661,7 @@ export class DurableTurns {
     // waiting on a claim this ends.
     if (state !== 'closed' && !row.settled) return false
     const ended = await endLostTurn(this.#sql, this.#events, row, state)
+    if (ended) await this.#ended?.(row.id).catch(() => {})
     // A parked turn's entries (#4018): no run will resolve them now, so they are cancelled here
     // rather than left for PendingInputSweep's next look, ten minutes or more away.
     const cancelled = await cancelOrphanedEntries({ sql: this.#sql, events: this.#events, audit: this.#audit }, { sessionId: row.id })

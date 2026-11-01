@@ -22,7 +22,7 @@ import {
 } from '../../agent/chat/images'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
-import { isDone, type SessionMode } from '../../agent/chat/protocol'
+import { isDone } from '../../agent/chat/protocol'
 import { askedBy, isBusy, isOwnedByBrowser, type SessionPatch, type SessionState } from '../../agent/chat/state'
 import { feedBlocks, toolStatus } from '../../agent/chat/toolGroups'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
@@ -40,8 +40,7 @@ import { Label } from '@/components/ui/label'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { Toggle } from '@/components/ui/toggle'
-import { DurableBadge, OriginBadge } from './badges'
-import { SessionModePicker } from './SessionModePicker'
+import { OriginBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
 import { ToolGroup } from './ToolGroup'
 import { BudgetMeter, BudgetSpent, usd } from './SessionBudget'
@@ -152,18 +151,6 @@ function readAdvanced(): boolean {
   }
 }
 
-/** Plan 5d — the composer's last picked session mode, remembered per browser (spec §6.1). */
-export const SESSION_MODE_KEY = 'scadbuddy.assistant.mode'
-
-function readSessionMode(): SessionMode | '' {
-  try {
-    const stored = window.localStorage.getItem(SESSION_MODE_KEY)
-    return stored === 'classic' || stored === 'durable' ? stored : ''
-  } catch {
-    return ''
-  }
-}
-
 export function AssistantChat({
   factory,
   onClose,
@@ -235,17 +222,6 @@ export function AssistantChat({
       }
       return next
     })
-  }
-  // Plan 5d — the mode a new chat asks for; '' sends none, so the agent's default applies.
-  const [sessionMode, setSessionMode] = useState<SessionMode | ''>(readSessionMode)
-  function pickSessionMode(next: SessionMode | '') {
-    setSessionMode(next)
-    try {
-      if (next) window.localStorage.setItem(SESSION_MODE_KEY, next)
-      else window.localStorage.removeItem(SESSION_MODE_KEY)
-    } catch {
-      // Private mode or blocked storage: the choice still holds for this page.
-    }
   }
   const composer = useRef<HTMLTextAreaElement>(null)
   const heading = useRef<HTMLHeadingElement>(null)
@@ -470,12 +446,7 @@ export function AssistantChat({
     speech.arm()
     const { tools, dialogs, page } = bridge.snapshot()
     const images = attachedNow.current.map((a) => ({ kind: 'attachment' as const, id: a.id }))
-    chat.send(
-      text,
-      pageContext(pathname, { tools, dialogs, page }),
-      images.length ? images : undefined,
-      sessionMode || undefined,
-    )
+    chat.send(text, pageContext(pathname, { tools, dialogs, page }), images.length ? images : undefined)
     writeDraft('')
     writeAttached([])
     setImageErrors([])
@@ -586,7 +557,6 @@ export function AssistantChat({
     }
   }
   const hasReply = lastReply !== undefined
-  const durable = active?.mode === 'durable'
   const parent = active?.parentId ? state.sessions[active.parentId] : undefined
 
   const prompts = suggestedPrompts(pathname)
@@ -729,7 +699,6 @@ export function AssistantChat({
             </span>
           </Tip>
           <OriginBadge origin={active.origin} />
-          {durable && <DurableBadge />}
           {archived && <Badge variant="secondary">Archived</Badge>}
           <span className="text-muted-foreground" data-testid="agent-status">
             {statusLabel(active.status)}
@@ -848,12 +817,6 @@ export function AssistantChat({
           {forkError?.session === active.id && (
             <p role="alert" className="w-full text-warn">
               The chat was not forked: {forkError.message}
-            </p>
-          )}
-          {active.modeFallback && (
-            // Plan 5d — the default asked for durable, and it could not run.
-            <p className="w-full text-[11.5px] text-muted-foreground" data-testid="session-mode-fallback">
-              Running as Classic, since durable sessions cannot start now: {active.modeFallback}
             </p>
           )}
           {!owned && (
@@ -1047,7 +1010,6 @@ export function AssistantChat({
             ))}
           </ul>
         )}
-        {!active && <SessionModePicker value={sessionMode} onChange={pickSessionMode} />}
         {active && archived && (
           <div className="mb-1.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <p id={archivedNoteId} className="min-w-0 flex-1">

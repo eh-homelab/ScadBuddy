@@ -50,15 +50,6 @@ export function OriginBadge({ origin }: { origin: Origin }) {
   )
 }
 
-/** Plan 5d — a session that runs as a durable Temporal workflow (spec §6.1). */
-export function DurableBadge() {
-  return (
-    <Pill className="border-primary/50 text-primary" title="Runs as a durable workflow: a turn survives a restart of the assistant">
-      Durable
-    </Pill>
-  )
-}
-
 /**
  * #1284 — a session its owner has offered to another principal: nothing has moved
  * until that principal accepts (agent sessions/manager.ts `handoff`).

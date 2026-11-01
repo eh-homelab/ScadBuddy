@@ -258,10 +258,9 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
       await env.client.workflow.getHandle(sessionWorkflowId(live.sessionId)).terminate('test')
     }, 60_000)
 
-    it('a durable id for a classic session, an unknown session or a malformed id is stale', async () => {
-      const { m, sessionId } = await durableSession()
-      await db.sql`UPDATE ai_sessions SET mode = 'classic' WHERE id = ${sessionId}`
-      for (const id of [durableRequestId(sessionId, 'run-1', 'toolu_1'), durableRequestId(randomUUID(), 'r', 't'), 'durable:x:y:z', 'flow:a:b:c']) {
+    it('a durable id for an unknown session or a malformed id is stale', async () => {
+      const { m } = await durableSession()
+      for (const id of [durableRequestId(randomUUID(), 'r', 't'), 'durable:x:y:z', 'flow:a:b:c']) {
         const err = await respond(m, BROWSER_USER, id, { kind: 'approval', decision: 'deny' }).catch((e: unknown) => e)
         expect(err, id).toBeInstanceOf(RespondError)
         expect((err as RespondError).status, id).toBe(404)

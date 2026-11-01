@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -26,12 +27,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await drop()
     })
 
-    it('answers only for a durable session, and a session is classic unless made durable', async () => {
+    it('answers for every session, a classic one an earlier release left included (plan Step 6.3)', async () => {
       const m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
       const { session } = await m.start(browser, { origin: 'chat', title: 't' })
       const owners = new PgSessionOwners(db.sql)
-      expect(await owners.ownerOf(session.id)).toBeUndefined()
-      await db.sql`UPDATE ai_sessions SET mode = 'durable' WHERE id = ${session.id}`
+      expect(await owners.ownerOf(randomUUID())).toBeUndefined()
+      expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null })
+      await db.sql`UPDATE ai_sessions SET mode = 'classic', runtime = NULL WHERE id = ${session.id}`
       expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null })
       // The tiers its current turn was sent with (#2320), only while the sender owns it.
       const sent = (by: { kind: string; id: string }, tiers: string[]) =>

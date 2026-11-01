@@ -12,8 +12,10 @@ import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
 import { loadDoneSummary } from '../src/questions/doneSummary.js'
 import { ATTENTION_RATE_LIMIT, ATTENTION_RATE_WINDOW_S, DONE_POSTS_PER_TURN, PENDING_CAP, TAB_WAIT_RATE_LIMIT } from '../src/questions/service.js'
-import { pendingInput } from '../src/routes/pendingInput.js'
-import { CLAIMED_AT, resolveTabWaits, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
+import { pendingInput, respond } from '../src/routes/pendingInput.js'
+import { ASK_USER, TIMEOUT_MIN_S, WAIT_FOR_USER } from '../src/gate/entry.js'
+import { TAB_WAIT_CALL } from '../src/sessions/attentionGate.js'
+import { CLAIMED_AT, resolveTabWaits, runningDurableTurn, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
 import { browserTools } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
@@ -24,6 +26,7 @@ import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // Attention requests (#815) at the question gate, in Postgres: parked as an
 // `ai_questions` row of kind 'attention', answered like a question, and timed
@@ -38,10 +41,15 @@ const input = (over: Record<string, unknown> = {}) => {
 
 const TAB = 'tab-aaaaaaaaaaaaaaaaaaaaaa'
 
+/** The shortest timer an AgentSession's entry takes (gate/entry.ts TIMEOUT_MIN_S), and a test that waits on it. */
+const SHORT_S = TIMEOUT_MIN_S
+const LONG_MS = 60_000
+
 const answer = (sessionId: string, id: string, answers: string[]) =>
   ({ v: PROTOCOL_VERSION, type: 'question.answer', sessionId, id, answers }) as const
 
-describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention requests in Postgres${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}${AGENT_SESSIONS_SKIP}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let verdicts: QuestionVerdict[]
@@ -82,28 +90,55 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     return (await m.events.read(sessionId)).map((e) => e.event)
   }
 
-  async function pending(sessionId: string): Promise<string> {
+  /**
+   * An AgentSession's parked attention request (#5003): the request id of its gate entry
+   * (ai_pending_input), the one `toolUseId` names when given. Its timer is the workflow's, at
+   * least gate/entry.ts TIMEOUT_MIN_S.
+   */
+  async function parked(sessionId: string, toolUseId?: string): Promise<string> {
     let id: string | undefined
-    await expect.poll(async () => {
-      const [row] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE session_id = ${sessionId} AND outcome IS NULL`
-      id = row?.id
-      return id
-    }).toBeDefined()
+    await expect
+      .poll(
+        async () => {
+          const rows = await db.sql<{ request_id: string }[]>`
+            SELECT request_id FROM ai_pending_input WHERE session_id = ${sessionId} ORDER BY created_at`
+          id = rows.find((r) => toolUseId === undefined || r.request_id.endsWith(`:${toolUseId}`))?.request_id
+          return id
+        },
+        { timeout: 15_000 },
+      )
+      .toBeDefined()
     return id!
   }
+  /** The user's reply to an AgentSession's entry, through the respond route's seam. */
+  const reply = (m: SessionManager, requestId: string, choice: string) => respond(m, browser, requestId, { kind: 'answer', choice })
+  /** The user's own words in reply. */
+  const replyText = (m: SessionManager, requestId: string, text: string) => respond(m, browser, requestId, { kind: 'answer', text })
+  /** How an AgentSession's entry ended (ai_input_responses). */
+  /** How a done summary names an AgentSession's timed-out entry: its tool_use id's tail, in plain words (questions/doneSummary.ts). */
+  const shown = (requestId: string) => requestId.split(':').at(-1)!.slice(-8).replace(/_/g, ' ')
+  const ended = async (requestId: string) =>
+    (await db.sql<{ outcome: string; response: unknown; reason: string | null; responder: { kind: string } }[]>`
+      SELECT outcome, response, reason, responder FROM ai_input_responses WHERE request_id = ${requestId}`)[0]
 
   it('parks the turn in waiting_input as an attention card, and the user acknowledges it with a reply', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'render it in my tab' })
-    const id = await pending(session.id)
+    const id = await parked(session.id)
     await expect.poll(async () => (await m.get(session.id, browser)).status).toBe('waiting_input')
 
     const [row] = await db.sql`
-      SELECT kind, attention_reason, on_timeout, tool, extract(epoch FROM expires_at - created_at)::int AS window
-      FROM ai_questions WHERE id = ${id}`
-    expect(row).toEqual({ kind: 'attention', attention_reason: 'tab_disconnected', on_timeout: 'proceed', tool: ATTENTION_TOOL, window: 300 })
+      SELECT kind, tool, prompt, attention, extract(epoch FROM expires_at - created_at)::int AS window
+      FROM ai_pending_input WHERE request_id = ${id}`
+    expect(row).toEqual({
+      kind: 'answer',
+      tool: WAIT_FOR_USER,
+      prompt: 'The ScadBuddy tab closed; reopen it?',
+      attention: { reason: 'tab_disconnected', on_timeout: 'proceed' },
+      window: 300,
+    })
 
-    await m.questions.answer(browser, answer(session.id, id, ["I'm here"]))
+    expect(await reply(m, id, "I'm here")).toMatchObject({ outcome: 'answered' })
     await turn!.done
     expect(verdicts).toEqual([{ answered: true, answers: { 'The ScadBuddy tab closed; reopen it?': "I'm here" } }])
 
@@ -111,7 +146,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const asked = log.find((e) => e.type === 'question.asked')
     expect(asked).toMatchObject({
       id,
-      tool: 'toolu_a0',
       questions: [{ question: 'The ScadBuddy tab closed; reopen it?', header: 'Tab disconnected', options: [{ label: "I'm here" }, { label: 'Carry on without me' }] }],
       attention: { reason: 'tab_disconnected', onTimeout: 'proceed', expiresAt: expect.any(String) },
     })
@@ -121,13 +155,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
   it("is listed as pending for the badge while it waits, with its timer, and not once it is answered", async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ reason: 'blocked' }) }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    const id = await pending(session.id)
-    expect((await m.questions.listPending(browser)).questions).toEqual([
-      expect.objectContaining({ id, sessionId: session.id, kind: 'attention', attentionReason: 'blocked', onTimeout: 'proceed', expiresAt: expect.any(String) }),
+    const id = await parked(session.id)
+    expect((await pendingInput(m, browser)).entries).toEqual([
+      expect.objectContaining({ id, session_id: session.id, kind: 'answer', attention: { reason: 'blocked', on_timeout: 'proceed' }, expires_at: expect.any(String) }),
     ])
-    await m.questions.answer(browser, answer(session.id, id, ['Carry on without me']))
+    await reply(m, id, 'Carry on without me')
     await turn!.done
-    expect((await m.questions.listPending(browser)).questions).toEqual([])
+    expect((await pendingInput(m, browser)).entries).toEqual([])
   })
 
   // #1218: only a browser-owned session parks a request, and a handoff cancels
@@ -137,11 +171,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
     const mine = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const theirs = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    const myId = await pending(mine.session.id)
-    await pending(theirs.session.id)
+    const myId = await parked(mine.session.id)
+    await parked(theirs.session.id)
     await db.sql`UPDATE ai_sessions SET owner_kind = ${agentA.kind}, owner_id = ${agentA.id}, owner_label = ${agentA.label}
                  WHERE id = ${theirs.session.id}`
-    expect((await m.questions.listPending(browser)).questions.map((q) => q.id)).toEqual([myId])
+    expect((await pendingInput(m, browser)).entries.map((e) => e.id)).toEqual([myId])
     expect(await m.interrupt(mine.session.id, browser)).toBe(true)
     expect(await m.interrupt(theirs.session.id, agentA)).toBe(true)
     await Promise.all([mine.turn!.done, theirs.turn!.done])
@@ -150,14 +184,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
   // #815 §4: the timer never answers for the user, and never approves.
   it("on_timeout 'proceed': the timer resolves it as timed_out, never answered, and the turn goes on", async () => {
     const audit = new AuditLog({ sql: db.sql })
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: 0.3 }) }), approvalPollMs: 20, audit })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: SHORT_S }) }), approvalPollMs: 20, audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    const id = await pending(session.id)
+    const id = await parked(session.id)
     await turn!.done
 
     expect(verdicts).toEqual([{ answered: false, timedOut: true, message: expect.stringMatching(/nobody replied/) }])
-    const [row] = await db.sql`SELECT outcome, answers, answered_by_kind FROM ai_questions WHERE id = ${id}`
-    expect(row).toEqual({ outcome: 'timed_out', answers: null, answered_by_kind: null })
+    // Never answered, by nobody: the timer is ScadBuddy's.
+    expect(await ended(id)).toMatchObject({ outcome: 'timed_out', response: null, responder: { kind: 'system' } })
     const log = await events(m, session.id)
     const resolved = log.find((e) => e.type === 'question.resolved')
     expect(resolved).toMatchObject({ id, answered: false, reason: expect.stringMatching(/proceed/) })
@@ -170,31 +204,30 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(await db.sql`SELECT action, surface, principal_kind, outcome FROM ai_audit WHERE kind = 'question'`).toEqual([
       { action: 'timed_out', surface: 'system', principal_kind: 'system', outcome: 'refused' },
     ])
-  })
+  }, LONG_MS)
 
   it("on_timeout 'stop': the timer ends the turn as an interrupt does", async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ onTimeout: 'stop', timeoutS: 0.3 }) }), approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ onTimeout: 'stop', timeoutS: SHORT_S }) }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    const id = await pending(session.id)
+    const id = await parked(session.id)
     await turn!.done
 
     expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/did not reply.*on_timeout: stop.*turn ends/) }])
-    const [row] = await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`
-    expect(row).toEqual({ outcome: 'timed_out' })
+    expect(await ended(id)).toMatchObject({ outcome: 'timed_out' })
     const log = await events(m, session.id)
-    expect(log.find((e) => e.type === 'question.resolved')).toMatchObject({ id, answered: false, reason: expect.stringMatching(/on_timeout: stop/) })
+    expect(log.find((e) => e.type === 'question.resolved')).toMatchObject({ id, answered: false })
     // #1206: the panel is told the timer ended it, not that the user stopped it.
     expect(log.find((e) => e.type === 'error')).toMatchObject({
       code: 'interrupted',
-      message: expect.stringMatching(/^the turn ended: nobody replied to the attention request in 0\.3 s \(on_timeout: stop\)$/),
+      message: expect.stringMatching(new RegExp(`^the turn ended: nobody replied to the attention request in ${SHORT_S} s \\(on_timeout: stop\\)$`)),
     })
     expect((await m.get(session.id, browser)).status).toBe('idle')
-  })
+  }, LONG_MS)
 
   // #1352: the timer and the abort are armed before the reconnect check, so a check that hangs cannot stall the call.
   it('a reconnect check that never returns still times out, and an interrupt still ends the wait', async () => {
     const hangs = () => new Promise<void>(() => undefined)
-    const timed = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: 0.3, onParked: hangs }) }), approvalPollMs: 20 })
+    const timed = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: SHORT_S, onParked: hangs }) }), approvalPollMs: 20 })
     const first = await timed.start(browser, { origin: 'chat', prompt: 'go' })
     await first.turn!.done
     expect(verdicts).toEqual([{ answered: false, timedOut: true, message: expect.stringMatching(/nobody replied/) }])
@@ -202,16 +235,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     verdicts = []
     const stopped = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ onParked: hangs }) }), approvalPollMs: 20 })
     const second = await stopped.start(browser, { origin: 'chat', prompt: 'go' })
-    await pending(second.session.id)
+    await parked(second.session.id)
     expect(await stopped.interrupt(second.session.id, browser)).toBe(true)
     await second.turn!.done
     expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/did not answer/) }])
-  })
+  }, LONG_MS)
 
-  // The check runs beside the wait, not before it: the row resolving ends the wait at once, however long the check takes.
+  // The check runs beside the wait, not before it: the entry ending ends the wait at once, however long the check takes.
   it('a reply or a reconnect ends the wait at once while the reconnect check still hangs', async () => {
     const hangs = () => new Promise<void>(() => undefined)
-    const started = performance.now()
     const m = manager({
       sql: db.sql,
       paths: await tempPaths(),
@@ -219,58 +251,28 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       approvalPollMs: 5_000,
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    const first = await pending(session.id)
-    await m.questions.answer(browser, answer(session.id, first, ['Done']))
-    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL AND id <> ${first}`).length).toBe(1)
-    expect(await m.questions.reconnected(session.id)).toBe(1)
+    const first = await parked(session.id, 'toolu_a0')
+    const started = performance.now()
+    await replyText(m, first, 'Done')
+    await parked(session.id, 'toolu_a1')
+    expect(await m.durable!.tabReconnected(session.id)).toBe(1)
     await turn!.done
     expect(verdicts).toEqual([
       { answered: true, answers: { [attentionCard(input()).question]: 'Done' } },
       { answered: false, reconnected: true, message: expect.any(String) },
     ])
-    // Neither the 300 s timer nor even one 5 s poll: wake() ended both waits.
+    // Neither the 300 s timer nor even one 5 s poll: the row's end ended both waits.
     expect(performance.now() - started).toBeLessThan(5_000)
-  })
-
-  // #1394: the wait's own row read can see the row before the commit that resolves it; the wake() that commit
-  // sends must not be lost while that read is in flight, or the wait sleeps a whole poll (here an hour).
-  it('a wake that lands while the wait reads its row ends the wait at once, not after a poll', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 3_600_000 })
-    const service = m.questions as unknown as { row(id: string): Promise<unknown> }
-    const real = service.row.bind(service)
-    let reading!: () => void
-    const inRead = new Promise<void>((resolve) => (reading = resolve))
-    let release!: () => void
-    const held = new Promise<void>((resolve) => (release = resolve))
-    let first = true
-    vi.spyOn(service, 'row').mockImplementation(async (id) => {
-      const row = await real(id)
-      // Hold only the wait's read of its still-pending row (#1410): any other row() call
-      // that came first would otherwise take the hold and leave the test proving nothing.
-      if (first && (row as { outcome: unknown } | undefined)?.outcome === null) {
-        // The row as read before the answer commits: still pending.
-        first = false
-        reading()
-        await held
-      }
-      return row
-    })
-    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    await inRead
-    await m.questions.answer(browser, answer(session.id, await pending(session.id), ['Done']))
-    release()
-    await turn!.done
-    expect(verdicts).toEqual([{ answered: true, answers: { [attentionCard(input()).question]: 'Done' } }])
   })
 
   it('an interrupt cancels it like a question: nothing is answered and nothing times out', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    const id = await pending(session.id)
+    const id = await parked(session.id)
     expect(await m.interrupt(session.id, browser)).toBe(true)
     await turn!.done
     expect(verdicts).toEqual([{ answered: false, message: expect.stringMatching(/did not answer/) }])
-    expect((await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`)[0]).toEqual({ outcome: 'cancelled' })
+    await expect.poll(async () => (await ended(id))?.outcome).toBe('cancelled')
   })
 
   // #815 §5: one open request per session per reason; a new one replaces the last.
@@ -280,11 +282,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         await Promise.resolve()
         const ask = (toolUseId: string, s: AttentionSpec) =>
           run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId, signal: new AbortController().signal, attention: s })
+        const open = async () => (await db.sql`SELECT 1 FROM ai_pending_input`).length
         const first = ask('toolu_1', spec())
-        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
-        const other = ask('toolu_2', spec({ reason: 'blocked', timeoutS: 0.3 }))
-        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(2)
-        const second = ask('toolu_3', spec({ timeoutS: 0.3 }))
+        await expect.poll(open, { timeout: 15_000 }).toBe(1)
+        const other = ask('toolu_2', spec({ reason: 'blocked', timeoutS: SHORT_S }))
+        await expect.poll(open, { timeout: 15_000 }).toBe(2)
+        const second = ask('toolu_3', spec({ timeoutS: SHORT_S }))
         verdicts.push(await first, await other, await second)
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
@@ -296,13 +299,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       { answered: false, timedOut: true, message: expect.any(String) },
       { answered: false, timedOut: true, message: expect.any(String) },
     ])
-    const rows = await db.sql`SELECT tool_use_id, outcome FROM ai_questions WHERE session_id = ${session.id} ORDER BY created_at`
-    expect(rows).toEqual([
+    const rows = await db.sql<{ request_id: string; outcome: string; reason: string | null }[]>`
+      SELECT request_id, outcome, reason FROM ai_input_responses WHERE session_id = ${session.id} ORDER BY requested_at`
+    expect(rows.map((r) => ({ tool_use_id: r.request_id.split(':').at(-1), outcome: r.outcome }))).toEqual([
       { tool_use_id: 'toolu_1', outcome: 'cancelled' },
       { tool_use_id: 'toolu_2', outcome: 'timed_out' },
       { tool_use_id: 'toolu_3', outcome: 'timed_out' },
     ])
-  })
+    expect(rows[0]!.reason).toBe('replaced by a newer request for the same reason')
+  }, LONG_MS)
 
   // #815 §4: the done summary is posted, never waited on, and outlives its turn.
   const DONE = 'Rendered the sign headlessly; the plate still needs your tab.'
@@ -363,7 +368,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         await touch(sessionId, 'before')
         const card = attentionCard(input())
         verdicts.push(
-          await run.questionGate!({ tool: ATTENTION_TOOL, questions: [card], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+          await run.questionGate!({ tool: ATTENTION_TOOL, questions: [card], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: SHORT_S }) }),
         )
         await touch(sessionId, 'unattended')
         verdicts.push(await postDone(run))
@@ -373,13 +378,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
     expect(verdicts).toEqual([{ answered: false, timedOut: true, message: expect.any(String) }, { answered: false, posted: true, message: 'posted' }])
-    const [timedOut] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome = 'timed_out'`
+    const [timedOut] = await db.sql<{ request_id: string }[]>`
+      SELECT request_id FROM ai_input_responses WHERE session_id = ${session.id} AND outcome = 'timed_out'`
     const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
     expect(done!.summary).toBe(
-      `**While nobody answered (attention request ${timedOut!.id.slice(0, 8)} timed out)**\n- created preset \`unattended\` of \`sign\` (\`save_preset\`)` +
+      `**While nobody answered (attention request ${shown(timedOut!.request_id)} timed out)**\n- created preset \`unattended\` of \`sign\` (\`save_preset\`)` +
         '\n\n**Before you were asked**\n- created preset `before` of `sign` (`save_preset`)',
     )
-  })
+  }, LONG_MS)
 
   it('a second timeout after the user replied opens a second unattended window', async () => {
     const twice = (run: HarnessRun): AsyncIterable<SDKMessage> =>
@@ -387,48 +393,43 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         await Promise.resolve()
         const ask = (toolUseId: string, s: AttentionSpec) =>
           run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId, signal: new AbortController().signal, attention: s })
-        verdicts.push(await ask('toolu_a', spec({ timeoutS: 0.3 })))
+        verdicts.push(await ask('toolu_a', spec({ timeoutS: SHORT_S })))
         verdicts.push(await ask('toolu_b', spec())) // the user answers this one
-        verdicts.push(await ask('toolu_c', spec({ timeoutS: 0.3 })))
+        verdicts.push(await ask('toolu_c', spec({ timeoutS: SHORT_S })))
         await touch(run.sessionId ?? run.resume!, 'unattended')
         verdicts.push(await postDone(run))
         yield result(run)
       })()
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice, approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    let b: string | undefined
-    await expect.poll(async () => {
-      const [row] = await db.sql<{ id: string }[]>`
-        SELECT id FROM ai_questions WHERE session_id = ${session.id} AND tool_use_id = 'toolu_b' AND outcome IS NULL`
-      b = row?.id
-      return b
-    }).toBeDefined()
-    await m.questions.answer(browser, answer(session.id, b!, ["I'm here"]))
+    const b = await parked(session.id, 'toolu_b')
+    await replyText(m, b, "I'm here")
     await turn!.done
-    const timedOut = await db.sql<{ id: string }[]>`
-      SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome = 'timed_out' ORDER BY created_at`
+    const timedOut = await db.sql<{ request_id: string }[]>`
+      SELECT request_id FROM ai_input_responses WHERE session_id = ${session.id} AND outcome = 'timed_out' ORDER BY requested_at`
     expect(timedOut).toHaveLength(2)
     const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
     expect(done!.summary).toBe(
-      `**While nobody answered (attention requests ${timedOut[0]!.id.slice(0, 8)}, ${timedOut[1]!.id.slice(0, 8)} timed out)**\n` +
+      `**While nobody answered (attention requests ${shown(timedOut[0]!.request_id)}, ${shown(timedOut[1]!.request_id)} timed out)**\n` +
         '- created preset `unattended` of `sign` (`save_preset`)',
     )
-  })
+  }, LONG_MS)
 
   it("the summary's turn start is the database's clock, not the agent's", async () => {
+    const working = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        await touch(run.sessionId ?? run.resume!, 'preset-1')
+        verdicts.push(await postDone(run))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: working, approvalPollMs: 20 })
+    // Started on the real clock: the check that a session worker polls reads Temporal's poller times by it.
+    const { session } = await m.start(browser, { origin: 'chat', title: 'render it' })
     // The agent's clock runs an hour ahead of Postgres's: a touch Postgres stamps during the turn is still this turn's.
     vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 3_600_000, shouldAdvanceTime: true })
     try {
-      const working = (run: HarnessRun): AsyncIterable<SDKMessage> =>
-        (async function* () {
-          await Promise.resolve()
-          await touch(run.sessionId ?? run.resume!, 'preset-1')
-          verdicts.push(await postDone(run))
-          yield result(run)
-        })()
-      const m = manager({ sql: db.sql, paths: await tempPaths(), run: working, approvalPollMs: 20 })
-      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'render it' })
-      await turn!.done
+      await (await m.send(session.id, browser, 'render it')).done
       const [done] = await db.sql<{ summary: string }[]>`SELECT summary FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
       expect(done!.summary).toBe('**What this turn changed**\n- created preset `preset-1` of `sign` (`save_preset`)')
     } finally {
@@ -640,69 +641,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(done.summary).toBe('**What this turn changed**\n- created preset `resumed` of `sign` (`save_preset`)')
   })
 
-  /** A session whose turn A timed out a request, worked unattended, and parked an outward call before it was lost. */
-  async function parkedOrphan(m: SessionManager) {
-    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
-    const a = '00000000-0000-4000-8000-000000000201'
-    await timedOut(session.id, a, 10)
-    await touchedAt(session.id, 'unattended', 20)
-    await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
-    const approval = await m.approvals.create({
-      sessionId: session.id,
-      turnId: a,
-      toolUseId: 'toolu_out',
-      tool: 'mcp__stub__print',
-      input: { job: 'box.3mf' },
-      tier: 'outward',
-      requestedBy: browser,
-    })
-    return { session, approval }
-  }
-
-  // #1416: the real path, not a hand-made resume_turn_id: the user approves the orphan, resumeApproved
-  // starts turn B, and B's done summary carries A's unattended record.
-  it("approving a parked turn's orphan resumes a turn whose done summary keeps the parked turn's unattended record", async () => {
-    const resumed = (run: HarnessRun): AsyncIterable<SDKMessage> =>
-      (async function* () {
-        await Promise.resolve()
-        await touch(run.sessionId ?? run.resume!, 'resumed')
-        verdicts.push(await postDone(run))
-        yield result(run)
-      })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: resumed, approvalPollMs: 20 })
-    const { session, approval } = await parkedOrphan(m)
-    await m.approvals.decide(browser, approval.id, true)
-    let done: { summary: string; unattended: boolean; turn_id: string } | undefined
-    await expect.poll(async () => {
-      ;[done] = await db.sql<{ summary: string; unattended: boolean; turn_id: string }[]>`
-        SELECT summary, unattended, turn_id FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done'`
-      return done
-    }).toBeDefined()
-    await expect.poll(async () => (await m.get(session.id, browser)).status).toBe('idle')
-    expect(verdicts).toEqual([{ answered: false, posted: true, message: 'posted' }])
-    const [bound] = await db.sql<{ resume_turn_id: string }[]>`SELECT resume_turn_id FROM ai_approvals WHERE id = ${approval.id}`
-    expect(done!.turn_id).toBe(bound!.resume_turn_id)
-    expect(done!.unattended).toBe(true)
-    expect(done!.summary.split('\n\n')).toEqual([
-      expect.stringMatching(/^\*\*While nobody answered[^\n]*\*\*\n- created preset `unattended` of `sign` \(`save_preset`\)$/),
-      '**After you replied**\n- created preset `resumed` of `sign` (`save_preset`)',
-    ])
-  })
-
-  // #1409: the resumed summary reads touches from the parked turn's first window on, by time. That is sound
-  // only because no other turn can run between the parked turn's end and its resume: a new turn cancels the
-  // orphan, so the approval can no longer be decided and nothing is resumed.
-  it("a turn started before the orphan is decided cancels it, so no resumed turn reports that turn's work", async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising(), approvalPollMs: 20 })
-    const { session, approval } = await parkedOrphan(m)
-    const between = await m.send(session.id, browser, 'never mind, do something else')
-    await between.done
-    await expect(m.approvals.decide(browser, approval.id, true)).rejects.toMatchObject({ code: 'conflict' })
-    const [row] = await db.sql`SELECT decision, reason, resume_turn_id FROM ai_approvals WHERE id = ${approval.id}`
-    expect(row).toEqual({ decision: 'cancelled', reason: 'superseded by a new turn', resume_turn_id: null })
-    expect((await events(m, session.id)).filter((e) => e.type === 'user.turn')).toHaveLength(1)
-  })
-
   it('undismissed done summaries do not push a request a turn is parked on off the pending list', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ reason: 'blocked' }) }), approvalPollMs: 20 })
     const { session: old } = await m.start(browser, { origin: 'chat', title: 'old' })
@@ -712,11 +650,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
              now() - interval '1 day' + i * interval '1 second'
       FROM generate_series(1, ${PENDING_CAP}) AS i`
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    const id = await pending(session.id)
-    const listed = (await m.questions.listPending(browser)).questions
-    expect(listed[0]).toMatchObject({ id, attentionReason: 'blocked' })
-    expect(listed.filter((q) => q.attentionReason === 'done')).toHaveLength(PENDING_CAP)
-    await m.questions.answer(browser, answer(session.id, id, ['Carry on without me']))
+    const id = await parked(session.id)
+    const listed = (await pendingInput(m, browser)).entries
+    expect(listed).toContainEqual(expect.objectContaining({ id, attention: { reason: 'blocked', on_timeout: 'proceed' } }))
+    expect(listed.filter((e) => e.attention?.reason === 'done')).toHaveLength(PENDING_CAP)
+    await reply(m, id, 'Carry on without me')
     await turn!.done
   })
 
@@ -760,7 +698,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         await Promise.resolve()
         if (n === 0) {
           verdicts.push(
-            await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+            await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: SHORT_S }) }),
           )
           await touch(run.sessionId ?? run.resume!, 'unattended')
         }
@@ -775,14 +713,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(done.map((q) => q.toolUseId)).toEqual(['toolu_done1', 'toolu_done0'])
     expect(done[1]!.summary).toContain('created preset `unattended`')
     expect(await db.sql`SELECT unattended FROM ai_questions WHERE session_id = ${session.id} AND tool_use_id = 'toolu_done0'`).toEqual([{ unattended: true }])
-  })
+  }, LONG_MS)
 
   it("one turn's repeated done posts keep only its latest, unattended record or not", async () => {
     const repeat = (run: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
         await Promise.resolve()
         verdicts.push(
-          await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+          await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: SHORT_S }) }),
         )
         await touch(run.sessionId ?? run.resume!, 'unattended')
         for (let i = 0; i < 3; i++) verdicts.push(await postDone(run, `toolu_done${i}`))
@@ -794,7 +732,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done' AND outcome IS NULL`).toEqual([
       { tool_use_id: 'toolu_done2' },
     ])
-  })
+  }, LONG_MS)
 
   // #1383: a handoff cancels the session's waiting rows, not its done summary. The
   // badge lists only the owner's sessions (#1218), so it is off the browser's list
@@ -829,11 +767,36 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       await tx`SET LOCAL DateStyle = 'SQL, DMY'`
       await tx`SET LOCAL TimeZone = 'Asia/Kolkata'`
       const [row] = await tx.unsafe<{ claimed_at: string }[]>(
-        `SELECT ${CLAIMED_AT} FROM (SELECT timestamptz '2026-10-13 21:00:00.123456+00' AS updated_at) AS t`,
+        `SELECT ${CLAIMED_AT} FROM (SELECT timestamptz '2026-10-13 21:00:00.123456+00' AS turn_started_at, now() AS updated_at) AS t`,
       )
       expect(row?.claimed_at).toBe('2026-10-13T21:00:00.123456Z')
     })
   })
+
+  // #5050: each placement of a turn reads the session again (an activity retry, a continuation
+  // after a release), and every event and status change writes `updated_at`: the turn's start is
+  // its claim's, or a later placement's summary loses the windows and touches before it.
+  it("gives every placement of a turn the turn's claim time, not the row's last write", async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const waiting = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await held
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: waiting, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const [row] = await db.sql<{ turn: string; at: string }[]>`
+      SELECT durable_turn_id::text AS turn, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
+      FROM ai_sessions WHERE id = ${session.id}`
+    const first = (await runningDurableTurn(db.sql, session.id, row!.turn))!.session.claimedAt
+    await db.sql`UPDATE ai_sessions SET updated_at = now() + interval '1 minute' WHERE id = ${session.id}`
+    const later = (await runningDurableTurn(db.sql, session.id, row!.turn))!.session.claimedAt
+    release()
+    await turn!.done
+    expect(later).toBe(first)
+    expect(first <= row!.at).toBe(true)
+  }, LONG_MS)
 
   // #1383: done is outside the rate limit, so a model looping on it is capped per turn,
   // before it scans the turn's touches or writes anything.
@@ -877,7 +840,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
           // A request times out, but nothing is touched while nobody answers.
           await touch(run.sessionId ?? run.resume!, 'before')
           verdicts.push(
-            await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: 0.3 }) }),
+            await run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_tab', signal: new AbortController().signal, attention: spec({ timeoutS: SHORT_S }) }),
           )
         }
         verdicts.push(await postDone(run, `toolu_done${n++}`))
@@ -892,7 +855,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     await (await m.send(session.id, browser, 'two')).done
     const pendingDone = (await m.questions.listPending(browser)).questions.filter((q) => q.attentionReason === 'done')
     expect(pendingDone.map((q) => q.toolUseId)).toEqual(['toolu_done1'])
-  })
+  }, LONG_MS)
 
   it('whether an earlier done is kept follows its unattended flag, never its summary text', async () => {
     const posting = (run: HarnessRun): AsyncIterable<SDKMessage> =>
@@ -1011,7 +974,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
   })
 
   it('holds the rate limit across sessions raising at once: one parks, the other is refused', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: 0.3 }) }), approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: SHORT_S }) }), approvalPollMs: 20 })
     const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
     for (let i = 0; i < ATTENTION_RATE_LIMIT - 1; i++) {
       await db.sql`
@@ -1027,9 +990,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     await Promise.all([a.turn!.done, b.turn!.done])
     expect(verdicts.filter((v) => !v.answered && 'timedOut' in v && v.timedOut)).toHaveLength(1)
     expect(verdicts.filter((v) => !v.answered && /at most 10/.test(v.message))).toHaveLength(1)
-    const parked = await db.sql`SELECT 1 FROM ai_questions WHERE session_id IN (${a.session.id}, ${b.session.id})`
-    expect(parked).toHaveLength(1)
-  })
+    // One entry was opened, open or ended; the refused one never was.
+    const opened = await db.sql`
+      SELECT request_id FROM ai_pending_input WHERE session_id IN (${a.session.id}, ${b.session.id})
+      UNION SELECT request_id FROM ai_input_responses WHERE session_id IN (${a.session.id}, ${b.session.id})`
+    expect(opened).toHaveLength(1)
+  }, LONG_MS)
 
   it('a question cannot be timed out, by the schema itself', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
@@ -1068,8 +1034,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     })
     const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_approvals WHERE decision IS NULL`).length).toBe(1)
-    const attId = await pending(session.id)
+    const attId = await parked(session.id, 'toolu_a')
+    const approvalId = await parked(session.id, 'toolu_p')
     // A question parked in another of the user's sessions: also counted.
     const asker = (run: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
@@ -1085,29 +1051,32 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       })()
     const m2 = manager({ sql: db.sql, paths: await tempPaths(), run: asker, approvalPollMs: 20 })
     const { session: s2, turn: t2 } = await m2.start(browser, { origin: 'chat', prompt: 'ask' })
-    const qId = await pending(s2.id)
+    const qId = await parked(s2.id)
 
     expect((await app.request('/api/v1/ai/pending-input')).status).toBe(403)
     const response = await app.request('/api/v1/ai/pending-input', { headers: UI_READ })
     expect(response.status).toBe(200)
-    const { entries } = (await response.json()) as { entries: Record<string, unknown>[] }
+    const { entries: listed } = (await response.json()) as { entries: Record<string, unknown>[] }
+    // The list is by creation, and the turn opens its first two entries at once (#5051's CI saw
+    // either first): the session's attention request, its approval, then the other session's question.
+    const own = (e: Record<string, unknown>) => e.session_id === session.id
+    const entries = [...listed.filter(own).sort((x, y) => (x.kind === 'answer' ? -1 : 0) - (y.kind === 'answer' ? -1 : 0)), ...listed.filter((e) => !own(e))]
+    expect(listed.at(-1)).toMatchObject({ id: qId })
     expect(entries).toEqual([
-      expect.objectContaining({ id: `question:${attId}`, kind: 'answer', session_id: session.id, tool: ATTENTION_TOOL, prompt: 'Load the PETG, please', responders: ['browser'], expires_at: expect.any(String), attention: { reason: 'blocked', on_timeout: 'proceed' } }),
-      expect.objectContaining({ kind: 'approval', session_id: session.id, tool: 'mcp__stub__print', prompt: '', input_hash: expect.stringMatching(/^[0-9a-f]{64}$/), responders: ['browser', 'grant'] }),
-      expect.objectContaining({ id: `question:${qId}`, kind: 'answer', session_id: s2.id, tool: 'AskUserQuestion', prompt: 'Which colour?', expires_at: expect.any(String) }),
+      expect.objectContaining({ id: attId, kind: 'answer', session_id: session.id, tool: WAIT_FOR_USER, prompt: 'Load the PETG, please', responders: ['browser'], expires_at: expect.any(String), attention: { reason: 'blocked', on_timeout: 'proceed' } }),
+      expect.objectContaining({ id: approvalId, kind: 'approval', session_id: session.id, tool: 'mcp__stub__print', prompt: '', input_hash: expect.stringMatching(/^[0-9a-f]{64}$/), responders: ['browser', 'grant'] }),
+      expect.objectContaining({ id: qId, kind: 'answer', session_id: s2.id, tool: ASK_USER, prompt: 'Which colour?', expires_at: expect.any(String) }),
     ])
     expect(entries[1]).not.toHaveProperty('attention')
     // Never the outward call's raw input.
     expect(JSON.stringify(entries)).not.toContain('"job"')
 
-    await m.questions.answer(browser, answer(session.id, attId, ['Done, loaded']))
-    const approvalId = (await m.approvals.list(browser, { pending: true }))[0]!.id
-    await m.approvals.decide(browser, approvalId, false)
+    await replyText(m, attId, 'Done, loaded')
+    expect(await respond(m, browser, approvalId, { kind: 'approval', decision: 'deny' })).toMatchObject({ outcome: 'denied' })
     await turn!.done
     await m2.interrupt(s2.id, browser)
     await t2!.done
-    const after = (await (await app.request('/api/v1/ai/pending-input', { headers: UI_READ })).json()) as { entries: unknown[] }
-    expect(after.entries).toEqual([])
+    await expect.poll(async () => ((await (await app.request('/api/v1/ai/pending-input', { headers: UI_READ })).json()) as { entries: unknown[] }).entries).toEqual([])
   })
 
   // #815 §2: the session's tab coming back resolves its tab_disconnected request.
@@ -1118,35 +1087,28 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         const ask = (toolUseId: string, s: AttentionSpec) =>
           run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId, signal: new AbortController().signal, attention: s })
         const tab = ask('toolu_tab', spec())
-        const blocked = ask('toolu_blk', spec({ reason: 'blocked', timeoutS: 0.5 }))
+        const blocked = ask('toolu_blk', spec({ reason: 'blocked', timeoutS: SHORT_S }))
         verdicts.push(await tab, await blocked)
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
-    const audit = new AuditLog({ sql: db.sql })
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: both, approvalPollMs: 20, audit })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: both, approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(2)
-    expect(await m.questions.reconnected(session.id)).toBe(1)
-    expect(await m.questions.reconnected(session.id)).toBe(0)
+    const tabId = await parked(session.id, 'toolu_tab')
+    const blockedId = await parked(session.id, 'toolu_blk')
+    expect(await m.durable!.tabReconnected(session.id)).toBe(1)
+    expect(await m.durable!.tabReconnected(session.id)).toBe(0)
     await turn!.done
     expect(verdicts).toEqual([
       { answered: false, reconnected: true, message: 'the ScadBuddy tab is connected again' },
       { answered: false, timedOut: true, message: expect.any(String) },
     ])
-    const rows = await db.sql`SELECT tool_use_id, outcome, answers FROM ai_questions WHERE session_id = ${session.id} ORDER BY tool_use_id`
-    expect(rows).toEqual([
-      { tool_use_id: 'toolu_blk', outcome: 'timed_out', answers: null },
-      { tool_use_id: 'toolu_tab', outcome: 'reconnected', answers: null },
-    ])
+    // Reconnected is a cancel with `{reconnected: true}` (gate/entry.ts RECONNECTED_RESPONSE), by the system, never an answer.
+    expect(await ended(tabId)).toMatchObject({ outcome: 'cancelled', response: { reconnected: true }, responder: { kind: 'system' } })
+    expect(await ended(blockedId)).toMatchObject({ outcome: 'timed_out', response: null })
     const log = await events(m, session.id)
-    expect(log.find((e) => e.type === 'question.resolved' && e.reconnected)).toMatchObject({ answered: false, reconnected: true })
+    expect(log.find((e) => e.type === 'question.resolved' && e.reconnected)).toMatchObject({ id: tabId, answered: false, reconnected: true })
     await expectPanelAccepts(log)
-    expect(await db.sql`SELECT action, principal_kind, outcome FROM ai_audit WHERE kind = 'question' AND action = 'reconnected'`).toEqual([
-      { action: 'reconnected', principal_kind: 'system', outcome: 'ok' },
-    ])
-    // Only a tab_disconnected attention request can end this way, by the schema itself.
-    await expect(db.sql`UPDATE ai_questions SET outcome = 'reconnected' WHERE tool_use_id = 'toolu_blk'`).rejects.toThrow(/ai_questions_outcome_check/)
-  })
+  }, LONG_MS)
 
   // #1380: the hub calls reconnected() on every attach and pairing, almost always with nothing waiting.
   it('reconnected() with no open tab_disconnected request returns 0 and writes no event, audit row or status', async () => {
@@ -1168,50 +1130,25 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
   })
 
   // #815 §2: reloading the tab and clicking "I'm back" race; whichever loses, the user sees no error.
-  it("an \"I'm back\" answer that loses the race to reconnected() succeeds as a no-op, before or after its check; other replies do not", async () => {
-    let racing: (() => Promise<unknown>) | undefined
-    // reconnected() lands between answer()'s check and its update: the check saw the row open.
-    const sql = new Proxy(db.sql, {
-      apply(target, thisArg, args: unknown[]) {
-        const query = Reflect.apply(target, thisArg, args) as Promise<unknown>
-        const text = Array.isArray(args[0]) ? (args[0] as string[]).join('') : ''
-        const race = racing
-        if (!race || !text.includes('SELECT questions, outcome,')) return query
-        racing = undefined
-        return query.then(async (rows) => {
-          await race()
-          return rows
-        })
-      },
-    })
-    const m = manager({ sql, paths: await tempPaths(), run: raising({ spec: spec() }, { spec: spec() }, { spec: spec() }), approvalPollMs: 20 })
+  // An AgentSession's workflow takes the reply and the reconnect one at a time (temporal/session/
+  // gate.ts), so a reply that loses meets the entry as reconnected() left it.
+  it("an \"I'm back\" answer that loses the race to reconnected() succeeds as a no-op; other replies do not", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }, { spec: spec() }, { spec: spec() }), approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    const next = async (...seen: string[]) => {
-      let id: string | undefined
-      await expect.poll(async () => {
-        const [row] = await db.sql<{ id: string }[]>`
-          SELECT id FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL AND NOT (id = ANY(${seen}::uuid[]))`
-        id = row?.id
-        return id
-      }).toBeDefined()
-      return id!
-    }
 
-    const first = await pending(session.id)
-    racing = () => m.questions.reconnected(session.id)
-    await expect(m.questions.answer(browser, answer(session.id, first, ["I'm back"]))).resolves.toBeUndefined()
-    expect(racing).toBeUndefined()
+    const first = await parked(session.id, 'toolu_a0')
+    expect(await m.durable!.tabReconnected(session.id)).toBe(1)
+    await expect(reply(m, first, "I'm back")).resolves.toMatchObject({ id: first })
 
-    // reconnected() won outright: the check itself sees the row resolved.
-    const second = await next(first)
-    expect(await m.questions.reconnected(session.id)).toBe(1)
-    await expect(m.questions.answer(browser, answer(session.id, second, ["I'm back"]))).resolves.toBeUndefined()
+    const second = await parked(session.id, 'toolu_a1')
+    expect(await m.durable!.tabReconnected(session.id)).toBe(1)
+    await expect(replyText(m, second, "I'm back")).resolves.toMatchObject({ id: second })
 
     // Typed words that lose the race would be dropped unread: the user is told, not quietly ignored.
-    const third = await next(first, second)
-    racing = () => m.questions.reconnected(session.id)
-    await expect(m.questions.answer(browser, answer(session.id, third, ["never mind, don't print it"]))).rejects.toMatchObject({ code: 'conflict' })
-    await expect(m.questions.answer(browser, answer(session.id, third, ['Carry on without me']))).rejects.toMatchObject({ code: 'conflict' })
+    const third = await parked(session.id, 'toolu_a2')
+    expect(await m.durable!.tabReconnected(session.id)).toBe(1)
+    await expect(replyText(m, third, "never mind, don't print it")).rejects.toMatchObject({ status: 409 })
+    await expect(reply(m, third, 'Carry on without me')).rejects.toMatchObject({ status: 409 })
 
     await turn!.done
     expect(verdicts).toEqual([
@@ -1219,15 +1156,28 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       { answered: false, reconnected: true, message: expect.any(String) },
       { answered: false, reconnected: true, message: expect.any(String) },
     ])
-    expect(await db.sql`SELECT outcome, answers FROM ai_questions WHERE session_id = ${session.id}`).toEqual([
-      { outcome: 'reconnected', answers: null },
-      { outcome: 'reconnected', answers: null },
-      { outcome: 'reconnected', answers: null },
-    ])
+    for (const id of [first, second, third]) {
+      expect(await ended(id)).toMatchObject({ outcome: 'cancelled', response: { reconnected: true } })
+    }
     expect((await events(m, session.id)).filter((e) => e.type === 'question.resolved' && e.answered)).toEqual([])
-    // Any other resolved row is still a conflict.
-    await db.sql`UPDATE ai_questions SET outcome = 'cancelled' WHERE id = ${first}`
-    await expect(m.questions.answer(browser, answer(session.id, first, ['late']))).rejects.toMatchObject({ code: 'conflict' })
+    // Any other ended entry is still a conflict.
+    await db.sql`UPDATE ai_input_responses SET response = NULL WHERE request_id = ${first}`
+    await expect(replyText(m, first, 'late')).rejects.toMatchObject({ status: 409 })
+    await expect(reply(m, first, "I'm back")).rejects.toMatchObject({ status: 409 })
+  }, LONG_MS)
+
+  it("an \"I'm back\" answer to a tab wait reconnected() already ended succeeds as a no-op", async () => {
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    // The workflow takes the two Updates one at a time (temporal/session/gate.ts): a reply is
+    // checked against the entry as reconnected() left it, never between its check and its write.
+    const first = await parked(session.id)
+    expect(await m.durable!.tabReconnected(session.id)).toBe(1)
+    await expect(reply(m, first, "I'm back")).resolves.toMatchObject({ id: first })
+    await turn!.done
+    expect(verdicts).toEqual([{ answered: false, reconnected: true, message: expect.any(String) }])
+    expect(await ended(first)).toMatchObject({ outcome: 'cancelled', response: { reconnected: true } })
+    expect((await events(m, session.id)).filter((e) => e.type === 'question.resolved' && e.answered)).toEqual([])
   })
 
   it("a turn's browser_* calls that find no tab wait on one tab_disconnected request, and both go on when the tab is back", async () => {
@@ -1254,11 +1204,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       },
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'select the plate' })
-    const id = await pending(session.id)
-    const [row] = await db.sql`SELECT kind, attention_reason, tool, tool_use_id FROM ai_questions WHERE id = ${id}`
-    expect(row).toEqual({ kind: 'attention', attention_reason: 'tab_disconnected', tool: 'mcp__scadbuddy__browser_snapshot', tool_use_id: 'toolu_s' })
-    expect((await m.questions.listPending(browser)).questions).toHaveLength(1)
-    await m.questions.reconnected(session.id)
+    // The opener's call, as an entry of its own (sessions/attentionGate.ts TAB_WAIT_CALL).
+    const id = await parked(session.id, `${TAB_WAIT_CALL}toolu_s`)
+    const [row] = await db.sql`SELECT kind, tool, attention FROM ai_pending_input WHERE request_id = ${id}`
+    expect(row).toEqual({ kind: 'answer', tool: WAIT_FOR_USER, attention: { reason: 'tab_disconnected', on_timeout: 'proceed' } })
+    expect((await pendingInput(m, browser)).entries).toHaveLength(1)
+    expect(await m.durable!.tabReconnected(session.id)).toBe(1)
     await turn!.done
     expect(results).toEqual([{ back: true, why: 'reconnected' }, { back: true, why: 'reconnected' }])
   })
@@ -1286,7 +1237,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
     expect(results).toEqual([{ back: true, why: 'reconnected' }])
-    expect(await db.sql`SELECT outcome FROM ai_questions WHERE session_id = ${session.id}`).toEqual([{ outcome: 'reconnected' }])
+    expect(await db.sql`SELECT outcome, response FROM ai_input_responses WHERE session_id = ${session.id}`).toEqual([
+      { outcome: 'cancelled', response: { reconnected: true } },
+    ])
   })
 
   // #1308: one card per disconnected tab (#815 §5), whichever side asked first.
@@ -1294,12 +1247,20 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     let wait: WaitForTab | undefined
     const results: unknown[] = []
     let joined!: () => void
-    const parked = new Promise<void>((resolve) => (joined = resolve))
+    const parkedBoth = new Promise<void>((resolve) => (joined = resolve))
+    let opened!: () => void
+    const ownOpened = new Promise<void>((resolve) => (opened = resolve))
     const both = (run: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
         await Promise.resolve()
-        const own = run.questionGate!({ tool: ATTENTION_TOOL, questions: [attentionCard(input())], toolUseId: 'toolu_own', signal: new AbortController().signal, attention: spec() })
-        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(1)
+        const own = run.questionGate!({
+          tool: ATTENTION_TOOL,
+          questions: [attentionCard(input())],
+          toolUseId: 'toolu_own',
+          signal: new AbortController().signal,
+          attention: spec({ onParked: () => (opened(), Promise.resolve()) }),
+        })
+        await ownOpened
         // The reconnect check runs once the wait is recorded, joined or not.
         const auto = wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_s', signal: new AbortController().signal, isBack: () => (joined(), Promise.resolve(false)) })
         results.push(...(await Promise.all([own, auto])))
@@ -1325,9 +1286,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
                 'attention', 'done', 'proceed', now(), 'timed_out', 'old', now())`
     }
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    await parked
-    expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id}`).toEqual([{ tool_use_id: 'toolu_own' }])
-    expect(await m.questions.reconnected(session.id)).toBe(1)
+    await parkedBoth
+    const own = await parked(session.id)
+    expect(own).toMatch(/:toolu_own$/)
+    expect(await db.sql`SELECT request_id FROM ai_pending_input WHERE session_id = ${session.id}`).toEqual([{ request_id: own }])
+    expect(await m.durable!.tabReconnected(session.id)).toBe(1)
     await turn!.done
     expect(results).toEqual([{ answered: false, reconnected: true, message: expect.any(String) }, { back: true, why: 'reconnected' }])
     expect((await events(m, session.id)).filter((e) => e.type === 'question.asked')).toHaveLength(1)
@@ -1337,12 +1300,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     let wait: WaitForTab | undefined
     const results: unknown[] = []
     let joined!: () => void
-    const parked = new Promise<void>((resolve) => (joined = resolve))
+    const parkedBoth = new Promise<void>((resolve) => (joined = resolve))
+    let opened!: () => void
+    const tabOpened = new Promise<void>((resolve) => (opened = resolve))
     const both = (run: HarnessRun): AsyncIterable<SDKMessage> =>
       (async function* () {
         await Promise.resolve()
-        const auto = wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_s', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
-        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(1)
+        const auto = wait!({ tool: 'browser_snapshot', toolUseId: 'toolu_s', signal: new AbortController().signal, isBack: () => (opened(), Promise.resolve(false)) })
+        await tabOpened
         const card = attentionCard(input())
         // onParked runs once the gate has recorded the wait, joined or not.
         const own = run.questionGate!({
@@ -1366,11 +1331,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       },
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    const id = await pending(session.id)
-    await parked
-    // The model's request joined rather than opening a card: still one row.
-    expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id}`).toEqual([{ tool_use_id: 'toolu_s' }])
-    await m.questions.answer(browser, answer(session.id, id, ["I'm back"]))
+    const id = await parked(session.id)
+    await parkedBoth
+    // The model's request joined rather than opening a card: still one entry, the tab wait's.
+    expect(await db.sql`SELECT request_id FROM ai_pending_input WHERE session_id = ${session.id}`).toEqual([{ request_id: id }])
+    expect(id).toMatch(new RegExp(`:${TAB_WAIT_CALL}toolu_s$`))
+    await reply(m, id, "I'm back")
     await turn!.done
     expect(results).toEqual([{ back: true, why: 'user_back' }, { answered: true, answers: { [results[2] as string]: "I'm back" } }, expect.any(String)])
     expect((await events(m, session.id)).filter((e) => e.type === 'question.asked')).toHaveLength(1)
@@ -1382,7 +1348,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const results: unknown[] = []
     const card = attentionCard(input())
     let joined!: () => void
-    const parked = new Promise<void>((resolve) => (joined = resolve))
+    const parkedBoth = new Promise<void>((resolve) => (joined = resolve))
+    let opened!: () => void
+    const tabOpened = new Promise<void>((resolve) => (opened = resolve))
     let tabDone!: (verdict: unknown) => void
     const tab = new Promise<unknown>((resolve) => (tabDone = resolve))
     const both = (run: HarnessRun): AsyncIterable<SDKMessage> =>
@@ -1393,9 +1361,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
           questions: [attentionCard(input())],
           toolUseId: 'toolu_s',
           signal: new AbortController().signal,
-          attention: spec({ timeoutS: 3 }),
+          attention: spec({ timeoutS: SHORT_S, onParked: () => (opened(), Promise.resolve()) }),
         })
-        await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(1)
+        await tabOpened
         const own = run.questionGate!({
           tool: ATTENTION_TOOL,
           questions: [card],
@@ -1409,19 +1377,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       })()
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: both, approvalPollMs: 20 })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    await parked
-    // Joined, before the tab wait's timer: still one row.
-    expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id}`).toEqual([{ tool_use_id: 'toolu_s' }])
+    await parkedBoth
+    // Joined, before the tab wait's timer: still one entry.
+    const first = await parked(session.id)
+    expect(first).toMatch(new RegExp(`:${TAB_WAIT_CALL}toolu_s$`))
+    expect(await db.sql`SELECT request_id FROM ai_pending_input WHERE session_id = ${session.id}`).toEqual([{ request_id: first }])
     expect(await tab).toMatchObject({ answered: false, timedOut: true })
     // The model's call still waits (its turn was not stopped), now on a card of its own.
     await expect
-      .poll(async () => await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id} AND outcome IS NULL`, { timeout: 10_000 })
-      .toEqual([{ tool_use_id: 'toolu_own' }])
+      .poll(async () => (await db.sql<{ request_id: string }[]>`SELECT request_id FROM ai_pending_input WHERE session_id = ${session.id}`).map((r) => r.request_id.split(':').at(-1)), { timeout: 10_000 })
+      .toEqual(['toolu_own'])
     expect(results).toEqual([])
-    await m.questions.answer(browser, answer(session.id, await pending(session.id), ["I'm here"]))
+    await reply(m, await parked(session.id, 'toolu_own'), "I'm here")
     await turn!.done
     expect(results).toEqual([{ answered: true, answers: { [card.question]: "I'm here" } }])
-  }, 30_000)
+  }, LONG_MS)
 
   // #1344: TAB_WAITS_PER_TURN bounds one turn; this bounds the user's sessions together.
   it(`opens at most ${TAB_WAIT_RATE_LIMIT} tab waits in ${ATTENTION_RATE_WINDOW_S / 60} minutes across sessions`, async () => {
@@ -1461,7 +1431,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
         message: `The user was not asked for the tab: at most ${TAB_WAIT_RATE_LIMIT} tab waits are opened in ${ATTENTION_RATE_WINDOW_S / 60} minutes. Carry on without the tab.`,
       },
     ])
-    expect(await db.sql`SELECT 1 FROM ai_questions WHERE session_id = ${session.id}`).toEqual([])
+    expect(await db.sql`SELECT 1 FROM ai_pending_input WHERE session_id = ${session.id}`).toEqual([])
+    expect(await db.sql`SELECT 1 FROM ai_input_responses WHERE session_id = ${session.id}`).toEqual([])
     // #1205: audited as the model's own rate limit is.
     expect(await db.sql`SELECT action, outcome, session_id FROM ai_audit WHERE kind = 'question'`).toEqual([
       { action: 'rate_limited', outcome: 'refused', session_id: session.id },
@@ -1495,17 +1466,19 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const results: TabWait[] = []
     const call = new AbortController()
     const { m, session, turn } = await withTabWait(async (wait) => {
-      const pendingCall = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_w', signal: call.signal, isBack: () => Promise.resolve(false) })
-      await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length).toBe(1)
+      let opened!: () => void
+      const recorded = new Promise<void>((resolve) => (opened = resolve))
+      const pendingCall = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_w', signal: call.signal, isBack: () => (opened(), Promise.resolve(false)) })
+      await recorded
       call.abort()
       results.push(await pendingCall)
-      await expect.poll(async () => (await db.sql`SELECT outcome FROM ai_questions`)[0]?.outcome).toBe('cancelled')
+      await expect.poll(async () => (await db.sql`SELECT outcome FROM ai_input_responses`)[0]?.outcome).toBe('cancelled')
     })
     await turn.done
     expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }])
-    expect((await m.questions.listPending(browser)).questions).toEqual([])
-    const [row] = await db.sql`SELECT reason FROM ai_questions WHERE session_id = ${session.id}`
-    expect(row).toEqual({ reason: 'the call was withdrawn' })
+    expect((await pendingInput(m, browser)).entries).toEqual([])
+    const [row] = await db.sql`SELECT reason FROM ai_input_responses WHERE session_id = ${session.id}`
+    expect(row).toEqual({ reason: 'the call stopped waiting' })
   })
 
   it('a failed check for an early reconnect leaves the wait waiting, and the tab coming back still ends it', async () => {
@@ -1513,25 +1486,13 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const { m, session, turn } = await withTabWait(async (wait) => {
       results.push(await wait({ tool: 'browser_snapshot', toolUseId: 'toolu_e', signal: new AbortController().signal, isBack: () => Promise.reject(new Error('hub gone')) }))
     })
-    await pending(session.id)
-    expect(await m.questions.reconnected(session.id)).toBe(1)
+    await parked(session.id)
+    expect(await m.durable!.tabReconnected(session.id)).toBe(1)
     await turn.done
     expect(results).toEqual([{ back: true, why: 'reconnected' }])
   })
 
-  /** Resolves on the next `wake` of question `id` after it is called: an event, not a sleep. */
-  function nextWake(m: SessionManager, id: string): () => Promise<void> {
-    const questions = m.questions as unknown as { wake(id: string): void }
-    const wake = questions.wake.bind(questions)
-    let woken: (() => void) | undefined
-    vi.spyOn(questions, 'wake').mockImplementation((woke) => {
-      wake(woke)
-      if (woke === id) woken?.()
-    })
-    return () => new Promise<void>((resolve) => (woken = resolve))
-  }
-
-  const openRows = async () => db.sql`SELECT tool_use_id FROM ai_questions WHERE outcome IS NULL`
+  const openRows = async () => db.sql`SELECT request_id FROM ai_pending_input`
 
   // #1352: a reconnect check that outlives its wait must not end the wait opened after it.
   it("a reconnect check that returns after its wait ended does not end a later wait's request", async () => {
@@ -1541,68 +1502,19 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const { turn } = await withTabWait(async (wait, { m, sessionId }) => {
       const a = wait({ tool: 'browser_snapshot', toolUseId: 'toolu_a', signal: first.signal, isBack: () => new Promise((resolve) => (late = resolve)) })
       await expect.poll(async () => (await openRows()).length).toBe(1)
-      const [rowA] = await db.sql<{ id: string }[]>`SELECT id FROM ai_questions WHERE tool_use_id = 'toolu_a'`
       first.abort()
       results.push(await a)
       await expect.poll(async () => (await openRows()).length).toBe(0)
       const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
       await expect.poll(async () => (await openRows()).length).toBe(1)
-      // The first wait's check settling wakes its row (questions/service.ts gate): wait for that, not a clock.
-      const settled = nextWake(m, rowA!.id)()
+      // The first wait's check settling names only its own entry (tab_reconnected's request_id):
+      // the second wait's stays open, through more than its turn's 50 ms row polls.
       late(true)
-      await settled
-      expect(await openRows()).toEqual([{ tool_use_id: 'toolu_b' }])
-      await m.questions.reconnected(sessionId)
-      results.push(await b)
-    })
-    await turn.done
-    expect(results).toEqual([{ back: false, message: expect.stringMatching(/stopped while it waited/) }, { back: true, why: 'reconnected' }])
-  })
-
-  // #1360: the check passed `parked.aborted` but its reconnect was held up (a lock, the pool) until a later wait opened.
-  it("a reconnect check held up past its wait's end resolves only its own row, never a later wait's", async () => {
-    let back: (back: boolean) => void = () => undefined
-    let release: () => void = () => undefined
-    const held = new Promise<void>((resolve) => (release = resolve))
-    const first = new AbortController()
-    const results: TabWait[] = []
-    const { turn } = await withTabWait(async (wait, { m, sessionId }) => {
-      const reconnected = m.questions.reconnected.bind(m.questions)
-      let entered: () => void = () => undefined
-      const reconnecting = new Promise<void>((resolve) => (entered = resolve))
-      let finished: Promise<number> | undefined
-      vi.spyOn(m.questions, 'reconnected').mockImplementationOnce((...args) => {
-        entered()
-        finished = held.then(() => reconnected(...args))
-        return finished
-      })
-      // The check starts after the row commits (questions/service.ts gate), so a poll can
-      // see the row before `back` is set (#4514): wait for the check itself.
-      let checking: () => void = () => undefined
-      const checked = new Promise<void>((resolve) => (checking = resolve))
-      const a = wait({
-        tool: 'browser_snapshot',
-        toolUseId: 'toolu_a',
-        signal: first.signal,
-        isBack: () =>
-          new Promise((resolve) => {
-            back = resolve
-            checking()
-          }),
-      })
-      await checked
-      expect(await openRows()).toEqual([{ tool_use_id: 'toolu_a' }])
-      back(true)
-      await reconnecting
-      first.abort()
-      results.push(await a)
-      await expect.poll(async () => (await openRows()).length).toBe(0)
-      const b = wait({ tool: 'browser_click', toolUseId: 'toolu_b', signal: new AbortController().signal, isBack: () => Promise.resolve(false) })
-      await expect.poll(async () => (await openRows()).length).toBe(1)
-      release()
-      expect(await finished).toBe(0)
-      expect(await openRows()).toEqual([{ tool_use_id: 'toolu_b' }])
-      await m.questions.reconnected(sessionId)
+      for (let i = 0; i < 20; i++) {
+        expect(await openRows()).toEqual([{ request_id: expect.stringMatching(new RegExp(`:${TAB_WAIT_CALL}toolu_b$`)) }])
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      expect(await m.durable!.tabReconnected(sessionId)).toBe(1)
       results.push(await b)
     })
     await turn.done
@@ -1645,9 +1557,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
     const m = manager({ sql: db.sql, paths: await tempPaths(), run, approvalPollMs: 20, ...tools })
     resolveTabWaits(hub, m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'look at the page' })
-    const id = await pending(session.id)
-    expect(await db.sql`SELECT attention_reason, tool_use_id FROM ai_questions WHERE id = ${id}`).toEqual([
-      { attention_reason: 'tab_disconnected', tool_use_id: 'toolu_snap' },
+    const id = await parked(session.id, `${TAB_WAIT_CALL}toolu_snap`)
+    expect(await db.sql`SELECT attention FROM ai_pending_input WHERE request_id = ${id}`).toEqual([
+      { attention: { reason: 'tab_disconnected', on_timeout: 'proceed' } },
     ])
     // The user sends from a tab (routes/chat.ts pairs it), and the tab connects.
     hub.pairSession(session.id, TAB)
@@ -1658,7 +1570,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`attention requests in Postgres${TEST_DATABA
       queueMicrotask(() => void conn.receive(JSON.stringify({ v: 1, type: 'result', id: frame.id, outcome: { ok: true, result: { snapped: true } } })))
     })
     await conn.receive(JSON.stringify({ v: 1, type: 'hello', tabId: TAB, route: '/', live: ['snapshot'] }))
-    await expect.poll(async () => (await db.sql`SELECT outcome FROM ai_questions WHERE id = ${id}`)[0]?.outcome, { timeout: 10_000 }).toBe('reconnected')
+    await expect.poll(async () => await ended(id), { timeout: 10_000 }).toMatchObject({ outcome: 'cancelled', response: { reconnected: true } })
     await turn!.done
     expect(calls).toEqual(['snapshot'])
     expect(results).toMatchObject([{ content: [{ type: 'text', text: expect.stringContaining('"snapped": true') }] }])

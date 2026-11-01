@@ -103,7 +103,7 @@ export async function pendingInput(
     sessions.questions.listPending(principal),
     sessions.projection.entries({
       ...(filter.sessionId === undefined ? {} : { sessionId: filter.sessionId }),
-      ...(browser ? {} : { ownedBy: principal, allApprovals: grant }),
+      ...(browser ? { ownAnswers: true } : { ownedBy: principal, allApprovals: grant }),
     }),
     withRuns ? sessions.queue.ownEntries() : Promise.resolve([]),
   ])
@@ -133,9 +133,9 @@ export async function pendingInput(
 }
 
 /**
- * One session's entries, as `principal` may see them: a durable session's from its
- * workflow (DurableUnavailable when its worker does not answer), a classic one's
- * from its stores. Undefined when there is no such session for the principal.
+ * One session's entries, as `principal` may see them, from its workflow's gate
+ * (DurableUnavailable when its worker does not answer). Undefined when there is no such
+ * session for the principal.
  */
 export async function sessionPendingInput(
   sessions: SessionManager,
@@ -148,18 +148,16 @@ export async function sessionPendingInput(
   const grant = principal.kind !== 'browser' && (await sessions.approvals.holdsGrant(principal))
   const own = canSee(principal, { owner: session.owner, creator: session.creator, offer: null })
   if (principal.kind !== 'browser' && !grant && !own) return undefined
-  if (session.mode === 'durable') {
-    if (!sessions.durable) throw new DurableUnavailable("durable sessions need Temporal, and this agent service has none configured")
-    const entries = await sessions.durable.pendingInput(sessionId)
-    if (principal.kind === 'browser' || own) return { entries, summaries_truncated: false }
-    // A grant holder that does not own the session sees its approvals only, as in the
-    // aggregate, and none of a flow run's, which are the person's (#2482).
-    // One query for every entry, not one per approval (#2863).
-    const approvals = entries.filter((e) => e.kind === 'approval')
-    const inRun = await sessions.projection.inRunOf(approvals.map((e) => e.id))
-    return { entries: approvals.filter((e) => !inRun.has(e.id)), summaries_truncated: false }
-  }
-  return pendingInput(sessions, principal, { sessionId })
+  // Every session is an AgentSession (plan Step 6.3): its entries are the gate's.
+  if (!sessions.durable) throw new DurableUnavailable("sessions need Temporal, and this agent service has none configured")
+  const entries = await sessions.durable.pendingInput(sessionId)
+  if (principal.kind === 'browser' || own) return { entries, summaries_truncated: false }
+  // A grant holder that does not own the session sees its approvals only, as in the
+  // aggregate, and none of a flow run's, which are the person's (#2482).
+  // One query for every entry, not one per approval (#2863).
+  const approvals = entries.filter((e) => e.kind === 'approval')
+  const inRun = await sessions.projection.inRunOf(approvals.map((e) => e.id))
+  return { entries: approvals.filter((e) => !inRun.has(e.id)), summaries_truncated: false }
 }
 
 /** A response's cap (gate/validate.ts, plan 5b ruling 1). */
@@ -235,7 +233,7 @@ export async function respond(
 ): Promise<RespondResult> {
   const parsed = parseRequestId(requestId)
   const stale = new RespondError(404, `no pending input ${requestId}: it is stale or was never asked`)
-  if (parsed?.store === 'durable') return respondDurable(sessions, principal, parsed, requestId, body, stale)
+  if (parsed?.store === 'durable') return respondDurable(sessions, principal, parsed, requestId, body, stale, where)
   if (parsed?.store !== 'approval' && parsed?.store !== 'question') throw stale
   // The classic stores authorize other principals themselves (sessions_approve calls them directly).
   if (principal.kind !== 'browser') throw new RespondError(403, 'only the user in the ScadBuddy panel responds through this route')
@@ -341,9 +339,10 @@ async function respondDurable(
   requestId: string,
   body: RespondBody,
   stale: RespondError,
+  where: { clientIp?: string | undefined },
 ): Promise<RespondResult> {
   const session = await sessions.projection.session(parsed.sessionId)
-  if (!session || session.mode !== 'durable') throw stale
+  if (!session) throw stale
   const grant = principal.kind !== 'browser' && (await sessions.approvals.holdsGrant(principal))
   const role = roleOf(principal, session, grant)
   // A flow run's calls are the person's (#2482, spec 2026-10-11 §4.2): no approval grant
@@ -370,8 +369,23 @@ async function respondDurable(
   // of the request that made it, linked to the parked call's span (#5041).
   const decision = body.kind === 'approval' ? await decisionSpan(sessions, requestId, parsed.sessionId, principal) : undefined
   try {
+    // An entry that has ended is answered from its response row (resolve_input writes it in the
+    // transaction that removes the entry), never by asking its workflow, which may have gone
+    // on or be gone: the same decision again by the same responder is that decision's outcome
+    // (#3717), anything else a 409 saying how (#1400, #1479).
+    if (await sessions.projection.recorded(requestId)) {
+      const done = await repeated(sessions, requestId, body, principal)
+      if (done) {
+        decision?.setAttribute('scadbuddy.outcome', done.outcome)
+        return done
+      }
+      const ended = await endedConflict(sessions, requestId)
+      if (ended) throw ended
+    }
     const out = await sessions.durable.respond(parsed.sessionId, { request_id: requestId, response: body, responder: principal, role })
     decision?.setAttribute('scadbuddy.outcome', out.outcome)
+    // An answer's audit row, as classic's (#1075); best effort, as classic's `audited` is.
+    if (out.outcome === 'answered') await sessions.questions.auditGateAnswer(principal, requestId, where).catch(() => {})
     return { id: requestId, kind: out.kind, outcome: out.outcome }
   } catch (err) {
     if (err instanceof RespondRefusal) {
@@ -388,8 +402,11 @@ async function respondDurable(
       }
     }
     if (decision) recordFailure(decision, err)
-    if (err instanceof RespondRefusal) throw refused(err)
-    if (err instanceof WorkflowNotFoundError) throw stale
+    if (err instanceof RespondRefusal) {
+      if (err.code === 'resolved' || err.code === 'stale') throw (await endedConflict(sessions, requestId)) ?? refused(err)
+      throw refused(err)
+    }
+    if (err instanceof WorkflowNotFoundError) throw (await endedConflict(sessions, requestId)) ?? stale
     if (err instanceof DurableUnavailable) throw new RespondError(503, err.message)
     throw err
   } finally {
@@ -423,6 +440,24 @@ async function decisionSpan(sessions: SessionManager, requestId: string, session
   const traceparent = traceparentOf(span)
   if (traceparent) await sessions.projection.markDecision(requestId, traceparent).catch(() => {})
   return span
+}
+
+/**
+ * An AgentSession entry that has ended, as classic answers one (#1400, #1479): a 409 saying how,
+ * whatever kind the body names, from its response row; undefined when it has none (never asked).
+ */
+async function endedConflict(sessions: SessionManager, requestId: string): Promise<RespondError | undefined> {
+  const done = await sessions.projection.recorded(requestId).catch(() => undefined)
+  if (!done) return undefined
+  const reconnected = done.outcome === 'cancelled' && (done.response as { reconnected?: unknown } | null)?.reconnected === true
+  const how =
+    done.kind === 'approval'
+      ? done.outcome === 'approved' || done.outcome === 'denied'
+        ? `it was already ${done.outcome}`
+        : (done.reason ?? (done.outcome === 'expired' ? 'nobody decided before it expired' : 'it was cancelled'))
+      : endedReason({ outcome: reconnected ? 'reconnected' : done.outcome === 'expired' ? 'timed_out' : (done.outcome as 'answered' | 'cancelled' | 'timed_out'), reason: done.reason })
+  const what = done.kind === 'approval' ? 'an approval' : 'an answer'
+  return new RespondError(409, `${requestId} is no longer waiting for ${what}`, how)
 }
 
 /**

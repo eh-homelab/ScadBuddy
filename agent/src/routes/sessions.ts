@@ -151,7 +151,7 @@ export function sessionView(s: SessionRecord, viewer: Pick<Owner, 'kind' | 'id'>
 const StartBody = z.strictObject({
   title: z.string().max(200).optional(),
   prompt: z.string().min(1).max(MESSAGE_MAX).optional(),
-  /** Plan 5d: absent, the `session_mode` setting's, which falls back to classic when durable cannot run. */
+  /** Taken and ignored (plan Step 6.3): every session is an AgentSession. */
   mode: z.enum(SESSION_MODES).optional(),
 })
 const SendBody = z.strictObject({ text: z.string().min(1).max(MESSAGE_MAX) })
@@ -309,17 +309,15 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, StartBody, {})
       if (!body.ok) return body.response
-      const { session, turn, modeFallback } = await sessions.start(BROWSER_USER, {
+      const { session, turn } = await sessions.start(BROWSER_USER, {
         origin: 'chat',
         ...(body.value.title ? { title: body.value.title } : {}),
         ...(body.value.prompt ? { prompt: body.value.prompt } : {}),
-        ...(body.value.mode ? { mode: body.value.mode } : {}),
       })
       return c.json(
         {
           session: sessionView(session, BROWSER_USER),
           ...(turn ? { turn_id: turn.turnId } : {}),
-          ...(modeFallback ? { mode_fallback: modeFallback } : {}),
         },
         201,
       )

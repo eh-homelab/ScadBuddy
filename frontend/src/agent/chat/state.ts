@@ -130,8 +130,6 @@ export interface SessionState {
   updatedAt?: string
   /** Plan 5d — how it runs; absent from an older agent (classic). */
   mode?: SessionMode
-  /** Plan 5d — why a session whose mode came from the default runs classic, not durable. */
-  modeFallback?: string
   /**
    * #1885 — archived by the user: left out of the switcher's list and read-only until
    * unarchived. Known from a session route's answer; the snapshot lists only the others.
@@ -350,7 +348,6 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       const next = patchSession(budgeted, event.sessionId, (s) => ({
         ...s,
         ...(event.mode ? { mode: event.mode } : {}),
-        ...(event.modeFallback ? { modeFallback: event.modeFallback } : {}),
       }))
       // Newest first (a replay on attach keeps its place); the panel's own new chat
       // becomes the active one.

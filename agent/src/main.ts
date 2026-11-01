@@ -126,7 +126,7 @@ import { SessionFiles, WORKSPACE_SWEEP_MS, type WorkspaceBytesStatus } from './w
 const PORT = 8081
 /** How often approvals nobody is waiting on are expired (approvals/service.ts). */
 const APPROVAL_SWEEP_MS = 30_000
-/** How often sessions whose turn died with its lease are ended (SessionManager.reapExpired). */
+/** How often sessions left `running` with nothing behind them are ended (DurableRunningSweep). */
 const SESSION_REAP_MS = 30_000
 // The shutdown's budget for running turns, inside the pod's 30 s
 // terminationGracePeriodSeconds (clusters, strategy Recreate): TURN_DRAIN_MS
@@ -572,12 +572,6 @@ const stopEscalationSweeper = !role.http ? undefined : sessions?.escalations.sta
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('escalation hop sweep failed:', (err as Error).message),
 })
-// Now and every 30 s: sessions whose turn died without finishing (a SIGKILL,
-// or a restart that closed the pool under it) say so and stop claiming to run.
-const stopReaper = !role.http ? undefined : sessions?.startReaper(SESSION_REAP_MS, {
-  ...(database ? { ready: database.ready } : {}),
-  onError: (err) => console.error('session lease reaper failed:', (err as Error).message),
-})
 // Audit rows older than `audit_retention_days` (ai_settings) are deleted hourly.
 const stopRetention = !role.http ? undefined : audit?.startRetention(AUDIT_RETENTION_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
@@ -875,8 +869,7 @@ const temporalWorker =
         },
       })
     : undefined
-// AgentSession (unified runtime spec 2026-10-13 §5.1): new durable sessions run here only
-// while `unified_sessions` is on; flagged off, nothing is ever started on this queue.
+// AgentSession (unified runtime spec 2026-10-13 §5.1): every new session runs here (plan Step 6.3).
 // Versioned as the Deployment `scadbuddy-agent` (D4) when the build has an id (config.buildId),
 // else unversioned like the agent's other workers. `session_settings` is a local activity, so it
 // is served here. `session_turn` is Task 5.2's, on the host worker.
@@ -960,14 +953,20 @@ if (sessions && temporalClient && payloadKeys && database) {
     sql: database.sql,
     events: sessions.events,
     audit,
+    ended: (id) => sessions.endClassicLeftovers(id),
     // A unified session is ready while some replica hosts its turns (§5.2), this one or a worker's (§14.3).
   })
 }
-// Every 30 s, beside the lease reaper: durable sessions left `running` whose workflow
-// has ended or never started (#2001); a durable turn takes no lease.
+// Every 30 s: sessions left `running` whose workflow has ended or never started (#2001), and a
+// classic turn's whose lease lapsed with no replica left to end it (plan Step 6.3: no reaper).
 const stopDurableSweep =
   role.http && sessions && temporalClient && database
-    ? new DurableRunningSweep({ sql: database.sql, events: sessions.events, describe: durableDescriber(temporalClient) }).start(
+    ? new DurableRunningSweep({
+        sql: database.sql,
+        events: sessions.events,
+        describe: durableDescriber(temporalClient),
+        ended: (id) => sessions.endClassicLeftovers(id),
+      }).start(
         SESSION_REAP_MS,
         {
           ready: database.ready,
@@ -1158,7 +1157,6 @@ async function stop(): Promise<void> {
   stopOrphanSweep?.()
   stopPluginSessionSweep?.()
   stopDurableSweep?.()
-  stopReaper?.()
   stopRetention?.()
   stopAttachmentSweep?.()
   stopWorkspaceSweep?.()

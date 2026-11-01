@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
 import { SpanStatusCode } from '@opentelemetry/api'
@@ -7,13 +7,12 @@ import type { SessionManager } from '../src/sessions/manager.js'
 import { PROTOCOL_VERSION } from '../src/sessions/protocol.js'
 import { WARM_SPAN } from '../src/telemetry/turn.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { PARENT_SPAN_ID, resetTracing, TRACE_ID, TRACEPARENT, testTracing, waitForSpan } from './support/tracing.js'
-import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // The turn's trace against a real SessionManager, without the SDK: the chat
-// socket's first frame carries the browser's traceparent (spec 2026-10-01 §4),
-// and an orphan approved after a restart resumes under its decision.
+// socket's first frame carries the browser's traceparent (spec 2026-10-01 §4).
 
 const spans = testTracing()
 
@@ -157,37 +156,5 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`turn tracin
     expect(spawns.map((s) => s.attributes['warm.outcome'])).toEqual(['miss', 'hit'])
     expect(spawns.map((s) => s.parentSpanContext?.spanId)).toEqual(turns.map((s) => s.spanContext().spanId))
     expect(spawns.map((s) => s.attributes['scadbuddy.session_id'])).toEqual([session.id, session.id])
-  })
-
-  it('a turn whose finish throws ends its span failed with the class', async () => {
-    // The in-process turn's own finish().
-    classicTurns(m)
-    vi.spyOn(m as unknown as { finish: () => Promise<never> }, 'finish').mockRejectedValue(new TypeError('finish failed'))
-    const connection = new ChatConnection(m, () => {})
-    await connection.open()
-    await connection.receive(frame({}))
-    const turn = await waitForSpan(spans, (s) => s.name === 'agent.turn')
-    connection.close()
-    expect(turn.attributes).toMatchObject({ 'scadbuddy.outcome': 'failed', 'scadbuddy.failure_class': 'TypeError' })
-  })
-
-  it('an orphan approved after a restart resumes as a new turn under its decision', async () => {
-    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
-    await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
-    const approval = await m.approvals.create({
-      sessionId: session.id,
-      turnId: null,
-      toolUseId: 'toolu_1',
-      tool: 'mcp__stub__print',
-      input: { job: 'box.3mf' },
-      tier: 'outward',
-      requestedBy: agentA,
-      traceparent: TRACEPARENT,
-    })
-    await m.approvals.decide(browser, approval.id, true)
-    const decision = await waitForSpan(spans, (s) => s.name === 'agent.approval')
-    const turn = await waitForSpan(spans, (s) => s.name === 'agent.turn')
-    expect(turn.parentSpanContext?.spanId).toBe(decision.spanContext().spanId)
-    expect(decision.links[0]?.context.spanId).toBe(PARENT_SPAN_ID)
   })
 })

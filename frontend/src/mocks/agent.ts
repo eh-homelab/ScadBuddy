@@ -59,20 +59,7 @@ export interface MockAgentOptions {
   stepMs?: number
   /** What a new chat may spend in all; each turn costs COST_PER_TURN. */
   budgetUsd?: number
-  /**
-   * Plan 5d — whether a durable session can start (default true). When not, a new chat
-   * that names no mode runs classic and says why, and one asking for durable is refused.
-   */
-  durableAvailable?: boolean
-  /**
-   * Plan 5d — the mode a chat that names none gets. Classic here (the agent's default is
-   * durable) because the mock's scripts are classic sessions.
-   */
-  defaultMode?: SessionMode
 }
-
-/** Plan 5d — why the mock's default durable chat ran classic (agent manager.ts `startMode`). */
-export const MOCK_MODE_FALLBACK = 'no durable session worker (agent-durable) polls Temporal\'s "agent" queue'
 
 /** What one scripted turn costs. */
 export const COST_PER_TURN = 0.0184
@@ -145,8 +132,6 @@ function chunks(text: string, size = 14): string[] {
 export function createMockAgentTransport({
   stepMs = 120,
   budgetUsd = 1,
-  durableAvailable = true,
-  defaultMode = 'classic',
 }: MockAgentOptions = {}): MockAgentTransport {
   let handlers: TransportHandlers | null = null
   const sent: ClientMessage[] = []
@@ -548,18 +533,9 @@ export function createMockAgentTransport({
           return
         }
         const isNew = !s
-        if (s && msg.mode) {
-          emit({ type: 'error', sessionId: s.sessionId, code: 'invalid', message: `session ${s.sessionId} exists: its mode is set when it starts` })
-          return
-        }
-        if (!s && msg.mode === 'durable' && !durableAvailable) {
-          emit({ type: 'error', code: 'unavailable', message: `durable sessions cannot run now: ${MOCK_MODE_FALLBACK}` })
-          return
-        }
         if (!s) {
-          const asked = msg.mode ?? defaultMode
-          const fellBack = !msg.mode && asked === 'durable' && !durableAvailable
-          const mode = fellBack ? 'classic' : asked
+          // Plan Step 6.3: every session is an AgentSession; a frame's `mode` is ignored.
+          const mode: SessionMode = 'durable'
           s = {
             sessionId: nextId('chat'),
             title: msg.text.slice(0, 40),
@@ -582,7 +558,6 @@ export function createMockAgentTransport({
             title: s.title,
             budgetUsd,
             mode,
-            ...(fellBack ? { modeFallback: MOCK_MODE_FALLBACK } : {}),
           })
         }
         emit({

@@ -1,5 +1,5 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import { attentionCard, type AttentionSpec, parseAttention } from '../src/harness/attention.js'
@@ -12,11 +12,13 @@ import type { SessionManager } from '../src/sessions/manager.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, withoutTemporal } from './support/agentSessions.js'
 
 // POST /api/v1/ai/pending-input/{request_id} (#815; spec §6.6 `respond`): one
 // route answers an approval, a question or an attention request, and refuses a
 // stale id, an entry no longer pending, and a body that is not the entry's kind
-// or does not fit it.
+// or does not fit it. The parks are an AgentSession's (plan Step 6.3,
+// support/agentSessions.ts): entries of its workflow's gate, in ai_pending_input.
 
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https', 'content-type': 'application/json' }
 
@@ -41,7 +43,8 @@ describe('the respond cap', () => {
   })
 })
 
-describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond route${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}${AGENT_SESSIONS_SKIP}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let verdicts: QuestionVerdict[]
@@ -93,25 +96,27 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
       app.request(`/api/v1/ai/pending-input/${id}`, { method: 'POST', headers, body: typeof body === 'string' ? body : JSON.stringify(body) })
   }
 
+  type Pending = { request_id: string; kind: 'approval' | 'answer'; input_hash: string | null; attention: unknown }
+  const pendingOf = (sessionId: string) =>
+    db.sql<Pending[]>`SELECT request_id, kind, input_hash, attention FROM ai_pending_input WHERE session_id = ${sessionId}`
+  /** How an entry ended (ai_input_responses), or undefined while it is pending. */
+  const ended = async (requestId: string) =>
+    (await db.sql<{ outcome: string; reason: string | null }[]>`SELECT outcome, reason FROM ai_input_responses WHERE request_id = ${requestId}`)[0]
+
   async function setUp() {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: parks, approvalPollMs: 20 })
     const post = respondTo(m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
-    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_approvals WHERE decision IS NULL`).length, { timeout: 10_000 }).toBe(1)
-    await expect.poll(async () => (await db.sql`SELECT 1 FROM ai_questions WHERE outcome IS NULL`).length, { timeout: 10_000 }).toBe(2)
-    const ids = await ids_(m)
-    return { m, session, turn: turn!, ids, post }
-  }
-
-  async function ids_(m: SessionManager) {
-    const [approval] = await m.approvals.list(browser, { pending: true })
-    const { questions } = await m.questions.listPending(browser)
-    return {
-      approval: `approval:${approval!.id}`,
-      inputHash: approval!.inputHash,
-      attention: `question:${questions.find((q) => q.kind === 'attention')!.id}`,
-      question: `question:${questions.find((q) => q.kind === 'question')!.id}`,
+    let rows: Pending[] = []
+    await expect.poll(async () => (rows = await pendingOf(session.id)).length, { timeout: 10_000 }).toBe(3)
+    const approval = rows.find((r) => r.kind === 'approval')!
+    const ids = {
+      approval: approval.request_id,
+      inputHash: approval.input_hash!,
+      attention: rows.find((r) => r.kind === 'answer' && r.attention !== null)!.request_id,
+      question: rows.find((r) => r.kind === 'answer' && r.attention === null)!.request_id,
     }
+    return { m, session, turn: turn!, ids, post }
   }
 
   const detail = async (r: Response) => ((await r.json()) as { detail: string }).detail
@@ -145,49 +150,38 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     const decided = await post(ids.approval, { kind: 'approval', decision: 'deny' })
     expect(decided.status).toBe(409)
     expect(await decided.json()).toMatchObject({ reason: 'it was already approved' })
-    // Approved, then withdrawn unused: it no longer stands, so it must not read "already approved".
-    await db.sql`UPDATE ai_approvals SET consumed_at = NULL, revoked_at = now(), reason = 'the turn ended' WHERE id = ${ids.approval.slice('approval:'.length)}`
-    const revoked = await post(ids.approval, { kind: 'approval', decision: 'deny' })
-    expect(await revoked.json()).toMatchObject({ reason: 'it was approved, then withdrawn (the turn ended)' })
   })
 
   it("says a cancelled or timed-out entry's own reason in its 409, not that it was answered (#1400)", async () => {
     const { m, ids, post, session, turn } = await setUp()
     await m.interrupt(session.id, browser)
     await turn.done
-    const [row] = await db.sql<{ reason: string }[]>`SELECT reason FROM ai_questions WHERE id = ${ids.question.slice('question:'.length)}`
+    const row = await ended(ids.question)
+    expect(row).toMatchObject({ outcome: 'cancelled', reason: expect.any(String) })
     const cancelled = await post(ids.question, { kind: 'answer', answers: { 'Which colour?': 'Red', 'Which parts?': 'Lid' } })
     expect(cancelled.status).toBe(409)
     expect(await cancelled.json()).toMatchObject({ reason: row!.reason })
     expect(row!.reason).not.toMatch(/answered/)
-    // An approval cancelled with the turn says the row's reason too, not a generic one.
-    const [approvalRow] = await db.sql<{ decision: string; reason: string | null }[]>`
-      SELECT decision, reason FROM ai_approvals WHERE id = ${ids.approval.slice('approval:'.length)}`
-    expect(approvalRow).toMatchObject({ decision: 'cancelled', reason: expect.any(String) })
+    // An approval cancelled with the turn says its reason too, not a generic one.
+    const approvalRow = await ended(ids.approval)
+    expect(approvalRow).toMatchObject({ outcome: 'cancelled', reason: expect.any(String) })
     const cancelledApproval = await post(ids.approval, { kind: 'approval', decision: 'approve' })
     expect(cancelledApproval.status).toBe(409)
     expect(await cancelledApproval.json()).toMatchObject({ reason: approvalRow!.reason })
-
-    // A timed-out one says so (the row is rewritten once nothing is parked on it).
-    await db.sql`UPDATE ai_questions SET outcome = 'timed_out', reason = 'nobody replied in time (on_timeout: proceed)'
-                 WHERE id = ${ids.attention.slice('question:'.length)}`
-    const timedOut = await post(ids.attention, { kind: 'answer', choice: "I'm here" })
-    expect(timedOut.status).toBe(409)
-    expect(await timedOut.json()).toMatchObject({ reason: 'nobody replied in time (on_timeout: proceed)' })
   })
 
   // #1538: the service takes "I'm back" to a reconnected tab wait as a no-op (#815 §2); the route must not 409 it first.
   it("takes an I'm-back reply to an attention request the tab's return already ended, and refuses any other reply", async () => {
     const { m, ids, post, session, turn } = await setUp()
-    expect(await m.questions.reconnected(session.id)).toBe(1)
+    expect(await m.durable!.tabReconnected(session.id)).toBe(1)
     const back = await post(ids.attention, { kind: 'answer', choice: "I'm here" })
     expect(back.status).toBe(200)
     expect(await back.json()).toEqual({ id: ids.attention, kind: 'answer', outcome: 'answered' })
     const other = await post(ids.attention, { kind: 'answer', text: 'never mind' })
     expect(other.status).toBe(409)
     expect(await other.json()).toMatchObject({ reason: 'the ScadBuddy tab is connected again' })
-    const [row] = await db.sql`SELECT outcome, answers FROM ai_questions WHERE id = ${ids.attention.slice('question:'.length)}`
-    expect(row).toEqual({ outcome: 'reconnected', answers: null })
+    const [row] = await db.sql`SELECT outcome, response FROM ai_input_responses WHERE request_id = ${ids.attention}`
+    expect(row).toMatchObject({ outcome: 'cancelled', response: { reconnected: true } })
     await m.interrupt(session.id, browser)
     await turn.done
   })
@@ -224,8 +218,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect((await post(ids.approval, 'not json')).status).toBe(400)
     expect((await post(ids.approval, { kind: 'approval', decision: 'approve', input_hash: '0'.repeat(64) })).status).toBe(409)
 
-    expect((await m.questions.listPending(browser)).questions.length).toBe(2)
-    expect((await m.approvals.list(browser, { pending: true })).length).toBe(1)
+    expect(await pendingOf(session.id)).toHaveLength(3)
     await m.interrupt(session.id, browser)
     await turn.done
   })
@@ -240,7 +233,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect((await post('approval:00000000-0000-4000-8000-000000000000', { kind: 'approval', decision: 'deny' })).status).toBe(404)
     expect((await post('question:not-a-uuid', { kind: 'answer', text: 'hi' })).status).toBe(404)
     expect((await post(`durable:${session.id}:run:toolu_a`, { kind: 'answer', text: 'hi' })).status).toBe(404)
-    expect((await post(ids.attention.slice('question:'.length), { kind: 'answer', text: 'hi' })).status).toBe(404)
+    expect((await post(ids.attention.slice('durable:'.length), { kind: 'answer', text: 'hi' })).status).toBe(404)
 
     const { origin: _origin, ...noOrigin } = UI
     expect((await post(ids.attention, { kind: 'answer', text: 'hi' }, noOrigin)).status).toBe(403)
@@ -250,7 +243,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     const padded = (n: number) => `{"kind":"answer","text":"hi"}`.padEnd(n, ' ')
     expect((await post(ids.attention, padded(RESPONSE_MAX + 1))).status).toBe(413)
 
-    expect((await m.questions.listPending(browser)).questions.length).toBe(2)
+    expect(await pendingOf(session.id)).toHaveLength(3)
     expect((await post(ids.attention, padded(RESPONSE_MAX))).status).toBe(200)
     await m.interrupt(session.id, browser)
     await turn.done
@@ -277,7 +270,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     const comma = await post(ids.question, { kind: 'answer', answers: { 'Which colour?': 'Red', 'Which parts?': ['Lid, Base'] } })
     expect(comma.status).toBe(400)
     expect(await detail(comma)).toMatch(/", "/)
-    expect((await m.questions.listPending(browser)).questions.length).toBe(2)
+    expect(await pendingOf(session.id)).toHaveLength(3)
     await m.interrupt(session.id, browser)
     await turn.done
   })
@@ -295,32 +288,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     const settled = await post(ids.approval, { kind: 'answer', text: 'yes' })
     expect(settled.status).toBe(409)
     expect(await settled.json()).toMatchObject({ reason: expect.any(String) })
-  })
-
-  // #1412: a question that ends between the route's read and its answer still says how it ended.
-  it('re-reads a question that ended between the read and the answer, and says how it ended', async () => {
-    const { m, ids, post, turn } = await setUp()
-    const rowId = ids.question.slice('question:'.length)
-    const pending = await m.questions.entry(rowId)
-    const answers = { 'Which colour?': 'Red', 'Which parts?': 'Lid' }
-    expect((await post(ids.question, { kind: 'answer', answers })).status).toBe(200)
-
-    // The route's first read still sees it pending; answer() then finds it answered.
-    const entry = vi.spyOn(m.questions, 'entry').mockResolvedValueOnce(pending)
-    const raced = await post(ids.question, { kind: 'answer', answers })
-    expect(raced.status).toBe(409)
-    expect(await raced.json()).toMatchObject({ reason: 'it was already answered' })
-
-    // A re-read that still shows it pending falls through to a plain 409 with no reason.
-    entry.mockResolvedValue(pending)
-    const plain = await post(ids.question, { kind: 'answer', answers })
-    expect(plain.status).toBe(409)
-    expect(await plain.json()).not.toHaveProperty('reason')
-    entry.mockRestore()
-
-    await post(ids.attention, { kind: 'answer', choice: "I'm here" })
-    await post(ids.approval, { kind: 'approval', decision: 'deny' })
-    await turn.done
   })
 
   // A `done` summary (#1379) outlives its turn: nothing is parked on it, and the panel's
@@ -375,9 +342,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
   })
 
   // spec §6.6 "Two reads, two sources": the badge's read is one Postgres read of the
-  // classic stores and the durable projection; a durable entry past its timer is `expiring`.
+  // classic stores (rows an earlier release left) and the durable projection; a durable
+  // entry past its timer is `expiring`.
   it('lists durable entries from the projection beside classic ones, never their input, and marks an overdue one expiring', async () => {
     const { m, session, turn } = await setUp()
+    // A classic approval an earlier release left, on a session of its own.
+    const { session: old } = await m.start(browser, { origin: 'chat', title: 'old' })
+    await db.sql`UPDATE ai_sessions SET mode = 'classic', runtime = NULL, status = 'waiting_approval' WHERE id = ${old.id}`
+    const classic = await m.approvals.create({
+      sessionId: old.id,
+      turnId: null,
+      toolUseId: 'toolu_old',
+      tool: 'mcp__stub__print',
+      input: { job: 'old' },
+      tier: 'outward',
+      requestedBy: browser,
+    })
     const durable = randomUUID()
     await db.sql`
       INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
@@ -396,8 +376,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect(live).not.toHaveProperty('expiring')
     expect(mine.find((e) => e.id === `durable:${durable}:run-1:toolu_late`)).toMatchObject({ expiring: true })
     expect(entries.filter((e) => e.session_id === session.id)).toHaveLength(3)
+    expect(entries.filter((e) => e.session_id === old.id).map((e) => e.id)).toEqual([`approval:${classic.id}`])
 
-    // One session's entries: a classic one's from its stores.
+    // One session's entries: its workflow's.
     const app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
@@ -417,8 +398,23 @@ describe.skipIf(!TEST_DATABASE_URL)(`the respond route${TEST_DATABASE_URL ? '' :
     expect(page.entries.every((e) => e.session_id === session.id)).toBe(true)
     expect((await app.request(`/api/v1/ai/sessions/${session.id}/pending-input`)).status).toBe(403)
     expect((await app.request(`/api/v1/ai/sessions/${randomUUID()}/pending-input`, { headers: READ })).status).toBe(404)
-    // A durable session with no Temporal configured: its workflow cannot be asked.
-    expect((await app.request(`/api/v1/ai/sessions/${durable}/pending-input`, { headers: READ })).status).toBe(503)
+    // A session whose workflow is not there (never started) has none to ask.
+    expect((await app.request(`/api/v1/ai/sessions/${durable}/pending-input`, { headers: READ })).status).toBe(404)
+    // With no Temporal configured, no session's workflow can be asked.
+    const bare = manager({ sql: db.sql, paths: await tempPaths(), run: parks })
+    withoutTemporal(bare)
+    const noTemporal = createApp({
+      database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
+      backend: () => Promise.resolve(true),
+      kek: { ok: false, reason: 'unused' },
+      credentials: new MemoryCredentials(),
+      testConnection: () => Promise.resolve({ ok: true, detail: 'ok', duration_ms: 0, model: 'm' }),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+      approvals: bare.approvals,
+      sessions: bare,
+    })
+    expect((await noTemporal.request(`/api/v1/ai/sessions/${session.id}/pending-input`, { headers: READ })).status).toBe(503)
     await m.interrupt(session.id, browser)
     await turn.done
   })

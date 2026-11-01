@@ -393,10 +393,7 @@ export const sessionTools: Tool[] = [
       mode: z
         .enum(SESSION_MODES)
         .optional()
-        .describe(
-          'classic runs in the agent service; durable runs as a Temporal workflow that survives restarts. ' +
-            'Asked for, durable is refused when it cannot run now; omitted, the default applies.',
-        ),
+        .describe('Taken and ignored: every session runs as a Temporal workflow that survives restarts.'),
       wait_seconds: waitSeconds,
     }),
     risk: 'write',
@@ -405,19 +402,18 @@ export const sessionTools: Tool[] = [
     summarize: ({ title, prompt, images }) =>
       `start a session${title ? ` "${title}"` : ''}${prompt ? ' with a prompt' : ''}${images ? ` and ${images.length} image${images.length === 1 ? '' : 's'}` : ''}`,
     waitsMs: ({ wait_seconds }) => wait_seconds * 1000,
-    handler: async ({ prompt, images, title, tags, scope, mode, wait_seconds }, ctx) => {
+    handler: async ({ prompt, images, title, tags, scope, wait_seconds }, ctx) => {
       const sessions = manager(ctx)
       if (images && prompt === undefined) throw new ToolError('images are sent with a prompt: give the prompt too', 400)
       const owner = ownerOf(ctx.principal)
       const attachments = ctx.attachments ? { store: ctx.attachments, owner } : undefined
       const resolved = images ? await resolveSendImages(images, ctx.backend, attachments, ctx.flowImages) : undefined
-      const { session, turn, modeFallback } = await refusals(() =>
+      const { session, turn } = await refusals(() =>
         sessions.start(ownerOf(ctx.principal), {
           origin: originOf(ctx.principal),
           ...(title === undefined ? {} : { title }),
           ...(tags === undefined ? {} : { tags }),
           ...(scope === undefined ? {} : { scope }),
-          ...(mode === undefined ? {} : { mode }),
           ...(prompt === undefined ? {} : { prompt, tiers: ctx.principal.tiers }),
           ...(resolved ? { images: resolved.images } : {}),
           // A flow run's call (#2481): its turn is the run's, so the run's grant may cover it.
@@ -429,8 +425,7 @@ export const sessionTools: Tool[] = [
           console.error(`sessions_start: session ${session.id}: could not move its attachments: ${err instanceof Error ? err.message : String(err)}`)
         })
       }
-      const fellBack = modeFallback ? { mode_fallback: modeFallback } : {}
-      if (!turn) return json({ session: sessionView(session, viewerOf(ctx)), ...fellBack })
+      if (!turn) return json({ session: sessionView(session, viewerOf(ctx)) })
       const outcome = await waitFor(turn, wait_seconds, ctx)
       const now = await refusals(() => sessions.get(session.id, ownerOf(ctx.principal)))
       return json({
@@ -438,7 +433,6 @@ export const sessionTools: Tool[] = [
         turn_id: turn.turnId,
         turn: outcomeView(outcome),
         after_seq: 0,
-        ...fellBack,
       })
     },
   }),

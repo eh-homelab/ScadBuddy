@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@temporalio/activity'
-import { WorkflowNotFoundError } from '@temporalio/client'
+import { type Client, WorkflowNotFoundError } from '@temporalio/client'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { bundleWorkflowCode, Worker } from '@temporalio/worker'
 import type { Sql } from 'postgres'
@@ -9,7 +9,7 @@ import { afterAll, afterEach, beforeAll } from 'vitest'
 import { AuditLog } from '../../src/audit/log.js'
 import { DurableGate, sessionWorkflowId } from '../../src/gate/durable.js'
 import { SessionBlobs } from '../../src/sessions/blobs.js'
-import { DurableTurns, type DurableTurn, type SessionRuntime } from '../../src/sessions/durable.js'
+import { DurableTurns, type DurableTurn } from '../../src/sessions/durable.js'
 import type { SessionManager, SessionManagerDeps, SessionRecord, Turn } from '../../src/sessions/manager.js'
 import { readRuntimeSettings, RUNTIME_DEFAULTS } from '../../src/sessions/runtimeSettings.js'
 import { TurnHost } from '../../src/sessions/turnHost.js'
@@ -202,6 +202,13 @@ export function agentSessions(): void {
   }, 60_000)
 }
 
+/** The type and task queue of `session-<id>`'s latest run on the file's dev server. */
+export async function sessionWorkflow(id: string): Promise<{ type: string; taskQueue: string }> {
+  if (!active) throw new Error('no agentSessions() stack is set up in this describe')
+  const described = await active.env.client.workflow.getHandle(sessionWorkflowId(id)).describe()
+  return { type: described.type, taskQueue: described.taskQueue }
+}
+
 /**
  * Serves `m` from the file's stack, when `agentSessions()` set one up (support/sessions.ts
  * `manager()` calls it): DurableTurns and DurableGate on the dev server, and a TurnHost over its
@@ -209,7 +216,10 @@ export function agentSessions(): void {
  */
 export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, 'sql' | 'settings'>): void {
   const stack = active
-  if (!stack) return
+  if (!stack) {
+    turnless(m, deps.sql)
+    return
+  }
   const served: Served = {
     m,
     sql: deps.sql,
@@ -241,24 +251,58 @@ export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, '
 }
 
 /**
- * Takes `m` back to the in-process turn for one test of it (the session mode's fallback with no
- * Temporal, a classic turn's own shutdown): no DurableTurns or DurableGate.
+ * Takes Temporal away from `m` for one test of what a service without it does (spec 2026-10-13
+ * §10.1: a new session is refused `unavailable`): no DurableTurns or DurableGate.
  */
-export function classicTurns(m: SessionManager): void {
+export function withoutTemporal(m: SessionManager): void {
   m.durableTurns = undefined
   m.durable = undefined
 }
 
-/** DurableTurns that starts every new session on AgentSession, and says which manager sent each session's turn. */
+/** What a turn sent outside an agentSessions() describe says. */
+export const NO_TURNS_HERE = 'this describe runs no turn: call agentSessions() in it, and skip it with AGENT_SESSIONS_SKIP (support/agentSessions.ts)'
+
+/**
+ * A Temporal that holds no workflow: every handle's call is WorkflowNotFoundError, as for a
+ * session that never ran a turn; anything else is NO_TURNS_HERE.
+ */
+const noWorkflows = new Proxy({} as Client, {
+  get: (_, key) => {
+    if (key !== 'workflow') throw new Error(NO_TURNS_HERE)
+    return {
+      getHandle: (workflowId: string) =>
+        new Proxy({}, { get: () => () => Promise.reject(new WorkflowNotFoundError('no workflow in this test', workflowId, undefined)) }),
+    }
+  },
+})
+
+/** DurableTurns for a manager outside an agentSessions() describe: sessions start, and a turn refuses with NO_TURNS_HERE. */
+class TurnlessTurns extends DurableTurns {
+  override unready(): Promise<string | undefined> {
+    return Promise.resolve(undefined)
+  }
+
+  override send(): Promise<Turn | undefined> {
+    return Promise.reject(new Error(NO_TURNS_HERE))
+  }
+}
+
+/**
+ * Gives `m`, made outside an agentSessions() describe, what a service with Temporal has, for a
+ * test that runs no turn (a session's records, its files, its edits): sessions start, a turn
+ * fails with NO_TURNS_HERE, and a session's workflow is never found.
+ */
+function turnless(m: SessionManager, sql: Sql): void {
+  m.durableTurns = new TurnlessTurns({ client: noWorkflows, sql, events: m.events })
+  m.durable = new DurableGate(noWorkflows)
+}
+
+/** DurableTurns that says which manager sent each session's turn. */
 class ServedTurns extends DurableTurns {
   readonly #sent: (sessionId: string) => void
   constructor(deps: ConstructorParameters<typeof DurableTurns>[0], sent: (sessionId: string) => void) {
     super(deps)
     this.#sent = sent
-  }
-
-  override newRuntime(): Promise<SessionRuntime> {
-    return Promise.resolve('unified')
   }
 
   override send(session: SessionRecord, turn: DurableTurn): Promise<Turn | undefined> {

@@ -230,6 +230,11 @@ async function resolved(
 ): Promise<void> {
   const sid = String(row.session_id)
   const rid = row.request_id
+  // An attention request's timer gives no reason (the workflow's `#expire`); it gets classic's
+  // (questions/service.ts `timeOut`, #815), so the panel and the audit row say why it ended.
+  if (outcome === 'timed_out' && reason === null && row.attention) {
+    reason = `nobody replied in time (on_timeout: ${row.attention.on_timeout ?? 'proceed'})`
+  }
   const hops: Hop[] = [...(row.hops ?? [])]
   if (row.flow_run_id !== null && row.hop !== null) {
     // A run's entry keeps its way up, the resolution as its last step (§4.6).
@@ -278,16 +283,43 @@ async function resolved(
   events.push(
     event({ type: 'input.resolved', sessionId: sid, id: rid, kind: row.kind, outcome, ...(reason ? { reason } : {}) }),
   )
-  // Back to running once nothing of the session is parked any more.
-  const running = await tx`
-    UPDATE ai_sessions SET status = 'running', updated_at = now()
-    WHERE id = ${sid} AND status IN ('waiting_approval', 'waiting_input')
-      AND NOT EXISTS (SELECT 1 FROM ai_pending_input WHERE session_id = ${sid})
-    RETURNING status`
-  if (running.length > 0) events.push(event({ type: 'session.status', sessionId: sid, status: 'running' }))
+  // The status follows what of the session is still parked: running once nothing is, else the
+  // kind still waiting (an approval first), as classic's stores hand back (approvals/service.ts,
+  // questions/service.ts `withStatus`). Read under the session row's lock, so two resolves that
+  // overlap cannot each see the other's entry still there and both leave it waiting (#3685).
+  // agent-durable's gate/store.py `_resolved` does the same, and audits as below (#5052).
+  await tx`SELECT 1 FROM ai_sessions WHERE id = ${sid} FOR UPDATE`
+  const moved = await tx<{ status: 'running' | 'waiting_approval' | 'waiting_input' }[]>`
+    WITH next AS (
+      SELECT CASE
+        WHEN EXISTS (SELECT 1 FROM ai_pending_input WHERE session_id = ${sid} AND kind = 'approval') THEN 'waiting_approval'
+        WHEN EXISTS (SELECT 1 FROM ai_pending_input WHERE session_id = ${sid}) THEN 'waiting_input'
+        ELSE 'running' END AS status)
+    UPDATE ai_sessions SET status = next.status, updated_at = now() FROM next
+    WHERE id = ${sid} AND ai_sessions.status IN ('waiting_approval', 'waiting_input') AND ai_sessions.status <> next.status
+    RETURNING ai_sessions.status`
+  if (moved[0]) events.push(event({ type: 'session.status', sessionId: sid, status: moved[0].status }))
   await append(tx, sid, events)
   await tx`SELECT pg_notify(${INPUT_CHANNEL}, ${rid})`
   if (row.kind === 'approval') await audit(tx, { ...row, created_at: row.created_at_text }, outcome, responder, reason)
+  else if (outcome !== 'answered') await auditUnanswered(tx, row, outcome, reason)
+}
+
+/**
+ * The `question` row classic's QuestionService writes for a question nobody answered (#1075):
+ * ScadBuddy's own, `system`. An answer's row is the respond route's, which knows the client.
+ */
+async function auditUnanswered(tx: TransactionSql, row: PendingRow, outcome: InputOutcome, reason: string | null): Promise<void> {
+  const parsed = parseRequestId(row.request_id)
+  const toolUseId = parsed?.store === 'durable' ? parsed.toolUseId : null
+  const action = outcome === 'expired' || outcome === 'timed_out' ? outcome : 'cancelled'
+  const detail = `${row.tool} question ${row.request_id}${reason ? `: ${reason}` : ''}`
+  await tx`
+    INSERT INTO ai_audit (kind, action, surface, principal_kind, principal_id, principal_label,
+                          session_id, tool_use_id, tier, request_id, outcome, detail, started_at, finished_at, duration_ms)
+    VALUES ('question', ${action}, 'system', ${SYSTEM.kind}, ${SYSTEM.id}, ${SYSTEM.label}, ${String(row.session_id)},
+            ${toolUseId}, 'read', ${row.request_id}, 'refused', ${cut(detail, 500)}, ${row.created_at_text}::timestamptz, now(),
+            GREATEST(0, (extract(epoch FROM now() - ${row.created_at_text}::timestamptz) * 1000)::int))`
 }
 
 /** The `approval` row ApprovalService writes for a classic decision (audit/log.ts). */

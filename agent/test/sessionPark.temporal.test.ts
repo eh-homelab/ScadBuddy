@@ -23,7 +23,7 @@ import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { originPolicy } from '../src/http/origins.js'
 import { SessionBlobs } from '../src/sessions/blobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
-import { resolveTabWaits, type SessionManager, SETTING_SESSION_MODE, TAB_WAIT_S } from '../src/sessions/manager.js'
+import { resolveTabWaits, type SessionManager, TAB_WAIT_S } from '../src/sessions/manager.js'
 import type { InputEntry } from '../src/sessions/protocol.js'
 import type { WaitForTab } from '../src/tools/registry.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
@@ -33,7 +33,7 @@ import { acquireActivities, releaseActivities } from '../src/temporal/session/af
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
 import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
-import { ACQUIRE_WORKER_ACTIVITY, OPEN_INPUT_UPDATE, SESSION_GATE_ACTIVITIES as GATE, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, sessionHostQueue, UNIFIED_SESSIONS_SETTING } from '../src/temporal/session/names.js'
+import { ACQUIRE_WORKER_ACTIVITY, OPEN_INPUT_UPDATE, SESSION_GATE_ACTIVITIES as GATE, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, sessionHostQueue } from '../src/temporal/session/names.js'
 import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
 import { gateActivities, PgSessionOwners } from '../src/temporal/toolActivities.js'
 import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
@@ -154,7 +154,6 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
     ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     // Set in the database, as no route writes it (unifiedSessionsFlag.pg.test.ts).
-    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(true)})`
     spawned = 0
     sent = []
     readFailures = 0
@@ -176,7 +175,7 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
       sql: pool.sql,
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-park-test-token' }),
-      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === SETTING_SESSION_MODE ? 'durable' : undefined) as T) },
+      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       mcpServers: (_session, _principal, extras) => ({ stub: createSdkMcpServer({ name: 'stub', tools: [send, tabProbe(extras?.waitForTab)] }) }),
       tierOf: (n) => (n === SEND ? 'outward' : n === TAB ? 'read' : undefined),
       warm: { maxEntries: 8 },

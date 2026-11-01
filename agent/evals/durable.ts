@@ -17,7 +17,7 @@ import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
 import type { RiskTier } from '../src/harness/permissions.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { kekFromBase64 } from '../src/secrets.js'
-import { DurableTurns, SETTLED } from '../src/sessions/durable.js'
+import { SETTLED } from '../src/sessions/durable.js'
 import { SessionManager, SETTING_MODEL, SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
 import type { Owner, SessionStatus } from '../src/sessions/protocol.js'
 import { PgPayloadKeys, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
@@ -30,6 +30,7 @@ import type { ToolServices } from '../src/tools/registry.js'
 import { fixedCredentials } from '../test/support/fixedCredentials.js'
 import { ensureTemplate, TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from '../test/support/postgres.js'
 import { durableHealthPort, notStarted } from '../test/support/durableHealth.js'
+import { DurableSessionTurns } from '../test/support/durableSessionTurns.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_CLI_ENV } from '../test/support/temporal.js'
 import { EVAL_BACKEND_URL, EvalBackend } from './backend.js'
 import { collectRenders, type CollectOptions, type ScenarioBackend } from './render.js'
@@ -40,7 +41,7 @@ import { DURABLE_EVAL_TOOL_PREFIX as DURABLE_TOOL_PREFIX, EVAL_TOOL_PREFIX, type
 // Temporal dev server; agent-durable's real worker (`python -m scadbuddy_durable`, its
 // real DurableSession and the Claude Code its SDK bundles, no scripted model); the
 // agent's own agent-tools worker serving the real tool registry (DURABLE_TOOLS) against
-// the scenario's backend; and SessionManager starting the session in durable mode, so
+// the scenario's backend; and SessionManager starting the session as a DurableSession, so
 // the turn gets what a durable chat's turn gets (its system append included). The
 // credential is saved in Settings as a session's is, so a gateway pointed at the fake
 // Anthropic endpoint (test/evals.durable.e2e.test.ts) or a live key both work.
@@ -193,7 +194,9 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
       settings,
       newSessions: { max: 10_000, windowMs: 1 },
     })
-    manager.durableTurns = new DurableTurns({ client, sql: db.sql, events: manager.events, sendTimeoutMs: 60_000 })
+    // A DurableSession, as an earlier release started one: no new one is made since plan
+    // Step 6.3, and one that ran keeps going to agent-durable until Step 7.2.
+    manager.durableTurns = new DurableSessionTurns({ client, sql: db.sql, events: manager.events, sendTimeoutMs: 60_000 })
     const gate = new DurableGate(client, { timeoutMs: 15_000 })
     const started: string[] = []
     cleanups.push(async () => {
@@ -213,7 +216,7 @@ export async function startDurableStack(options: DurableStackOptions): Promise<D
         let sessionId: string | undefined
         let log: Logged[] = []
         try {
-          const { session } = await manager.start(EVAL_OWNER, { origin: 'mcp', title: scenario.id, mode: 'durable', prompt })
+          const { session } = await manager.start(EVAL_OWNER, { origin: 'mcp', title: scenario.id, prompt })
           sessionId = session.id
           started.push(session.id)
           const answered = new Set<string>()

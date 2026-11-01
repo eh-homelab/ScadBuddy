@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { Hono } from 'hono'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { createBackendClient } from '../src/api/backend.js'
 import { connectDatabase, type Database } from '../src/db.js'
@@ -191,8 +191,11 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent traci
     const seg0 = await waitForSpan(spans, (s) => s.name === 'agent.turn')
     expect(parkedTool.attributes).toMatchObject({ 'scadbuddy.outcome': 'parked', 'scadbuddy.approval_id': approvalId })
     expect(seg0.attributes).toMatchObject({ 'scadbuddy.outcome': 'parked', 'scadbuddy.approval_id': approvalId })
-    const [row] = await db.sql<{ traceparent: string | null }[]>`SELECT traceparent FROM ai_pending_input WHERE request_id = ${approvalId!}`
-    expect(row?.traceparent).toBe(`00-${parkedTool.spanContext().traceId}-${parkedTool.spanContext().spanId}-01`)
+    // Written after the entry opens (turnHost.ts `#traceEntry`, best effort), so it may land after the spans.
+    await vi.waitFor(async () => {
+      const [row] = await db.sql<{ traceparent: string | null }[]>`SELECT traceparent FROM ai_pending_input WHERE request_id = ${approvalId!}`
+      expect(row?.traceparent).toBe(`00-${parkedTool.spanContext().traceId}-${parkedTool.spanContext().spanId}-01`)
+    }, { timeout: 10_000, interval: 50 })
     expect(hits.filter((h) => h.path === '/healthz')).toEqual([])
 
     await approve(routes(m), approvalId!)

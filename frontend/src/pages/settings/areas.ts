@@ -35,7 +35,7 @@ export const LEGACY_ANCHORS: Readonly<Record<string, { area: AreaId; section: st
   'assistant-browser': { area: 'tools', section: 'builtin' },
   'assistant-tools': { area: 'tools', section: 'builtin' },
   'assistant-model': { area: 'assistant', section: 'model' },
-  'assistant-sessions': { area: 'assistant', section: 'default-session-mode' },
+  'assistant-sessions': { area: 'assistant', section: 'session-limits' },
   'assistant-mcp': { area: 'mcp', section: 'mcp-auth-mode' },
   'assistant-plugins': { area: 'tools', section: 'packages' },
   plugins: { area: 'tools', section: 'packages' },

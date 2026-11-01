@@ -59,8 +59,10 @@ key) and `POST /api/v1/settings/register-sidebar`.
 
 ### Both session modes
 
-A chat runs in one of two modes (`session_mode`, spec 2026-10-01 §6), and the
-scenarios run in both, scored by the same checks (#2320):
+The scenarios run on two engines, scored by the same checks (#2320). Since plan Step 6.3
+every new chat is an `AgentSession`, which runs the classic harness on Temporal; a
+`DurableSession` an earlier release started keeps running on agent-durable until Step 7.2,
+so both stay covered:
 
 - **classic**: `runScenario`, the harness a classic turn runs (`runHarness`).
 - **durable**: `evals/durable.ts`. `startDurableStack` starts what a durable chat runs
@@ -68,7 +70,8 @@ scenarios run in both, scored by the same checks (#2320):
   scadbuddy_durable`: its `DurableSession` and the Claude Code its SDK bundles, no
   scripted model), the agent's `agent-tools` worker serving the real tool registry
   against the scenario's backend, a throwaway Postgres database, and
-  `SessionManager`. Each scenario starts a session with `mode: 'durable'` and the
+  `SessionManager`. Each scenario starts a session as a `DurableSession` (its runtime
+  recorded as `durable` before the first send, as an earlier release's is) with the
   scenario's prompt, so the turn gets exactly what a durable chat's turn gets: the
   system append, ScadBuddy's own plugin (`SCADBUDDY_DURABLE_SKILLS_DIR`), and the
   credential, model and budget saved in Settings, as the durable runner reads them.

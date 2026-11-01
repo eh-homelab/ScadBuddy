@@ -7,6 +7,7 @@ import { runTool } from '../src/tools/registry.js'
 import { firstText, services } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, manager, tempPaths } from './support/sessions.js'
+import { withoutTemporal } from './support/agentSessions.js'
 
 // pending_input_list and sessions_pending_input (spec 2026-10-01 §6.6 "Reads", plan 5b
 // ruling 10): what each principal sees, under the approvals' visibility rules.
@@ -81,8 +82,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`the pending-input read tools${TEST_DATABASE
   })
 
   it("sessions_pending_input reads one session as the caller may see it, and hides one it may not", async () => {
-    const { call, durable } = await setUp()
-    // A durable session's read asks its workflow; with no Temporal configured it fails as retryable.
+    const { call, durable, m } = await setUp()
+    // A session's read asks its workflow; with no Temporal configured it fails as retryable.
+    withoutTemporal(m)
     const owned = await call(agentB, 'sessions_pending_input', { session_id: durable })
     expect(owned.isError).toBe(true)
     expect(JSON.stringify(owned.content)).toMatch(/Temporal/)
