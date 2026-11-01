@@ -187,6 +187,8 @@ def test_choices_carry_what_this_model_last_printed_with(client: TestClient, mod
 
     assert body["model_choices"] == {
         "printer_id": 1,
+        # #4971: the registry printer, only for a printer with no Bambuddy id.
+        "printer": None,
         "filament_plan": [{"slot_id": 1, "spool_id": 22}],
         "nozzles": [],
         "tier": None,
@@ -202,6 +204,7 @@ def test_the_dialogs_nozzles_tier_and_process_are_remembered_per_model(
     """Spec §7 — the dialog reopens on the last choices for this model."""
     remembered = {
         "printer_id": 1,
+        "printer": None,
         "filament_plan": [],
         "nozzles": [{"size": "0.2", "flow": "high_flow"}, {"size": "0.2", "flow": "high_flow"}],
         "tier": None,
