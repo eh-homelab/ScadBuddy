@@ -46,6 +46,7 @@ export async function gateSettings(sql: Sql): Promise<GateSettings> {
 /**
  * The gate's GateDb as main.ts builds it: the session manager's event log, or with none (no
  * credentials) a log of its own that only publishes, so a write still reaches the bus (#3365).
+ * Nothing follows that log: with no session manager there are no followers on this replica.
  */
 export function gateDb(sql: Sql, events: EventLog | undefined, onAppend: AppendHook | undefined): GateDb {
   return { sql, events: events ?? new EventLog(sql, onAppend ? { onAppend } : {}) }
