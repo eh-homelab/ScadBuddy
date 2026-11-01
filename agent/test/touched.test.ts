@@ -533,6 +533,13 @@ describe('extractors', () => {
     ])
   })
 
+  it('records no resource for an analyzer decision (#4966)', () => {
+    const decision = { id: 'd'.repeat(32), kind: 'accept', scope: { kind: 'print', key: 'o' } }
+    expect(touches('apply_analyzer_fix', { output_id: 'o' }, decision)).toEqual([])
+    expect(touches('record_analyzer_decision', { diagnostic_id: 'SB2001' }, decision)).toEqual([])
+    expect(touches('remove_analyzer_decision', { decision_id: 'd'.repeat(32) }, { removed: 'd'.repeat(32) })).toEqual([])
+  })
+
   it('leaves only the browser click and fill unclassified', () => {
     const open = ALL_TOOLS.filter((t) => t.risk !== 'read' && !EXTRACTORS[t.name] && !TOUCHES_NOTHING.has(t.name))
     expect(open.map((t) => t.name).sort()).toEqual(['browser_click', 'browser_fill'])

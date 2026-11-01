@@ -2,8 +2,8 @@
 
 Run the bundled analyzers over an output or a configuration, preview a fix, apply
 one, and record or remove a decision at a scope. The print dialog's analyzer panel
-(``frontend/src/components/print/AnalyzerPanel.tsx``) is their UI; no agent tool wraps
-them yet (``agent/src/tools/coverage.ts``).
+(``frontend/src/components/print/AnalyzerPanel.tsx``) is their UI; the agent's tools
+are ``agent/src/tools/analyzers.ts`` (#4966).
 
 **Applying records a decision; it sends nothing.** Apply stores an ``accept`` row in
 ScadBuddy's own database, which is the ``write`` tier (AI spec §8.1): reversible by
