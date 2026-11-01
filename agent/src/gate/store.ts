@@ -532,8 +532,12 @@ export async function resolveInput(sql: Sql, args: ResolveInput): Promise<boolea
   })
 }
 
-/** A response to a request whose row is its record (decideInput), as the respond route passes it. */
-export type DecideInput = { requestId: string; response: unknown; responder: Responder; role: Role }
+/**
+ * A response to a request whose row is its record (decideInput), as the respond route passes it.
+ * `live` says whether the row's workflow run still runs: one that ended without resolving it (a
+ * terminated run, until gate/sweep.ts removes its row) is never decided, since no call would run.
+ */
+export type DecideInput = { requestId: string; response: unknown; responder: Responder; role: Role; live?: (workflowId: string, runId: string) => Promise<boolean> }
 
 /** How decideInput ended: the request's outcome, or `workflow` when its workflow holds the entry (no `gate`). */
 export type Decided = { kind: 'approval' | 'answer'; outcome: InputOutcome } | 'workflow'
@@ -545,12 +549,18 @@ export type Decided = { kind: 'approval' | 'answer'; outcome: InputOutcome } | '
  * to write), then the row removed and its resolution written (`resolved`) in the same
  * transaction. The workflow is woken only after (gate/durable.ts), and a lost wake is made up by
  * its timer's read. A missing row is RespondRefusal `stale` (ended, or never asked): the route
- * then says how it ended.
+ * then says how it ended; so is a row whose run has ended (`live`).
+ *
+ * A decision that commits while the workflow is cancelling the entry (a Stop, the turn's end:
+ * the workflow's `resolving`, its row not yet gone) stands: the row decides, the cancel's
+ * resolve_input then finds it gone and the workflow ends the entry as recorded. The turn that
+ * was stopped does not run the call, as with an approval that lands just before a Stop; the
+ * respond Update refused it `resolving` instead, a window the record no longer has.
  */
 export async function decideInput(sql: Sql, args: DecideInput): Promise<Decided> {
   return await sql.begin(async (tx) => {
     await lockSessionOf(tx, args.requestId)
-    const [row] = await tx<(PendingRow & { gate: GateRecord | null; expired: boolean })[]>`
+    const [row] = await tx<(PendingRow & { gate: GateRecord | null; expired: boolean; workflow_id: string; workflow_run_id: string })[]>`
       SELECT *, created_at::text AS created_at_text, expires_at <= now() AS expired
       FROM ai_pending_input WHERE request_id = ${args.requestId} FOR UPDATE`
     if (row === undefined) throw new RespondRefusal('stale', `no pending input ${args.requestId}: it is stale or was never asked`)
@@ -559,6 +569,10 @@ export async function decideInput(sql: Sql, args: DecideInput): Promise<Decided>
       { ...row.gate, id: row.request_id, kind: row.kind, state: row.expired ? 'resolving' : 'pending' },
       { requestId: args.requestId, response: args.response, responder: { kind: args.responder.kind as Owner['kind'], id: args.responder.id }, role: args.role },
     )
+    // After the validator, so a response it refuses costs no call to Temporal.
+    if (args.live && !(await args.live(row.workflow_id, row.workflow_run_id))) {
+      throw new RespondRefusal('stale', `no pending input ${args.requestId}: its session's workflow run has ended`)
+    }
     const outcome: InputOutcome = 'decision' in valid ? (valid.decision === 'approve' ? 'approved' : 'denied') : 'answered'
     const response = 'decision' in valid ? { decision: valid.decision } : { answers: [...valid.answers] }
     await tx`DELETE FROM ai_pending_input WHERE request_id = ${args.requestId}`

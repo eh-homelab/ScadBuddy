@@ -58,7 +58,8 @@ import { FLOW_GRANT_CHECK_ACTIVITY, SESSION_GATE_ACTIVITIES } from './names.js'
 // workflow keeps the request id and its timers: on the wake, on a recheck timer (every
 // `recheckS`, doubling to RECHECK_MAX_S) and whenever its own resolve_input finds the row gone,
 // it reads the response row (`gate.read_input`) and ends the entry as recorded. So a lost wake
-// is made up by the next read. The `respond` Update still decides an entry the workflow holds,
+// is made up by the next read. A decision that commits while the workflow is cancelling the entry
+// stands, and the entry ends as it says (gate/store.ts decideInput). The `respond` Update still decides an entry the workflow holds,
 // one of a run from before the patch, and one an older replica's route sends.
 
 /** An entry's timer at most (ai_pending_input's CHECK). */
@@ -137,6 +138,8 @@ type Parked = {
   openFailed: boolean
   /** Whether its row is its record (R5): decided there, and read back here. */
   record: boolean
+  /** The read of its row in flight (#adopt): a wake that lands meanwhile joins it rather than read again. */
+  reading?: Promise<boolean> | undefined
 }
 
 type Verdict = { verdict: string; grant_id?: string; timeout_s?: number; on_outside?: string; reason?: string; hop_s?: number; parent_hop?: boolean; parent_session?: string; parent_principal?: string }
@@ -648,7 +651,14 @@ export class SessionGate {
    * Ends a recorded entry as its response row says, once there is one (R5): on the route's wake and
    * on each recheck. Whether the entry is no longer pending here, by this read or another path.
    */
-  async #adopt(parked: Parked): Promise<boolean> {
+  #adopt(parked: Parked): Promise<boolean> {
+    parked.reading ??= this.#read(parked).finally(() => {
+      parked.reading = undefined
+    })
+    return parked.reading
+  }
+
+  async #read(parked: Parked): Promise<boolean> {
     if (!(parked.opened || parked.openFailed)) await condition(() => parked.opened || parked.openFailed)
     if (parked.openFailed || parked.entry.state !== 'pending') return true
     const row = (await this.#onTimer[SESSION_GATE_ACTIVITIES.read]!({ requestId: parked.entry.id })) as InputRecord | null

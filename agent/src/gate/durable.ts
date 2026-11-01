@@ -106,6 +106,17 @@ export class DurableGate {
     }
   }
 
+  /** Whether the run `runId` of `workflowId` still runs; one that is not found has ended. Unreachable, DurableUnavailable. */
+  async #runs(workflowId: string, runId: string): Promise<boolean> {
+    try {
+      const described = await this.#call(this.#timeoutMs, () => this.#client.workflow.getHandle(workflowId, runId).describe())
+      return described.status.name === 'RUNNING'
+    } catch (err) {
+      if (err instanceof WorkflowNotFoundError) return false
+      throw err
+    }
+  }
+
   /** The session's parked calls, from its workflow (the source of truth). */
   async pendingInput(sessionId: string): Promise<PendingInputEntry[]> {
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
@@ -121,7 +132,13 @@ export class DurableGate {
   async respond(sessionId: string, args: RespondArgs): Promise<RespondOutcome> {
     if (this.#sql) {
       const { kind, id, label } = args.responder
-      const decided = await decideInput(this.#sql, { requestId: args.request_id, response: args.response, responder: { kind, id, label }, role: args.role })
+      const decided = await decideInput(this.#sql, {
+        requestId: args.request_id,
+        response: args.response,
+        responder: { kind, id, label },
+        role: args.role,
+        live: (workflowId, runId) => this.#runs(workflowId, runId),
+      })
       if (decided !== 'workflow') {
         await this.#wake(sessionId, args.request_id).catch((err: unknown) => {
           console.warn(`respond: session ${sessionId}'s workflow was not woken for ${args.request_id}; its recheck reads the decision (${(err as Error).message})`)

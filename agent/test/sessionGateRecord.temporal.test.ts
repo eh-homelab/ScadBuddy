@@ -191,6 +191,16 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     expect(reads).toBeGreaterThan(before)
   })
 
+  it('a respond to an entry whose run has ended (before the sweep removes its row) is stale, and decides nothing', async () => {
+    const id = randomUUID()
+    await send(env.client, id)
+    const entry = await parked(id)
+    await env.client.workflow.getHandle(sessionWorkflowId(id)).terminate('the test ended the run')
+    await expect(approve(new DurableGate(env.client, { sql: db.sql }), id, entry.request_id)).rejects.toMatchObject({ code: 'stale' })
+    expect((await db.sql`SELECT 1 FROM ai_pending_input WHERE request_id = ${entry.request_id}`).length).toBe(1)
+    expect((await db.sql`SELECT 1 FROM ai_input_responses WHERE request_id = ${entry.request_id}`).length).toBe(0)
+  })
+
   it('a restart of every worker while a park is open keeps it, and its resolution', async () => {
     const id = randomUUID()
     await send(env.client, id)
