@@ -133,7 +133,7 @@ async def test_a_flows_payloads_are_sealed_and_others_pass_through() -> None:
         assert sealed.metadata["encoding"] == SUBJECT_ENCODING
         assert b"the flow" not in sealed.data
         assert await codec.decode([sealed]) == [PLAIN]
-    for other in ("render-abc", "flow-nope", f"{FLOW}-x"):
+    for other in ("render-abc", "flow-nope", f"{FLOW}x"):
         ctx = WorkflowSerializationContext(namespace="default", workflow_id=other)
         assert await codec.with_context(ctx).encode([PLAIN]) == [PLAIN]
     assert await codec.encode([PLAIN]) == [PLAIN]

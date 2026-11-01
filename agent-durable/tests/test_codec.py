@@ -99,7 +99,7 @@ async def test_a_sessions_payloads_are_sealed_and_others_pass_through() -> None:
         assert sealed.metadata["encoding"] == SUBJECT_ENCODING
         assert b"the user" not in sealed.data
         assert await codec.decode([sealed]) == [PLAIN]
-    for other in ("render-abc", "session-nope", f"{SUBJECT}-x"):
+    for other in ("render-abc", "session-nope", f"{SUBJECT}x"):
         ctx = WorkflowSerializationContext(namespace="default", workflow_id=other)
         assert await codec.with_context(ctx).encode([PLAIN]) == [PLAIN]
     assert await codec.encode([PLAIN]) == [PLAIN]
