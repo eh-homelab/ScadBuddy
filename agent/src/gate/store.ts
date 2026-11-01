@@ -214,6 +214,7 @@ type Tx = { tx: TransactionSql; events: EventLog; appended: { sessionId: string;
 /** Runs `fn` in one transaction; once it has committed, tells the event log of every batch it appended. */
 async function transaction<T>(db: GateDb, fn: (w: Tx) => Promise<T>): Promise<T> {
   const appended: Tx['appended'] = []
+  // The cast drops postgres.js's UnwrapPromiseArray<T>: safe, since no caller's `fn` resolves to an array of promises.
   const result = (await db.sql.begin((tx) => fn({ tx, events: db.events, appended }))) as T
   for (const a of appended) db.events.committed(a.sessionId, a.events, a.seqs)
   return result
