@@ -121,6 +121,8 @@ export type SessionGateOptions = {
   onTimeout?: (onTimeout: string) => boolean
   /** Whether an entry about to open is recorded in its row (R5): asked once per entry that parks, so a workflow can put it behind `patched()`. Never, when absent. */
   record?: () => boolean
+  /** Whether a wake that joined a read which found nothing reads the row again (#5118): asked only then, so a workflow can put it behind `patched()`. Never, when absent. */
+  rereadOnWake?: () => boolean
 }
 
 type Parked = {
@@ -138,7 +140,7 @@ type Parked = {
   openFailed: boolean
   /** Whether its row is its record (R5): decided there, and read back here. */
   record: boolean
-  /** The read of its row in flight (#adopt): a wake that lands meanwhile joins it rather than read again. */
+  /** The read of its row in flight (#adopt): a wake that lands meanwhile joins it, and reads again if it found nothing (#woken). */
   reading?: Promise<boolean> | undefined
 }
 
@@ -245,7 +247,7 @@ export class SessionGate {
     // A request decided in its record: read what was decided. An id this run holds no record of is ignored.
     setHandler(inputDecidedSignal, (args) => {
       const parked = this.#parked.get(String(args?.request_id ?? ''))
-      if (parked?.record) void this.#adopt(parked).catch(ignoreTemporalFailure)
+      if (parked?.record) void this.#woken(parked).catch(ignoreTemporalFailure)
     })
   }
 
@@ -656,6 +658,18 @@ export class SessionGate {
       parked.reading = undefined
     })
     return parked.reading
+  }
+
+  /**
+   * The route's wake (`input_decided`): the decision is in the row. A read already in flight (a
+   * recheck's) may have read the row before the decision committed; the wake joins it, so when it
+   * found nothing the row is read once more, rather than the entry waiting for its next recheck
+   * (up to RECHECK_MAX_S) with its decision written (#5118).
+   */
+  async #woken(parked: Parked): Promise<void> {
+    const joined = parked.reading !== undefined
+    if (await this.#adopt(parked)) return
+    if (joined && this.#opts.rereadOnWake?.()) await this.#adopt(parked)
   }
 
   async #read(parked: Parked): Promise<boolean> {
