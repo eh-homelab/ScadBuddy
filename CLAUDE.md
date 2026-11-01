@@ -825,7 +825,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `ToolServices.workspace` (so in-process, `/mcp` and the durable activities alike),
     with `workspaceOf(ctx)`; the `workspace_*` tools are `src/tools/workspace.ts`, and
     `http_request`'s `save_to_workspace` gets the session's from `sessions/manager.ts`.
-    Never a file on the pod. The bytes (#4789) are a blob of the backend's content store,
+    Never a file on the pod; a session's working directory, `<SCADBUDDY_SESSION_DIR>/<id>/`
+    (each worker's own capped emptyDir, Step 9.5; not the NAS share, whose backup cannot leave
+    the plaintext copies out), is a copy of it that each turn's placement fills and each park
+    and its end write back by sha256 (`src/workspace/directory.ts`). The bytes (#4789) are a blob of the backend's content store,
     sealed under a per-file key wrapped under the session's data key (`src/workspace/sealing.ts`,
     `blobs.ts`; backend `api/internal_workspace.py` mints the URLs; a trigger keeps the
     `blob_refs` holder with the row, which assumes one database and role for both services;

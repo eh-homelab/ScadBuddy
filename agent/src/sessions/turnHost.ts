@@ -23,6 +23,7 @@ import { type ClaimedSession, runningDurableTurn, TAB_WAIT_S, type TurnOutcome, 
 import { scrubForLog } from './sdkEvents.js'
 import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
+import type { Placement, SessionDirectory } from '../workspace/directory.js'
 
 // An AgentSession's turn on this replica (unified runtime spec 2026-10-13 §5.2, §5.5): what
 // the `session_turn` activity runs (temporal/session/turnActivity.ts). The turn is a classic
@@ -36,6 +37,10 @@ import type { WarmEntry } from './warm.js'
 //      dies before its result still counts against the budget; at its end the cost and turns
 //      as a classic turn reckons them, as increments over what it wrote; the closing events
 //      (`tail`) are the workflow's `session.finish_turn`.
+//   5. the session's working directory (workspace/directory.ts, plan Step 9.5): made what its
+//      workspace holds before the message goes in, written back at each park and once the turn
+//      has ended here (released and shut-down turns too), unless another placement holds the
+//      turn by then; a turn whose directory grows past the workspace cap is stopped.
 //
 // Placements (§5.2 "Recovery"). A placement the workflow gave up on may still run here (its
 // heartbeat stalled, it ran past `turn_max_seconds`). Each of its event appends and transcript
@@ -103,6 +108,8 @@ export const NOT_ASKED = 'The question was not asked: the session is no longer t
 export const INPUT_POLL_MS = 1_000
 /** The gate's question tool (gate/entry.ts ASK_USER): AskUserQuestion and the subagents' ask_user park as it. */
 const GATE_ASK = 'ask_user'
+/** How often a running turn checks its working directory against the workspace cap. */
+export const DIR_CHECK_MS = 15_000
 /** How often a running placement checks that it still holds the turn, and writes what it has spent. */
 export const FENCE_MS = 1_000
 
@@ -152,6 +159,14 @@ export type TurnHostDeps = {
   runCall?: (call: DecidedCall) => Promise<DecidedRun>
   /** Where a `done` summary is posted, as a classic turn posts it (#815 §4); absent, it reads NO_PARKS. */
   questions?: Pick<QuestionService, 'gate' | 'attentionLimit'>
+  /**
+   * The session's working directory as a copy of its workspace (workspace/directory.ts, plan
+   * Step 9.5): placed before the turn runs, written back at its end. Absent, the directory is
+   * the process's own, unsynced.
+   */
+  directory?: Pick<SessionDirectory, 'place' | 'writeBack' | 'done' | 'usage'>
+  /** Tests only: how often a running turn checks its directory against the workspace cap (DIR_CHECK_MS). */
+  dirCheckMs?: number
 }
 
 /** A placement's holds (§5.4): the calls held now, the hold's length, and the release that ends them all. */
@@ -402,6 +417,12 @@ export class TurnHost {
       return why !== undefined && why !== 'shutdown'
     }
     const spend = new Spend(sql, id)
+    /** The session's working directory as placed for this turn (set just before it runs). */
+    let placed: Placement | undefined
+    /** The directory's changes so far, into the workspace: at each park, and at the turn's end; not once cut off. */
+    const sync = async () => {
+      if (placed && !fenced()) await this.#writeBack(placed)
+    }
     /**
      * This placement still holds its turn: checked, row locked, in each write's own transaction.
      * The turn as well as the attempt: an attempt id is the run's and the cycle's, so the next
@@ -445,6 +466,7 @@ export class TurnHost {
           shown: ctx.shown,
           trace: ctx.trace,
           asks: ctx.turn.run.questionGate !== undefined,
+          sync,
           // An attention request's timer, or its release, ends the turn as a Stop does: an MCP tool's result cannot.
           endTurn: (why) => {
             if (!controller.signal.aborted) controller.abort(new Error(why))
@@ -491,8 +513,33 @@ export class TurnHost {
     fence.unref()
     let outcome: TurnOutcome = { kind: 'failed', message: 'the turn could not finish' }
     let result: SDKResultMessage | undefined
+    let capCheck: ReturnType<typeof setInterval> | undefined
     try {
-      const run = await core.run(prompt)
+      placed = await this.#place(id)
+      // A directory past the workspace cap stops the turn: what it holds then is written back
+      // up to the cap, and the rest removed (directory.ts), so this disk stays bounded.
+      if (placed) {
+        const checking = placed
+        capCheck = setInterval(() => {
+          void this.#deps.directory!.usage(checking).then(
+            ({ bytes, cap }) => {
+              if (bytes <= cap || controller.signal.aborted) return
+              console.warn(`session directory cap: session ${id}'s working directory holds ${bytes} bytes, past the workspace's ${cap}; the turn is stopped`)
+              controller.abort(new Error(`the session's working directory grew past the workspace cap (${cap} bytes)`))
+            },
+            () => {},
+          )
+        }, this.#deps.dirCheckMs ?? DIR_CHECK_MS)
+        capCheck.unref()
+      }
+      let run: Awaited<ReturnType<CoreTurn['run']>>
+      try {
+        run = await core.run(prompt)
+      } finally {
+        clearInterval(capCheck)
+        // Not once cut off: the placement that holds the turn now has the directory.
+        await sync()
+      }
       clearInterval(fence)
       result = run.result
       const released = parks.released.aborted
@@ -537,8 +584,39 @@ export class TurnHost {
       throw err
     } finally {
       clearInterval(fence)
+      clearInterval(capCheck)
+      if (placed) this.#deps.directory?.done(placed)
       control.cancelled.removeEventListener('abort', onCancel)
       core.end(outcome, result)
+    }
+  }
+
+  /** The session's directory, made what its workspace holds; undefined (unsynced this turn) when that fails. */
+  async #place(id: string): Promise<Placement | undefined> {
+    const directory = this.#deps.directory
+    if (!directory) return undefined
+    try {
+      return await directory.place(id)
+    } catch (err) {
+      console.error(`session ${id}: its working directory could not be placed, so this turn's changes there are not kept: ${describe(err)}`)
+      return undefined
+    }
+  }
+
+  /** The directory's changes written back to the workspace; a failure is logged, and the turn keeps its end. */
+  async #writeBack(placed: Placement): Promise<void> {
+    try {
+      const back = await this.#deps.directory!.writeBack(placed)
+      const capped = back.skipped.filter((s) => s.code === 'too_large' || s.code === 'quota')
+      const other = back.skipped.filter((s) => !capped.includes(s))
+      if (capped.length > 0) {
+        console.warn(`session directory cap: session ${placed.sessionId}: ${capped.length} file(s) past the workspace caps were refused and removed: ${capped.map((s) => s.why).join('; ')}`)
+      }
+      if (other.length > 0) {
+        console.warn(`session ${placed.sessionId}: ${other.length} file(s) of its working directory were not written back: ${other.map((s) => s.why).join('; ')}`)
+      }
+    } catch (err) {
+      console.error(`session ${placed.sessionId}: its working directory could not be written back: ${describe(err)}`)
     }
   }
 
@@ -553,9 +631,11 @@ export class TurnHost {
     shown: (toolUseId: string, toolName: string, input: Record<string, unknown>) => Promise<void>
     trace: GateTrace
     asks: boolean
+    /** Writes the session's directory back: a parked turn's writes so far outlive the pod. */
+    sync: () => Promise<void>
     endTurn: (why: string) => void
   }): TurnGates {
-    const { session, turnId, control, stop, holds, secrets, shown, trace, asks, endTurn } = turn
+    const { session, turnId, control, stop, holds, secrets, shown, trace, asks, sync, endTurn } = turn
     const open = control.openInput
     if (!open) {
       return {
@@ -589,6 +669,8 @@ export class TurnHost {
       const rid = opened.request_id
       holds.held.add(rid)
       options.opened?.(rid)
+      // A park may outlast this pod (a release, a shutdown): what the turn wrote so far goes to the workspace first.
+      await sync()
       // Past the hold, the turn lets its process go (§5.4 "Release"); the entry stays open.
       const timer = setTimeout(() => holds.release(), options.holdMs ?? holds.holdMs)
       timer.unref()

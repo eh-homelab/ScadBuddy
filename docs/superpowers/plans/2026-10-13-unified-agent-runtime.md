@@ -1346,6 +1346,18 @@ Decision Q5.
 **Depends on:** #4812 merged; Q5. **Closes:** none. It is #1399's per-agent-session
 directory (`Refs #1399`).
 
+**As built (2026-11-01, #5095):** the directory is a capped emptyDir of each worker, not
+`Scadbuddy/sessions` on the NAS share. The working copies are plaintext, and the share's one
+backup (`nas-share-backup.yaml`) uses Velero 1.18's kopia fs-backup, which carries the whole
+share and cannot leave a subPath out. A security review also found that the backend's `/data`
+mount (`Scadbuddy/`) would have read every session's files. Continuity across pods does not
+need a shared disk. Every placement refills the directory from `SessionFiles`. Each park and
+the turn's end write it back. A session's copy goes once its warm process on that worker
+closes. There is no stale marker: each placement compares sha256 with the record. The
+workspace caps bound the directory, and a turn whose directory grows past `workspace_max_bytes`
+is stopped. Each directory is 0700. A separate NAS share outside the backup is still possible
+if the refill costs too much. `docs/ai/operating.md` §13 has the details.
+
 ### Step 9.6: Claude Code's own built-ins (R2) (PR, `feat(agent)!: Claude Code's own built-ins in every session`)
 
 Decisions Q2, Q3 and Q4.

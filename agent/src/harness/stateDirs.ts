@@ -19,8 +19,13 @@ export class StateDirError extends Error {
 
 export { isUuid }
 
+/** Where the sessions' working directories are: SCADBUDDY_SESSION_DIR's, else `work/sessions` under the state directory. */
+export function sessionsRoot(paths: HarnessPaths): string {
+  return paths.sessionsDir ?? path.join(scratchDir(paths), 'sessions')
+}
+
 /**
- * A session's own working directory (#300, spec §6): `work/sessions/<id>`.
+ * A session's own working directory (#300, spec §6): `<sessionsRoot>/<id>`.
  * Deterministic from the session id, so every replica computes the same path
  * and a session's `cwd` is the same wherever it resumes (spec §3.1: the SDK's
  * store key "derives from the working directory"). The id must be a UUID, which
@@ -31,7 +36,7 @@ export function sessionWorkDir(paths: HarnessPaths, sessionId: string): string {
   if (!isUuid(sessionId)) {
     throw new StateDirError(`not a session id: ${JSON.stringify(sessionId)}`)
   }
-  return path.join(scratchDir(paths), 'sessions', sessionId.toLowerCase())
+  return path.join(sessionsRoot(paths), sessionId.toLowerCase())
 }
 
 /**
@@ -58,7 +63,7 @@ export async function ensureSessionDir(paths: HarnessPaths, sessionId: string): 
 export async function ensureStateDirs(paths: HarnessPaths): Promise<string[]> {
   // The plugin package cache (#297) is checked with the others, so an
   // unwritable one stops the pod here rather than failing the first install.
-  const dirs = [claudeConfigDir(paths), scratchDir(paths), pluginCacheDir(paths)]
+  const dirs = [claudeConfigDir(paths), scratchDir(paths), pluginCacheDir(paths), ...(paths.sessionsDir ? [paths.sessionsDir] : [])]
   for (const dir of dirs) {
     try {
       await mkdir(dir, { recursive: true })
@@ -69,7 +74,7 @@ export async function ensureStateDirs(paths: HarnessPaths): Promise<string[]> {
       const code = (err as NodeJS.ErrnoException).code ?? String(err)
       throw new StateDirError(
         `cannot create a writable harness state directory ${dir} (${code}); ` +
-          `mount a writable volume at ${paths.stateDir} owned by the service user`,
+          `mount a writable volume at ${dir === paths.sessionsDir ? dir : paths.stateDir} owned by the service user`,
       )
     }
   }

@@ -236,6 +236,7 @@ as unset (`present()`).
 | `SCADBUDDY_PUBLIC_URL` | unset → loopback only | `originPolicy()` in [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts) | The UI's public URL. This is the same variable the backend reads (`public_url` in `backend/scadbuddy/core/settings.py`). Its origin is the only non-loopback origin allowed to write. Must be `http(s)`. See §6. |
 | `SCADBUDDY_AGENT_TRUSTED_PROXIES` | unset → no proxy trusted | `parseCidrList()` in `origins.ts` | A comma-separated list of CIDRs or bare addresses whose `X-Forwarded-Proto`/`X-Forwarded-Host` are believed. A malformed entry is a `ConfigError` at start. See §6. |
 | `SCADBUDDY_AGENT_ROLE` | `all` | `loadConfig()` | `all`, `api` or `worker` (§1, "Roles"). Any other value stops the process with exit code 1, naming the value. |
+| `SCADBUDDY_SESSION_DIR` | unset → `work/sessions` under the state directory | `loadConfig()`, `sessionsRoot()` in [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts) | Where each session's working directory, `<dir>/<session id>/`, is: the `cwd` of its Claude Code process, a working copy of its workspace (§13). Set it on the workers to a capped emptyDir of the pod's own, never the NAS share (the copies are plaintext, and the share's backup cannot leave a subPath out); every placement refills it from the workspace, so a turn placed on another pod still finds the files the last one wrote back. Must be an absolute path. The process checks at start that it can write there. |
 
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.
@@ -1501,6 +1502,42 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   table: it migrates both services into one database, runs the real API on moto's S3
   (`backend/tests/support/workspace_backend.py`), and checks the `blob_refs` row; a
   change to that table the trigger does not follow fails it.
+- The working directory (plan 2026-10-13 Step 9.5, decision Q5,
+  [`agent/src/workspace/directory.ts`](../../agent/src/workspace/directory.ts)): a
+  session's Claude Code runs in `<SCADBUDDY_SESSION_DIR>/<session id>/` (§2), a working copy
+  of its workspace; `ai_session_files` stays the record. Before each turn the worker makes
+  the directory what the workspace holds: it writes each file whose bytes differ and removes
+  everything else (a file the workspace no longer holds, what a turn that died never wrote
+  back, and every entry that is not a regular file at a workspace path, such as a symlink or a
+  dot-file). At each park and at the turn's end (a released or shut-down turn's too), it
+  writes each changed file back and deletes each removed one, by sha256 against what it
+  last synced, with the source `{kind: "session_dir"}`. A panel upload or a `workspace_*`
+  write during the turn wins over the directory's change to the same file, and reaches the
+  directory at the next turn. A turn cut off because another placement took it writes
+  nothing back. A worker that dies mid-turn loses only that turn's changes since its last
+  park.
+  - As built, against Q5: Q5 put the directory on the NAS share. It is a capped emptyDir of
+    each worker instead, refilled at every placement, because the copies are plaintext and the
+    share's one backup (`nas-share-backup.yaml`, Velero 1.18's kopia fs-backup) carries the
+    whole share and cannot leave a subPath out. A separate NAS share outside that backup stays
+    possible if the refill costs too much.
+  - Caps: the workspace's. A file past `workspace_file_max_bytes`, or one the
+    `workspace_max_bytes` quota refuses, is removed from the directory at the write-back, as is
+    every entry that cannot be synced. A turn whose directory grows past `workspace_max_bytes`
+    is stopped (checked every 15 s, `DIR_CHECK_MS`). Each refusal logs a line starting
+    `session directory cap:`. A session's directory is removed once its warm process on that
+    worker closes, so a worker's disk holds at most `warm_max_per_replica` directories. The
+    worker's emptyDir `sizeLimit` must be at least `workspace_max_bytes` times
+    `warm_max_per_replica`.
+  - Isolation: each directory is 0700 and its files 0600. Nothing is read or written through a
+    symlink, and no path leaves the directory. All sessions on a worker share one uid, so
+    that uid is not a boundary between them: the boundary is these checks, and the
+    file-tool seam that Step 9.6 adds.
+  - The directory holds the files in plaintext (the record's bytes are sealed):
+    `forgetSubject` removes the copy on its own pod, and each worker removes, every hour, the
+    directories of sessions whose row is gone. Until Step 9.6 gives
+  sessions Claude Code's own file tools, only an `allow_refused` package's built-ins (§9)
+  and a Monitor's command use the directory.
 - A session's files go with the session (deleting it, or `forgetSubject`, deletes them,
   and forgetting deletes the key that opens its blobs); a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
   principal's own workspace, whose files are swept 24 h after their last write (every

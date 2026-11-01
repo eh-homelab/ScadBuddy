@@ -1,0 +1,376 @@
+import { constants } from 'node:fs'
+import { chmod, lstat, mkdir, open, readdir, rm, stat, utimes } from 'node:fs/promises'
+import path from 'node:path'
+import type { Sql } from 'postgres'
+import { isUuid } from '../harness/uuid.js'
+import { sha256, type SessionFiles, WORKSPACE_PATH_MAX, WorkspaceError, type WorkspaceErrorCode, type WorkspaceRef } from './store.js'
+
+// A session's working directory, Claude Code's `cwd` (plan 2026-10-13 Step 9.5, #4773 R3,
+// decision Q5 as built): `<root>/<session id>/`, where root is SCADBUDDY_SESSION_DIR (a capped
+// emptyDir of the worker pod's own), else `work/sessions` under the state directory
+// (harness/stateDirs.ts `sessionsRoot`). The directory is a WORKING COPY of the session's
+// workspace: `SessionFiles` (store.ts, the blob store since #4812) stays the record, and every
+// placement refills the copy from it, so a turn placed on another pod finds what the last turn
+// wrote back. Q5 put the copy on the NAS share; it is per pod because the share's backup cannot
+// leave a subPath out (Velero 1.18's kopia fs-backup) and these copies are plaintext.
+//
+//   - `place`, when a turn is placed (sessions/turnHost.ts): the directory is made what the
+//     record holds. A file whose bytes differ is written from the record; anything else there
+//     goes: a file the record does not hold (a panel delete, or what a placement that died
+//     never wrote back), and every entry that is not a regular file at a workspace path
+//     (a symlink, a dot-file, a fifth level). The record's sha256 of each file placed is the
+//     placement's base.
+//   - `writeBack`, at each park and at the turn's end (a released or shut-down turn's too):
+//     each file whose sha256 is not its base is written to the record, and each base file gone
+//     from the directory is deleted there, both only while the record still holds the base
+//     (`expectedSha256`); the base then moves on. A record changed meanwhile (a panel upload,
+//     a `workspace_*` write during the turn) wins: the next placement brings it in.
+//   - `evict`, once the session's warm process here has closed (warm.ts `onClosed`): the copy
+//     goes, so the pod's disk holds at most its warm sessions' directories.
+//
+// Caps: the workspace's (`workspace_file_max_bytes`, `workspace_max_bytes`). A file the record
+// refuses for its size (`too_large`, `quota`) is removed from the directory at the write-back,
+// with every entry that cannot be synced, so after a write-back a directory holds no more than
+// its workspace. TurnHost also stops a turn whose directory grows past the cap (`usage`), and
+// logs each refusal (`session directory cap:`). Each directory is 0700 and its files 0600.
+// Every session's directory is the same uid's, so what keeps a session to its own is that
+// nothing here follows a link or takes a path outside it (`..` is no workspace segment), and
+// Step 9.6's file-tool seam.
+//
+// So a panel upload or a `workspace_*` write needs no marker: the next placement compares the
+// record with the directory. A pod that dies mid-turn loses only that turn's writes since its
+// last park, which the restart message already tells the model to check. The directory holds
+// plaintext, where the record's bytes are sealed: forgetSubject removes it
+// (`removeSessionDir`), and `sweep` removes one whose session is gone.
+
+/** A path segment the workspace takes (store.ts WORKSPACE_PATH's). */
+const SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/
+/** How deep a workspace path goes (store.ts WORKSPACE_PATH: four segments). */
+const MAX_SEGMENTS = 4
+/** What a write-back records as a file's source. */
+const SOURCE = { kind: 'session_dir' } as const
+/** A directory no turn was placed in for this long is removed by the sweep, a backstop for a missed eviction. */
+export const IDLE_MS = 24 * 60 * 60 * 1000
+/** The refusals that mean a file is past a cap: such a file leaves the directory at the write-back. */
+const CAPPED: ReadonlySet<WorkspaceErrorCode> = new Set(['too_large', 'quota'])
+
+/** A placement: the directory, and the record's sha256 of each file it holds as synced (moved on by each write-back). */
+export type Placement = { sessionId: string; dir: string; base: Map<string, string> }
+
+/** What a write-back did; `skipped` names each file it left, and why. */
+export type WriteBack = {
+  written: string[]
+  deleted: string[]
+  /** Each file left unsynced, why, and the refusal's code; a capped one (`too_large`, `quota`) was removed from the directory. */
+  skipped: { path: string; why: string; code: WorkspaceErrorCode }[]
+  /** How many entries that cannot be synced (links, dot-files, past four levels) were removed. */
+  strays: number
+}
+
+/** What a walk found: the regular files at workspace paths, by path, and every other entry (absolute). */
+type Walked = { files: Map<string, string>; strays: string[] }
+
+function ws(sessionId: string): WorkspaceRef {
+  return { kind: 'session', sessionId }
+}
+
+function missing(err: unknown): boolean {
+  return (err as NodeJS.ErrnoException).code === 'ENOENT'
+}
+
+/** `<root>/<id>`, for a session id only (a UUID), so no id leaves `root`. */
+export function sessionDirOf(root: string, sessionId: string): string {
+  if (!isUuid(sessionId)) throw new Error(`not a session id: ${JSON.stringify(sessionId)}`)
+  return path.join(root, sessionId.toLowerCase())
+}
+
+/** Removes a session's directory and all in it (forgetSubject, the sweep). */
+export async function removeSessionDir(root: string, sessionId: string): Promise<void> {
+  await rm(sessionDirOf(root, sessionId), { recursive: true, force: true })
+}
+
+/** Every entry under `dir`, never following a link: the regular files at workspace paths, and the rest. */
+async function walk(dir: string): Promise<Walked> {
+  const out: Walked = { files: new Map(), strays: [] }
+  const visit = async (abs: string, rel: string[]): Promise<void> => {
+    let entries
+    try {
+      entries = await readdir(abs, { withFileTypes: true })
+    } catch (err) {
+      if (missing(err)) return
+      throw err
+    }
+    for (const entry of entries) {
+      const at = path.join(abs, entry.name)
+      const parts = [...rel, entry.name]
+      const named = SEGMENT.test(entry.name) && parts.join('/').length <= WORKSPACE_PATH_MAX
+      if (named && entry.isDirectory() && parts.length < MAX_SEGMENTS) await visit(at, parts)
+      else if (named && entry.isFile()) out.files.set(parts.join('/'), at)
+      else out.strays.push(at)
+    }
+  }
+  await visit(dir, [])
+  return out
+}
+
+/** Every byte under `dir`, never following a link (a link counts as itself). */
+async function sizeOf(dir: string): Promise<number> {
+  let total = 0
+  const visit = async (abs: string): Promise<void> => {
+    let entries
+    try {
+      entries = await readdir(abs, { withFileTypes: true })
+    } catch (err) {
+      if (missing(err)) return
+      throw err
+    }
+    for (const entry of entries) {
+      const at = path.join(abs, entry.name)
+      if (entry.isDirectory()) await visit(at)
+      else total += await lstat(at).then((st) => st.size, () => 0)
+    }
+  }
+  await visit(dir)
+  return total
+}
+
+/** A regular file's bytes, opened without following a link; undefined when it is gone, or past `max` bytes (`size` then). */
+async function readRegular(abs: string, max: number): Promise<{ bytes: Buffer } | { size: number } | undefined> {
+  let handle
+  try {
+    handle = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW)
+  } catch (err) {
+    if (missing(err) || (err as NodeJS.ErrnoException).code === 'ELOOP') return undefined
+    throw err
+  }
+  try {
+    const st = await handle.stat()
+    if (!st.isFile()) return undefined
+    if (st.size > max) return { size: st.size }
+    return { bytes: await handle.readFile() }
+  } finally {
+    await handle.close()
+  }
+}
+
+/** Writes `rel` under `dir`, replacing any entry in its way (a link above all) rather than writing through it. */
+async function writeInside(dir: string, rel: string, bytes: Uint8Array): Promise<void> {
+  const parts = rel.split('/')
+  let at = dir
+  for (const part of parts.slice(0, -1)) {
+    at = path.join(at, part)
+    const st = await lstat(at).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))
+    if (st && !st.isDirectory()) await rm(at, { recursive: true, force: true })
+    if (!st || !st.isDirectory()) await mkdir(at, { mode: 0o700 })
+  }
+  const target = path.join(at, parts.at(-1)!)
+  const st = await lstat(target).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))
+  if (st && !st.isFile()) await rm(target, { recursive: true, force: true })
+  const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600)
+  try {
+    await handle.writeFile(bytes)
+  } finally {
+    await handle.close()
+  }
+}
+
+/** The directory itself, a real one: a link or a file in its place is removed first. */
+async function ensureDir(dir: string): Promise<void> {
+  const st = await lstat(dir).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))
+  if (st && !st.isDirectory()) await rm(dir, { recursive: true, force: true })
+  if (!st?.isDirectory()) await mkdir(dir, { recursive: true, mode: 0o700 })
+  // Its owner only, whatever umask made it; and its time is the placement's, which the sweep reads.
+  await chmod(dir, 0o700)
+  const now = new Date()
+  await utimes(dir, now, now)
+}
+
+export class SessionDirectory {
+  readonly #files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits'>
+  readonly #root: string
+  /** Each session's operations on its directory, one at a time: a sweep or an eviction never runs into a placement. */
+  readonly #chains = new Map<string, Promise<unknown>>()
+  /** The sessions with a turn placed here now (between `place` and `done`): never evicted or swept. */
+  readonly #busy = new Map<string, number>()
+
+  constructor(files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits'>, root: string) {
+    this.#files = files
+    this.#root = root
+  }
+
+  /** The session's directory: the `cwd` its turns run in (harness/stateDirs.ts `sessionWorkDir`, from the same root). */
+  dirOf(sessionId: string): string {
+    return sessionDirOf(this.#root, sessionId)
+  }
+
+  #serial<T>(sessionId: string, work: () => Promise<T>): Promise<T> {
+    const id = sessionId.toLowerCase()
+    const run = (this.#chains.get(id) ?? Promise.resolve()).then(work, work)
+    const settled = run.catch(() => {})
+    this.#chains.set(id, settled)
+    void settled.then(() => {
+      if (this.#chains.get(id) === settled) this.#chains.delete(id)
+    })
+    return run
+  }
+
+  /**
+   * Makes the directory what the session's workspace holds (the header); its base is what each
+   * write-back compares with. The session is busy here until `done`.
+   */
+  place(sessionId: string): Promise<Placement> {
+    const id = sessionId.toLowerCase()
+    this.#busy.set(id, (this.#busy.get(id) ?? 0) + 1)
+    return this.#serial(sessionId, () => this.#place(sessionId)).catch((err: unknown) => {
+      this.#unbusy(id)
+      throw err
+    })
+  }
+
+  /** The placement's turn has ended here: its directory may be evicted again. */
+  done(placement: Placement): void {
+    this.#unbusy(placement.sessionId.toLowerCase())
+  }
+
+  #unbusy(id: string): void {
+    const n = (this.#busy.get(id) ?? 1) - 1
+    if (n > 0) this.#busy.set(id, n)
+    else this.#busy.delete(id)
+  }
+
+  async #place(sessionId: string): Promise<Placement> {
+    const dir = this.dirOf(sessionId)
+    await ensureDir(dir)
+    const [record, found] = await Promise.all([this.#files.list(ws(sessionId)), walk(dir)])
+    for (const stray of found.strays) await rm(stray, { recursive: true, force: true })
+    const base = new Map<string, string>()
+    const held = new Set(record.map((f) => f.path))
+    for (const [rel, abs] of found.files) {
+      if (!held.has(rel)) await rm(abs, { force: true })
+    }
+    for (const file of record) {
+      const there = found.files.get(file.path)
+      const current = there === undefined ? undefined : await readRegular(there, file.size)
+      if (current && 'bytes' in current && sha256(current.bytes) === file.sha256) {
+        base.set(file.path, file.sha256)
+        continue
+      }
+      let read
+      try {
+        read = await this.#files.read(ws(sessionId), file.path)
+      } catch (err) {
+        // A blob that cannot be read now (workspace store.ts `unavailable`): left out of the
+        // base, so the write-back cannot replace or delete the record's file over it.
+        if (err instanceof WorkspaceError) continue
+        throw err
+      }
+      if (!read) continue
+      await writeInside(dir, file.path, read.bytes)
+      base.set(file.path, read.sha256)
+    }
+    return { sessionId, dir, base }
+  }
+
+  /**
+   * Writes the directory's changes since the placement's base to the session's workspace (the
+   * header), and moves the base on to what it synced: a turn writes back at each park and again
+   * at its end.
+   */
+  writeBack(placement: Placement): Promise<WriteBack> {
+    return this.#serial(placement.sessionId, () => this.#writeBack(placement))
+  }
+
+  async #writeBack(placement: Placement): Promise<WriteBack> {
+    const { sessionId, dir, base } = placement
+    const out: WriteBack = { written: [], deleted: [], skipped: [], strays: 0 }
+    const { fileMaxBytes } = await this.#files.limits()
+    const found = await walk(dir)
+    // Deletions first: what they free counts toward the writes' quota.
+    for (const [rel, digest] of [...base].sort(([a], [b]) => a.localeCompare(b))) {
+      if (found.files.has(rel)) continue
+      try {
+        if (await this.#files.delete(ws(sessionId), rel, { expectedSha256: digest })) out.deleted.push(rel)
+        base.delete(rel)
+      } catch (err) {
+        if (!(err instanceof WorkspaceError)) throw err
+        out.skipped.push({ path: rel, why: err.message, code: err.code })
+      }
+    }
+    for (const [rel, abs] of [...found.files].sort(([a], [b]) => a.localeCompare(b))) {
+      const read = await readRegular(abs, fileMaxBytes)
+      if (!read) continue
+      if (!('bytes' in read)) {
+        out.skipped.push({ path: rel, why: `${rel} is ${read.size} bytes; a workspace file holds at most ${fileMaxBytes}`, code: 'too_large' })
+        await rm(abs, { force: true })
+        continue
+      }
+      const was = base.get(rel)
+      const digest = sha256(read.bytes)
+      if (was === digest) continue
+      try {
+        await this.#files.write(ws(sessionId), rel, read.bytes, { source: SOURCE, expectedSha256: was ?? null })
+        out.written.push(rel)
+        base.set(rel, digest)
+      } catch (err) {
+        if (!(err instanceof WorkspaceError)) throw err
+        out.skipped.push({ path: rel, why: err.message, code: err.code })
+        // Past a cap: not kept on this disk either.
+        if (CAPPED.has(err.code)) await rm(abs, { force: true })
+      }
+    }
+    for (const stray of found.strays) await rm(stray, { recursive: true, force: true })
+    out.strays = found.strays.length
+    return out
+  }
+
+  /** The bytes the directory holds now, every entry counted (a link as itself), and the workspace cap (`workspace_max_bytes`). */
+  async usage(placement: Placement): Promise<{ bytes: number; cap: number }> {
+    const [{ workspaceMaxBytes }, bytes] = await Promise.all([this.#files.limits(), sizeOf(placement.dir)])
+    return { bytes, cap: workspaceMaxBytes }
+  }
+
+  /** Removes the session's directory (forgetSubject). */
+  remove(sessionId: string): Promise<void> {
+    return this.#serial(sessionId, () => removeSessionDir(this.#root, sessionId))
+  }
+
+  /**
+   * Removes the session's directory unless a turn is placed in it now: its process here has
+   * closed (warm.ts `onClosed`), and the next placement, here or elsewhere, rebuilds it from the
+   * record. So this disk holds at most the warm sessions' directories. Whether it removed it.
+   */
+  evict(sessionId: string): Promise<boolean> {
+    const id = sessionId.toLowerCase()
+    return this.#serial(sessionId, async () => {
+      if (this.#busy.has(id)) return false
+      await removeSessionDir(this.#root, id)
+      return true
+    })
+  }
+
+  /**
+   * Removes the directories of sessions whose row is gone, and those no turn was placed in for
+   * `idleMs` (a backstop for a missed eviction); the ids it removed. Never a busy one, and
+   * nothing not named by a session id.
+   */
+  async sweep(sql: Sql, idleMs = IDLE_MS, now = Date.now()): Promise<string[]> {
+    const names = await readdir(this.#root).catch((err: unknown) => (missing(err) ? ([] as string[]) : Promise.reject(err)))
+    const ids = names.filter((n) => isUuid(n) && n === n.toLowerCase())
+    if (ids.length === 0) return []
+    const live = new Set((await sql<{ id: string }[]>`SELECT id::text FROM ai_sessions WHERE id = ANY(${ids}::uuid[])`).map((r) => r.id))
+    const removed: string[] = []
+    for (const id of ids) {
+      const gone = await this.#serial(id, async () => {
+        if (this.#busy.has(id)) return false
+        if (live.has(id)) {
+          const placedAt = await stat(sessionDirOf(this.#root, id)).then((st) => st.mtimeMs, () => now)
+          if (now - placedAt < idleMs) return false
+        }
+        await removeSessionDir(this.#root, id)
+        return true
+      })
+      if (gone) removed.push(id)
+    }
+    return removed
+  }
+}

@@ -253,6 +253,8 @@ export class WarmSessions {
   private idleMs: number
   private readonly now: () => number
   private readonly log: (message: string) => void
+  /** Told each session whose process here has closed and left no other (workspace/directory.ts drops its copy). */
+  private readonly closedListeners: ((sessionId: string) => void)[] = []
   private readonly start: (run: HarnessRun) => WarmQuery
   /** By session, least recently used first. */
   private readonly slots = new Map<string, Slot>()
@@ -766,7 +768,13 @@ export class WarmSessions {
         this.log(`warm: releasing session ${id}'s assembly failed: ${err instanceof Error ? err.message : String(err)}`)
       }
       this.log(`warm: closed session ${id}'s process: ${reason}`)
+      if (!this.slots.has(id)) for (const listener of this.closedListeners) listener(id)
     })
+  }
+
+  /** `listener` is told each session whose process here closes with no newer one spawned for it. */
+  onClosed(listener: (sessionId: string) => void): void {
+    this.closedListeners.push(listener)
   }
 
   /**
