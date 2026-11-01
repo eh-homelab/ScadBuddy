@@ -8,6 +8,7 @@ import { isUuid } from '../harness/stateDirs.js'
 import { loadDoneSummary } from './doneSummary.js'
 import { isDoneSummary, isNotDoneSummary } from './waiting.js'
 import { inputRequested, inputResolved, questionEntry } from '../gate/classic.js'
+import { parseRequestId } from '../gate/ids.js'
 import { WAIT_FOR_USER } from '../gate/entry.js'
 import { redact } from '../secrets.js'
 import type { EventLog } from '../sessions/eventLog.js'
@@ -107,6 +108,8 @@ export const TAB_WAIT_RATE_LIMIT = 10
  */
 export const DONE_POSTS_PER_TURN = 3
 /** The advisory lock the rate limit's count and insert are taken under. */
+/** How long `attentionLimit` holds its lock for the entry's open (a workflow Update round trip). */
+const OPEN_WAIT_MS = 10_000
 const ATTENTION_RATE_LOCK = 'scadbuddy:attention-rate'
 
 export type QuestionErrorCode = 'not_found' | 'forbidden' | 'conflict' | 'invalid'
@@ -448,6 +451,40 @@ export class QuestionService {
   }
 
   /**
+   * The `question` audit row of an AgentSession's answered entry (`requestId`, a gate id), as
+   * `answer` writes one for a classic question (#1075): who answered, from where, the call, and
+   * the answers as a hash, never their text. Read from the entry's response row, once its
+   * workflow has resolved it; nothing when there is no answered row or no audit log.
+   */
+  async auditGateAnswer(principal: Owner, requestId: string, where: { clientIp?: string | undefined } = {}): Promise<void> {
+    if (!this.deps.audit) return
+    const [row] = await this.deps.sql<{ session_id: string; tool: string | null; requested_at: Date | null; response: { answers?: unknown } | null }[]>`
+      SELECT session_id, tool, requested_at, response FROM ai_input_responses
+       WHERE request_id = ${requestId} AND kind = 'answer' AND outcome = 'answered'`
+    if (!row) return
+    const parsed = parseRequestId(requestId)
+    const tool = row.tool ?? 'question'
+    const answers = Array.isArray(row.response?.answers) ? row.response.answers.filter((a): a is string => typeof a === 'string') : []
+    await this.audited([
+      {
+        kind: 'question',
+        action: 'answered',
+        surface: 'http',
+        actor: principal,
+        clientIp: where.clientIp,
+        sessionId: row.session_id,
+        ...(parsed?.store === 'durable' ? { toolUseId: parsed.toolUseId } : {}),
+        tier: 'read',
+        inputHash: this.deps.audit.hash(tool, { answers }),
+        outcome: 'ok',
+        detail: `${tool} question ${requestId}: ${answers.length} answer${answers.length === 1 ? '' : 's'}`,
+        startedAt: row.requested_at ?? new Date(),
+        finishedAt: new Date(),
+      },
+    ])
+  }
+
+  /**
    * The panel's `question.answer`, from the user in the panel. `where` is for
    * the audit log, as for an approval decision: the answerer's address and the
    * surface ('http', the panel, when omitted).
@@ -753,16 +790,20 @@ export class QuestionService {
    * `tab:<tool_use id>` (TurnHost's; any other entry is a model's own request, a DurableSession's
    * `wait_for_user` among them, whatever its reason, as a classic row is told apart by its tool;
    * agent-durable records no `tool` on its responses, so its resolved ones are not counted).
-   * Undefined when it may be asked; else the refusal the model reads,
-   * audited as `gate` audits one. The count holds `gate`'s lock, but the entry is written
-   * after it, by the workflow: two requests raised at once may both pass at the limit.
+   * Undefined when it was asked: `open`, which the workflow's entry is written by, runs under
+   * `gate`'s lock, as `gate`'s insert does, so two requests raised at once cannot both pass at the
+   * limit. Else the refusal the model reads, audited as `gate` audits one, and `open` never runs.
    */
-  async attentionLimit(context: { sessionId: string; turnId: string; toolUseId: string; tool: string; reason: string; own: boolean }): Promise<string | undefined> {
+  async attentionLimit(
+    context: { sessionId: string; turnId: string; toolUseId: string; tool: string; reason: string; own: boolean },
+    open: () => Promise<void>,
+  ): Promise<string | undefined> {
     const { own } = context
     const tab = '%:tab:%'
-    const [recent] = await this.deps.sql.begin(async (tx) => {
+    const limit = own ? ATTENTION_RATE_LIMIT : TAB_WAIT_RATE_LIMIT
+    const recent = await this.deps.sql.begin(async (tx) => {
       await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
-      return tx<{ n: number }[]>`
+      const [row] = await tx<{ n: number }[]>`
         SELECT
           (SELECT count(*) FROM ai_questions
            WHERE kind = 'attention' AND created_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})
@@ -774,9 +815,16 @@ export class QuestionService {
           + (SELECT count(*) FROM ai_input_responses
              WHERE tool = ${WAIT_FOR_USER} AND requested_at > now() - make_interval(secs => ${ATTENTION_RATE_WINDOW_S})
                AND (request_id LIKE ${tab}) <> ${own}) AS n`
+      const n = Number(row?.n ?? 0)
+      // Bounded: the lock is every session's, and a slow or absent workflow must not hold it.
+      // Past OPEN_WAIT_MS the entry opens outside it, so the limit may then let one more through.
+      if (n < limit) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([open(), new Promise<void>((resolve) => (timer = setTimeout(resolve, OPEN_WAIT_MS)))]).finally(() => clearTimeout(timer))
+      }
+      return n
     })
-    const limit = own ? ATTENTION_RATE_LIMIT : TAB_WAIT_RATE_LIMIT
-    if (Number(recent?.n ?? 0) < limit) return undefined
+    if (recent < limit) return undefined
     const limited = own
       ? `The user was not asked: at most ${ATTENTION_RATE_LIMIT} attention requests are sent in ` +
         `${ATTENTION_RATE_WINDOW_S / 60} minutes. Say what you need in your reply instead.`

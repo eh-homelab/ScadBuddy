@@ -97,6 +97,8 @@ export const RESTARTED_PROMPT =
   'The agent service restarted during this turn. Calls that were in flight are marked as interrupted; check before repeating any of them. Continue the task.'
 /** What a call that cannot park here reads: an attention request or a tab wait, or a turn with no way to its workflow. */
 export const NO_PARKS = 'this session cannot wait for an approval or an answer yet, so the call was not run'
+/** What a question is told when the session is no longer the user's, or its turn ended: classic's words (questions/service.ts). */
+export const NOT_ASKED = 'The question was not asked: the session is no longer the user’s, or its turn ended.'
 /** How often a held call reads its entry's response row besides the NOTIFY (approvals/service.ts's waiter's 1 s). */
 export const INPUT_POLL_MS = 1_000
 /** The gate's question tool (gate/entry.ts ASK_USER): AskUserQuestion and the subagents' ask_user park as it. */
@@ -644,6 +646,7 @@ export class TurnHost {
       stop,
       secrets,
       park,
+      withdraw: (callId, why) => control.withdrawInput?.({ turn_id: turnId, tool_use_id: callId, reason: why }) ?? Promise.resolve(false),
       hold: (requestId, signal) => this.#hold(requestId, signal),
       holdMs: holds.holdMs,
       released: holds.released,
@@ -661,6 +664,9 @@ export class TurnHost {
       return classic.gate({ sessionId: session.id, turnId, secrets, signal: stop, turnStartedAt: session.claimedAt })(request)
     }
     const questionGate: QuestionGate = async (request): Promise<QuestionVerdict> => {
+      // Only the user is asked, and only by the turn that holds the session: a handoff since the
+      // turn started ends its asking (classic's QuestionService.ask reads the same, per call).
+      if (!(await this.#stillAsks(session.id, turnId))) return { answered: false, message: NOT_ASKED }
       if (request.attention) return attend(request, request.attention)
       if (stop.aborted) return { answered: false, message: 'The user did not answer: the turn is stopping.' }
       // The card the panel shows, with the turn's secrets redacted as the classic QuestionService does.
@@ -694,6 +700,13 @@ export class TurnHost {
           }
         : {}),
     }
+  }
+
+  /** Whether the session is still the browser user's and turn `turnId` still holds it. */
+  async #stillAsks(sessionId: string, turnId: string): Promise<boolean> {
+    const [row] = await this.#deps.sql<{ owner_kind: string }[]>`
+      SELECT owner_kind FROM ai_sessions WHERE id = ${sessionId} AND durable_turn_id = ${turnId}`
+    return row?.owner_kind === 'browser'
   }
 
   /**

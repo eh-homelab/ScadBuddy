@@ -103,7 +103,7 @@ export async function pendingInput(
     sessions.questions.listPending(principal),
     sessions.projection.entries({
       ...(filter.sessionId === undefined ? {} : { sessionId: filter.sessionId }),
-      ...(browser ? {} : { ownedBy: principal, allApprovals: grant }),
+      ...(browser ? { ownAnswers: true } : { ownedBy: principal, allApprovals: grant }),
     }),
     withRuns ? sessions.queue.ownEntries() : Promise.resolve([]),
   ])
@@ -233,7 +233,7 @@ export async function respond(
 ): Promise<RespondResult> {
   const parsed = parseRequestId(requestId)
   const stale = new RespondError(404, `no pending input ${requestId}: it is stale or was never asked`)
-  if (parsed?.store === 'durable') return respondDurable(sessions, principal, parsed, requestId, body, stale)
+  if (parsed?.store === 'durable') return respondDurable(sessions, principal, parsed, requestId, body, stale, where)
   if (parsed?.store !== 'approval' && parsed?.store !== 'question') throw stale
   // The classic stores authorize other principals themselves (sessions_approve calls them directly).
   if (principal.kind !== 'browser') throw new RespondError(403, 'only the user in the ScadBuddy panel responds through this route')
@@ -339,6 +339,7 @@ async function respondDurable(
   requestId: string,
   body: RespondBody,
   stale: RespondError,
+  where: { clientIp?: string | undefined },
 ): Promise<RespondResult> {
   const session = await sessions.projection.session(parsed.sessionId)
   if (!session) throw stale
@@ -364,12 +365,23 @@ async function respondDurable(
       "an approval grant is for approving another agent's outward actions, never your own; ask the user in the ScadBuddy UI",
     )
   }
+  // An entry that has ended is answered from its response row (resolve_input writes it in the
+  // transaction that removes the entry), never by asking its workflow: the same decision again
+  // by the same responder is that decision's outcome (#3717), anything else a 409 saying how.
+  if (await sessions.projection.recorded(requestId)) {
+    const done = await repeated(sessions, requestId, body, principal)
+    if (done) return done
+    const ended = await endedConflict(sessions, requestId)
+    if (ended) throw ended
+  }
   // The decision's own trace, as a classic one's (approvals/service.ts `decisionSpan`): a child
   // of the request that made it, linked to the parked call's span (#5041).
   const decision = body.kind === 'approval' ? await decisionSpan(sessions, requestId, parsed.sessionId, principal) : undefined
   try {
     const out = await sessions.durable.respond(parsed.sessionId, { request_id: requestId, response: body, responder: principal, role })
     decision?.setAttribute('scadbuddy.outcome', out.outcome)
+    // An answer's audit row, as classic's (#1075); best effort, as classic's `audited` is.
+    if (out.outcome === 'answered') await sessions.questions.auditGateAnswer(principal, requestId, where).catch(() => {})
     return { id: requestId, kind: out.kind, outcome: out.outcome }
   } catch (err) {
     if (decision) recordFailure(decision, err)
@@ -380,10 +392,11 @@ async function respondDurable(
       if (err.code === 'resolved' || err.code === 'stale') {
         const done = await repeated(sessions, requestId, body, principal)
         if (done) return done
+        throw (await endedConflict(sessions, requestId)) ?? refused(err)
       }
       throw refused(err)
     }
-    if (err instanceof WorkflowNotFoundError) throw stale
+    if (err instanceof WorkflowNotFoundError) throw (await endedConflict(sessions, requestId)) ?? stale
     if (err instanceof DurableUnavailable) throw new RespondError(503, err.message)
     throw err
   } finally {
@@ -422,6 +435,24 @@ async function decisionSpan(sessions: SessionManager, requestId: string, session
  * approval is the same when its decision is; an answer when the hash of the response
  * the person sent (`ai_input_responses.response_hash`, #3724) is.
  */
+/**
+ * An AgentSession entry that has ended, as classic answers one (#1400, #1479): a 409 saying how,
+ * whatever kind the body names, from its response row; undefined when it has none (never asked).
+ */
+async function endedConflict(sessions: SessionManager, requestId: string): Promise<RespondError | undefined> {
+  const done = await sessions.projection.recorded(requestId).catch(() => undefined)
+  if (!done) return undefined
+  const reconnected = done.outcome === 'cancelled' && (done.response as { reconnected?: unknown } | null)?.reconnected === true
+  const how =
+    done.kind === 'approval'
+      ? done.outcome === 'approved' || done.outcome === 'denied'
+        ? `it was already ${done.outcome}`
+        : (done.reason ?? (done.outcome === 'expired' ? 'nobody decided before it expired' : 'it was cancelled'))
+      : endedReason({ outcome: reconnected ? 'reconnected' : done.outcome === 'expired' ? 'timed_out' : (done.outcome as 'answered' | 'cancelled' | 'timed_out'), reason: done.reason })
+  const what = done.kind === 'approval' ? 'an approval' : 'an answer'
+  return new RespondError(409, `${requestId} is no longer waiting for ${what}`, how)
+}
+
 async function repeated(sessions: SessionManager, requestId: string, body: RespondBody, principal: Owner): Promise<RespondResult | undefined> {
   const done = await sessions.projection.recorded(requestId)
   if (!done || done.kind !== body.kind) return undefined

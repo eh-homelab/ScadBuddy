@@ -53,6 +53,12 @@ export type ProjectionFilter = {
   ownedBy?: Pick<Owner, 'kind' | 'id'>
   /** …except approvals, which a grant holder sees in every session. */
   allApprovals?: boolean
+  /**
+   * With no `ownedBy` (the browser user's read): the answers of the sessions the user owns only,
+   * as classic's QuestionService.listPending lists them (#1218). An entry that outlived a handoff
+   * is not the user's to answer. Approvals and a flow run's entries stay listed.
+   */
+  ownAnswers?: boolean
 }
 
 export type RecordedInput = {
@@ -61,6 +67,8 @@ export type RecordedInput = {
   response: unknown
   responseHash: string | null
   responder: { kind?: string; id?: string }
+  /** Why it ended, when it was not answered or decided (a cancel's, an expiry's). */
+  reason: string | null
 }
 
 export class PendingProjection {
@@ -83,6 +91,7 @@ export class PendingProjection {
              OR (${filter.allApprovals === true} AND p.kind = 'approval' AND p.flow_run_id IS NULL)
              OR (s.owner_kind = ${owner?.kind ?? null} AND s.owner_id = ${owner?.id ?? null})
              OR (s.creator_kind = ${owner?.kind ?? null} AND s.creator_id = ${owner?.id ?? null}))
+        AND (${filter.ownAnswers !== true} OR p.kind = 'approval' OR p.flow_run_id IS NOT NULL OR s.owner_kind = 'browser')
       ORDER BY p.created_at, p.request_id
       LIMIT 500`
     return rows.map((r) => ({
@@ -132,7 +141,7 @@ export class PendingProjection {
   /** What the gate recorded for a resolved request (`ai_input_responses`), or undefined. */
   async recorded(requestId: string): Promise<RecordedInput | undefined> {
     const [row] = await this.#sql<RecordedInput[]>`
-      SELECT kind, outcome, response, response_hash AS "responseHash", responder FROM ai_input_responses WHERE request_id = ${requestId}`
+      SELECT kind, outcome, response, response_hash AS "responseHash", responder, reason FROM ai_input_responses WHERE request_id = ${requestId}`
     return row
   }
 

@@ -46,14 +46,20 @@ function harness(over: Partial<AttentionGateDeps> = {}) {
       // As TurnHost's park: its hold ends with the release too.
       return { requestId: rid, row: await hold(rid, AbortSignal.any([signal, releasing.signal])) }
     },
+    // As the workflow's withdraw_input: the call's entry ends cancelled, saying why.
+    withdraw: async (callId, why) => {
+      rowOf(`durable:s1:run:${callId}`).resolve({ outcome: 'cancelled', response: null, reason: why, responder: { kind: 'system' } })
+      return true
+    },
     hold: (rid, signal) => hold(rid, signal),
     holdMs: 300_000,
     released: releasing.signal,
     release: () => ({ answered: false, message: 'released', interrupt: true }),
     endTurn: (why) => ended.push(why),
     questions: {
-      attentionLimit: async ({ own, reason }) => {
+      attentionLimit: async ({ own, reason }, open) => {
         limits.push({ own, reason })
+        await open()
         return undefined
       },
     },

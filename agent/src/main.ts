@@ -869,8 +869,7 @@ const temporalWorker =
         },
       })
     : undefined
-// AgentSession (unified runtime spec 2026-10-13 §5.1): new durable sessions run here only
-// while `unified_sessions` is on; flagged off, nothing is ever started on this queue.
+// AgentSession (unified runtime spec 2026-10-13 §5.1): every new session runs here (plan Step 6.3).
 // Versioned as the Deployment `scadbuddy-agent` (D4) when the build has an id (config.buildId),
 // else unversioned like the agent's other workers. `session_settings` is a local activity, so it
 // is served here. `session_turn` is Task 5.2's, on the host worker.

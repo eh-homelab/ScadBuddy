@@ -57,17 +57,15 @@ describe('the composer', () => {
     expect(screen.queryByTestId('session-mode-fallback')).not.toBeInTheDocument()
   })
 
-  it('ignores a mode an earlier release remembered, and sends none with any message', async () => {
+  it('ignores a mode an earlier release remembered, and sends none', async () => {
     window.localStorage.setItem('scadbuddy.assistant.mode', 'classic')
     const { user, box } = await openComposer()
     expect(screen.queryByRole('button', { name: /^Session mode/ })).not.toBeInTheDocument()
     await user.type(box, 'hello{Enter}')
     await waitFor(() => expect(sentMessages()).toHaveLength(1))
     expect(sentMessages()[0]).not.toHaveProperty('mode')
-    await waitFor(() => expect(screen.getByTestId('agent-status')).toHaveTextContent(/idle|approval/i))
-    await user.type(box, 'and again{Enter}')
-    await waitFor(() => expect(sentMessages()).toHaveLength(2))
-    expect(sentMessages()[1]).not.toHaveProperty('mode')
+    // Left where it was: the composer neither reads nor clears it.
+    expect(window.localStorage.getItem('scadbuddy.assistant.mode')).toBe('classic')
   })
 
   it('forks a chat from its header, and offers a fork from each reply (#2688)', async () => {

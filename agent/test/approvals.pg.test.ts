@@ -22,18 +22,17 @@ import { originPolicy } from '../src/http/origins.js'
 import { registerApprovalRoutes } from '../src/routes/approvals.js'
 import { ChatConnection } from '../src/routes/chat.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
-import type { SessionManager, TurnPrincipal } from '../src/sessions/manager.js'
-import type { Owner, ServerEvent } from '../src/sessions/protocol.js'
-import { hasTier, type Tier } from '../src/auth/principal.js'
-import { turnPrincipal } from '../src/tools/harness.js'
-import { ALL_TOOLS } from '../src/tools/index.js'
-import { SERVER_NAME } from '../src/tools/projections.js'
+import type { SessionManager } from '../src/sessions/manager.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { respond } from '../src/routes/pendingInput.js'
 
 // The approval store and its rules without the SDK (#258): ai_approvals in
-// Postgres, expiry, visibility, the orphan paths, and the HTTP routes. The
+// Postgres, expiry, visibility, the orphan paths, and the HTTP routes. Since plan
+// Step 6.3 no turn parks here (an AgentSession's park is the gate's, ai_pending_input);
+// these rows are what an earlier release left, which expire, and MCP prepares. The
 // parked-turn flows run on the real SDK in test/approvals.e2e.test.ts.
 
 describe('input binding', () => {
@@ -501,362 +500,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     expect(await service.consume(session.id, turnA, pending!.tool, pending!.inputHash)).toBeUndefined()
   })
 
-  it('an approved orphan whose session cannot resume is voided at once, and the session is told', async () => {
-    const { session, approval } = await orphan()
-    // Another replica holds the session with a live turn: the resume cannot claim it.
-    await db.sql`UPDATE ai_sessions SET turn_id = gen_random_uuid(), lease_until = now() + interval '1 minute' WHERE id = ${session.id}`
-    await m.approvals.decide(browser, approval.id, true)
-    const after = await m.approvals.get(approval.id, browser)
-    expect(after).toMatchObject({ decision: 'approved', consumedAt: null, resumeTurnId: null })
-    expect(after.revokedAt).not.toBeNull()
-    expect(after.reason).toMatch(/could not resume: it is running another turn/)
-    const events = (await m.events.read(session.id, 0, 1000)).map((e) => e.event)
-    await expectPanelAccepts(events)
-    expect(events.at(-1)).toMatchObject({ type: 'error', code: 'approval_void', message: expect.stringContaining(approval.id) })
-    // Nothing can use it now, whatever turn asks.
-    await db.sql`UPDATE ai_sessions SET turn_id = NULL, lease_until = NULL WHERE id = ${session.id}`
-    expect(await m.approvals.bindResume(approval.id, '33333333-3333-4333-8333-333333333333')).toBe(false)
-  })
-
-  it('a resume that fails after claiming the session gives the claim back', async () => {
-    const { session, approval } = await orphan()
-    const failing = manager({
-      sql: db.sql,
-      paths: await tempPaths(),
-      run: scriptedRunner(() => ({ reply: 'ok' })).runner,
-      settings: { get: <T>(key: string) => Promise.resolve(values.get(key) as T) },
-    })
-    // Make startTurn throw: the events table refuses this session's appends.
-    await db.sql`CREATE FUNCTION refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
-      IF NEW.event LIKE '%user.turn%' THEN RAISE EXCEPTION 'append refused'; END IF; RETURN NEW; END $$`
-    await db.sql`CREATE TRIGGER refuse BEFORE INSERT ON ai_session_events FOR EACH ROW EXECUTE FUNCTION refuse()`
-    await failing.approvals.decide(browser, approval.id, true)
-    expect(await failing.get(session.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })
-    const after = await failing.approvals.get(approval.id, browser)
-    expect(after.revokedAt).not.toBeNull()
-    expect(after.reason).toMatch(/append refused/)
-  })
-
-  it('a resumed turn that does not use its approval voids it when it ends', async () => {
-    const { session, approval } = await orphan()
-    await m.approvals.decide(browser, approval.id, true)
-    await expect.poll(async () => (await m.get(session.id, agentA)).turnActive, { timeout: 5000 }).toBe(false)
-    const after = await m.approvals.get(approval.id, browser)
-    expect(after).toMatchObject({ decision: 'approved', consumedAt: null, reason: 'the turn ended' })
-    expect(after.resumeTurnId).not.toBeNull()
-    expect(after.revokedAt).not.toBeNull()
-  })
-
-  it('F1 repro: after interrupt and handoff, the new owner’s turn cannot use an old approval', async () => {
-    const { session, approval } = await orphan()
-    // Approved while the session is busy elsewhere (so nothing resumes), then the hold goes.
-    await db.sql`UPDATE ai_sessions SET turn_id = gen_random_uuid(), lease_until = now() + interval '1 minute' WHERE id = ${session.id}`
-    await m.approvals.decide(browser, approval.id, true)
-    await db.sql`UPDATE ai_sessions SET turn_id = NULL, lease_until = NULL WHERE id = ${session.id}`
-    expect(await m.interrupt(session.id, browser)).toBe(false)
-    await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))
-    const turn = await m.send(session.id, agentB, 'print the box')
-    await turn.done
-    const [{ turn_id: none } = { turn_id: null }] = await db.sql<{ turn_id: string | null }[]>`SELECT turn_id FROM ai_sessions WHERE id = ${session.id}`
-    expect(none).toBeNull()
-    // Whatever turn id agent B's turn had, nothing can consume the approval.
-    const rows = await db.sql<{ n: number }[]>`
-      SELECT count(*)::int AS n FROM ai_approvals WHERE id = ${approval.id} AND revoked_at IS NULL AND consumed_at IS NULL`
-    expect(rows[0]?.n).toBe(0)
-  })
-
-  it('interrupt and handoff void an approved-but-unused approval of the session', async () => {
-    for (const end of ['interrupt', 'handoff'] as const) {
-      const { session, approval } = await orphan()
-      const turnA = '44444444-4444-4444-8444-444444444444'
-      await db.sql`UPDATE ai_approvals SET decision = 'approved', decided_at = now(), usable_until = now() + interval '1 hour',
-                   resume_turn_id = ${turnA} WHERE id = ${approval.id}`
-      if (end === 'interrupt') expect(await m.interrupt(session.id, browser)).toBe(true)
-      else await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))
-      const after = await m.approvals.get(approval.id, browser)
-      expect(after.revokedAt).not.toBeNull()
-      expect(await m.approvals.consume(session.id, turnA, approval.tool, approval.inputHash)).toBeUndefined()
-    }
-  })
-
-  /** A manager whose turn parks on one outward call, then ends with a result. */
-  async function parking() {
-    const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
-      (async function* () {
-        await Promise.resolve()
-        await run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box.3mf' }, toolUseId: 'toolu_p', tier: 'outward', signal: run.signal! })
-        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
-      })()
-    const p = manager({ sql: db.sql, paths: await tempPaths(), run: runner, approvalPollMs: 20 })
-    const { session, turn } = await p.start(agentA, { origin: 'mcp', prompt: 'print' })
-    let id: string | undefined
-    await expect.poll(async () => (id = (await p.approvals.list(browser, { sessionId: session.id, pending: true }))[0]?.id)).toBeDefined()
-    return { p, session, turn: turn!, id: id! }
-  }
-  const statuses = async (mm: SessionManager, sessionId: string) =>
-    (await mm.events.read(sessionId, 0, 1000)).flatMap(({ event: e }) => (e.type === 'session.status' ? [e.status] : []))
-
-  // #3583, as #3256 for questions: the decision and the session's move back to `running` are
-  // one commit. The parked turn resumes on the decision's commit alone (it polls the row), so a
-  // status change made in a later transaction could land after the turn had finished. Read off
-  // the commits themselves, so the order of the turn and the decision does not matter.
-  it('logs the move back to running in the same commit as the decision (#3583)', async () => {
-    const { p, session, turn, id } = await parking()
-    const commits: ServerEvent[][] = []
-    const committed = p.events.committed.bind(p.events)
-    vi.spyOn(p.events, 'committed').mockImplementation((sessionId, logged, seqs) => {
-      commits.push([...logged])
-      committed(sessionId, logged, seqs)
-    })
-
-    await p.approvals.decide(browser, id, true)
-    await turn.done
-
-    const withDecision = commits.find((batch) => batch.some((e) => e.type === 'approval.resolved'))
-    expect(withDecision?.flatMap((e) => (e.type === 'session.status' ? [e.status] : []))).toEqual(['running'])
-    expect(await statuses(p, session.id)).toEqual(['idle', 'running', 'waiting_approval', 'running', 'idle'])
-  })
-
-  // #3583: the decision and the session's status are one commit, so a status write that fails
-  // takes the decision with it: the approval stays pending and decidable, never decided with the
-  // session left saying it waits. Nothing is audited until a decision commits.
-  it('a failed status write rolls the decision back, and it can be decided again (#3583)', async () => {
-    const audit = new AuditLog({ sql: db.sql })
-    const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
-      (async function* () {
-        await Promise.resolve()
-        await run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: 'box.3mf' }, toolUseId: 'toolu_r', tier: 'outward', signal: run.signal! })
-        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
-      })()
-    const p = manager({ sql: db.sql, paths: await tempPaths(), run: runner, approvalPollMs: 20, audit })
-    const { session, turn } = await p.start(agentA, { origin: 'mcp', prompt: 'print' })
-    let id: string | undefined
-    await expect.poll(async () => (id = (await p.approvals.list(browser, { sessionId: session.id, pending: true }))[0]?.id)).toBeDefined()
-    const service = p.approvals as unknown as { statusRefresh: () => Promise<ServerEvent[]> }
-    vi.spyOn(service, 'statusRefresh').mockRejectedValueOnce(new Error('status write failed'))
-
-    await expect(p.approvals.decide(browser, id!, false)).rejects.toThrow('status write failed')
-    expect(await db.sql`SELECT decision FROM ai_approvals WHERE id = ${id!}`).toEqual([{ decision: null }])
-    expect((await p.get(session.id, agentA)).status).toBe('waiting_approval')
-    expect(await db.sql`SELECT action FROM ai_audit WHERE kind = 'approval' AND action <> 'requested'`).toEqual([])
-
-    await p.approvals.decide(browser, id!, false)
-    await turn!.done
-    expect(await db.sql`SELECT action FROM ai_audit WHERE kind = 'approval' AND action <> 'requested'`).toEqual([{ action: 'denied' }])
-  })
-
-  // Review of #3685: two settles of one session's approvals that overlap each see the other's
-  // decision as pending under READ COMMITTED, so without a lock on the session row neither
-  // moves it back, and it stays `waiting_approval` with nothing pending. Both settles are
-  // held inside the refresh, their decisions written and not committed, before either runs it.
-  it('two overlapping decisions in one session move it back from waiting_approval (review of #3685)', async () => {
-    let hold!: () => void
-    const held = new Promise<void>((r) => (hold = r))
-    const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
-      (async function* () {
-        await Promise.resolve()
-        const gate = (toolUseId: string) =>
-          run.approvalGate!({ toolName: 'mcp__stub__print', input: { job: toolUseId }, toolUseId, tier: 'outward', signal: run.signal! })
-        await Promise.all([gate('toolu_1'), gate('toolu_2')])
-        await held
-        yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
-      })()
-    const p = manager({ sql: db.sql, paths: await tempPaths(), run: runner, approvalPollMs: 20 })
-    const { session, turn } = await p.start(agentA, { origin: 'mcp', prompt: 'print twice' })
-    let ids: string[] = []
-    await expect.poll(async () => (ids = (await p.approvals.list(browser, { sessionId: session.id, pending: true })).map((a) => a.id)).length).toBe(2)
-
-    const service = p.approvals as unknown as { statusRefresh: (db: unknown, sessionId: string) => Promise<ServerEvent[]> }
-    const refresh = service.statusRefresh.bind(service)
-    let arrived = 0
-    let both!: () => void
-    const together = new Promise<void>((r) => (both = r))
-    /** What the two settling commits moved the session to: the second must move it, seeing both decisions. */
-    const moved: string[] = []
-    vi.spyOn(service, 'statusRefresh').mockImplementation(async (tx, sessionId) => {
-      // Both meet here when nothing orders them; with the session locked the second settle
-      // cannot arrive until the first commits, so the first goes on alone after a wait.
-      if (++arrived === 2) both()
-      await Promise.race([together, new Promise((r) => setTimeout(r, 1_000))])
-      const out = await refresh(tx, sessionId)
-      moved.push(...out.flatMap((e) => (e.type === 'session.status' ? [e.status] : [])))
-      return out
-    })
-
-    await Promise.all(ids.map((id) => p.approvals.decide(browser, id, true)))
-    expect(arrived).toBe(2)
-    expect(moved).toEqual(['running'])
-    expect((await p.get(session.id, agentA)).status).toBe('running')
-    hold()
-    await turn!.done
-  })
-
-  it('F3: a decision that lands while its turn is finishing is voided, and the session does not stay waiting', async () => {
-    let hold!: () => void
-    const held = new Promise<void>((r) => {
-      hold = r
-    })
-    let parkedId: string | undefined
-    const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
-      (async function* () {
-        await Promise.resolve()
-        try {
-          await run.approvalGate!({
-            toolName: 'mcp__stub__print',
-            input: { job: 'box.3mf' },
-            toolUseId: 'toolu_f3',
-            tier: 'outward',
-            signal: run.signal!,
-          })
-        } catch {
-          // The shutdown aborted the wait; the turn is now finishing, slowly.
-          await held
-          throw new Error('Claude Code process aborted by user')
-        }
-        yield* []
-      })()
-    const f3 = manager({ sql: db.sql, paths: await tempPaths(), run: runner, approvalPollMs: 20 })
-    const { session } = await f3.start(agentA, { origin: 'mcp', prompt: 'print' })
-    await expect.poll(async () => {
-      parkedId = (await f3.approvals.list(browser, { sessionId: session.id, pending: true }))[0]?.id
-      return parkedId
-    }).toBeDefined()
-    f3.abortAll() // shutdown: the approval stays pending, the turn still holds the session
-    await expect.poll(async () => (await f3.get(session.id, agentA)).turnActive).toBe(true)
-    await f3.approvals.decide(browser, parkedId!, true) // looks parked: nobody resumes
-    hold()
-    await expect.poll(async () => (await f3.get(session.id, agentA)).turnActive, { timeout: 5000 }).toBe(false)
-    expect(await f3.get(session.id, agentA)).toMatchObject({ status: 'idle' })
-    const after = await f3.approvals.get(parkedId!, browser)
-    // Voided by the finishing turn, before or after it released the session.
-    expect(after).toMatchObject({ decision: 'approved', consumedAt: null, reason: expect.stringMatching(/turn ended/) })
-    expect(after.revokedAt).not.toBeNull()
-  })
-
-  describe("a resumed orphan's turn (PR #715 review)", () => {
-    // A registry tool only an outward principal is offered (tools/harness.ts `mcpServers`).
-    const outward = ALL_TOOLS.find((t) => t.risk === 'outward' && !t.name.startsWith('sessions_'))!
-    const outwardName = `mcp__${SERVER_NAME}__${outward.name}`
-
-    /** A manager whose turns park on `outwardName`, recording what each turn is offered. */
-    async function recording(currentTiers?: (owner: Owner) => Promise<readonly Tier[] | undefined>) {
-      const offered: string[][] = []
-      const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
-        (async function* () {
-          await Promise.resolve()
-          if (offered.length > 1) {
-            yield* [] // the resumed turn: its tools are what is checked
-            return
-          }
-          await run.approvalGate!({
-            toolName: outwardName,
-            input: { url: 'https://example.com/box.scad' },
-            toolUseId: 'toolu_resume',
-            tier: 'outward',
-            signal: run.signal!,
-          }).catch(() => {})
-          throw new Error('Claude Code process aborted by user')
-        })()
-      const r = manager({
-        sql: db.sql,
-        paths: await tempPaths(),
-        run: runner,
-        approvalPollMs: 20,
-        // What tools/harness.ts offers a turn, by name.
-        mcpServers: (session: { owner: Owner }, turn?: TurnPrincipal) => {
-          const principal = turnPrincipal(session.owner, turn)
-          offered.push(ALL_TOOLS.filter((t) => hasTier(principal, t.risk)).map((t) => `mcp__${SERVER_NAME}__${t.name}`))
-          return {}
-        },
-        ...(currentTiers ? { currentTiers } : {}),
-      })
-      return { r, offered }
-    }
-
-    /** A token-owned session sent to with outward tiers, whose turn parked and then lost its process. */
-    async function parkedThenRestarted(r: SessionManager) {
-      const { session, turn } = await r.start(agentA, { origin: 'mcp', prompt: 'import it', tiers: ['read', 'write', 'outward'] })
-      let parked: string | undefined
-      await expect.poll(async () => {
-        parked = (await r.approvals.list(browser, { sessionId: session.id, pending: true }))[0]?.id
-        return parked
-      }).toBeDefined()
-      r.abortAll() // shutdown: the approval stays pending
-      await turn!.done
-      await expect.poll(async () => (await r.get(session.id, agentA)).turnActive).toBe(false)
-      return { session, approvalId: parked! }
-    }
-
-    it("runs with the asking turn's tiers, so the approved outward tool is offered again", async () => {
-      const { r, offered } = await recording()
-      const { session, approvalId } = await parkedThenRestarted(r)
-      expect(offered[0]).toContain(outwardName)
-      expect((await r.approvals.get(approvalId, browser)).requestedTiers).toEqual(['read', 'write', 'outward'])
-
-      await r.approvals.decide(browser, approvalId, true)
-      await expect.poll(() => offered.length).toBe(2)
-      await expect.poll(async () => (await r.get(session.id, agentA)).turnActive, { timeout: 5000 }).toBe(false)
-      // Without the recorded tiers this turn was `read` only and not offered the tool it was told to call again.
-      expect(offered[1]).toContain(outwardName)
-      expect(offered[1]).toEqual(offered[0])
-    })
-
-    it('gets no more than the owner holds now: a downgraded token loses the tool, a revoked one keeps `read`', async () => {
-      let now: readonly Tier[] = ['read', 'write']
-      const { r, offered } = await recording((owner) => Promise.resolve(owner.id === agentA.id ? now : undefined))
-      const first = await parkedThenRestarted(r)
-      await r.approvals.decide(browser, first.approvalId, true)
-      await expect.poll(() => offered.length).toBe(2)
-      await expect.poll(async () => (await r.get(first.session.id, agentA)).turnActive, { timeout: 5000 }).toBe(false)
-      expect(offered[1]).not.toContain(outwardName)
-      expect(offered[1]).toContain(`mcp__${SERVER_NAME}__sessions_send`) // write, still held
-
-      now = []
-      offered.length = 0
-      const second = await parkedThenRestarted(r)
-      await r.approvals.decide(browser, second.approvalId, true)
-      await expect.poll(() => offered.length).toBe(2)
-      await expect.poll(async () => (await r.get(second.session.id, agentA)).turnActive, { timeout: 5000 }).toBe(false)
-      expect(offered[1]).toEqual(ALL_TOOLS.filter((t) => t.risk === 'read').map((t) => `mcp__${SERVER_NAME}__${t.name}`))
-    })
-
-    it('are not carried to another owner: a stored approval of agent A resumed in B’s session runs with B’s default', async () => {
-      const { r, offered } = await recording()
-      const { session } = await r.start(agentB, { origin: 'mcp', title: 't' })
-      await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
-      const approval = await r.approvals.create({
-        sessionId: session.id,
-        turnId: null,
-        toolUseId: 'toolu_1',
-        tool: outwardName,
-        input: { url: 'https://example.com/box.scad' },
-        tier: 'outward',
-        requestedBy: agentA,
-        requestedTiers: ['read', 'write', 'outward'],
-      })
-      offered.push([]) // so the runner treats the next turn as the resumed one
-      await r.approvals.decide(browser, approval.id, true)
-      await expect.poll(() => offered.length).toBe(2)
-      expect(offered[1]).not.toContain(outwardName)
-      expect(offered[1]).not.toContain(`mcp__${SERVER_NAME}__sessions_send`)
-    })
-  })
-
-  it('interrupting a session with an orphan cancels it; a new turn supersedes one', async () => {
-    const first = await orphan()
-    expect(await m.interrupt(first.session.id, browser)).toBe(true)
-    expect(await m.approvals.get(first.approval.id, browser)).toMatchObject({ decision: 'cancelled', reason: 'interrupted by You' })
-    expect(await m.get(first.session.id, agentA)).toMatchObject({ status: 'idle' })
-
-    const second = await orphan()
-    const turn = await m.send(second.session.id, agentA, 'never mind, do something else')
-    await turn.done
-    expect(await m.approvals.get(second.approval.id, browser)).toMatchObject({
-      decision: 'cancelled',
-      reason: 'superseded by a new turn',
-    })
-  })
-
   it('handing off a session cancels its pending approval', async () => {
     const { session, approval } = await orphan()
     await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))
@@ -980,3 +623,83 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     })
   })
 })
+
+// #3583 and the review of #3685, for an AgentSession's park (plan Step 6.3): the decision
+// and the session's move back to `running` are one commit, and two overlapping decisions in
+// one session still move it back. The park is the gate's (ai_pending_input), answered
+// through `respond`; the scripted turn runs through AgentSession (support/agentSessions.ts).
+describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(
+  `an AgentSession's approvals in Postgres${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}${AGENT_SESSIONS_SKIP}`,
+  () => {
+    agentSessions()
+    let db: Database
+    let drop: () => Promise<void>
+
+    beforeEach(async () => {
+      ;({ db, drop } = await throwawayDatabase())
+      expect(await db.ready()).toBe(true)
+    })
+    afterEach(async () => {
+      await drop()
+    })
+
+    const result = (run: HarnessRun) =>
+      ({ type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume }) as unknown as SDKMessage
+    /** A manager whose turn parks on each of `jobs` at once, then ends with a result once `held` resolves. */
+    async function parking(jobs: string[], held: Promise<void> = Promise.resolve()) {
+      const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+        (async function* () {
+          await Promise.resolve()
+          await Promise.all(
+            jobs.map((job) =>
+              run.approvalGate!({ toolName: 'mcp__stub__print', input: { job }, toolUseId: `toolu_${job}`, tier: 'outward', signal: run.signal! }),
+            ),
+          )
+          await held
+          yield result(run)
+        })()
+      const p = manager({ sql: db.sql, paths: await tempPaths(), run: runner })
+      const { session, turn } = await p.start(agentA, { origin: 'mcp', prompt: 'print' })
+      let ids: string[] = []
+      await expect
+        .poll(async () => (ids = (await db.sql<{ request_id: string }[]>`
+          SELECT request_id FROM ai_pending_input WHERE session_id = ${session.id} ORDER BY request_id`).map((r) => r.request_id)).length)
+        .toBe(jobs.length)
+      return { p, session, turn: turn!, ids }
+    }
+    const statuses = async (mm: SessionManager, sessionId: string) =>
+      (await mm.events.read(sessionId, 0, 1000)).flatMap(({ event: e }) => (e.type === 'session.status' ? [e.status] : []))
+    /** Each logged event's type, status and the transaction that wrote it (`xmin`). */
+    const logged = (sessionId: string) =>
+      db.sql<{ type: string; status: string | null; tx: string }[]>`
+        SELECT event::jsonb->>'type' AS type, event::jsonb->>'status' AS status, xmin::text AS tx
+          FROM ai_session_events WHERE session_id = ${sessionId} ORDER BY seq`
+
+    it('logs the move back to running in the same commit as the decision (#3583)', async () => {
+      const { p, session, turn, ids } = await parking(['box.3mf'])
+      expect(await respond(p, browser, ids[0]!, { kind: 'approval', decision: 'approve' })).toMatchObject({ outcome: 'approved' })
+      expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+
+      const rows = await logged(session.id)
+      const decision = rows.find((r) => r.type === 'approval.resolved')!
+      expect(rows.filter((r) => r.tx === decision.tx && r.type === 'session.status').map((r) => r.status)).toEqual(['running'])
+      expect(await statuses(p, session.id)).toEqual(['idle', 'running', 'waiting_approval', 'running', 'idle'])
+    })
+
+    it('two overlapping decisions in one session move it back from waiting_approval (review of #3685)', async () => {
+      let hold!: () => void
+      const held = new Promise<void>((r) => (hold = r))
+      const { p, session, turn, ids } = await parking(['a.3mf', 'b.3mf'], held)
+      expect((await p.get(session.id, agentA)).status).toBe('waiting_approval')
+
+      const outcomes = await Promise.all(ids.map((id) => respond(p, browser, id, { kind: 'approval', decision: 'approve' })))
+      expect(outcomes.map((o) => o.outcome)).toEqual(['approved', 'approved'])
+      expect(await db.sql`SELECT 1 FROM ai_pending_input WHERE session_id = ${session.id}`).toHaveLength(0)
+      // Moved back once, by whichever decision committed last, and never left waiting.
+      await expect.poll(async () => (await p.get(session.id, agentA)).status).toBe('running')
+      expect((await logged(session.id)).filter((r) => r.type === 'session.status' && r.status === 'running')).toHaveLength(2)
+      hold()
+      expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    })
+  },
+)

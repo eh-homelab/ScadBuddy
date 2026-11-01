@@ -95,8 +95,7 @@ import { FlowQueue } from '../flows/queue.js'
 //     approval grant as `approvalGrants` (auth/tokens.ts `approvalGrantCheck`).
 //     The caller's principal is mapped to an `Owner` by approvals/mcp.ts
 //     `ownerOf`, and a start or send passes its tiers (`tiers` below), which
-//     the turn's in-process tools run with. An approval a turn asks for
-//     records them, so resuming it restores them (`resumeApproved`).
+//     the turn's tools run with (`turn_tiers`, read by the tool activities).
 //   - The registry supplies `tierOf` and the in-process MCP servers
 //     (`mcpServers` below; main.ts passes tools/harness.ts `harnessTools`).
 //     Tool payloads: tool.call inputs and tool.result summaries go into the
@@ -110,35 +109,22 @@ import { FlowQueue } from '../flows/queue.js'
 //   - `onAppend` publishes `session.*` on the bus, and main.ts's LISTEN
 //     consumer calls EventLog.wake() (busEvents.ts, #300).
 //
-// Concurrency. A turn CLAIMS its session row with one conditional UPDATE
-// (status 'running', a fresh turn_id, a lease), so two sends — on one replica
-// or on two — cannot both win; the loser gets SessionError 'busy' (spec §6:
-// "a send while a turn is running gets a clear error"). The running turn
-// renews the lease every `renewMs`; if its replica dies, the lease runs out
-// after `leaseMs` and the session can be sent to again, and the reaper
-// (`reapExpired`, every 30 s from main.ts) ends that turn: an interrupted event
-// naming what this replica can tell of the cause, a `turn` audit row, and the
-// session back to idle, since its own finish() never ran (#2375). The same
-// renewal reads `interrupt_requested`, which is how an interrupt reaches a turn
-// running on another replica. On SIGTERM, `stopTurns` drains: no new turn,
-// running ones may finish, the rest are aborted and waited for, and the warm
-// processes are closed.
+// Turns (plan Step 6.3: every session is an AgentSession). `send` claims the row and
+// sends the turn to the session's workflow (durable.ts DurableTurns, `session-<id>` on
+// `agent-sessions`), whose `session_turn` activity runs it on a worker replica's warm
+// Claude Code (turnHost.ts over `turnCore`, warm.ts). Without Temporal, a new session is
+// refused `unavailable` (spec 2026-10-13 §10.1). The claim is one conditional UPDATE, so
+// two sends, on one replica or two, cannot both win; the loser gets SessionError 'busy'.
+// A turn takes no lease: its end is the workflow's `finish_turn`, and a turn whose
+// workflow cannot end it is the sweep's (durableSweep.ts). A classic session an earlier
+// release left goes on as an AgentSession at its next send, its turns read from its
+// transcript; one whose classic turn still holds a live lease on an older pod is left to
+// that pod. On SIGTERM, `stopTurns` drains: no new send here, and the warm processes close.
 //
-// Processes (unified runtime spec 2026-10-13 §5.3). A classic session's turns
-// run on one warm Claude Code per replica (`warm`, warm.ts), a streaming-input
-// query that each turn pushes its prompt into (warmTurn.ts): a turn after the
-// first spawns nothing while the process still matches it (its fingerprint,
-// the transcript tail, the budget), and respawns from the transcript when not.
-// A turn's cost is the difference of its process's cumulative total (§6.6).
-// An interrupt is `query.interrupt()`; the process answers with its result and
-// stays. A fallback to another credential respawns (§6.7).
-//
-// Approvals (#258). Every turn's queries get `approvals.gate()`: an outward
-// call parks the turn in `waiting_approval` until a human decides
-// (src/approvals/service.ts has the whole flow). interrupt and handoff cancel
-// a session's pending approvals, and so does claiming a new turn; a shutdown
-// leaves them pending, and the session `waiting_approval`, across the restart.
-// Approving such an orphan resumes the session through `resumeApproved`.
+// Approvals (#258). A turn's outward call parks in the gate (`ai_pending_input`, spec
+// 2026-10-01 §6.6) until a person decides through the pending-input route; interrupt and
+// handoff cancel a session's parked calls through its workflow. `approvals` (ai_approvals)
+// keeps the grants and the classic rows an earlier release left, which expire.
 //
 // Budget and turns. Each session gets `max_turns` and `budget_usd` from
 // ai_settings at start (keys below; defaults from harness/run.ts). max_turns
@@ -733,8 +719,7 @@ export type SessionManagerDeps = {
   /**
    * The tiers a principal holds now, when that can be known without its
    * credential (a bearer token's row; auth/tokens.ts `liveTokenTiers`), or
-   * undefined when it cannot. A resumed approval's turn gets no more than
-   * these (`resumeApproved`).
+   * undefined when it cannot.
    */
   currentTiers?: (owner: Owner) => Promise<readonly Tier[] | undefined>
   /** The data keys the transcript is sealed under (D7); without them no transcript line is written. */

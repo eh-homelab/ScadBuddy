@@ -15,6 +15,8 @@ import type { OpenInputArgs } from '../temporal/session/models.js'
 //   - the entry's timer (the workflow's) answers `timed_out`: `proceed` returns that, `stop`
 //     and `wait` end the turn as an interrupt does;
 //   - #815 §5's rate limits refuse it before anything parks (QuestionService.attentionLimit);
+//   - #815 §5: one open request per reason; a new one cancels the open one of its side (SUPERSEDED),
+//     as classic's replaces its row. A turn's entries end with it, so the turn's are the session's;
 //   - #1308: one card per disconnected tab. The model's own `tab_disconnected` request and a
 //     browser call's tab wait join the other side's open one, waiting on its row to their own
 //     deadline; that row ending without the user (its timer, its withdrawal) does not end the
@@ -28,6 +30,8 @@ import type { OpenInputArgs } from '../temporal/session/models.js'
 export const ATTENTION_GRACE_MS = 30_000
 /** A tab wait's call id is this plus the browser call's tool_use id: an entry of its own, never that call's (whose approval may have parked under its id). */
 export const TAB_WAIT_CALL = 'tab:'
+/** Why an open attention request ended when a newer one for its reason opened (classic's words, questions/service.ts `gate`). */
+export const SUPERSEDED = 'replaced by a newer request for the same reason'
 
 /** An entry's response row, as resolve_input (or a grant, or the flow's refusal) wrote it. */
 export type HeldRow = { outcome: string; response: { answers?: unknown; reconnected?: unknown } | null; reason: string | null; responder: { kind?: string } | null }
@@ -53,6 +57,8 @@ export type AttentionGateDeps = {
     signal: AbortSignal,
     options: { holdMs?: number; opened?: (requestId: string) => void },
   ) => Promise<{ requestId: string; row?: Response; early?: unknown }>
+  /** Cancels a call's open entry, saying why (the Update `withdraw_input`). */
+  withdraw: (callId: string, why: string) => Promise<unknown>
   /** Holds on an entry's response row until `signal` aborts (TurnHost's hold). */
   hold: (requestId: string, signal: AbortSignal) => Promise<Response>
   /** How long a held call holds the turn's process, and the release that ends every hold. */
@@ -70,6 +76,8 @@ export function attentionGate(deps: AttentionGateDeps): (request: QuestionReques
   const { session, turnId, stop, secrets, endTurn } = deps
   /** This placement's open tab waits, by side (`true`: the model's own request; `false`: a browser call's): the other side joins one. */
   const tabCards = new Map<boolean, string>()
+  /** This turn's open requests' call ids, by side and reason: a newer one cancels it. */
+  const openCards = new Map<string, string>()
   const turnStopped: QuestionVerdict = { answered: false, message: 'The user did not answer: the turn stopped first.' }
   /** What an attention request's call reads once its row (its own, or the one it joined) says how it ended. */
   const verdictOf = (row: Response, question: string, attention: Wait): QuestionVerdict => {
@@ -105,8 +113,6 @@ export function attentionGate(deps: AttentionGateDeps): (request: QuestionReques
     }
     const left = Math.ceil((deadline - performance.now()) / 1000)
     if (left <= 0) return verdictOf({ outcome: 'timed_out', response: null, reason: null, responder: null }, card.question, attention)
-    const limited = await deps.questions?.attentionLimit({ sessionId: session.id, turnId, toolUseId: request.toolUseId, tool: request.tool, reason: attention.reason, own })
-    if (limited !== undefined) return { answered: false, message: limited }
     // Redacted as the classic QuestionService redacts the card; the workflow checks the rest (gate/entry.ts).
     const hidden = secrets()
     // A joiner asking again has what is left of its own timer, at least the gate's floor (gate/entry.ts TIMEOUT_MIN_S).
@@ -119,25 +125,45 @@ export function attentionGate(deps: AttentionGateDeps): (request: QuestionReques
       on_timeout: attention.onTimeout,
     }
     const timerMs = timeoutS * 1000
+    const callId = own ? request.toolUseId : `${TAB_WAIT_CALL}${request.toolUseId}`
+    const side = `${own}:${attention.reason}`
     // The check `onParked` makes, beside the hold: it stops with the wait, and what it settles is read from the row.
     const checking = new AbortController()
     let tabCard: string | undefined
-    let parked
-    try {
-      parked = await deps.park(
-        { id: own ? request.toolUseId : `${TAB_WAIT_CALL}${request.toolUseId}`, name: WAIT_FOR_USER, input },
-        AbortSignal.any([stop, request.signal]),
-        {
+    let parking: ReturnType<AttentionGateDeps['park']> | undefined
+    /** Replaces this side's open request for the reason and opens the entry; done once the entry is open or the park ended. */
+    const open = async () => {
+      const superseded = openCards.get(side)
+      if (superseded !== undefined) await deps.withdraw(superseded, SUPERSEDED).catch(() => {})
+      openCards.set(side, callId)
+      await new Promise<void>((entered) => {
+        parking = deps.park({ id: callId, name: WAIT_FOR_USER, input }, AbortSignal.any([stop, request.signal]), {
           ...(timerMs <= deps.holdMs ? { holdMs: timerMs + ATTENTION_GRACE_MS } : {}),
           opened: (rid) => {
-            if (attention.reason === 'tab_disconnected' && !tabCards.has(own)) {
+            entered()
+            // A newer card of this side replaced the open one (above), so it is the one a join finds.
+            if (attention.reason === 'tab_disconnected') {
               tabCard = rid
               tabCards.set(own, rid)
             }
             void attention.onParked?.(checking.signal, rid).catch(() => {})
           },
-        },
-      )
+        })
+        parking.then(
+          () => entered(),
+          () => entered(),
+        )
+      })
+    }
+    let parked
+    try {
+      // #815 §5: the rate limit's count holds its lock until the entry is open, so two sessions
+      // raising at once cannot both pass at the limit.
+      const limited = deps.questions
+        ? await deps.questions.attentionLimit({ sessionId: session.id, turnId, toolUseId: request.toolUseId, tool: request.tool, reason: attention.reason, own }, open)
+        : await open()
+      if (limited !== undefined) return { answered: false, message: limited }
+      parked = await parking!
     } catch (err) {
       if (deps.released.aborted) return deps.release()
       if (stop.aborted || request.signal.aborted) return turnStopped
@@ -145,6 +171,7 @@ export function attentionGate(deps: AttentionGateDeps): (request: QuestionReques
     } finally {
       checking.abort()
       if (tabCard !== undefined && tabCards.get(own) === tabCard) tabCards.delete(own)
+      if (openCards.get(side) === callId) openCards.delete(side)
     }
     const { row, early } = parked
     if (!row) {
