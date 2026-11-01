@@ -137,6 +137,13 @@ const DIR_SYNC_EVERY = 4
  * worker's emptyDir, so one this slow is a hung disk or a tree built to stall it.
  */
 export const DIR_WALK_TIMEOUT_MS = 10_000
+/** How many skipped files' reasons one log line names; a flood of them is counted, not listed. */
+const LOGGED_REASONS = 5
+
+function firstReasons(skipped: readonly { why: string }[]): string {
+  const named = skipped.slice(0, LOGGED_REASONS).map((s) => s.why).join('; ')
+  return skipped.length > LOGGED_REASONS ? `${named}; and ${skipped.length - LOGGED_REASONS} more` : named
+}
 /** How often a running placement checks that it still holds the turn, and writes what it has spent. */
 export const FENCE_MS = 1_000
 
@@ -294,6 +301,8 @@ export class TurnHost {
    * A token of its own, not the attempt id, which the next turn's first placement in a run shares.
    */
   readonly #arrived = new Map<string, object>()
+  /** The skipped paths each placement's write-backs have logged (`#writeBack`). */
+  readonly #reported = new WeakMap<Placement, Set<string>>()
   /** Held calls by request id: each is woken by its entry's NOTIFY. */
   readonly #waiters = new Map<string, Set<() => void>>()
 
@@ -706,13 +715,23 @@ export class TurnHost {
   async #writeBack(placed: Placement, prune: boolean): Promise<number | undefined> {
     try {
       const back = await this.#deps.directory!.writeBack(placed, { prune })
-      const capped = back.skipped.filter((s) => s.code === 'too_large' || s.code === 'quota')
-      const other = back.skipped.filter((s) => !capped.includes(s))
+      // Each skipped path is logged once per placement: a file the turn keeps (a write-back during
+      // the turn only offers) is skipped again at every park and every minute.
+      let reported = this.#reported.get(placed)
+      if (!reported) this.#reported.set(placed, (reported = new Set()))
+      const fresh = back.skipped.filter((s) => {
+        const key = `${s.code}:${s.path}`
+        if (reported.has(key)) return false
+        reported.add(key)
+        return true
+      })
+      const capped = fresh.filter((s) => s.code === 'too_large' || s.code === 'quota')
+      const other = fresh.filter((s) => !capped.includes(s))
       if (capped.length > 0) {
-        console.warn(`session directory cap: session ${placed.sessionId}: ${capped.length} file(s) past the workspace caps were refused${prune ? ' and removed' : ''}: ${capped.map((s) => s.why).join('; ')}`)
+        console.warn(`session directory cap: session ${placed.sessionId}: ${capped.length} file(s) past the workspace caps were refused${prune ? ' and removed' : ''}: ${firstReasons(capped)}`)
       }
       if (other.length > 0) {
-        console.warn(`session ${placed.sessionId}: ${other.length} file(s) of its working directory were not written back: ${other.map((s) => s.why).join('; ')}`)
+        console.warn(`session ${placed.sessionId}: ${other.length} file(s) of its working directory were not written back: ${firstReasons(other)}`)
       }
       return back.bytes
     } catch (err) {

@@ -455,6 +455,24 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     expect(JSON.stringify(result)).toContain('grew past the workspace cap')
   })
 
+  it('a file skipped at every write-back of a placement is logged once', async () => {
+    const dir = await root()
+    let writeBacks = 0
+    const skipped = [{ path: 'big.bin', why: 'big.bin is past the cap', code: 'too_large' as const }]
+    const directory = {
+      place: async (sessionId: string) => ({ sessionId, dir, base: new Map<string, string>() }),
+      writeBack: async () => {
+        writeBacks += 1
+        return { written: [], deleted: [], skipped, strays: 0, bytes: 0 }
+      },
+      usage: async () => ({ bytes: 0, cap: 1_000 }),
+      done: () => {},
+    }
+    const { warned } = await cappedTurn(directory, { dirCheckMs: 10, stopAfterMs: 400 })
+    expect(writeBacks).toBeGreaterThan(2)
+    expect(warned.filter((w) => w.startsWith('session directory cap:'))).toHaveLength(1)
+  })
+
   it('a workspace holds at most maxFiles files: a new one past it is refused quota, a rewrite is not', async () => {
     const id = await session()
     const few = new SessionFiles(db.sql, { maxFiles: 3 })
