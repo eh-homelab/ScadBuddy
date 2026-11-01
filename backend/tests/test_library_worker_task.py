@@ -603,6 +603,18 @@ def test_the_library_worker_has_time_to_join_its_sweeps() -> None:
     ) <= main.LIBRARY_WORKER_STOP_TIMEOUT
 
 
+#: The API pod's `terminationGracePeriodSeconds` in eh-homelab/clusters
+#: (`applications/scadbuddy/scadbuddy.yaml`, clusters#3095, #2726 Phase 11).
+API_POD_GRACE_S = 60
+
+
+def test_the_library_worker_stops_inside_the_api_pods_grace() -> None:
+    """The kubelet kills the API pod `API_POD_GRACE_S` after SIGTERM. The library worker's
+    stop must end first, with room for the process to exit after it: raising
+    `LIBRARY_WORKER_STOP_TIMEOUT` past this means raising the grace in clusters too."""
+    assert main.LIBRARY_WORKER_STOP_TIMEOUT + 10 <= API_POD_GRACE_S
+
+
 async def test_the_boots_backfills_stop_and_their_threads_finish_before_shutdown_goes_on() -> None:
     """#2128: the boot's backfills run in threads, which a cancel would leave running on
     the pool the lifespan closes next. The shutdown sets their stop and waits for them."""
