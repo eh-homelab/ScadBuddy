@@ -71,7 +71,7 @@ import { PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
 import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities, toolCallActivities } from './temporal/toolActivities.js'
-import { finishedToolCalls, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
+import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { sessionGateActivities } from './temporal/session/gateActivities.js'
@@ -699,6 +699,8 @@ const durableCredentialSecrets = async () => {
 // A durable session's MCP client on each remote plugin, kept on the replica its calls
 // are pinned to (#2581): a stateful plugin (Playwright MCP) keeps its page between calls.
 const turnClients = new SessionClients<ListedTools>()
+/** How long a ToolCall's tool waits for its turn's plugin and package secrets to be gathered. */
+const TURN_SECRETS_MS = 30_000
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
@@ -786,7 +788,12 @@ const temporalClient = temporal
       ...(dataConverter ? { dataConverter } : {}),
     })
   : undefined
-if (temporalClient && temporal) toolCallStart = toolCallStarter({ client: temporalClient, blobs: new SessionBlobs(temporal.sql) })
+if (temporalClient && temporal) {
+  const results = { client: temporalClient, blobs: new SessionBlobs(temporal.sql) }
+  toolCallStart = toolCallStarter(results)
+  // `tool_call_result`: what a finished call returned, which a restarted turn's message names (Step 9.2).
+  toolServices.toolCallResults = (session, toolUseId) => toolCallResult(results, session, toolUseId)
+}
 // A place in this replica's warm cache, and its session host queue (§5.2): on agent-tools, and on
 // the session host queue for a turn another replica (one it was lost on) refers here.
 const sessionAcquire =
@@ -826,8 +833,19 @@ const temporalWorker =
         identity: workerIdentity(replicaIdentity()),
         activities: {
           ...toolActivities(ALL_TOOLS, durableToolDeps),
-          // A session turn's calls, each its own ToolCall workflow (plan 2026-10-13 Step 9.2).
-          ...toolCallActivities(ALL_TOOLS, durableToolDeps),
+          // A session turn's calls, each its own ToolCall workflow (plan 2026-10-13 Step 9.2),
+          // redacted of the turn's plugin and package tokens as an in-process call is.
+          ...toolCallActivities(ALL_TOOLS, {
+            ...durableToolDeps,
+            turnSecrets: async (session, owner) => {
+              const set = await turnToolDeps.servers({ session, owner, signal: AbortSignal.timeout(TURN_SECRETS_MS) })
+              try {
+                return set.secrets
+              } finally {
+                await set.release()
+              }
+            },
+          }),
           ...gateActivities({
             audit,
             sessions: new PgSessionOwners(temporal.sql),

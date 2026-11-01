@@ -102,8 +102,8 @@ export function createHarnessServer(
   /**
    * The turn's calls as activities (activityProjection.ts, plan 2026-10-13 Step 9.2): each call
    * with a tool_use id, in a session, runs as its ToolCall workflow, given the gate entry the seam
-   * approved it on (`approvalOf`). The browser_* tools stay here: their tab is reached through
-   * BridgeCall (#4806) and a call that finds none waits on this turn's gate.
+   * approved it on (`approvalOf`). A tool whose calls stay in the turn (Tool.inTurn: the browser_*
+   * tools) runs here.
    */
   activities?: { start: ToolCallStarter; approvalOf: (toolUseId: string) => CallApproval | undefined },
 ): McpSdkServerConfigWithInstance {
@@ -130,7 +130,7 @@ export function createHarnessServer(
           // in the query's context, not the tool's (telemetry/trace.ts).
           otelContext.with(toolContextFor(extra, turnContext), () => {
             const toolUseId = toolUseIdFrom(extra)
-            if (activities && session !== undefined && toolUseId !== undefined && !t.name.startsWith('browser_')) {
+            if (activities && session !== undefined && toolUseId !== undefined && !t.inTurn) {
               // An approved call runs the input its approval was given for, as the seam passed it
               // (the hash binds that, before this server's own parse filled any default).
               const approval = activities.approvalOf(toolUseId)

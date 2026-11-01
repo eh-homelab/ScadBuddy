@@ -1,8 +1,7 @@
 import type { Client } from '@temporalio/client'
-import { WorkflowNotFoundError } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import { backgroundWorkflowId } from '../background/service.js'
-import { terminateOpenToolCalls } from '../tools/activityProjection.js'
+import { terminateOpenToolCalls, workflowNotFound as notFound } from '../tools/activityProjection.js'
 import { type PayloadKeys, payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
 import { copyForkRanges, ForksNeedKeys, hasForks } from './store.js'
 import { notifyWarmEvict } from './warmEvict.js'
@@ -54,11 +53,6 @@ export type Forgotten = {
   key: boolean
   workflow: 'deleted' | 'not_found' | 'not_reached'
   rows: number
-}
-
-/** A gRPC NOT_FOUND from the workflow service. */
-function notFound(err: unknown): boolean {
-  return err instanceof WorkflowNotFoundError || (err as { code?: unknown } | null)?.code === 5
 }
 
 async function endBackgroundTasks(deps: ForgetDeps, sessionId: string): Promise<void> {

@@ -40,7 +40,8 @@ import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal }
 import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
-import { readToolsAsActivities } from './runtimeSettings.js'
+import { readRuntimeSettings, readToolsAsActivities, RUNTIME_DEFAULTS } from './runtimeSettings.js'
+import type { ToolCallRequest } from '../tools/activityProjection.js'
 import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnContext, type TurnSlot } from './turnSlot.js'
 import { PgHttpBodies } from './httpBodies.js'
@@ -504,19 +505,24 @@ export class TurnRunner {
           }
         }
       }
-      const [cwd, resume, settingModel, httpAccess, asActivities] = await phase('session', () =>
+      const [cwd, resume, settingModel, httpAccess, asActivities, runtime] = await phase('session', () =>
         Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.deps.store.exists(id),
           this.deps.settings?.get<string>(SETTING_MODEL),
           this.deps.httpRequest ? access.entry(BUILTIN_SOURCES.http, HTTP_TOOL) : undefined,
           this.deps.settings ? readToolsAsActivities(this.deps.settings) : false,
+          this.deps.settings ? readRuntimeSettings(this.deps.settings) : undefined,
         ]),
       )
       // The turn's ScadBuddy calls as activities (plan 2026-10-13 Step 9.2), each given the gate
-      // entry the seam approved it on. Without a starter (no Temporal), they run here.
+      // entry the seam approved it on, and bounded by the turn's own limit. Without a starter (no
+      // Temporal), they run here.
       const toolCalls = asActivities ? this.deps.toolCalls?.() : undefined
-      const activities = toolCalls ? { start: toolCalls, approvalOf: (toolUseId: string) => ledger.approvalOf(toolUseId) } : undefined
+      const timeoutMs = (runtime ?? RUNTIME_DEFAULTS).turn_max_seconds * 1000
+      const activities = toolCalls
+        ? { start: (request: ToolCallRequest) => toolCalls({ ...request, timeoutMs }), approvalOf: (toolUseId: string) => ledger.approvalOf(toolUseId) }
+        : undefined
       // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
       const model = session.agentModel ?? settingModel
       // Not while that subagent, or the own plugin, is switched off (#4757 Task 6 review I3): the

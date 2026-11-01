@@ -32,6 +32,8 @@ export type ToolCallArgs = {
   input: unknown
   /** The gate entry the call parked on and a person approved (`durable:<session>:<run>:<tool_use_id>`); absent for a call that never parked. */
   requestId?: string
+  /** The call's span in the turn's trace (telemetry/turn.ts), the activity's parent; absent when it is not sampled. */
+  traceparent?: string
 }
 
 /** A result block: text, or an image kept in the session's blobs (sessions/blobs.ts), by name, never its bytes. */
@@ -39,6 +41,9 @@ export type ToolCallBlock = { type: 'text'; text: string } | { type: 'image'; na
 
 /** What `tool:<name>` returns: whether the call succeeded, and what the model reads of it. */
 export type ToolCallResult = { ok: boolean; content: ToolCallBlock[] }
+
+/** The tool that reads what a session's finished ToolCall returned (tools/toolCalls.ts), which the restart message names. */
+export const TOOL_CALL_RESULT_TOOL = 'tool_call_result'
 
 /** The activity that runs a registry tool's call. */
 export const toolCallActivity = (tool: string): string => `tool:${tool}`

@@ -13,9 +13,11 @@ import type { SessionManager } from '../src/sessions/manager.js'
 import { event } from '../src/sessions/protocol.js'
 import { RESTARTED_PROMPT, restartedPrompt } from '../src/sessions/turnHost.js'
 import { forgetSubject } from '../src/sessions/forget.js'
-import { finishedToolCalls, toolCallStarter } from '../src/tools/activityProjection.js'
+import { finishedToolCalls, toolCallResult, toolCallStarter } from '../src/tools/activityProjection.js'
 import { harnessTools } from '../src/tools/harness.js'
-import { defineTool, json, type Tool, type ToolContext } from '../src/tools/registry.js'
+import { defineTool, json, text, type Tool, type ToolContext } from '../src/tools/registry.js'
+import { toolCallTools } from '../src/tools/toolCalls.js'
+import { redact } from '../src/secrets.js'
 import { PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolCallActivities } from '../src/temporal/toolActivities.js'
 import { toolCallWorkflowId } from '../src/temporal/toolCall.js'
 import { services } from './helpers/mcp.js'
@@ -101,15 +103,39 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
       return json({ waited: true })
     },
   })
-  const TOOLS: readonly Tool[] = [probe, send, wait]
+  /** Says a plugin's token, as a saved response read back would, redacted as workspace_read redacts (tools/workspace.ts). */
+  const echo = defineTool({
+    name: 'echo',
+    label: 'echo',
+    description: 'Reads a saved response back',
+    input: z.object({}),
+    risk: 'read',
+    routes: [],
+    handler: async (args, ctx) => {
+      record('echo', args, ctx)
+      return text(redact(`the plugin answered with ${PLUGIN_TOKEN}`, (await ctx.secrets?.()) ?? []))
+    },
+  })
+  const TOOLS: readonly Tool[] = [probe, send, wait, echo]
+  const PLUGIN_TOKEN = 'plugin-bearer-token-0123456789abcdef'
+  /** The turn's own limit, which bounds each of its calls. */
+  const TURN_MAX_SECONDS = 900
+  /** The tools the worker's Settings switch off, unknown to the turn's own seam. */
+  const disabled = new Set<string>()
+  /** Each session a ToolCall gathered its turn's secrets for. */
+  let secretsFor: string[]
 
   beforeAll(async () => {
     const env = agentSessionsEnv()
     const activities = toolCallActivities(TOOLS, {
-      services: services(),
+      services: services({
+        secrets: async () => ['a-saved-claude-credential'],
+        toolOverrides: { of: async (tool) => ({ disabled: disabled.has(tool) }), disabled: async () => disabled },
+      }),
       sessions: { ownerOf: (id) => deps!.sessions.ownerOf(id) },
       approvals: { approved: (id, call) => deps!.approvals!.approved(id, call) },
       audit: { hash: (n, i) => deps!.audit!.hash(n, i), summarise: (n, i) => deps!.audit!.summarise(n, i), record: async () => {} },
+      turnSecrets: async (session) => (secretsFor.push(session), [PLUGIN_TOKEN]),
     })
     worker = await Worker.create({
       connection: env.nativeConnection,
@@ -129,6 +155,8 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
     expect(await db.ready()).toBe(true)
     fake = await startFakeAnthropic((r) => script(r))
     ran = []
+    secretsFor = []
+    disabled.clear()
     deps = {
       services: services(),
       sessions: new PgSessionOwners(db.sql),
@@ -150,11 +178,12 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
       sql: db.sql,
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-tool-calls-token-0123456789abcdef' }),
-      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === 'tools_as_activities' ? true : undefined) as T) },
+      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === 'tools_as_activities' ? true : key === 'turn_max_seconds' ? TURN_MAX_SECONDS : undefined) as T) },
       ...harnessTools(services(), TOOLS),
       toolCalls: () => start,
       approvalPollMs: 50,
       approvalHashKey: Buffer.alloc(32, 5),
+      audit: deps!.audit!,
     })
   }
 
@@ -173,6 +202,10 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
     expect(call!.callKey).toBe(`call:${session.id}:${toolUseId}`)
     const described = await agentSessionsEnv().client.workflow.getHandle(toolCallWorkflowId(session.id, toolUseId)).describe()
     expect(described).toMatchObject({ type: 'ToolCall', taskQueue: queue, status: { name: 'COMPLETED' } })
+    // Bounded by the turn's own limit (turn_max_seconds), not a fixed one.
+    const history = await agentSessionsEnv().client.workflow.getHandle(toolCallWorkflowId(session.id, toolUseId)).fetchHistory()
+    const scheduled = history.events?.find((e) => e.activityTaskScheduledEventAttributes)?.activityTaskScheduledEventAttributes
+    expect(Number(scheduled?.startToCloseTimeout?.seconds)).toBe(TURN_MAX_SECONDS)
     // The model read the activity's result.
     const told = fake.messageCalls().map(lastContent).find((c) => c.includes('tool_result'))
     expect(told).toContain('probed')
@@ -225,7 +258,32 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
     expect(ran).toEqual([])
   }, 120_000)
 
-  it("gives a restarted turn the results of its calls whose ToolCall completed, and runs none again", async () => {
+  it("redacts a ToolCall's result of the turn's plugin tokens, as an in-process call is", async () => {
+    script = (r) => (lastContent(r).includes('tool_result') ? { text: 'Read.' } : { toolUse: { name: 'mcp__scadbuddy__echo', input: {} } })
+    const m = await agent()
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'read it back' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(ran.map((r) => r.tool)).toEqual(['echo'])
+    expect(secretsFor).toEqual([session.id])
+    const told = fake.messageCalls().map(lastContent).find((c) => c.includes('tool_result'))
+    expect(told).toContain('the plugin answered with')
+    expect(told).not.toContain(PLUGIN_TOKEN)
+  }, 120_000)
+
+  it('a call its ToolCall refuses (the tool switched off since the seam passed it) leaves one tool_call audit row', async () => {
+    disabled.add('probe')
+    script = (r) => (lastContent(r).includes('tool_result') ? { text: 'Refused.' } : { toolUse: { name: 'mcp__scadbuddy__probe', input: { n: 3 } } })
+    const m = await agent()
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'probe it' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(ran).toEqual([])
+    expect(fake.messageCalls().map(lastContent).find((c) => c.includes('tool_result'))).toContain('disabled')
+    await expect
+      .poll(async () => db.sql<{ outcome: string }[]>`SELECT outcome FROM ai_audit WHERE kind = 'tool_call' AND action = 'mcp__scadbuddy__probe' AND session_id = ${session.id}`, { timeout: 10_000 })
+      .toEqual([{ outcome: 'error' }])
+  }, 120_000)
+
+  it("tells a restarted turn which of its calls completed as ToolCalls, never what they returned, and runs none again", async () => {
     script = () => ({ text: 'Hello.' })
     const m = await agent()
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hi' })
@@ -242,19 +300,30 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
     await start({ sessionId: session.id, toolUseId: 'toolu_01Done_a', tool: 'probe', input: { n: 41 }, signal: new AbortController().signal })
     expect(ran).toHaveLength(1)
     const finished = await finishedToolCalls({ sql: db.sql, client }, session.id, turnId)
-    expect(finished).toEqual([{ id: 'toolu_01Done_a', name: 'mcp__scadbuddy__probe', ok: true, text: expect.stringContaining('41') }])
+    expect(finished).toEqual([{ id: 'toolu_01Done_a', name: 'mcp__scadbuddy__probe', ok: true }])
     const prompt = restartedPrompt(finished)
     expect(prompt).not.toBe(RESTARTED_PROMPT)
-    expect(prompt).toContain('toolu_01Done_a')
-    expect(prompt).toContain('41')
+    expect(prompt).toContain('mcp__scadbuddy__probe (call toolu_01Done_a) succeeded')
+    expect(prompt).toContain('tool_call_result')
+    // The result is tool output: it reaches the model only as a tool result (#258), never in the user's message.
+    expect(prompt).not.toContain('41')
+    expect(prompt).not.toContain('probed')
     expect(prompt).not.toContain('toolu_01Lost_b')
+    // The model reads it with tool_call_result: the call's own result, as a tool result.
+    const results = { client, blobs: new SessionBlobs(db.sql) }
+    const [readBack] = toolCallTools
+    const ctx = (session_: string | undefined) =>
+      ({ ...services(), toolCallResults: (s: string, id: string) => toolCallResult(results, s, id), session: session_ }) as unknown as ToolContext
+    expect(JSON.stringify((await readBack!.execute({ call_id: 'toolu_01Done_a' }, ctx(session.id))).content)).toContain('41')
+    expect(JSON.stringify((await readBack!.execute({ call_id: 'toolu_01Lost_b' }, ctx(session.id))).content)).toContain('no finished result')
+    await expect(readBack!.execute({ call_id: 'toolu_01Done_a' }, ctx(undefined))).rejects.toThrow('in none')
     // Reading it again runs nothing: the call ran once.
     await finishedToolCalls({ sql: db.sql, client }, session.id, turnId)
     expect(ran).toHaveLength(1)
     expect(restartedPrompt([])).toBe(RESTARTED_PROMPT)
   }, 120_000)
 
-  it("forgetting the session terminates its calls still open", async () => {
+  it("forgetting the session terminates its calls still open, the one whose tool.call was never written too", async () => {
     script = () => ({ text: 'Hello.' })
     const m = await agent()
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hi' })
@@ -266,10 +335,24 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
     ])
     const start = toolCallStarter({ client, blobs: new SessionBlobs(db.sql), queue })
     const answer = start({ sessionId: session.id, toolUseId, tool: 'wait', input: {}, signal: new AbortController().signal }).catch((err: unknown) => err)
-    await expect.poll(() => ran.length, { timeout: 30_000 }).toBe(1)
+    // Started just before its tool.call event would have been written.
+    const unlogged = 'toolu_01Unlogged_d'
+    const other = start({ sessionId: session.id, toolUseId: unlogged, tool: 'wait', input: {}, signal: new AbortController().signal }).catch((err: unknown) => err)
+    await expect.poll(() => ran.length, { timeout: 30_000 }).toBe(2)
+    // Visibility lists an execution a moment after it starts.
+    await expect
+      .poll(async () => {
+        let n = 0
+        for await (const _ of client.workflow.list({ query: `WorkflowId = "${toolCallWorkflowId(session.id, unlogged)}"` })) n += 1
+        return n
+      }, { timeout: 30_000 })
+      .toBe(1)
     await forgetSubject({ sql: db.sql, client }, `session-${session.id}`)
-    const described = await client.workflow.getHandle(toolCallWorkflowId(session.id, toolUseId)).describe()
-    expect(described.status.name).toBe('TERMINATED')
+    for (const id of [toolUseId, unlogged]) {
+      const described = await client.workflow.getHandle(toolCallWorkflowId(session.id, id)).describe()
+      expect(described.status.name).toBe('TERMINATED')
+    }
     await answer
+    await other
   }, 120_000)
 })

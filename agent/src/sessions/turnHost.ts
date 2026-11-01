@@ -12,6 +12,7 @@ import { INPUT_CHANNEL } from '../gate/store.js'
 import { type AttentionSpec, answeredText, BACK_REPLIES, DEFAULT_REPLIES, RECONNECTED_TEXT, timedOutText } from '../harness/attention.js'
 import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
 import type { FinishedCall } from '../tools/activityProjection.js'
+import { TOOL_CALL_RESULT_TOOL } from '../temporal/toolCall.js'
 import type { QuestionGate, QuestionRequest, QuestionVerdict, UserQuestion } from '../harness/questions.js'
 import type { QuestionService } from '../questions/service.js'
 import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
@@ -98,14 +99,17 @@ export const RESTARTED_PROMPT =
   'The agent service restarted during this turn. Calls that were in flight are marked as interrupted; check before repeating any of them. Continue the task.'
 /**
  * The restart message when calls in flight had finished as ToolCall workflows (plan 2026-10-13 Step
- * 9.2): what each returned, so the model need not repeat them; the rest are still to be checked.
+ * 9.2): which ones, and whether each succeeded, so the model need not repeat them; the rest are still
+ * to be checked. Never what a call returned: that is tool output, which reaches the model only as a
+ * tool result (#258), here `tool_call_result`'s.
  */
 export function restartedPrompt(finished: readonly FinishedCall[]): string {
   if (finished.length === 0) return RESTARTED_PROMPT
-  const lines = finished.map((c) => `- ${c.name} (call ${c.id}) ${c.ok ? 'succeeded' : 'failed'} and returned:\n${c.text}`)
+  const lines = finished.map((c) => `- ${c.name} (call ${c.id}) ${c.ok ? 'succeeded' : 'failed'}`)
   return (
     'The agent service restarted during this turn. These calls finished before the restart; do not repeat them:\n' +
     `${lines.join('\n')}\n` +
+    `Read what one returned with the ${TOOL_CALL_RESULT_TOOL} tool, giving its call id. ` +
     'Any other call that was in flight is marked as interrupted; check before repeating it. Continue the task.'
   )
 }
@@ -163,7 +167,7 @@ export type TurnHostDeps = {
   listen?: (channel: string, onNotify: (payload: string) => void) => void
   /** Tests only: how often a held call reads its row (INPUT_POLL_MS). */
   inputPollMs?: number
-  /** The calls in flight at a restart whose ToolCall finished, and what each returned (activityProjection.ts `finishedToolCalls`); absent, none. */
+  /** The calls in flight at a restart whose ToolCall finished, and whether each succeeded (activityProjection.ts `finishedToolCalls`); absent, none. */
   finishedCalls?: (sessionId: string, turnId: string) => Promise<FinishedCall[]>
   /** Runs a released turn's approved call once (toolActivities.ts `decidedCalls`); absent, the model is told it was not run. */
   runCall?: (call: DecidedCall) => Promise<DecidedRun>

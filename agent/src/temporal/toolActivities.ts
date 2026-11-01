@@ -2,7 +2,9 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common'
 import type { Sql } from 'postgres'
+import { context as otelContext, SpanStatusCode } from '@opentelemetry/api'
 import type { AuditLog } from '../audit/log.js'
+import { contextFrom, withSpan } from '../telemetry/trace.js'
 import { type Tier, TIERS } from '../auth/principal.js'
 import { imageOfBlock, RESULT_IMAGES_MAX, type SessionImage } from '../sessions/blobs.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -177,6 +179,12 @@ export type ToolActivityDeps = {
   resolveBackoffMs?: readonly number[]
   /** Tool access (#4757): a package built-in's, which `builtin_tier` answers; every built-in `outward` without it. */
   access?: Pick<AccessResolver, 'builtin'> | undefined
+  /**
+   * A session turn's own secrets beside `services.secrets` (its remote plugins' and package
+   * servers' header values and forwarder URLs, as sessions/turnRunner.ts gathers them), which a
+   * ToolCall's tool redacts as the in-process call does (tools/harness.ts `withSecrets`, #2329).
+   */
+  turnSecrets?: ((session: string, owner: Owner) => Promise<readonly string[]>) | undefined
 }
 
 export type ToolActivity = (input: unknown) => Promise<unknown>
@@ -748,6 +756,10 @@ export function toolCallActivities(tools: readonly Tool[], deps: ToolActivityDep
         }
         const { turnTiers: sent, turnId, ...who } = owner
         const callKey = requestId ?? `call:${session}:${toolUseId}`
+        // Redacted of what the turn redacts in-process: its plugin and package tokens too.
+        const base = deps.services.secrets
+        const turnSecrets = deps.turnSecrets
+        const services = turnSecrets ? { ...deps.services, secrets: async () => [...((await base?.()) ?? []), ...(await turnSecrets(session, who))] } : deps.services
         const caller: Caller = {
           owner: who,
           session,
@@ -758,13 +770,26 @@ export function toolCallActivities(tools: readonly Tool[], deps: ToolActivityDep
         }
         let run: ToolRun
         try {
-          run = await runGated(tool, args.input, quiet, lookup, caller, {
-            toolUseId,
-            signal: context.cancellationSignal,
-            heartbeat: (details) => context.heartbeat(details),
-            describedAs: `${HARNESS_PREFIX}${tool.name}`,
-            callKey,
-          })
+          // Under the call's span in the turn's trace, as an in-process call's backend requests are (spec 2026-10-01 §5.4).
+          run = await withSpan(
+            `agent.tool/${tool.name}`,
+            { parent: contextFrom(args.traceparent, otelContext.active()), attributes: { 'scadbuddy.tool': tool.name, 'scadbuddy.tier': tool.risk } },
+            async (span) => {
+              const done = await runGated(tool, args.input, { ...quiet, services }, lookup, caller, {
+                toolUseId,
+                signal: context.cancellationSignal,
+                heartbeat: (details) => context.heartbeat(details),
+                describedAs: `${HARNESS_PREFIX}${tool.name}`,
+                callKey,
+              })
+              span.setAttribute('scadbuddy.outcome', done.outcome)
+              if (done.outcome === 'error') {
+                span.setStatus({ code: SpanStatusCode.ERROR })
+                span.setAttribute('scadbuddy.failure_class', 'ToolError')
+              }
+              return done
+            },
+          )
         } catch (err) {
           if (err instanceof ApplicationFailure && err.nonRetryable) return refused(err.message)
           throw err

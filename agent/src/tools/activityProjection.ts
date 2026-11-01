@@ -1,8 +1,10 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import { context as otelContext, trace } from '@opentelemetry/api'
 import { type Client, WorkflowFailedError, WorkflowNotFoundError } from '@temporalio/client'
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import type { SessionBlobs } from '../sessions/blobs.js'
+import { traceparentOf } from '../telemetry/trace.js'
 import { TASK_QUEUE } from '../temporal/names.js'
 import {
   TOOL_CALL_WORKFLOW,
@@ -22,8 +24,10 @@ import { errorResult } from './registry.js'
 // already there (a re-send after a lost answer), and answers with its result. The call then runs
 // on whichever agent-tools worker takes it, as `tool:<name>` (toolActivities.ts
 // `toolCallActivities`), so a pod that dies while the turn waits loses the turn, not the call:
-// the restarted turn reads what the call returned (`finishedToolCalls`). Images come back as
-// names in the session's blobs, never as bytes in a payload, and are read back here.
+// the restarted turn is told which calls finished (`finishedToolCalls`) and reads what each
+// returned with `tool_call_result` (`toolCallResult`), so the result reaches the model as a tool
+// result, never in the user's message. Images come back as names in the session's blobs, never as
+// bytes in a payload, and are read back here.
 
 /** One call to run: its session and tool_use id name the workflow; `requestId` is the gate entry it was approved on, if it parked. */
 export type ToolCallRequest = {
@@ -35,12 +39,22 @@ export type ToolCallRequest = {
   requestId?: string
   /** Aborted when the turn stops: the call's workflow is cancelled. */
   signal: AbortSignal
+  /** The most the call may run: the turn's own limit (`turn_max_seconds`); the starter's default when absent. */
+  timeoutMs?: number
 }
 
 export type ToolCallStarter = (request: ToolCallRequest) => Promise<CallToolResult>
 
-/** The most one call may run: a turn's own default limit (runtimeSettings.ts `turn_max_seconds`). */
+/** The most one call may run when its turn names no limit: a turn's own default (runtimeSettings.ts `turn_max_seconds`). */
 export const TOOL_CALL_TIMEOUT_MS = 7200 * 1000
+
+/** gRPC's NOT_FOUND (https://grpc.github.io/grpc/core/md_doc_statuscodes.html): what the workflow service answers for an execution it does not have. */
+export const GRPC_NOT_FOUND = 5
+
+/** Whether the workflow service said it has no such execution (any longer). */
+export function workflowNotFound(err: unknown): boolean {
+  return err instanceof WorkflowNotFoundError || (err as { code?: unknown } | null)?.code === GRPC_NOT_FOUND
+}
 
 /** The deepest message of a failure chain: what the model reads of a call whose workflow failed. */
 function failureMessage(err: unknown): string {
@@ -72,8 +86,16 @@ export function toolCallStarter(deps: { client: Client; blobs: Pick<SessionBlobs
   const queue = deps.queue ?? TASK_QUEUE
   return async (request) => {
     const workflowId = toolCallWorkflowId(request.sessionId, request.toolUseId)
-    const args: ToolCallArgs = { tool: request.tool, input: request.input, ...(request.requestId ? { requestId: request.requestId } : {}) }
-    const input: ToolCallInput = { activity: toolCallActivity(request.tool), queue, args, timeoutMs: deps.timeoutMs ?? TOOL_CALL_TIMEOUT_MS }
+    // The call's span (telemetry/turn.ts TurnTrace) is the activity's parent, as an in-process call's backend requests are its children.
+    const traceparent = traceparentOf(trace.getSpan(otelContext.active()))
+    const args: ToolCallArgs = {
+      tool: request.tool,
+      input: request.input,
+      ...(request.requestId ? { requestId: request.requestId } : {}),
+      ...(traceparent ? { traceparent } : {}),
+    }
+    const timeoutMs = request.timeoutMs ?? deps.timeoutMs ?? TOOL_CALL_TIMEOUT_MS
+    const input: ToolCallInput = { activity: toolCallActivity(request.tool), queue, args, timeoutMs }
     let handle
     try {
       handle = await deps.client.workflow.start(TOOL_CALL_WORKFLOW, {
@@ -118,17 +140,15 @@ async function openCalls(sql: Sql, sessionId: string, afterSeq: number): Promise
   return [...open].map(([id, name]) => ({ id, name }))
 }
 
-/** What a ToolCall that completed before a restart returned, for the restart message (turnHost.ts). */
-export type FinishedCall = { id: string; name: string; ok: boolean; text: string }
-
-/** The most of one finished call's text the restart message carries. */
-export const FINISHED_TEXT_MAX = 4000
+/** A ToolCall that completed before a restart, for the restart message (turnHost.ts): which call, and whether it succeeded. Never what it returned. */
+export type FinishedCall = { id: string; name: string; ok: boolean }
 
 /**
  * The calls of turn `turnId` that were in flight when its placement was lost (a `tool.call` with no
- * `tool.result`) and whose ToolCall completed, with what each returned (plan Step 9.2): the restart
- * message states them in place of "unknown". A call whose workflow is still open, failed, or was
- * never started (an in-process call) is left out: the message says those are to be checked.
+ * `tool.result`) and whose ToolCall completed (plan Step 9.2): the restart message names them in
+ * place of "unknown", and the model reads each one's result with `tool_call_result`. A call whose
+ * workflow is still open, failed, or was never started (an in-process call) is left out: the
+ * message says those are to be checked.
  */
 export async function finishedToolCalls(deps: { sql: Sql; client: Client }, sessionId: string, turnId: string): Promise<FinishedCall[]> {
   const [start] = await deps.sql<{ seq: string }[]>`
@@ -143,8 +163,7 @@ export async function finishedToolCalls(deps: { sql: Sql; client: Client }, sess
       const { status } = await handle.describe()
       if (status.name !== 'COMPLETED') continue
       const result = (await handle.result()) as ToolCallResult
-      const text = result.content.map((b) => (b.type === 'text' ? b.text : `[image ${b.name}]`)).join('\n')
-      out.push({ id: call.id, name: call.name, ok: result.ok, text: text.length > FINISHED_TEXT_MAX ? `${text.slice(0, FINISHED_TEXT_MAX)}…` : text })
+      out.push({ id: call.id, name: call.name, ok: result.ok })
     } catch (err) {
       if (!(err instanceof WorkflowNotFoundError)) throw err
     }
@@ -152,14 +171,37 @@ export async function finishedToolCalls(deps: { sql: Sql; client: Client }, sess
   return out
 }
 
-/** Terminates a session's ToolCalls still open (forget.ts): every call its events show with no result. */
-export async function terminateOpenToolCalls(deps: { sql: Sql; client: Client }, sessionId: string, reason: string): Promise<void> {
-  for (const call of await openCalls(deps.sql, sessionId, 0)) {
-    try {
-      await deps.client.workflow.getHandle(toolCallWorkflowId(sessionId, call.id)).terminate(reason)
-    } catch (err) {
-      // Never started (an in-process call), or closed already.
-      if (!(err instanceof WorkflowNotFoundError) && (err as { code?: unknown } | null)?.code !== 5) throw err
-    }
+/** What a session's completed ToolCall returned, as the model reads a tool result (`tool_call_result`); undefined while it runs, or when it never ran or failed. */
+export async function toolCallResult(deps: { client: Client; blobs: Pick<SessionBlobs, 'get'> }, sessionId: string, toolUseId: string): Promise<CallToolResult | undefined> {
+  const handle = deps.client.workflow.getHandle(toolCallWorkflowId(sessionId, toolUseId))
+  try {
+    if ((await handle.describe()).status.name !== 'COMPLETED') return undefined
+    return await callToolResult(sessionId, (await handle.result()) as ToolCallResult, deps.blobs)
+  } catch (err) {
+    if (workflowNotFound(err)) return undefined
+    throw err
   }
+}
+
+/**
+ * Terminates a session's ToolCalls still open (forget.ts): every call its events show with no
+ * result, and every execution of its id prefix still running, which a call started just before
+ * its `tool.call` event was written is, all at once.
+ */
+export async function terminateOpenToolCalls(deps: { sql: Sql; client: Client }, sessionId: string, reason: string): Promise<void> {
+  const ids = new Set((await openCalls(deps.sql, sessionId, 0)).map((call) => toolCallWorkflowId(sessionId, call.id)))
+  const prefix = toolCallWorkflowId(sessionId, '')
+  for await (const execution of deps.client.workflow.list({ query: `WorkflowId STARTS_WITH "${prefix}" AND ExecutionStatus = "Running"` })) {
+    ids.add(execution.workflowId)
+  }
+  await Promise.all(
+    [...ids].map(async (id) => {
+      try {
+        await deps.client.workflow.getHandle(id).terminate(reason)
+      } catch (err) {
+        // Never started (an in-process call), or closed already.
+        if (!workflowNotFound(err)) throw err
+      }
+    }),
+  )
 }
