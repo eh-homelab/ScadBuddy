@@ -1,5 +1,4 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
-import { createHash } from 'node:crypto'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { z } from 'zod'
@@ -900,15 +899,14 @@ describe('/mcp callers pair by code (spec §8.5)', () => {
     const pairings = new InMemoryPairingStore()
     const hub = new TabHub({ pairings })
     const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('pixels')])
-    const name = `${createHash('sha256').update(bytes).digest('hex')}.png`
     const frames: AgentFrame[] = []
     const conn: TabConnection = hub.open((frame) => {
       frames.push(frame)
       if (frame.type !== 'call') return
       queueMicrotask(() => {
-        void conn.receive(JSON.stringify({ v: 1, type: 'image', id: frame.id, name, mediaType: 'image/png', size: bytes.length }))
+        void conn.receive(JSON.stringify({ v: 1, type: 'image', id: frame.id, mediaType: 'image/png', size: bytes.length }))
         void conn.receive(bytes)
-        const result = { image: { name, mediaType: 'image/png' }, width: 2, height: 1, hidden: 0 }
+        const result = { image: { mediaType: 'image/png' }, width: 2, height: 1, hidden: 0 }
         void conn.receive(JSON.stringify({ v: 1, type: 'result', id: frame.id, outcome: { ok: true, result } }))
       })
     })

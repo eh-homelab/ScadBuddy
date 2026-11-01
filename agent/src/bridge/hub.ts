@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { Principal } from '../auth/principal.js'
 import { type PairingRequest, PairingError, type PairingStore, type PairingView } from './pairings.js'
 import {
@@ -14,7 +14,7 @@ import type { RelayAnswer, RelayRequest, TabRelay } from './relay.js'
 import type { SessionTabStore } from './sessionTabs.js'
 import { MemoryTabImageStore, type StoredTabImage, type TabImageStore } from './tabImages.js'
 import { sniff } from '../sessions/images.js'
-import type { SessionImage } from '../sessions/blobs.js'
+import { type SessionImage, sessionImage } from '../sessions/blobs.js'
 
 // The agent's side of the browser bridge (#254, spec §5.2): the tabs connected
 // to this process over `GET /api/v1/ai/bridge` (routes/bridge.ts), and the
@@ -75,7 +75,7 @@ export interface BrowserTabs {
   pair(principal: Principal): Promise<PairingRequest>
   /** The same tabs, with every call's target naming `sessionId` (tools/harness.ts binds each turn's). */
   forSession(sessionId: string): BrowserTabs
-  /** An image a call's answer names (`browser_screenshot`), held for a while by any replica (tabImages.ts). */
+  /** An image a call's answer names (`browser_screenshot`), stored by any replica and taken by this read (tabImages.ts). */
   image(name: string, options?: { signal?: AbortSignal }): Promise<StoredTabImage | undefined>
 }
 
@@ -86,15 +86,13 @@ type PendingCall = {
 }
 
 /** An image whose binary frames are still arriving (protocol.ts `image`). */
-type IncomingImage = { id: string; name: string; mediaType: SessionImage['mediaType']; size: number; chunks: Buffer[]; received: number }
+type IncomingImage = { id: string; mediaType: SessionImage['mediaType']; size: number; chunks: Buffer[]; received: number }
 
-/** The image name an answer carries (`{ image: { name } }`, frontend link.ts), if any. */
-function imageNamed(result: unknown): string | undefined {
-  if (typeof result !== 'object' || result === null) return undefined
+/** Whether an answer holds an image (`{ image: { mediaType } }`, frontend link.ts), whose bytes came before it. */
+function hasImage(result: unknown): result is Record<string, unknown> & { image: object } {
+  if (typeof result !== 'object' || result === null) return false
   const image = (result as { image?: unknown }).image
-  if (typeof image !== 'object' || image === null) return undefined
-  const name = (image as { name?: unknown }).name
-  return typeof name === 'string' ? name : undefined
+  return typeof image === 'object' && image !== null
 }
 
 /** A binary frame's bytes: an ArrayBuffer from the socket (@hono/node-server), or a view of one. */
@@ -205,7 +203,7 @@ export class TabConnection {
           return this.send(agentFrame({ type: 'error', message: 'an image began before the last one ended; both dropped' }))
         }
         if (!this.calls.has(frame.id)) return this.send(agentFrame({ type: 'error', message: `no call ${frame.id} is waiting` }))
-        this.#incoming = { id: frame.id, name: frame.name, mediaType: frame.mediaType, size: frame.size, chunks: [], received: 0 }
+        this.#incoming = { id: frame.id, mediaType: frame.mediaType, size: frame.size, chunks: [], received: 0 }
         return
       }
       case 'result': {
@@ -229,8 +227,9 @@ export class TabConnection {
 
   /**
    * A binary frame: the next bytes of the image the last `image` frame announced. Once all
-   * have arrived they are checked against its name (their sha256) and type (their
-   * signature), and kept for that call's `result`; anything else is dropped and refused.
+   * have arrived they are checked against its type (their signature), named here by their
+   * sha256 (the tab needs no WebCrypto, which a plain-http origin lacks), and kept for that
+   * call's `result`; anything else is dropped and refused.
    */
   #receiveBytes(raw: unknown): void {
     const incoming = this.#incoming
@@ -247,12 +246,11 @@ export class TabConnection {
     if (incoming.received < incoming.size) return
     this.#incoming = undefined
     const bytes = Buffer.concat(incoming.chunks)
-    const sha = createHash('sha256').update(bytes).digest('hex')
-    if (!incoming.name.startsWith(`${sha}.`) || sniff(bytes) !== incoming.mediaType) {
-      return this.send(agentFrame({ type: 'error', message: 'the image does not match its name or type; dropped' }))
+    if (sniff(bytes) !== incoming.mediaType) {
+      return this.send(agentFrame({ type: 'error', message: 'the image is not of the type its image frame said; dropped' }))
     }
     // Only for a call still waiting: a late image is not kept.
-    if (this.calls.has(incoming.id)) this.#images.set(incoming.id, { name: incoming.name, mediaType: incoming.mediaType, bytes })
+    if (this.calls.has(incoming.id)) this.#images.set(incoming.id, sessionImage(incoming.mediaType, bytes))
   }
 
   /** The call's image, dropped with it when it ends without a `result` (a timeout, an abort). */
@@ -518,28 +516,25 @@ export class TabHub implements BrowserTabs {
   }
 
   image(name: string, { signal }: { signal?: AbortSignal } = {}): Promise<StoredTabImage | undefined> {
-    return this.#images.get(name, signal)
+    return this.#images.take(name, signal)
   }
 
   /**
-   * A call's answer with the image it names stored first, so the caller (on any replica)
-   * can read it by name. An image the answer does not name is not stored; an answer that
-   * names one that did not arrive, or could not be stored, is a failure.
+   * A call's answer with its image stored first and named in it (`image: {name, mediaType}`),
+   * so the caller (on any replica) can read it by name. An image the answer does not hold is
+   * not stored; an answer holding one whose bytes did not arrive, or could not be stored, is
+   * a failure.
    */
   async #withImage(tool: string, outcome: CallOutcome, image: SessionImage | undefined): Promise<CallOutcome> {
-    if (!outcome.ok) return outcome
-    const named = imageNamed(outcome.result)
-    if (named === undefined) return outcome
-    if (!image || image.name !== named) {
-      return failure('not_stored', `the tab's answer to ${tool} names an image whose bytes did not arrive; try again`)
-    }
+    if (!outcome.ok || !hasImage(outcome.result)) return outcome
+    if (!image) return failure('not_stored', `the tab's answer to ${tool} holds an image whose bytes did not arrive; try again`)
     try {
       await this.#images.put(image)
     } catch (err) {
       this.logError(err)
       return failure('not_stored', `the image the tab answered ${tool} with could not be stored; try again`)
     }
-    return outcome
+    return { ok: true, result: { ...outcome.result, image: { name: image.name, mediaType: image.mediaType } } }
   }
 
   async #resolve(

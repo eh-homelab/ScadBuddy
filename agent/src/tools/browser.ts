@@ -38,7 +38,7 @@ import { errorName } from '../telemetry/scrub.js'
 //
 // `browser_screenshot` is the fallback of #254 for what a snapshot cannot say: the
 // tab draws its own viewport (frontend agent/screenshot.ts) and sends the bytes as
-// binary frames on its socket, which the replica holding it stores (bridge/tabImages.ts)
+// binary frames on its socket, which the replica holding it names and stores (bridge/tabImages.ts)
 // before the answer, which names the image only (#2479), comes back; the tool reads the
 // bytes by that name and returns them as MCP image content.
 //
@@ -231,8 +231,7 @@ async function screenshotAnswer(result: unknown, ctx: ToolContext): Promise<Call
   if (typeof pointer?.name !== 'string') throw new ToolError('the tab answered screenshot without an image')
   const stored = await tabs(ctx).image(pointer.name, { signal: ctx.signal })
   if (!stored) throw new ToolError('the screenshot is no longer held; take it again')
-  const bytes = stored.bytes.buffer.slice(stored.bytes.byteOffset, stored.bytes.byteOffset + stored.bytes.byteLength) as ArrayBuffer
-  return { content: [...image(bytes, stored.mediaType).content, ...json(rest).content] }
+  return { content: [...image(stored.bytes, stored.mediaType).content, ...json(rest).content] }
 }
 
 /**

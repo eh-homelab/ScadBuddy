@@ -224,7 +224,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the browser
     await client.close()
   }, 60_000)
 
-  it("returns the tab's screenshot, its bytes sent as binary frames and stored by name (#254)", async () => {
+  it("returns the tab's screenshot, its bytes sent as binary frames and stored by the name the agent gives them (#254)", async () => {
     const { tokens } = await start()
     const tab = await openTab()
     const { token } = await tokens.mint({ name: 'laptop', tier: 'write' })
@@ -242,8 +242,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the browser
     const image = result.content.find((c) => c.type === 'image')!
     expect(image.mimeType).toBe('image/png')
     expect(Buffer.from(image.data!, 'base64').equals(SCREENSHOT)).toBe(true)
+    // Named by the agent, and taken by the tool's read.
     const name = `${createHash('sha256').update(SCREENSHOT).digest('hex')}.png`
-    expect((await tabs.image(name))?.bytes.equals(SCREENSHOT)).toBe(true)
+    expect(await tabs.image(name)).toBeUndefined()
     await client.close()
   }, 60_000)
 

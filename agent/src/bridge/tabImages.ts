@@ -11,8 +11,9 @@ import type { SessionImage } from '../sessions/blobs.js'
 //
 // A name is the bytes' sha256 and the type's extension (sessions/blobs.ts BLOB_NAME),
 // checked against the bytes before they are stored, so one name is one image and a
-// row cannot be made to answer for another. An image is kept for TAB_IMAGE_TTL_MS only:
-// the call that asked for it reads it at once; each put drops the rows past that.
+// row cannot be made to answer for another. The call that asked for an image reads it at
+// once, and the read takes it (it is deleted); one never read (its call gave up) is kept
+// for TAB_IMAGE_TTL_MS at most, dropped by the next put or read.
 
 /** How long a tab's image is held for the call that asked for it. */
 export const TAB_IMAGE_TTL_MS = 10 * 60_000
@@ -23,8 +24,8 @@ export type StoredTabImage = { mediaType: ImageMediaType; bytes: Buffer }
 
 export interface TabImageStore {
   put(image: SessionImage): Promise<void>
-  /** `signal` stops the read with the call it is for. */
-  get(name: string, signal?: AbortSignal): Promise<StoredTabImage | undefined>
+  /** The image, deleted as it is read. `signal` stops the read with the call it is for. */
+  take(name: string, signal?: AbortSignal): Promise<StoredTabImage | undefined>
 }
 
 /** Without a database: only this process's tabs are reached (hub.ts), so this process holds their images. */
@@ -43,9 +44,10 @@ export class MemoryTabImageStore implements TabImageStore {
     while (this.#images.size > MEMORY_TAB_IMAGES_MAX) this.#images.delete(this.#images.keys().next().value!)
   }
 
-  async get(name: string): Promise<StoredTabImage | undefined> {
+  async take(name: string): Promise<StoredTabImage | undefined> {
     this.#drop()
     const held = this.#images.get(name)
+    this.#images.delete(name)
     return held ? { mediaType: held.image.mediaType, bytes: held.image.bytes } : undefined
   }
 
@@ -71,14 +73,16 @@ export class PostgresTabImageStore implements TabImageStore {
       ON CONFLICT (name) DO UPDATE SET stored_at = now()`
   }
 
-  async get(name: string, signal?: AbortSignal): Promise<StoredTabImage | undefined> {
+  async take(name: string, signal?: AbortSignal): Promise<StoredTabImage | undefined> {
     const ttl = `${TAB_IMAGE_TTL_MS} milliseconds`
-    const query = this.#sql<{ media_type: ImageMediaType; bytes: Buffer }[]>`
-      SELECT media_type, bytes FROM ai_tab_images WHERE name = ${name} AND stored_at >= now() - ${ttl}::interval`
+    // The expired rows go with the read, and the one read goes as it is returned.
+    const query = this.#sql<{ media_type: ImageMediaType; bytes: Buffer; fresh: boolean }[]>`
+      DELETE FROM ai_tab_images WHERE name = ${name} OR stored_at < now() - ${ttl}::interval
+      RETURNING media_type, bytes, (name = ${name} AND stored_at >= now() - ${ttl}::interval) AS fresh`
     const onAbort = () => query.cancel()
     signal?.addEventListener('abort', onAbort, { once: true })
     try {
-      const [row] = await query
+      const row = (await query).find((r) => r.fresh)
       return row ? { mediaType: row.media_type, bytes: row.bytes } : undefined
     } finally {
       signal?.removeEventListener('abort', onAbort)

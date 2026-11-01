@@ -1,3 +1,6 @@
+import { act } from 'react'
+import { createPortal } from 'react-dom'
+import { createRoot } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const domToCanvas = vi.fn()
@@ -54,6 +57,24 @@ describe('hiddenElements', () => {
       <div id="other">fine</div>`
     const ids = hiddenElements().map((element) => element.id)
     expect(ids.sort()).toEqual(['key', 'menu', 'panel', 'trigger', 'wrap'])
+  })
+})
+
+describe('hiddenElements, for what the assistant panel renders through a portal', () => {
+  it('paints over a dialog the panel portals under <body>', async () => {
+    const host = document.createElement('div')
+    document.body.append(host)
+    const root = createRoot(host)
+    await act(async () =>
+      root.render(
+        <aside aria-label="Assistant">
+          {createPortal(<div id="lightbox">a sent image</div>, document.body)}
+        </aside>,
+      ),
+    )
+    const ids = hiddenElements().map((element) => element.id || element.tagName.toLowerCase())
+    expect(ids.sort()).toEqual(['aside', 'lightbox'])
+    await act(async () => root.unmount())
   })
 })
 

@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import { BLOB_NAME } from '../sessions/blobs.js'
 import { IMAGE_BYTES_MAX, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
 
 // The tab socket's wire protocol, version 1 (#254): `GET /api/v1/ai/bridge`
@@ -10,9 +9,10 @@ import { IMAGE_BYTES_MAX, IMAGE_MEDIA_TYPES } from '../sessions/images.js'
 //
 //   tab → agent   hello            first frame: the tab's id, route and live tools
 //                 state            the route or the live tools changed
-//                 image            an image the next `result` of call `id` names
-//                                  (`screenshot`), its bytes in the binary frames
-//                                  that follow, each at most IMAGE_CHUNK_MAX
+//                 image            the image the next `result` of call `id` holds
+//                                  (`screenshot`): its type and size, its bytes in the
+//                                  binary frames that follow, each at most
+//                                  IMAGE_CHUNK_MAX; the agent names it (hub.ts)
 //                 result           the answer to a `call`, as the tab's
 //                                  AgentBridge.call() gives it (never a throw)
 //                 pairing.accept   the user typed a pairing code (spec §8.5)
@@ -28,7 +28,7 @@ export const LINK_PROTOCOL_VERSION = 1 as const
 /**
  * The largest binary frame of an image (frontend link.ts `IMAGE_CHUNK_BYTES`), under the
  * socket's frame cap (routes/bridge.ts BRIDGE_FRAME_MAX). An image never goes as base64
- * in a JSON frame (#2479): its bytes are binary frames, and the `result` names it.
+ * in a JSON frame (#2479): its bytes are binary frames, and the agent names it in the `result`.
  */
 export const IMAGE_CHUNK_MAX = 128 * 1024
 
@@ -59,7 +59,6 @@ export const TabFrameSchema = z.discriminatedUnion('type', [
     v,
     type: z.literal('image'),
     id,
-    name: z.string().regex(BLOB_NAME),
     mediaType: z.enum(IMAGE_MEDIA_TYPES),
     size: z.number().int().min(1).max(IMAGE_BYTES_MAX),
   }),

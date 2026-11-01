@@ -72,7 +72,7 @@ Notes, each from the tool's own entry:
   (`Preview.tsx` `preserveDrawingBuffer`), so it is drawn as shown. What `snapshot`
   never reads back is painted over grey before the image leaves the page: password
   fields, every user-only element (the pairing code being typed, a new MCP token) and
-  what a user-only trigger controls, and the assistant panel, so a paired agent is not
+  what a user-only trigger controls, and the assistant panel with what it portals, so a paired agent is not
   shown the user's chats ([`screenshot.ts`](../../frontend/src/agent/screenshot.ts)
   `hiddenElements`). WebMCP does not offer it: its content would carry the image as
   base64 (#2479).
@@ -254,16 +254,18 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   [`link.ts`](../../frontend/src/agent/link.ts)), because the agent's tab socket takes
   frames up to 256 KiB (`routes/bridge.ts` `BRIDGE_FRAME_MAX`).
 - **Images** (`browser_screenshot`) never go as base64 in a JSON frame (#2479). The tab
-  sends an `image` frame naming the image (its sha256 and extension, and its size), its
-  bytes in binary frames of at most 128 KiB (`IMAGE_CHUNK_BYTES`), then the `result`,
-  whose `image` is `{name, mediaType}`. The replica holding the tab checks the bytes
-  against the name and the type's signature, and stores them before the call's answer
-  resolves (`ai_tab_images`, [`bridge/tabImages.ts`](../../agent/src/bridge/tabImages.ts);
-  in memory without a database), so the answer crosses the relay as a pointer and the
-  tool, on whichever replica it runs, reads the bytes by name and returns them as MCP
-  image content with the rest of the answer as JSON. An image is held for ten minutes.
-  A result that names an image whose bytes did not arrive, or could not be stored, fails
-  `not_stored`.
+  sends an `image` frame with the image's type and size, its bytes in binary frames of at
+  most 128 KiB (`IMAGE_CHUNK_BYTES`), then the `result`, whose `image` is `{mediaType}`.
+  The replica holding the tab checks the bytes against the type's signature, names them by
+  their sha256 (the tab needs no `crypto.subtle`, which a plain-http origin lacks, as
+  `tabId.ts`), stores them before the call's answer resolves (`ai_tab_images`,
+  [`bridge/tabImages.ts`](../../agent/src/bridge/tabImages.ts); in memory without a
+  database), and writes the name into the answer's `image`. So the answer crosses the relay
+  as a pointer, and the tool, on whichever replica it runs, takes the bytes by name (the
+  read deletes them) and returns them as MCP image content with the rest of the answer as
+  JSON. One never read (its call gave up) is dropped after ten minutes, by the next read or
+  write. A result holding an image whose bytes did not arrive, or could not be stored,
+  fails `not_stored`.
 - **Not here:** the Playwright MCP plugin ([headless-browser.md](headless-browser.md)), a separate
   browser whose tools are `mcp__playwright__browser_*`.
 
@@ -279,7 +281,7 @@ frames after the `image` frame that names them, version 1
 |---|---|---|
 | tab | `hello {tabId, route, live}` | First frame. Nothing else is taken before it. |
 | tab | `state {route, live}` | The route or the live tools changed (issue #254: "The tab reports its live handlers on each route change"). |
-| tab | `image {id, name, mediaType, size}` | An image the next `result` of call `id` names; its `size` bytes follow as binary frames (#254). |
+| tab | `image {id, mediaType, size}` | The image the next `result` of call `id` holds; its `size` bytes follow as binary frames, and the agent names it (#254). |
 | tab | `result {id, outcome}` | The answer to a `call`: `CallResult`, never a throw. |
 | tab | `pairing.accept {id, code}`, `pairing.deny {id}`, `pairing.end {id}` | The user's answers in the pairing prompt. |
 | agent | `call {id, tool, args}` | Run one tool of `TOOLS`. |
@@ -464,7 +466,7 @@ reaches an agent.
   the `scadbuddy://browser/paired/snapshot` resource), and
   [`browserScreenshot.test.ts`](../../agent/test/browserScreenshot.test.ts) (an image's
   frames, the checks on its bytes, and its store); the tab's side is
-  [`screenshot.test.ts`](../../frontend/src/agent/screenshot.test.ts) and `link.test.ts`,
+  [`screenshot.test.tsx`](../../frontend/src/agent/screenshot.test.tsx) and `link.test.ts`,
   and `e2e/agent-bridge.spec.ts` takes one in Chromium under the page's CSP.
   The Postgres store: [`bridgePairings.pg.test.ts`](../../agent/test/bridgePairings.pg.test.ts).
   Two replicas through Temporal:

@@ -37,30 +37,21 @@ export const MAX_RESULT_BYTES = 200_000
 /**
  * The bytes of one binary frame of an image (agent `src/bridge/protocol.ts`
  * `IMAGE_CHUNK_MAX`). An answer holding an image (`screenshot`'s `{ image: Blob }`) is
- * sent as an `image` frame naming it, its bytes in binary frames of at most this, and then
- * the `result`, whose `image` is that name and type: an image never goes as base64 in
- * JSON (#2479).
+ * sent as an `image` frame with its type and size, its bytes in binary frames of at most
+ * this, and then the `result`, whose `image` is `{ mediaType }`: an image never goes as
+ * base64 in JSON (#2479). The agent names it by the bytes' sha256, so the tab needs no
+ * `crypto.subtle`, which a plain-http origin does not have (as `tabId.ts`).
  */
 export const IMAGE_CHUNK_BYTES = 128 * 1024
 
-const IMAGE_EXTENSIONS: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
-}
+/** The image types the agent takes (agent `src/sessions/images.ts` `IMAGE_MEDIA_TYPES`). */
+const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp'])
 
 /** An answer with an image in it, which goes as bytes rather than in the JSON. */
 function withImage(outcome: unknown): outcome is { ok: true; result: { image: Blob } & Record<string, unknown> } {
   if (typeof outcome !== 'object' || outcome === null || (outcome as { ok?: unknown }).ok !== true) return false
   const result = (outcome as { result?: unknown }).result
   return typeof result === 'object' && result !== null && (result as { image?: unknown }).image instanceof Blob
-}
-
-/** The agent's name for an image's bytes: their sha256 and the type's extension. */
-async function imageName(bytes: Uint8Array<ArrayBuffer>, extension: string): Promise<string> {
-  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
-  return `${[...digest].map((byte) => byte.toString(16).padStart(2, '0')).join('')}.${extension}`
 }
 
 /** What the link needs of the bridge (`AgentBridge` has it all). */
@@ -149,17 +140,17 @@ export function createTabLink({
 
   /**
    * Sends an answer's image on `ws` (an `image` frame, then its bytes) and gives the answer
-   * as it then goes in the `result`, naming the image; a failure when it cannot.
+   * as it then goes in the `result`; a failure when it cannot.
    */
-  const sendImage = async (ws: WebSocket, id: string, tool: string, image: Blob): Promise<{ name: string; mediaType: string } | CallResult> => {
-    const extension = IMAGE_EXTENSIONS[image.type]
-    if (!extension) return { ok: false, error: { code: 'failed', message: `"${tool}" made an image of type "${image.type}"` } }
+  const sendImage = async (ws: WebSocket, id: string, tool: string, image: Blob): Promise<{ mediaType: string } | CallResult> => {
+    if (!IMAGE_TYPES.has(image.type)) {
+      return { ok: false, error: { code: 'failed', message: `"${tool}" made an image of type "${image.type}"` } }
+    }
     const bytes = new Uint8Array(await image.arrayBuffer())
-    const name = await imageName(bytes, extension)
-    if (socket !== ws || ws.readyState !== ws.OPEN) return { name, mediaType: image.type }
-    ws.send(JSON.stringify(tabFrame({ type: 'image', id, name, mediaType: image.type, size: bytes.byteLength })))
+    if (socket !== ws || ws.readyState !== ws.OPEN) return { mediaType: image.type }
+    ws.send(JSON.stringify(tabFrame({ type: 'image', id, mediaType: image.type, size: bytes.byteLength })))
     for (let at = 0; at < bytes.byteLength; at += IMAGE_CHUNK_BYTES) ws.send(bytes.subarray(at, at + IMAGE_CHUNK_BYTES))
-    return { name, mediaType: image.type }
+    return { mediaType: image.type }
   }
 
   const run = async (id: string, tool: string, args: Record<string, unknown>) => {
@@ -180,7 +171,7 @@ export function createTabLink({
           error: { code: 'failed', message: `"${tool}" could not send its image: ${String(error)}` },
         }),
       )
-      outcome = 'name' in sent ? { ok: true, result: { ...rest, image: sent } } : sent
+      outcome = 'mediaType' in sent ? { ok: true, result: { ...rest, image: sent } } : sent
     }
     let frame = JSON.stringify(tabFrame({ type: 'result', id, outcome }))
     const bytes = new TextEncoder().encode(frame).byteLength

@@ -11,9 +11,9 @@ import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { services } from './helpers/mcp.js'
 
 // browser_screenshot (#254): the tab sends its image as an `image` frame and binary
-// frames (bridge/protocol.ts), the hub checks and stores it before the `result` that
-// names it resolves the call (bridge/hub.ts), and the tool reads it back by name as MCP
-// image content. No image crosses a JSON frame as base64 (#2479).
+// frames (bridge/protocol.ts), the hub checks, names (sha256) and stores it before the
+// `result` that holds it resolves the call, naming it there (bridge/hub.ts), and the tool
+// takes it by name as MCP image content. No image crosses a JSON frame as base64 (#2479).
 // test/bridge.e2e.test.ts runs the tab's own link.ts against the real socket.
 
 const TAB = 'tab-aaaaaaaaaaaaaaaaaaaaaa'
@@ -62,9 +62,9 @@ function sending(image: { bytes: Buffer; name: string }, chunk = IMAGE_CHUNK_MAX
   const chunks: Buffer[] = []
   for (let at = 0; at < image.bytes.length; at += chunk) chunks.push(image.bytes.subarray(at, at + chunk))
   return {
-    header: { name: image.name, mediaType: 'image/png', size: image.bytes.length },
+    header: { mediaType: 'image/png', size: image.bytes.length },
     chunks,
-    result: { ok: true, result: { image: { name: image.name, mediaType: 'image/png' }, width: 800, height: 600, hidden: 1 } },
+    result: { ok: true, result: { image: { mediaType: 'image/png' }, width: 800, height: 600, hidden: 1 } },
   }
 }
 
@@ -80,14 +80,14 @@ describe('browser_screenshot (#254)', () => {
     expect(Buffer.from(shown.data, 'base64').equals(image.bytes)).toBe(true)
     expect(lastJson(result)).toEqual({ width: 800, height: 600, hidden: 1 })
     expect(t.errors()).toEqual([])
-    // Held by name for a caller on any replica (bridge/tabImages.ts).
-    expect((await hub.image(image.name))?.bytes.equals(image.bytes)).toBe(true)
+    // Named here by its sha256, and taken by the tool's read (bridge/tabImages.ts).
+    expect(await hub.image(image.name)).toBeUndefined()
   })
 
   it('stores the image before the answer resolves, so a store that fails fails the call', async () => {
     const failing: TabImageStore = {
       put: () => Promise.reject(new Error('pool down')),
-      get: () => Promise.resolve(undefined),
+      take: () => Promise.resolve(undefined),
     }
     const logged: string[] = []
     const hub = new TabHub({ images: failing, log: (m) => logged.push(m) })
@@ -99,22 +99,33 @@ describe('browser_screenshot (#254)', () => {
     expect(logged.join('\n')).toMatch(/pool down/)
   })
 
-  it('refuses bytes that do not match the name they came under, and fails the call that names them', async () => {
+  it('refuses bytes that are not of the type their image frame said, and fails the call that holds them', async () => {
     const hub = new TabHub()
     const image = png(1000)
-    const other = png(1000)
-    const t = await tab(hub, () => ({ ...sending(image), chunks: [other.bytes] }))
+    const t = await tab(hub, () => ({ ...sending(image), header: { mediaType: 'image/jpeg', size: image.bytes.length } }))
     const result = await runTool(screenshot, {}, ctx(hub))
     expect(result.isError).toBe(true)
-    expect(JSON.stringify(result.content)).toMatch(/names an image whose bytes did not arrive/)
-    expect(t.errors()).toEqual(['the image does not match its name or type; dropped'])
+    expect(JSON.stringify(result.content)).toMatch(/holds an image whose bytes did not arrive/)
+    expect(t.errors()).toEqual(['the image is not of the type its image frame said; dropped'])
     expect(await hub.image(image.name)).toBeUndefined()
+  })
+
+  it('names the image itself: a name the tab puts in its answer is replaced', async () => {
+    const stored: string[] = []
+    const memory = new MemoryTabImageStore()
+    const hub = new TabHub({ images: { put: (i) => (stored.push(i.name), memory.put(i)), take: (n) => memory.take(n) } })
+    const image = png(1000)
+    const sent = sending(image)
+    await tab(hub, () => ({ ...sent, result: { ok: true, result: { image: { name: png(10).name, mediaType: 'image/png' } } } }))
+    const result = await runTool(screenshot, {}, ctx(hub))
+    expect(result.isError).toBeFalsy()
+    expect(stored).toEqual([image.name])
   })
 
   it('refuses bytes past the size the image frame said', async () => {
     const hub = new TabHub()
     const image = png(1000)
-    const t = await tab(hub, () => ({ ...sending(image), header: { name: image.name, mediaType: 'image/png', size: 500 } }))
+    const t = await tab(hub, () => ({ ...sending(image), header: { mediaType: 'image/png', size: 500 } }))
     const result = await runTool(screenshot, {}, ctx(hub))
     expect(result.isError).toBe(true)
     expect(t.errors()).toEqual(['the image is larger than its image frame said; dropped'])
@@ -124,7 +135,7 @@ describe('browser_screenshot (#254)', () => {
     const hub = new TabHub()
     const { conn, errors } = await tab(hub, () => ({ result: { ok: true, result: {} } }))
     await conn.receive(PNG_SIGNATURE)
-    await conn.receive(JSON.stringify({ v: 1, type: 'image', id: 'nobody', name: png(10).name, mediaType: 'image/png', size: 10 }))
+    await conn.receive(JSON.stringify({ v: 1, type: 'image', id: 'nobody', mediaType: 'image/png', size: 10 }))
     await conn.receive({ not: 'bytes' })
     expect(errors()).toEqual([
       'image bytes arrived with no image frame before them',
@@ -138,7 +149,7 @@ describe('browser_screenshot (#254)', () => {
     await tab(hub, () => ({ result: { ok: true, result: { width: 1 } } }))
     expect(JSON.stringify((await runTool(screenshot, {}, ctx(hub))).content)).toMatch(/without an image/)
 
-    const forgetful: TabImageStore = { put: () => Promise.resolve(), get: () => Promise.resolve(undefined) }
+    const forgetful: TabImageStore = { put: () => Promise.resolve(), take: () => Promise.resolve(undefined) }
     const later = new TabHub({ images: forgetful })
     await tab(later, () => sending(png(100)))
     const result = await runTool(screenshot, {}, ctx(later))
@@ -153,13 +164,16 @@ describe('MemoryTabImageStore', () => {
     const store = new MemoryTabImageStore(() => now)
     const first = sessionImage('image/png', png(100).bytes)
     await store.put(first)
-    expect((await store.get(first.name))?.bytes.equals(first.bytes)).toBe(true)
+    expect((await store.take(first.name))?.bytes.equals(first.bytes)).toBe(true)
+    // Taken: a second read finds nothing.
+    expect(await store.take(first.name)).toBeUndefined()
+    await store.put(first)
     now = TAB_IMAGE_TTL_MS + 1
-    expect(await store.get(first.name)).toBeUndefined()
+    expect(await store.take(first.name)).toBeUndefined()
 
     const many = Array.from({ length: MEMORY_TAB_IMAGES_MAX + 1 }, () => sessionImage('image/png', png(100).bytes))
     for (const image of many) await store.put(image)
-    expect(await store.get(many[0]!.name)).toBeUndefined()
-    expect(await store.get(many.at(-1)!.name)).toBeDefined()
+    expect(await store.take(many[0]!.name)).toBeUndefined()
+    expect(await store.take(many.at(-1)!.name)).toBeDefined()
   })
 })

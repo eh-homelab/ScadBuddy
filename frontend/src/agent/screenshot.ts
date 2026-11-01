@@ -1,4 +1,4 @@
-import { isUserOnly } from './dom'
+import { isWithin } from './dom'
 
 /**
  * `screenshot` (#254): the fallback for what `snapshot` cannot say (a layout, a colour, the
@@ -21,6 +21,8 @@ import { isUserOnly } from './dom'
 export const SCREENSHOT_MAX_EDGE = 1568
 /** The largest image sent: the agent's `IMAGE_BYTES_MAX` (sessions/images.ts), 5 MiB of base64. */
 export const SCREENSHOT_MAX_BYTES = 3_932_160
+/** What is painted over with everything inside it: user-only elements and the assistant panel. */
+const PAINTED = '[data-agent-user-only], aside[aria-label="Assistant"]'
 /** The colour hidden regions are painted. */
 const HIDDEN_FILL = '#6b7280'
 
@@ -36,14 +38,13 @@ export interface Screenshot {
 /** The elements a screenshot paints over (exported for the tests; layout is not jsdom's). */
 export function hiddenElements(doc: Document = document): Element[] {
   const found = new Set<Element>()
-  for (const element of doc.querySelectorAll('[data-agent-user-only], input[type="password"], aside[aria-label="Assistant"]')) {
-    found.add(element)
-  }
-  // What a user-only control opened or rendered elsewhere: a portal's root sits under
-  // <body>, and a trigger names its content with aria-controls (dom.ts `isUserOnly`).
-  for (const element of doc.body.children) if (!found.has(element) && isUserOnly(element)) found.add(element)
+  for (const element of doc.querySelectorAll(`${PAINTED}, input[type="password"]`)) found.add(element)
+  // What a user-only control or the assistant panel opened or rendered elsewhere (a
+  // dialog, a lightbox): a portal's root sits under <body>, and a trigger names its
+  // content with aria-controls (dom.ts `isWithin`, as `isUserOnly` counts it).
+  for (const element of doc.body.children) if (!found.has(element) && isWithin(element, PAINTED)) found.add(element)
   for (const controller of doc.querySelectorAll('[aria-controls]')) {
-    if (!isUserOnly(controller)) continue
+    if (!isWithin(controller, PAINTED)) continue
     for (const id of (controller.getAttribute('aria-controls') ?? '').split(/\s+/)) {
       const target = id ? doc.getElementById(id) : null
       if (target) found.add(target)

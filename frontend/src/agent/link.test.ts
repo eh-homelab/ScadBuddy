@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { AgentBridge } from './bridge'
 import { createTabLink, IMAGE_CHUNK_BYTES, MAX_RESULT_BYTES } from './link'
 import { TAB_ID } from './tabId'
@@ -127,11 +127,13 @@ describe('createTabLink', () => {
   })
 
   // #254, #2479: an image goes as binary frames after an `image` frame naming it, never as base64 in JSON.
-  it('sends an answer\'s image as binary frames, and a result that names it by its sha256', async () => {
+  // Without crypto.subtle, as on a plain-http origin: the agent names the image, not the tab.
+  it("sends an answer's image as binary frames after its type and size, with no WebCrypto", async () => {
+    vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) })
+    onTestFinished(() => void vi.unstubAllGlobals())
+    expect(globalThis.crypto.subtle).toBeUndefined()
     const bytes = new Uint8Array(IMAGE_CHUNK_BYTES * 2 + 10).map((_, i) => i % 251)
     bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-    const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))
-    const name = `${[...digest].map((b) => b.toString(16).padStart(2, '0')).join('')}.png`
     const bridge = new AgentBridge()
     bridge.register(
       { screenshot: () => ({ image: new Blob([bytes], { type: 'image/png' }), width: 4, height: 3, hidden: 2 }) },
@@ -142,7 +144,7 @@ describe('createTabLink', () => {
     ws().deliver({ type: 'call', id: 'shot', tool: 'screenshot', args: {} })
     await vi.waitFor(() => expect(ws().frames().some((f) => f.type === 'result')).toBe(true))
     const sent = ws().sent.slice(1)
-    expect(JSON.parse(sent[0] as string)).toEqual({ v: 1, type: 'image', id: 'shot', name, mediaType: 'image/png', size: bytes.length })
+    expect(JSON.parse(sent[0] as string)).toEqual({ v: 1, type: 'image', id: 'shot', mediaType: 'image/png', size: bytes.length })
     const chunks = sent.slice(1, -1) as Uint8Array[]
     expect(chunks.map((c) => c.byteLength)).toEqual([IMAGE_CHUNK_BYTES, IMAGE_CHUNK_BYTES, 10])
     expect(new Uint8Array(chunks.flatMap((c) => [...c]))).toEqual(bytes)
@@ -150,7 +152,7 @@ describe('createTabLink', () => {
       v: 1,
       type: 'result',
       id: 'shot',
-      outcome: { ok: true, result: { image: { name, mediaType: 'image/png' }, width: 4, height: 3, hidden: 2 } },
+      outcome: { ok: true, result: { image: { mediaType: 'image/png' }, width: 4, height: 3, hidden: 2 } },
     })
   })
 
