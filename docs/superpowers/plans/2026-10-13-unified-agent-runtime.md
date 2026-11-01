@@ -1503,6 +1503,11 @@ that Deployment is `RollingUpdate` from Step 6.2 on.
 
 ### Task 11.1: Design check (gate)
 
+**Result (2026-11-01):** the gate passes; see
+[`2026-10-13-unified-agent-runtime-phase-11.md`](2026-10-13-unified-agent-runtime-phase-11.md).
+It changes three things below: the host queues stay unversioned (its finding 3), Task 11.3 was
+already done by #4090, and Task 11.4 keeps `maxSurge: 1, maxUnavailable: 0`.
+
 - [ ] **Write the check.** Write `docs/superpowers/plans/2026-10-13-unified-agent-runtime-phase-11.md`. It records how Worker Deployment versioning routes activity tasks on a queue that both of these schedule onto:
   - a versioned workflow (`AgentSession`, `AgentOperation` once versioned);
   - an unversioned one (`ProjectWorkflow` on `projects`, which runs tools on `agent-tools`).

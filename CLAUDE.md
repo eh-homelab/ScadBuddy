@@ -785,7 +785,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     value to its row and to the columns that say where it is sent (for the credential:
     `kind` and `base_url`). Comparable tokens are stored hashed instead.
   - Temporal (#1055, spec 2026-10-01 §6.3): with `SCADBUDDY_TEMPORAL_ADDRESS` (and the
-    database) `src/temporal/worker.ts` runs one unversioned worker on `agent-tools`:
+    database) `src/temporal/worker.ts` runs one worker on `agent-tools`, a version of
+    `scadbuddy-agent` with `agent-sessions` when the build has an id (#2726 Phase 11; the
+    host queues stay unversioned, `agent/test/temporal.versioning.temporal.test.ts`):
     every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
     `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow (as the
     session's owner with its turn's tiers; `mode` is not read, since every session is an

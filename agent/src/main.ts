@@ -865,6 +865,12 @@ const background =
         workspace,
       })
     : undefined
+// The queues of `scadbuddy-agent`, each polled by this build before it is made current (worker.ts).
+// Each is the condition its worker below starts on: a queue whose worker this process never
+// starts stays out, so the build is still made current on the other.
+const runsToolsWorker = Boolean(role.sharedWorkers && temporal && operationStore && turnToolDeps && durableToolDeps)
+const runsSessionWorker = Boolean(role.sharedWorkers && temporal && settings)
+const VERSIONED_QUEUES = [...(runsToolsWorker ? [TASK_QUEUE] : []), ...(runsSessionWorker ? [SESSION_QUEUE] : [])]
 const temporalWorker =
   role.sharedWorkers && temporal && operationStore && turnToolDeps && durableToolDeps
     ? AgentWorker.start({
@@ -904,6 +910,9 @@ const temporalWorker =
           ...(background ?? {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
+        // The same Deployment and build as agent-sessions (plan Phase 11): Temporal then hands
+        // agent-tools' tasks, whoever schedules them, only to the current build's workers.
+        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: VERSIONED_QUEUES } } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
@@ -912,7 +921,7 @@ const temporalWorker =
     : undefined
 // AgentSession (unified runtime spec 2026-10-13 §5.1): every new session runs here (plan Step 6.3).
 // Versioned as the Deployment `scadbuddy-agent` (D4) when the build has an id (config.buildId),
-// else unversioned like the agent's other workers. `session_settings` is a local activity, so it
+// as agent-tools is, else unversioned like the host queues. `session_settings` is a local activity, so it
 // is served here. `session_turn` is Task 5.2's, on the host worker.
 const sessionWorker =
   role.sharedWorkers && temporal && settings
@@ -924,13 +933,15 @@ const sessionWorker =
         identity: workerIdentity(replicaIdentity()),
         activities: { [SESSION_SETTINGS_ACTIVITY]: () => readRuntimeSettings(settings) },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
-        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId } } : {}),
+        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: VERSIONED_QUEUES } } : {}),
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
         },
       })
     : undefined
-// This replica's own queues (temporal/session/hostWorkers.ts): a pinned turn tool's calls
+// This replica's own queues (temporal/session/hostWorkers.ts), unversioned (plan Phase 11): a queue
+// only one replica polls is no member of a newer build, so once that build is current Temporal
+// would hand a versioned one's tasks to no one while its replica still runs. A pinned turn tool's calls
 // (#2320) and a classic session's Monitor commands on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
 // cache's largest setting plus two for releases. Their work dies with the pod; a call scheduled after
 // that fails at its schedule-to-start (a turn) or schedule-to-close (a pinned call) timeout.
@@ -1153,6 +1164,10 @@ const health = role.http
           { name: HOST_QUEUE, type: 2, started: hostWorkers?.pinned !== undefined },
           { name: SESSION_HOST_QUEUE, type: 2, started: hostWorkers?.sessions !== undefined },
         ]
+        // Ready once this build is current too (plan Phase 11): a rollout then stops an old
+        // replica only after Temporal hands the shared queues' tasks to this build.
+        const notCurrent = [sessionWorker, temporalWorker].some((worker) => worker !== undefined && !worker.current())
+        if (notCurrent) return Promise.resolve(`build ${config.buildId} is not yet current for ${SESSION_DEPLOYMENT}`)
         return queuesPolled(temporalClient, queues, workerIdentity(replicaIdentity()))
       },
     })

@@ -826,7 +826,8 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
   runs, all of them started unversioned, move to the versioned build at their next task
   ([migration guide](https://docs.temporal.io/production-deployment/worker-deployments/unversioned-to-versioned-migration)):
   they are the replay-compatible runs an unversioned worker would have replayed anyway.
-  The agent needs nothing: its `agent-tools` worker stays unversioned.
+  The agent needed nothing: its `agent-tools` worker was unversioned until #2726 Phase 11,
+  which versions it in `scadbuddy-agent` (below, "SCADBUDDY_AGENT_ROLE").
 - **Then, in clusters**, once a build with #4146 runs: in `scadbuddy-projects.yaml`,
   set `strategy: RollingUpdate` (`maxSurge: 1`, `maxUnavailable: 0`) and point the
   `readinessProbe` at `/readyz` (the liveness and startup probes stay on `/healthz`).
@@ -1154,12 +1155,30 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   tabs connected to it). `worker` runs the Temporal workers that run turns
   (`agent-tools`, `agent-sessions` and its own `agent-sessions.<hostname>` and
   `agent-tools.<hostname>`) and serves only `GET /healthz` and `GET /readyz` on port
-  `8081`; `/readyz` is `200` once Temporal lists it on all four queues. Run `worker` in
+  `8081`; `/readyz` is `200` once Temporal lists it on all four queues and its build is
+  current (below). Run `worker` in
   a Deployment of its own, with the agent container's database, Temporal, KEK, payload
   and backend settings, but with `SCADBUDDY_BACKEND_URL` set to the backend's cluster
   address (it is not in the API's pod), and set the API pod's `agent` container to
   `api`. Without any `worker` or `all` process, no unified session can start
   (`docs/ai/operating.md` §1, "Roles").
+- **Versioning** (#2726 Phase 11): with a build id (`SCADBUDDY_BUILD_ID`, else the
+  image's tag) the shared `agent-tools` and `agent-sessions` workers are one version of
+  the Worker Deployment `scadbuddy-agent`, every workflow on them `AUTO_UPGRADE`. A new
+  build is made current once per process, only once Temporal lists it on both queues,
+  and from then on every caller's task on them (an `AgentSession`, an unversioned or
+  another deployment's workflow, such as `ProjectWorkflow`) goes to it; an old replica
+  still polling takes none, so it needs no drain. The host queues
+  (`agent-tools.<hostname>`, `agent-sessions.<hostname>`) stay unversioned: a queue only
+  one replica polls is no member of the next build, and once that build is current
+  Temporal would give a versioned one's tasks to no one while the old replica still ran
+  its turns. Roll the worker Deployment out with `RollingUpdate` (`maxSurge: 1`,
+  `maxUnavailable: 0`) and its `readinessProbe` on `/readyz`, so an old pod stops only
+  once the new build is current. A rollback to a build before Phase 11 needs nothing:
+  its `agent-tools` worker is unversioned, and a queue the current build does not poll
+  goes to unversioned pollers (measured,
+  `agent/test/temporal.versioning.temporal.test.ts`;
+  `docs/superpowers/plans/2026-10-13-unified-agent-runtime-phase-11.md`).
 - **`SCADBUDDY_SECRET_KEY_FILE`** is the key-encryption key for the Claude
   credential, which is stored encrypted in the database (envelope encryption,
   spec §9; `agent/src/secrets.ts`). The file holds exactly 32 random bytes,
