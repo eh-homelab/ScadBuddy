@@ -388,7 +388,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     const { session: started } = await m.start(browser, { origin: 'chat' })
     const turnId = randomUUID()
     await db.sql`
-      UPDATE ai_sessions SET status = 'running', mode = 'durable', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
+      UPDATE ai_sessions SET status = 'running', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
       WHERE id = ${started.id}`
     const warned: string[] = []
     const warn = console.warn
@@ -657,7 +657,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     const id = started.id
     const turnId = randomUUID()
     await db.sql`
-      UPDATE ai_sessions SET status = 'running', mode = 'durable', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
+      UPDATE ai_sessions SET status = 'running', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
       WHERE id = ${id}`
     const dir = await root()
     let walks = 0
@@ -725,7 +725,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     const id = started.id
     const turnId = randomUUID()
     await db.sql`
-      UPDATE ai_sessions SET status = 'running', mode = 'durable', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
+      UPDATE ai_sessions SET status = 'running', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
       WHERE id = ${id}`
     const directory = new SessionDirectory(files, sessionsDir)
     const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory })

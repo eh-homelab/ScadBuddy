@@ -74,7 +74,7 @@ describe.skipIf(skip !== undefined)(`a placement's spend over a carried cost-sta
     if (carried === 'before') await costState()
     const turnId = randomUUID()
     await db.sql`
-      UPDATE ai_sessions SET status = 'running', mode = 'durable', runtime = 'unified', durable_turn_id = ${turnId},
+      UPDATE ai_sessions SET status = 'running', runtime = 'unified', durable_turn_id = ${turnId},
         cost_usd = ${R}, updated_at = now()
       WHERE id = ${id}`
     const deltas: number[] = []
