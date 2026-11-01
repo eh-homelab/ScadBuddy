@@ -58,6 +58,9 @@ try {
     store: new PostgresSessionStore(sql, { keys }),
     events: new EventLog(sql),
     audit: new AuditLog({ sql }),
+    // A Query on a DurableSession no worker holds in its cache replays its whole history first:
+    // 13 s for one of 1,982 entries on 2026-11-01, so the 10 s default failed 7 of 62 sessions.
+    callTimeoutMs: 60_000,
   })
   const report = await backfill(client, sql, migration, { dryRun })
   for (const line of report.lines) console.log(JSON.stringify(line))

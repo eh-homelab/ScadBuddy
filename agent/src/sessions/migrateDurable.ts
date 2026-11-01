@@ -585,8 +585,9 @@ export async function backfill(
       }
     } catch (err) {
       failed++
-      // The error's name and the refusal's text: no payload is in either.
-      line.error = err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 300) : 'error'
+      // The error's name, the refusal's text and its cause's (a deadline, a gRPC status): no payload is in any.
+      const cause = err instanceof Error && err.cause instanceof Error ? ` (${err.cause.message})` : ''
+      line.error = err instanceof Error ? `${err.name}: ${err.message}${cause}`.slice(0, 300) : 'error'
     }
     const key = line.error ? 'error' : String(line.state ?? line.outcome)
     counts[key] = (counts[key] ?? 0) + 1
