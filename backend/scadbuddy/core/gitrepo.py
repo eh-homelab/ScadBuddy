@@ -36,10 +36,12 @@ from __future__ import annotations
 import fcntl
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from dataclasses import dataclass
@@ -98,6 +100,11 @@ DEFAULT_BRANCH = "main"
 RECOVERED_MESSAGE = "Recover uncommitted changes"
 
 COMMIT_ID_PATTERN = r"^[0-9a-f]{7,40}$"
+#: A full object id (SHA-1 or SHA-256): what it names never changes, so an answer
+#: about it may be kept. An abbreviation can grow ambiguous, and a ref moves.
+FULL_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+#: How many answers about full ids an instance keeps (#849).
+IMMUTABLE_CACHE_SIZE = 4096
 
 # git's own hash of the empty tree: what a root commit's diff is taken against,
 # since it has no parent to compare with.
@@ -282,6 +289,23 @@ class GitRepo:
         #: What `revalidate_dirs` opens before every git call: where HEAD, the
         #: index, ``packed-refs`` and the branch refs are replaced by rename.
         self._git_dirs = (root, git_dir, git_dir / "refs", git_dir / "refs" / "heads")
+        #: Answers about full object ids, which no commit or replica changes (#849).
+        self._immutable: OrderedDict[tuple[str, ...], str] = OrderedDict()
+        self._immutable_lock = threading.Lock()
+
+    def _recall(self, key: tuple[str, ...]) -> str | None:
+        with self._immutable_lock:
+            value = self._immutable.get(key)
+            if value is not None:
+                self._immutable.move_to_end(key)
+            return value
+
+    def _remember(self, key: tuple[str, ...], value: str) -> None:
+        with self._immutable_lock:
+            self._immutable[key] = value
+            self._immutable.move_to_end(key)
+            while len(self._immutable) > IMMUTABLE_CACHE_SIZE:
+                self._immutable.popitem(last=False)
 
     def _gitignore_body(self) -> str | None:
         """The ``.gitignore`` :meth:`ensure_repo` keeps at the root; None for none."""
@@ -808,7 +832,12 @@ class GitRepo:
         return completed.stdout.strip() or None if completed.returncode == 0 else None
 
     def resolve(self, commit: str) -> str:
-        """Full commit id for a revision, or :class:`RevisionNotFoundError`."""
+        """Full commit id for a revision, or :class:`RevisionNotFoundError`. A full id
+        that resolved is kept: nothing rewrites the history. A miss is never kept,
+        since another replica's commit may not be visible yet (#2385)."""
+        key = ("resolve", commit)
+        if FULL_ID.fullmatch(commit) and (known := self._recall(key)) is not None:
+            return known
         completed = self._run(
             "rev-parse", "--verify", "--quiet", f"{commit}^{{commit}}", check=False
         )
@@ -816,6 +845,8 @@ class GitRepo:
         resolved = completed.stdout.strip()
         if completed.returncode != 0 or not resolved:
             raise RevisionNotFoundError(commit)
+        if FULL_ID.fullmatch(commit):
+            self._remember(key, resolved)
         return resolved
 
     def last_commit(self, path: str) -> str | None:
