@@ -103,6 +103,9 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
         connection: env.nativeConnection,
         taskQueue,
         activities,
+        // A stop the test makes is bounded however loaded the machine is: past these, in-flight work is cut.
+        shutdownGraceTime: '1s',
+        shutdownForceTime: '10s',
         // The restarted workers take the run at once, not after its old sticky queue times out.
         ...(workflowBundle ? { workflowBundle, stickyQueueScheduleToStartTimeout: '1s' } : {}),
       })
@@ -127,8 +130,8 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     workers = made.map((worker) => ({ worker, run: worker.run() }))
   }
   async function stopWorkers(): Promise<void> {
-    for (const { worker } of workers) worker.shutdown()
-    await Promise.all(workers.map((w) => w.run))
+    for (const { worker } of workers) if (worker.getState() === 'RUNNING') worker.shutdown()
+    await Promise.all(workers.map((w) => w.run.catch(() => undefined)))
     workers = []
   }
 
@@ -153,6 +156,13 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     let rows: { request_id: string; gate: unknown }[] = []
     await expect.poll(async () => (rows = await db.sql`SELECT request_id, gate FROM ai_pending_input WHERE session_id = ${id}`).length, { timeout: 20_000 }).toBe(1)
     return rows[0]!
+  }
+
+  /** Whether the history holds a completed `session_turn`: the first placement's `released`. */
+  async function turnReleased(id: string): Promise<boolean> {
+    const events = (await env.client.workflow.getHandle(sessionWorkflowId(id)).fetchHistory()).events ?? []
+    const turns = new Set(events.filter((e) => e.activityTaskScheduledEventAttributes?.activityType?.name === SESSION_TURN_ACTIVITY).map((e) => String(e.eventId)))
+    return events.some((e) => turns.has(String(e.activityTaskCompletedEventAttributes?.scheduledEventId)))
   }
 
   const approve = (gate: DurableGate, id: string, requestId: string) =>
@@ -205,6 +215,9 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     const id = randomUUID()
     await send(env.client, id)
     const entry = await parked(id)
+    // The release is in the history first: a stop before session_turn's result reached it places
+    // the turn again on restart (a `restarted` continuation, not the parked one this test reads).
+    await expect.poll(() => turnReleased(id), { timeout: 30_000 }).toBe(true)
     await stopWorkers()
     // Decided while no worker runs: the row takes it, and the wake waits in the history.
     expect(await approve(new DurableGate(env.client, { sql: db.sql }), id, entry.request_id)).toEqual({ kind: 'approval', outcome: 'approved' })
