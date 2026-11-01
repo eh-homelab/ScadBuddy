@@ -233,18 +233,46 @@ describe('the credential gateway', () => {
     })
 
     it('is checked as at save time: a metadata address is refused before anything is sent', async () => {
-      const seen: string[] = []
-      const checked = await CredentialGateway.start({ resolve: async () => ['169.254.169.254'], fetch: async (input) => (seen.push(String(input)), new Response('')) })
+      // `localhost` would reach the fake; the check says it is 169.254.169.254.
+      const checked = await CredentialGateway.start({ resolve: async () => ['169.254.169.254'] })
       try {
-        const lease = checked.lease({ kind: 'gateway', baseUrl: 'http://metadata.example', secret: GATEWAY_SECRET })
+        const lease = checked.lease({ kind: 'gateway', baseUrl: fake.url.replace('127.0.0.1', 'localhost'), secret: GATEWAY_SECRET })
         const res = await post(lease.baseUrl, { authorization: `Bearer ${lease.token}` })
         expect(res.status).toBe(502)
         expect(JSON.stringify(await res.json())).not.toContain(GATEWAY_SECRET)
-        expect(seen).toEqual([])
+        expect(fake.requests).toHaveLength(0)
       } finally {
         await checked.close()
       }
     })
+
+    it('is reached at the address the check passed, never resolved again (DNS rebinding)', async () => {
+      // The name resolves nowhere on this host; the check's answer is the fake's address.
+      const checked = await CredentialGateway.start({ resolve: async () => ['127.0.0.1'] })
+      try {
+        const lease = checked.lease({ kind: 'gateway', baseUrl: fake.url.replace('127.0.0.1', 'llm.scadbuddy.invalid'), secret: GATEWAY_SECRET })
+        const res = await post(lease.baseUrl, { authorization: `Bearer ${lease.token}` })
+        expect(res.status).toBe(200)
+        await res.text()
+        expect(fake.messageCalls()[0]?.headers.host).toMatch(/^llm\.scadbuddy\.invalid:\d+$/)
+      } finally {
+        await checked.close()
+      }
+    })
+  })
+
+  it('answers a body past its limit with 413, not a reset, and sends nothing on', async () => {
+    const small = await CredentialGateway.start({ anthropicUrl: fake.url, maxRequestBytes: 1024 })
+    try {
+      const lease = small.lease({ kind: 'anthropic_api_key', secret: API_KEY })
+      const big = JSON.stringify({ model: 'claude-sonnet-4-5', messages: [{ role: 'user', content: 'x'.repeat(256 * 1024) }] })
+      const res = await post(lease.baseUrl, { 'x-api-key': lease.token }, big)
+      expect(res.status).toBe(413)
+      expect(await res.json()).toMatchObject({ error: { type: 'request_too_large' } })
+      expect(fake.requests).toHaveLength(0)
+    } finally {
+      await small.close()
+    }
   })
 
   it('listens on loopback only', () => {

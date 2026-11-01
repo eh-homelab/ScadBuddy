@@ -392,6 +392,8 @@ const QUESTION_PROMPT_HOOK: HookCallbackMatcher = {
  * first instead (`stopFirst`).
  */
 export function buildHarnessOptions(run: HarnessRun): Options {
+  // The options name a gateway token, live until `abortController` aborts: a caller that
+  // never aborts them leaves it in the process's gateway (runHarness releases its own).
   const { options, abort, lease } = buildHarness(run)
   abort.signal.addEventListener('abort', () => lease.release(), { once: true })
   if (run.signal) {

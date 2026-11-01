@@ -66,15 +66,31 @@ export type TurnSlot = {
   current?: TurnContext
   set(ctx: TurnContext): void
   clear(): void
+  /**
+   * What the credential gateway priced for the process (run.ts `onSpend`): the turn's
+   * `metered`, or, between turns (a command still running after its turn ended), held and
+   * given to the next turn the slot is set for, so `cost_usd` still counts it.
+   */
+  meter(usd: number): void
 }
 
 export function createTurnSlot(): TurnSlot {
+  let between = 0
   const slot: TurnSlot = {
     set(ctx) {
       slot.current = ctx
+      if (between > 0 && ctx.metered) {
+        ctx.metered.usd += between
+        between = 0
+      }
     },
     clear() {
       delete slot.current
+    },
+    meter(usd) {
+      const metered = slot.current?.metered
+      if (metered) metered.usd += usd
+      else between += usd
     },
   }
   return slot

@@ -682,10 +682,7 @@ export class TurnRunner {
         traceHooks: TurnTrace.hooksFor(() => slot.current?.trace),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
         // What the credential gateway priced, to the turn the process serves (turnCore.ts `runningUsd`).
-        onSpend: (usd) => {
-          const metered = slot.current?.metered
-          if (metered) metered.usd += usd
-        },
+        onSpend: (usd) => slot.meter(usd),
       }
       inProcessServers = Object.keys(run.mcpServers ?? {})
       const first = candidates[0]
