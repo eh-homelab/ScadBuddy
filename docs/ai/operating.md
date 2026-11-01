@@ -946,7 +946,11 @@ session's Claude Code process offers its own built-ins, each an item of the acce
   whose target is outside, or a path, Glob pattern or Grep glob that starts with `~`. A Glob
   pattern or Grep glob that could reach `..` in any glob syntax is refused too, failing closed:
   one with `..` left once `\ { } , [ ] ( ) | ! @ + ? *` are taken out (`.{.,x}/*`,
-  `[.][.]/*`), or with a segment of only dots and that syntax (`.?`, `.*`, `*.*`)
+  `[.][.]/*`); one whose brace and extglob alternatives, spelled out (at most 256), have a
+  segment that could be `..`, reading each class that can match `.` as a `.` and `*` and `?`
+  as wildcards (`.{x,.}/*`, `.[!x]/*`, `.@(x|.)/*`, and `.?`, `.*`, `*.*`); and one with group
+  syntax left over or an unclosed `[` (`?.|x`). Checked against minimatch and picomatch on
+  300,000 random patterns: none they read as `..` got through
   ([`agent/src/harness/confine.ts`](../../agent/src/harness/confine.ts), an input guard in
   both canUseTool and the PreToolUse hook). Claude Code expands a leading `~` to HOME, the
   state directory with its config and transcripts; Glob's and Grep's `path` reach the seam
