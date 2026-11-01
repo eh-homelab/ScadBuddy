@@ -338,6 +338,110 @@
           "limit": 20
         }
       ]
+    },
+    {
+      "id": 17,
+      "type": "row",
+      "title": "Session runtime",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 57, "w": 24, "h": 1 },
+      "panels": []
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Warm hit ratio",
+      "description": "Each turn's agent.turn.spawn span by warm.outcome, stacked to 100%: the hit band is the share of turns that reused the session's warm Claude Code process (spec 2026-10-13 §5.3). A TraceQL metrics query: it needs Tempo's metrics-generator local-blocks processor (clusters#1596, spec 2026-10-01 §7). Without it this panel is empty, which means not configured, not zero turns.",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 58, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "custom": { "stacking": { "mode": "percent", "group": "A" }, "fillOpacity": 40 } }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.turn.spawn\"} | rate() by (span.warm.outcome)",
+          "limit": 20
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "type": "timeseries",
+      "title": "Spawn p50 and p95 by warm outcome",
+      "description": "How long a turn waited for its process (the agent.turn.spawn span), at the median and the 95th percentile, by warm.outcome: a hit takes a live process, a miss or a recycle starts one (spec 2026-10-13 §5.3). A TraceQL metrics query, as above.",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 8, "y": 58, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.turn.spawn\"} | quantile_over_time(duration, .5, .95) by (span.warm.outcome)",
+          "limit": 20
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Releases per hour",
+      "description": "agent.turn.release spans per hour: turns that closed their process on a park held past park_hold_seconds (or at a shutdown, while a call was held), to go on as a parked continuation once the calls are decided (spec 2026-10-13 §5.4 \"Release\", agent/src/sessions/turnHost.ts). scadbuddy.parked_calls is how many calls each held. A TraceQL metrics query, as above.",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 16, "y": 58, "w": 8, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.turn.release\"} | count_over_time()",
+          "step": "1h",
+          "limit": 20
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Continued turns by kind",
+      "description": "agent.turn spans of a placement that continues its turn, per second, by scadbuddy.continuation: parked (a released turn placed again once its calls were decided, spec 2026-10-13 §5.4) or restarted (a turn whose pod or process was lost, resumed with the restart message, §5.5). A TraceQL metrics query, as above.",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 0, "y": 66, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && name=\"agent.turn\" && span.scadbuddy.continuation != nil} | rate() by (span.scadbuddy.continuation)",
+          "limit": 20
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Tool activities by queue",
+      "description": "A turn's tool calls, each a ToolCall workflow's activity (plan 2026-10-13 Steps 9.2 and 9.3), per second, by the task queue it ran on (scadbuddy.task_queue): the shared agent-tools, or a replica's own agent-tools.<hostname> for a pinned server's calls. A TraceQL metrics query, as above.",
+      "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+      "gridPos": { "x": 12, "y": 66, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
+          "queryType": "traceql",
+          "metricsQueryType": "range",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && span.scadbuddy.tool != nil && span.scadbuddy.task_queue != nil} | rate() by (span.scadbuddy.task_queue)",
+          "limit": 20
+        }
+      ]
     }
   ]
 }

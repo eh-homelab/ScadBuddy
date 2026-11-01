@@ -491,7 +491,7 @@ if (role.http && database && dataKeys) {
 const memory: MemoryOptions | undefined = undefined
 
 // How a turn's ScadBuddy call runs as its ToolCall workflow (plan 2026-10-13 Step 9.2), once the
-// Temporal client below exists; read by each turn that has `tools_as_activities` on.
+// Temporal client below exists; read by each turn (until then, its calls run in-process).
 let toolCallStart: ToolCallStarter | undefined
 // And how its plugin and http tools are listed for their proxies (Step 9.3), once turnToolDeps exists.
 let turnToolList: NonNullable<SessionManagerDeps['turnTools']> | undefined
@@ -879,12 +879,13 @@ const background =
         workspace,
       })
     : undefined
-// The queues of `scadbuddy-agent`, each polled by this build before it is made current (worker.ts).
-// Each is the condition its worker below starts on: a queue whose worker this process never
-// starts stays out, so the build is still made current on the other.
-const runsToolsWorker = Boolean(role.sharedWorkers && temporal && operationStore && turnToolDeps && durableToolDeps)
-const runsSessionWorker = Boolean(role.sharedWorkers && temporal && settings)
-const VERSIONED_QUEUES = [...(runsToolsWorker ? [TASK_QUEUE] : []), ...(runsSessionWorker ? [SESSION_QUEUE] : [])]
+// The queues of `scadbuddy-agent` this process polls, each polled by this build before it is made
+// current (worker.ts): read from the workers that started, when the build is made current, so a
+// queue whose worker this process never starts stays out and the build is still made current on the other.
+const versionedQueues = (): string[] => [
+  ...(temporalWorker ? [TASK_QUEUE] : []),
+  ...(sessionWorker ? [SESSION_QUEUE] : []),
+]
 const temporalWorker =
   role.sharedWorkers && temporal && operationStore && turnToolDeps && durableToolDeps
     ? AgentWorker.start({
@@ -928,7 +929,7 @@ const temporalWorker =
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
         // The same Deployment and build as agent-sessions (plan Phase 11): Temporal then hands
         // agent-tools' tasks, whoever schedules them, only to the current build's workers.
-        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: VERSIONED_QUEUES } } : {}),
+        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: versionedQueues } } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
@@ -949,7 +950,7 @@ const sessionWorker =
         identity: workerIdentity(replicaIdentity()),
         activities: { [SESSION_SETTINGS_ACTIVITY]: () => readRuntimeSettings(settings) },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
-        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: VERSIONED_QUEUES } } : {}),
+        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: versionedQueues } } : {}),
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
         },

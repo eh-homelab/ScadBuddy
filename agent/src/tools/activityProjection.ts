@@ -21,8 +21,8 @@ import {
 import { errorResult } from './registry.js'
 
 // A turn's ScadBuddy tool calls as activities (unified runtime plan 2026-10-13 Step 9.2, R1 of
-// #4773, decision Q1), behind the `tools_as_activities` setting. The turn's in-process server keeps
-// projections.ts's names, schemas and descriptions, so neither the model nor Settings sees a
+// #4773, decision Q1), whenever the turn has Temporal (Step 9.9 removed the setting). The turn's
+// in-process server keeps projections.ts's names, schemas and descriptions, so neither the model nor Settings sees a
 // change; only its handler differs: it starts the call's ToolCall workflow
 // (`session-<uuid>-call-<tool_use_id>`, temporal/toolCall.ts), or attaches to it when it is
 // already there (a re-send after a lost answer), and answers with its result. The call then runs

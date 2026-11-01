@@ -6,9 +6,10 @@ import type { WarmSessions } from './warm.js'
 // The session-runtime settings (unified runtime spec 2026-10-13 §13, plan Task
 // 2.5): stored in `ai_settings` under their own names. `warm_*` size the warm
 // process cache (warm.ts `resize`), applied at start and on each change on any
-// replica; `park_hold_seconds` and `turn_max_seconds` are only stored and served
-// here, and later phases read them through `readRuntimeSettings`. None of them
-// is a fingerprint input (warmEvict.ts), so a write never evicts a process.
+// replica; `park_hold_seconds` (how long a park holds its process, spec §5.4) and
+// `turn_max_seconds` are read as each AgentSession turn starts (`session_settings`,
+// temporal/session/workflow.ts). None of them is a fingerprint input (warmEvict.ts),
+// so a write never evicts a process.
 
 export type RuntimeSettings = {
   park_hold_seconds: number
@@ -42,21 +43,7 @@ export const RuntimePutBody = z.strictObject({
   warm_max_per_replica: field('warm_max_per_replica').optional(),
   warm_idle_seconds: field('warm_idle_seconds').optional(),
   turn_max_seconds: field('turn_max_seconds').optional(),
-  tools_as_activities: z.boolean().optional(),
 })
-
-/**
- * Whether a turn's ScadBuddy tool calls run as activities, each its own ToolCall workflow (plan
- * 2026-10-13 Step 9.2): read by every turn's assembly (sessions/turnRunner.ts), and a warm
- * process's fingerprint input, so a change reaches the next turn of every session. Off by default
- * for one release; Step 9.9 removes it.
- */
-export const TOOLS_AS_ACTIVITIES = 'tools_as_activities'
-
-/** The stored flag; off for anything but `true`. */
-export async function readToolsAsActivities(settings: Pick<SettingsRepo, 'get'>): Promise<boolean> {
-  return (await settings.get<unknown>(TOOLS_AS_ACTIVITIES)) === true
-}
 
 export const isRuntimeKey = (key: string): key is keyof RuntimeSettings => (RUNTIME_KEYS as string[]).includes(key)
 

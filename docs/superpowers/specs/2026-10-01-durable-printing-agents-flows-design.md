@@ -591,6 +591,30 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 
 ## 6. Durable agent sessions
 
+> **Amended by 2026-10-13** (`2026-10-13-unified-agent-runtime-design.md`, epic #2726; plan
+> `docs/superpowers/plans/2026-10-13-unified-agent-runtime.md`). There is one session
+> runtime, so most of this section describes what was built and then retired. As merged on
+> main on 2026-11-01:
+>
+> - **§6.1 Mode** is gone. Since plan Step 6.3 (#5051, #5054) every new session is an
+>   `AgentSession`, and nothing reads `ai_sessions.mode` or the `session_mode` setting; the
+>   panel has no Classic / Durable picker and no Durable badge. Phase 10 drops the columns
+>   (#5174 removed their last readers; a later PR drops them).
+> - **§6.2, §6.3, §6.3a and §6.3b** are replaced by spec 2026-10-13 §5 and §14:
+>   `AgentSession` (`session-<id>` on `agent-sessions`, `agent/src/temporal/session/workflow.ts`)
+>   runs each turn as the TypeScript `session_turn` activity on a replica of the
+>   `scadbuddy-agent-worker` Deployment (role `worker`), on that replica's warm Claude Code
+>   process. A park holds the process for `park_hold_seconds`, then releases it and continues
+>   once decided (2026-10-13 §5.4); a turn lost with its pod resumes on another (§5.5). Each
+>   tool call is a `ToolCall` workflow of its own (plan Steps 9.2 and 9.3). The Python
+>   `DurableSession` and its segment runner retired in Phase 8 (#5067, #5075); its open
+>   sessions moved to `AgentSession` in Phase 7 (#5058, #5064). `agent-durable/` stays as the
+>   Python worker image (2026-10-13 §14.4), with no turn code.
+> - **§6.5** (the payload codec, `forgetSubject`) stays.
+>
+> Since #5173 (Phase 11) `agent-tools` is versioned with `agent-sessions` too; see
+> `docs/ai/operating.md` §1.2.
+
 ### 6.1 Mode
 
 - `ai_sessions.mode text not null default 'classic' check (mode in ('classic','durable'))`,
@@ -861,6 +885,16 @@ mechanism for this is a **Payload Codec**, and with it deletion is crypto-shredd
   checks, not through the Temporal UI link (#668).
 
 ### 6.6 Waiting on a person: the tool-call gate
+
+> **Amended by 2026-10-13** (`2026-10-13-unified-agent-runtime-design.md` §5.4, §14.7 R5). Every
+> session is an `AgentSession`, so "Classic sessions" below no longer applies: an outward call
+> or a question of any session parks on its workflow's gate, held then released (2026-10-13
+> §5.4). The gate's workflow half is TypeScript (`agent/src/temporal/session/gate.ts`), and an
+> entry's record is its `ai_pending_input` row (`gate` column, plan Step 9.7, #5099): the
+> route decides it there (`agent/src/gate/store.ts` `decideInput`) and wakes the workflow with
+> the Signal `input_decided`, and the workflow reads it back with `gate.read_input`.
+> `gate/classic.ts` and `questions/` were folded into `agent/src/gate/` (#5110). The ids, the
+> `respond` validator and `pending-input-vectors.json` are unchanged.
 
 > **Amended** for flow runs and the sessions they drive by
 > `2026-10-11-flow-grants-and-git-design.md` (#2480): run grants, the escalation chain,

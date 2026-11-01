@@ -41,7 +41,7 @@ import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal }
 import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
-import { readRuntimeSettings, readToolsAsActivities, RUNTIME_DEFAULTS } from './runtimeSettings.js'
+import { readRuntimeSettings, RUNTIME_DEFAULTS } from './runtimeSettings.js'
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import { type ProxiedTool, type ToolCallRequest, turnToolProxies } from '../tools/activityProjection.js'
 import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
@@ -118,7 +118,11 @@ export type FingerprintParts = {
   raisedTiers: string[]
   /** Whether the run has the http_request tool (#827). */
   httpRequest: boolean
-  /** Whether its ScadBuddy tool calls run as activities (plan 2026-10-13 Step 9.2): the in-process server a process keeps is spawned with it. */
+  /**
+   * Whether its ScadBuddy tool calls run as activities (plan 2026-10-13 Step 9.2): the in-process
+   * server a process keeps is spawned with it. No longer a setting (Step 9.9): true whenever the
+   * turn had a Temporal starter (`deps.toolCalls`).
+   */
   toolsAsActivities: boolean
   /** http_request's stored access in ai_access (#2171), its tier when one is set; null when none is stored. */
   httpTier: ToolAccess | null
@@ -522,13 +526,12 @@ export class TurnRunner {
           }
         }
       }
-      const [cwd, resume, settingModel, httpAccess, asActivities, runtime] = await phase('session', () =>
+      const [cwd, resume, settingModel, httpAccess, runtime] = await phase('session', () =>
         Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.deps.store.exists(id),
           this.deps.settings?.get<string>(SETTING_MODEL),
           this.deps.httpRequest ? access.entry(BUILTIN_SOURCES.http, HTTP_TOOL) : undefined,
-          this.deps.settings ? readToolsAsActivities(this.deps.settings) : false,
           this.deps.settings ? readRuntimeSettings(this.deps.settings) : undefined,
         ]),
       )
@@ -537,7 +540,7 @@ export class TurnRunner {
       // The turn's ScadBuddy calls as activities (plan 2026-10-13 Step 9.2), each given the gate
       // entry the seam approved it on, and bounded by the turn's own limit. Without a starter (no
       // Temporal), they run here.
-      const toolCalls = asActivities ? this.deps.toolCalls?.() : undefined
+      const toolCalls = this.deps.toolCalls?.()
       const timeoutMs = (runtime ?? RUNTIME_DEFAULTS).turn_max_seconds * 1000
       const activities = toolCalls
         ? { start: (request: ToolCallRequest) => toolCalls({ ...request, timeoutMs }), approvalOf: (toolUseId: string) => ledger.approvalOf(toolUseId) }

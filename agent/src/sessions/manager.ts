@@ -645,14 +645,14 @@ export type SessionManagerDeps = {
     },
   ) => Record<string, McpSdkServerConfigWithInstance>
   /**
-   * How a turn's ScadBuddy call starts its ToolCall workflow (tools/activityProjection.ts), when
-   * `tools_as_activities` is on; undefined (no Temporal client yet, or none at all) runs them in-process.
+   * How a turn's ScadBuddy call starts its ToolCall workflow (tools/activityProjection.ts);
+   * undefined (no Temporal client yet, or none at all) runs them in-process.
    */
   toolCalls?: () => ToolCallStarter | undefined
   /**
    * The turn's tools beside ScadBuddy's own, listed as the `turn:` activities that run their calls
-   * list them (temporal/turnTools.ts `listTurnTools`), for the in-process proxies a turn with
-   * `tools_as_activities` gets in place of its plugins and http_request (plan 2026-10-13 Step 9.3).
+   * list them (temporal/turnTools.ts `listTurnTools`), for the in-process proxies a turn
+   * on Temporal gets in place of its plugins and http_request (plan 2026-10-13 Step 9.3).
    */
   turnTools?: (context: { session: string; owner: Owner; signal: AbortSignal }, only: ReadonlySet<string>) => Promise<Pick<TurnToolsResult, 'tools' | 'unlisted'>>
   /**
