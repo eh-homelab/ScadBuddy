@@ -6,8 +6,8 @@ require (
 	github.com/eh-homelab/ScadBuddy/tools/go/scadbuddy-client v0.0.0-00010101000000-000000000000
 	github.com/google/uuid v1.6.0
 	github.com/hanwen/go-fuse/v2 v2.12.1
-	github.com/microsoft/kiota-abstractions-go v1.11.4
-	github.com/microsoft/kiota-http-go v1.5.9
+	github.com/microsoft/kiota-abstractions-go v1.12.0
+	github.com/microsoft/kiota-http-go v1.6.0
 	github.com/microsoft/kiota-serialization-json-go v1.1.5
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.47.0
@@ -24,9 +24,9 @@ require (
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
-	github.com/microsoft/kiota-serialization-form-go v1.1.5 // indirect
+	github.com/microsoft/kiota-serialization-form-go v1.1.6 // indirect
 	github.com/microsoft/kiota-serialization-multipart-go v1.1.4 // indirect
-	github.com/microsoft/kiota-serialization-text-go v1.1.5 // indirect
+	github.com/microsoft/kiota-serialization-text-go v1.1.6 // indirect
 	github.com/std-uritemplate/std-uritemplate/go/v2 v2.0.12 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.47.0 // indirect
