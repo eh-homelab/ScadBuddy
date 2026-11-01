@@ -700,11 +700,13 @@ export const orderTools: Tool[] = [
     description:
       "The price book in force: the currency the next order copies (and its `minor_exponent`), the pricing policy " +
       '(machine rate per hour, setup fee per plate, labour per item, markup percent, rounding), the rough ' +
-      "estimate's factor, and the filament records not archived, each with its cost per kilogram.",
-    input: z.object({}),
+      "estimate's factor, and the filament records not archived, each with its cost per kilogram. " +
+      '`include_archived: true` lists the archived records too (each with its `archived_at`), to unarchive one.',
+    input: z.object({ include_archived: z.boolean().default(false) }),
     risk: 'read',
     routes: ['GET /api/v1/orders/price-book'],
-    handler: async (_input, { backend }) => json(await ok(backend.GET('/api/v1/orders/price-book'), 'read the price book')),
+    handler: async (query, { backend }) =>
+      json(await ok(backend.GET('/api/v1/orders/price-book', { params: { query } }), 'read the price book')),
   }),
   defineTool({
     name: 'price_book_set',
@@ -712,13 +714,14 @@ export const orderTools: Tool[] = [
     description:
       'Keep the price book: `policy` (the fields given replace those in force, the rest stay), ' +
       "`rough_estimate_factor`, and `filament`: a new record (no `filament_id`; material, colour and cost_per_kg), " +
-      'an edit of one (`filament_id` with the fields to change), or `archive: true` to hide it from the book. A ' +
-      'recorded quote keeps the rates it was priced at.',
+      'an edit of one (`filament_id` with the fields to change), `archive: true` to hide it from the book, or ' +
+      '`unarchive: true` to put an archived one back with its id (`filament_exists` when the same filament was added ' +
+      'again since). A recorded quote keeps the rates it was priced at.',
     input: z.object({
       policy: policyFields.optional(),
       rough_estimate_factor: decimal.optional(),
       filament: z
-        .object({ filament_id: ID.optional(), archive: z.boolean().default(false), ...filamentFields })
+        .object({ filament_id: ID.optional(), archive: z.boolean().default(false), unarchive: z.boolean().default(false), ...filamentFields })
         .strict()
         .optional(),
     }),
@@ -728,17 +731,20 @@ export const orderTools: Tool[] = [
       'POST /api/v1/orders/price-book/filaments',
       'PATCH /api/v1/orders/price-book/filaments/{filament_id}',
       'POST /api/v1/orders/price-book/filaments/{filament_id}/archive',
+      'POST /api/v1/orders/price-book/filaments/{filament_id}/unarchive',
     ],
     title: ({ policy, filament }) =>
       filament?.archive
         ? `Archive filament ${filament.filament_id ?? ''}`.trim()
-        : filament
-          ? filament.filament_id
-            ? `Edit filament ${filament.filament_id}`
-            : `Add filament ${filament.material ?? ''}`.trim()
-          : policy
-            ? 'Set the pricing policy'
-            : 'Set the price book',
+        : filament?.unarchive
+          ? `Unarchive filament ${filament.filament_id ?? ''}`.trim()
+          : filament
+            ? filament.filament_id
+              ? `Edit filament ${filament.filament_id}`
+              : `Add filament ${filament.material ?? ''}`.trim()
+            : policy
+              ? 'Set the pricing policy'
+              : 'Set the price book',
     handler: async ({ policy, rough_estimate_factor, filament }, { backend }) => {
       if (policy === undefined && rough_estimate_factor === undefined && filament === undefined) {
         throw new ToolError('nothing to change: give a policy, a rough_estimate_factor or a filament')
@@ -756,10 +762,11 @@ export const orderTools: Tool[] = [
         )
       }
       if (filament !== undefined) {
-        const { filament_id, archive, ...fields } = filament
+        const { filament_id, archive, unarchive, ...fields } = filament
         const body = Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined))
+        if (archive && unarchive) throw new ToolError('archive and unarchive cannot both be true')
         if (filament_id === undefined) {
-          if (archive) throw new ToolError('archive needs a filament_id')
+          if (archive || unarchive) throw new ToolError(`${archive ? 'archive' : 'unarchive'} needs a filament_id`)
           answer.filament = await ok(backend.POST('/api/v1/orders/price-book/filaments', { body: body as never }), 'add a filament')
         } else {
           const path = { filament_id }
@@ -775,7 +782,13 @@ export const orderTools: Tool[] = [
               `archive filament ${filament_id}`,
             )
           }
-          if (answer.filament === undefined) throw new ToolError('give the fields to change, or archive: true')
+          if (unarchive) {
+            answer.filament = await ok(
+              backend.POST('/api/v1/orders/price-book/filaments/{filament_id}/unarchive', { params: { path } }),
+              `unarchive filament ${filament_id}`,
+            )
+          }
+          if (answer.filament === undefined) throw new ToolError('give the fields to change, or archive or unarchive: true')
         }
       }
       return json(answer)

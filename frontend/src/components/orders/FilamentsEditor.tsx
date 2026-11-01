@@ -3,6 +3,7 @@ import { api } from '../../api/client'
 import type { Filament, FilamentInput } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { DataTable, type Column } from '../records/DataTable'
@@ -60,10 +61,12 @@ export function filamentLabel(filament: Pick<Filament, 'material' | 'subtype' | 
  * #4250 — the price book's filaments (spec 2026-10-18 §5.1, plan Ruling 4), under the
  * Settings page's Orders section: what a kilogram of each costs, and its density for the
  * rough estimate. A record is never deleted, only archived: a quote priced with it keeps
- * its lines, and an item may still name it.
+ * its lines, and an item may still name it. "Show archived" lists the archived ones, each
+ * with an Unarchive that brings the same record back (#4977).
  */
 export function FilamentsEditor() {
-  const book = useAsync(() => api.priceBook(), [])
+  const [showArchived, setShowArchived] = useState(false)
+  const book = useAsync(() => api.priceBook(showArchived), [showArchived])
   const [draft, setDraft] = useState<Draft>(EMPTY)
   const [editing, setEditing] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -117,6 +120,7 @@ export function FilamentsEditor() {
         <span className="inline-flex items-center gap-2">
           <span aria-hidden="true" className="inline-block size-3 shrink-0 rounded-sm border" style={{ background: f.colour }} />
           {filamentLabel(f)}
+          {f.archived_at && <span className="text-xs text-muted-foreground">Archived</span>}
         </span>
       ),
     },
@@ -127,25 +131,30 @@ export function FilamentsEditor() {
       key: 'actions',
       header: <span className="sr-only">Actions</span>,
       className: 'whitespace-nowrap text-right',
-      cell: (f) => (
-        <span className="inline-flex gap-1">
-          <Button
-            size="xs"
-            variant="outline"
-            disabled={busy}
-            onClick={() => {
-              setEditing(f.id)
-              setDraft(draftOf(f))
-              setError(null)
-            }}
-          >
-            Edit
+      cell: (f) =>
+        f.archived_at ? (
+          <Button size="xs" variant="outline" disabled={busy} onClick={() => void act(() => api.unarchiveFilament(f.id))} aria-label={`Unarchive ${filamentLabel(f)}`}>
+            Unarchive
           </Button>
-          <Button size="xs" variant="ghost" disabled={busy} onClick={() => void act(() => api.archiveFilament(f.id))} aria-label={`Archive ${filamentLabel(f)}`}>
-            Archive
-          </Button>
-        </span>
-      ),
+        ) : (
+          <span className="inline-flex gap-1">
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                setEditing(f.id)
+                setDraft(draftOf(f))
+                setError(null)
+              }}
+            >
+              Edit
+            </Button>
+            <Button size="xs" variant="ghost" disabled={busy} onClick={() => void act(() => api.archiveFilament(f.id))} aria-label={`Archive ${filamentLabel(f)}`}>
+              Archive
+            </Button>
+          </span>
+        ),
     },
   ]
 
@@ -153,8 +162,12 @@ export function FilamentsEditor() {
     <section className="flex flex-col gap-2" aria-label="Filaments">
       <h4 className="text-sm font-medium">Filaments</h4>
       <p className="text-xs text-muted-foreground">
-        What a kilogram of each filament costs, in {book.data?.currency ?? 'the orders currency'}. A slice quote prices each colour at the filament it names; archiving one hides it from new quotes.
+        What a kilogram of each filament costs, in {book.data?.currency ?? 'the orders currency'}. A slice quote prices each colour at the filament it names; archiving one hides it from new quotes until it is unarchived.
       </p>
+      <label className="flex items-center gap-2 text-xs text-muted-foreground">
+        <Checkbox checked={showArchived} onCheckedChange={(checked) => setShowArchived(checked === true)} aria-label="Show archived" />
+        Show archived
+      </label>
       {book.error && (
         <p role="alert" className="text-[13px] text-warn">
           The price book could not be read: {book.error.message}

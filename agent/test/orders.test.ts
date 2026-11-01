@@ -477,6 +477,31 @@ describe('pricing tools (#4250)', () => {
     await expect(tool('price_book_set').execute({}, ctx())).rejects.toThrow(ToolError)
   })
 
+  // #4977
+  it('lists the archived filaments and unarchives one', async () => {
+    let url = ''
+    let unarchived = 0
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/price-book`, ({ request }) => {
+        url = request.url
+        return HttpResponse.json({ filaments: [] })
+      }),
+      http.post(`${BACKEND}/api/v1/orders/price-book/filaments/${FILAMENT}/unarchive`, () => {
+        unarchived += 1
+        return HttpResponse.json({ id: FILAMENT, archived_at: null })
+      }),
+    )
+    await tool('price_book_get').execute({ include_archived: true }, ctx())
+    expect(new URL(url).searchParams.get('include_archived')).toBe('true')
+    const back = await tool('price_book_set').execute({ filament: { filament_id: FILAMENT, unarchive: true } }, ctx())
+    expect(firstText(back)).toEqual({ filament: { id: FILAMENT, archived_at: null } })
+    expect(unarchived).toBe(1)
+    await expect(tool('price_book_set').execute({ filament: { unarchive: true, material: 'PLA' } }, ctx())).rejects.toThrow('filament_id')
+    await expect(tool('price_book_set').execute({ filament: { filament_id: FILAMENT, archive: true, unarchive: true } }, ctx())).rejects.toThrow(
+      'cannot both',
+    )
+  })
+
   it('reads the rough estimate', async () => {
     let url = ''
     const estimate = { estimate: true, grams: '24.24', filament_minor: 62, currency: 'USD', minor_exponent: 2, factor: '1.15', parts: [], unknown_parts: 0 }

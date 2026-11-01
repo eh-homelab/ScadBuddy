@@ -40,7 +40,7 @@ import { redact } from '../secrets.js'
 //               action the method, `input_summary` the scheme, host, status
 //               and size as JSON (never a path, a header or a body)
 //   question    every answer the user gives a question the agent asked
-//               (#940, #1075, questions/service.ts): action `answered`,
+//               (#940, #1075, gate/questions.ts): action `answered`,
 //               tied to the call by `tool_use_id`, `input_hash` the keyed
 //               hash of the answers (never their text: an answer may be
 //               anything the user typed)

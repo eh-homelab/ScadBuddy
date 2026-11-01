@@ -98,6 +98,7 @@ function tabs(ctx: ToolContext) {
 function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
   return defineTool({
     name: `browser_${spec.tool}`,
+    inTurn: true,
     label: spec.label,
     description: spec.description,
     input: spec.input,
@@ -215,6 +216,7 @@ const PREFIX = "In the user's own open ScadBuddy tab, which they watch as it hap
 export const browserTools: Tool[] = [
   defineTool({
     name: 'browser_status',
+    inTurn: true,
     label: "Check your tab's connection",
     description:
       "Whether a ScadBuddy tab is attached for the browser_* tools: the user's tab this chat runs in, or one the " +
@@ -239,6 +241,7 @@ export const browserTools: Tool[] = [
 
   defineTool({
     name: 'browser_pair',
+    inTurn: true,
     label: 'Pair with your tab',
     description:
       "Ask to drive the user's open ScadBuddy tab with the browser_* tools. Returns a short code: tell the user " +

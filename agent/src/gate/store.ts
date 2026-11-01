@@ -243,7 +243,7 @@ async function resolved(
   const sid = String(row.session_id)
   const rid = row.request_id
   // An attention request's timer gives no reason (the workflow's `#expire`); it gets classic's
-  // (questions/service.ts `timeOut`, #815), so the panel and the audit row say why it ended.
+  // (classic's QuestionService `timeOut`, before plan Step 9.7, #815), so the panel and the audit row say why it ended.
   if (outcome === 'timed_out' && reason === null && row.attention) {
     reason = `nobody replied in time (on_timeout: ${row.attention.on_timeout ?? 'proceed'})`
   }
@@ -287,7 +287,7 @@ async function resolved(
         answered: outcome === 'answered',
         ...(answered ? { answers: [...(answers as unknown[])], by: responder } : {}),
         ...(reason && outcome !== 'answered' ? { reason } : {}),
-        // #5003: a tab wait the tab's return ended, as a classic one's event says it (questions/service.ts `reconnected`).
+        // #5003: a tab wait the tab's return ended, as a classic one's event says it (classic's QuestionService `reconnected`, before plan Step 9.7).
         ...(outcome === 'cancelled' && (response as { reconnected?: unknown } | null | undefined)?.reconnected === true ? { reconnected: true } : {}),
       }),
     )
@@ -297,7 +297,7 @@ async function resolved(
   )
   // The status follows what of the session is still parked: running once nothing is, else the
   // kind still waiting (an approval first), as classic's stores hand back (approvals/service.ts,
-  // questions/service.ts `withStatus`). Read under the session row's lock, so two resolves that
+  // classic's QuestionService `withStatus`, before plan Step 9.7). Read under the session row's lock, so two resolves that
   // overlap cannot each see the other's entry still there and both leave it waiting (#3685).
   // agent-durable's gate/store.py `_resolved` does the same, and audits as below (#5052).
   await tx`SELECT 1 FROM ai_sessions WHERE id = ${sid} FOR UPDATE`

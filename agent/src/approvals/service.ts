@@ -15,8 +15,8 @@ import {
   type ServerEvent,
 } from '../sessions/protocol.js'
 import { scrubForLog } from '../sessions/sdkEvents.js'
-import { approvalEntry, inputRequested, inputResolved } from '../gate/classic.js'
-import { isNotDoneSummary } from '../questions/waiting.js'
+import { approvalEntry, inputRequested, inputResolved } from '../gate/projection.js'
+import { isNotDoneSummary } from '../gate/waiting.js'
 import { type AuditOutcome, type AuditSink, type AuditSurface, SYSTEM_ACTOR } from '../audit/log.js'
 import { context as otelContext, type Span, SpanKind } from '@opentelemetry/api'
 import { contextFrom, linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
@@ -877,7 +877,7 @@ export class ApprovalService {
   /**
    * Sets a session that no longer waits on an approval back from
    * `waiting_approval`: to `waiting_input` while a question of the turn is
-   * still unanswered (#940, questions/service.ts), to `running` while its turn
+   * still unanswered (#940, gate/questions.ts), to `running` while its turn
    * is live, else `idle`.
    */
   async refreshStatus(sessionId: string): Promise<void> {

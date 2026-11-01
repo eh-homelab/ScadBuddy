@@ -28,13 +28,14 @@ class PriceBookReader:
         )
         return runtime.orders_currency, policy, runtime.rough_estimate_factor
 
-    def snapshot(self) -> PriceBook:
-        """The book in one read. Blocking: call it in a thread."""
+    def snapshot(self, *, include_archived: bool = False) -> PriceBook:
+        """The book in one read; ``include_archived`` adds the archived filaments, for
+        the editor that unarchives them (#4977). Blocking: call it in a thread."""
         currency, policy, factor = self.policy()
         return PriceBook(
             currency=currency,
             minor_exponent=minor_exponent(currency),
             policy=policy,
             rough_estimate_factor=factor,
-            filaments=self.store.filaments(),
+            filaments=self.store.filaments(include_archived=include_archived),
         )

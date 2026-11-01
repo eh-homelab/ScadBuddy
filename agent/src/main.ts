@@ -71,7 +71,8 @@ import { ALL_TOOLS } from './tools/index.js'
 import { PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
-import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities } from './temporal/toolActivities.js'
+import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities, toolCallActivities } from './temporal/toolActivities.js'
+import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { sessionGateActivities } from './temporal/session/gateActivities.js'
@@ -477,6 +478,9 @@ if (role.http && database && dataKeys) {
 // Undefined: the defaults.
 const memory: MemoryOptions | undefined = undefined
 
+// How a turn's ScadBuddy call runs as its ToolCall workflow (plan 2026-10-13 Step 9.2), once the
+// Temporal client below exists; read by each turn that has `tools_as_activities` on.
+let toolCallStart: ToolCallStarter | undefined
 const sessions =
   database && credentials
     ? new SessionManager({
@@ -488,6 +492,7 @@ const sessions =
         access: accessResolver,
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
+        toolCalls: () => toolCallStart,
         // Settings → Tools & plugins' overrides of the built-in tools (#1953), per turn.
         builtInTools: () => builtInTools.policy(),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
@@ -561,11 +566,6 @@ const stopSessionWake =
 const stopSweeper = !role.http ? undefined : sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', sweepErrorText(err)),
-})
-// Questions past `question_expiry_seconds` whose turn is gone (spec §6.6): cancelled, never answered.
-const stopQuestionSweeper = !role.http ? undefined : sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, {
-  ...(database ? { ready: database.ready } : {}),
-  onError: (err) => console.error('question expiry sweep failed:', (err as Error).message),
 })
 // A flow run's call whose hop at its starting session is over goes to the person (#2482).
 const stopEscalationSweeper = !role.http ? undefined : sessions?.escalations.startSweeper(APPROVAL_SWEEP_MS, {
@@ -702,6 +702,9 @@ const turnHost =
         hostQueue: SESSION_HOST_QUEUE,
         ...(events ? { listen: (channel: string, onNotify: (payload: string) => void) => events.listenAlso(channel, onNotify) } : {}),
         ...(durableToolDeps ? { runCall: decidedCalls(ALL_TOOLS, durableToolDeps) } : {}),
+        // A restarted turn's calls that finished as ToolCall workflows (Step 9.2), read with the client below.
+        finishedCalls: (sessionId: string, turnId: string) =>
+          temporalClient ? finishedToolCalls({ sql: temporal.sql, client: temporalClient }, sessionId, turnId) : Promise.resolve([]),
         // A `done` summary, posted as a classic turn's (#5003).
         questions: sessions.questions,
         // The session's working directory, a copy of its workspace placed for each turn and written back at its end (Step 9.5).
@@ -721,6 +724,8 @@ const durableCredentialSecrets = async () => {
 // A durable session's MCP client on each remote plugin, kept on the replica its calls
 // are pinned to (#2581): a stateful plugin (Playwright MCP) keeps its page between calls.
 const turnClients = new SessionClients<ListedTools>()
+/** How long a ToolCall's tool waits for its turn's plugin and package secrets to be gathered. */
+const TURN_SECRETS_MS = 30_000
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
@@ -808,6 +813,12 @@ const temporalClient = temporal
       ...(dataConverter ? { dataConverter } : {}),
     })
   : undefined
+if (temporalClient && temporal) {
+  const results = { client: temporalClient, blobs: new SessionBlobs(temporal.sql) }
+  toolCallStart = toolCallStarter(results)
+  // `tool_call_result`: what a finished call returned, which a restarted turn's message names (Step 9.2).
+  toolServices.toolCallResults = (session, toolUseId) => toolCallResult(results, session, toolUseId)
+}
 // A place in this replica's warm cache, and its session host queue (§5.2): on agent-tools, and on
 // the session host queue for a turn another replica (one it was lost on) refers here.
 const sessionAcquire =
@@ -848,6 +859,19 @@ const temporalWorker =
         identity: workerIdentity(replicaIdentity()),
         activities: {
           ...toolActivities(ALL_TOOLS, durableToolDeps),
+          // A session turn's calls, each its own ToolCall workflow (plan 2026-10-13 Step 9.2),
+          // redacted of the turn's plugin and package tokens as an in-process call is.
+          ...toolCallActivities(ALL_TOOLS, {
+            ...durableToolDeps,
+            turnSecrets: async (session, owner) => {
+              const set = await turnToolDeps.servers({ session, owner, signal: AbortSignal.timeout(TURN_SECRETS_MS) })
+              try {
+                return set.secrets
+              } finally {
+                await set.release()
+              }
+            },
+          }),
           ...gateActivities({
             audit,
             sessions: new PgSessionOwners(temporal.sql),
@@ -1148,7 +1172,6 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 
 async function stop(): Promise<void> {
   stopSweeper?.()
-  stopQuestionSweeper?.()
   stopEscalationSweeper?.()
   stopOrphanSweep?.()
   stopPluginSessionSweep?.()

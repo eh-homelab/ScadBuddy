@@ -302,13 +302,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'files and camera; order_get lists them under `attachments` and each item\'s `delivered_attachment_id`. ' +
       "They land UI-first; spec 2026-10-18 §7.3's order_attach (by workspace_path, #2329) is a follow-up.",
   })),
-  {
-    operation: 'PUT /api/v1/print/printers/{printer_id}/rack-algorithm',
-    reason:
-      "Remembers how the print dialog ranks a printer's nozzle rack (#836). It lands UI-first, " +
-      'like the rest of the rack picker; an agent prints through print_output, which takes the ' +
-      'remembered algorithm, and a tool for changing it is a follow-up.',
-  },
   ...(
     [
       'GET /api/v1/print/outputs/{output_id}/preview-slices/{job_id}/toolpath',

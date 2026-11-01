@@ -1,5 +1,5 @@
 import type { TransactionSql } from 'postgres'
-import { WAIT_FOR_USER } from '../gate/entry.js'
+import { WAIT_FOR_USER } from './entry.js'
 import { redact } from '../secrets.js'
 import { cutBetweenCodePoints } from '../sessions/touched.js'
 
@@ -170,7 +170,7 @@ export function doneSummary(
  * answered is not lost because it ended waiting for the approval, and what it
  * did while the user was there stays its own. `unattended`: some touch was
  * made while nobody answered (the first section lists something), which keeps
- * the summary from being replaced by a later turn's (questions/service.ts).
+ * the summary from being replaced by a later turn's (gate/questions.ts).
  * `secrets`: the turn's, redacted from every name before it is formatted.
  */
 export async function loadDoneSummary(

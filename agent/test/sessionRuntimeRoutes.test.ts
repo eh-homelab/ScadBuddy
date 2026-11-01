@@ -11,6 +11,7 @@ import {
   runtimeResizer,
   RUNTIME_BOUNDS,
   RUNTIME_DEFAULTS,
+  readToolsAsActivities,
   RUNTIME_PAYLOAD,
   SETTINGS_CHANNEL,
 } from '../src/sessions/runtimeSettings.js'
@@ -66,17 +67,17 @@ describe.skipIf(!TEST_DATABASE_URL)(`the session runtime settings${TEST_DATABASE
   it('answers the defaults until something is set', async () => {
     const res = await get(app)
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ park_hold_seconds: 300, warm_max_per_replica: 8, warm_idle_seconds: 600, turn_max_seconds: 7200 })
+    expect(await res.json()).toEqual({ park_hold_seconds: 300, warm_max_per_replica: 8, warm_idle_seconds: 600, turn_max_seconds: 7200, tools_as_activities: false })
     expect(RUNTIME_DEFAULTS.warm_max_per_replica).toBe(8)
   })
 
   it('stores a partial body, writes one audit row, and a GET returns it', async () => {
     const res = await put(app, { warm_max_per_replica: 2 })
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ ...RUNTIME_DEFAULTS, warm_max_per_replica: 2 })
+    expect(await res.json()).toEqual({ ...RUNTIME_DEFAULTS, warm_max_per_replica: 2, tools_as_activities: false })
     expect(await store.get('warm_max_per_replica')).toBe(2)
     expect(await store.get('warm_idle_seconds')).toBeUndefined()
-    expect(await (await get(app)).json()).toEqual({ ...RUNTIME_DEFAULTS, warm_max_per_replica: 2 })
+    expect(await (await get(app)).json()).toEqual({ ...RUNTIME_DEFAULTS, warm_max_per_replica: 2, tools_as_activities: false })
     const rows = await db.sql<{ kind: string; action: string; actor: string; client_ip: string }[]>`SELECT * FROM ai_audit WHERE kind = 'settings'`
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ action: 'warm_max_per_replica', client_ip: '10.0.0.7' })
@@ -84,8 +85,20 @@ describe.skipIf(!TEST_DATABASE_URL)(`the session runtime settings${TEST_DATABASE
 
   it('writes every key sent, one audit row each', async () => {
     const body = { park_hold_seconds: 60, warm_max_per_replica: 0, warm_idle_seconds: 120, turn_max_seconds: 600 }
-    expect(await (await put(app, body)).json()).toEqual(body)
+    expect(await (await put(app, body)).json()).toEqual({ ...body, tools_as_activities: false })
     expect(await db.sql`SELECT 1 FROM ai_audit WHERE kind = 'settings'`).toHaveLength(4)
+  })
+
+  // Plan 2026-10-13 Step 9.2: off by default, a boolean only, read by the next turn's assembly.
+  it('stores tools_as_activities, refuses anything but a boolean, and reads anything stored but `true` as off', async () => {
+    expect(await (await put(app, { tools_as_activities: true })).json()).toMatchObject({ tools_as_activities: true })
+    expect(await store.get('tools_as_activities')).toBe(true)
+    expect(await readToolsAsActivities(store)).toBe(true)
+    expect((await put(app, { tools_as_activities: 'yes' })).status).toBe(422)
+    expect(await store.get('tools_as_activities')).toBe(true)
+    await store.set('tools_as_activities', 'true')
+    expect(await readToolsAsActivities(store)).toBe(false)
+    expect(await (await get(app)).json()).toMatchObject({ tools_as_activities: false })
   })
 
   it('takes each bound itself and refuses one past it with 422, storing nothing', async () => {

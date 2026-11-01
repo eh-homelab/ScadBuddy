@@ -361,10 +361,11 @@ def _filament_exists(error: FilamentExistsError) -> ApiError:
 
 
 @router.get("/price-book", response_model=PriceBook, summary="The price book")
-async def get_price_book(orders: OrdersDep) -> PriceBook:
+async def get_price_book(orders: OrdersDep, include_archived: bool = False) -> PriceBook:
     """The currency the next order copies, the pricing policy, the rough estimate's
-    factor and the filament records not archived, in one read (§5.1)."""
-    return await asyncio.to_thread(orders.price_book.snapshot)
+    factor and the filament records not archived, in one read (§5.1);
+    ``include_archived`` lists the archived ones too, each with its ``archived_at``."""
+    return await asyncio.to_thread(orders.price_book.snapshot, include_archived=include_archived)
 
 
 @router.put("/price-book", response_model=PriceBook, summary="Set the pricing policy")
@@ -448,6 +449,25 @@ async def archive_filament(filament_id: str, orders: OrdersDep) -> Filament:
     name it."""
     _path(filament_id)
     found = await asyncio.to_thread(orders.store.archive_filament, filament_id)
+    if found is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
+    return found
+
+
+@router.post(
+    "/price-book/filaments/{filament_id}/unarchive",
+    response_model=Filament,
+    summary="Unarchive a filament of the price book",
+)
+async def unarchive_filament(filament_id: str, orders: OrdersDep) -> Filament:
+    """Back in the book with its id, so its quotes and items still name it (#4977). 409
+    ``filament_exists`` naming the record that holds its identity now, when the same
+    filament was added again after the archive."""
+    _path(filament_id)
+    try:
+        found = await asyncio.to_thread(orders.store.unarchive_filament, filament_id)
+    except FilamentExistsError as error:
+        raise _filament_exists(error) from None
     if found is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
     return found

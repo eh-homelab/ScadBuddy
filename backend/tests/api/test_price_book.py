@@ -103,6 +103,31 @@ def test_a_filament_is_edited_and_archived(client: TestClient) -> None:
     assert [f["id"] for f in client.get(BOOK).json()["filaments"]] == [again.json()["id"]]
 
 
+def test_an_archived_filament_is_listed_and_unarchived(client: TestClient) -> None:
+    """#4977: ``include_archived`` lists the archived records beside the book's, and
+    ``…/unarchive`` puts one back with its id; an identity the book holds again is 409
+    ``filament_exists`` naming that record."""
+    made = add_filament(client)
+    assert client.post(f"{BOOK}/filaments/{made['id']}/archive").status_code == 200
+    assert client.get(BOOK).json()["filaments"] == []
+    listed = client.get(BOOK, params={"include_archived": "true"}).json()["filaments"]
+    assert [(f["id"], f["archived_at"] is not None) for f in listed] == [(made["id"], True)]
+
+    back = client.post(f"{BOOK}/filaments/{made['id']}/unarchive")
+    assert back.status_code == 200, back.text
+    assert (back.json()["id"], back.json()["archived_at"]) == (made["id"], None)
+    assert [f["id"] for f in client.get(BOOK).json()["filaments"]] == [made["id"]]
+    assert client.post(f"{BOOK}/filaments/{made['id']}/unarchive").status_code == 200
+    assert client.post(f"{BOOK}/filaments/nobody/unarchive").status_code == 404
+
+    client.post(f"{BOOK}/filaments/{made['id']}/archive")
+    newer = add_filament(client)
+    refused = client.post(f"{BOOK}/filaments/{made['id']}/unarchive")
+    assert refused.status_code == 409
+    assert refused.json()["type"] == "https://scadbuddy.dev/problems/orders/filament_exists"
+    assert refused.json()["filament_id"] == newer["id"]
+
+
 def test_the_exponent_is_on_the_order_and_the_book(client: TestClient) -> None:
     """Ruling 5: the browser takes the digits it is given, so every order and the book
     carry ``minor_exponent`` from the backend's one table."""

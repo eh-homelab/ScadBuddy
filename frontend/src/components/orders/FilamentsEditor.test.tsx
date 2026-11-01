@@ -35,6 +35,34 @@ describe('FilamentsEditor (#4250)', () => {
     await waitFor(() => expect(screen.queryByTestId(`filament-${FILAMENT_PLA}`)).toBeNull())
   })
 
+  // #4977 — an archived record comes back with its id, so its quotes keep naming it.
+  it('shows the archived filaments and unarchives one', async () => {
+    await api.archiveFilament(FILAMENT_PLA)
+    const { user } = renderPage(<FilamentsEditor />)
+    await within(await screen.findByRole('table', { name: 'Filaments' })).findByText(/Black/)
+    expect(screen.queryByTestId(`filament-${FILAMENT_PLA}`)).toBeNull()
+
+    await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
+    const row = await screen.findByTestId(`filament-${FILAMENT_PLA}`)
+    expect(within(row).getByText('Archived')).toBeInTheDocument()
+    expect(within(row).queryByRole('button', { name: 'Edit' })).toBeNull()
+    await user.click(within(row).getByRole('button', { name: /^Unarchive/ }))
+    await waitFor(async () => expect((await api.priceBook()).filaments.map((f) => f.id)).toContain(FILAMENT_PLA))
+    await waitFor(() => expect(within(screen.getByTestId(`filament-${FILAMENT_PLA}`)).queryByText('Archived')).toBeNull())
+  })
+
+  it('says which record holds the identity when an unarchive is refused', async () => {
+    const { material, subtype, brand, colour_name, colour, cost_per_kg, density_g_cm3 } = await api.archiveFilament(FILAMENT_PLA)
+    await api.createFilament({ material, subtype, brand, colour_name, colour, cost_per_kg, density_g_cm3 })
+    const { user } = renderPage(<FilamentsEditor />)
+    await screen.findByRole('table', { name: 'Filaments' })
+    await user.click(screen.getByRole('checkbox', { name: 'Show archived' }))
+    const row = await screen.findByTestId(`filament-${FILAMENT_PLA}`)
+    await user.click(within(row).getByRole('button', { name: /^Unarchive/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('exists')
+    expect((await api.priceBook()).filaments.map((f) => f.id)).not.toContain(FILAMENT_PLA)
+  })
+
   it('says what is wrong with a filament before sending it', async () => {
     const { user } = renderPage(<FilamentsEditor />)
     await screen.findByRole('table', { name: 'Filaments' })

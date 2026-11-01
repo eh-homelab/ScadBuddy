@@ -33,6 +33,7 @@ function assembly(): AssembledTurn {
       disabledTools: [],
       raisedTiers: [],
       httpRequest: false,
+      toolsAsActivities: false,
       httpTier: null,
       builtinTools: [],
       recallMaxQueryChars: null,

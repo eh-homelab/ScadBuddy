@@ -114,9 +114,9 @@ def test_archiving_hides_a_filament_from_the_book(rows: OrderStore, book: PriceB
 
 
 def test_an_archived_filament_frees_its_identity(rows: OrderStore, book: PriceBookReader) -> None:
-    """There is no unarchive, so the identity index covers the records in the book only:
-    archive "PLA / Basic / Bambu / #FFFFFF" and the same filament can be added again,
-    and the book shows the new record."""
+    """The identity index covers the records in the book only: archive "PLA / Basic /
+    Bambu / #FFFFFF" and the same filament can be added again, and the book shows the
+    new record."""
     first = rows.insert_filament(PLA)
     rows.archive_filament(first.id)
     second = rows.insert_filament(PLA)
@@ -126,6 +126,32 @@ def test_an_archived_filament_frees_its_identity(rows: OrderStore, book: PriceBo
     with pytest.raises(FilamentExistsError) as raised:
         rows.insert_filament(PLA)
     assert raised.value.existing_id == second.id
+
+
+def test_an_archived_filament_is_unarchived(rows: OrderStore, book: PriceBookReader) -> None:
+    """#4977: the same record back in the book, its id (and so its quotes and items)
+    kept; a record never archived comes back as it is."""
+    made = rows.insert_filament(PLA)
+    rows.archive_filament(made.id)
+    back = rows.unarchive_filament(made.id)
+    assert back is not None and back.id == made.id and back.archived_at is None
+    assert [f.id for f in book.snapshot().filaments] == [made.id]
+    again = rows.unarchive_filament(made.id)
+    assert again is not None and again.archived_at is None
+    assert rows.unarchive_filament("nobody") is None
+
+
+def test_an_unarchive_refuses_an_identity_the_book_holds(rows: OrderStore) -> None:
+    """Archived, then the same filament added again: the old record cannot come back
+    beside the new one, and the refusal names the record in the book."""
+    first = rows.insert_filament(PLA)
+    rows.archive_filament(first.id)
+    second = rows.insert_filament(PLA)
+    with pytest.raises(FilamentExistsError) as raised:
+        rows.unarchive_filament(first.id)
+    assert raised.value.existing_id == second.id
+    still = rows.filament(first.id)
+    assert still is not None and still.archived_at is not None
 
 
 def test_the_price_book_reads_policy_and_filaments_together(
