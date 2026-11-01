@@ -15,8 +15,10 @@ import { goSignal, type ProbeCall, type ProbeResult } from './support/versioning
 // AUTO_UPGRADE workflow of another deployment (prod's ProjectWorkflow, `scadbuddy-projects`).
 // The first block records what Temporal does (the gate's measurement,
 // docs/superpowers/plans/2026-10-13-unified-agent-runtime-phase-11.md); the second checks that
-// AgentWorker, as main.ts runs it, never lets a new activity reach the old build.
+// AgentWorker, as main.ts runs it, makes a build current only once it serves both queues.
 
+/** As the backend's UNREGISTERED_WAITS (workflows/flow_tools.py), in seconds. */
+const UNREGISTERED_WAITS_S = [2, 4, 8]
 const WORKFLOWS = new URL('./support/versioningWorkflows.ts', import.meta.url).pathname
 type Counts = Record<string, number>
 
@@ -84,7 +86,30 @@ describe.skipIf(!TEMPORAL_CLI)(`worker versioning on a shared queue${TEMPORAL_SK
     return counts
   }
 
-  it('routes every kind of caller to the current build, and a queue outside it to unversioned pollers only', async () => {
+  /**
+   * `n` callers each run `call` as a flow's call is run, asked again while the build that took it
+   * does not register it: where each ended up, and how many needed more than one try.
+   */
+  const probeRetried = async (callerQueue: string, call: ProbeCall, n = 8): Promise<{ ran: Counts; retried: number }> => {
+    const results = await Promise.all(
+      Array.from({ length: n }, () =>
+        env.client.workflow.execute('probeRetrying', {
+          taskQueue: callerQueue,
+          workflowId: `retried-${randomUUID()}`,
+          args: [call, UNREGISTERED_WAITS_S],
+          workflowExecutionTimeout: '2m',
+        }) as Promise<ProbeResult & { tries: number }>,
+      ),
+    )
+    const ran: Counts = {}
+    for (const r of results) {
+      const key = 'ran' in r ? r.ran : r.failed
+      ran[key] = (ran[key] ?? 0) + 1
+    }
+    return { ran, retried: results.filter((r) => r.tries > 1).length }
+  }
+
+  it('routes every kind of caller to the current build, some after a retry, and a queue outside it to unversioned pollers only', async () => {
     const id = randomUUID().slice(0, 8)
     const [agent, projects] = [`agent-${id}`, `projects-${id}`]
     const q = {
@@ -126,9 +151,16 @@ describe.skipIf(!TEMPORAL_CLI)(`worker versioning on a shared queue${TEMPORAL_SK
     expect(await fromEveryCaller({ queue: q.tools, activity: 'a_new' })).toEqual([{ NotFoundError: 8 }, { NotFoundError: 8 }, { NotFoundError: 8 }])
     expect(await probe(q.sessions, { queue: q.oldHost, activity: 'whoami' }, 2)).toEqual({ 'v1-host': 2 })
 
-    // Once the new build is current, no caller reaches the old one, though it still polls.
+    // Once the new build is current, every caller ends up on it, though the old one still polls.
+    // Not at once for every caller: an unversioned or another deployment's caller is routed by
+    // the activity queue's own copy of the routing, which can lag the switch. On a loaded CI
+    // runner 7 of 8 unversioned and 4 of 8 other-deployment calls went to the old build first
+    // (a versioned caller's 8 went to the new one); on an idle dev server none did (the check's
+    // doc, §3). So a call is asked again after a wait, as a flow's is, and lands on the new build.
     await setCurrent(agent, 'v2')
-    expect(await fromEveryCaller({ queue: q.tools, activity: 'a_new' })).toEqual([{ v2: 8 }, { v2: 8 }, { v2: 8 }])
+    const switched = await Promise.all(callers.map((caller) => probeRetried(caller, { queue: q.tools, activity: 'a_new' })))
+    expect(switched.map((r) => r.ran)).toEqual([{ v2: 8 }, { v2: 8 }, { v2: 8 }])
+    console.info(`retried after the switch (AgentSession-like, unversioned, other deployment): ${switched.map((r) => r.retried).join(', ')} of 8`)
     await waiter.signal(goSignal)
     expect(await waiter.result()).toEqual({ ran: 'v2' })
     // The old replica's own queue is no member of the new build: versioned, its tasks reach no
@@ -144,18 +176,16 @@ describe.skipIf(!TEMPORAL_CLI)(`worker versioning on a shared queue${TEMPORAL_SK
     expect(await probe(q.sessions, { queue: q.newHost, activity: 'whoami' }, 2)).toEqual({ 'v2-host': 2 })
 
     // A rollback to a build whose shared-queue worker is unversioned (before Phase 11): the queue
-    // is no member of the current build, so its unversioned poller takes the tasks.
+    // is no member of the current build, so its unversioned poller takes the tasks: every call
+    // runs, and once the routing has settled (it lags the switch, as above) all of them there.
     await start({ taskQueue: q.sessions, workflowBundle: bundle, ...versioned(agent, 'v0') })
     await start({ taskQueue: q.tools, activities: { whoami: ran('v0-unversioned') } })
     await setCurrent(agent, 'v0')
-    expect(await fromEveryCaller({ queue: q.tools, activity: 'whoami' }, 4)).toEqual([
-      { 'v0-unversioned': 4 },
-      { 'v0-unversioned': 4 },
-      { 'v0-unversioned': 4 },
-    ])
+    const allOnV0 = [{ 'v0-unversioned': 4 }, { 'v0-unversioned': 4 }, { 'v0-unversioned': 4 }]
+    await until(async () => JSON.stringify(await fromEveryCaller({ queue: q.tools, activity: 'whoami' }, 4)) === JSON.stringify(allOnV0), 60_000)
   }, 300_000)
 
-  it('never hands an activity only the new build has to an old-build worker that still polls', async () => {
+  it('makes a build current only once it polls both queues, and then runs every caller\'s new activity', async () => {
     const id = randomUUID().slice(0, 8)
     const deployment = `agent-${id}`
     const q = { tools: `tools-${id}`, sessions: `sessions-${id}`, unversioned: `unversioned-${id}` }
@@ -192,9 +222,10 @@ describe.skipIf(!TEMPORAL_CLI)(`worker versioning on a shared queue${TEMPORAL_SK
     await until(() => newSessions.current() && newTools.current(), 30_000)
     expect(await currentBuild(deployment)).toBe('v2')
     expect(old.map((w) => w.state())).toEqual(['ok', 'ok'])
-    // Ready (current) means every caller's new activity lands on the new build.
-    expect(await probe(q.sessions, { queue: q.tools, activity: 'a_new' })).toEqual({ v2: 8 })
-    expect(await probe(q.unversioned, { queue: q.tools, activity: 'a_new' })).toEqual({ v2: 8 })
+    // Ready (current) means every caller's new activity runs on the new build: an unversioned
+    // caller's after a retry at worst (the first test).
+    expect((await probeRetried(q.sessions, { queue: q.tools, activity: 'a_new' })).ran).toEqual({ v2: 8 })
+    expect((await probeRetried(q.unversioned, { queue: q.tools, activity: 'a_new' })).ran).toEqual({ v2: 8 })
   }, 120_000)
 
   it('is current at once when unversioned', async () => {

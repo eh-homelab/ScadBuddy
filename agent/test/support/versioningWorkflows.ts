@@ -1,4 +1,4 @@
-import { ActivityFailure, ApplicationFailure, condition, defineSignal, proxyActivities, setHandler } from '@temporalio/workflow'
+import { ActivityFailure, ApplicationFailure, condition, defineSignal, proxyActivities, setHandler, sleep } from '@temporalio/workflow'
 
 // Probe workflows for test/temporal.versioning.temporal.test.ts (plan 2026-10-13 Phase 11):
 // a caller that runs one named activity on a named queue, once, and says which build ran it
@@ -31,4 +31,18 @@ export async function probeWaiter(call: ProbeCall): Promise<ProbeResult> {
   setHandler(goSignal, () => void (go = true))
   await condition(() => go)
   return probeCaller(call)
+}
+
+/**
+ * `call`, asked again after each of `waitsSeconds` while the build that took it does not
+ * register it, as a flow's call is (backend workflows/flow_tools.py UNREGISTERED_WAITS): which
+ * build ran it, after how many tries.
+ */
+export async function probeRetrying(call: ProbeCall, waitsSeconds: number[]): Promise<ProbeResult & { tries: number }> {
+  for (let tries = 1; ; tries++) {
+    const result = await probeCaller(call)
+    const wait = waitsSeconds[tries - 1]
+    if ('ran' in result || !result.failed.startsWith('NotFoundError') || wait === undefined) return { ...result, tries }
+    await sleep(`${wait}s`)
+  }
 }

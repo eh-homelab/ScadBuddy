@@ -52,50 +52,45 @@ documented setting to prevent that.
 
 Where: `agent/test/temporal.versioning.temporal.test.ts`, first test, on the Temporal CLI 1.9.1
 dev server (Server 1.32.0; prod runs 1.32.1, `kubectl --context primary -n bambuddy get deploy
-scadbuddy-temporal-v2-matching`). How: one deployment `agent-<id>` with an old build `v1` and a
-new build `v2`, each with a versioned `AUTO_UPGRADE` worker on a caller queue (as
-`agent-sessions`) and on a shared activity queue (as `agent-tools`, `a_new` registered only on
-`v2`); an unversioned caller queue (an in-process `ProjectWorkflow`); a caller queue in another
-deployment `projects-<id>`, `AUTO_UPGRADE` (prod's `ProjectWorkflow`). Each row is 8 workflows
-per caller, each running the activity once with no retry. All of it was also run first as a
-throwaway script with the same steps, with the same results.
+scadbuddy-temporal-v2-matching`), locally and in CI's `agent` job. How: one deployment
+`agent-<id>` with an old build `v1` and a new build `v2`, each with a versioned `AUTO_UPGRADE`
+worker on a caller queue (as `agent-sessions`) and on a shared activity queue (as
+`agent-tools`, `a_new` registered only on `v2`); an unversioned caller queue (an in-process
+`ProjectWorkflow`); a caller queue in another deployment `projects-<id>`, `AUTO_UPGRADE`
+(prod's `ProjectWorkflow`). Each row is 8 workflows per caller (4 or 2 where it says), each
+running the activity once with no retry.
 
 | Step | `AgentSession`-like caller | unversioned caller | other-deployment caller |
 | --- | --- | --- | --- |
 | `v1` current, `v1` polls; `whoami` | 8 on `v1` | 8 on `v1` | 8 on `v1` |
 | `v1` current, `v1` and `v2` poll; `a_new` | 8 `NotFoundError` on `v1` | 8 `NotFoundError` on `v1` | 8 `NotFoundError` on `v1` |
-| `v2` made current, at once; `a_new` | 8 on `v2` | 8 on `v2` | 8 on `v2` |
-| `v2` current, 10 s later; `a_new`, `whoami` | 8 on `v2` | 8 on `v2` | 8 on `v2` |
-| old replica's own queue, versioned in `v1`, after `v2` is current | ScheduleToStart timeout | ScheduleToStart timeout | (not run) |
+| `v2` made current, at once; `a_new`, **local, idle** | 8 on `v2` | 8 on `v2` | 8 on `v2` |
+| `v2` made current, at once; `a_new`, **CI** ([run](https://github.com/eh-homelab/ScadBuddy/actions/runs/41346969409/job/124968822491)) | 8 on `v2` | **7 `NotFoundError` on `v1`**, 1 on `v2` | **4 `NotFoundError` on `v1`**, 4 on `v2` |
+| `v2` current, 10 s later (local); `a_new`, `whoami` | 8 on `v2` | 8 on `v2` | 8 on `v2` |
+| old replica's own queue, versioned in `v1`, after `v2` is current | 2 ScheduleToStart timeouts | 2 ScheduleToStart timeouts | (not run) |
 | old replica's own queue, unversioned, after `v2` is current | 2 on its poller | 2 on its poller | 2 on its poller |
-| rollback: `v0` current, its shared-queue worker unversioned | 4 on `v0` | 4 on `v0` | 4 on `v0` |
+| rollback: `v0` current, its shared-queue worker unversioned (local) | 4 on `v0` | 4 on `v0` | 4 on `v0`; on a later run 3 on `v0` and 1 on `v2` at once, then 4 on `v0` |
 
 A workflow open across the switch (started on `v1`, signalled after `v2` was current) ran its
-next activity on `v2`. The deployment then lists `v2` current and `v1` draining.
+next activity on `v2`. The deployment then lists `v2` current and `v1` draining. The test now
+asserts the recovery, not the first try: after the switch each call is asked again while the
+build that took it does not register it, as a flow's is (§4), and all 24 end on `v2`.
 
 Findings:
 
-1. **Every kind of caller routes alike: to the deployment's current build.** An unversioned
-   caller and another deployment's caller follow the Current Version of `agent-tools`'
-   deployment exactly as `AgentSession` does. Once the new build is current, no caller's task
-   reaches the old build, though it still polls.
-2. **An old build gets a new activity only while it is still current**, and then from every
-   kind of caller alike. The documented control is the Current Version itself: make the new
-   build current before anything depends on its new names. Two windows stay:
-   - before the switch, a caller of another build (the backend, the API's `agent` container)
-     can name an activity the current agent build lacks. `ProjectWorkflow` asks the tier of
-     every call on `agent-tools` first, so the current build answers it: a name it does not
-     know fails there as a non-retryable `ToolError`, which the script sees
-     (`agent/src/temporal/flowTools.ts`), and the call itself is never scheduled. The prod `agent-tools` worker also
-     registers a `default` activity (`turnToolActivity`), which fails any other unknown name
-     as a **retryable** `NotFoundError` (`agent/src/temporal/turnTools.ts`), so a retry after
-     the switch lands on the new build;
-   - right after the switch a non-root partition of the activity queue can lag its root and
-     still hand a task to the old build (#4255: 0.3 s after the switch, measured on the
-     backend's `library` queue in CI). That window is the same for a versioned caller.
-
-   Unversioned today, any of the replicas takes any task during the whole rollout, so both
-   windows are strictly smaller than now. **The gate passes.**
+1. **Every kind of caller ends up on the deployment's current build.** An unversioned caller
+   and another deployment's caller follow the Current Version of `agent-tools`' deployment as
+   `AgentSession` does, and while the old build is current all three reach only it.
+2. **But not at once.** A versioned caller's activity is dispatched on its workflow's target
+   version, so it moves with the switch. An unversioned or other-deployment caller's activity
+   is an independent one, routed by the activity queue's own copy of the routing data, which
+   lags the switch: on CI's loaded runner 7 of 8 unversioned and 4 of 8 other-deployment calls
+   still went to the old build, which lacks the activity; on an idle dev server none did. This
+   is #4255's lag (0.3 s on the backend's `library` queue in CI). Waiting for the queue's root to
+   route to the new build narrows it but cannot cover its other partitions, and no documented
+   setting closes it. So **the gate as written fails**: such a caller's activity can reach an
+   old build that lacks it, for seconds after the switch. Unversioned (today), any replica
+   takes any task for the whole rollout, so the window is still far smaller than now.
 3. **The host queues must stay unversioned.** A queue only one replica polls
    (`agent-tools.<hostname>`, `agent-sessions.<hostname>`) is a member of that replica's build
    only. Versioned, once a newer build is current its tasks reach no one (the ScheduleToStart
@@ -109,11 +104,24 @@ Findings:
    has none. So Task 11.2 makes a build current only once
    `DescribeWorkerDeploymentVersion` lists it on both of its queues.
 5. **A rollback past Phase 11 needs nothing:** a queue the current build does not poll goes to
-   its unversioned pollers (the last row), so the old image's unversioned `agent-tools` worker
-   takes its tasks again.
+   its unversioned pollers (the last row; it lags the switch the same way), so the old image's
+   unversioned `agent-tools` worker takes its tasks again.
+
+**Decision (the user, 2026-11-01): version, and retry.** The window of finding 2 is accepted,
+and the one caller it reaches, a flow (`ProjectWorkflow`), asks again (§4). Every other caller
+of `agent-tools` is a workflow of `scadbuddy-agent` itself, which moves with the switch.
 
 ## 4. What follows for Tasks 11.2–11.4
 
+- **The retry** (backend `workflows/flow_tools.py`, `UNREGISTERED_WAITS`, behind
+  `flow-unregistered-2726`): an old build answers a flow's tier for a tool it lacks with
+  `UnknownTool` (retryable, `agent/src/temporal/flowTools.ts`; it was a non-retryable
+  `ToolError`), and a call for an activity it lacks with its catch-all's `NotFoundError`
+  (`agent/src/temporal/turnTools.ts`). Neither ran anything, so the run asks again after 2, 4
+  and 8 s, a write included, on the shared queue only. A tool no build has fails after those
+  14 s: "there is no tool 'x': the agent has no tool x (asked 4 times over 14s)"
+  (`backend/tests/flows/test_tool_host_function.py`, where an old build answers first and the
+  new build then runs the call once).
 - **11.2** (agent): `agent-tools` joins `scadbuddy-agent` with the same build id as
   `agent-sessions`, every workflow `AUTO_UPGRADE` (the worker's default behavior, so
   `AgentOperation` needs no annotation of its own; its changes already go behind `patched()`).

@@ -160,8 +160,29 @@ class ToolFailedError(Exception):
 
 #: The agent's activity refusals (`agent/src/temporal/toolActivities.ts`) and a tool's
 #: own error: final, the call is never sent again.
-_TOOL_REFUSALS = ["ToolError", "NotApproved", "GrantRevoked", "UnknownFlow", "NotForFlows"]
+_TOOL_REFUSALS = [
+    "ToolError",
+    "NotApproved",
+    "GrantRevoked",
+    "UnknownFlow",
+    "NotForFlows",
+    "UnknownTool",
+]
 _TOOL_TIMEOUT = timedelta(seconds=120)
+
+#: A name the agent replica that answered does not register (#2726 Phase 11): the tier's
+#: `UnknownTool` (agent/src/temporal/flowTools.ts) and a call's `NotFoundError` (the
+#: agent worker's catch-all `default`, agent/src/temporal/turnTools.ts). Neither ran
+#: anything. Right after a new agent build is made current, an unversioned or another
+#: deployment's caller can still be handed to the old build for a few seconds (the
+#: activity queue's routing lags the switch, measured in
+#: agent/test/temporal.versioning.temporal.test.ts), so such an answer is asked again
+#: after each of these waits before it is final. A tool that does not exist fails after
+#: their sum, 14 s.
+UNKNOWN_TOOL = "UnknownTool"
+UNREGISTERED = "NotFoundError"
+UNREGISTERED_WAITS = (timedelta(seconds=2), timedelta(seconds=4), timedelta(seconds=8))
+FLOW_UNREGISTERED_PATCH = "flow-unregistered-2726"
 
 
 def _agent_heartbeat() -> timedelta:
@@ -694,6 +715,8 @@ async def _call_tool(
     # names then (#4152): one tiered just before a deploy took its replica.
     tries = 2 if per_call else 1
     heartbeat: timedelta | None = _agent_heartbeat()
+    # Only on the shared queue: a replica's own queue is that one build's.
+    unregistered_waits = [] if pinned else list(UNREGISTERED_WAITS)
     while True:
         tries -= 1
         try:
@@ -714,6 +737,15 @@ async def _call_tool(
             return _tool_result(answer)
         except ActivityError as err:
             if isinstance(err.cause, ApplicationError):
+                if (
+                    err.cause.type == UNREGISTERED
+                    and unregistered_waits
+                    and workflow.patched(FLOW_UNREGISTERED_PATCH)
+                ):
+                    # Nothing ran: the replica that took it has no such activity.
+                    await workflow.sleep(unregistered_waits.pop(0))
+                    tries += 1
+                    continue
                 raise ToolFailedError(err.cause.message) from None
             # Only the last attempt's failure is known, as for the tier.
             if (
@@ -905,24 +937,37 @@ async def _live_tier(name: str, own: str | None) -> tuple[str, bool]:
     it), so the tier alone said. One the agent does not have, or will not say, is refused;
     nothing falls back to the tiers the run started with."""
     owner: StepOwner = workflow.instance()
-    try:
-        tiered: dict[str, Any] = await workflow.execute_activity(
-            FLOW_TOOL_TIER,
-            {"tool": name},
-            task_queue=owner.tools_queue,
-            result_type=dict,
-            start_to_close_timeout=_TIER_TIMEOUT,
-            retry_policy=RetryPolicy(maximum_attempts=3, non_retryable_error_types=_TOOL_REFUSALS),
-        )
-    except ActivityError as err:
-        if isinstance(err.cause, ApplicationError) and err.cause.type in (
-            "ToolError",
-            "NotForFlows",
-        ):
-            raise ValueError(f"there is no tool {name!r}: {err.cause.message}") from None
-        if isinstance(err.cause, ApplicationError):
-            raise ToolFailedError(err.cause.message) from None
-        raise
+    waits = list(UNREGISTERED_WAITS)
+    while True:
+        try:
+            tiered: dict[str, Any] = await workflow.execute_activity(
+                FLOW_TOOL_TIER,
+                {"tool": name},
+                task_queue=owner.tools_queue,
+                result_type=dict,
+                start_to_close_timeout=_TIER_TIMEOUT,
+                retry_policy=RetryPolicy(
+                    maximum_attempts=3, non_retryable_error_types=_TOOL_REFUSALS
+                ),
+            )
+            break
+        except ActivityError as err:
+            cause = err.cause
+            if isinstance(cause, ApplicationError) and cause.type == UNKNOWN_TOOL:
+                if waits and workflow.patched(FLOW_UNREGISTERED_PATCH):
+                    await workflow.sleep(waits.pop(0))
+                    continue
+                asked = len(UNREGISTERED_WAITS) + 1
+                total = int(sum(w.total_seconds() for w in UNREGISTERED_WAITS))
+                raise ValueError(
+                    f"there is no tool {name!r}: {cause.message} "
+                    f"(asked {asked} times over {total}s)"
+                ) from None
+            if isinstance(cause, ApplicationError) and cause.type in ("ToolError", "NotForFlows"):
+                raise ValueError(f"there is no tool {name!r}: {cause.message}") from None
+            if isinstance(cause, ApplicationError):
+                raise ToolFailedError(cause.message) from None
+            raise
     tier = tiered.get("tier")
     if tier not in RISK_TIERS:
         raise ToolFailedError(f"the agent gave no tier for {name}")

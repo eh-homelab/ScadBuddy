@@ -1166,9 +1166,12 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   image's tag) the shared `agent-tools` and `agent-sessions` workers are one version of
   the Worker Deployment `scadbuddy-agent`, every workflow on them `AUTO_UPGRADE`. A new
   build is made current once per process, only once Temporal lists it on both queues,
-  and from then on every caller's task on them (an `AgentSession`, an unversioned or
-  another deployment's workflow, such as `ProjectWorkflow`) goes to it; an old replica
-  still polling takes none, so it needs no drain. The host queues
+  and from then on every caller's task on them goes to it, so an old replica still polling
+  needs no drain. An `AgentSession`'s moves at once; an unversioned or another deployment's
+  workflow's (a flow's `ProjectWorkflow`) can still reach the old build for a few seconds,
+  since the queue's routing lags the switch, so a flow asks again after 2, 4 and 8 s for a
+  tool or activity the replica that answered does not have (`UNREGISTERED_WAITS`,
+  `backend/scadbuddy/workflows/flow_tools.py`). The host queues
   (`agent-tools.<hostname>`, `agent-sessions.<hostname>`) stay unversioned: a queue only
   one replica polls is no member of the next build, and once that build is current
   Temporal would give a versioned one's tasks to no one while the old replica still ran
