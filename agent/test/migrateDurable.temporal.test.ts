@@ -270,6 +270,27 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(
       expect(await counts()).toEqual(written)
     })
 
+    it('the backfill moves an archived session without starting its AgentSession, which its next send starts', async () => {
+      const m = await agent()
+      const id = await durableSession(m)
+      await db.sql`UPDATE ai_sessions SET archived_at = now() WHERE id = ${id}`
+      const only = (w: string) => w === sessionWorkflowId(id)
+      await eventually(
+        async () => (await backfill(agentSessionsEnv().client, db.sql, migration(m), { dryRun: true, only })).lines.length,
+        (n) => n === 1,
+      )
+      const report = await backfill(agentSessionsEnv().client, db.sql, migration(m), { only })
+      expect(report).toMatchObject({ counts: { migrated: 1 }, failed: 0, open: 0 })
+      expect(await runs(id)).toEqual([{ type: 'DurableSession', status: 'COMPLETED' }])
+      expect((await db.sql<{ runtime: string }[]>`SELECT runtime FROM ai_sessions WHERE id = ${id}`)[0]?.runtime).toBe('durable')
+      // Unarchived and sent to: its AgentSession starts then, on the conversation already written.
+      await db.sql`UPDATE ai_sessions SET archived_at = NULL WHERE id = ${id}`
+      const turn = await m.send(id, browser, NEXT)
+      expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+      expect((await agentSessionsEnv().client.workflow.getHandle(sessionWorkflowId(id)).describe()).type).toBe(SESSION_WORKFLOW)
+      expect(said(fake.messageCalls().at(-1))).toContain(FIRST_PROMPT)
+    })
+
     it("a migrated session's events stay readable in the panel", async () => {
       const m = await agent()
       const id = await durableSession(m)

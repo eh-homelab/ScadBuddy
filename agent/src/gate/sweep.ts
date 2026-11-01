@@ -140,8 +140,8 @@ export async function cancelOrphanedEntries(
         VALUES (${row.request_id}, ${row.session_id}, ${row.kind}, 'cancelled', ${tx.json(SYSTEM_ACTOR)}, ${reason}, ${row.tool}, ${row.created_at_text}::timestamptz)`
       const events: ServerEvent[] = [
         row.kind === 'approval'
-          ? event({ type: 'approval.resolved', sessionId: row.session_id, id: row.request_id, approved: false, decision: 'cancelled', reason: reason })
-          : event({ type: 'question.resolved', sessionId: row.session_id, id: row.request_id, answered: false, reason: reason }),
+          ? event({ type: 'approval.resolved', sessionId: row.session_id, id: row.request_id, approved: false, decision: 'cancelled', reason })
+          : event({ type: 'question.resolved', sessionId: row.session_id, id: row.request_id, answered: false, reason }),
         inputResolved(row.session_id, row.request_id, row.kind, 'cancelled', reason),
       ]
       const [idle] = await tx`

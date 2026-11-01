@@ -391,23 +391,32 @@ export class DurableMigration {
    * migration of the session runs, `unavailable` when Temporal or the workflow's worker does not answer.
    */
   async migrate(sessionId: string, { stopTurn = false }: { stopTurn?: boolean } = {}): Promise<MigrateOutcome> {
+    // A session-level lock on a connection of its own, not an open transaction, held across the
+    // Temporal waits.
+    const conn = await this.#sql.reserve()
+    const lock = `migrate-durable:${sessionId}`
     try {
-      return await this.#sql.begin(async (tx) => {
-        const [locked] = await tx<{ ok: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtext(${`migrate-durable:${sessionId}`})) AS ok`
-        if (!locked?.ok) throw new SessionError('busy', `session ${sessionId} is being moved to the new session runtime; send it again in a moment`)
-        return this.#migrate(sessionId, stopTurn)
-      })
+      const [locked] = await conn<{ ok: boolean }[]>`SELECT pg_try_advisory_lock(hashtext(${lock})) AS ok`
+      if (!locked?.ok) throw new SessionError('busy', `session ${sessionId} is being moved to the new session runtime; send it again in a moment`)
+      try {
+        return await this.#migrate(sessionId, stopTurn)
+      } finally {
+        await conn`SELECT pg_advisory_unlock(hashtext(${lock}))`
+      }
     } catch (err) {
       if (err instanceof SessionError) throw err
       if (err instanceof DurableUnavailable || isGrpcDeadlineError(err)) {
         throw new SessionError('unavailable', `session ${sessionId}'s workflow did not answer while it was moved to the new session runtime; try again in a moment`)
       }
       throw err
+    } finally {
+      conn.release()
     }
   }
 
   async #migrate(sessionId: string, stopTurn: boolean): Promise<MigrateOutcome> {
-    const [row] = await this.#sql<{ status: string; runtime: string | null }[]>`SELECT status, runtime FROM ai_sessions WHERE id = ${sessionId}`
+    const [row] = await this.#sql<{ status: string; archived: boolean }[]>`
+      SELECT status, archived_at IS NOT NULL AS archived FROM ai_sessions WHERE id = ${sessionId}`
     if (!row) throw new SessionError('not_found', `no session ${sessionId}`)
     let described = await this.#describe(sessionId)
     if (!described) return 'none'
@@ -426,6 +435,9 @@ export class DurableMigration {
       await this.#unified(sessionId)
       return 'migrated'
     }
+    // Nor an archived one, until it is sent to again: it stays `durable`, so that send finds its
+    // DurableSession COMPLETED and goes on here, at step 4.
+    if (row.archived) return 'migrated'
     await this.#startAgentSession(sessionId)
     await this.#unified(sessionId)
     return 'migrated'
