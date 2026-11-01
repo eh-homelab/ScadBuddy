@@ -5,7 +5,7 @@ import {
   MIN_APPROVAL_EXPIRY_SECONDS,
   SETTING_APPROVAL_EXPIRY_SECONDS,
 } from '../../approvals/service.js'
-import { denyInput, grantInput, openInput, resolveInput } from '../../gate/store.js'
+import { denyInput, grantInput, openInput, readInput, resolveInput } from '../../gate/store.js'
 import {
   DEFAULT_QUESTION_EXPIRY_SECONDS,
   MAX_QUESTION_EXPIRY_SECONDS,
@@ -48,5 +48,6 @@ export function sessionGateActivities(sql: Sql) {
     [SESSION_GATE_ACTIVITIES.grant]: (args: Parameters<typeof grantInput>[1]) => grantInput(sql, args),
     [SESSION_GATE_ACTIVITIES.deny]: (args: Parameters<typeof denyInput>[1]) => denyInput(sql, args),
     [SESSION_GATE_ACTIVITIES.resolve]: (args: Parameters<typeof resolveInput>[1]) => resolveInput(sql, args),
+    [SESSION_GATE_ACTIVITIES.read]: (args: Parameters<typeof readInput>[1]) => readInput(sql, args),
   }
 }

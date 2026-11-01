@@ -232,7 +232,7 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
       events: p.m.events,
       liveHosts: async () => new Set([...(await liveHostQueues(client))].filter((q) => processes.some((other) => sessionHostQueue(other.identity) === q))),
     })
-    p.m.durable = new DurableGate(client, { timeoutMs: 30_000 })
+    p.m.durable = new DurableGate(client, { timeoutMs: 30_000, sql: pool.sql })
     // As main.ts: the hub's process resolves a session's tab waits; every process follows the evictions.
     if (parts.http) resolveTabWaits(p.tabs, p.m)
     p.stopRuntimeSync = wireRuntimeSync({ settings: { get: () => Promise.resolve(undefined) }, warm: p.m.warm, revalidate: () => p.m.revalidateWarm(), events: listener, log: () => {} })
