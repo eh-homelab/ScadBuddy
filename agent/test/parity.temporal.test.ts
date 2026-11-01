@@ -133,7 +133,6 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`an AgentSessi
       remotePlugins,
       packagePlugins,
       httpRequest: {},
-      approvalPollMs: 50,
       approvalHashKey: Buffer.alloc(32, 5),
     })
   }

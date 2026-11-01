@@ -739,7 +739,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   top of it (credential via the per-query `env` only, `maxTurns`, `maxBudgetUsd`,
   abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
   `PreToolUse` hook; outward calls in a session PARK in `canUseTool` until a human
-  decides, via `src/approvals/service.ts` and the `ai_approvals` table, #258; outside
+  decides, as an entry of the session workflow's gate (`src/sessions/turnHost.ts`,
+  `ai_pending_input`; `src/approvals/service.ts` and `ai_approvals` keep /mcp's prepared
+  actions), #258; outside
   a session they are denied as "needs approval"; the built-in `AskUserQuestion`, given
   only to sessions the browser user owns, parks there too until the user answers in the
   panel, via `src/harness/questions.ts` and the session workflow's gate (an `ai_pending_input`

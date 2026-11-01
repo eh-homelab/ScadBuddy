@@ -147,13 +147,11 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session arc
   it('a durable archived session refuses a send before it reaches the workflow', async () => {
     const id = await session()
     await archived(id)
-    await db.sql`UPDATE ai_sessions SET mode = 'durable' WHERE id = ${id}`
     await expect(m.send(id, browser, 'more')).rejects.toMatchObject({ code: 'archived' })
   })
 
   it('a durable claim refuses a chat archived after the send checked it (#2118)', async () => {
     const id = await session()
-    await db.sql`UPDATE ai_sessions SET mode = 'durable' WHERE id = ${id}`
     // What the manager read before the archive committed.
     const before = await m.get(id, browser)
     expect(before.archivedAt).toBeNull()

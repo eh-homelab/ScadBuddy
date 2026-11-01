@@ -28,12 +28,14 @@ import { event, type Owner, type SentImage, type SessionStatus } from './protoco
 // the turn's end from the event log. (The name is from when DurableSession, agent-durable's
 // Python workflow, ran them: plan Step 8.1 retired it.)
 //
-// - send: claim the row (`status = 'running'`, no turn_id or lease: the workflow owns the turn),
+// - send: claim the row (`status = 'running'`, `durable_turn_id`: the workflow owns the turn),
 //   put the turn's images in ai_session_blobs (the claim check, by name), write `user.turn` and
 //   `session.status running`, then update-with-start `send_message` (update id: the turn id),
-//   starting the workflow on the first message. Once a turn has run (`durable_offset` moved) it
-//   is a plain Update: a workflow removed by retention is refused `closed`, never restarted empty
-//   (#2078). Only a definite refusal (the validator's `busy`, a failed Update, an ended workflow)
+//   starting the workflow on the first message. An ended workflow still retained is refused
+//   `closed` (REJECT_DUPLICATE); one removed by retention is started again, and its turn resumes
+//   the transcript in ai_session_entries, so it never runs empty (#2078's concern was
+//   DurableSession, whose history held the chat). Only a definite refusal (the validator's
+//   `busy`, a failed Update, an ended workflow)
 //   gives the claim back. An Update not accepted in time keeps it: Temporal may already hold the
 //   message, which a worker delivers later, so the turn is handed back and `done` follows the log.
 // - `done` follows the event log from the turn's own `session.status running` to the status the
@@ -143,8 +145,6 @@ export type DurableTurnsDeps = {
   cancelTimeoutMs?: number
   /** Tests only: how Stop describes a gone workflow (default durableDescriber). */
   describe?: DescribeSession
-  /** Run when a Stop ended a lost turn: what a classic one left parked (SessionManager.endClassicLeftovers). */
-  ended?: (sessionId: string) => Promise<unknown>
 }
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
@@ -163,7 +163,6 @@ export class DurableTurns {
   readonly #sql: Sql
   readonly #events: EventLog
   readonly #audit: AuditSink | undefined
-  readonly #ended: ((sessionId: string) => Promise<unknown>) | undefined
   readonly #gate: DurableGate
   readonly #blobs: SessionBlobs
   readonly #sessionQueue: string
@@ -178,7 +177,6 @@ export class DurableTurns {
     this.#sql = deps.sql
     this.#events = deps.events
     this.#audit = deps.audit
-    this.#ended = deps.ended
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
     this.#blobs = new SessionBlobs(deps.sql)
     this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
@@ -255,22 +253,19 @@ export class DurableTurns {
     // The lock makes a concurrent claim read the committed `running`, so its guarded UPDATE matches nothing.
     // `archived_at` is tested here too: an archive that commits after the manager's check
     // must not let a turn start on a chat the panel no longer lists (#2118).
-    // The runtime is recorded by the first send: AgentSession for a session whose DurableSession
-    // ran nothing (a classic session's too, once a classic turn still running on an older replica
-    // has let its lease go), else `durable`, which is refused below. `durable` stays right after
-    // Step 8.1: such a row's conversation is in its DurableSession's history, not in
-    // `ai_session_entries`, so an AgentSession would run on with none of it.
-    const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string; runtime: SessionRuntime }[]>(
-      `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
+    // The runtime is recorded by the first send of a session that has none (a classic
+    // session's): AgentSession. Every DurableSession row has its own, `unified` or `durable`
+    // (the six closed ones, refused below: such a row's conversation is in its DurableSession's
+    // history, not in `ai_session_entries`, so an AgentSession would run on with none of it).
+    const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; runtime: SessionRuntime }[]>(
+      `WITH prior AS (SELECT status AS prior_status FROM ai_sessions WHERE id = $1 FOR UPDATE)
        UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(), turn_started_at = now(),
-         interrupt_requested = false, turn_id = NULL, lease_until = NULL,
-         runtime = coalesce(runtime, CASE WHEN prior.durable_offset = 0 THEN 'unified' ELSE 'durable' END)
+         interrupt_requested = false, runtime = coalesce(runtime, 'unified')
        FROM prior
        WHERE id = $1 AND owner_kind = $2 AND owner_id = $3
-         AND (turn_id IS NULL OR lease_until <= now())
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
          AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
-       RETURNING prior.prior_status, prior.durable_offset, ai_sessions.runtime`,
+       RETURNING prior.prior_status, ai_sessions.runtime`,
       // The turn's tool activities run with these, cut to what the owner holds then (#2320).
       [
         id,
@@ -283,7 +278,6 @@ export class DurableTurns {
     )
     if (!claimed) return undefined
     let seq = 0
-    const ranTurn = Number(claimed.durable_offset) > 0
     try {
       if (claimed.runtime === 'durable') {
         // A DurableSession that closed before plan Step 7.2 (see the header): its conversation
@@ -305,7 +299,7 @@ export class DurableTurns {
         event({ type: 'session.status', sessionId: id, status: 'running' }),
       ])
       seq = seqs.at(-1) ?? 0
-      await this.#sendMessage(session, turn, sent, ranTurn)
+      await this.#sendMessage(session, turn, sent)
     } catch (err) {
       if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq)
       // The refusal is what the caller hears, whatever the give-back meets.
@@ -330,13 +324,7 @@ export class DurableTurns {
     }
   }
 
-  /**
-   * `ranTurn`: the session's workflow has run a turn (its output moved
-   * `durable_offset`), so the message goes to that workflow and never starts one: a
-   * workflow not found was removed by retention after it ended, and starting
-   * `session-<id>` again would run the session's history-holding chat empty (#2078).
-   */
-  async #sendMessage(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[], ranTurn: boolean): Promise<void> {
+  async #sendMessage(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[]): Promise<void> {
     const start: SessionStart = {
       session_id: session.id,
       creator: wire(session.creator),
@@ -370,19 +358,17 @@ export class DurableTurns {
     const update = { args: [message] as [DurableMessage], updateId: turn.turnId }
     try {
       await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
-        ranTurn
-          ? this.#client.workflow.getHandle(sessionWorkflowId(session.id)).executeUpdate<SendAnswer, [DurableMessage]>(SEND_MESSAGE_UPDATE, update)
-          : this.#client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, SendAnswer, [DurableMessage]>(
-              SEND_MESSAGE_UPDATE,
-              { ...update, startWorkflowOperation: operation },
-            ),
+        this.#client.workflow.executeUpdateWithStart<(start: SessionStart) => Promise<void>, SendAnswer, [DurableMessage]>(
+          SEND_MESSAGE_UPDATE,
+          { ...update, startWorkflowOperation: operation },
+        ),
       )
     } catch (err) {
       const cause = err instanceof WorkflowUpdateFailedError ? err.cause : undefined
       if (cause instanceof ApplicationFailure && cause.type === BUSY) {
         throw new SessionError('busy', `a turn is already running in session ${session.id}; wait for it to finish or interrupt it`)
       }
-      // A plain Update to an ended workflow is NOT_FOUND whether or not retention has removed it yet.
+      // An ended workflow still retained refuses the start (REJECT_DUPLICATE).
       if (err instanceof WorkflowNotFoundError || err instanceof WorkflowExecutionAlreadyStartedError) {
         throw new SessionError('closed', `session ${session.id}'s workflow has ended; continue in a new chat`)
       }
@@ -444,7 +430,7 @@ export class DurableTurns {
    */
   async interrupt(session: SessionRecord, reason: string): Promise<boolean> {
     const [row] = await this.#sql<(RunningRow & { status: SessionStatus; settled: boolean; runtime: SessionRuntime | null })[]>`
-      SELECT id, status, event_seq, durable_offset, runtime,
+      SELECT id, status, event_seq, runtime,
         updated_at < now() - make_interval(secs => ${RUNNING_GRACE_MS / 1000}) AS settled
       FROM ai_sessions WHERE id = ${session.id}`
     if (!row || !RUNNING.includes(row.status)) return false
@@ -496,7 +482,6 @@ export class DurableTurns {
     // waiting on a claim this ends.
     if (state !== 'closed' && !row.settled) return false
     const ended = await endLostTurn(this.#sql, this.#events, row, state)
-    if (ended) await this.#ended?.(row.id).catch(() => {})
     // A parked turn's entries (#4018): no run will resolve them now, so they are cancelled here
     // rather than left for PendingInputSweep's next look, ten minutes or more away.
     const cancelled = await cancelOrphanedEntries({ sql: this.#sql, events: this.#events, audit: this.#audit }, { sessionId: row.id })
