@@ -2272,6 +2272,35 @@ describe('set_print_options: a settings write (spec §8.1), unlike the remember_
   })
 })
 
+describe('remember_printer_rack_algorithm (#4969)', () => {
+  it("is a write, like the printer's remembered plate", () => {
+    expect(tool('remember_printer_rack_algorithm').risk).toBe('write')
+  })
+
+  it("puts the algorithm on the printer's rack-algorithm route, unordered, and answers the one in force", async () => {
+    const bodies: unknown[] = []
+    server.use(
+      http.put(`${BACKEND}/api/v1/print/printers/3/rack-algorithm`, async ({ request }) => {
+        const body = (await request.json()) as { algorithm: string | null }
+        bodies.push(body)
+        return HttpResponse.json({ printer_id: 3, algorithm: body.algorithm ?? 'least_used' })
+      }),
+    )
+    const set = await runTool(tool('remember_printer_rack_algorithm'), { printer_id: 3, algorithm: 'oldest_first' }, ctx())
+    expect(set.isError).toBeFalsy()
+    expect(firstText(set)).toEqual({ printer_id: 3, algorithm: 'oldest_first' })
+    const forgot = await runTool(tool('remember_printer_rack_algorithm'), { printer_id: 3, algorithm: null }, ctx())
+    expect(firstText(forgot)).toEqual({ printer_id: 3, algorithm: 'least_used' })
+    // No `version`: the dialog's ordered saves (#1216) keep theirs.
+    expect(bodies).toEqual([{ algorithm: 'oldest_first' }, { algorithm: null }])
+  })
+
+  it('refuses an algorithm the backend does not know, before any call', async () => {
+    const result = await runTool(tool('remember_printer_rack_algorithm'), { printer_id: 3, algorithm: 'random' }, ctx())
+    expect(result.isError).toBe(true)
+  })
+})
+
 describe('id arguments match the backend path patterns', () => {
   it('refuses a malformed output id with a clear message, before any backend call', async () => {
     const result = await runTool(tool('get_output'), { output_id: 'out-1' }, ctx())

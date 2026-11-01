@@ -309,6 +309,9 @@ describe('extractors', () => {
     expect(touches('remember_printer_bed_type', { printer_id: 2, bed_type: 'pei' }, {})).toEqual([
       { type: 'setting', id: 'bed_type:2', action: 'modified' },
     ])
+    expect(touches('remember_printer_rack_algorithm', { printer_id: 2, algorithm: 'newest_first' }, {})).toEqual([
+      { type: 'setting', id: 'rack_algorithm:2', action: 'modified' },
+    ])
   })
 
   it('records the printer registry as settings, by row (#3823)', () => {

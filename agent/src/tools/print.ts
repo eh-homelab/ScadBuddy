@@ -1121,6 +1121,35 @@ export const printTools: Tool[] = [
       ),
   }),
 
+  // #4969: the print dialog's Advanced rack algorithm, a per-printer starting choice
+  // like the plate (rack spec §4). print_output takes it for every print on that printer.
+  defineTool({
+    name: 'remember_printer_rack_algorithm',
+    label: "Remember a printer's rack algorithm",
+    description:
+      "Remember how a printer's nozzle rack is ranked when a print leaves the hotend to ScadBuddy (#836): " +
+      '`least_used` (the default), `oldest_first`, `newest_first`, or `bambuddy` (the printer picks; no ' +
+      'nozzle mapping is sent). null forgets it. Every later print on that printer, the dialog\'s and ' +
+      "print_output's, ranks by it. Answers the algorithm now in force.",
+    input: z.object({
+      printer_id: z.number().int(),
+      algorithm: z.enum(['least_used', 'oldest_first', 'newest_first', 'bambuddy']).nullable(),
+    }),
+    risk: 'write',
+    routes: ['PUT /api/v1/print/printers/{printer_id}/rack-algorithm'],
+    // No `version` (#1216): an unordered save, which leaves the dialog's ordering alone.
+    handler: async ({ printer_id, algorithm }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/print/printers/{printer_id}/rack-algorithm', {
+            params: { path: { printer_id } },
+            body: { algorithm },
+          }),
+          `remember rack algorithm of printer ${printer_id}`,
+        ),
+      ),
+  }),
+
   // ── outward: everything that uploads to, creates in or queues on Bambuddy ──
   defineTool({
     name: 'send_to_bambuddy',
