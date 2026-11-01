@@ -3,6 +3,7 @@ import { ok } from './call.js'
 import { command } from './command.js'
 import { nozzles, presetRef, slotChoice, tier } from './print.js'
 import { defineTool, json, type Tool, ToolError } from './registry.js'
+import { FROM_WORKSPACE_ONLY, uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 
 // Orders phase 1 (#4249, spec 2026-10-18 §7.3, plan Ruling 14): customers, orders and line
 // items as ScadBuddy's own records. Routes: backend/scadbuddy/api/customers.py and
@@ -19,11 +20,23 @@ import { defineTool, json, type Tool, ToolError } from './registry.js'
 // slice of the item through the print dialog's own choices (the `order_item_quote`
 // operation, followed as every command is), and stays `write`: a quote records a price,
 // accepting it is the outward step. The rough estimate is a `read`, never a quote.
+//
+// Attachments (#4251, #4722, spec 2026-10-18 §7.3): order_attach sends a workspace file by
+// path and sha256, streamed into the multipart route (workspaceUploads.ts), and is `write`
+// with its caption, role and delivered mark: a record the shop keeps, which tells the
+// customer nothing. Removing one is `outward` (AI spec §8.1, a delete): its bytes are
+// freed and no history brings them back. The list, the bytes and the thumbnail stay the
+// page's (coverage.ts): order_get carries the list.
 
 const ID = z.string().min(1).max(100)
 const orderId = ID.describe('An order id, as order_list or order_create returns it')
 const itemId = ID.describe('A line item id, as order_get lists them')
 const customerId = ID.describe('A customer id, as customer_list returns it')
+const attachmentId = ID.describe("An attachment id, as order_get lists them under `attachments`")
+const attachmentRole = z
+  .enum(['reference', 'issue', 'finished', 'packed', 'timelapse', 'other'])
+  .describe('Why the file is kept')
+const attachmentCaption = z.string().max(1000)
 const money = z.number().int().describe('Integer minor units (cents, pence) in the order\'s currency')
 const datetime = z.string().datetime({ offset: true })
 
@@ -692,6 +705,117 @@ export const orderTools: Tool[] = [
               `cancel item ${item_id}`,
             ),
       ),
+  }),
+
+  defineTool({
+    name: 'order_attach',
+    label: 'Attach a file to an order',
+    description:
+      'Attach a file from your workspace to an order, or with `item_id` to one of its line items: a reference ' +
+      'drawing, a photo of the finished or packed piece, an issue, a timelapse. Any file; what it is (`kind`, ' +
+      '`media_type`) comes from its bytes, and it is kept in ScadBuddy\'s own store while the attachment stands. ' +
+      "Allowed in any state of the order; order_get lists it under `attachments`. `role` says why it is kept " +
+      '(`other` when left out). An item\'s image can then be marked delivered with order_attachment_update.' +
+      FROM_WORKSPACE_ONLY,
+    input: z
+      .object({
+        order_id: orderId,
+        item_id: itemId.optional().describe('Attach to this line item; the order itself when left out'),
+        workspace_path: workspacePathInput,
+        workspace_sha256: workspaceShaInput,
+        filename: z.string().min(1).max(255).optional().describe("e.g. \"finished.jpg\"; the workspace file's own name by default"),
+        role: attachmentRole.optional(),
+        caption: attachmentCaption.optional(),
+      })
+      .strict(),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/attachments', 'POST /api/v1/orders/{order_id}/items/{item_id}/attachments'],
+    title: ({ order_id, item_id, filename, workspace_path }) =>
+      `Attach ${filename ?? workspace_path} to ${item_id ? `item ${item_id} of ` : ''}order ${order_id}`,
+    handler: async ({ order_id, item_id, workspace_path, workspace_sha256, filename, role, caption }, ctx) => {
+      const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'order_attach')
+      const name = filename ?? uploadName(info.path)
+      const fields = { ...(role === undefined ? {} : { role }), ...(caption === undefined ? {} : { caption }) }
+      const body = { file: name, role: role ?? null, caption: caption ?? null }
+      const part = { name: 'file', filename: name, type: info.mediaType }
+      const answer = await command(ctx, `attach ${name} to ${item_id ? `item ${item_id}` : `order ${order_id}`}`, (headers) =>
+        item_id === undefined
+          ? ctx.backend.POST('/api/v1/orders/{order_id}/attachments', {
+              params: { path: { order_id } },
+              body,
+              ...uploadInit(ctx, info, part, headers, fields),
+            })
+          : ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/attachments', {
+              params: { path: { order_id, item_id } },
+              body,
+              ...uploadInit(ctx, info, part, headers, fields),
+            }),
+      )
+      return json(withSent(answer, info))
+    },
+  }),
+  defineTool({
+    name: 'order_attachment_update',
+    label: "Edit an order's attachment",
+    description:
+      "Caption or re-role an attachment (order_get lists them under `attachments`), in any state of the order. " +
+      "`delivered` with the attachment's `item_id`: true marks this image as what the item delivered (its picture " +
+      "from then on; refused unless it is one of that item's images), false clears the item's delivered mark.",
+    input: z.object({
+      order_id: orderId,
+      attachment_id: attachmentId,
+      caption: attachmentCaption.optional(),
+      role: attachmentRole.optional(),
+      item_id: itemId.optional().describe('The line item the attachment is on; needed with `delivered`'),
+      delivered: z.boolean().optional(),
+    }),
+    risk: 'write',
+    routes: ['PATCH /api/v1/orders/{order_id}/attachments/{attachment_id}', 'PUT /api/v1/orders/{order_id}/items/{item_id}/delivered'],
+    title: ({ order_id, attachment_id, delivered }) =>
+      `${delivered === undefined ? 'Edit' : delivered ? 'Mark delivered' : 'Clear the delivered mark of'} attachment ${attachment_id} of order ${order_id}`,
+    handler: async ({ order_id, attachment_id, caption, role, item_id, delivered }, { backend }) => {
+      if (delivered !== undefined && item_id === undefined) {
+        throw new ToolError("`delivered` needs `item_id`: the line item the attachment is on (order_get lists it as the attachment's `item_id`)")
+      }
+      const edits = Object.fromEntries(Object.entries({ caption, role }).filter(([, v]) => v !== undefined))
+      if (Object.keys(edits).length === 0 && delivered === undefined) throw new ToolError('nothing to change: give `caption`, `role` or `delivered`')
+      const answer: { attachment?: unknown; item?: unknown } = {}
+      if (Object.keys(edits).length > 0) {
+        answer.attachment = await ok(
+          backend.PATCH('/api/v1/orders/{order_id}/attachments/{attachment_id}', { params: { path: { order_id, attachment_id } }, body: edits }),
+          `edit attachment ${attachment_id}`,
+        )
+      }
+      if (delivered !== undefined && item_id !== undefined) {
+        answer.item = await ok(
+          backend.PUT('/api/v1/orders/{order_id}/items/{item_id}/delivered', {
+            params: { path: { order_id, item_id } },
+            body: { attachment_id: delivered ? attachment_id : null },
+          }),
+          `mark what item ${item_id} delivered`,
+        )
+      }
+      return json(answer)
+    },
+  }),
+  defineTool({
+    name: 'order_attachment_delete',
+    label: "Remove an order's attachment",
+    description:
+      'Remove an attachment (a mis-upload): it goes, recorded on the order\'s audit line, with an item\'s ' +
+      'delivered mark when it was this one, and its file is freed once nothing else holds the same bytes. ' +
+      'Outward: no history brings the file back.',
+    input: z.object({ order_id: orderId, attachment_id: attachmentId }),
+    risk: 'outward',
+    routes: ['DELETE /api/v1/orders/{order_id}/attachments/{attachment_id}'],
+    summarize: ({ order_id, attachment_id }) => `Remove attachment ${attachment_id} from order ${order_id}`,
+    handler: async ({ order_id, attachment_id }, { backend }) => {
+      await ok(
+        backend.DELETE('/api/v1/orders/{order_id}/attachments/{attachment_id}', { params: { path: { order_id, attachment_id } } }),
+        `remove attachment ${attachment_id}`,
+      )
+      return deleted(attachment_id)
+    },
   }),
 
   defineTool({

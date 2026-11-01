@@ -286,21 +286,16 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   })),
   ...(
     [
-      'POST /api/v1/orders/{order_id}/attachments',
-      'POST /api/v1/orders/{order_id}/items/{item_id}/attachments',
       'GET /api/v1/orders/{order_id}/attachments',
       'GET /api/v1/orders/{order_id}/attachments/{attachment_id}/content',
       'GET /api/v1/orders/{order_id}/attachments/{attachment_id}/thumbnail',
-      'PATCH /api/v1/orders/{order_id}/attachments/{attachment_id}',
-      'DELETE /api/v1/orders/{order_id}/attachments/{attachment_id}',
-      'PUT /api/v1/orders/{order_id}/items/{item_id}/delivered',
     ] as const
   ).map((operation) => ({
     operation,
     reason:
-      "An order's files and an item's delivered photo (#4251), added on the order page from the person's own " +
-      'files and camera; order_get lists them under `attachments` and each item\'s `delivered_attachment_id`. ' +
-      "They land UI-first; spec 2026-10-18 §7.3's order_attach (by workspace_path, #2329) is a follow-up.",
+      "An order's files (#4251) as the order page shows them: order_get lists them under `attachments` and " +
+      "each item's `delivered_attachment_id`, and the bytes and thumbnails are for the page to draw. The agent " +
+      'adds, edits and removes them with order_attach, order_attachment_update and order_attachment_delete (#4722).',
   })),
   ...(
     [
