@@ -32,6 +32,11 @@ function BoundParam({ element, context, extruders }: { element: HostElement; con
   const binding = bindingOf(element, context)
   if (typeof binding === 'string') return <Problem>{binding}</Problem>
   const { name, bind, param, value, mistyped } = binding
+  // A value bound under `params` is the `-D` of that key, numbered as it renders. Any
+  // other path is the UI's own state: saved with presets and outputs and handed to the
+  // pipeline, never a `-D`, so only the pipeline knows which extruder (if any) it takes.
+  const rendersAs = bind.startsWith('params.') ? bind.slice('params.'.length) : undefined
+  const extruder = rendersAs !== undefined && !rendersAs.includes('.') ? extruders.get(rendersAs) : undefined
   // `data-param`, as ParameterPanel's rows carry it: the agent's highlight (#254) finds
   // the parameter it just changed by it (`findParamRow`).
   return (
@@ -43,7 +48,7 @@ function BoundParam({ element, context, extruders }: { element: HostElement; con
         slug={context.slug}
         version={context.version}
         fonts={context.fonts}
-        extruder={extruders.get(name)}
+        extruder={extruder}
         onChange={(next) => context.onInputs(setPath(context.getInputs?.() ?? context.inputs, bind, next))}
       />
     </div>
