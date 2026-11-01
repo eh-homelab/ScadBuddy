@@ -32,9 +32,10 @@ import { event, type Owner, type SentImage, type SessionStatus } from './protoco
 //   put the turn's images in ai_session_blobs (the claim check, by name), write `user.turn` and
 //   `session.status running`, then update-with-start `send_message` (update id: the turn id),
 //   starting the workflow on the first message. An ended workflow still retained is refused
-//   `closed` (REJECT_DUPLICATE); one removed by retention is started again, and its turn resumes
-//   the transcript in ai_session_entries, so it never runs empty (#2078's concern was
-//   DurableSession, whose history held the chat). Only a definite refusal (the validator's
+//   `closed` (REJECT_DUPLICATE). Once retention removes it, the same session's next send starts
+//   it again, on purpose: the turn resumes the transcript in ai_session_entries, so it never runs
+//   empty (#2078 refused it for good because DurableSession's history held the chat; plan
+//   Phase 10). Only a definite refusal (the validator's
 //   `busy`, a failed Update, an ended workflow)
 //   gives the claim back. An Update not accepted in time keeps it: Temporal may already hold the
 //   message, which a worker delivers later, so the turn is handed back and `done` follows the log.
@@ -369,7 +370,7 @@ export class DurableTurns {
         throw new SessionError('busy', `a turn is already running in session ${session.id}; wait for it to finish or interrupt it`)
       }
       // An ended workflow still retained refuses the start (REJECT_DUPLICATE).
-      if (err instanceof WorkflowNotFoundError || err instanceof WorkflowExecutionAlreadyStartedError) {
+      if (err instanceof WorkflowExecutionAlreadyStartedError) {
         throw new SessionError('closed', `session ${session.id}'s workflow has ended; continue in a new chat`)
       }
       if (err instanceof WorkflowUpdateFailedError) {

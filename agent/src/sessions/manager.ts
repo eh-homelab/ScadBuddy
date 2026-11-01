@@ -1159,6 +1159,8 @@ export class SessionManager {
     const budgetUsd = from ? from.budgetUsd : fresh
     const forkOf = fields.forkOf
     const insert = async (sql: Sql) => {
+      // `mode` is not written: the next release drops the column (plan Phase 10), and a pod of
+      // this one still inserting it during that rollout would fail. Its default fills it until then.
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
                                  status, title, tags, scope, parent_id, runtime, max_turns, budget_usd, budget_root_id,
