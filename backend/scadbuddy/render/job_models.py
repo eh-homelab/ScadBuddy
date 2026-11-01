@@ -204,7 +204,7 @@ class Job(BaseModel):
     #: tracing, when the sampler dropped the request, or with the SDK disabled.
     traceparent: str | None = None
     #: Template-owned inputs (spec §4.3). For a params-only template, `{"params": …}`;
-    #: `params` is kept beside it through phase 1 and dropped by phase 2's migration.
+    #: `params` is read back from them (`render_jobs` keeps no column of its own, #1142).
     inputs: dict[str, Any] = Field(default_factory=dict)
     #: sha256 of the pipeline source `load_pipeline` recorded, or "default" (§3.2).
     pipeline_version: str = "default"

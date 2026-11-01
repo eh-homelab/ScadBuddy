@@ -133,8 +133,8 @@ def test_start_up_fails_what_a_legacy_queue_left_running(
         pass  # the first start migrates the schema
     with psycopg.connect(pg_conninfo) as conn:
         conn.execute(
-            "INSERT INTO render_jobs (id, slug, params, render_key, state, created_at,"
-            " started_at) VALUES (%s, 'widget', '{}', 'k', 'running', now(), now())",
+            "INSERT INTO render_jobs (id, slug, render_key, state, created_at,"
+            " started_at) VALUES (%s, 'widget', 'k', 'running', now(), now())",
             (job_id,),
         )
 

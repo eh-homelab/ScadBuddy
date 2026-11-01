@@ -34,8 +34,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     expect(await t.db.ready()).toBe(true)
     for (const file of readdirSync(MIGRATIONS).sort()) await t.db.sql.unsafe(readFileSync(`${MIGRATIONS}${file}`, 'utf8'))
     await t.db.sql`
-      INSERT INTO workflow_definitions (id, name, version, script, created_by)
-      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}')`
+      INSERT INTO workflow_definitions (id, name, version, commit, created_by)
+      VALUES ('d1', 'swap', 1, 'c1', '{"kind": "browser"}')`
     runId = randomUUID()
     await t.db.sql`
       INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by)

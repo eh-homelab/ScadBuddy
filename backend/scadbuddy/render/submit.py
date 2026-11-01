@@ -61,10 +61,8 @@ from scadbuddy.render.jobs import (
     prune_revision_exports,
 )
 from scadbuddy.render.projection import (
-    LEGACY_GRACE,
     VISIBILITY_GRACE,
     JobProjection,
-    legacy_unrun,
     open_runs,
     run_closed,
     workflow_id_for,
@@ -600,7 +598,6 @@ class RenderService:
         towards the queue (review #1066 1.2). A failed pass is logged and counted; the
         next one tries again."""
         passes: tuple[tuple[SettlePass, Callable[[], Awaitable[list[str]]]], ...] = (
-            ("legacy", self.settle_legacy),
             ("closed", self.settle_closed),
         )
         for settle_pass, settle in passes:
@@ -637,37 +634,6 @@ class RenderService:
                 extra={"job_ids": [job.id for job in settled]},
             )
         return closed
-
-    async def settle_legacy(self) -> list[str]:
-        """Fail the rows an older release inserted that no workflow will settle: pending
-        and never run, or running when its workflow closed. Only a row past
-        `LEGACY_GRACE` is judged: a younger one may be between the older API's insert
-        and its start (review #1066 1.2). A row whose workflow the listing of open runs
-        has is left alone without a describe (review #1066 (9) 4)."""
-        jobs = await asyncio.to_thread(self.store.legacy_unsettled, LEGACY_GRACE)
-        running = await self._open_runs("legacy") if jobs else None
-        if running is None:
-            return []
-        open_ids = {workflow_id for workflow_id, _ in running}
-        candidates = [job for job in jobs if job.workflow_id not in open_ids]
-        failed: list[str] = []
-        for job in candidates[:SETTLE_DESCRIBES]:
-            try:
-                async with asyncio.timeout(DESCRIBE_BOUND):
-                    if not await legacy_unrun(self.client, job, rpc_timeout=RPC_TIMEOUT):
-                        continue
-            except (RPCError, TimeoutError) as error:
-                self._unanswered("legacy", error)
-                break
-            failed.append(job.id)
-        if failed:
-            settled = await asyncio.to_thread(self.store.fail_legacy, failed)
-            self._settle_failed("legacy", settled)
-            logger.warning(
-                "failed the renders an older release left with no workflow to settle them",
-                extra={"job_ids": [job.id for job in settled]},
-            )
-        return failed
 
     async def _open_runs(self, settle_pass: SettlePass) -> set[tuple[str, str]] | None:
         """The open render runs, or None when Temporal does not answer in time."""

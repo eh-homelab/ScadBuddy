@@ -275,3 +275,81 @@ def test_the_refused_request_migration_backfills_unedited_refusals(pg_conninfo: 
             "SELECT position, refused_request FROM print_batch_items ORDER BY position"
         ).fetchall()
     assert rows == [(0, {"copies": 1}), (1, None), (2, None)]
+
+
+def _index(slug: str) -> int:
+    return next(i for i, m in enumerate(MIGRATIONS) if m.id.endswith(f"_{slug}"))
+
+
+@pytest.mark.requires_postgres
+def test_the_contract_migration_drops_what_the_durable_rollout_left(pg_conninfo: str) -> None:
+    # #1142: once no build before #1052/#1053 can run, the expand-only leftovers go.
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn)
+        columns = conn.execute(
+            "SELECT table_name, column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND (table_name, column_name) IN"
+            " (('print_runs', 'heartbeat_at'), ('render_jobs', 'params'),"
+            "  ('workflow_definitions', 'script'))"
+        ).fetchall()
+        relations = conn.execute(
+            "SELECT to_regclass('render_jobs_pending_key'), to_regclass('print_watches')"
+        ).fetchone()
+    assert columns == []
+    assert relations == (None, None)
+
+
+@pytest.mark.requires_postgres
+def test_the_contract_migration_ends_the_rows_an_older_build_left_unsettled(
+    pg_conninfo: str,
+) -> None:
+    # Nothing of this build settles them: a pre-#1052 run (no execution) and a render row
+    # an older build inserted (no `workflow_run_id`). Rows of this build are left alone,
+    # and a row written with no inputs keeps its parameters in them.
+    contract = _index("durable_rollout_contract")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:contract])
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, workflow_id,"
+            " workflow_run_id) VALUES ('old', 'o', 'k1', 'running', NULL, NULL),"
+            " ('new', 'o', 'k2', 'running', 'print-run-new', 'r')"
+        )
+        conn.execute(
+            "INSERT INTO render_jobs (id, slug, params, inputs, state, created_at, render_key,"
+            " workflow_id, workflow_run_id) VALUES"
+            " ('legacy', 'demo', '{}', '{\"params\": {}}', 'pending', now(), 'k',"
+            "  'render-legacy', NULL),"
+            " ('ours', 'demo', '{}', '{\"params\": {}}', 'pending', now(), 'k2', 'render-k2',"
+            "  'r'),"
+            " ('bare', 'demo', '{\"width\": 7}', '{}', 'done', now(), 'k3', 'render-k3', 'r')"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[contract].id
+        runs = conn.execute(
+            "SELECT id, status, enqueue_attempted FROM print_runs ORDER BY id"
+        ).fetchall()
+        jobs = conn.execute("SELECT id, state, inputs FROM render_jobs ORDER BY id").fetchall()
+    assert runs == [("new", "running", False), ("old", "failed", True)]
+    assert jobs == [
+        ("bare", "done", {"params": {"width": 7}, "v": 0}),
+        ("legacy", "failed", {"params": {}}),
+        ("ours", "pending", {"params": {}}),
+    ]
+
+
+@pytest.mark.requires_postgres
+def test_the_contract_migration_refuses_a_flow_version_git_does_not_hold(
+    pg_conninfo: str,
+) -> None:
+    # Its script is in the row only: dropping the column would lose it (#2503 backfill).
+    drop = _index("workflow_definitions_drop_script")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:drop])
+        conn.execute(
+            "INSERT INTO workflow_definitions (id, name, version, script, created_by)"
+            " VALUES ('v1', 'demo', 1, 'pass', '{}')"
+        )
+        conn.commit()
+        with pytest.raises(psycopg.errors.RaiseException, match="has no commit"):
+            migrate(conn)
+        conn.rollback()
+        assert conn.execute("SELECT script FROM workflow_definitions").fetchall() == [("pass",)]
