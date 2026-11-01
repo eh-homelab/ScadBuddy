@@ -549,8 +549,13 @@ Spools and inventory, archives, timelapse, projects, the queue's ordering. A nat
 print on a Bambuddy-linked printer still records to Bambuddy's archive when Bambuddy
 sees the print through its own connection; the linking code (`bambuddy/linking.py`)
 matches by `content_hash` as it does today. ScadBuddy keeps its own `output_last_prints`
-either way, in intent: a LAN print records no queue item, archive or `output_last_prints`
-row today (#4644).
+either way. A LAN print records no queue item or archive; `print_succeed` writes its
+`output_last_prints` row (`print_route` `lan`: the run, the registry printer, each plate
+with its copies), and the native follow moves the row's stage as it reads the report
+(#4644). Its outcome is `print_outcomes`' as any print's. Its rack picks are keyed by
+the run and the start's `subtask_name` and settled from the report (`lan_wait` per
+copy, the follow for the last), since there is no queue item or archive to key or
+settle them by (#4543).
 
 ### 6.4 Credentials
 

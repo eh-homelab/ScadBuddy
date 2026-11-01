@@ -458,6 +458,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   native library (nothing deletes it yet, #4337). The Customize page, the dialog's
   first read and its analysis, and the Prints page's queue and history panels ask
   Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
+  A LAN print's records (#4644, #4543): `print_succeed` writes its `output_last_prints`
+  row (`print_route` `lan`), and `lan_print` saves its rack picks keyed by run and
+  `subtask_name` (`rack_nozzle_*`'s `lan_run_id`, `lan_subtask`); the follow's read hooks
+  (`Follower.on_read`: `printers/progress.py` `lan_last_print`, `rack/usage.py`
+  `lan_settle_hook`) move the row and settle the picks, `lan_wait` each earlier copy's.
   A run of several plates or copies is its own queue (#4541, `workflows/printing.py`
   `_print_lan`): it succeeds at its first start, then `lan_wait` (`printers/print_activities.py`,
   over the watch's `printer_reports`) waits out each print before the next starts, and

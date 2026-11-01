@@ -320,6 +320,25 @@ function printTone(status: string): string {
   return 'text-muted-foreground'
 }
 
+type LanStage = NonNullable<Output['print_stage']>
+
+/** #4644 — a LAN print's stage in the words the history uses for an archive's status. */
+const LAN_STAGE_LABELS: Record<LanStage, string> = {
+  queued: 'Queued',
+  running: 'Printing',
+  done: 'Succeeded',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+  unknown: 'Not known',
+}
+
+/** #4644 — a LAN print's stage in its colour, as `printTone` colours an archive's. */
+function lanTone(stage: LanStage): string {
+  if (stage === 'done') return 'text-ok'
+  if (stage === 'failed' || stage === 'cancelled') return 'text-destructive'
+  return 'text-muted-foreground'
+}
+
 /** The copy the output was last uploaded as; copies are recorded in upload order. */
 function lastCopy(output: Output): LibraryCopy | undefined {
   const copies = output.library_files ?? []
@@ -526,7 +545,7 @@ function OutputRow({
   onQueue,
   onPreview,
   onRenamed,
-  lastPrint,
+  lastPrint: archivedPrint,
   onDelete,
   bambuddyUrl,
   pinned,
@@ -559,6 +578,10 @@ function OutputRow({
 }) {
   const diff = diffFromDefaults(schema, output.params ?? {})
   const unit = useDisplayUnit()
+  // #4644 — the last print over the LAN, as the native follow last read it; it is newer
+  // than any archived print, which then does not stand for the last one.
+  const lanStage = output.print_route === 'lan' ? (output.print_stage ?? 'running') : null
+  const lastPrint = lanStage ? undefined : archivedPrint
   const queuedPlates = output.plates ?? []
   // #986 — a printed plate by what it holds. Read only for an output printed plate by
   // plate; an unreadable list leaves the numbers.
@@ -690,6 +713,13 @@ function OutputRow({
             {/* #2288 — how its last print went, linked to ScadBuddy's print page. Being
                 queued says nothing of that, so the queue ids are neutral and show only
                 until a print is on record. */}
+            {/* #4644 — a print over the LAN has no archive to link to; its row is
+                newer than any archive's, so it says how that print went. */}
+            {lanStage && (
+              <span className={`whitespace-nowrap ${lanTone(lanStage)}`}>
+                {`Last print: ${LAN_STAGE_LABELS[lanStage]}`}
+              </span>
+            )}
             {lastPrint && (
               <Link
                 to={`/prints/${lastPrint.archive_id}`}
