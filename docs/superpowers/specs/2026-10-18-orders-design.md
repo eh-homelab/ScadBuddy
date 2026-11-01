@@ -494,8 +494,12 @@ still start (a 5xx) keeps it for the operation's retry, which repeats the same r
 `request_id` is made from the item and the key, and a claim found under it on another item
 is `print_request_conflict`; a claim's run, once attached, is never replaced. A retry whose
 claim has no run yet starts only while the claim still may print (the order not ended or on
-hold, the item still `queued`, the attempt still open); otherwise the open claim is
-released and the retry refused. A claim with no run keeps the item `queued` (it is a
+hold, the item still `queued`, the attempt still open). Otherwise its earlier start may
+have made the run all the same (a 5xx after the workflow started), so the retry looks for
+it by the run's key (`print_runs`, then the `print-<key>` workflow): a run there is
+attached and followed, the hold or cancel applying to what comes next; a workflow still
+accepting is a 503 for the retry; only with neither is the open claim released and the
+retry refused. A claim with no run keeps the item `queued` (it is a
 print's attempt, not one by hand), and its `PATCH` is refused (`print_starting`) while its
 `order_item_print` operation still runs. The item follows the run from what the print path
 records (`Lifecycle.follow_print`, heard on `print.run`, `print.progress` and

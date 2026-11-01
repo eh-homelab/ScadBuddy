@@ -22,13 +22,15 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from fastapi import Response, status
+from temporalio.client import WorkflowExecutionStatus
+from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.client import client_for, maybe_client
 from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
 from scadbuddy.bambuddy.print_run import PrintRunRequest, registry_printer, slice_route
 from scadbuddy.bambuddy.print_source import OutputSource
-from scadbuddy.bambuddy.runs import PrintRun
+from scadbuddy.bambuddy.runs import PrintRun, run_key
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
@@ -344,8 +346,10 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
 
         output_id = checked["output_id"]
 
-        async def start(copies: int) -> PrintRun:
-            body = PrintRunRequest.model_validate(
+        subject = PrintSubject.output(output_id)
+
+        def body(copies: int) -> PrintRunRequest:
+            return PrintRunRequest.model_validate(
                 {
                     **request["request"],
                     # §5.4: the quantity still to print, of the whole output (a quote is
@@ -357,12 +361,37 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     "request_id": request["request_id"],
                 }
             )
+
+        async def existing(copies: int) -> PrintRun | None:
+            """The run this request's start made, if it made one: its row by the run's
+            key, as the print route finds a repeat. A workflow still accepting with no
+            row yet may still print, so it is a 503 for the retry, never a release."""
+            key = run_key(subject.run_subject, body(copies))
+            found = await core.print_runs.store.find(key, has_request_id=True)
+            if found is not None:
+                return found
+            try:
+                handle = core.print_runs.client.get_workflow_handle(f"print-{key}")
+                described = await handle.describe()
+            except RPCError as error:
+                if error.status == RPCStatusCode.NOT_FOUND:
+                    return None
+                raise
+            if described.status == WorkflowExecutionStatus.RUNNING:
+                raise ApiError(
+                    status.HTTP_503_SERVICE_UNAVAILABLE,
+                    "this item's print is still being accepted; try again",
+                )
+            # Closed since the read above: it recorded its row, or it printed nothing.
+            return await core.print_runs.store.find(key, has_request_id=True)
+
+        async def start(copies: int) -> PrintRun:
             run = await accept_run(
                 core.print_runs,
                 Response(),
-                subject=PrintSubject.output(output_id),
+                subject=subject,
                 slug=checked["slug"],
-                request=body,
+                request=body(copies),
                 source=SourceSpec(kind="output", output_id=output_id),
                 activity=components.get(ACTIVITY),
             )
@@ -373,6 +402,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         attempt = await print_item(
             components.get(ORDERS).lifecycle,
             start,
+            existing,
             request["order_id"],
             request["item_id"],
             Actor.model_validate(request["by"]),

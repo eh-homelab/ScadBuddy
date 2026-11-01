@@ -384,24 +384,34 @@ def test_a_print_request_id_is_the_operations() -> None:
 class Starts:
     """The print route's start, counted: each call is a print the printer would make."""
 
-    def __init__(self, pool: PgPool, *, refuse: ApiError | None = None) -> None:
+    def __init__(self, pool: PgPool, *, refuse: ApiError | None = None, made: bool = False) -> None:
         self.pool = pool
         self.refuse = refuse
+        #: With ``refuse``: the run was made all the same (a 5xx after the start).
+        self.made = made
         self.calls: list[int] = []
+        self.run: PrintRun | None = None
 
     async def __call__(self, copies: int) -> PrintRun:
         self.calls.append(copies)
+        if self.refuse is None or self.made:
+            run_id = run_row(self.pool, status="succeeded")
+            self.run = PrintRun.model_validate(
+                {
+                    "id": run_id,
+                    "subject": f"output:{SUBJECT}",
+                    "status": "succeeded",
+                    "created_at": "2026-11-01T00:00:00Z",
+                }
+            )
         if self.refuse is not None:
             raise self.refuse
-        run_id = run_row(self.pool, status="succeeded")
-        return PrintRun.model_validate(
-            {
-                "id": run_id,
-                "subject": f"output:{SUBJECT}",
-                "status": "succeeded",
-                "created_at": "2026-11-01T00:00:00Z",
-            }
-        )
+        assert self.run is not None
+        return self.run
+
+    async def existing(self, copies: int) -> PrintRun | None:
+        """The run the request's start made, as the print route's record finds it."""
+        return self.run
 
 
 def _print(shop: Shop, order: Order, item: OrderItem, start: Starts, key: str) -> Fulfilment:
@@ -409,6 +419,7 @@ def _print(shop: Shop, order: Order, item: OrderItem, start: Starts, key: str) -
         print_item(
             shop.lifecycle,
             start,
+            start.existing,
             order.id,
             item.id,
             BY,
@@ -595,3 +606,23 @@ def test_a_claim_whose_start_ended_is_settled_by_hand(shop: Shop, pool: PgPool) 
         order.id, item.id, claim.id, FulfilmentInput(quantity=0, outcome="failed"), BY
     )
     assert shop.get_item(item).status == "failed"
+
+
+def test_a_retry_after_a_start_that_made_its_run_attaches_it(shop: Shop, pool: PgPool) -> None:
+    """The start answered 5xx but its run was made; a hold lands before the retry. The
+    print is real: the retry attaches it, and the hold is for what comes next."""
+    order, item = shop.accepted()
+    first = Starts(pool, refuse=ApiError(503, "Temporal is busy"), made=True)
+    with pytest.raises(ApiError):
+        _print(shop, order, item, first, "k")
+    assert first.run is not None
+    shop.lifecycle.hold(order.id, BY)
+    retry = Starts(pool)
+    retry.run = first.run
+    attempt = _print(shop, order, item, retry, "k")
+    assert retry.calls == []
+    assert attempt.print_run_id == first.run.id
+    assert [f.id for f in shop.rows.fulfilments(item.id)] == [attempt.id]
+    assert held(pool, FULFILMENT_HOLDER) == {attempt.id: "quote-a"}
+    assert shop.get_item(item).status == "queued"
+    assert "print.refused" not in shop.kinds(order)

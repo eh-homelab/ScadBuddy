@@ -63,6 +63,7 @@ from scadbuddy.orders.lifecycle import (
     ENDED,
     FULFILLABLE,
     SETTLED,
+    ClaimRefusedError,
     Lifecycle,
     LifecycleError,
 )
@@ -277,6 +278,7 @@ def listen_for_prints(
 async def print_item(
     lifecycle: Lifecycle,
     start: Callable[[int], Awaitable[PrintRun]],
+    existing: Callable[[int], Awaitable[PrintRun | None]],
     order_id: str,
     item_id: str,
     by: Actor,
@@ -292,7 +294,10 @@ async def print_item(
     start the print path refused (a 4xx: no spool, a printer it cannot serve) releases the
     claim; one that may still start (a 5xx, Temporal busy or away) keeps it, and the
     operation's retry finds it and repeats the same run. A claim whose run is attached
-    already starts nothing."""
+    already starts nothing. A retry whose claim may no longer print (``ClaimRefusedError``: a
+    hold, a cancel since) asks ``existing`` for the run its request made with the claim's
+    ``copies``: one there is attached and followed, and without one the claim is
+    released and the retry refused."""
     try:
         claim = await to_thread_to_end(
             lambda: lifecycle.claim_print(
@@ -304,6 +309,16 @@ async def print_item(
                 sliced_blob_key=sliced_blob_key,
             )
         )
+    except ClaimRefusedError as error:
+        # A retry that may no longer print. Its earlier start may have made the run all
+        # the same (a 5xx after the workflow started): that print is real and the item
+        # follows it; the refusal is for what comes next. Released only with no run.
+        assert error.claim.copies is not None
+        run = await existing(error.claim.copies)
+        if run is None:
+            await asyncio.to_thread(lifecycle.release_print, error.claim, error.slug)
+            raise refused(error) from None
+        return await _attached(lifecycle, error.claim, run)
     except LifecycleError as error:
         raise refused(error) from None
     assert claim.copies is not None
@@ -317,6 +332,11 @@ async def print_item(
         if error.status < 500:
             await asyncio.to_thread(lifecycle.release_print, claim, error.detail)
         raise
+    return await _attached(lifecycle, claim, run)
+
+
+async def _attached(lifecycle: Lifecycle, claim: Fulfilment, run: PrintRun) -> Fulfilment:
+    """The run attached to its claim, and followed once, for a run that ended before."""
     attempt = await asyncio.to_thread(lifecycle.attach_print, claim, run.id, run.printer)
     followed = await asyncio.to_thread(lifecycle.follow_print, run.id)
     return followed or attempt

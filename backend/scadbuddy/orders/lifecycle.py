@@ -125,6 +125,17 @@ class LifecycleError(Exception):
         self.unprocessable = unprocessable
 
 
+class ClaimRefusedError(LifecycleError):
+    """A retry's claim, with no run attached, that may no longer start its print
+    (``Lifecycle.claim_print``). Nothing is written: whether a print of its request
+    already exists decides between attaching it and releasing the claim
+    (``orders/printing.py`` ``print_item``)."""
+
+    def __init__(self, claim: Fulfilment, refusal: LifecycleError) -> None:
+        super().__init__(refusal.slug, str(refusal), items=refusal.items)
+        self.claim = claim
+
+
 # -- what a person sends (the routes' bodies, Ruling 12: no author, no status) ------------
 
 
@@ -1474,13 +1485,11 @@ class Lifecycle:
         prints. A claim this ``request_id`` made already (a retried or re-sent
         operation) is that claim, and nothing is written, once its run is attached;
         before that, only while it may still print (the order not ended or on hold, the
-        item still `queued`, the attempt still open), and released otherwise (unless a
-        person settled it). A ``request_id`` another item claimed is
+        item still `queued`, the attempt still open), else ``ClaimRefusedError``, writing
+        nothing. A ``request_id`` another item claimed is
         ``print_request_conflict``. Refused as a hand-recorded attempt is: the order
         accepted, not ended, not on hold, the item `approved` or `failed`; and
         ``item_made`` when its attempts made its quantity."""
-        refusal: LifecycleError | None = None
-        changed: list[tuple[OrderItem, int | None]] = []
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             existing = self.store.print_claim(request_id, conn=conn)
@@ -1498,14 +1507,7 @@ class Lifecycle:
                 refusal = self._claim_refusal(order, item, existing)
                 if refusal is None:
                     return existing
-                if existing.outcome == "unknown" and existing.finished_at is None:
-                    # Still open: nothing printed it, so it goes. One a person settled
-                    # is their record and stays.
-                    changed = self._release_claim(conn, order, existing, refusal.slug)
-                    order = self._rederive(conn, order, existing.created_by)
-        if refusal is not None:
-            self._told(_Change(order, changed))
-            raise refusal
+                raise ClaimRefusedError(existing, refusal)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -1594,7 +1596,8 @@ class Lifecycle:
         """A claim whose print was refused before it started: the attempt and its hold
         go, the item takes back the status its other attempts give it (`approved`, or
         `failed` after a failed one), and the audit line says why. Only a claim with no
-        run yet, and only while the item is still the `queued` the claim made it."""
+        run yet and still open (a person's settled attempt stays), and the item only
+        while it is still the `queued` the claim made it."""
         owner = self.store.item(claim.order_item_id)
         if owner is None:
             return
@@ -1602,6 +1605,9 @@ class Lifecycle:
             order = self._lock(conn, owner.order_id)
             row = self.store.fulfilment(claim.id, conn=conn)
             if row is None or row.print_run_id is not None:
+                return
+            if row.outcome != "unknown" or row.finished_at is not None:
+                # A person settled it: their record, not a claim, and it stays.
                 return
             changed = self._release_claim(conn, order, row, reason)
             order = self._rederive(conn, order, row.created_by)
