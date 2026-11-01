@@ -387,6 +387,9 @@ export type PriceBook = Schemas['PriceBook']
 /** `POST …/items/{item}/quote`: the print dialog's choices, and a price-book filament per
  * colour slot (`colours[].slot`, from 0). */
 export type SliceQuoteRequest = Schemas['SliceQuoteRequest']
+/** #4719 — `POST …/items/{item}/print`: the print dialog's printer, spools and choices; the
+ * item's copies, plates and request id are the server's. */
+export type OrderItemPrintRequest = Pick<RegistryRunRequest, 'printer' | 'printer_id' | 'filament_plan' | 'choices'>
 export type OrderEstimate = Schemas['OrderEstimate']
 
 /** The API's `ActivityItem`: the backend's `ActivityRow` as answered (advanced fields only with `?advanced=1`). */

@@ -250,8 +250,6 @@ export class TemporalTabRelay implements TabRelay {
     if (options.signal.aborted) throw abortError()
     if (jsonBytes(request) > MAX_BRIDGE_BYTES) return request.op === 'call' ? tooLarge('request') : undefined
     const sealing = this.#client
-    // Refused rather than sent to Temporal unsealed; a status read answers "not connected".
-    if (!sealing) return request.op === 'call' ? NO_SEALING : undefined
     try {
       const answer = await this.#viaTemporal(sealing, tabId, request, options.signal)
       if (answer === 'failed') return request.op === 'call' ? NO_ANSWER : undefined
@@ -271,7 +269,7 @@ export class TemporalTabRelay implements TabRelay {
    * the tab and is never sent again. Rejects when the row's read or the start failed.
    */
   async #viaTemporal(
-    { client, dropKey }: SealingClient,
+    sealing: SealingClient | undefined,
     tabId: string,
     request: RelayRequest,
     signal: AbortSignal,
@@ -281,6 +279,10 @@ export class TemporalTabRelay implements TabRelay {
     })
     // Here, the hub would have found it: a row of this queue's is a socket that closed.
     if (owner === undefined || owner.queue === this.hostQueue) return undefined
+    // A tab on another replica, but nothing sealed to reach it: refused rather than sent to
+    // Temporal unsealed; a status read answers "not connected".
+    if (!sealing) return request.op === 'call' ? NO_SEALING : undefined
+    const { client, dropKey } = sealing
     const { queue } = owner
     const input: BridgeCallInput = { queue, tabId, request, ackTimeoutMs: this.#ackTimeoutMs }
     const workflowId = bridgeWorkflowId()

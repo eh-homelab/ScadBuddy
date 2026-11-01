@@ -682,6 +682,21 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
   times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
+  Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
+  (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
+  `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)
+  starts the item's output's print through `api/printing.py` `accept_run`, never a path of
+  its own, its `request_id` from the operation's key. The item is claimed first, under the
+  order's lock (`Lifecycle.claim_print`: the attempt keyed by `print_request_id`, the quote's
+  file held by `(order_item_fulfilment, <id>)`, the item `queued`), so one print starts per
+  item; then the run is attached (`attach_print`) or a refused start releases the claim
+  (`release_print`); a retry re-checks a run-less claim before it starts (refused, it
+  attaches the run its request made if one exists, else releases), a key's claim on
+  another item is `print_request_conflict`, and a run-less claim's `PATCH` waits for its
+  operation (`print_starting`). The item follows the run from
+  `print_runs` and `print_outcomes` only (`Lifecycle.follow_print`, the component's
+  `listen_for_prints`), never by asking a printer or Bambuddy. Agent `order_item_print`
+  (outward); frontend `components/orders/PrintItem.tsx` over `PrintPicker`'s `itemPrint`.
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
