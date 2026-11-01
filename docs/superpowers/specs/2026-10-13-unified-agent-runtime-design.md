@@ -170,6 +170,16 @@ permission layer. Durability is about *where* and *when* that turn runs:
   (`@temporalio/worker/lib/worker-options.d.ts:427-435`). An activity learns that it was
   cancelled on a heartbeat round trip, so with a 20 s heartbeat timeout a cancel can take
   up to 16 s to arrive. Interrupt therefore has a fast path of its own (§5.6).
+- **Update limits on the deployed server (plan Step 9.2, decision Q1).** Prod's Temporal is
+  `ghcr.io/eh-homelab/temporal-server:1.32.1` (Deployment `scadbuddy-temporal-v2-history`,
+  namespace `bambuddy`), and its dynamic config (ConfigMap `scadbuddy-temporal-v2-dynamicconfig`)
+  sets only `frontend.visibilityArchivalQueryMaxPageSize` and
+  `history.cacheNonUserContextLockTimeout`; read with `kubectl get` on 2026-11-01. So both Update
+  limits are the server's defaults: `history.maxInFlightUpdates` 10 and `history.maxTotalUpdates`
+  2000 per workflow execution
+  ([`common/dynamicconfig/constants.go` at v1.32.1](https://github.com/temporalio/temporal/blob/v1.32.1/common/dynamicconfig/constants.go),
+  `WorkflowExecutionMaxInFlightUpdates`, `WorkflowExecutionMaxTotalUpdates`). A turn's calls
+  therefore run as `ToolCall` workflows of their own, never as Updates on `AgentSession`.
 - **Worker Deployments.** The 1.24 worker supports `workerDeploymentOptions` with
   `useWorkerVersioning` and `defaultVersioningBehavior`
   (`worker-options.d.ts:54-70`, `642-654`).

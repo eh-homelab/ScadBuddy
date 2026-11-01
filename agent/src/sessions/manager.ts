@@ -17,7 +17,8 @@ import type { ProbeVerdict } from '../harness/credentialErrors.js'
 import type { CredentialSource } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { ApprovalPreparer, TierResolver } from '../harness/permissions.js'
-import type { SeamLedger } from '../harness/seamLedger.js'
+import type { ToolCallStarter } from '../tools/activityProjection.js'
+import type { CallApproval, SeamLedger } from '../harness/seamLedger.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../harness/run.js'
 import { type HttpLimits, type SavedMeta, savedBody } from '../harness/httpRequest.js'
@@ -640,8 +641,15 @@ export type SessionManagerDeps = {
       secrets?: () => readonly string[]
       /** The tier the seam applied to each of the turn's calls (#2171). */
       ledger?: Pick<SeamLedger, 'tierOf'>
+      /** The turn's calls as activities (plan 2026-10-13 Step 9.2): how each starts, and the entry it was approved on. */
+      activities?: { start: ToolCallStarter; approvalOf: (toolUseId: string) => CallApproval | undefined }
     },
   ) => Record<string, McpSdkServerConfigWithInstance>
+  /**
+   * How a turn's ScadBuddy call starts its ToolCall workflow (tools/activityProjection.ts), when
+   * `tools_as_activities` is on; undefined (no Temporal client yet, or none at all) runs them in-process.
+   */
+  toolCalls?: () => ToolCallStarter | undefined
   /**
    * What an outward call parks, for a registry tool that resolves its arguments (#4442,
    * tools/harness.ts `prepareApproval`): bound to the turn's principal, as `mcpServers` is.

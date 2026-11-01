@@ -220,7 +220,7 @@ export async function sessionWorkflow(id: string): Promise<{ type: string; taskQ
  * `manager()` calls it): DurableTurns and DurableGate on the dev server, and a TurnHost over its
  * warm cache. Its stop and abort reach the turns hosted for it too.
  */
-export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, 'sql' | 'settings'>): void {
+export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, 'sql' | 'settings' | 'approvalHashKey'>): void {
   const stack = active
   if (!stack) {
     turnless(m, deps.sql)
@@ -230,7 +230,8 @@ export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, '
     m,
     sql: deps.sql,
     settings: deps.settings,
-    audit: new AuditLog({ sql: deps.sql }),
+    // Keyed as the manager's approvals are, as main.ts keys both (approvalHashKey).
+    audit: new AuditLog({ sql: deps.sql, ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}) }),
     turnHost: new TurnHost({
       core: m.turnCore,
       sql: deps.sql,

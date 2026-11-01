@@ -115,6 +115,11 @@ export type ToolServices = {
   /** Where a session's calls that ran (succeeded or failed) are reported, for what it touched (sessions/touched.ts, #931). */
   touched?: TouchedSink | undefined
   /**
+   * What a session's finished ToolCall returned, by its tool_use id (`tool_call_result`,
+   * tools/activityProjection.ts `toolCallResult`); undefined when it has none. Absent without Temporal.
+   */
+  toolCallResults?: ((session: string, toolUseId: string) => Promise<CallToolResult | undefined>) | undefined
+  /**
    * Settings → Tools & plugins' overrides of these tools (#1953, plugins/builtInTools.ts):
    * a raised or lowered tier or a disabled tool, from `ai_access` (#2171), read at each call. Every tool runs at its
    * own tier without it.
@@ -251,6 +256,12 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   bambuddyScope?: readonly BambuddyScope[]
   /** → `readOnlyHint`, for batching only; never used for gating (spec §5.1). Defaults to `risk === 'read'`. */
   readOnly?: boolean
+  /**
+   * Its calls run in the turn's own process, never as a ToolCall activity (plan 2026-10-13 Step
+   * 9.2): the browser_* tools, whose tab is reached through BridgeCall (#4806) and whose call that
+   * finds none waits on the turn's gate.
+   */
+  inTurn?: boolean
   /** The backend operations this tool covers, for the openapi coverage check. */
   routes: readonly Operation[]
   /**
@@ -316,6 +327,8 @@ export type Tool = {
   readonly readOnly: boolean
   readonly routes: readonly Operation[]
   readonly gated: boolean
+  /** ToolSpec.inTurn. */
+  readonly inTurn: boolean
   readonly annotations: ToolAnnotations
   /** Where its content comes from (ToolSpec.source). */
   readonly source: string
@@ -363,6 +376,7 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
     readOnly,
     routes: spec.routes,
     gated,
+    inTurn: spec.inTurn === true,
     source: spec.source ?? DEFAULT_SOURCE,
     annotations: {
       title: spec.label,

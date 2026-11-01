@@ -26,6 +26,11 @@ async function listVia(server: McpServer) {
 }
 
 describe('registry projections', () => {
+  it('keep in the turn exactly the browser_* tools, whose tab only the turn reaches (plan 2026-10-13 Step 9.2)', () => {
+    expect(ALL_TOOLS.filter((t) => t.inTurn).map((t) => t.name)).toEqual(ALL_TOOLS.filter((t) => t.name.startsWith('browser_')).map((t) => t.name))
+    expect(ALL_TOOLS.filter((t) => t.inTurn).length).toBeGreaterThan(0)
+  })
+
   it('serve the same tools in-process (harness) and over /mcp', async () => {
     const svc = services()
     const harness = createHarnessServer(ALL_TOOLS, svc, { id: 'browser', kind: 'browser', tiers: tiersUpTo('outward') })

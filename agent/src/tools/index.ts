@@ -26,6 +26,7 @@ import { settingsTools } from './settings.js'
 import { sourceFileTools } from './sourceFiles.js'
 import { storeTools } from './store.js'
 import { templateTools } from './templates.js'
+import { toolCallTools } from './toolCalls.js'
 import { traySpoolTools } from './traySpools.js'
 import { workspaceTools } from './workspace.js'
 
@@ -62,6 +63,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...browserTools,
   ...approvalTools,
   ...sessionTools,
+  ...toolCallTools,
   ...flowTools,
   ...flowTriggerTools,
   ...orderTools,
