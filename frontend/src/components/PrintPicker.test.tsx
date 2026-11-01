@@ -1705,7 +1705,7 @@ describe('PrintPicker · Printer', () => {
 
     expect(await optionDisabled(user, screen.getByLabelText('Printer'), /^Garage/)).toBe(true)
     await user.click(screen.getByLabelText('Printer'))
-    expect(await screen.findByRole('option', { name: /^Garage/ })).toHaveTextContent('not in Bambuddy')
+    expect(await screen.findByRole('option', { name: /^Garage/ })).toHaveTextContent('not printable over the LAN yet')
     // A row neither Bambuddy nor the LAN reaches is not a printer to offer (#4340 review M3).
     expect(screen.queryByRole('option', { name: /^Attic/ })).toBeNull()
   })
