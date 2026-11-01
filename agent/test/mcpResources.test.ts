@@ -22,6 +22,9 @@ const MODELS = [
   { slug: 'keychain', name: 'Keychain', origin: 'mine', has_thumbnail: true, has_readme: false, updated_at: '2026-09-28T00:00:00Z' },
   { slug: 'builtin:gridfinity-bin', name: 'Gridfinity bin', origin: 'builtin', has_thumbnail: false, has_readme: true, updated_at: '2026-09-28T00:00:00Z' },
 ]
+const PRINTER = '7d3c1e2a-1111-4222-8333-944455556666'
+const ARCHIVES = Array.from({ length: 250 }, (_, i) => ({ id: 1000 - i, status: 'completed' }))
+const archiveReads: string[] = []
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
 
 const backend = setupServer(
@@ -41,6 +44,18 @@ const backend = setupServer(
       { commit: 'fff0000aaa', short: 'fff0000', author: 'a', date: '2026-09-27T00:00:00Z', message: 'n' },
     ]),
   ),
+  http.get(`${BACKEND}/api/v1/printers`, () =>
+    HttpResponse.json([
+      { id: PRINTER, serial: 'SECRET-SERIAL', name: 'X1C', model: 'X1C', has_access_code: true, preferred_path: 'auto' },
+    ]),
+  ),
+  http.get(`${BACKEND}/api/v1/farm/archives`, ({ request }) => {
+    const { searchParams } = new URL(request.url)
+    archiveReads.push(searchParams.toString())
+    const limit = Number(searchParams.get('limit'))
+    const offset = Number(searchParams.get('offset'))
+    return HttpResponse.json(ARCHIVES.slice(offset, offset + limit))
+  }),
   http.get(`${BACKEND}/api/v1/settings`, () =>
     HttpResponse.json({ bambuddy_url: 'https://bambuddy.lan', has_api_key: true, api_key: 'leak-me-not' }),
   ),
@@ -299,6 +314,40 @@ describe('/mcp resources (#264)', () => {
     // DELETE /mcp ends the session (the idle sweep would too).
     await (client.transport as unknown as { terminateSession(): Promise<void> }).terminateSession()
     await until(() => hub.sessions === 0, 'the session to detach')
+  })
+
+  it('reads the newest page of the print history, never every archive (#4973)', async () => {
+    archiveReads.length = 0
+    const { client } = await setup()
+    const { contents } = await client.readResource({ uri: 'scadbuddy://print/history' })
+    const body = JSON.parse(unwrapUntrusted((contents[0] as { text: string }).text)) as {
+      items: { id: number }[]
+      next_cursor: string | null
+    }
+    expect(body.items).toHaveLength(100)
+    expect(body.items[0]).toMatchObject({ id: 1000 })
+    expect(typeof body.next_cursor).toBe('string')
+    expect(archiveReads).toHaveLength(1)
+  })
+
+  it('notifies printers subscriptions when a printer reports or its row changes (#4973)', async () => {
+    const { client, bus, updated } = await setup()
+    await client.subscribeResource({ uri: 'scadbuddy://printers' })
+    await client.subscribeResource({ uri: `scadbuddy://printers/${PRINTER}` })
+    bus.emit({ id: 'e1', kind: 'printer.report', printer_id: PRINTER })
+    await until(() => updated.includes('scadbuddy://printers'), 'the printers update')
+    expect(updated).not.toContain(`scadbuddy://printers/${PRINTER}`)
+    bus.emit({ id: 'e2', kind: 'printer.changed', printer_id: PRINTER })
+    await until(() => updated.includes(`scadbuddy://printers/${PRINTER}`), 'the printer update')
+  })
+
+  it('completes registry printer ids (#4973)', async () => {
+    const { client } = await setup()
+    const ids = await client.complete({
+      ref: { type: 'ref/resource', uri: 'scadbuddy://printers/{printer}' },
+      argument: { name: 'printer', value: '7d' },
+    })
+    expect(ids.completion.values).toEqual([PRINTER])
   })
 
   it('completes template arguments: slugs, and commits for a slug', async () => {

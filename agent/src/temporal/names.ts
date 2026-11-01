@@ -4,6 +4,9 @@
 /** The agent service's task queue: every tool as an activity, and the agent's commands. */
 export const TASK_QUEUE = 'agent-tools'
 
+/** The activity type a turn tool's call runs as: `turn:<server>__<tool>` (turnTools.ts). */
+export const TURN_TOOL_PREFIX = 'turn:'
+
 /** The agent's command workflow (§4.2), its first Update, and its record activities. */
 export const AGENT_OPERATION_WORKFLOW = 'AgentOperation'
 export const ACCEPTED_UPDATE = 'accepted'

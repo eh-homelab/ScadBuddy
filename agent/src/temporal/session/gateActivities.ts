@@ -11,7 +11,7 @@ import {
   MAX_QUESTION_EXPIRY_SECONDS,
   MIN_QUESTION_EXPIRY_SECONDS,
   SETTING_QUESTION_EXPIRY_SECONDS,
-} from '../../questions/service.js'
+} from '../../gate/questions.js'
 import type { GateSettings } from './gate.js'
 import { SESSION_GATE_ACTIVITIES } from './names.js'
 
@@ -20,7 +20,7 @@ import { SESSION_GATE_ACTIVITIES } from './names.js'
 // SessionGateOptions.taskQueue); and `gate.settings`, the entries' timers, which AgentSession
 // reads as each turn starts. Arguments are camelCase, as store.ts's types are.
 
-/** A timer setting as the classic services clamp it (approvals/service.ts, questions/service.ts); the default when unset or not a number. */
+/** A timer setting as the classic services clamp it (approvals/service.ts, gate/questions.ts); the default when unset or not a number. */
 function seconds(value: unknown, fallback: number, min: number, max: number): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
   return Math.min(Math.max(Math.round(value), min), max)

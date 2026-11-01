@@ -373,8 +373,8 @@ sequenceDiagram
   key (`PgPayloadKeys` reads it from the row each time), so no copy outlives the row in
   memory. A key that a cancelled call left is deleted by the hourly sweep
   (`sweepBridgeKeys`, older than an hour). Without
-  the KEK no call goes through Temporal: it is refused, or (for one release) takes the
-  Postgres relay below.
+  the KEK no call goes through Temporal: it is refused (`no_browser`, naming
+  `SCADBUDDY_SECRET_KEY_FILE`), and is never sent another way.
 - **Inline, capped:** a bridge payload is never kept in the payload store (only a
   session's are), so nothing is left on the data share. The request and the answer are
   each capped at 256 KiB of JSON (`MAX_BRIDGE_BYTES`), past a tab's own 200 000 bytes and
@@ -386,8 +386,7 @@ sequenceDiagram
   deleted only if nobody claimed or refreshed it after the call read it, so a live owner
   that was only slow keeps its row, or makes it again at its next refresh.
 - **A failed call answers, never throws:** if the owner's row cannot be read or Temporal
-  refuses the start, the call ran nowhere, so it takes the old relay while that exists,
-  or answers `no_answer`. Once the workflow has started, a failure or a timeout answers
+  refuses the start, the call ran nowhere, and it answers `no_answer`. Once the workflow has started, a failure or a timeout answers
   `no_answer` and is never sent again: the owner may have run it, and a click must not
   run twice. If the owner's run throws, the workflow completes with a `no_answer`
   outcome.
@@ -395,13 +394,14 @@ sequenceDiagram
   `no_answer`, as for a local call; the caller gives up on that replica after the timeout
   plus 3 s (the activity's start-to-close). `browser_status` asks the same way for the
   tab's route and live tools.
-- **During the rollout of #4780 (one release, #4868):** the Postgres relay of #1916
-  ([`bridge/pgRelay.ts`](../../agent/src/bridge/pgRelay.ts): rows in
-  `ai_bridge_messages`, NOTIFY `scadbuddy_bridge`, every replica hears every call) still
-  runs beside it. A replica on the new build answers its requests for the tabs it holds,
-  and tries it for a call the Temporal path cannot place: no row (the tab is on a replica
-  still on the old build), an owner that is gone or no longer holds the tab, or no KEK.
-  #4868 removes it and drops the table.
+- **The Postgres relay is gone (#4868):** the relay of #1916 (rows in
+  `ai_bridge_messages`, NOTIFY `scadbuddy_bridge`) ran beside this path for one release
+  of #4780. No replica of this build sends or answers it. While a replica of the build before
+  #4868 still runs, a call it sends that way finds nobody to take it and answers "not
+  connected" after 3 s; the tabs of both builds have `ai_tab_owners` rows, so that is
+  only a tab that no replica holds. The table stays for one more release,
+  because a replica of the build before #4868 still writes it for a tab it finds no live
+  owner for; #5109 drops it.
 - **Not covered:** a cancelled call cancels its workflow, but is not withdrawn from the
   tab, as with a local call. Without a database there is no relay, and only tabs on the
   same process can be reached.
@@ -437,8 +437,9 @@ reaches an agent.
   with `catalog.ts`, tiers, forwarding, "no browser attached", the timeout, a dropped
   or replaced tab, the harness and `/mcp` projections, `tab.bind`, and pairing by code).
   The Postgres store: [`bridgePairings.pg.test.ts`](../../agent/test/bridgePairings.pg.test.ts).
-  Two replicas on one database:
-  [`bridgeRelay.pg.test.ts`](../../agent/test/bridgeRelay.pg.test.ts).
+  Two replicas through Temporal:
+  [`bridgeRelay.temporal.test.ts`](../../agent/test/bridgeRelay.temporal.test.ts), and the
+  relay alone: [`bridgeRelay.test.ts`](../../agent/test/bridgeRelay.test.ts).
 - The round trip in Node:
   [`agent/test/bridge.e2e.test.ts`](../../agent/test/bridge.e2e.test.ts) runs the tab's
   own `bridge.ts` and `link.ts` over a real socket against the agent's real server: an

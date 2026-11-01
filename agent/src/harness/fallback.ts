@@ -23,8 +23,9 @@ import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness 
 
 // Several Claude credentials, in priority order, with fallback (#1093).
 //
-// Each credential is a separate Claude Code process env (run.ts
-// `credentialEnv`), so fallback is per query(): `runWithFallback` runs the
+// Each credential is a separate Claude Code process, with a gateway token of its
+// own that maps to that credential alone (run.ts `credentialEnv`,
+// gateway/server.ts), so fallback is per query(): `runWithFallback` runs the
 // turn on the first usable credential and, when it fails for a reason that
 // is the credential's (credentialErrors.ts `classifyFailure`), runs it again
 // on the next. Each credential is tried at most once per turn, which is the

@@ -1,7 +1,7 @@
 import type { Client } from '@temporalio/client'
-import { WorkflowNotFoundError } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import { backgroundWorkflowId } from '../background/service.js'
+import { terminateOpenToolCalls, workflowNotFound as notFound } from '../tools/activityProjection.js'
 import { type PayloadKeys, payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
 import { copyForkRanges, ForksNeedKeys, hasForks } from './store.js'
 import { notifyWarmEvict } from './warmEvict.js'
@@ -10,6 +10,8 @@ import { notifyWarmEvict } from './warmEvict.js'
 // deletion of a durable session or a flow run goes through. In this order:
 //   0. a session's background tasks (src/background/) end: their rows, then their
 //      workflows `bgtask-<session>-<id>`, terminated, so none encodes again under the key;
+//      and its tool calls still open (`session-<id>-call-<tool_use_id>`, plan 2026-10-13
+//      Step 9.2: every `tool.call` in its events with no `tool.result`) are terminated too;
 //   1. a session's forks that read its transcript through it (store.ts, plan 2026-10-13
 //      Step 6.5) take the range each references, sealed under their own keys, in the
 //      transaction that then goes on to
@@ -22,7 +24,8 @@ import { notifyWarmEvict } from './warmEvict.js'
 //      Its large payloads, files on the data share (#2243), are ciphertext under that
 //      key, so they are unreadable from here on too; step 3 removes them;
 //   2. terminate the workflow if it is open, then DeleteWorkflowExecution;
-//   3. remove its stored payloads' directory (when this process has the share), and
+//   3. remove its stored payloads' directory (when this process has the share) and a session's
+//      working directory on this pod, and
 //      delete our rows, as a session's deletion always did: `ai_sessions`, whose
 //      cascade takes its events, `ai_pending_input`, `ai_input_responses`, blobs,
 //      resources, approvals and questions, and `ai_session_entries`, which is not keyed
@@ -45,17 +48,17 @@ export type ForgetDeps = {
   payloads?: { forget(subject: string): Promise<void> } | undefined
   /** Its saved http bodies on this pod (turnServers.ts `removeTurnDir`); other pods' go to their sweep. */
   turnDirs?: ((subject: string) => Promise<void>) | undefined
+  /**
+   * A session's working directory (workspace/directory.ts `removeSessionDir`), its workspace's
+   * plaintext copy, on this pod; another worker's copy goes with its sweep once the row is gone.
+   */
+  sessionDirs?: ((sessionId: string) => Promise<void>) | undefined
 }
 
 export type Forgotten = {
   key: boolean
   workflow: 'deleted' | 'not_found' | 'not_reached'
   rows: number
-}
-
-/** A gRPC NOT_FOUND from the workflow service. */
-function notFound(err: unknown): boolean {
-  return err instanceof WorkflowNotFoundError || (err as { code?: unknown } | null)?.code === 5
 }
 
 async function endBackgroundTasks(deps: ForgetDeps, sessionId: string): Promise<void> {
@@ -78,6 +81,7 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   if (sessionId !== undefined && !deps.keys && (await hasForks(deps.sql, sessionId))) throw new ForksNeedKeys(sessionId)
   deps.keys?.forget(subject)
   if (sessionId !== undefined) await endBackgroundTasks(deps, sessionId)
+  if (sessionId !== undefined && deps.client) await terminateOpenToolCalls({ sql: deps.sql, client: deps.client }, sessionId, 'forgotten (forgetSubject)')
   // The tombstone with the deletion: no encoder still running for the subject (a
   // workflow task or an activity before the termination below) can make it a new key.
   const keys = await deps.sql.begin(async (tx) => {
@@ -114,6 +118,7 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   }
   await deps.payloads?.forget(subject)
   await deps.turnDirs?.(subject)
+  if (sessionId !== undefined) await deps.sessionDirs?.(sessionId)
   let rows = 0
   if (subject.startsWith('session-')) {
     const id = subject.slice('session-'.length)

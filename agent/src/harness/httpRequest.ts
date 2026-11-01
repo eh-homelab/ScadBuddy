@@ -37,8 +37,8 @@ import type { RiskTier, TierResolver } from './permissions.js'
 //   - Headers are ONLY what the model passed. Nothing from the agent's
 //     environment is added (no proxy variables, no user agent, no cookies):
 //     the request is built from the tool input alone, and Claude Code's
-//     environment, which holds the Claude credential (run.ts credentialEnv),
-//     never reaches this process's request code.
+//     environment, which holds its credential gateway token (run.ts
+//     credentialEnv), never reaches this process's request code.
 //   - The connection-level headers Node sets itself are refused.
 //   - No request carries the turn's secrets (the Claude credential and the
 //     plugins' header tokens, the same list the event log is redacted of): a

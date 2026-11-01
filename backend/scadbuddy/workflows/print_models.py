@@ -176,6 +176,9 @@ class SlicedUploadInput(BaseModel):
     planned: PlannedRun
     plate_id: int
     sliced: NativeSliced
+    #: The run's subject, which marks the sliced file (#4337); ``None`` in a history
+    #: from before it, and the copy's own mark is read instead.
+    subject: str | None = None
 
 
 class EnqueueInput(BaseModel):
@@ -284,6 +287,9 @@ class LanUploaded(BaseModel):
     #: The plate's rack plan, read from the 3MF (hot-path Task 8); ``None`` for a
     #: printer with no rack, or a plan that cannot be read (no ``nozzle_mapping``).
     rack: SlicedRack | None = None
+    #: The run it was uploaded for (#4543), from ``lan_upload``'s input: ``lan_print``
+    #: keys the rack pick it sends by it. ``None`` in a history from before it.
+    run_id: str | None = None
 
 
 class LanPrintInput(BaseModel):

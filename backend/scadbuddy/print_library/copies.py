@@ -13,9 +13,11 @@ Reuse is by (subject, folder, `Target.key`) only: none of Bambuddy's project rul
 is reused while its row is live and still in the folder: a native id is never handed to
 another file (an identity column, LIB Ruling 1) and a file's bytes are never rewritten
 in place (`NativeLibraryStore` has no update of ``sha256``), so the row is the check
-Bambuddy's ``file_hash`` comparison is there. Nothing here deletes: a superseded copy
-stays until the library's own rules remove it (none yet; the copy's lifetime is a
-follow-up, plan Task 14).
+Bambuddy's ``file_hash`` comparison is there. Nothing here deletes: the copy carries
+its run's subject (``print_subject``), and its lifetime is the housekeeping sweep's
+(`sweep.sweep_print_copies`, #4337): a superseded copy, and one nothing records once its
+output or model is gone, go to the trash there. A copy a person moved is theirs
+(`release_moved`).
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import io
 import logging
 from datetime import UTC, datetime
 
+import psycopg
 from fastapi import status
 
 from scadbuddy.bambuddy.models import LibraryFile
@@ -59,7 +62,8 @@ async def left_unrecorded(
     (`send._left_unrecorded`'s rule, #1145, on the native library). Only a per-print file
     (`NativeCopies.per_print_files`: no output named, not filed) is a candidate, never the
     output's filed copy or a person's copy of it, which can share the name and the bytes
-    (#4312 review M2). Named ``filename``,
+    (#4312 review M2), and only one a run marked (``print_subject``, #4337, case 5), never
+    a person's own upload. Named ``filename``,
     of ``size`` bytes hashing to ``digest`` (a sha256), that no subject records as a
     copy or a slice, and not ``besides`` (the file the upload is made from). Only one
     created since ``since``, when the run's first attempt was scheduled (#4312 re-review
@@ -122,6 +126,16 @@ async def _still_there(
     return True
 
 
+async def _touch(uploads: BambuddyUploadStore, key: str, copy_id: int) -> None:
+    """The copy this subject used last is the one its folder keeps (#4337). Best
+    effort: the print goes on without it, and the sweep then judges by the upload's time
+    (a print worker that starts before the API has migrated has no ``used_at`` yet)."""
+    try:
+        await uploads.touch(key, copy_id)
+    except psycopg.Error:
+        logger.warning("could not record a native copy's reuse", extra={"library_file_id": copy_id})
+
+
 async def ensure_native_copy(
     native: NativeCopies,
     uploads: BambuddyUploadStore,
@@ -146,6 +160,7 @@ async def ensure_native_copy(
             if copy.folder_id != folder_id or copy.target_key != target_key:
                 continue
             if await _still_there(native, uploads, printable.key, copy):
+                await _touch(uploads, printable.key, copy.id)
                 return copy.id
         with span("upload.fetch", attributes={"scadbuddy.subject": printable.key}):
             fetched = await printable.fetch()
@@ -165,7 +180,14 @@ async def ensure_native_copy(
         uploaded = (
             earlier.id
             if earlier is not None
-            else (await native.upload(printable.inbox_name, io.BytesIO(payload), folder_id)).id
+            else (
+                await native.upload(
+                    printable.inbox_name,
+                    io.BytesIO(payload),
+                    folder_id,
+                    print_subject=printable.key,
+                )
+            ).id
         )
         await uploads.record(
             printable.key, LibraryCopy(id=uploaded, folder_id=folder_id, target_key=target_key)
@@ -227,9 +249,25 @@ async def trash_copies(
         if row is None:
             continue
         if row.folder_id != copy.folder_id:
-            await uploads.forget_files([copy.id])
+            await release_moved(native, uploads, [copy.id])
             continue
         ids.append(copy.id)
         if not keep_slices:
             ids.extend(s.id for s in copy.sliced)
     return [f.id for f in await native.trash(ids)] if ids else []
+
+
+async def release_moved(
+    native: NativeLibrary, uploads: BambuddyUploadStore, ids: list[int]
+) -> None:
+    """Files a person moved are theirs (#4337, case 4; #4312 re-review I-a), as Bambuddy's
+    inbox copy once moved is (`send` `forget_files`, #2670): a per-print copy among them
+    with the slices recorded on it, which stay where they were. No sweep trashes them, no
+    run reuses or supersedes them: their marks are cleared, with their slices', then their
+    records forgotten, which a slice's mark is found by. A move clears a moved file's own
+    mark (`NativeLibraryStore.update_file`); this also clears its slices'."""
+    if not ids:
+        return
+    slices = await uploads.slices_on(ids)
+    await asyncio.to_thread(native.rows.release, [*ids, *slices])
+    await uploads.forget_files(ids)

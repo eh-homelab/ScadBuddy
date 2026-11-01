@@ -195,6 +195,16 @@ describe('extractors', () => {
     ])
   })
 
+  it('records a withdrawn render as its job modified (#4968), and a running one still answered', () => {
+    expect(touches('withdraw_render', { job_id: 'j1' }, { job_id: 'j1', status: 'cancelled' })).toEqual([
+      { type: 'render_job', id: 'j1', action: 'modified', model: null },
+    ])
+    // Still running for another claimant: the call took this caller's claim all the same.
+    expect(touches('withdraw_render', { job_id: 'j1' }, { job_id: 'j1', status: 'running' })).toEqual([
+      { type: 'render_job', id: 'j1', action: 'modified', model: null },
+    ])
+  })
+
   it('records a render, and the output it saved', () => {
     const job = { job_id: 'j1', status: 'done', model_version: C1 }
     expect(touches('render_model', { slug: 'box', params: {} }, job)).toEqual([
@@ -308,6 +318,9 @@ describe('extractors', () => {
     ])
     expect(touches('remember_printer_bed_type', { printer_id: 2, bed_type: 'pei' }, {})).toEqual([
       { type: 'setting', id: 'bed_type:2', action: 'modified' },
+    ])
+    expect(touches('remember_printer_rack_algorithm', { printer_id: 2, algorithm: 'newest_first' }, {})).toEqual([
+      { type: 'setting', id: 'rack_algorithm:2', action: 'modified' },
     ])
   })
 
@@ -528,6 +541,13 @@ describe('extractors', () => {
     expect(touches('rename_library_file', { file_id: 1, filename: 'b.3mf' }, renamed, 'outward')).toEqual([
       { type: 'bambuddy_file', id: '1', action: 'modified' },
     ])
+  })
+
+  it('records no resource for an analyzer decision (#4966)', () => {
+    const decision = { id: 'd'.repeat(32), kind: 'accept', scope: { kind: 'print', key: 'o' } }
+    expect(touches('apply_analyzer_fix', { output_id: 'o' }, decision)).toEqual([])
+    expect(touches('record_analyzer_decision', { diagnostic_id: 'SB2001' }, decision)).toEqual([])
+    expect(touches('remove_analyzer_decision', { decision_id: 'd'.repeat(32) }, { removed: 'd'.repeat(32) })).toEqual([])
   })
 
   it('leaves only the browser click and fill unclassified', () => {

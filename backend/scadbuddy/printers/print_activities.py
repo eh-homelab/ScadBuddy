@@ -27,7 +27,10 @@ the sliced 3MF, and ``lan_print`` ranks the rack in the report it reads as it st
 (`printers.nozzle_mapping`). The pick runs inside ``lan_print``, so a hotend's serial
 never enters the history; whatever it cannot resolve sends no field, and the firmware
 picks. What the pick says, or why the firmware picks, rides on `LanStarted.warnings` to
-the run's warnings (#4545).
+the run's warnings (#4545). The picks sent are saved under the run and the start's
+``subtask_name`` (#4543), since a LAN start has no queue item, so Least used sees them
+open; ``lan_wait`` settles each copy's as the printer ends it, and the follow the last
+(`rack.usage.lan_settle_hook`).
 """
 
 from __future__ import annotations
@@ -75,7 +78,14 @@ from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.status import print_error_text, status_from_report
 from scadbuddy.printers.store import KekMissingError, NoAccessCodeError, PrinterStore
 from scadbuddy.rack.rank import rack_serials
-from scadbuddy.rack.usage import RackUsage, record_seen
+from scadbuddy.rack.usage import (
+    LanRackUsage,
+    PickedHotend,
+    group_spools,
+    record_seen,
+    save_lan_picks,
+    settle_lan_print,
+)
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
 from scadbuddy.workflows.print_activities import heartbeating, raised_as
 from scadbuddy.workflows.print_models import (
@@ -178,7 +188,8 @@ class LanDeps:
     connect: Connect = LanPrinter
     start_wait: float = LAN_START_WAIT
     #: Rack hotend usage (#836): ranks a rack print's pick (hot-path Task 8).
-    rack: RackUsage | None = None
+    #: Its picks are saved and settled there too (#4543).
+    rack: LanRackUsage | None = None
     #: The printers' latest reports, which ``lan_wait`` polls (#4541).
     reports: PrinterReportStore | None = None
     #: Seconds between ``lan_wait``'s reads of the report.
@@ -265,7 +276,12 @@ class LanActivities:
             except CertificateMismatchError as error:
                 raise _failed(str(error), status_code=status.HTTP_409_CONFLICT) from None
         return LanUploaded(
-            remote_name=input.remote_name, md5=md5, bytes=size, filament_count=count, rack=rack
+            remote_name=input.remote_name,
+            md5=md5,
+            bytes=size,
+            filament_count=count,
+            rack=rack,
+            run_id=input.run_id,
         )
 
     @activity.defn(name=LAN_PRINT_ACTIVITY)
@@ -298,7 +314,11 @@ class LanActivities:
                     raise self._print_error(row, code)
                 raise _failed(f"{row.name} reports this print stopped.")
             if state in TAKEN_STATES:
-                return LanStarted(subtask_name=input.subtask_name, started_at=first.received_at)
+                # Its pick was saved by the attempt that sent it.
+                return self._named(
+                    LanStarted(subtask_name=input.subtask_name, started_at=first.received_at),
+                    input,
+                )
             if state == "FINISH":
                 # Either the printer names it over the last job's FINISH and never moved
                 # (#4935), or it printed and ended while the earlier attempt was unsure:
@@ -311,9 +331,37 @@ class LanActivities:
                     " its bed, then print again if it did not.",
                     status_code=status.HTTP_409_CONFLICT,
                 )
-        command, warnings = await self._command(row, printer, input)
-        started = await self._taken(row, lan, input, command, error_before)
-        return started.model_copy(update={"warnings": warnings})
+        command, warnings, picks = await self._command(row, printer, input)
+        try:
+            started = await self._taken(row, lan, input, command, error_before)
+        except ApplicationError as error:
+            if error.type == LAN_UNSURE:
+                # The printer may have taken it: its pick counts until it settles or
+                # ages out, and the start sent again, if it was not, replaces it.
+                await self._save_picks(row, input, picks)
+            raise
+        await self._save_picks(row, input, picks)
+        return self._named(started.model_copy(update={"warnings": warnings}), input)
+
+    @staticmethod
+    def _named(started: LanStarted, input: LanPrintInput) -> LanStarted:
+        """``started`` with its run and plate (#4543, #4644), which the run's record,
+        its last print and ``lan_wait``'s settle of the rack picks read."""
+        return started.model_copy(
+            update={"run_id": input.uploaded.run_id, "plate_id": input.plate_id}
+        )
+
+    async def _save_picks(
+        self, row: PrinterRow, input: LanPrintInput, picks: list[PickedHotend]
+    ) -> None:
+        """The rack picks sent with the start (#4543), under its run and its
+        ``subtask_name``: a LAN start has no queue item. Advisory, never raising."""
+        run_id = input.uploaded.run_id
+        if run_id is None or not picks:
+            return
+        await save_lan_picks(
+            self.d.rack, run_id, input.subtask_name, row.bambuddy_printer_id, picks
+        )
 
     async def _taken(
         self,
@@ -362,19 +410,29 @@ class LanActivities:
             seen = seen or shows(report, input.started)
             ended = lan_ended(report, input.started, seen=seen)
             if ended is not None:
+                if ended.run_id is not None:
+                    # The copy's rack picks (#4543), as the printer ends it: the next copy
+                    # is picked with its wear counted. Timed when the report said so.
+                    await settle_lan_print(
+                        self.d.rack,
+                        ended.run_id,
+                        ended.subtask_name,
+                        timed=ended.ended != "unknown",
+                    )
                 return ended
             activity.heartbeat(seen)
             await asyncio.sleep(self.d.wait_poll)
 
     async def _nozzle_mapping(
         self, row: PrinterRow, printer: PrinterStatus, input: LanPrintInput
-    ) -> tuple[list[int] | None, list[FilamentWarning]]:
+    ) -> tuple[list[int] | None, list[FilamentWarning], list[PickedHotend]]:
         """The rack pick from the report's status, as the wire (``None`` sends no field),
-        and what the run says about it (#4545). It never raises: on any failure it logs
-        the type, and the firmware picks."""
+        what the run says about it (#4545), and the picks sent with their spools (#4543;
+        none when no field is sent). It never raises: on any failure it logs the type,
+        and the firmware picks."""
         plan = input.uploaded.rack
         if plan is None or not plan.on_rack:
-            return None, []
+            return None, [], []
         try:
             usage = {}
             if self.d.rack is not None and input.rack_algorithm != "bambuddy":
@@ -394,36 +452,54 @@ class LanActivities:
                 usage=usage,
                 spools=input.spools,
             )
+            # Only the picks behind a sent wire print: `choose_nozzles` names none else.
+            picks = [
+                PickedHotend(
+                    group_id=pick.group_id,
+                    position=pick.position,
+                    serial=pick.serial,
+                    spools=group_spools(plan.filaments, input.spools, pick.group_id),
+                )
+                for pick in chosen.picks
+            ]
         except Exception as exc:
             # Never str(exc): an error's text can carry a serial (spec 2026-10-01 §7).
             logger.warning(
                 "nozzle_mapping not sent: the rack pick failed",
                 extra={"printer": row.id, "error": type(exc).__name__},
             )
-            return None, [_left_to_printer("the rack pick failed.")]
+            return None, [_left_to_printer("the rack pick failed.")], []
         for warning in chosen.warnings:
             logger.info("rack pick: %s", warning.kind, extra={"printer": row.id})
         if chosen.mapping is not None:
-            return chosen.mapping, chosen.warnings
+            return chosen.mapping, chosen.warnings, picks
         if chosen.declined:
             logger.info(
                 "nozzle_mapping not sent: the rack algorithm leaves the hotends to the printer",
                 extra={"printer": row.id},
             )
-            return None, [
-                *chosen.warnings,
-                _left_to_printer("Let Bambuddy pick sends no hotends over the LAN."),
-            ]
+            return (
+                None,
+                [
+                    *chosen.warnings,
+                    _left_to_printer("Let Bambuddy pick sends no hotends over the LAN."),
+                ],
+                [],
+            )
         logger.warning(
             "nozzle_mapping not sent: the rack pick placed not every rack group",
             extra={"printer": row.id},
         )
         # Nothing is sent, so what the pick said about its positions is not what prints.
-        return None, [_left_to_printer("ScadBuddy could not pick a hotend for every rack group.")]
+        return (
+            None,
+            [_left_to_printer("ScadBuddy could not pick a hotend for every rack group.")],
+            [],
+        )
 
     async def _command(
         self, row: PrinterRow, printer: PrinterStatus, input: LanPrintInput
-    ) -> tuple[dict[str, Any], list[FilamentWarning]]:
+    ) -> tuple[dict[str, Any], list[FilamentWarning], list[PickedHotend]]:
         # At least the largest slot chosen (`ams_mapping`'s rule for the count).
         count = max([input.uploaded.filament_count, *(c.slot_id for c in input.plan.slots)])
         try:
@@ -438,7 +514,7 @@ class LanActivities:
                 f"The filaments chosen do not map to {row.name}'s trays: {error}.",
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             ) from None
-        nozzle_mapping, warnings = await self._nozzle_mapping(row, printer, input)
+        nozzle_mapping, warnings, picks = await self._nozzle_mapping(row, printer, input)
         file = ProjectFile(
             url=file_url(input.uploaded.remote_name),
             param=f"Metadata/plate_{input.plate_id}.gcode",
@@ -451,7 +527,7 @@ class LanActivities:
             md5=input.uploaded.md5,
             nozzle_mapping=nozzle_mapping,
         )
-        return project_file_command(file, str(secrets.randbelow(10**9))), warnings
+        return project_file_command(file, str(secrets.randbelow(10**9))), warnings, picks
 
     def _started(
         self, row: PrinterRow, report: LanReport, input: LanPrintInput, error_before: int

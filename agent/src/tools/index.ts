@@ -1,4 +1,5 @@
 import { activityTools } from './activity.js'
+import { analyzerTools } from './analyzers.js'
 import { approvalTools } from './approvals.js'
 import { arrangeTools } from './arrange.js'
 import { authoringTools } from './authoring.js'
@@ -15,6 +16,7 @@ import { historyTools } from './history.js'
 import { inspectTools } from './inspect.js'
 import { libraryTools } from './libraries.js'
 import { meshModelTools } from './meshModels.js'
+import { nativeSpoolTools } from './nativeSpools.js'
 import { orderTools } from './orders.js'
 import { outputTools } from './outputs.js'
 import { printTools } from './print.js'
@@ -26,6 +28,7 @@ import { settingsTools } from './settings.js'
 import { sourceFileTools } from './sourceFiles.js'
 import { storeTools } from './store.js'
 import { templateTools } from './templates.js'
+import { toolCallTools } from './toolCalls.js'
 import { traySpoolTools } from './traySpools.js'
 import { workspaceTools } from './workspace.js'
 
@@ -57,11 +60,14 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...printHistoryTools,
   ...printMediaTools,
   ...farmTools,
+  ...analyzerTools,
   ...traySpoolTools,
+  ...nativeSpoolTools,
   ...printerTools,
   ...browserTools,
   ...approvalTools,
   ...sessionTools,
+  ...toolCallTools,
   ...flowTools,
   ...flowTriggerTools,
   ...orderTools,

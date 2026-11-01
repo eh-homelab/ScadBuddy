@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import psycopg
 from fastapi import status
 from fastapi.encoders import jsonable_encoder
 from temporalio import activity
@@ -67,7 +68,7 @@ from scadbuddy.bambuddy.subject import PrintSubject, library_slug
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DestinationKind
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.output_prints import OutputPrintStore
-from scadbuddy.library.outputs import PlateSend
+from scadbuddy.library.outputs import LanPlateSend, PlateSend
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.print_library.copies import NATIVE_PROJECT_REFUSAL
 from scadbuddy.print_library.ids import is_native_id
@@ -173,6 +174,21 @@ class PrintDeps:
     #: The spool providers' records (plan 2026-10-18 D1): a native run's plan lays them
     #: over its trays as the dialog does (#4551). ``None`` plans on the trays alone.
     spools: Spools | None = None
+
+
+def lan_plates(result: PrintRunResult) -> list[LanPlateSend]:
+    """A LAN run's plates in order, each with the copies it started or will start
+    (#4644): its starts, and its waiting copies unless the run stopped them.
+
+    A start's ``plate_id`` is ``None`` only in a run whose ``lan_print`` ran on a build
+    before it named the plate, through `PrintRunWorkflow._print`'s one plate of one
+    copy (`_print_lan` names it itself): read as plate 1, a one-plate output's plate."""
+    started = [start.plate_id or 1 for start in result.lan]
+    waiting = result.lan_waiting if result.lan_stopped is None else []
+    counts: dict[int, int] = {}
+    for plate_id in [*started, *waiting]:
+        counts[plate_id] = counts.get(plate_id, 0) + 1
+    return [LanPlateSend(plate_id=plate_id, copies=copies) for plate_id, copies in counts.items()]
 
 
 def plate_clear_of(planned: PlannedRun, settings: SettingsStore) -> PlannedRun:
@@ -672,6 +688,8 @@ class PrintActivities:
         print followed (an output's)."""
         spec = input.input.source
         run = await self.d.store.succeed(input.run_id, input.input.slug, input.result)
+        if spec.kind == "output" and spec.output_id is not None and input.result.lan:
+            await self._record_lan(spec.output_id, run, input.result)
         if spec.kind == "output" and spec.output_id is not None:
             # Best effort: the run is recorded, and a retry would not change it. An
             # output deleted while it printed has nothing left to follow.
@@ -687,11 +705,37 @@ class PrintActivities:
             self.d.observer.started_subject(subject.run_subject, library_slug(subject))
         return run
 
+    async def _record_lan(self, output_id: str, run: PrintRun, result: PrintRunResult) -> None:
+        """The output's last print, when the run started it over the LAN (#4644): no
+        queue item exists for ``print_record`` to record, so the run, its printer and
+        each plate it started or waits to start, with the run's copies, are. Best effort,
+        as ``print_record``'s sends: the plate is printing, and the progress route and
+        the follow read the run itself."""
+        if self.d.prints is None:
+            return
+        try:
+            await asyncio.to_thread(
+                self.d.prints.record_lan,
+                output_id,
+                run_id=run.id,
+                printer=run.printer,
+                plates=lan_plates(result),
+            )
+        except psycopg.Error as exc:
+            logger.warning(
+                "could not record the last print of run %s: %s", run.id, type(exc).__name__
+            )
+
     @activity.defn(name=PRINT_LAN_UPDATE_ACTIVITY)
     async def lan_update(self, input: LanUpdateInput) -> PrintRun:
         """A succeeded LAN run's result as its later starts are made (#4541): retried
-        without limit, as ``print_succeed`` is, since the plates it names are printing."""
-        return await self.d.store.update_result(input.run_id, input.slug, input.result)
+        without limit, as ``print_succeed`` is, since the plates it names are printing.
+        The output's last print follows it (#4644): a stop drops the copies never started."""
+        run = await self.d.store.update_result(input.run_id, input.slug, input.result)
+        subject = PrintSubject.parse(run.subject)
+        if subject.kind == "output" and input.result.lan:
+            await self._record_lan(subject.id, run, input.result)
+        return run
 
     @activity.defn(name="print_fail")
     async def fail(self, input: FailInput) -> PrintRun:

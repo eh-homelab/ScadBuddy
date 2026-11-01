@@ -1,7 +1,7 @@
 import type { Sql } from 'postgres'
 import { type AuditContext, type AuditSink, safeDetail, SYSTEM_ACTOR } from '../audit/log.js'
-import { inputResolved } from '../gate/classic.js'
-import { isDoneSummary } from '../questions/waiting.js'
+import { inputResolved } from '../gate/projection.js'
+import { isDoneSummary } from '../gate/waiting.js'
 import type { EventLog } from './eventLog.js'
 import { SessionError, type SessionRecord } from './manager.js'
 import { event, type Owner, type ServerEvent, sameOwner } from './protocol.js'
@@ -153,7 +153,7 @@ export class SessionEdits {
         finishedAt: new Date(),
       })
     }
-    // Audited as a cancelled question, as one cancelled when its turn ends is (questions/service.ts).
+    // Audited as a cancelled question, as a classic one cancelled when its turn ended was.
     const audit = this.deps.audit
     if (audit && dismissed.length) {
       await Promise.allSettled(

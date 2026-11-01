@@ -369,7 +369,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # and imports protobuf's well-known types (google/protobuf/field_mask.proto …), which
 # Debian ships in libprotobuf-dev, not protobuf-compiler: without it temporalio-protos'
 # build script fails with "google/protobuf/field_mask.proto: File not found".
-FROM rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8 AS slicer-build
+FROM rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b AS slicer-build
 
 # hadolint ignore=DL3008
 RUN apt-get update \
@@ -397,7 +397,7 @@ RUN cargo build --release --locked -p scadbuddy-slicer
 # Upstream publishes no arm64 AppImage, so this stage always takes the amd64 one,
 # whatever TARGETARCH is: the profiles are JSON and serve every app image, and only
 # `slicer`, which runs the CLI, refuses another architecture.
-FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS slicer-dist
+FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS slicer-dist
 
 ARG BAMBU_STUDIO_VERSION
 ARG BAMBU_STUDIO_ASSET
@@ -448,7 +448,7 @@ RUN curl --fail --silent --show-error --location --output bambu-studio.AppImage 
 # by tag and index digest, as `base` is, so the glibc the CLI was checked
 # against cannot move under a build. The worker built on bookworm (glibc 2.36)
 # runs on 24.04's 2.39.
-FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac AS slicer
+FROM ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852 AS slicer
 
 ARG TARGETARCH
 ARG BAMBU_STUDIO_VERSION

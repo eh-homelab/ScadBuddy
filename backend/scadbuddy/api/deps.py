@@ -68,7 +68,7 @@ from scadbuddy.library.repo_signal import ModelsHeadFollower
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.library.url_import import IMPORT_TIMEOUT, RESOLVER_THREADS
-from scadbuddy.printers.progress import LanProgress
+from scadbuddy.printers.progress import LanProgress, lan_last_print
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.render.previews import (
@@ -464,6 +464,9 @@ def _build_core(settings: Settings) -> AppState:
                 print_run_store, settings_store.load, latest=recent_runs.latest
             ),
             record_outcome=PrintOutcomeStore(pool, transactional_events(events)).record,
+            # A LAN print's last print follows its reads (#4644); the rack registers its
+            # own read hook (`rack/component.py`, #4543).
+            on_read=[lan_last_print(OutputPrintStore(pool))],
         ),
         print_runs=PrintCommands(
             store=print_run_store,

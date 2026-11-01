@@ -620,6 +620,23 @@ class OrderStore:
             ).fetchone()
         return None if row is None else _filament_of(row)
 
+    def unarchive_filament(self, filament_id: str, *, conn: Conn | None = None) -> Filament | None:
+        """Back in the book with its id, so its quotes and items still name it (#4977);
+        :class:`FilamentExistsError` when a record in the book holds its identity now (a
+        record never archived is returned as is)."""
+        try:
+            with self._write(conn) as c:
+                row = c.execute(
+                    "UPDATE filaments SET archived_at = NULL, updated_at = now()"
+                    f" WHERE id = %s RETURNING {_FILAMENT}",
+                    (filament_id,),
+                ).fetchone()
+        except errors.UniqueViolation:
+            current = self.filament(filament_id)
+            assert current is not None
+            self._raise_exists(current.material, current.subtype, current.brand, current.colour)
+        return None if row is None else _filament_of(row)
+
     def filament(self, filament_id: str, *, conn: Conn | None = None) -> Filament | None:
         with self._read(conn) as c:
             row = c.execute(

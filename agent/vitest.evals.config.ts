@@ -12,5 +12,7 @@ export default defineConfig({
     testTimeout: 360_000,
     // Verbose, so a skip shows its reason (the suite name carries it).
     reporters: ['verbose'],
+    // The credential gateway every query reaches the model through (src/gateway/server.ts).
+    setupFiles: ['test/support/gateway.ts'],
   },
 })

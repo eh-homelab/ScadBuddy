@@ -18,7 +18,6 @@ import { roleParts } from './runtime/role.js'
 import { BrowserOrigins } from './browser/store.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
-import { nestedQueries } from './builtins/nested.js'
 import { managerAgents } from './background/workflowAgents.js'
 import { backgroundActivities, managerSender } from './background/activities.js'
 import { agentTimezone } from './background/schedule.js'
@@ -30,17 +29,18 @@ import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
-import { ensureStateDirs, removeLegacyBrowserDir, StateDirError } from './harness/stateDirs.js'
+import { ensureStateDirs, removeLegacyBrowserDir, sessionsRoot, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
+import { startCredentialGateway, stopCredentialGateway } from './gateway/server.js'
 import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep, startMark } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview, warmPackages } from './plugins/packages/install.js'
 import { reviewsByHash } from './access/packageProvider.js'
 import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
-import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
+import { headerSecretVariants, loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
@@ -49,7 +49,6 @@ import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
-import { PgTabRelay } from './bridge/pgRelay.js'
 import { TemporalTabRelay } from './bridge/relay.js'
 import { PostgresTabOwnerStore } from './bridge/tabOwners.js'
 import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
@@ -58,8 +57,7 @@ import { PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
-import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
-import { poolRemainingUsd } from './sessions/turnShared.js'
+import { resolveTabWaits, SessionManager, type SessionManagerDeps, SETTING_MODEL } from './sessions/manager.js'
 import { readStartSettings, wireRuntimeSync } from './sessions/runtimeSync.js'
 import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
@@ -70,7 +68,8 @@ import { ALL_TOOLS } from './tools/index.js'
 import { PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
-import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities } from './temporal/toolActivities.js'
+import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities, toolCallActivities } from './temporal/toolActivities.js'
+import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { sessionGateActivities } from './temporal/session/gateActivities.js'
@@ -79,12 +78,13 @@ import { startHostWorkers } from './temporal/session/hostWorkers.js'
 import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
 import { sessionTurnActivity } from './temporal/session/turnActivity.js'
 import { TurnHost } from './sessions/turnHost.js'
+import { SessionDirectory } from './workspace/directory.js'
 import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
-import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/turnPackages.js'
-import { forwardPackageServers } from './plugins/packages/mcp.js'
+import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/packageServers.js'
+import { forwardPackageServers, packageHeaderSecrets } from './plugins/packages/mcp.js'
 import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
 import { SessionClients } from './temporal/sessionClients.js'
-import { type ListedTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
+import { type ListedTools, listTurnTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { AgentWorker, workerIdentity } from './temporal/worker.js'
 import {
   dropPayloadKey,
@@ -147,7 +147,7 @@ const role = roleParts(config.agentRole)
 // Before listening: a mounted, empty state volume must get its `claude/` and
 // `work/` back, and an unwritable one should stop the pod here, visibly.
 try {
-  await ensureStateDirs({ stateDir: DEFAULT_STATE_DIR })
+  await ensureStateDirs({ stateDir: DEFAULT_STATE_DIR, sessionsDir: config.sessionDir })
 } catch (err) {
   console.error(err instanceof StateDirError ? err.message : err)
   process.exit(1)
@@ -253,6 +253,9 @@ const pluginForwarder = await PluginForwarder.start({
   ...(database ? { sessions: new PluginSessions(database.sql) } : {}),
   log: (message) => console.error(message),
 })
+// Every Claude Code process reaches the model through this loopback gateway, which holds the
+// credential; the process gets only a token (gateway/server.ts, plan 2026-10-13 Step 9.4).
+await startCredentialGateway()
 // The database's clock the moment it is ready, before a turn can record a session: the pass at
 // start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
 const pluginSessionMark = database ? database.ready().then((ok) => (ok ? startMark(database.sql) : undefined)) : undefined
@@ -267,15 +270,12 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
 // browser_* calls for a tab connected to another replica (#4780, bridge/relay.ts): an
 // activity on the owner's HOST_QUEUE, through Temporal, sealed. Its client is set once made
-// (temporalClient below), only with the KEK. For one release (#4868) the Postgres relay
-// (#1916, bridge/pgRelay.ts) runs beside it, for replicas still on the old build: on the
-// listener's connection, made before start(), so its first LISTEN covers it.
+// (temporalClient below), only with the KEK; without it, such a call is refused.
 const tabRelay = database
   ? new TemporalTabRelay({
       owners: new PostgresTabOwnerStore(database.sql),
       hostQueue: HOST_QUEUE,
       ready: database.ready,
-      fallback: events ? new PgTabRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined,
     })
   : undefined
 // The rows a process before this one left under the same identity (a container restart).
@@ -285,7 +285,8 @@ void tabRelay?.releaseAll()
 const mcpRelay = role.http && database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
 events?.start()
 const resources = new ResourceHub(events)
-const paths = { stateDir: DEFAULT_STATE_DIR }
+// A session's working directory is under SCADBUDDY_SESSION_DIR when it is set (the worker's own emptyDir, plan Step 9.5).
+const paths = { stateDir: DEFAULT_STATE_DIR, sessionsDir: config.sessionDir }
 // The /mcp auth settings (auth/authenticate.ts `mcpAuthSettings`): `oidc` while
 // `ai_settings.mcp_oidc` is enabled (#262), otherwise the `mcp_auth_mode` and
 // `mcp_anonymous_cap` keys. One reader for /mcp, per request, and for Settings
@@ -471,6 +472,11 @@ if (role.http && database && dataKeys) {
 // Undefined: the defaults.
 const memory: MemoryOptions | undefined = undefined
 
+// How a turn's ScadBuddy call runs as its ToolCall workflow (plan 2026-10-13 Step 9.2), once the
+// Temporal client below exists; read by each turn that has `tools_as_activities` on.
+let toolCallStart: ToolCallStarter | undefined
+// And how its plugin and http tools are listed for their proxies (Step 9.3), once turnToolDeps exists.
+let turnToolList: NonNullable<SessionManagerDeps['turnTools']> | undefined
 const sessions =
   database && credentials
     ? new SessionManager({
@@ -482,6 +488,10 @@ const sessions =
         access: accessResolver,
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
+        toolCalls: () => toolCallStart,
+        // Listed as the agent-tools activities that run their calls list them (Step 9.3), on this
+        // replica's own queue for a pinned server; problems are the turn's own to say (pluginCheck).
+        turnTools: (context, only) => (turnToolList ? turnToolList(context, only) : Promise.reject(new Error('no Temporal, so no turn tool runs as an activity'))),
         // Settings → Tools & plugins' overrides of the built-in tools (#1953), per turn.
         builtInTools: () => builtInTools.policy(),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
@@ -555,11 +565,6 @@ const stopSessionWake =
 const stopSweeper = !role.http ? undefined : sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', sweepErrorText(err)),
-})
-// Questions past `question_expiry_seconds` whose turn is gone (spec §6.6): cancelled, never answered.
-const stopQuestionSweeper = !role.http ? undefined : sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, {
-  ...(database ? { ready: database.ready } : {}),
-  onError: (err) => console.error('question expiry sweep failed:', (err as Error).message),
 })
 // A flow run's call whose hop at its starting session is over goes to the person (#2482).
 const stopEscalationSweeper = !role.http ? undefined : sessions?.escalations.startSweeper(APPROVAL_SWEEP_MS, {
@@ -664,6 +669,28 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
       access: accessResolver,
     }
   : undefined
+// Each session's working directory (workspace/directory.ts, plan Step 9.5): a copy of its workspace
+// under SCADBUDDY_SESSION_DIR (the worker's own capped emptyDir), refilled from the workspace at each
+// placement. The directories of sessions gone since are swept every hour, by every process that runs turns.
+const sessionDirectory =
+  role.sessionHost && workspace
+    ? new SessionDirectory(workspace, sessionsRoot(paths), { sql: database?.sql, ...(sessions ? { warm: (id: string) => sessions.warm.has(id) } : {}) })
+    : undefined
+// A session's copy goes once its warm process here has: this disk holds the warm sessions' copies only.
+if (sessionDirectory && sessions) {
+  sessions.warm.onClosed((id) =>
+    void sessionDirectory.evict(id).catch((err: unknown) => console.error(`session ${id}: its working directory could not be removed:`, (err as Error).message)),
+  )
+}
+if (sessionDirectory && database) {
+  const sweep = () =>
+    void database
+      .ready()
+      .then((ok) => (ok ? sessionDirectory.sweep(database.sql) : []))
+      .catch((err: unknown) => console.error('session directory sweep failed:', (err as Error).message))
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
 // A parked call holds on its entry's row, woken by `scadbuddy_input` on the event bus's connection (§5.4).
 const turnHost =
   role.sessionHost && temporal && sessions
@@ -674,8 +701,13 @@ const turnHost =
         hostQueue: SESSION_HOST_QUEUE,
         ...(events ? { listen: (channel: string, onNotify: (payload: string) => void) => events.listenAlso(channel, onNotify) } : {}),
         ...(durableToolDeps ? { runCall: decidedCalls(ALL_TOOLS, durableToolDeps) } : {}),
+        // A restarted turn's calls that finished as ToolCall workflows (Step 9.2), read with the client below.
+        finishedCalls: (sessionId: string, turnId: string) =>
+          temporalClient ? finishedToolCalls({ sql: temporal.sql, client: temporalClient }, sessionId, turnId) : Promise.resolve([]),
         // A `done` summary, posted as a classic turn's (#5003).
         questions: sessions.questions,
+        // The session's working directory, a copy of its workspace placed for each turn and written back at its end (Step 9.5).
+        ...(sessionDirectory ? { directory: sessionDirectory } : {}),
       })
     : undefined
 // The enabled remote plugins and every usable credential's secret, as a classic turn
@@ -691,6 +723,42 @@ const durableCredentialSecrets = async () => {
 // A durable session's MCP client on each remote plugin, kept on the replica its calls
 // are pinned to (#2581): a stateful plugin (Playwright MCP) keeps its page between calls.
 const turnClients = new SessionClients<ListedTools>()
+/**
+ * What a ToolCall's tool redacts beside the credentials (plan 2026-10-13 Step 9.2): the header
+ * values of the remote plugins and package http servers a turn reaches, as the turn redacts them,
+ * read from their stores alone: no address check, no forwarder route, no plugin contacted. The
+ * turn's own forwarder URLs never reach Claude Code with the turn's tools proxied (Step 9.3).
+ */
+const readHeaderSecrets = async (): Promise<string[]> => {
+  const out: string[] = []
+  if (plugins) {
+    const { plugins: enabled } = await plugins.enabled(kek.ok ? kek.kek : undefined)
+    for (const plugin of enabled) if (plugin.header) out.push(...headerSecretVariants(plugin.header.value))
+  }
+  if (pluginPackages) {
+    const loaded = await loadPackagesForRun(pluginPackages, packageInstaller)
+    try {
+      out.push(...packageHeaderSecrets(loaded.loaded))
+    } finally {
+      loaded.release()
+    }
+  }
+  return out
+}
+/** How long one read of them serves every ToolCall's tool: a header changed since is redacted once it lapses. */
+const HEADER_SECRETS_MS = 30_000
+let headerSecrets: { at: number; read: Promise<string[]> } | undefined
+const turnHeaderSecrets = (): Promise<string[]> => {
+  if (!headerSecrets || Date.now() - headerSecrets.at > HEADER_SECRETS_MS) {
+    const read = readHeaderSecrets()
+    headerSecrets = { at: Date.now(), read }
+    // A read that failed is not kept: the next call reads again.
+    read.catch(() => {
+      if (headerSecrets?.read === read) headerSecrets = undefined
+    })
+  }
+  return headerSecrets.read
+}
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
@@ -704,38 +772,11 @@ const turnToolDeps = temporal
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
         httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, audit, ...(workspace ? { files: workspace } : {}) },
-        // Shared with agent-durable on the payload volume, which its runner loads them from.
         ...(pluginPackages
           ? {
               packages: {
                 load: () => loadPackagesForRun(pluginPackages, packageInstaller),
-                root: config.payloadDir ? path.join(config.payloadDir, SHARED_PACKAGES) : undefined,
-                localRoot: path.join(paths.stateDir, 'plugins-local'),
                 forward: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { access: accessResolver }),
-              },
-            }
-          : {}),
-        // An allowed package's other built-ins (#2393), on the session's workspace and credential.
-        ...(workspace && credentials
-          ? {
-              builtins: {
-                files: workspace,
-                audit,
-                nested: (context: { session: string; flow?: string }) =>
-                  nestedQueries({
-                    paths,
-                    credentials: new CredentialPool({ repo: credentials, kek, audit }),
-                    ...(context.flow ? {} : { sessionId: context.session }),
-                    // Counted in the session's cost, which its budget reads, as a classic turn counts Claude Code's own calls.
-                    ...(context.flow
-                      ? {}
-                      : {
-                          spent: async (cost: number) => {
-                            await temporal.sql`UPDATE ai_sessions SET cost_usd = cost_usd + ${cost} WHERE id = ${context.session}`
-                          },
-                          remaining: () => poolRemainingUsd(temporal.sql, context.session),
-                        }),
-                  }),
               },
             }
           : {}),
@@ -760,6 +801,11 @@ const turnToolDeps = temporal
         : {}),
     }
   : undefined
+if (turnToolDeps) {
+  const deps = turnToolDeps
+  // The turn says what its listing left out itself (`unlisted`), beside its own assembly's problems.
+  turnToolList = (context, only) => listTurnTools({ ...deps, report: undefined }, context, only)
+}
 // AgentSession's turns are hosted here only with both halves (§5.2): acquire_worker on agent-tools
 // hands out SESSION_HOST_QUEUE, so it is offered only where the session host worker below serves it.
 const sessionHosting = turnHost && sessions && operationStore && turnToolDeps ? { turnHost, warm: sessions.warm } : undefined
@@ -778,6 +824,12 @@ const temporalClient = temporal
       ...(dataConverter ? { dataConverter } : {}),
     })
   : undefined
+if (temporalClient && temporal) {
+  const results = { client: temporalClient, blobs: new SessionBlobs(temporal.sql) }
+  toolCallStart = toolCallStarter(results)
+  // `tool_call_result`: what a finished call returned, which a restarted turn's message names (Step 9.2).
+  toolServices.toolCallResults = (session, toolUseId) => toolCallResult(results, session, toolUseId)
+}
 // A place in this replica's warm cache, and its session host queue (§5.2): on agent-tools, and on
 // the session host queue for a turn another replica (one it was lost on) refers here.
 const sessionAcquire =
@@ -803,6 +855,7 @@ const background =
         send: managerSender(sessions),
         tz: agentTimezone(),
         paths,
+        ...(sessionDirectory ? { directory: sessionDirectory } : {}),
         secrets: toolServices.secrets,
         agents: managerAgents(sessions, { access: accessResolver }),
         workspace,
@@ -817,6 +870,12 @@ const temporalWorker =
         identity: workerIdentity(replicaIdentity()),
         activities: {
           ...toolActivities(ALL_TOOLS, durableToolDeps),
+          // A session turn's calls, each its own ToolCall workflow (plan 2026-10-13 Step 9.2),
+          // redacted of the turn's plugin and package tokens as an in-process call is.
+          ...toolCallActivities(ALL_TOOLS, {
+            ...durableToolDeps,
+            turnSecrets: turnHeaderSecrets,
+          }),
           ...gateActivities({
             audit,
             sessions: new PgSessionOwners(temporal.sql),
@@ -1117,7 +1176,6 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 
 async function stop(): Promise<void> {
   stopSweeper?.()
-  stopQuestionSweeper?.()
   stopEscalationSweeper?.()
   stopOrphanSweep?.()
   stopPluginSessionSweep?.()
@@ -1173,6 +1231,7 @@ async function stop(): Promise<void> {
     closeServer: async () => {
       await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
       await pluginForwarder.close()
+      await stopCredentialGateway()
     },
     // The session-event publisher closes only now, after the drain: turns
     // stopped above append their final session.status/session.done while they

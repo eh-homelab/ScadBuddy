@@ -56,6 +56,7 @@ from scadbuddy.api.limits import (
     BodySizeGate,
     RouteLimit,
 )
+from scadbuddy.api.printing import end_gone_sequences
 from scadbuddy.api.realtime import EventCursor
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
@@ -102,7 +103,7 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.print_library.component import PRINT_LIBRARY
-from scadbuddy.print_library.sweep import sweep_library
+from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
 from scadbuddy.printers.bambuddy_sync import sync_printers
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
@@ -153,7 +154,6 @@ from scadbuddy.workflows.client import (
     sandboxed_runner,
 )
 from scadbuddy.workflows.flow_triggers import VersionedFlowTriggerFire
-from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
     ATTACHMENTS_SWEEP,
@@ -164,6 +164,7 @@ from scadbuddy.workflows.housekeeping import (
     LIBRARY_SWEEP,
     LOST_NATIVE_SLICES_SWEEP,
     LOST_SLICES_SWEEP,
+    NATIVE_COPIES_SWEEP,
     NATIVE_SLICES_SWEEP,
     PREVIEWS_SWEEP,
     PRINTER_SYNC_SWEEP,
@@ -288,16 +289,20 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
     if stopped(stop):
         return []
     jobs = state.render.store.list_jobs()
-    params = [job.params for job in jobs] + state.presets.saved_params()
+    # Whole inputs, not only their `params`: a template UI's own state can name an
+    # upload too (#725). A job's `params` beside them, for a row whose inputs are `{}`.
+    records: list[Mapping[str, Any]] = [job.inputs for job in jobs]
+    records += [job.params for job in jobs]
+    records += state.presets.saved_inputs()
     try:
         # Every order item's inputs (#4249, orders spec §3.3). Fails closed: without
         # them the sweep would take an ordered upload, so a store that cannot answer
         # (or no orders component at all) skips this pass, as `stopped` does.
-        item_inputs = list(state.components.get(ORDERS).store.item_inputs())
+        records += state.components.get(ORDERS).store.item_inputs()
     except Exception:
         logger.exception("skipping the asset sweep: the orders' inputs could not be read")
         return []
-    referenced = referenced_asset_ids(state.paths, params, item_inputs)
+    referenced = referenced_asset_ids(state.paths, records)
     if stopped(stop):
         return []
     removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)
@@ -651,6 +656,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sync_bambuddy_printers() -> None:
         await _heartbeating(_sync_bambuddy_printers_logged(state))
 
+    @activity.defn(name=NATIVE_COPIES_SWEEP)
+    async def sweep_native_copies() -> None:
+        await _heartbeating(_sweep_native_copies_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -672,6 +681,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         ensure_printer_watches,
         reap_quote_holds,
         sync_bambuddy_printers,
+        sweep_native_copies,
     ]
 
 
@@ -775,6 +785,29 @@ async def _sweep_print_library_logged(state: AppState) -> None:
             "swept the print library",
             extra={"purged": done.purged, "orphans": done.orphans},
         )
+
+
+async def _sweep_native_copies_logged(state: AppState) -> None:
+    """#4337: a native run's per-print copies and slices nothing keeps, to the trash;
+    nothing on ``bambuddy``."""
+    try:
+        native = await state.components.get(PRINT_LIBRARY).serving_native()
+        if native is None:
+            return
+        # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`). Without
+        # Temporal every LAN run with prints still to start is kept as in use.
+        try:
+            await end_gone_sequences(state.print_runs)
+        except Exception:
+            logger.warning(
+                "could not check the LAN runs' sequences; their files are kept", exc_info=True
+            )
+        await sweep_print_copies(
+            native, state.uploads, state.print_runs.store.subjects_in_use, now=datetime.now(UTC)
+        )
+    except Exception:
+        logger.exception("could not sweep the native per-print copies")
+        raise
 
 
 async def _sweep_print_attachments_logged(state: AppState) -> None:
@@ -1209,7 +1242,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         library=deps.library,
         # A native slice's blob, from this process's own store (plan 2026-10-16 Task 9).
         blobs=ContentBlobs(content) if content is not None else None,
-        rack=deps.rack,
+        rack=state.components.get(RACK_USAGE),
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
     )
@@ -1238,48 +1271,21 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
 
 
-async def _hand_off_watches(state: AppState, client: Client) -> None:
-    """Follow on Temporal the prints the old in-process watcher recorded (#268)."""
-    try:
-        resumed = await resume_followed(
-            state.projection.pool,
-            client,
-            state.settings.temporal_task_queue_bambuddy,
-            datetime.now(UTC),
-        )
-        if resumed:
-            logger.info(
-                "following on Temporal the prints the old watcher followed",
-                extra={"output_ids": resumed},
-            )
-    except Exception:
-        logger.exception("could not hand the old watcher's prints to FollowPrint")
-
-
 def serves_print_queue(settings: Settings) -> bool:
     """Whether the API process serves the ``bambuddy`` queue itself (#1060)."""
     return settings.temporal_worker_inprocess or settings.temporal_print_worker_inprocess
 
 
 async def _print_upkeep(state: AppState, stop: asyncio.Event) -> None:
-    """What the API does for print runs whoever serves their queue (#1060): hand the old
-    watcher's prints to ``FollowPrint`` once and, beside it, end the runs and operations
-    whose execution closed without ending them, until ``stop``. Postgres and a client only."""
+    """What the API does for print runs whoever serves their queue (#1060): end the runs
+    and operations whose execution closed without ending them, until ``stop``. Postgres
+    and a client only."""
     client = await _connect_until(state, stop, "print upkeep")
     if client is None:
         return
     ops = state.components.get(OPERATIONS)
-    # Beside the reconciler (review #1091 4): each follow it starts may wait out an RPC
-    # timeout on a slow Temporal.
-    handoff = asyncio.create_task(_hand_off_watches(state, client))
-    try:
-        where = {name: kind.where for name, kind in ops.kinds.items()}
-        await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop, where)
-    finally:
-        # A row whose follow did not start stays for the next boot.
-        handoff.cancel()
-        with suppress(asyncio.CancelledError):
-            await handoff
+    where = {name: kind.where for name, kind in ops.kinds.items()}
+    await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop, where)
 
 
 #: The ``library`` worker's workflows beside ``Housekeeping`` (`library_worker` adds it),

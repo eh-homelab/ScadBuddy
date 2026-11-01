@@ -565,8 +565,11 @@ export const printTools: Tool[] = [
     description:
       'Filament profiles (#717): named process changes the print dialog suggests for a spool, e.g. Silk PLA\'s ' +
       'slower outer wall. Each lists which spools it is for (`match`: the material, and a word in the spool\'s ' +
-      'subtype or slicer preset), the settings it changes, each with its cited sources, and advice it cannot ' +
-      'apply (`notes`). Apply one with print_output\'s `filament_profiles`, only when the user wants it.',
+      'subtype or slicer preset), the process settings it changes, each with its cited sources, the filament ' +
+      'settings it sets in the matching slots\' filament presets (`filament_settings`, e.g. Silk\'s 235 °C ' +
+      'nozzle; applied by the native slicer only, and on Bambuddy\'s the run warns profile-not-applied), and ' +
+      'advice it cannot apply (`notes`). Apply one with print_output\'s `filament_profiles`, only when the ' +
+      'user wants it.',
     input: z.object({}),
     risk: 'read',
     source: 'ScadBuddy\'s built-in profiles, quoting the pages they cite',
@@ -1061,9 +1064,9 @@ export const printTools: Tool[] = [
     label: "Remember a model's print choices",
     description:
       "Remember what a model's (or a Bambuddy library file's, `library_file_id`) print dialog opens on next " +
-      'time: the printer, per-slot spools, nozzles, and the quality tier or named process. Replaces the ' +
-      "entry whole: an omitted part is forgotten, and passing nothing forgets them all (get_print_choices " +
-      'shows the current `model_choices`).',
+      'time: the printer, per-slot spools, nozzles, the quality tier or named process, and the print sequence. ' +
+      'Replaces the entry whole: an omitted part is forgotten, and passing nothing forgets them all ' +
+      '(get_print_choices shows the current `model_choices`).',
     input: z
       .object({
         slug: slug.optional(),
@@ -1073,19 +1076,28 @@ export const printTools: Tool[] = [
         nozzles: z.array(nozzleChoice).max(2).optional(),
         tier: tier.nullable().optional(),
         process_name: z.string().max(200).nullable().optional().describe('An Advanced-mode Bambu process, in place of a tier'),
+        print_sequence: z
+          .enum(['by layer', 'by object'])
+          .nullable()
+          .optional()
+          .describe("An Advanced-mode print sequence (#4970); omit for the template's own"),
       })
       .refine((o) => (o.slug === undefined) !== (o.library_file_id === undefined), {
         message: 'name one: slug or library_file_id',
       }),
     risk: 'write',
     routes: ['PUT /api/v1/print/models/{slug}/choices', 'PUT /api/v1/print/library/{file_id}/choices'],
-    handler: async ({ slug, library_file_id, printer_id, filament_plan, nozzles, tier, process_name }, { backend }) => {
+    handler: async (
+      { slug, library_file_id, printer_id, filament_plan, nozzles, tier, process_name, print_sequence },
+      { backend },
+    ) => {
       const body = {
         printer_id: printer_id ?? null,
         filament_plan: filament_plan ?? [],
         nozzles: nozzles ?? [],
         tier: tier ?? null,
         process_name: process_name ?? null,
+        print_sequence: print_sequence ?? null,
       }
       if (library_file_id !== undefined) {
         return json(
@@ -1117,6 +1129,35 @@ export const printTools: Tool[] = [
         await ok(
           backend.PUT('/api/v1/print/printers/{printer_id}/bed-type', { params: { path: { printer_id } }, body: { bed_type } }),
           `remember bed type of printer ${printer_id}`,
+        ),
+      ),
+  }),
+
+  // #4969: the print dialog's Advanced rack algorithm, a per-printer starting choice
+  // like the plate (rack spec §4). print_output takes it for every print on that printer.
+  defineTool({
+    name: 'remember_printer_rack_algorithm',
+    label: "Remember a printer's rack algorithm",
+    description:
+      "Remember how a printer's nozzle rack is ranked when a print leaves the hotend to ScadBuddy (#836): " +
+      '`least_used` (the default), `oldest_first`, `newest_first`, or `bambuddy` (the printer picks; no ' +
+      'nozzle mapping is sent). null forgets it. Every later print on that printer, the dialog\'s and ' +
+      "print_output's, ranks by it. Answers the algorithm now in force.",
+    input: z.object({
+      printer_id: z.number().int(),
+      algorithm: z.enum(['least_used', 'oldest_first', 'newest_first', 'bambuddy']).nullable(),
+    }),
+    risk: 'write',
+    routes: ['PUT /api/v1/print/printers/{printer_id}/rack-algorithm'],
+    // No `version` (#1216): an unordered save, which leaves the dialog's ordering alone.
+    handler: async ({ printer_id, algorithm }, { backend }) =>
+      json(
+        await ok(
+          backend.PUT('/api/v1/print/printers/{printer_id}/rack-algorithm', {
+            params: { path: { printer_id } },
+            body: { algorithm },
+          }),
+          `remember rack algorithm of printer ${printer_id}`,
         ),
       ),
   }),

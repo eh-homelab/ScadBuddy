@@ -180,6 +180,8 @@ export const PendingInputSchema = z.object({
       session_id: z.string().nullable().optional().catch(undefined),
       tool: z.string().optional().catch(undefined),
       summary: z.string().optional().catch(undefined),
+      /** A question's text or an attention request's message (#815: what its OS notification says). */
+      prompt: z.string().optional().catch(undefined),
       requested_by: z.object({ label: z.string() }).nullable().optional().catch(undefined),
       expires_at: z.string().nullable().optional().catch(undefined),
       input_hash: z.string().nullable().optional().catch(undefined),

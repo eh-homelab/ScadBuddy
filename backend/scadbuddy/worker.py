@@ -85,11 +85,11 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.print_library.reads import LibraryReads
 from scadbuddy.print_library.remote import RemoteLibrary
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
-from scadbuddy.printers.progress import LanProgress
+from scadbuddy.printers.progress import LanProgress, lan_last_print
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import WatchActivities
-from scadbuddy.rack.usage import RackUsageStore, settle_hook
+from scadbuddy.rack.usage import RackUsageStore, lan_settle_hook, settle_hook
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import probe_openscad_version
@@ -1188,6 +1188,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         read_library=read_library,
         events=events,
         on_settled=[settle_hook(rack, links, settings_store.load)],
+        # A LAN print's last print and rack picks follow its reads (#4644, #4543).
+        on_read=[lan_last_print(OutputPrintStore(pool)), lan_settle_hook(rack)],
         newest_failed=newest_failed_from(
             print_runs, settings_store.load, latest=recent_runs.latest
         ),

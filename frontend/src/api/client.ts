@@ -1510,6 +1510,13 @@ export const api = {
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
 
+  /**
+   * #4968 — withdraw this page's claim on a render: the last claim withdrawn cancels it.
+   * A command, so a re-send after a lost answer withdraws once. Answers the job as it now
+   * stands (a settled one unchanged).
+   */
+  withdrawJob: (jobId: string) => command<Job>(`/jobs/${seg(jobId)}/withdraw`, { method: 'POST' }),
+
   previewUrl: (jobId: string) => `${API_BASE}/jobs/${seg(jobId)}/preview.glb`,
 
   /**
@@ -2174,13 +2181,15 @@ export const api = {
     return followRunning<Quote>(op, signal)
   },
   // -- the price book and the rough estimate (#4250, spec 2026-10-18 §5.1, §5.3) -------------
-  priceBook: () => request<PriceBook>('/orders/price-book'),
+  /** `includeArchived` lists the archived filaments too, for the editor that unarchives them (#4977). */
+  priceBook: (includeArchived = false) => request<PriceBook>(`/orders/price-book${includeArchived ? '?include_archived=true' : ''}`),
   setPriceBook: (body: PolicyUpdate) => request<PriceBook>('/orders/price-book', { method: 'PUT', body: JSON.stringify(body) }),
   createFilament: (body: FilamentInput) =>
     request<Filament>('/orders/price-book/filaments', { method: 'POST', body: JSON.stringify(body) }),
   updateFilament: (id: string, body: FilamentPatch) =>
     request<Filament>(`/orders/price-book/filaments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   archiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/archive`, { method: 'POST' }),
+  unarchiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/unarchive`, { method: 'POST' }),
   /** A rough estimate (§5.3), never a quote: nothing is recorded. */
   orderEstimate: (outputId: string, filamentId: string) =>
     request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),

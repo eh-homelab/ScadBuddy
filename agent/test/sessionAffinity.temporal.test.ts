@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@temporalio/activity'
@@ -37,6 +38,7 @@ import {
 import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
 import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, REPLY_COST_USD, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { liveClaudeCodes } from './support/claudeProcesses.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
@@ -549,6 +551,40 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
       SELECT turns, cost_usd, status, durable_turn_id FROM ai_sessions WHERE id = ${id}`
     expect(row).toMatchObject({ turns: 1, status: 'idle', durable_turn_id: null })
     expect(row!.cost_usd).toBeGreaterThan(0)
+  })
+
+  it("counts a request a command makes with the process's token, which no result prices (Step 9.4)", async () => {
+    const hold = latch()
+    slowGate = hold.promise
+    script = (r) => (conversation(r).includes('tool_use') || conversation(r).includes('from a command') ? { text: 'carried on' } : { toolUse: { name: 'mcp__stub__slow', input: { q: 'x' } } })
+    const a = await replica('a')
+    const { id, turn } = await startOn(a, 'do the slow thing')
+    await pollUntil(() => slowCalls, 1)
+    // What a `Bash` command of the turn would find in its environment: the gateway's URL and
+    // token, never the credential (gateway/server.ts).
+    const [claude] = liveClaudeCodes()
+    const environ = Object.fromEntries(
+      readFileSync(`/proc/${claude!.pid}/environ`, 'utf8')
+        .split('\0')
+        .filter(Boolean)
+        .map((kv) => [kv.slice(0, kv.indexOf('=')), kv.slice(kv.indexOf('=') + 1)]),
+    )
+    expect(JSON.stringify(environ)).not.toContain('gw-affinity-test-token')
+    const res = await fetch(`${environ.ANTHROPIC_BASE_URL}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${environ.ANTHROPIC_AUTH_TOKEN}`, 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 5, messages: [{ role: 'user', content: 'from a command' }] }),
+    })
+    expect(res.status).toBe(200)
+    await res.text()
+    hold.release()
+    expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    await settled(id)
+    // Claude Code's two requests, and the command's, which only the gateway saw priced.
+    const row = await recorded(id)
+    expect(row.costUsd).toBeCloseTo(3 * REPLY_COST_USD, 12)
+    expect(row.unpricedUsd).toBeCloseTo(REPLY_COST_USD, 12)
+    expect(await turnCosts(id)).toEqual([expect.closeTo(3 * REPLY_COST_USD, 12)])
   })
 
   it('events match a classic turn that runs out of turns: error_max_turns, and the session stays idle', async () => {

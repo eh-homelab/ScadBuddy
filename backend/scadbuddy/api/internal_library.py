@@ -89,9 +89,12 @@ async def upload_library_file(
     library: PrintLibraryDep,
     filename: Annotated[str, Query()],
     folder_id: Annotated[int | None, Query(ge=1)] = None,
+    subject: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
 ) -> LibraryFile:
     """A per-print file (#4312 review I3): it names no output and is not filed, whatever
-    the request says, and its name is checked as the public upload's is."""
+    the request says, and its name is checked as the public upload's is. ``subject`` is
+    the print subject whose run uploads it (#4337); a print worker from before it sends
+    none, and its file is then left unmarked, as every file was."""
     if not filename or "/" in filename or "\x00" in filename or len(filename) > 255:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -104,7 +107,7 @@ async def upload_library_file(
         async for chunk in request.stream():
             await asyncio.to_thread(body.write, chunk)
         await asyncio.to_thread(body.seek, 0)
-        row = await native.upload(filename, body, folder_id)
+        row = await native.upload(filename, body, folder_id, print_subject=subject)
     return await native.library_file(row.id)
 
 

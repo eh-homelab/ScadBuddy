@@ -59,7 +59,10 @@ describe.skipIf(skip !== undefined)(`WarmSessions${skip ? ` (skipped: ${skip})` 
     const two = await h.turn(id, h.assembled({ credentialUpdatedAt: '2' }), 1 - one.result.total_cost_usd, h.credential('gw-new-key-9999'))
     expect(two).toMatchObject({ outcome: 'recycle', reason: 'fingerprint' })
     expect(h.spawns).toHaveLength(2)
-    expect(h.spawns[1]?.env.ANTHROPIC_AUTH_TOKEN).toBe('gw-new-key-9999')
+    // The new process has a gateway token of its own, mapped to the new credential (gateway/server.ts).
+    expect(h.spawns[1]?.env.ANTHROPIC_AUTH_TOKEN).not.toBe(h.spawns[0]?.env.ANTHROPIC_AUTH_TOKEN)
+    expect(JSON.stringify(h.spawns[1]?.env)).not.toContain('gw-new-key-9999')
+    expect(h.fake.messageCalls().at(-1)?.headers.authorization).toBe('Bearer gw-new-key-9999')
     await h.spawns[0]?.exited
     expect(first.release).toHaveBeenCalledTimes(1)
   }, 60_000)
@@ -70,7 +73,9 @@ describe.skipIf(skip !== undefined)(`WarmSessions${skip ? ` (skipped: ${skip})` 
     const one = await h.turn(id, h.assembled(), 1)
     const two = await h.turn(id, h.assembled(), 1 - one.result.total_cost_usd, h.credential('gw-fallback-key-8888'))
     expect(two).toMatchObject({ outcome: 'recycle', reason: 'fingerprint' })
-    expect(h.spawns[1]?.env.ANTHROPIC_AUTH_TOKEN).toBe('gw-fallback-key-8888')
+    expect(h.spawns[1]?.env.ANTHROPIC_AUTH_TOKEN).not.toBe(h.spawns[0]?.env.ANTHROPIC_AUTH_TOKEN)
+    expect(JSON.stringify(h.spawns[1]?.env)).not.toContain('gw-fallback-key-8888')
+    expect(h.fake.messageCalls().at(-1)?.headers.authorization).toBe('Bearer gw-fallback-key-8888')
   }, 60_000)
 
   it('evicts idle entries', async () => {

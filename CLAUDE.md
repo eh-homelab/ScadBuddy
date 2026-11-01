@@ -268,7 +268,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `QueueFullError`), `submit.py` (`RenderService`, what the routes type against as
   `RenderDep`: submit starts `render-<render_key>` with update-with-start; the
   workflow's first (local) activity inserts the row, identical requests join it as
-  claims, and a supersede sends the old execution `release`, #1053; with `reuse_finished`
+  claims, and a supersede sends the old execution `release`, #1053; a withdrawal
+  (`withdraw`, `POST /jobs/{id}/withdraw` with an `Idempotency-Key`, the agent's
+  `withdraw_render`, the Customize page's Cancel) sends it `release` with `cancelled`,
+  and the last claim withdrawn cancels the job, #4968; with `reuse_finished`
   (the render route, an order's quote) a `done` job of the key whose refs still hold its
   result answers at once, its `reused_at` keeping it from the prune,
   `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output
@@ -446,7 +449,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded
   trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
-  off the path). `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
+  off the path): Bambuddy's inventory and ScadBuddy's own (`native_spools`,
+  `spools/native.py`, provider `native` in `spools/spool_providers.py`, routes
+  `api/native_spools.py`, #4643; each write re-caches it at once). `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
   command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
@@ -454,9 +459,18 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   presets from the kept copy `slicing/held_presets.py` (#4645: `held_local_presets`,
   refreshed on the spool providers' Schedule, read through `Profiles.held`; cloud user
   presets are not offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
-  native library (nothing deletes it yet, #4337). The Customize page, the dialog's
+  native library, marked with its run's subject (`library_files.print_subject`, as is
+  its slice); `print_library/sweep.py` `sweep_print_copies` (housekeeping
+  `NATIVE_COPIES_SWEEP`, #4337) trashes a folder's superseded copies and what nothing
+  records, as Bambuddy's inbox keeps its copies; a moved, restored or copied one is the
+  person's (no subject). The Customize page, the dialog's
   first read and its analysis, and the Prints page's queue and history panels ask
   Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
+  A LAN print's records (#4644, #4543): `print_succeed` writes its `output_last_prints`
+  row (`print_route` `lan`), and `lan_print` saves its rack picks keyed by run and
+  `subtask_name` (`rack_nozzle_*`'s `lan_run_id`, `lan_subtask`); the follow's read hooks
+  (`Follower.on_read`: `printers/progress.py` `lan_last_print`, `rack/usage.py`
+  `lan_settle_hook`) move the row and settle the picks, `lan_wait` each earlier copy's.
   A run of several plates or copies is its own queue (#4541, `workflows/printing.py`
   `_print_lan`): it succeeds at its first start, then `lan_wait` (`printers/print_activities.py`,
   over the watch's `printer_reports`) waits out each print before the next starts, and
@@ -618,7 +632,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   Phase 2, pricing (#4250, plan `2026-10-22-orders-phase-2-pricing.md`): the price book is
   `filaments` rows (`pricebook.py` `PriceBookReader`, the store's `*_filament` methods) and
   the stored settings `pricing_*` and `rough_estimate_factor` (`live`), behind `GET`/`PUT
-  /orders/price-book` and `…/price-book/filaments`; `currency.py` is the one table of
+  /orders/price-book` and `…/price-book/filaments` (an archived filament comes back, its id
+  kept, through `…/{id}/unarchive`, 409 `filament_exists` when its identity was taken since,
+  #4977); `currency.py` is the one table of
   minor-unit exponents (ISO 4217), published as `minor_exponent` on every order and on the
   book (the browser's `lib/money.ts` takes it as an argument and never asks `Intl` for the
   digits), and `orders_currency` refuses a code with no minor unit. `pricing.py` is the
@@ -654,8 +670,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `derive` gives its rows; a cancelled one back to the status its cancel's audit row
   recorded, with the items it took) and `reopen_item` (a cancelled item back to what its
   quotes and attempts give it), each taking its quotes' sliced-file holds again (`_hold`);
-  `POST /customers/{id}/unarchive`. Agent `order_reopen` (outward, as a cancel) and
-  `customer_upsert`'s `unarchive`. `Lifecycle.unfulfil_item` (#4952, `POST
+  `POST /customers/{id}/unarchive`. Agent `order_reopen` (outward, as a cancel),
+  `customer_upsert`'s `unarchive` and `price_book_set`'s filament `unarchive`. `Lifecycle.unfulfil_item` (#4952, `POST
   …/items/{item}/unfulfil`, agent `order_item_unfulfil`, outward) clears the latest
   accepted attempt's `accepted_at` (the row stays) and sets the item to what its latest
   attempt gives; refused for an item on a shipment (`order_item_shipped`) and on hold.
@@ -725,13 +741,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   decides, via `src/approvals/service.ts` and the `ai_approvals` table, #258; outside
   a session they are denied as "needs approval"; the built-in `AskUserQuestion`, given
   only to sessions the browser user owns, parks there too until the user answers in the
-  panel, via `src/harness/questions.ts`, `src/questions/service.ts` and `ai_questions`,
-  #940, and never outlives its turn; the agent's `request_user_attention` tool, #815,
-  `src/harness/attention.ts`, parks on the same gate as an `ai_questions` row of kind
-  `attention`, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
-  `stop` end the turn; its `done` reason waits for nothing and outlives its turn, shown
-  beside the badge's waiting count (not in it) until dismissed, at most
-  `DONE_POSTS_PER_TURN` a turn, carrying `src/questions/doneSummary.ts`'s record of what the turn
+  panel, via `src/harness/questions.ts` and the session workflow's gate (an `ai_pending_input`
+  entry, the request's record, plan Step 9.7), #940, and never outlives its turn; the agent's
+  `request_user_attention` tool, #815, `src/harness/attention.ts`, parks on the same gate as a
+  `wait_for_user` entry, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
+  `stop` end the turn; its `done` reason waits for nothing and outlives its turn, an `ai_questions`
+  row (`src/gate/questions.ts`), shown beside the badge's waiting count (not in it) until dismissed, at most
+  `DONE_POSTS_PER_TURN` a turn, carrying `src/gate/doneSummary.ts`'s record of what the turn
   touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
   the one read of every parked call, approvals and answers, that the badge counts, and
   `POST /api/v1/ai/pending-input/{request_id}` the one respond route the panel answers
@@ -823,11 +839,14 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `SessionFiles` over `ai_session_files`, keyed by `workspace` (`session:<id>`, gone
     with its session, copied by a fork; or `principal:<kind>:<id>` outside a session,
     swept 24 h after its last write) and a checked `path`; caps
-    `workspace_file_max_bytes`/`workspace_max_bytes`. Reached as
+    `workspace_file_max_bytes`/`workspace_max_bytes` and `WORKSPACE_MAX_FILES` (5,000). Reached as
     `ToolServices.workspace` (so in-process, `/mcp` and the durable activities alike),
     with `workspaceOf(ctx)`; the `workspace_*` tools are `src/tools/workspace.ts`, and
     `http_request`'s `save_to_workspace` gets the session's from `sessions/manager.ts`.
-    Never a file on the pod. The bytes (#4789) are a blob of the backend's content store,
+    Never a file on the pod; a session's working directory, `<SCADBUDDY_SESSION_DIR>/<id>/`
+    (each worker's own capped emptyDir, Step 9.5; not the NAS share, whose backup cannot leave
+    the plaintext copies out), is a copy of it that each turn's placement fills and each park
+    and its end write back by sha256 (`src/workspace/directory.ts`). The bytes (#4789) are a blob of the backend's content store,
     sealed under a per-file key wrapped under the session's data key (`src/workspace/sealing.ts`,
     `blobs.ts`; backend `api/internal_workspace.py` mints the URLs; a trigger keeps the
     `blob_refs` holder with the row, which assumes one database and role for both services;

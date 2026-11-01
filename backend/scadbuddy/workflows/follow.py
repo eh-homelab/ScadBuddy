@@ -17,10 +17,8 @@ import logging
 import time
 from collections.abc import Callable
 from contextlib import suppress
-from datetime import datetime, timedelta
-from typing import Any
+from datetime import timedelta
 
-from psycopg_pool import ConnectionPool
 from temporalio import workflow
 from temporalio.client import Client
 from temporalio.common import RetryPolicy, VersioningBehavior, WorkflowIDReusePolicy
@@ -199,34 +197,3 @@ class Follows:
         for task in self.starting:
             task.cancel()
         await asyncio.gather(*self.starting, return_exceptions=True)
-
-
-def _recent_watches(pool: ConnectionPool[Any], cutoff: datetime) -> list[str]:
-    with pool.connection() as conn:
-        found = conn.execute("SELECT to_regclass('print_watches') AS t").fetchone()
-        if found is None or found["t"] is None:
-            return []
-        with conn.transaction():
-            conn.execute("DELETE FROM print_watches WHERE printed_at < %s", (cutoff,))
-            rows = conn.execute("SELECT output_id FROM print_watches").fetchall()
-    return [row["output_id"] for row in rows]
-
-
-def _forget_watches(pool: ConnectionPool[Any], output_ids: list[str]) -> None:
-    with pool.connection() as conn:
-        conn.execute("DELETE FROM print_watches WHERE output_id = ANY(%s)", (output_ids,))
-
-
-async def resume_followed(
-    pool: ConnectionPool[Any], client: Client, task_queue: str, now: datetime
-) -> list[str]:
-    """On each boot after the upgrade from the in-process watcher (#268): follow on
-    Temporal the prints it recorded within `MAX_AGE`, and empty its `print_watches` log,
-    which nothing writes any more. A row leaves only once its follow is running, so one
-    that did not start waits for the next boot. The migration that drops the table
-    removes this call."""
-    recent = await asyncio.to_thread(_recent_watches, pool, now - MAX_AGE)
-    followed = [output_id for output_id in recent if await follow(client, task_queue, output_id)]
-    if followed:
-        await asyncio.to_thread(_forget_watches, pool, followed)
-    return followed

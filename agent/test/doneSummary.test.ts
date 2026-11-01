@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { type DoneTouch, doneSummary, SECTION_MAX } from '../src/questions/doneSummary.js'
+import { type DoneTouch, doneSummary, SECTION_MAX } from '../src/gate/doneSummary.js'
 import { redact } from '../src/secrets.js'
 
 // #815 §4: the record ScadBuddy adds to a `done` summary, split around the

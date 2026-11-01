@@ -6,7 +6,8 @@ import { ASK_USER_QUESTION, ASK_USER_TOOL, type QuestionVerdict, type UserQuesti
 import type { HarnessRun } from '../src/harness/run.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { ATTENTION_RATE_LOCK, QuestionService } from '../src/questions/service.js'
+import { ATTENTION_RATE_LOCK, QuestionService } from '../src/gate/questions.js'
+import { gateSettings } from '../src/temporal/session/gateActivities.js'
 import { respond, RespondError } from '../src/routes/pendingInput.js'
 import { ChatConnection } from '../src/routes/chat.js'
 import { type Owner, PROTOCOL_VERSION, type ServerEvent } from '../src/sessions/protocol.js'
@@ -549,10 +550,13 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(
 
     // spec 2026-10-01 §6.6 Timeouts: a question's timer cancels it, never answers it.
     describe('question expiry', () => {
-      const expiry = (seconds: unknown) => ({ get: async <T,>(key: string) => (key === 'question_expiry_seconds' ? (seconds as T) : undefined) })
-
       it('bounds question_expiry_seconds to 10–86 400, default 3600', async () => {
-        const at = (v: unknown) => new QuestionService({ sql: db.sql, events: {} as EventLog, settings: expiry(v) }).expirySeconds()
+        // The gate's timers, read as each turn starts (temporal/session/gateActivities.ts).
+        const at = async (v: unknown) => {
+          await db.sql`DELETE FROM ai_settings WHERE key = 'question_expiry_seconds'`
+          if (v !== undefined) await db.sql`INSERT INTO ai_settings (key, value) VALUES ('question_expiry_seconds', ${db.sql.json(v as never)})`
+          return (await gateSettings(db.sql)).questionExpiryS
+        }
         expect(await at(undefined)).toBe(3600)
         expect(await at(5)).toBe(10)
         expect(await at(100_000)).toBe(86_400)

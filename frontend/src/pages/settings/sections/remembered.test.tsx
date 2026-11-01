@@ -27,6 +27,13 @@ describe('Remembered choices (#322)', () => {
     expect((await api.getRemembered()).printer_bed_types).toEqual({ '1': 'Textured PEI Plate' })
   })
 
+  it('shows a remembered print sequence (#4970)', async () => {
+    setMockRemembered({ modelChoices: { gear: { tier: 'draft', print_sequence: 'by object' } } })
+    renderSettingsSection(<Remembered />, { route: '/settings/printing' })
+    const table = await screen.findByRole('table', { name: 'Remembered choices' })
+    expect(within(table).getByText('draft quality · by object')).toBeInTheDocument()
+  })
+
   it("shows each project's printer and nozzle and forgets one (#599)", async () => {
     setMockRemembered({
       projectTargets: { '1': { printer_id: 1, nozzle_diameter: '0.4' }, '99': { printer_id: 42 } },

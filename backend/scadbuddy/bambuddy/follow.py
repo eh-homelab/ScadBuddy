@@ -91,6 +91,10 @@ Ended = Literal["settled", "gone", "deleted", "quiet"]
 #: Awaited on each read that finds a print settled (#836): after its ``print.settled``
 #: is published. Given the print's subject, an output's or a library file's (#1073).
 SettledHook = Callable[[PrintSubject], Awaitable[None]]
+#: Awaited on each read whose progress differs from the read before it, the settled one
+#: included (#4644, #4543): given the run subject and that progress. A LAN print's last
+#: print and its rack picks follow it, since the report is all a LAN print has.
+ReadHook = Callable[[str, PrintProgress], Awaitable[None]]
 #: Records a settled print's outcome once (#2665, `outcomes.PrintOutcomeStore.record`):
 #: given the run subject, its slug and the settled read.
 OutcomeRecorder = Callable[[str, str, PrintProgress], Awaitable[object]]
@@ -126,6 +130,7 @@ class Follower:
         read_library: LibraryReader | None = None,
         newest_failed: NewestFailed | None = None,
         record_outcome: OutcomeRecorder | None = None,
+        on_read: Sequence[ReadHook] = (),
     ) -> None:
         self.outputs = outputs
         self.observer = observer
@@ -143,6 +148,9 @@ class Follower:
         #: A hook must be idempotent: it may run more than once for one print, and
         #: concurrently (a poke's old attempt reads until its next heartbeat).
         self.on_settled: list[SettledHook] = list(on_settled)
+        #: Each runs on every read that moved, before the settled hooks, bounded and
+        #: logged as they are; idempotent for the same reasons.
+        self.on_read: list[ReadHook] = list(on_read)
         self.settle_timeout = settle_timeout
         #: The progress the subject's newest run shows when it failed before queueing
         #: (``runs.newest_failure``), else None. While it is not None that is what is
@@ -217,7 +225,10 @@ class Follower:
             # Whether the print moved: while a newer run's failure is what is published,
             # that is not what the observer compared.
             changed = published if failed is None else progress != last_read
+            moved = progress != last_read
             last_read = progress
+            if progress is not None and moved:
+                await self._read_hooks(key, progress, active, heartbeat)
             if progress is not None and progress.settled:
                 # After observe, so print.settled is already published (#836). Not on
                 # progress None: a print never queued has no picks.
@@ -272,6 +283,23 @@ class Follower:
                 "a settled print's outcome could not be recorded",
                 extra={"subject": key, "error": type(exc).__name__},
             )
+
+    async def _read_hooks(
+        self,
+        key: str,
+        progress: PrintProgress,
+        active: datetime,
+        heartbeat: Callable[[datetime], None],
+    ) -> None:
+        for hook in self.on_read:
+            try:
+                await self._bounded(hook(key, progress), active, heartbeat)
+            except Exception as exc:
+                # Type only, as the settled hooks.
+                logger.warning(
+                    "a print read hook failed",
+                    extra={"subject": key, "error": type(exc).__name__},
+                )
 
     async def _settled(
         self, subject: PrintSubject, active: datetime, heartbeat: Callable[[datetime], None]

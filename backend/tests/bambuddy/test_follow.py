@@ -448,6 +448,37 @@ def test_a_settled_print_runs_each_settled_hook_once(paths: DataPaths) -> None:
     assert heard == [(OUTPUT, "print.settled")]
 
 
+def test_each_read_that_moved_runs_each_read_hook_once(paths: DataPaths) -> None:
+    """#4644, #4543: a LAN print's last print and rack picks follow its reads, so a read
+    hook hears every read that differs from the one before, the settled one included,
+    and never a repeat."""
+    write_output(paths)
+    follower, _ = follower_for(
+        paths,
+        Script(
+            progress("queued"),
+            progress("queued"),
+            progress("running"),
+            progress("done", settled=True, done=1),
+        ),
+    )
+    heard: list[tuple[str, str, bool]] = []
+
+    async def hook(key: str, read: PrintProgress) -> None:
+        heard.append((key, read.stage, read.settled))
+
+    async def broken(key: str, read: PrintProgress) -> None:
+        raise RuntimeError("serial ABC123 leaked")
+
+    follower.on_read.extend([broken, hook])
+    assert follow(follower) == "settled"
+    assert heard == [
+        (OUTPUT, "queued", False),
+        (OUTPUT, "running", False),
+        (OUTPUT, "done", True),
+    ]
+
+
 def test_a_failing_settled_hook_does_not_fail_the_follow(paths: DataPaths) -> None:
     write_output(paths)
     follower, _ = follower_for(paths, Script(progress("done", settled=True)))

@@ -229,7 +229,6 @@ export class TabHub implements BrowserTabs {
     this.#relay = options.relay
     this.#sessionTabStore = options.sessionTabs
     this.#relay?.serve({
-      holds: (tabId) => this.#tabs.has(tabId),
       tabs: () => this.connected(),
       run: (tabId, request) => this.#runHere(tabId, request),
     })

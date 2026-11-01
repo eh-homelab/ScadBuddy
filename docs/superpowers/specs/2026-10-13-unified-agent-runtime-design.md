@@ -170,6 +170,16 @@ permission layer. Durability is about *where* and *when* that turn runs:
   (`@temporalio/worker/lib/worker-options.d.ts:427-435`). An activity learns that it was
   cancelled on a heartbeat round trip, so with a 20 s heartbeat timeout a cancel can take
   up to 16 s to arrive. Interrupt therefore has a fast path of its own (§5.6).
+- **Update limits on the deployed server (plan Step 9.2, decision Q1).** Prod's Temporal is
+  `ghcr.io/eh-homelab/temporal-server:1.32.1` (Deployment `scadbuddy-temporal-v2-history`,
+  namespace `bambuddy`), and its dynamic config (ConfigMap `scadbuddy-temporal-v2-dynamicconfig`)
+  sets only `frontend.visibilityArchivalQueryMaxPageSize` and
+  `history.cacheNonUserContextLockTimeout`; read with `kubectl get` on 2026-11-01. So both Update
+  limits are the server's defaults: `history.maxInFlightUpdates` 10 and `history.maxTotalUpdates`
+  2000 per workflow execution
+  ([`common/dynamicconfig/constants.go` at v1.32.1](https://github.com/temporalio/temporal/blob/v1.32.1/common/dynamicconfig/constants.go),
+  `WorkflowExecutionMaxInFlightUpdates`, `WorkflowExecutionMaxTotalUpdates`). A turn's calls
+  therefore run as `ToolCall` workflows of their own, never as Updates on `AgentSession`.
 - **Worker Deployments.** The 1.24 worker supports `workerDeploymentOptions` with
   `useWorkerVersioning` and `defaultVersioningBehavior`
   (`worker-options.d.ts:54-70`, `642-654`).
@@ -765,13 +775,16 @@ The row's owner changes, as today. Then:
 
 ### 6.7 Credential, KEK, security
 
-- **The credential.** It is opened per spawn by the `CredentialPool`, and goes only into
-  the query's `env` (`credentialEnv`, `run.ts:233`, `383-389`), as classic does today.
-  - A warm process holds its credential in its environment for its life. That is at
-    most `warm_idle_seconds` past its last turn, or until its credential row changes
-    (fingerprint, plus `NOTIFY`).
-  - A fallback (`runWithFallback`, `manager.ts:1793`) means a respawn with the next
-    credential.
+- **The credential.** It is opened per spawn by the `CredentialPool`, and stays in the
+  worker: the spawn leases a token from the loopback credential gateway
+  (`agent/src/gateway/server.ts`, plan Step 9.4, R4), and the token goes into the query's
+  `env` (`credentialEnv`, `harness/run.ts`). The gateway adds the credential's header
+  upstream and meters each request.
+  - A warm process holds its token in its environment for its life. That is at most
+    `warm_idle_seconds` past its last turn, or until its credential row changes
+    (fingerprint, plus `NOTIFY`). The token is released when the process's query ends.
+  - A fallback (`runWithFallback`, `harness/fallback.ts`) means a respawn with the next
+    credential, under a new token.
 - **Plugin vetting is unchanged** (`agent/src/harness/plugins.ts`,
   `plugins/packages/vet.ts`). Nothing that starts a process inherits the credential env.
 - **The KEK** is needed by the agent alone: for the codec, the sealing store, credentials

@@ -6,10 +6,9 @@ import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
 import { declaredConfigs } from '../src/harness/plugins.js'
 import { derivedPackage, NOTHING_OMITTED, type Omitted, placeCopy } from '../src/plugins/packages/derived.js'
 import { hashTree } from '../src/plugins/packages/hash.js'
-import type { LoadedPackage } from '../src/plugins/packages/install.js'
 import { collidingServerNames, declaresRemoteServers } from '../src/plugins/packages/mcp.js'
+import type { LoadedPackage } from '../src/plugins/packages/install.js'
 import { hookId, packageItems, vetPackage } from '../src/plugins/packages/vet.js'
-import { sharePackage } from '../src/temporal/turnPackages.js'
 
 // #4757: the copy of a package a turn loads, named by its own hash, without its http
 // servers and without what the turn's access switches off.
@@ -243,7 +242,7 @@ describe('derivedPackage', () => {
     expect((await readdir(root)).filter((n) => !n.startsWith('.'))).toEqual([])
   })
 
-  it('names the loaded folder after the package in every variant and in both runtimes (review I2)', async () => {
+  it('names the loaded folder after the package in every variant (review I2)', async () => {
     const files = {
       '.claude-plugin/plugin.json': JSON.stringify({ name: 'solo' }),
       'SKILL.md': '---\ndescription: no name\n---\nDo it.\n',
@@ -251,18 +250,15 @@ describe('derivedPackage', () => {
     }
     const source = await writeTree(path.join(await temp('derived-cache-'), 'abc123-0123456789abcdef'), files)
     const contentHash = (await hashTree(source)).hash
-    const pkg: LoadedPackage = { name: 'solo', dir: source, contentHash, allowed: false, builtinTools: [] }
     const local = await temp('derived-local-')
     // Claude Code 2.1.310 names a root skill with no frontmatter name by its folder (`_7t`).
     const claudeName = (dir: string) => path.basename(dir).replace(/[^a-zA-Z0-9_-]/g, '-')
     const all = await derivedPackage(source, contentHash, local)
     const noHook = await derivedPackage(source, contentHash, local, omit({ hooks: [hookId('Stop', undefined, STOP)] }))
-    const shared = await sharePackage(pkg, await temp('derived-shared-'), local)
     expect(all.dir).not.toBe(source)
     expect(all.contentHash).toBe(contentHash)
     expect(noHook.contentHash).not.toBe(contentHash)
-    for (const dir of [all.dir, noHook.dir, shared.dir]) expect(claudeName(dir)).toBe('solo')
-    expect(shared.dir).toBe(`${contentHash.slice(7)}/solo`)
+    for (const dir of [all.dir, noHook.dir]) expect(claudeName(dir)).toBe('solo')
     for (const dir of [all.dir, noHook.dir]) expect([...packageItems(dir, declaredConfigs(dir).manifest).skills.keys()]).toEqual(['solo'])
 
     // A package with no manifest is named by its folder too: the pin's name.

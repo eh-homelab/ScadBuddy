@@ -40,6 +40,9 @@ import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal }
 import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
+import { readRuntimeSettings, readToolsAsActivities, RUNTIME_DEFAULTS } from './runtimeSettings.js'
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
+import { type ProxiedTool, type ToolCallRequest, turnToolProxies } from '../tools/activityProjection.js'
 import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnContext, type TurnSlot } from './turnSlot.js'
 import { PgHttpBodies } from './httpBodies.js'
@@ -48,6 +51,9 @@ import { browserGuard } from '../browser/guard.js'
 import { BrowserOrigins } from '../browser/store.js'
 import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
 import { BACKGROUND_BUILTINS, BUILTIN_SERVER, CLASSIC_BUILTINS, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
+
+/** The longest a turn's assembly waits for its plugin and http tools' listing (temporal/turnTools.ts LIST_TIMEOUT_MS is each server's). */
+const TURN_TOOLS_LIST_MS = 30_000
 
 export type TurnRunnerDeps = Pick<
   SessionManagerDeps,
@@ -58,6 +64,8 @@ export type TurnRunnerDeps = Pick<
   | 'tools'
   | 'tierOf'
   | 'mcpServers'
+  | 'toolCalls'
+  | 'turnTools'
   | 'prepareApproval'
   | 'builtInTools'
   | 'pluginPaths'
@@ -109,6 +117,8 @@ export type FingerprintParts = {
   raisedTiers: string[]
   /** Whether the run has the http_request tool (#827). */
   httpRequest: boolean
+  /** Whether its ScadBuddy tool calls run as activities (plan 2026-10-13 Step 9.2): the in-process server a process keeps is spawned with it. */
+  toolsAsActivities: boolean
   /** http_request's stored access in ai_access (#2171), its tier when one is set; null when none is stored. */
   httpTier: ToolAccess | null
   builtinTools: string[]
@@ -207,6 +217,7 @@ export class TurnRunner {
     'memoryHooks',
     'traceHooks',
     'stderr',
+    'onSpend',
   ]
 
   /**
@@ -247,6 +258,7 @@ export class TurnRunner {
     memoryHooks: 'slot',
     traceHooks: 'slot',
     stderr: 'spawn', // a constant sink (fingerprint rule)
+    onSpend: 'slot', // the credential gateway's meter, to the slot's turn (gateway/server.ts)
   }
 
   private readonly deps: TurnRunnerDeps
@@ -500,14 +512,24 @@ export class TurnRunner {
           }
         }
       }
-      const [cwd, resume, settingModel, httpAccess] = await phase('session', () =>
+      const [cwd, resume, settingModel, httpAccess, asActivities, runtime] = await phase('session', () =>
         Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.deps.store.exists(id),
           this.deps.settings?.get<string>(SETTING_MODEL),
           this.deps.httpRequest ? access.entry(BUILTIN_SOURCES.http, HTTP_TOOL) : undefined,
+          this.deps.settings ? readToolsAsActivities(this.deps.settings) : false,
+          this.deps.settings ? readRuntimeSettings(this.deps.settings) : undefined,
         ]),
       )
+      // The turn's ScadBuddy calls as activities (plan 2026-10-13 Step 9.2), each given the gate
+      // entry the seam approved it on, and bounded by the turn's own limit. Without a starter (no
+      // Temporal), they run here.
+      const toolCalls = asActivities ? this.deps.toolCalls?.() : undefined
+      const timeoutMs = (runtime ?? RUNTIME_DEFAULTS).turn_max_seconds * 1000
+      const activities = toolCalls
+        ? { start: (request: ToolCallRequest) => toolCalls({ ...request, timeoutMs }), approvalOf: (toolUseId: string) => ledger.approvalOf(toolUseId) }
+        : undefined
       // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
       const model = session.agentModel ?? settingModel
       // Not while that subagent, or the own plugin, is switched off (#4757 Task 6 review I3): the
@@ -550,6 +572,43 @@ export class TurnRunner {
           : undefined
       // The built-ins the packages name that the session serves instead of Claude Code: the
       // background ones, kept past the turn, and WebFetch, pinned to the addresses it checked (#2684).
+      // With the turn's calls as activities (plan 2026-10-13 Step 9.3), its remote plugins, package
+      // http servers and http_request are in-process proxies of the same names, each call a ToolCall
+      // whose activity builds the server again where it runs: none is handed to Claude Code. Listed
+      // here, as the activity lists them; a listing that fails leaves the turn as it was. Their
+      // forwarder routes above are kept on purpose: the listing names its servers from them, and
+      // a listing that fails falls back to them.
+      let proxies: Record<string, McpSdkServerConfigWithInstance> | undefined
+      if (activities && this.deps.turnTools) {
+        try {
+          const wanted = new Set([...remotePlugins.map((p) => p.name), ...(http ? [HTTP_SERVER] : [])])
+          const listed = await phase('turn tools', () =>
+            this.deps.turnTools!({ session: id, owner: session.owner, signal: AbortSignal.timeout(TURN_TOOLS_LIST_MS) }, wanted),
+          )
+          // A server that listed nothing is said so, as one the assembly left out is (its own problems are said above).
+          for (const problem of listed.unlisted ?? []) {
+            this.deps.stderr?.(`${problem}\n`)
+            await unavailable(problem)
+          }
+          const byServer = new Map<string, ProxiedTool[]>()
+          for (const entry of listed.tools) {
+            const at = entry.name.indexOf('__')
+            const server = entry.name.slice(0, at)
+            if (at <= 0 || !wanted.has(server)) continue
+            const tools = byServer.get(server) ?? []
+            tools.push({
+              name: entry.name.slice(at + 2),
+              description: entry.description,
+              inputSchema: entry.input_schema,
+              ...(entry.task_queue ? { queue: entry.task_queue } : {}),
+            })
+            byServer.set(server, tools)
+          }
+          proxies = turnToolProxies(byServer, id, activities.start, activities.approvalOf)
+        } catch (err) {
+          this.deps.stderr?.(`session ${id}: its plugin and http tools could not be listed, so they run in this turn's process: ${err instanceof Error ? err.message : String(err)}\n`)
+        }
+      }
       const served = allowedPluginPaths.length
         ? (packages?.builtinTools ?? []).filter(
             (n) => CLASSIC_BUILTINS.includes(n) && (this.deps.background !== undefined || !BACKGROUND_BUILTINS.includes(n)),
@@ -562,7 +621,8 @@ export class TurnRunner {
         includePartialMessages: true,
         maxTurns: session.maxTurns,
         maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
-        tierOf,
+        // The plugins' tiers come with them (run.ts harnessTierOf); proxied, they are not handed over, so their tiers are given here.
+        tierOf: proxies ? pluginTiers : tierOf,
         // The headless browser's lists (#982): every remote plugin's browser_* calls.
         browser: browserGuard({
           store: new BrowserOrigins(this.deps.sql, this.deps.settings),
@@ -571,9 +631,13 @@ export class TurnRunner {
         }),
         ...(builtIn ? { builtInPolicy: builtIn } : {}),
         ...(live ? { live } : {}),
-        approvalGate: (request) => {
+        approvalGate: async (request) => {
           const turn = slot.current
-          return turn ? turn.approvalGate(request) : Promise.resolve({ approved: false, message: NO_TURN })
+          if (!turn) return { approved: false, message: NO_TURN }
+          const verdict = await turn.approvalGate(request)
+          // The entry it was approved on, which its ToolCall runs on (Step 9.2).
+          if (verdict.approved && verdict.approvalId !== undefined) ledger.approve(request.toolUseId, { requestId: verdict.approvalId, input: verdict.input })
+          return verdict
         },
         // A registry tool that resolves what its arguments name parks that, by name (#4442).
         ...(this.deps.prepareApproval ? { prepareApproval: this.deps.prepareApproval(session, principal) } : {}),
@@ -595,7 +659,7 @@ export class TurnRunner {
         ...(session.agentEffort ? { effort: session.agentEffort } : {}),
         // The plugin's subagent of that name (its agents/<name>.md), as the turn's main thread.
         ...(agentDefinition && session.agentType ? { agent: { name: session.agentType, definition: agentDefinition } } : {}),
-        ...(this.deps.mcpServers || http || served.length
+        ...(this.deps.mcpServers || http || served.length || proxies
           ? {
               mcpServers: {
                 ...(this.deps.mcpServers
@@ -611,11 +675,13 @@ export class TurnRunner {
                       turnContext: () => slot.current?.trace.context() ?? ROOT_CONTEXT,
                       ...(builtIn ? { builtIn } : {}),
                       ...(live ? { ledger } : {}),
+                      ...(activities ? { activities } : {}),
                       // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
                       secrets: () => secrets,
                     })
                   : {}),
-                ...(http ? { [HTTP_SERVER]: http } : {}),
+                ...(http && !proxies ? { [HTTP_SERVER]: http } : {}),
+                ...(proxies ?? {}),
                 ...(served.length
                   ? {
                       [BUILTIN_SERVER]: classicBuiltinServer(served, {
@@ -672,13 +738,15 @@ export class TurnRunner {
           ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !served.includes(n)) }
           : {}),
         ...(ownPlugin !== undefined ? { ownPlugin } : {}),
-        ...(remotePlugins.length ? { remotePlugins } : {}),
+        ...(remotePlugins.length && !proxies ? { remotePlugins } : {}),
         disallowedTools: localOff,
         // Shaped like any turn's memory hooks (the same config gives the same
         // events, matchers and timeouts); each runs the current turn's own.
         ...(memory ? { memoryHooks: slotHooks(memory.hooks('', '').hooks, slot, (turn) => turn.memory?.hooks) } : {}),
         traceHooks: TurnTrace.hooksFor(() => slot.current?.trace),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
+        // What the credential gateway priced, to the turn the process serves (turnCore.ts `runningUsd`).
+        onSpend: (usd) => slot.meter(usd),
       }
       inProcessServers = Object.keys(run.mcpServers ?? {})
       const first = candidates[0]
@@ -705,6 +773,7 @@ export class TurnRunner {
         disabledTools: [...(builtIn?.disallowed ?? []), ...localOff],
         raisedTiers: [...(builtIn?.raised ?? [])],
         httpRequest: http !== undefined,
+        toolsAsActivities: activities !== undefined,
         httpTier: httpAccess?.access ?? null,
         builtinTools: run.builtinTools ?? [],
         servedBuiltins: served,
@@ -786,19 +855,29 @@ export class TurnRunner {
  * one for each turn the slot holds, dropped with it, so a warm process that serves many
  * turns never holds more than one turn's calls. With no turn it records nothing.
  */
-function turnLedger(slot: TurnSlot): Pick<SeamLedger, 'record' | 'tierOf'> {
+function turnLedger(slot: TurnSlot): Pick<SeamLedger, 'record' | 'tierOf' | 'approve' | 'approvalOf'> {
   const ledgers = new WeakMap<TurnContext, SeamLedger>()
+  const current = (): SeamLedger | undefined => {
+    const turn = slot.current
+    if (!turn) return undefined
+    let ledger = ledgers.get(turn)
+    if (!ledger) ledgers.set(turn, (ledger = new SeamLedger()))
+    return ledger
+  }
   return {
     record(toolUseId, tier) {
-      const turn = slot.current
-      if (!turn) return
-      let ledger = ledgers.get(turn)
-      if (!ledger) ledgers.set(turn, (ledger = new SeamLedger()))
-      ledger.record(toolUseId, tier)
+      current()?.record(toolUseId, tier)
     },
     tierOf(toolUseId) {
       const turn = slot.current
       return turn ? ledgers.get(turn)?.tierOf(toolUseId) : undefined
+    },
+    approve(toolUseId, approval) {
+      current()?.approve(toolUseId, approval)
+    },
+    approvalOf(toolUseId) {
+      const turn = slot.current
+      return turn ? ledgers.get(turn)?.approvalOf(toolUseId) : undefined
     },
   }
 }

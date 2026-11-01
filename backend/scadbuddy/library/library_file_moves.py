@@ -34,8 +34,10 @@ On ``library_backend=native`` (plan 2026-10-17-native-print-library, Rulings 4 a
 the same kinds work on ScadBuddy's own rows, chosen when they run: a move clears the
 file's ``filed`` (Ruling 8) and names no project (native folders have none), a copy
 indexes the source's blob under the copy's key and moves no bytes
-(`NativeLibrary.copy`), and a rename keeps the extension as on Bambuddy. The upload rows
-are Bambuddy's copies, so none of them is touched.
+(`NativeLibrary.copy`), and a rename keeps the extension as on Bambuddy. A native run's
+per-print copy a person moves is theirs, with its slices (`copies.release_moved`, #4337):
+its upload rows are forgotten, as a Bambuddy copy moved into the inbox is, and no sweep
+trashes it.
 """
 
 from __future__ import annotations
@@ -67,6 +69,7 @@ from scadbuddy.library.library_file_operations import (
 )
 from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.copies import release_moved
 from scadbuddy.print_library.store import file_type_of
 from scadbuddy.store.content_models import ReuseLostError
 
@@ -409,7 +412,19 @@ def library_file_move_kinds(state: Core, components: Components) -> list[Operati
         folder_id: int | None = checked["folder_id"]
         native = await library.serving_native()
         if native is not None:
-            return (await _native_move(native, checked)).model_dump(mode="json")
+            ids = [entry["id"] for entry in checked["files"]]
+            was = {
+                f.id: f.folder_id for f in await asyncio.to_thread(native.rows.files_by_ids, ids)
+            }
+            done = await _native_move(native, checked)
+            # A run's per-print copy a person moves to another folder is theirs, with its
+            # slices (#4337).
+            await release_moved(
+                native,
+                state.uploads,
+                [file.id for file in done.moved if was.get(file.id, folder_id) != folder_id],
+            )
+            return done.model_dump(mode="json")
         files = [MovedLibraryFile.model_validate(entry) for entry in checked["files"]]
         settings = await asyncio.to_thread(state.settings_store.load)
         result = LibraryMoveResult(folder_id=folder_id, moved=[], skipped=[])

@@ -193,9 +193,9 @@ function DiagnosticItem({ diagnostic, scopes, decisions, target, request, onChan
 /**
  * Removes the decision that set a finding aside, so it is open again. Keyed by the
  * decision, so the next one deciding the same finding (a wider suppression beneath the
- * one removed) starts with its own state. An enforced decision was made to override
- * narrower ones (`post_decision`), so it is not removed from here; one wider than the
- * template reaches other models' prints, so removing it is confirmed first.
+ * one removed) starts with its own state. An enforced decision overrides narrower ones
+ * (`post_decision`) and one wider than the template reaches other models' prints, so
+ * removing either is confirmed first. This is the only place the UI removes one (#4967).
  */
 function RemoveDecision({ diagnostic, onChanged }: { diagnostic: AnalyzerDiagnostic; onChanged: () => void }) {
   const applied = diagnostic.decision?.decision
@@ -214,10 +214,8 @@ function RemoveButton({ decision, diagnostic, onChanged }: RemoveProps) {
   const [confirming, setConfirming] = useState(false)
   const [refusal, setRefusal] = useState<string | null>(null)
   const verb = { accept: 'accepted fix', suppress: 'suppression', ignore: 'ignore' }[decision.kind]
-  if (decision.enforced) {
-    return <span className="ml-1 text-faint">(enforced, so not removable from here)</span>
-  }
   const wide = widerThanTemplate(decision.scope)
+  const asks = wide || decision.enforced
 
   function remove() {
     setBusy(true)
@@ -240,18 +238,21 @@ function RemoveButton({ decision, diagnostic, onChanged }: RemoveProps) {
         variant="link"
         disabled={busy}
         aria-label={`Remove the ${verb} of ${diagnostic.key}`}
-        onClick={wide ? () => setConfirming(true) : remove}
+        onClick={asks ? () => setConfirming(true) : remove}
         className={INLINE}
       >
         Remove
       </Button>
-      {/* One wider than the template reaches other models' prints: confirmed first. */}
+      {/* One wider than the template reaches other models' prints, and an enforced one
+          overrides narrower decisions: either is confirmed first. */}
       <AlertDialog open={confirming} onOpenChange={setConfirming}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{`Remove the ${verb} of ${diagnostic.key}?`}</AlertDialogTitle>
             <AlertDialogDescription>
-              Remove it for {scopeLabel(decision.scope).toLowerCase()}? It applies beyond this template.
+              Remove it for {scopeLabel(decision.scope).toLowerCase()}?
+              {wide && ' It applies beyond this template.'}
+              {decision.enforced && ' It is enforced over narrower scopes; removing it lets their decisions apply again.'}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

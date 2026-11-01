@@ -47,6 +47,12 @@ export type TurnContext = {
   http?: HttpState
   /** What the turn's WebFetch model calls cost (builtins/nested.ts), which no result prices (#2684). */
   nested?: { usd: number }
+  /**
+   * What the process's model requests cost this turn as the credential gateway priced them
+   * (gateway/server.ts): every request made with its token, a command's too, which Claude Code
+   * prices only for its own (Step 9.4).
+   */
+  metered?: { usd: number }
   /** The credential the turn is on now, which a fallback moves (#2973): WebFetch's model call asks on it. */
   credential?: { current: PooledCredential | undefined }
   /** #815 §2: how this turn's browser_* calls wait for a missing tab; only with a question gate. */
@@ -60,15 +66,31 @@ export type TurnSlot = {
   current?: TurnContext
   set(ctx: TurnContext): void
   clear(): void
+  /**
+   * What the credential gateway priced for the process (run.ts `onSpend`): the turn's
+   * `metered`, or, between turns (a command still running after its turn ended), held and
+   * given to the next turn the slot is set for, so `cost_usd` still counts it.
+   */
+  meter(usd: number): void
 }
 
 export function createTurnSlot(): TurnSlot {
+  let between = 0
   const slot: TurnSlot = {
     set(ctx) {
       slot.current = ctx
+      if (between > 0 && ctx.metered) {
+        ctx.metered.usd += between
+        between = 0
+      }
     },
     clear() {
       delete slot.current
+    },
+    meter(usd) {
+      const metered = slot.current?.metered
+      if (metered) metered.usd += usd
+      else between += usd
     },
   }
   return slot

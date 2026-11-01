@@ -138,7 +138,7 @@ describe("a classic turn's packages and own plugin (#4757)", () => {
   })
 
   it('one package off, one write: Bash offered in neither runtime', async () => {
-    // The durable half is turnPackages.test.ts's, over the same rows.
+    // The access half is packageServers.test.ts's, over the same rows.
     const a = await pkg({ name: 'a', allowed: true, builtins: ['Bash'] })
     const b = await pkg({ name: 'b', allowed: true, builtins: ['Bash', 'Grep'] })
     const { turn } = await assemble([a, b], [row(packageSource('a'), 'builtin:Bash', 'write'), row(packageSource('b'), 'builtin:Bash', 'off')])

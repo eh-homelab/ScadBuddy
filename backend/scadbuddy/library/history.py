@@ -25,7 +25,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from scadbuddy.core.gitrepo import _FIELD, _RECORD, AUTHOR_EMAIL, AUTHOR_NAME, GitRepo
+from scadbuddy.core.gitrepo import _FIELD, _RECORD, AUTHOR_EMAIL, AUTHOR_NAME, FULL_ID, GitRepo
 from scadbuddy.core.gitrepo import COMMIT_ATTEMPTS as COMMIT_ATTEMPTS
 from scadbuddy.core.gitrepo import COMMIT_ID_PATTERN as COMMIT_ID_PATTERN
 from scadbuddy.core.gitrepo import COMMIT_RETRY_SECONDS as COMMIT_RETRY_SECONDS
@@ -231,10 +231,42 @@ class ModelHistory(GitRepo):
 
     def tree(self, commit: str, path: str) -> str | None:
         """The object id of ``path`` at ``commit`` (a directory's is its tree id);
-        ``None`` where it is absent."""
+        ``None`` where it is absent. Kept for a full commit id, whose tree never
+        changes (#849); an absence is not, as the commit may not be visible yet."""
+        key = ("tree", commit, path)
+        cacheable = FULL_ID.fullmatch(commit) is not None
+        if cacheable and (known := self._recall(key)) is not None:
+            return known
         completed = self._run("rev-parse", "--verify", "--quiet", f"{commit}:{path}", check=False)
         assert isinstance(completed.stdout, str)
-        return completed.stdout.strip() or None if completed.returncode == 0 else None
+        found = completed.stdout.strip() or None if completed.returncode == 0 else None
+        if cacheable and found is not None:
+            self._remember(key, found)
+        return found
+
+    def head_if_clean(self, path: str) -> str | None:
+        """HEAD's commit id when the working tree under ``path`` is as HEAD has it
+        (as :meth:`clean`), else ``None``: one ``git status`` for both (#849)."""
+        completed = self._run(
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=all",
+            "--",
+            path,
+            check=False,
+        )
+        assert isinstance(completed.stdout, str)
+        if completed.returncode != 0:
+            return None
+        head: str | None = None
+        for line in completed.stdout.splitlines():
+            if not line.startswith("# "):
+                return None  # an entry: something under path differs from HEAD
+            if line.startswith("# branch.oid "):
+                oid = line.removeprefix("# branch.oid ").strip()
+                head = oid if FULL_ID.fullmatch(oid) else None  # "(initial)"
+        return head
 
     def clean(self, path: str) -> bool:
         """Whether the working tree under ``path`` is as HEAD has it: nothing edited,

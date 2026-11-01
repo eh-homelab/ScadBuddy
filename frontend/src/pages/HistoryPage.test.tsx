@@ -5,7 +5,7 @@ import { Route, Routes, useLocation, useParams } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Output } from '../api/types'
 import { bbox, keychainSchema, models, outputs, prints } from '../mocks/fixtures'
-import { addMockOutput, problem } from '../mocks/handlers'
+import { addMockOutput, mockOutput, problem } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { fakeRealtime } from '../lib/realtime.fake'
 import { setDisplayUnit } from '../lib/units'
@@ -603,6 +603,27 @@ describe('HistoryPage', () => {
     expect(
       await within(await row('Workshop')).findByRole('link', { name: 'Last print: Deleted in Bambuddy' }),
     ).toBeInTheDocument()
+  })
+
+  it("says how an output's last print over the LAN went, newer than its Bambuddy prints (#4644)", async () => {
+    // The mock's own record, which every test starts afresh.
+    const reagan = mockOutput(outputs.find((o) => o.name === 'Reagan')!.id)!
+    Object.assign(reagan, {
+      print_route: 'lan',
+      print_run_id: 'run-1',
+      print_stage: 'done',
+      print_settled: true,
+      queue_item_id: null,
+      plates: [],
+      lan_plates: [{ plate_id: 1, copies: 1 }],
+    })
+    render()
+    const row_ = await row('Reagan')
+    const outcome = await within(row_).findByText('Last print: Succeeded')
+    // No archive holds a LAN print: nothing to link to.
+    expect(outcome.closest('a')).toBeNull()
+    expect(outcome).toHaveClass('text-ok')
+    expect(within(row_).queryByRole('link', { name: /^Last print/ })).not.toBeInTheDocument()
   })
 
   it('says a print that finishes while the page is open, without a reload (#2786 review)', async () => {

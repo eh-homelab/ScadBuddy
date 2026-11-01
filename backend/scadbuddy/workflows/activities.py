@@ -17,14 +17,12 @@ from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from concurrent.futures import Executor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Concatenate
 
 import psycopg
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
-from temporalio.service import RPCError
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome, RenderStage
@@ -60,8 +58,6 @@ from scadbuddy.render.previews import PreviewFailedError, render_preview
 from scadbuddy.render.projection import (
     PROJECT_POOL_TIMEOUT,
     JobProjection,
-    LegacyPendingError,
-    legacy_unrun,
 )
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput, cached_schema, params_problem
 from scadbuddy.render.split import MODEL_ENTRY, MaterialSplitError
@@ -75,7 +71,6 @@ from scadbuddy.workflows.models import (
     ACCEPT_ACTIVITY,
     ACCEPT_TRANSIENT,
     CLAIMS_ACTIVITY,
-    LEGACY_PENDING,
     QUEUE_FULL,
     AcceptRender,
     Failure,
@@ -90,8 +85,6 @@ logger = logging.getLogger(__name__)
 
 #: The finished piece, written last: a blob that has it is never rendered again.
 PIECE_NAME = "piece.json"
-#: How long `render_accept` asks Temporal about an older build's row holding its key.
-LEGACY_DESCRIBE = timedelta(seconds=5)
 
 
 @dataclass
@@ -884,29 +877,7 @@ class RenderActivities:
             created_at=now(),
             traceparent=start.traceparent,
         )
-        orphaned: str | None = None
         try:
-            try:
-                return await asyncio.to_thread(
-                    self.deps.projection.accept,
-                    job,
-                    start.render_key,
-                    workflow_id=accept.workflow_id,
-                    run_id=accept.run_id,
-                    max_pending=start.max_pending,
-                    supersedes=start.supersedes,
-                )
-            except LegacyPendingError as waiting:
-                # An older build's row holds the key: retried until that build runs it,
-                # unless no workflow ever will (it would block the key for good). A local
-                # activity has a client too when it is `async def` (temporalio 1.33,
-                # worker/_activity.py: `client=... if not running_activity.sync`;
-                # review #1066 (2) 1.1), and test_submit's legacy_unrun tests run it.
-                if not await legacy_unrun(
-                    activity.client(), waiting.job, rpc_timeout=LEGACY_DESCRIBE
-                ):
-                    raise ApplicationError(str(waiting), type=LEGACY_PENDING) from None
-                orphaned = waiting.job.id
             return await asyncio.to_thread(
                 self.deps.projection.accept,
                 job,
@@ -915,16 +886,14 @@ class RenderActivities:
                 run_id=accept.run_id,
                 max_pending=start.max_pending,
                 supersedes=start.supersedes,
-                orphaned=orphaned,
             )
         except QueueFullError as error:
             raise ApplicationError(
                 str(error), error.depth, type=QUEUE_FULL, non_retryable=True
             ) from None
-        except (psycopg.OperationalError, RPCError) as error:
-            # Postgres out of reach (a pool timeout is one too), or Temporal unable to
-            # say whether the older row's workflow runs: states that pass (review #1066
-            # (11)).
+        except psycopg.OperationalError as error:
+            # Postgres out of reach (a pool timeout is one too): a state that passes
+            # (review #1066 (11)).
             raise ApplicationError(str(error), type=ACCEPT_TRANSIENT) from error
 
     @activity.defn(name=CLAIMS_ACTIVITY)

@@ -6,12 +6,14 @@ import path from 'node:path'
 // changed plugin | ... command hooks refused"; §10, "Command hooks are
 // refused, because the harness has no shell").
 //
-// Why it matters here: the harness passes the Claude credential to Claude Code
-// through the SDK's `env` (run.ts), and every process Claude Code starts for a
-// plugin inherits that environment. A plugin that runs a program of its own
-// therefore gets ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN /
-// ANTHROPIC_AUTH_TOKEN. `tools: []` removes Bash, but not these, which Claude
-// Code starts itself.
+// Why it matters here: every process Claude Code starts for a plugin inherits
+// the environment the harness gives it through the SDK's `env` (run.ts). Since
+// plan 2026-10-13 Step 9.4 that holds no Claude credential, only the process's
+// token at the loopback credential gateway (gateway/server.ts), which reaches
+// the model on the session's budget while the process lives. A plugin that
+// runs a program of its own would still get that token, and the process's
+// other access. `tools: []` removes Bash, but not these, which Claude Code
+// starts itself.
 //
 // What starts a process, per the plugin manifest reference
 // (https://code.claude.com/docs/en/plugins-reference, "Fields", "Component

@@ -11,8 +11,10 @@ import { refusal } from '../gate/refusal.js'
 import { INPUT_CHANNEL } from '../gate/store.js'
 import { type AttentionSpec, answeredText, BACK_REPLIES, DEFAULT_REPLIES, RECONNECTED_TEXT, timedOutText } from '../harness/attention.js'
 import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
+import type { FinishedCall } from '../tools/activityProjection.js'
+import { TOOL_CALL_RESULT_TOOL } from '../temporal/toolCall.js'
 import type { QuestionGate, QuestionRequest, QuestionVerdict, UserQuestion } from '../harness/questions.js'
-import type { QuestionService } from '../questions/service.js'
+import type { QuestionService } from '../gate/questions.js'
 import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
 import type { DecidedCall, DecidedRun } from '../temporal/toolActivities.js'
 import { NO_CAPACITY, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
@@ -23,6 +25,7 @@ import { type ClaimedSession, runningDurableTurn, TAB_WAIT_S, type TurnOutcome, 
 import { scrubForLog } from './sdkEvents.js'
 import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
+import { type Placement, type SessionDirectory, watchCaps } from '../workspace/directory.js'
 
 // An AgentSession's turn on this replica (unified runtime spec 2026-10-13 §5.2, §5.5): what
 // the `session_turn` activity runs (temporal/session/turnActivity.ts). The turn is a classic
@@ -36,6 +39,10 @@ import type { WarmEntry } from './warm.js'
 //      dies before its result still counts against the budget; at its end the cost and turns
 //      as a classic turn reckons them, as increments over what it wrote; the closing events
 //      (`tail`) are the workflow's `session.finish_turn`.
+//   5. the session's working directory (workspace/directory.ts, plan Step 9.5): made what its
+//      workspace holds before the message goes in, written back at each park and once the turn
+//      has ended here (released and shut-down turns too), unless another placement holds the
+//      turn by then; a turn whose directory grows past the workspace cap is stopped.
 //
 // Placements (§5.2 "Recovery"). A placement the workflow gave up on may still run here (its
 // heartbeat stalled, it ran past `turn_max_seconds`). Each of its event appends and transcript
@@ -70,7 +77,7 @@ import type { WarmEntry } from './warm.js'
 // reply, the tab's return (`reconnected`, which the process whose hub sees the tab sends as the
 // Update `tab_reconnected`, manager.ts `resolveTabWaits`), or the entry's timer, whose `stop` and
 // `wait` end the turn. A `done` summary waits for nothing and outlives its turn, so it is posted
-// as classic's is (questions/service.ts), never through the workflow, whose entries end with
+// as classic's is (gate/questions.ts), never through the workflow, whose entries end with
 // their turn. A released one is told in the continuation in the words its call would have read.
 //
 // Release (§5.4 "Release"). A hold lasts `park_hold_seconds` (the input's parkHoldSeconds);
@@ -95,14 +102,40 @@ import type { WarmEntry } from './warm.js'
 
 export const RESTARTED_PROMPT =
   'The agent service restarted during this turn. Calls that were in flight are marked as interrupted; check before repeating any of them. Continue the task.'
+/**
+ * The restart message when calls in flight had finished as ToolCall workflows (plan 2026-10-13 Step
+ * 9.2): which ones, and whether each succeeded, so the model need not repeat them; the rest are still
+ * to be checked. Never what a call returned: that is tool output, which reaches the model only as a
+ * tool result (#258), here `tool_call_result`'s.
+ */
+export function restartedPrompt(finished: readonly FinishedCall[]): string {
+  if (finished.length === 0) return RESTARTED_PROMPT
+  const lines = finished.map((c) => `- ${c.name} (call ${c.id}) ${c.ok ? 'succeeded' : 'failed'}`)
+  return (
+    'The agent service restarted during this turn. These calls finished before the restart; do not repeat them:\n' +
+    `${lines.join('\n')}\n` +
+    `Read what one returned with the ${TOOL_CALL_RESULT_TOOL} tool, giving its call id. ` +
+    'Any other call that was in flight is marked as interrupted; check before repeating it. Continue the task.'
+  )
+}
+
 /** What a call that cannot park here reads: an attention request or a tab wait, or a turn with no way to its workflow. */
 export const NO_PARKS = 'this session cannot wait for an approval or an answer yet, so the call was not run'
-/** What a question is told when the session is no longer the user's, or its turn ended: classic's words (questions/service.ts). */
+/** What a question is told when the session is no longer the user's, or its turn ended: classic's words (QuestionService before plan Step 9.7). */
 export const NOT_ASKED = 'The question was not asked: the session is no longer the user’s, or its turn ended.'
 /** How often a held call reads its entry's response row besides the NOTIFY (approvals/service.ts's waiter's 1 s). */
 export const INPUT_POLL_MS = 1_000
 /** The gate's question tool (gate/entry.ts ASK_USER): AskUserQuestion and the subagents' ask_user park as it. */
 const GATE_ASK = 'ask_user'
+/** Every this many cap checks (each minute, directory.ts DIR_CHECK_MS), a running turn also writes its directory back. */
+const DIR_SYNC_EVERY = 4
+/** How many skipped files' reasons one log line names; a flood of them is counted, not listed. */
+const LOGGED_REASONS = 5
+
+function firstReasons(skipped: readonly { why: string }[]): string {
+  const named = skipped.slice(0, LOGGED_REASONS).map((s) => s.why).join('; ')
+  return skipped.length > LOGGED_REASONS ? `${named}; and ${skipped.length - LOGGED_REASONS} more` : named
+}
 /** How often a running placement checks that it still holds the turn, and writes what it has spent. */
 export const FENCE_MS = 1_000
 
@@ -148,10 +181,22 @@ export type TurnHostDeps = {
   listen?: (channel: string, onNotify: (payload: string) => void) => void
   /** Tests only: how often a held call reads its row (INPUT_POLL_MS). */
   inputPollMs?: number
+  /** The calls in flight at a restart whose ToolCall finished, and whether each succeeded (activityProjection.ts `finishedToolCalls`); absent, none. */
+  finishedCalls?: (sessionId: string, turnId: string) => Promise<FinishedCall[]>
   /** Runs a released turn's approved call once (toolActivities.ts `decidedCalls`); absent, the model is told it was not run. */
   runCall?: (call: DecidedCall) => Promise<DecidedRun>
   /** Where a `done` summary is posted, as a classic turn posts it (#815 §4); absent, it reads NO_PARKS. */
   questions?: Pick<QuestionService, 'gate' | 'attentionLimit'>
+  /**
+   * The session's working directory as a copy of its workspace (workspace/directory.ts, plan
+   * Step 9.5): placed before the turn runs, written back at its end. Absent, the directory is
+   * the process's own, unsynced.
+   */
+  directory?: Pick<SessionDirectory, 'place' | 'writeBack' | 'done' | 'usage'>
+  /** Tests only: how often a running turn checks its directory against the workspace cap (directory.ts DIR_CHECK_MS). */
+  dirCheckMs?: number
+  /** Tests only: how long one check's walk may take (directory.ts DIR_WALK_TIMEOUT_MS). */
+  dirWalkTimeoutMs?: number
 }
 
 /** A placement's holds (§5.4): the calls held now, the hold's length, and the release that ends them all. */
@@ -248,6 +293,8 @@ export class TurnHost {
    * A token of its own, not the attempt id, which the next turn's first placement in a run shares.
    */
   readonly #arrived = new Map<string, object>()
+  /** The skipped paths each placement's write-backs have logged (`#writeBack`). */
+  readonly #reported = new WeakMap<Placement, Set<string>>()
   /** Held calls by request id: each is woken by its entry's NOTIFY. */
   readonly #waiters = new Map<string, Set<() => void>>()
 
@@ -384,7 +431,14 @@ export class TurnHost {
       const said = `the turn ended: ${decided.stop}`
       return this.#result(tallyTurn(session, { stopped: said, interrupted: said, result: undefined, refused: undefined, failure: undefined, secrets: [], turnUsd: 0, cutUsd: 0 }), [])
     }
-    const text = restarted ? RESTARTED_PROMPT : decided ? decided.text : (input.message?.text ?? '')
+    // Unread (Temporal away), the message says only what it always said: the model checks them.
+    const finished = restarted
+      ? ((await this.#deps.finishedCalls?.(id, turnId).catch((err: unknown) => {
+          this.#deps.core.stderr?.(`restarted turn ${turnId}: its finished calls could not be read: ${describe(err)}\n`)
+          return []
+        })) ?? [])
+      : []
+    const text = restarted ? restartedPrompt(finished) : decided ? decided.text : (input.message?.text ?? '')
     if (!text) throw ApplicationFailure.nonRetryable(`turn ${turnId} of session ${id} has no message`, SESSION_GONE)
     const images = restarted || parked ? [] : await this.#images(id, input.message?.images ?? [])
     const prompt = images.length ? userPrompt(text, images) : text
@@ -402,6 +456,17 @@ export class TurnHost {
       return why !== undefined && why !== 'shutdown'
     }
     const spend = new Spend(sql, id)
+    /** The session's working directory as placed for this turn (set just before it runs). */
+    let placed: Placement | undefined
+    /**
+     * The directory's changes so far, into the workspace: at each park and every minute (offers
+     * only, so the turn keeps what it still uses), and at the turn's end (`prune`); not once cut
+     * off. The bytes it found, when it ran.
+     */
+    const sync = async (prune: boolean): Promise<number | undefined> => {
+      if (placed && !fenced()) return this.#writeBack(placed, prune)
+      return undefined
+    }
     /**
      * This placement still holds its turn: checked, row locked, in each write's own transaction.
      * The turn as well as the attempt: an attempt id is the run's and the cycle's, so the next
@@ -445,6 +510,7 @@ export class TurnHost {
           shown: ctx.shown,
           trace: ctx.trace,
           asks: ctx.turn.run.questionGate !== undefined,
+          sync,
           // An attention request's timer, or its release, ends the turn as a Stop does: an MCP tool's result cannot.
           endTurn: (why) => {
             if (!controller.signal.aborted) controller.abort(new Error(why))
@@ -491,8 +557,44 @@ export class TurnHost {
     fence.unref()
     let outcome: TurnOutcome = { kind: 'failed', message: 'the turn could not finish' }
     let result: SDKResultMessage | undefined
+    let stopCaps: (() => void) | undefined
     try {
-      const run = await core.run(prompt)
+      placed = await this.#place(id)
+      // A directory past the workspace cap stops the turn: what it holds then is written back
+      // up to the cap, and the rest removed (directory.ts), so this disk stays bounded.
+      if (placed) {
+        let syncing = false
+        const stop = (why: string, message: string) => {
+          if (controller.signal.aborted) return
+          console.warn(`session directory cap: session ${id}'s working directory ${why}; the turn is stopped`)
+          controller.abort(new Error(message))
+        }
+        stopCaps = watchCaps(this.#deps.directory!, placed, {
+          ...(this.#deps.dirCheckMs === undefined ? {} : { checkMs: this.#deps.dirCheckMs }),
+          ...(this.#deps.dirWalkTimeoutMs === undefined ? {} : { walkTimeoutMs: this.#deps.dirWalkTimeoutMs }),
+          over: stop,
+          // A long turn with no park still writes back each minute: a lost pod then loses less. The
+          // write-back has a flag of its own and never holds the walks up.
+          under: (checks) => {
+            if (checks % DIR_SYNC_EVERY !== 0 || syncing) return
+            syncing = true
+            // sync logs its own failures (#writeBack).
+            void sync(false)
+              .catch(() => {})
+              .finally(() => {
+                syncing = false
+              })
+          },
+        })
+      }
+      let run: Awaited<ReturnType<CoreTurn['run']>>
+      try {
+        run = await core.run(prompt)
+      } finally {
+        stopCaps?.()
+        // Not once cut off: the placement that holds the turn now has the directory.
+        await sync(true)
+      }
       clearInterval(fence)
       result = run.result
       const released = parks.released.aborted
@@ -503,6 +605,10 @@ export class TurnHost {
             ? controller.signal.reason.message
             : 'the turn was interrupted'
           : undefined
+      const cut = stopped !== undefined || !result ? run.cutUsd : 0
+      // What the credential gateway metered past Claude Code's own reckoning (gateway/server.ts):
+      // requests made with the process's token that no result prices, a command's (Step 9.4).
+      const uncounted = Math.max(run.meteredUsd - (run.spentUsd + cut), 0)
       const end: TallyInput = {
         stopped,
         interrupted: stopped,
@@ -512,7 +618,7 @@ export class TurnHost {
         secrets: run.secrets,
         turnUsd: run.spentUsd,
         // WebFetch's own model calls are in no result, so they are added in every outcome (#2684).
-        cutUsd: (stopped !== undefined || !result ? run.cutUsd : 0) + run.nestedUsd,
+        cutUsd: cut + uncounted + run.nestedUsd,
       }
       const tally = tallyTurn(session, end)
       outcome = tally.outcome
@@ -537,8 +643,54 @@ export class TurnHost {
       throw err
     } finally {
       clearInterval(fence)
+      stopCaps?.()
+      if (placed) this.#deps.directory?.done(placed, { cutOff: fenced() })
       control.cancelled.removeEventListener('abort', onCancel)
       core.end(outcome, result)
+    }
+  }
+
+  /** The session's directory, made what its workspace holds; undefined (unsynced this turn) when that fails. */
+  async #place(id: string): Promise<Placement | undefined> {
+    const directory = this.#deps.directory
+    if (!directory) return undefined
+    try {
+      return await directory.place(id)
+    } catch (err) {
+      console.error(`session ${id}: its working directory could not be placed, so this turn's changes there are not kept: ${describe(err)}`)
+      return undefined
+    }
+  }
+
+  /**
+   * The directory's changes written back to the workspace, removing what cannot be synced only
+   * when `prune` (the turn's end); the bytes it found. A failure is logged, and the turn keeps its end.
+   */
+  async #writeBack(placed: Placement, prune: boolean): Promise<number | undefined> {
+    try {
+      const back = await this.#deps.directory!.writeBack(placed, { prune })
+      // Each skipped path is logged once per placement: a file the turn keeps (a write-back during
+      // the turn only offers) is skipped again at every park and every minute.
+      let reported = this.#reported.get(placed)
+      if (!reported) this.#reported.set(placed, (reported = new Set()))
+      const fresh = back.skipped.filter((s) => {
+        const key = `${s.code}:${s.path}`
+        if (reported.has(key)) return false
+        reported.add(key)
+        return true
+      })
+      const capped = fresh.filter((s) => s.code === 'too_large' || s.code === 'quota')
+      const other = fresh.filter((s) => !capped.includes(s))
+      if (capped.length > 0) {
+        console.warn(`session directory cap: session ${placed.sessionId}: ${capped.length} file(s) past the workspace caps were refused${prune ? ' and removed' : ''}: ${firstReasons(capped)}`)
+      }
+      if (other.length > 0) {
+        console.warn(`session ${placed.sessionId}: ${other.length} file(s) of its working directory were not written back: ${firstReasons(other)}`)
+      }
+      return back.bytes
+    } catch (err) {
+      console.error(`session ${placed.sessionId}: its working directory could not be written back: ${describe(err)}`)
+      return undefined
     }
   }
 
@@ -553,9 +705,11 @@ export class TurnHost {
     shown: (toolUseId: string, toolName: string, input: Record<string, unknown>) => Promise<void>
     trace: GateTrace
     asks: boolean
+    /** Writes the session's directory back: a parked turn's writes so far outlive the pod. */
+    sync: (prune: boolean) => Promise<unknown>
     endTurn: (why: string) => void
   }): TurnGates {
-    const { session, turnId, control, stop, holds, secrets, shown, trace, asks, endTurn } = turn
+    const { session, turnId, control, stop, holds, secrets, shown, trace, asks, sync, endTurn } = turn
     const open = control.openInput
     if (!open) {
       return {
@@ -589,6 +743,8 @@ export class TurnHost {
       const rid = opened.request_id
       holds.held.add(rid)
       options.opened?.(rid)
+      // A park may outlast this pod (a release, a shutdown): what the turn wrote so far goes to the workspace first.
+      await sync(false)
       // Past the hold, the turn lets its process go (§5.4 "Release"); the entry stays open.
       const timer = setTimeout(() => holds.release(), options.holdMs ?? holds.holdMs)
       timer.unref()

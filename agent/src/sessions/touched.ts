@@ -36,7 +36,7 @@ export const RESOURCE_TYPES = [
   'library',
   'font',
   // Stored settings and remembered choices, by what they are for (`print_options:<scope>[:<key>]`,
-  // `print_choices:<slug>`, `print_choices:library:<file id>`, `bed_type:<printer>`), and a
+  // `print_choices:<slug>`, `print_choices:library:<file id>`, `bed_type:<printer>`, `rack_algorithm:<printer>`), and a
   // registry printer (`printer:<uuid>`, #3823).
   'setting',
   // Bambuddy's own: a project, a library file, a print archive (its id, not a queue item).
@@ -312,8 +312,16 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_close: () => [],
   order_cancel: () => [],
   order_reopen: () => [],
+  order_attach: () => [],
+  order_attachment_update: () => [],
+  order_attachment_delete: () => [],
   // The price book (#4250) is a record of its own, edited on the Settings page.
   price_book_set: () => [],
+  // Analyzer decisions (#4966) are a print's checks, not a resource: the print dialog's
+  // analyzer panel and list_analyzer_decisions show them, and an apply sends nothing.
+  apply_analyzer_fix: () => [],
+  record_analyzer_decision: () => [],
+  remove_analyzer_decision: () => [],
   // Models.
   create_model: (_input, result) => modelCreated(result),
   import_model: (_input, result) => modelCreated(result),
@@ -387,6 +395,11 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       ...(job ? [{ type: 'render_job' as const, id: job, action: 'created' as const, model: slug, after: str(field(result, 'model_version')) }] : []),
       ...output(field(result, 'output'), slug),
     ]
+  },
+  // #4968: the caller's claim is gone whether or not the job was cancelled by it.
+  withdraw_render: (input) => {
+    const job = str(input.job_id)
+    return job ? [{ type: 'render_job', id: job, action: 'modified', model: null }] : []
   },
   save_output: (input, result) => output(result, str(input.slug)),
   // #1864: nothing is recorded until the arrange is saved; a still-running one is not.
@@ -515,6 +528,10 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
     const printer = bambuddyId(input.printer_id)
     return setting(printer ? `bed_type:${printer}` : null)
   },
+  remember_printer_rack_algorithm: (input) => {
+    const printer = bambuddyId(input.printer_id)
+    return setting(printer ? `rack_algorithm:${printer}` : null)
+  },
   // Bambuddy projects and library files.
   create_print_project: (input, result) => {
     const id = bambuddyId(field(result, 'id'))
@@ -597,6 +614,10 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // tray_spool_links; the spool and its providers' records are unchanged).
   'link_tray_spool',
   'unlink_tray_spool',
+  // ScadBuddy's own spools (#4643, native_spools) are no recorded resource kind: the
+  // shelf lists them, and the overlay's cached copy follows each write.
+  'native_spool_upsert',
+  'native_spool_delete',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',

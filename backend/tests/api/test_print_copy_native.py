@@ -54,12 +54,14 @@ def test_the_print_worker_writes_through_the_internal_route(
     async def write() -> tuple[Any, ...]:
         remote = _remote(native_client)
         try:
-            uploaded = await remote.upload("bracket (ScadBuddy).3mf", io.BytesIO(payload), folder)
+            uploaded = await remote.upload(
+                "bracket (ScadBuddy).3mf", io.BytesIO(payload), folder, print_subject="out-1"
+            )
             listed = await remote.library_listing(folder_id=folder)
             top = await remote.library_listing(folder_id=None)
             file = await remote.library_file(uploaded.id)
             with pytest.raises(ApiError) as missing:
-                await remote.upload("x.3mf", io.BytesIO(payload), folder + 999)
+                await remote.upload("x.3mf", io.BytesIO(payload), folder + 999, print_subject="o")
         finally:
             await remote.aclose()
         return uploaded, listed, top, file, missing.value
@@ -78,6 +80,9 @@ def test_the_print_worker_writes_through_the_internal_route(
     shown = native_client.get("/api/v1/print/library", params={"folder_id": folder})
     assert shown.status_code == 200, shown.text
     assert [entry["id"] for entry in shown.json()["files"]] == [uploaded.id]
+    # #4337: the run's subject marks it, so its lifetime finds it.
+    row = native_client.portal.call(_native(native_client).rows.file, uploaded.id)
+    assert row is not None and row.print_subject == "out-1"
     row = native_client.portal.call(_native(native_client)._file, uploaded.id)
     assert (row.output_id, row.filed) == (None, False)
     paths = native_client.get("/openapi.json").json()["paths"]

@@ -44,6 +44,8 @@ export const BusEventSchema = z
     seq: z.number().optional(),
     status: z.string().optional(),
     replica: z.string().optional(),
+    // `printer.report` / `printer.changed`: the registry printer's id (#3823).
+    printer_id: z.string().optional(),
   })
   .loose()
 

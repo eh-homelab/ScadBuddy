@@ -53,7 +53,7 @@ export type AttentionView =
   /**
    * A `done` summary (#815 §4): no timer, nothing waits on it, and it stays
    * until the user dismisses it. `summary` is ScadBuddy's record of what the
-   * turn touched (Markdown, questions/doneSummary.ts). A replica on an older
+   * turn touched (Markdown, gate/doneSummary.ts). A replica on an older
    * image sends a done request in the shape above.
    */
   | { reason: 'done'; summary: string }

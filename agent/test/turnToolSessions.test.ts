@@ -14,18 +14,15 @@ import type { Owner } from '../src/sessions/protocol.js'
 import { SessionClients } from '../src/temporal/sessionClients.js'
 import { turnServers } from '../src/temporal/turnServers.js'
 import {
+  listTurnTools,
   TURN_TOOL_TIER_ACTIVITY,
-  TURN_TOOLS_ACTIVITY,
-  TURN_TOOLS_CLOSE_ACTIVITY,
   turnToolActivities,
   turnToolActivity,
   type ListedTools,
   type TurnToolsDeps,
-  type TurnToolsResult,
 } from '../src/temporal/turnTools.js'
 
-// #2581: a durable session keeps one MCP session per remote plugin on the replica that
-// holds it, so a stateful plugin (Playwright MCP run --isolated: one browser context per
+// #2581: a session keeps one MCP session per remote plugin on the replica its turn runs on, so a stateful plugin (Playwright MCP run --isolated: one browser context per
 // MCP session) keeps its page from one call, and one turn, to the next.
 
 const A = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
@@ -177,8 +174,7 @@ function replica(options: { plugin?: () => RemotePlugin; idleMs?: number; host?:
     })
   return {
     clients,
-    list: (session: string) =>
-      env(TURN_TOOLS_ACTIVITY, session).run(activities[TURN_TOOLS_ACTIVITY] as () => Promise<TurnToolsResult>) as Promise<TurnToolsResult>,
+    list: (session: string) => listTurnTools(deps, { session, owner: BROWSER, signal: new AbortController().signal }),
     tier: (session: string, tool: string) =>
       env(TURN_TOOL_TIER_ACTIVITY, session).run(activities[TURN_TOOL_TIER_ACTIVITY]!, { tool, input: {} }) as Promise<unknown> as Promise<{
         tier: string
@@ -187,7 +183,6 @@ function replica(options: { plugin?: () => RemotePlugin; idleMs?: number; host?:
     call: (session: string, tool: string, input: unknown = {}) =>
       env(`turn:browser__${tool}`, session).run(call, input) as Promise<unknown> as Promise<string>,
     flowCall: (tool: string) => env(`turn:browser__${tool}`, FLOW, `flow-${FLOW}`).run(call, {}) as Promise<unknown> as Promise<string>,
-    close: (session: string) => env(TURN_TOOLS_CLOSE_ACTIVITY, session).run(activities[TURN_TOOLS_CLOSE_ACTIVITY] as () => Promise<void>),
   }
 }
 
@@ -231,14 +226,14 @@ describe('a durable session keeps one MCP session per remote plugin (#2581)', ()
     expect(mcp.created).toHaveLength(2)
   })
 
-  it("ends the session's MCP sessions with a DELETE when the session ends, and frees their forwarder routes", async () => {
+  it("ends a session's MCP sessions with a DELETE when they are closed, and frees their forwarder routes", async () => {
     mcp = await startBrowserMcp()
     const routes = forwarder.size
     const r = replica()
     await r.call(A, 'navigate', { url: 'https://a.example/' })
     await r.call(B, 'page')
     expect(forwarder.size).toBe(routes + 2)
-    await r.close(A)
+    await r.clients.closeSession(A)
     expect(mcp.deleted).toEqual([mcp.created[0]])
     expect(r.clients.size).toBe(1)
     // The process stopping ends the rest.

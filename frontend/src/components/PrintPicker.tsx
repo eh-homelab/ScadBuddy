@@ -111,6 +111,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils'
 import { Spinner } from './ui/spinner'
 import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
+import { lanBlockReason } from '../lib/lanBlock'
+import { Link } from 'react-router'
 
 /**
  * The print dialog, spool-first (docs/superpowers/specs/2026-09-27-spool-first-print-design.md).
@@ -394,6 +396,15 @@ export function PrintPicker({
   /** #3818 — of those, the ones the server says a run reaches: choosable. */
   const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row))
   /**
+   * #3823 — the rest, each with the server's reasons a run does not reach it
+   * (`ChoicesView.lan_blocked`, `print_run.lan_block`): only rows it names, never a guess.
+   */
+  const lanBlocked = lanOnly.flatMap((row) => {
+    if (lanChoosable.includes(row)) return []
+    const block = choices?.lan_blocked?.find((entry) => entry.printer === row.id)
+    return block ? [{ row, block }] : []
+  })
+  /**
    * #3818 Task 9 — the `printer_id` every run, check, background-slice, batch-step,
    * analysis (#4629), arrange and quote (#4551) body sends beside `printer`: none beside a
    * LAN-only row, which links no Bambuddy printer, so `printer` alone names it.
@@ -520,11 +531,8 @@ export function PrintPicker({
     const { manual_start: start, ...rest } = options
     return start === null || start === undefined ? rest : options
   }, [options])
-  /**
-   * #1862 — this print's sequence, `null` for the template's or the process's. Per print,
-   * never remembered (until #1754 decides remembered choices by subject).
-   */
-  const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
+  // #1862, #4970 — the print's sequence, remembered by subject with the other choices.
+  const { printSequence, setPrintSequence } = picker
   // #1899 — this print's supports; `null` leaves them to the template and the process.
   const [supports, setSupports] = useState<SupportsChoice | null>(null)
   // #3628 — this print's prime tower; `null` leaves it to the template and the process.
@@ -894,7 +902,6 @@ export function PrintPicker({
   useEffect(() => {
     if (carry.get()) return
     setOptions({})
-    setPrintSequence(null)
     setSupports(null)
     setPrimeTower(null)
     resetProfiles()
@@ -1245,7 +1252,10 @@ export function PrintPicker({
     }
     setOptions(seed.options ?? {})
     if (seed.copies !== undefined && seed.copies !== null) setCopies(seed.copies)
-    if (seed.print_sequence) setPrintSequence(seed.print_sequence)
+    // A step's own seed is its sequence, Default included; another step's names one only
+    // when it has one, and otherwise leaves the subject's remembered one (#4970).
+    if (batch.seedIsOwn) setPrintSequence(seed.print_sequence ?? null)
+    else if (seed.print_sequence) setPrintSequence(seed.print_sequence)
     if (batch.seedIsOwn) {
       // Its own choices, the ones a mount resets to the defaults (#2718 review): saving
       // the step again without them would queue it without the supports, tower or
@@ -1270,6 +1280,7 @@ export function PrintPicker({
     changeQuality,
     setPlan,
     setPlate,
+    setPrintSequence,
     restoreProfiles,
   ])
 
@@ -1352,7 +1363,6 @@ export function PrintPicker({
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
-    setPrintSequence(null)
     setSupports(null)
     setPrimeTower(null)
     filamentProfiles.reset()
@@ -1606,13 +1616,36 @@ export function PrintPicker({
                             ) : (
                               <SelectItem key={row.id} value={`registry:${row.id}`} disabled>
                                 {row.name}
-                                {row.model ? ` (${row.model})` : ''}: not in Bambuddy, so not yet printable from here
+                                {row.model ? ` (${row.model})` : ''}: not printable over the LAN yet
                               </SelectItem>
                             ),
                           )}
                         </SelectContent>
                       </Select>
                     </div>
+                  )}
+                  {lanBlocked.length > 0 && (
+                    <ul className="grid gap-1 text-xs text-muted-foreground" data-testid="lan-blocked">
+                      {lanBlocked.map(({ row, block }) => (
+                        <li key={row.id}>
+                          {row.name} is not in Bambuddy and cannot print over the LAN yet:{' '}
+                          {block.reasons.map((reason, index) => {
+                            const said = lanBlockReason(reason, block.seen_at)
+                            return (
+                              <span key={reason}>
+                                {index > 0 && '; '}
+                                {said.text} (
+                                <Link to={said.href} className="underline">
+                                  Settings
+                                </Link>
+                                )
+                              </span>
+                            )
+                          })}
+                          .
+                        </li>
+                      ))}
+                    </ul>
                   )}
                   {printerId !== null && <PlateClearNotice printerId={printerId} />}
 

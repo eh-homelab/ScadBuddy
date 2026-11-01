@@ -93,6 +93,7 @@ export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   nozzles: [],
   tier: null,
   process_name: null,
+  print_sequence: null,
 }
 
 /** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
@@ -102,7 +103,8 @@ export function isNoModelChoices(choices: ModelPrintChoices): boolean {
     !choices.filament_plan?.length &&
     !choices.nozzles?.length &&
     choices.tier == null &&
-    choices.process_name == null
+    choices.process_name == null &&
+    choices.print_sequence == null
   )
 }
 
@@ -2852,6 +2854,19 @@ export const handlers = [
   http.get(`${base}/jobs/:id`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job) return problem(404, 'Job not found')
+    return HttpResponse.json(job)
+  }),
+
+  // #4968 — the page's one claim withdrawn: an unsettled job is cancelled.
+  http.post(`${base}/jobs/:id/withdraw`, ({ params }) => {
+    const id = String(params['id'])
+    const job = state.jobs.get(id)
+    if (!job) return problem(404, 'Job not found')
+    if (job.status === 'pending' || job.status === 'running') {
+      job.status = 'cancelled'
+      job.error = fixtures.CANCELLED_ERROR
+      emitRealtime('job.cancelled', [`job:${id}`], { job_id: id, slug: job.slug })
+    }
     return HttpResponse.json(job)
   }),
 

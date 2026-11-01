@@ -306,6 +306,8 @@ export type PrinterRow = Schemas['PrinterRow']
 export type PrinterCreate = Schemas['PrinterCreate']
 export type PrinterPatch = Schemas['PrinterPatch']
 export type PrintPath = PrinterRow['preferred_path']
+/** #3823 — a registry printer no run reaches natively, and the server's reasons why. */
+export type LanBlock = Schemas['LanBlock']
 export type DiscoveredPrinter = Schemas['DiscoveredPrinter']
 /** #4439, #4747 — the Bambuddy printer sync's summary, and what Bambuddy reports per row. */
 export type PrinterSyncResult = Schemas['PrinterSyncResult']

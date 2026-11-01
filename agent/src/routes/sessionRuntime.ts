@@ -1,7 +1,7 @@
 import type { Hono } from 'hono'
 import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
-import { readRuntimeSettings, type RuntimeSettings, RuntimePutBody } from '../sessions/runtimeSettings.js'
+import { readRuntimeSettings, readToolsAsActivities, type RuntimeSettings, RuntimePutBody, TOOLS_AS_ACTIVITIES } from '../sessions/runtimeSettings.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import type { SettingsRepo } from '../credentials.js'
 import type { SettingsWriter } from './mcpAuthMode.js'
@@ -10,9 +10,10 @@ import { ready, type RouteModule } from './module.js'
 // /api/v1/ai/settings/session-runtime (unified runtime spec 2026-10-13 §13,
 // plan Task 2.5): how long a parked call is held, the warm process cache's size
 // and idle time, and the most a turn may run. Stored in `ai_settings` under the
-// four names in sessions/runtimeSettings.ts.
+// four names in sessions/runtimeSettings.ts, and the flag `tools_as_activities` (plan 2026-10-13
+// Step 9.2, off by default), which the next turn's assembly reads.
 //
-//   GET /api/v1/ai/settings/session-runtime   RuntimeSettings  (the defaults when unset)
+//   GET /api/v1/ai/settings/session-runtime   RuntimeSettings and `tools_as_activities` (the defaults when unset)
 //   PUT /api/v1/ai/settings/session-runtime   a partial RuntimeSettings; 422 { detail } out of range
 //
 // Guarded and audited like PUT /api/v1/ai/settings/workspace: the keys are
@@ -35,6 +36,11 @@ const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is no
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 const WHAT = 'assistant session runtime settings'
 
+async function current(settings: SettingsRepo): Promise<RuntimeSettings & { [TOOLS_AS_ACTIVITIES]: boolean }> {
+  const [runtime, activities] = await Promise.all([readRuntimeSettings(settings), readToolsAsActivities(settings)])
+  return { ...runtime, [TOOLS_AS_ACTIVITIES]: activities }
+}
+
 export function registerSessionRuntimeRoutes(app: Hono, deps: SessionRuntimeRouteDeps): void {
   async function repo(): Promise<SettingsRepo | string> {
     if (!deps.settings) return NO_DATABASE
@@ -50,7 +56,7 @@ export function registerSessionRuntimeRoutes(app: Hono, deps: SessionRuntimeRout
     if (problem) return c.json({ detail: problem }, 403)
     const settings = await repo()
     if (typeof settings === 'string') return c.json({ detail: settings }, 503)
-    return c.json(await readRuntimeSettings(settings))
+    return c.json(await current(settings))
   })
 
   app.put(SESSION_RUNTIME_PATH, async (c) => {
@@ -71,12 +77,12 @@ export function registerSessionRuntimeRoutes(app: Hono, deps: SessionRuntimeRout
       const detail = parsed.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ')
       return c.json({ detail }, 422)
     }
-    const values: Partial<RuntimeSettings> = parsed.data
+    const values: Partial<RuntimeSettings> & { [TOOLS_AS_ACTIVITIES]?: boolean } = parsed.data
     if (Object.keys(values).length > 0) {
       const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
       await store.setMany(values, undefined, context)
     }
-    return c.json(await readRuntimeSettings(settings))
+    return c.json(await current(settings))
   })
 }
 

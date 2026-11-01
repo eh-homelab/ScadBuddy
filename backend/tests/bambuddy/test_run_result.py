@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import fields
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -15,7 +16,9 @@ from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.print_run import (
     PrintRunResult,
     _queued,
+    lan_block,
     lan_printers,
+    lan_reach,
     run_path,
 )
 from scadbuddy.library.settings_store import StoredSettings
@@ -64,18 +67,6 @@ class _Rows:
     def list(self) -> list[PrinterRow]:
         self.reads += 1
         return [_both_links_native()]
-
-
-class _Unread:
-    """A registry component no read may reach while no run is native."""
-
-    @property
-    def store(self) -> object:
-        raise AssertionError("the registry was read")
-
-    @property
-    def reports(self) -> object:
-        raise AssertionError("the registry was read")
 
 
 #: The hot path's stored backends (plan 2026-10-18 D2).
@@ -160,7 +151,89 @@ def test_the_print_worker_decides_a_run_as_the_dialog_reads_it() -> None:
 
 
 def test_the_choices_view_lists_no_lan_printer_while_no_run_is_native() -> None:
+    """#3823: on Bambuddy's backends no row is native, and the view says which backends
+    keep each one off the LAN, so the dialog never says "not yet" of it."""
     view = ChoicesView(filaments=FilamentOptions(library_file_id=None))
-    seen = asyncio.run(with_lan_printers(view, StoredSettings(), _Unread()))  # type: ignore[arg-type]
+    printers = SimpleNamespace(store=_Rows(), reports=None)
+    seen = asyncio.run(with_lan_printers(view, StoredSettings(), printers))  # type: ignore[arg-type]
     assert seen.lan_printers == []
-    assert seen.model_dump()["lan_printers"] == []
+    assert seen.model_dump()["lan_blocked"] == [
+        {
+            "printer": _both_links_native().id,
+            "reasons": ["slicer_backend", "library_backend", "store_backend"],
+            "seen_at": None,
+        }
+    ]
+
+
+def test_an_unreadable_registry_on_bambuddys_backends_leaves_the_view() -> None:
+    """The reasons only add to a Bambuddy-path view: a registry that cannot be read
+    leaves it as it was, never failing the dialog's read."""
+
+    class Unreadable:
+        def list(self) -> list[PrinterRow]:
+            raise RuntimeError("the registry is down")
+
+    view = ChoicesView(filaments=FilamentOptions(library_file_id=None))
+    printers = SimpleNamespace(store=Unreadable(), reports=None)
+    seen = asyncio.run(with_lan_printers(view, StoredSettings(), printers))  # type: ignore[arg-type]
+    assert (seen.lan_printers, seen.lan_blocked) == ([], [])
+    with pytest.raises(RuntimeError):
+        asyncio.run(with_lan_printers(view, StoredSettings(**HOT_PATH), printers))  # type: ignore[arg-type]
+
+
+def _lan_only(**update: Any) -> PrinterRow:
+    return _both_links_native().model_copy(
+        update={"bambuddy_printer_id": None, "preferred_path": "auto", **update}
+    )
+
+
+@pytest.mark.parametrize(
+    ("backends", "row", "seen", "reasons"),
+    [
+        ({}, {}, "fresh", []),
+        ({}, {"preferred_path": "native"}, None, []),
+        ({"slicer_backend": "bambuddy"}, {}, "fresh", ["slicer_backend"]),
+        ({"store_backend": "local"}, {}, "fresh", ["store_backend"]),
+        ({}, {"preferred_path": "bambuddy"}, "fresh", ["preferred_path"]),
+        ({}, {"lan_host": None}, None, ["no_lan_link"]),
+        ({}, {"has_access_code": False}, None, ["no_access_code"]),
+        ({}, {}, None, ["no_report"]),
+        ({}, {}, "stale", ["stale_report"]),
+        (
+            {"slicer_backend": "bambuddy", "library_backend": "bambuddy"},
+            {},
+            None,
+            ["slicer_backend", "library_backend", "no_report"],
+        ),
+    ],
+)
+def test_lan_block_names_every_reason_and_none_exactly_when_native(
+    backends: dict[str, str], row: dict[str, Any], seen: str | None, reasons: list[str]
+) -> None:
+    now = datetime.now(UTC)
+    seen_at = {None: None, "fresh": now, "stale": now - timedelta(hours=1)}[seen]
+    settings = StoredSettings(**{**HOT_PATH, **backends})
+    printer = _lan_only(**row)
+    assert lan_block(settings, printer, seen_at, now=now) == reasons
+    path = run_path(printer, seen_at, now=now)
+    assert (reasons == []) is hot_path_native(settings, path)
+
+
+def test_a_stale_reports_time_is_sent_with_it() -> None:
+    seen_at = datetime.now(UTC) - timedelta(hours=1)
+    row = _lan_only()
+
+    class Rows:
+        def list(self) -> list[PrinterRow]:
+            return [row]
+
+    class Reports:
+        def all(self) -> dict[str, tuple[dict[str, Any], datetime]]:
+            return {row.id: ({}, seen_at)}
+
+    native, blocked = asyncio.run(lan_reach(StoredSettings(**HOT_PATH), Rows(), Reports()))  # type: ignore[arg-type]
+    assert native == []
+    assert [(b.printer, b.reasons, b.seen_at) for b in blocked] == [
+        (row.id, ["stale_report"], seen_at)
+    ]

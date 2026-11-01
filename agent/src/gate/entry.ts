@@ -26,7 +26,7 @@ export const WAIT_FOR_USER = 'wait_for_user'
 export const DEFAULT_REPLIES: readonly string[] = ["I'm here", 'Carry on without me']
 export const REDACTED = '[redacted]'
 export const DEFAULT_TIMEOUT_S = 300
-/** A tab wait the tab's return ended (#5003; questions/service.ts `reconnected`'s words): its response row's `reason` and `response`. */
+/** A tab wait the tab's return ended (#5003; classic's QuestionService `reconnected`, before plan Step 9.7's words): its response row's `reason` and `response`. */
 export const RECONNECTED_REASON = 'the ScadBuddy tab is connected again'
 export const RECONNECTED_RESPONSE = { reconnected: true } as const
 

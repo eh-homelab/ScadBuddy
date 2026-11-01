@@ -1,7 +1,8 @@
 # Filament profiles: per-filament process changes in the print dialog (#717)
 
 Status: first slice shipped in #2804; the override's effect measured against the live
-Bambuddy (#2803), 2026-10-13. Follow-ups: #2799 (filament-setting channel), #2800
+Bambuddy (#2803), 2026-10-13; the nozzle temperature through the native slicer (#2799),
+2026-11-01. Follow-ups: #2799 (filament-setting channel), #2800
 (storage, Settings editing, more built-ins), #2801 (media), #2802 (orientation check),
 #2803 (this measurement).
 
@@ -14,8 +15,9 @@ silently. The dialog shows each change against the value it replaces, with its s
 and sends the ids the user left on (`PrintRunRequest.filament_profiles`).
 
 The one built-in is **Silk PLA** (`silk-pla`). It matches a PLA spool whose name says
-silk and sets `outer_wall_speed` to 50 mm/s. Its 235 °C nozzle advice is a note only:
-filament settings have no verified channel yet (#2799).
+silk and sets `outer_wall_speed` to 50 mm/s. Its 235 °C nozzle (`nozzle_temperature`
+and `nozzle_temperature_initial_layer`) is a filament setting (`filament_settings`),
+applied by the native slicer only (§5, #2799).
 
 ## 2. How a change reaches the slicer
 
@@ -98,5 +100,56 @@ for a slice.
 
   A test of the untested route must therefore send six entries, not one per slot.
 
-Until that is measured, or Bambuddy gains a filament override, the temperature is set
-in the spool's filament preset, as the note says.
+Until that is measured, or Bambuddy gains a filament override, a print sliced by
+Bambuddy does not get the temperature: the run's warnings say so (§5).
+
+## 5. Nozzle temperature on the native slicer (#2799, 2026-11-01)
+
+The native slicer (`slicer_backend` `native`, epic #3818) builds every file the CLI
+loads (`slicing/presets.py`), so ScadBuddy can write a filament setting into one slot's
+filament file. Measured that this is the channel the CLI honours, and that the process
+file is not:
+
+- **Slicer:** `ghcr.io/eh-homelab/scadbuddy-slicer:main@sha256:098ac9e603c4…`, Bambu
+  Studio 02.08.02.61, run with the worker's argv
+  (`workers/rust/crates/sb-slicer/src/runner.rs` `command_line`: `--load-settings
+  "machine;process" --load-filaments "f1;f2" --filament-colour … --arrange 0 --slice 1
+  --export-3mf`), no Bambuddy, nothing printed.
+- **Files:** built by `scadbuddy.slicing.profiles.Profiles` from the image's own
+  `resources/profiles`: `Bambu Lab A1 0.4 nozzle`, `0.20mm Standard @BBL A1`, and
+  `Bambu PLA Basic @BBL A1` (`nozzle_temperature` `["220"]`) in both slots.
+- **Source:** MakerWorld's `448-articulated-pumpkin.3mf` (`test-fixtures/makerworld/`,
+  two filaments, one plate).
+- Read from each output's `Metadata/project_settings.config` and
+  `Metadata/plate_1.gcode`: each `M104`/`M109` counted under the tool (`T0`/`T1`) last
+  selected before it.
+
+| | Plain | 235 in the process file | 235 in slot 2's filament file |
+|---|---|---|---|
+| `nozzle_temperature` (sliced) | `220, 220` | `220, 220` | `220, 235` |
+| `nozzle_temperature_initial_layer` | `220, 220` | `220, 220` | `220, 235` |
+| Under `T0`: print temperature | `S220` ×50 | `S220` ×50 | `S220` ×50 |
+| Under `T1`: print temperature | `S220` ×51 | `S220` ×51 | `S235` ×51 |
+| Flush temperature, `S240` (`T0` + `T1`) | 25 + 11 | 25 + 11 | 25 + 11 |
+| Tool changes | 54 | 54 | 54 |
+
+What this shows:
+
+- **A filament key in the process file is ignored.** Every temperature is the plain
+  slice's. This is the same route as `process_overrides` on Bambuddy's slicer (§4),
+  measured here on ScadBuddy's CLI, not on Bambuddy's sidecar.
+- **Only temperatures are compared.** The CLI's toolpaths differ run to run: a second
+  plain slice of the same files differed from the first in most lines and by 32 s of
+  estimated time, with the same temperatures as the table's.
+- **The slot's filament file sets it, for that slot only.** Slot 2 prints at 235 °C
+  after every change to it, while slot 1 stays at 220 °C. The flush temperature is
+  unchanged.
+
+So a profile's `filament_settings` go out as `SlicePlan.filament_overrides`, by slot,
+written into that slot's filament file in the preset's shape (one value per entry, as
+the process overrides are, §2) by `build_presets`, and keyed into the native slice
+(`native_preset_key`). The slots are those whose chosen spool the profile matches
+(`ProfileMatch.matches`, as the dialog suggests it for that spool); only a profile that
+applies (§2) sets them. On Bambuddy's slicer a plan carries none: the preview says
+`filament_applied: false` with the reason, and Checks and the run say
+`profile-not-applied` for the temperature, while the wall speed still goes out.
