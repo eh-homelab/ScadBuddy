@@ -33,7 +33,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const owners = new PgSessionOwners(db.sql)
       expect(await owners.ownerOf(randomUUID())).toBeUndefined()
       expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null })
-      await db.sql`UPDATE ai_sessions SET mode = 'classic', runtime = NULL WHERE id = ${session.id}`
+      await db.sql`UPDATE ai_sessions SET runtime = NULL WHERE id = ${session.id}`
       expect(await owners.ownerOf(session.id)).toEqual({ ...browser, turnTiers: null, turnId: null })
       // The tiers its current turn was sent with (#2320), only while the sender owns it.
       const sent = (by: { kind: string; id: string }, tiers: string[]) =>
@@ -46,7 +46,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const turn = '6a1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
       await db.sql`UPDATE ai_sessions SET durable_turn_id = ${turn} WHERE id = ${session.id}`
       expect((await owners.ownerOf(session.id))?.turnId).toBe(turn)
-      await expect(db.sql`UPDATE ai_sessions SET mode = 'other' WHERE id = ${session.id}`).rejects.toThrow()
+      await expect(db.sql`UPDATE ai_sessions SET runtime = 'other' WHERE id = ${session.id}`).rejects.toThrow()
     })
 
     it("finds a call's approval only as an approved outcome of that request id", async () => {

@@ -316,8 +316,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
   it("names a durable call's approver from ai_input_responses, by its request id", async () => {
     const session = '33333333-3333-4333-8333-333333333333'
     await db.sql`
-      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
-      VALUES (${session}, 'mcp', 'bearer', 'token:a', 'Agent A', 'bearer', 'token:a', 'running', 10, 1, 'durable')`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+      VALUES (${session}, 'mcp', 'bearer', 'token:a', 'Agent A', 'bearer', 'token:a', 'running', 10, 1)`
     const yes = `durable:${session}:run-1:t1`
     const no = `durable:${session}:run-1:t2`
     await db.sql`

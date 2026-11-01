@@ -42,8 +42,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
   async function session(kind: string, id: string): Promise<string> {
     const sid = randomUUID()
     await db.sql`
-      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
-      VALUES (${sid}, 'chat', ${kind}, ${id}, 'Owner', ${kind}, ${id}, 'waiting_approval', 10, 1, 'durable')`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+      VALUES (${sid}, 'chat', ${kind}, ${id}, 'Owner', ${kind}, ${id}, 'waiting_approval', 10, 1)`
     return sid
   }
 

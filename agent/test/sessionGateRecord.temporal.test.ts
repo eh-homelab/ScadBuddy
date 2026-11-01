@@ -151,8 +151,8 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
   async function send(client: Client, id: string) {
     started.add(id)
     await db.sql`
-      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode, runtime)
-      VALUES (${id}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'running', 10, 1, 'durable', 'unified')`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, runtime)
+      VALUES (${id}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'running', 10, 1, 'unified')`
     const start: SessionStart = { session_id: id, creator: OWNER, owner: OWNER, max_turns: 50, system_append: null }
     const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(SESSION_WORKFLOW, {
       workflowId: sessionWorkflowId(id),
