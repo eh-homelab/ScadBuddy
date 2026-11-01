@@ -1,322 +1,130 @@
-import type { Sql } from 'postgres'
-import { Client } from '@temporalio/client'
-import { Context } from '@temporalio/activity'
-import type { TestWorkflowEnvironment } from '@temporalio/testing'
-import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { randomBytes, randomUUID } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
+import { Client, WorkflowNotFoundError } from '@temporalio/client'
+import type { TestWorkflowEnvironment } from '@temporalio/testing'
+import { bundleWorkflowCode } from '@temporalio/worker'
 import { createBackendClient } from '../src/api/backend.js'
+import { approvalHashKey } from '../src/approvals/service.js'
 import { AuditLog } from '../src/audit/log.js'
-import { type Credential, CredentialStore, SettingsStore } from '../src/credentials.js'
-import type { Database } from '../src/db.js'
+import { type Credential, SettingsStore } from '../src/credentials.js'
+import { connectDatabase, type Database } from '../src/db.js'
+import { PgEventListener } from '../src/events/pgListener.js'
 import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
+import { parseRequestId } from '../src/gate/ids.js'
+import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { OWN_PLUGIN_DIR } from '../src/harness/ownPlugin.js'
-import type { RiskTier } from '../src/harness/permissions.js'
+import { runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { respond } from '../src/routes/pendingInput.js'
+import { queuesPolled } from '../src/runtime/health.js'
+import { roleParts } from '../src/runtime/role.js'
 import { kekFromBase64 } from '../src/secrets.js'
-import { SETTLED } from '../src/sessions/durable.js'
-import { SessionManager, SETTING_MODEL, SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
-import type { Owner, SessionStatus } from '../src/sessions/protocol.js'
-import { PgPayloadKeys, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
-import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities, type ToolActivity } from '../src/temporal/toolActivities.js'
+import { SessionBlobs } from '../src/sessions/blobs.js'
+import { DurableTurns } from '../src/sessions/durable.js'
+import { type QueryRunner, SessionManager, SETTING_MODEL, SETTING_SESSION_BUDGET_USD } from '../src/sessions/manager.js'
+import type { Owner } from '../src/sessions/protocol.js'
+import { readRuntimeSettings } from '../src/sessions/runtimeSettings.js'
+import { TurnHost } from '../src/sessions/turnHost.js'
+import { TASK_QUEUE } from '../src/temporal/names.js'
+import { FilePayloadStore, PgPayloadKeys, subjectDataConverter } from '../src/temporal/payloadCodec.js'
+import { acquireActivities, releaseActivities } from '../src/temporal/session/affinity.js'
+import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
+import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
+import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
+import { SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, sessionHostQueue } from '../src/temporal/session/names.js'
+import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
+import { gateActivities, PgApprovalRecords, PgSessionOwners } from '../src/temporal/toolActivities.js'
 import { turnToolActivities, turnToolActivity, type TurnToolsDeps } from '../src/temporal/turnTools.js'
-import { AgentWorker } from '../src/temporal/worker.js'
-import { DURABLE_TOOLS, writeManifest } from '../src/tools/manifest.js'
+import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
+import { harnessTools } from '../src/tools/harness.js'
+import { DURABLE_TOOLS } from '../src/tools/manifest.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { fixedCredentials } from '../test/support/fixedCredentials.js'
 import { ensureTemplate, TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from '../test/support/postgres.js'
-import { durableHealthPort, notStarted } from '../test/support/durableHealth.js'
-import { DurableSessionTurns } from '../test/support/durableSessionTurns.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_CLI_ENV } from '../test/support/temporal.js'
 import { EVAL_BACKEND_URL, EvalBackend } from './backend.js'
-import { collectRenders, type CollectOptions, type ScenarioBackend } from './render.js'
-import { DURABLE_EVAL_TOOL_PREFIX as DURABLE_TOOL_PREFIX, EVAL_TOOL_PREFIX, type Outcome, type RunResult, type Scenario, type ScriptedTurn, type ToolCall } from './runner.js'
+import { collectRenders, type ScenarioBackend } from './render.js'
+import { type CollectBudget, collectWithin, foldMessages, type Outcome, type Scenario, type ScriptedTurn } from './runner.js'
 
-// The evals in a durable session (#2320): the same scenarios and checks as the classic
-// run (runner.ts `runScenario`), answered through the stack a durable chat runs on. A
-// Temporal dev server; agent-durable's real worker (`python -m scadbuddy_durable`, its
-// real DurableSession and the Claude Code its SDK bundles, no scripted model); the
-// agent's own agent-tools worker serving the real tool registry (DURABLE_TOOLS) against
-// the scenario's backend; and SessionManager starting the session as a DurableSession, so
-// the turn gets what a durable chat's turn gets (its system append included). The
-// credential is saved in Settings as a session's is, so a gateway pointed at the fake
-// Anthropic endpoint (test/evals.durable.e2e.test.ts) or a live key both work.
+// The evals on the one runtime (plan 2026-10-13 Step 6.6, spec §3 goal 7): each scenario is a
+// session, an AgentSession on Temporal, as every session has been since Step 6.3. Two agent
+// processes on one Temporal dev server and one throwaway Postgres database, each wired as
+// main.ts wires its SCADBUDDY_AGENT_ROLE (runtime/role.ts `roleParts`): the `api` process starts
+// the session and answers its gate, as the panel does, and polls no turn queue; the `worker`
+// process runs AgentSession, its shared agent-tools activities and its session host queue, so
+// every turn runs there, in the real Claude Code, with the real ScadBuddy tools
+// (tools/harness.ts `harnessTools`) against the scenario's backend and ScadBuddy's own plugin,
+// as main.ts gives a session. Every payload is sealed, as main.ts seals them with the KEK. The
+// credential is the caller's (a gateway pointed at the fake Anthropic endpoint, or a live key),
+// the model and the budget are the Settings a session's turn reads.
 //
-// Every parked outward call is denied through the gate's `respond` Update, as the
-// browser user would deny it. The model then gets the durable engine's own rejection
-// text (DURABLE_REJECTION), followed by a classic turn's refusal wording, which the
-// segment runner adds (#2392); the outcome records the engine's text.
-//
-// The outcome is built from what the session logged (`ai_session_events`, what the
-// panel shows) and from the tool activities themselves: a durable tool.result event
-// carries the call's status, not its text, so each activity's return (or failure) is
-// recorded where it runs.
+// Every parked outward call is denied through the pending-input route's `respond`, as the
+// browser user denies one in the panel; the model then gets the session's refusal ("The user
+// denied ..."). The outcome is folded from the worker's Claude Code message stream
+// (runner.ts `foldMessages`), so it records what the model saw, its init message included,
+// and its decisions are the tier seam's own (HarnessRun `onDecision`).
 
-/** What the durable engine tells the model a denied call came back with (temporalio.claude_agent_sdk `_workflow.py`). */
-export const DURABLE_REJECTION = 'A human reviewer rejected this action. Do not retry it.'
-
-const DURABLE_DIR = fileURLToPath(new URL('../../agent-durable/', import.meta.url))
-
-/** Who starts an eval's session: the browser user, with every tier, as runScenario's principal. */
+/** Who starts an eval's session: the browser user, with every tier. */
 const EVAL_OWNER: Owner = { kind: 'browser', id: 'browser', label: 'Eval' }
 
-function hasUv(): boolean {
-  try {
-    execFileSync('uv', ['--version'], { stdio: 'ignore' })
-    return true
-  } catch {
-    return false
-  }
-}
+const WORKFLOWS = fileURLToPath(new URL('../src/temporal/workflows.ts', import.meta.url))
 
-/** Why the durable run cannot happen here, or undefined when it can. */
-export function durableEvalSkip(): string | undefined {
-  if (!hasUv()) return 'uv is not on PATH (agent-durable runs under it)'
+/** Why the evals cannot run here, or undefined when they can. */
+export function evalStackSkip(): string | undefined {
   if (!TEMPORAL_CLI) return `${TEMPORAL_CLI_ENV} is not set and no temporal on PATH`
   if (!TEST_DATABASE_URL) return `${TEST_DATABASE_URL_ENV} is not set`
+  try {
+    bundledCliPath()
+  } catch (err) {
+    return (err as Error).message
+  }
   return undefined
 }
 
-function withSearchPath(url: string, schema: string): string {
-  const u = new URL(url)
-  u.searchParams.set('options', `-csearch_path=${schema}`)
-  return u.toString()
-}
-
-function storedCredential(c: Credential) {
-  return c.kind === 'gateway' ? { kind: c.kind, base_url: c.baseUrl, secret: c.secret } : { kind: c.kind, secret: c.secret }
-}
-
-export type DurableStackOptions = {
+export type EvalStackOptions = {
   credential: Credential
-  /** Model id or alias, saved as the `model` setting the durable runner reads. */
+  /** Model id or alias, saved as the `model` setting a session's turn reads. */
   model?: string
-  /** Each session's budget (the `session_max_budget_usd` setting); 0.5, as runScenario's. */
+  /** Each session's budget (the `session_max_budget_usd` setting); 0.5 by default. */
   maxBudgetUsd?: number
-  /** How long render_model waits for a render before handing back the running job. */
+  /** How long render_model waits for a render before handing back the running job (5 s: the recorded backend's are instant). */
   renderWaitMs?: number
-  /** The durable worker's output, line by line. */
+  /** Claude Code's stderr, line by line. */
   stderr?: (line: string) => void
-  /** A turn's other tools (turnServers.ts), built on the stack's database and state dir; none by default. */
-  turnServers?: (deps: { sql: Sql; stateDir: string }) => TurnToolsDeps['servers']
-  /** How a parked approval is answered; every one is denied by default, as a careful user would. */
-  decide?: (tool: string) => 'approve' | 'deny'
 }
 
-export type DurableRunOptions = {
-  /** Whole-run deadline. */
+export type EvalRunOptions = CollectBudget & {
+  /** The turn's deadline. */
   timeoutMs?: number
-  collect?: CollectOptions
 }
 
-/** A tool activity's own record of one call, keyed by its tool_use id. */
-type Ran = { ok: boolean; result: string }
-
-export type DurableEvalStack = {
-  run(scenario: Scenario, options?: DurableRunOptions, backend?: ScenarioBackend): Promise<Outcome & { script: ScriptedTurn[]; sessionId?: string }>
+export type EvalStack = {
+  run(scenario: Scenario, options?: EvalRunOptions, backend?: ScenarioBackend): Promise<Outcome & { script: ScriptedTurn[]; sessionId?: string }>
+  /** The type and task queue of `session-<id>`'s latest run. */
+  workflow(sessionId: string): Promise<{ type: string; taskQueue: string }>
+  /** How many Claude Code processes each process spawned. */
+  spawned(): { api: number; worker: number }
   close(): Promise<void>
 }
 
-/** Starts the durable stack once; each `run` is a new durable session on it. */
-export async function startDurableStack(options: DurableStackOptions): Promise<DurableEvalStack> {
-  const skip = durableEvalSkip()
-  if (skip) throw new Error(`the durable eval cannot run: ${skip}`)
-  const cleanups: (() => Promise<unknown>)[] = []
-  const close = async () => {
-    for (const cleanup of cleanups.reverse()) await cleanup().catch(() => {})
-  }
-  try {
-    const env: TestWorkflowEnvironment = await localTemporal()
-    cleanups.push(() => env.teardown())
-    await ensureTemplate()
-    const { db, url, schema, drop } = await throwawayDatabase()
-    cleanups.push(drop)
-    if (!(await db.ready())) throw new Error('the eval database did not migrate')
-    const dir = await mkdtemp(path.join(os.tmpdir(), 'scadbuddy-durable-eval-'))
-    cleanups.push(() => rm(dir, { recursive: true, force: true }))
-    await ensureStateDirs({ stateDir: dir })
-    const kekB64 = randomBytes(32).toString('base64')
-    await writeFile(path.join(dir, 'kek'), kekB64, { mode: 0o600 })
-    const kek = kekFromBase64(kekB64)
-    await writeManifest(path.join(dir, 'tools.json'))
+/** What the Claude Code a run's session spawned yielded, and the seam's decisions on its calls. */
+type Sink = { messages: SDKMessage[]; decisions: Outcome['decisions'] }
 
-    // What a session's turn reads: the credential, the model and the budget, in Settings.
-    await new CredentialStore(db.sql).put(storedCredential(options.credential), kek)
-    const settings = new SettingsStore(db.sql)
-    if (options.model) await settings.set(SETTING_MODEL, options.model)
-    await settings.set(SETTING_SESSION_BUDGET_USD, options.maxBudgetUsd ?? 0.5)
-
-    const worker = await startDurableWorker({ url: withSearchPath(url, schema), address: env.address, dir, stderr: options.stderr })
-    cleanups.push(() => stopProcess(worker))
-
-    const codec = { payloadCodecs: [new SubjectPayloadCodec(new PgPayloadKeys(db.sql, kek))] }
-    const client = new Client({ connection: env.connection, namespace: 'default', dataConverter: codec })
-
-    // Each run's backend, behind one set of services the worker was started with.
-    let current: ScenarioBackend = new EvalBackend()
-    const ran = new Map<string, Ran>()
-    const services = {
-      backend: createBackendClient(EVAL_BACKEND_URL, (input, init) => current.fetch(input, init)),
-      pending: new PendingActionStore(),
-      pollIntervalMs: 5,
-      renderWaitMs: options.renderWaitMs ?? 5_000,
-    } satisfies ToolServices
-    const sessions = new PgSessionOwners(db.sql)
-    const audit = new AuditLog({ sql: db.sql, settings: () => settings, hashKey: randomBytes(32) })
-    const turnDeps: TurnToolsDeps = {
-      sessions,
-      approvals: new PgApprovalRecords(db.sql),
-      audit,
-      servers: options.turnServers?.({ sql: db.sql, stateDir: dir }) ?? (async () => ({ servers: [], problems: [], secrets: [], release: () => {} })),
-    }
-    const tools = AgentWorker.start({
-      address: env.address,
-      namespace: 'default',
-      activities: {
-        ...recording(toolActivities(DURABLE_TOOLS, { services, sessions, audit }), ran),
-        ...gateActivities({ audit, sessions }),
-        ...turnToolActivities(turnDeps),
-        default: turnToolActivity(turnDeps),
-      },
-      dataConverter: codec,
-    })
-    cleanups.push(() => tools.stop())
-    await tools.running(60_000)
-
-    const manager = new SessionManager({
-      sql: db.sql,
-      paths: { stateDir: dir },
-      credentials: fixedCredentials(options.credential),
-      settings,
-      newSessions: { max: 10_000, windowMs: 1 },
-    })
-    // A DurableSession, as an earlier release started one: no new one is made since plan
-    // Step 6.3, and one that ran keeps going to agent-durable until Step 7.2.
-    manager.durableTurns = new DurableSessionTurns({ client, sql: db.sql, events: manager.events, sendTimeoutMs: 60_000 })
-    const gate = new DurableGate(client, { timeoutMs: 15_000 })
-    const started: string[] = []
-    cleanups.push(async () => {
-      for (const id of started) await client.workflow.getHandle(sessionWorkflowId(id)).terminate('eval over').catch(() => {})
-    })
-
-    return {
-      close,
-      async run(scenario, runOptions = {}, backend = new EvalBackend()) {
-        current = backend
-        ran.clear()
-        const { prompt, script } = scenario.prepare(backend)
-        const startedAt = Date.now()
-        const deadline = startedAt + (runOptions.timeoutMs ?? 300_000)
-        const approvals: Outcome['approvals'] = []
-        let error: string | undefined
-        let sessionId: string | undefined
-        let log: Logged[] = []
-        try {
-          const { session } = await manager.start(EVAL_OWNER, { origin: 'mcp', title: scenario.id, prompt })
-          sessionId = session.id
-          started.push(session.id)
-          const answered = new Set<string>()
-          const polled: Polled = {}
-          for (;;) {
-            log = await events(db, session.id)
-            if (ended(log)) break
-            if (Date.now() > deadline) throw new Error(timedOut(polled))
-            const pending = await pollPending(gate, session.id, polled)
-            for (const entry of pending) {
-              if (entry.kind !== 'approval' || answered.has(entry.id)) continue
-              answered.add(entry.id)
-              const toolUseId = entry.id.slice(entry.id.lastIndexOf(':') + 1)
-              const call = log.find((e) => e.type === 'tool.call' && e.id === toolUseId)
-              approvals.push({
-                toolName: `${DURABLE_TOOL_PREFIX}${entry.tool}`,
-                input: (call?.input as Record<string, unknown> | undefined) ?? {},
-                toolUseId,
-                tier: (call?.risk as RiskTier | undefined) ?? 'outward',
-              })
-              const decision = options.decide?.(entry.tool) ?? 'deny'
-              await gate.respond(session.id, { request_id: entry.id, response: { kind: 'approval', decision }, responder: EVAL_OWNER, role: 'browser' })
-            }
-            await new Promise((r) => setTimeout(r, 200))
-          }
-        } catch (err) {
-          error = err instanceof Error ? err.message : String(err)
-        }
-        const folded = foldEvents(log, ran)
-        // Each approval's input, from the call's event when it was logged after the park.
-        for (const a of approvals) {
-          const call = folded.toolCalls.find((c) => c.id === a.toolUseId)
-          if (call && Object.keys(a.input).length === 0) a.input = call.input
-        }
-        const renders = await collectRenders(backend, runOptions.collect)
-        return {
-          scenario: scenario.id,
-          ...folded,
-          approvals,
-          decisions: folded.toolCalls.map((c) => ({
-            toolName: c.name,
-            decision: approvals.some((a) => a.toolUseId === c.id) ? ('needs_approval' as const) : ('allow' as const),
-            tier: c.tier,
-          })),
-          backend,
-          renders,
-          ...(options.model ? { model: options.model } : {}),
-          ...(error !== undefined ? { error: sessionId ? `${error} (session ${sessionId})` : error } : {}),
-          durationMs: Date.now() - startedAt,
-          script,
-          ...(sessionId ? { sessionId } : {}),
-        }
-      },
-    }
-  } catch (err) {
-    await close()
-    throw err
-  }
-}
-
-/** Records each tool activity's own result, by the tool_use id its activity id carries (`tool-<id>`). */
-function recording(activities: Record<string, ToolActivity>, ran: Map<string, Ran>): Record<string, ToolActivity> {
-  return Object.fromEntries(
-    Object.entries(activities).map(([name, run]) => [
-      name,
-      async (input: unknown) => {
-        const id = Context.current().info.activityId.replace(/^tool-/, '')
-        try {
-          const result = await run(input)
-          ran.set(id, { ok: true, result: typeof result === 'string' ? result : JSON.stringify(result) })
-          return result
-        } catch (err) {
-          ran.set(id, { ok: false, result: err instanceof Error ? err.message : String(err) })
-          throw err
-        }
-      },
-    ]),
-  )
-}
-
-export type Logged = { type: string; [key: string]: unknown }
-
-async function events(db: Database, sessionId: string): Promise<Logged[]> {
-  const rows = await db.sql<{ event: string }[]>`SELECT event FROM ai_session_events WHERE session_id = ${sessionId} ORDER BY seq`
-  return rows.map((r) => JSON.parse(r.event) as Logged)
-}
-
-/** finish_turn's events end the turn: its `session.result`, then a `session.status`. */
-function ended(log: Logged[]): boolean {
-  const result = log.findIndex((e) => e.type === 'session.result')
-  return result >= 0 && log.slice(result).some((e) => e.type === 'session.status')
-}
+/** One agent process of a role, as main.ts builds it. */
+type AgentProcess = { m: SessionManager; spawned: number; stop(): Promise<void> }
 
 /** What the last poll of the gate's pending input saw: its failure, while the gate keeps failing. */
 export type Polled = { gateError?: string }
 
 /**
- * The session's pending input, or none when the gate cannot be read (#2465). The poll
- * goes on, as a later read may answer, but the failure is kept: a gate that never
- * answers leaves a parked call undenied, and the run then ends only at its deadline.
+ * The session's pending input, or none when the gate cannot be read (#2465). The poll goes on,
+ * as a later read may answer, but the failure is kept: a gate that never answers leaves a parked
+ * call undenied, and the run then ends only at its deadline.
  */
 export async function pollPending(
   gate: Pick<DurableGate, 'pendingInput'>,
@@ -338,128 +146,275 @@ export function timedOut(polled: Polled): string {
   return polled.gateError === undefined ? 'eval timed out' : `eval timed out; the gate's pending input last failed: ${polled.gateError}`
 }
 
-
-/** The own plugin's built-ins, which run inside a segment (harness/ownPlugin.ts). */
-const IN_SEGMENT_BUILTINS: ReadonlySet<string> = new Set(['Skill', 'Agent', 'Task'])
-
-/** The session's events as an Outcome's tool calls, final text and result. */
-export function foldEvents(log: Logged[], ran: ReadonlyMap<string, Ran>): Pick<Outcome, 'toolCalls' | 'finalText' | 'result'> {
-  const toolCalls: ToolCall[] = []
-  let finalText = ''
-  const texts = new Map<string, string>()
-  let result: RunResult | undefined
-  // A turn's `error` and `session.result` are matched within the turn, which its
-  // settled `session.status` closes, in either order. finish_turn logs the error after
-  // the result today (agent-durable session/activities.py `turn_events`); a reorder must
-  // not score a failed turn as a success (#2465). The gate also logs `running` and
-  // `waiting` partway through a turn, around a parked call (gate/store.py); those do
-  // not close it, so an error logged before a park still counts.
-  let turnError: string | undefined
-  let turnResult = false
-  for (const e of log) {
-    if (e.type === 'tool.call' && typeof e.id === 'string' && typeof e.name === 'string') {
-      // A subagent's call is not the agent's, as foldMessages counts only the main
-      // thread's: one under an Agent call, or one on the server only subagents have
-      // (agent-durable runner.py SegmentCalls, which can leave `parent` off).
-      if (typeof e.parent === 'string' || e.name.startsWith(EVAL_TOOL_PREFIX)) continue
-      // A call Claude Code ran inside the segment keeps its own name (Skill, Agent, an
-      // MCP tool); the workflow's calls carry the registry name.
-      const own = e.name.startsWith('mcp__') || IN_SEGMENT_BUILTINS.has(e.name)
-      toolCalls.push({
-        id: e.id,
-        name: own ? e.name : `${DURABLE_TOOL_PREFIX}${e.name}`,
-        tool: e.name,
-        input: (e.input as Record<string, unknown> | undefined) ?? {},
-        tier: (e.risk as RiskTier | undefined) ?? 'outward',
-      })
-    } else if (e.type === 'tool.result' && typeof e.id === 'string') {
-      const call = toolCalls.find((c) => c.id === e.id)
-      if (!call) continue
-      call.ok = e.ok === true
-      const own = ran.get(e.id)
-      // A call that never reached its activity was refused before it: denied at the gate.
-      call.result = own ? own.result : e.summary === 'rejected' ? DURABLE_REJECTION : String(e.summary ?? '')
-    } else if (e.type === 'assistant.text.delta' && typeof e.messageId === 'string' && typeof e.delta === 'string') {
-      const text = (texts.get(e.messageId) ?? '') + e.delta
-      texts.set(e.messageId, text)
-      if (text.trim()) finalText = text
-    } else if (e.type === 'session.result') {
-      result = {
-        subtype: turnError ?? 'success',
-        ...(typeof e.costUsd === 'number' ? { total_cost_usd: e.costUsd } : {}),
-        ...(typeof e.turns === 'number' ? { num_turns: e.turns } : {}),
+/**
+ * A warm query whose messages `seen` also gets, as Claude Code yields them; its interrupt and
+ * close are the query's own, so the warm cache uses it as it is (manager.ts `startedQuery`).
+ */
+function tapped(query: ReturnType<typeof runHarness>, seen: (message: SDKMessage) => void) {
+  return {
+    [Symbol.asyncIterator]: () => {
+      const it = query[Symbol.asyncIterator]()
+      return {
+        next: async () => {
+          const next = await it.next()
+          if (!next.done) seen(next.value)
+          return next
+        },
+        return: async (value?: unknown) => (it.return ? it.return(value as never) : { done: true as const, value: undefined }),
       }
-      turnResult = true
-    } else if (e.type === 'error') {
-      turnError = `error: ${String(e.code)}: ${String(e.message ?? '')}`
-      if (result && turnResult) result = { ...result, subtype: turnError }
-    } else if (e.type === 'session.status' && SETTLED.includes(e.status as SessionStatus)) {
-      // Only a settled status ends the turn, as `DurableTurns` reads it: a park
-      // (`waiting_approval`, `waiting_input`) and `running` are the turn's own (#2970).
-      turnError = undefined
-      turnResult = false
-    }
-  }
-  return { toolCalls, finalText, ...(result ? { result } : {}) }
-}
-
-async function startDurableWorker(o: { url: string; address: string; dir: string; stderr?: ((line: string) => void) | undefined }): Promise<ChildProcess> {
-  const worker = spawn('uv', ['run', '--frozen', 'python', '-m', 'scadbuddy_durable'], {
-    cwd: DURABLE_DIR,
-    env: {
-      ...process.env,
-      SCADBUDDY_DATABASE_URL: o.url,
-      SCADBUDDY_TEMPORAL_ADDRESS: o.address,
-      SCADBUDDY_TEMPORAL_NAMESPACE: 'default',
-      SCADBUDDY_SECRET_KEY_FILE: path.join(o.dir, 'kek'),
-      SCADBUDDY_DURABLE_TOOLS_JSON: path.join(o.dir, 'tools.json'),
-      SCADBUDDY_DURABLE_CWD: o.dir,
-      // ScadBuddy's own plugin, as runScenario gives the classic harness (`ownPlugin`).
-      SCADBUDDY_DURABLE_SKILLS_DIR: OWN_PLUGIN_DIR,
-      SCADBUDDY_DURABLE_HEALTH_PORT: '0',
-      // No agent serves the subagents' loopback MCP server here: without "off" every
-      // segment's Claude Code waits about 30 s on a server it cannot reach.
-      SCADBUDDY_DURABLE_SUBAGENT_MCP_URL: 'off',
     },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  let log = ''
-  // Read as it arrives, before the log is trimmed: a long uv sync could push it out.
-  let port: number | undefined
-  const take = (d: Buffer) => {
-    const text = d.toString()
-    port ??= durableHealthPort(log + text)
-    log = (log + text).slice(-20_000)
-    if (o.stderr) for (const line of text.split('\n')) if (line) o.stderr(line)
-  }
-  worker.stdout?.on('data', take)
-  worker.stderr?.on('data', take)
-  // uv may sync the worker's environment first.
-  const deadline = Date.now() + 240_000
-  for (;;) {
-    if (worker.exitCode !== null) throw new Error(`the durable worker exited: ${log}`)
-    const status = port === undefined
-      ? undefined
-      : await fetch(`http://127.0.0.1:${port}/healthz`)
-          .then((r) => r.json() as Promise<{ worker?: string }>)
-          .catch(() => undefined)
-    if (status?.worker === 'running') return worker
-    if (status?.worker && status.worker !== 'starting') {
-      await stopProcess(worker)
-      throw new Error(`the durable worker is ${status.worker}: ${log}`)
-    }
-    if (Date.now() > deadline) {
-      await stopProcess(worker)
-      throw notStarted('the durable worker', port, log)
-    }
-    await new Promise((r) => setTimeout(r, 500))
+    interrupt: () => query.interrupt(),
+    close: () => query.close(),
   }
 }
 
-async function stopProcess(worker: ChildProcess): Promise<void> {
-  if (worker.exitCode !== null) return
-  const exited = new Promise((resolve) => worker.once('exit', resolve))
-  worker.kill('SIGTERM')
-  await Promise.race([exited, new Promise((r) => setTimeout(r, 15_000))])
-  if (worker.exitCode === null) worker.kill('SIGKILL')
+/** Starts the stack once; each `run` is a new session on it. */
+export async function startEvalStack(options: EvalStackOptions): Promise<EvalStack> {
+  const skip = evalStackSkip()
+  if (skip) throw new Error(`the evals cannot run: ${skip}`)
+  const cleanups: (() => Promise<unknown>)[] = []
+  const close = async () => {
+    for (const cleanup of cleanups.reverse()) await cleanup().catch(() => {})
+  }
+  try {
+    const env: TestWorkflowEnvironment = await localTemporal()
+    cleanups.push(() => env.teardown())
+    const bundle = await bundleWorkflowCode({ workflowsPath: WORKFLOWS })
+    await ensureTemplate()
+    const { db, url, schema, drop } = await throwawayDatabase()
+    cleanups.push(drop)
+    if (!(await db.ready())) throw new Error('the eval database did not migrate')
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'scadbuddy-eval-'))
+    cleanups.push(() => rm(dir, { recursive: true, force: true }))
+    const kek = kekFromBase64(randomBytes(32).toString('base64'))
+    const keys = new PgPayloadKeys(db.sql, kek)
+    // One input-hash key for both processes, as main.ts derives it from the one KEK.
+    const hashKey = approvalHashKey(kek)
+    const dataConverter = subjectDataConverter(keys, new FilePayloadStore(path.join(dir, 'payloads')))
+    const client = new Client({ connection: env.connection, namespace: 'default', dataConverter })
+
+    // What a session's turn reads: the model and the budget, in Settings.
+    const stored = new SettingsStore(db.sql)
+    if (options.model) await stored.set(SETTING_MODEL, options.model)
+    await stored.set(SETTING_SESSION_BUDGET_USD, options.maxBudgetUsd ?? 0.5)
+
+    // Each run's backend, and the message stream of the Claude Code its session spawned.
+    let current: ScenarioBackend = new EvalBackend()
+    let sink: Sink = { messages: [], decisions: [] }
+    const services = {
+      backend: createBackendClient(EVAL_BACKEND_URL, (input, init) => current.fetch(input, init)),
+      pending: new PendingActionStore(),
+      pollIntervalMs: 5,
+      renderWaitMs: options.renderWaitMs ?? 5_000,
+    } satisfies ToolServices
+
+    const tag = randomUUID().slice(0, 8)
+    const workerHost = sessionHostQueue(`worker-${tag}`)
+
+    async function agentProcess(role: 'api' | 'worker'): Promise<AgentProcess> {
+      const parts = roleParts(role)
+      const identity = `${role}-${tag}`
+      const sessionHost = sessionHostQueue(identity)
+      const stateDir = path.join(dir, role)
+      await ensureStateDirs({ stateDir })
+      const pool: Database = connectDatabase(url, { searchPath: schema })
+      const listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
+      const settings = new SettingsStore(pool.sql)
+      const audit = new AuditLog({ sql: pool.sql, settings: () => settings, hashKey })
+      const p: AgentProcess = { spawned: 0 } as AgentProcess
+      const run: QueryRunner = (spawn) => {
+        p.spawned++
+        const into = sink
+        return tapped(
+          runHarness({
+            ...spawn,
+            // The tier seam's verdict on each call, as it ran (harness/permissions.ts).
+            onDecision: (toolName, decision) => {
+              spawn.onDecision?.(toolName, decision)
+              into.decisions.push({ toolName, decision: decision.decision, tier: decision.tier })
+            },
+            ...(options.stderr ? { stderr: options.stderr } : {}),
+          }),
+          (m) => into.messages.push(m),
+        )
+      }
+      p.m = new SessionManager({
+        sql: pool.sql,
+        paths: { stateDir },
+        credentials: fixedCredentials(options.credential),
+        settings,
+        payloadKeys: keys,
+        approvalHashKey: hashKey,
+        audit,
+        // ScadBuddy's tools and their tiers, and its own plugin, as main.ts gives every session.
+        ...harnessTools(services),
+        ownPlugin: OWN_PLUGIN_DIR,
+        run,
+        newSessions: { max: 10_000, windowMs: 1 },
+      })
+      // Every session is an AgentSession: ready while the worker's session host polls.
+      p.m.durableTurns = new DurableTurns({ client, sql: pool.sql, events: p.m.events, audit, liveHosts: async () => new Set([workerHost]) })
+      p.m.durable = new DurableGate(client, { timeoutMs: 15_000 })
+      listener.start()
+
+      const shared: AgentWorker[] = []
+      let hosts: HostWorkers | undefined
+      let turnHost: TurnHost | undefined
+      if (parts.sessionHost && parts.sharedWorkers) {
+        turnHost = new TurnHost({
+          core: p.m.turnCore,
+          sql: pool.sql,
+          images: new SessionBlobs(pool.sql),
+          hostQueue: sessionHost,
+          listen: (channel, onNotify) => listener.listenAlso(channel, onNotify),
+          questions: p.m.questions,
+        })
+        const turnDeps: TurnToolsDeps = {
+          sessions: new PgSessionOwners(pool.sql),
+          approvals: new PgApprovalRecords(pool.sql),
+          audit,
+          servers: async () => ({ servers: [], problems: [], secrets: [], release: () => {} }),
+        }
+        const acquire = acquireActivities({ warm: p.m.warm, hostQueue: sessionHost, identity, liveHosts: async () => new Set([sessionHost]) })
+        const common = { address: env.address, namespace: 'default', identity: workerIdentity(identity), dataConverter, shutdownGraceMs: 1_000, log: () => {} }
+        shared.push(
+          AgentWorker.start({
+            ...common,
+            taskQueue: TASK_QUEUE,
+            activities: {
+              ...gateActivities({ audit, sessions: new PgSessionOwners(pool.sql), tools: DURABLE_TOOLS, services }),
+              ...sessionGateActivities(pool.sql),
+              ...sessionFinishActivities(pool.sql, p.m.events),
+              ...acquire,
+            },
+            workflows: { workflowBundle: bundle },
+          }),
+          AgentWorker.start({
+            ...common,
+            taskQueue: SESSION_QUEUE,
+            activities: { [SESSION_SETTINGS_ACTIVITY]: () => readRuntimeSettings(settings) },
+            workflows: { workflowBundle: bundle },
+          }),
+        )
+        hosts = startHostWorkers({
+          address: env.address,
+          namespace: 'default',
+          identity,
+          dataConverter,
+          // A pinned turn tool's calls (#2320), as main.ts's host worker serves them: the eval's turns offer none.
+          pinned: { ...turnToolActivities(turnDeps), default: turnToolActivity(turnDeps) },
+          sessions: {
+            activities: { ...sessionTurnActivity(turnHost, { client }), ...releaseActivities(p.m.warm), ...acquire },
+            slots: 10,
+            shutdownGraceMs: 2_000,
+            shutdownForceMs: 3_000,
+          },
+          shutdownGraceMs: 1_000,
+        })
+        await Promise.all([...shared.map((w) => w.running(60_000)), hosts.pinned.running(60_000), hosts.sessions?.running(60_000)])
+        // Its /readyz (runtime/health.ts): Temporal lists it on every queue it serves.
+        const queues = [
+          { name: SESSION_QUEUE, type: 1 as const },
+          { name: TASK_QUEUE, type: 2 as const },
+          { name: sessionHost, type: 2 as const },
+        ]
+        const deadline = Date.now() + 60_000
+        for (;;) {
+          const missing = await queuesPolled(client, queues, workerIdentity(identity))
+          if (missing === undefined) break
+          if (Date.now() > deadline) throw new Error(`the eval worker never polled: ${missing}`)
+          await new Promise((r) => setTimeout(r, 100))
+        }
+      }
+      p.stop = async () => {
+        const hosted = turnHost?.stop({ graceMs: 1_000, abortWaitMs: 1_000 })
+        await Promise.all([...shared.map((w) => w.stop()), hosts?.stop(), p.m.stopTurns({ graceMs: 1_000, abortWaitMs: 1_000, ...(hosted ? { others: hosted } : {}) })])
+        await listener.close()
+        await pool.close()
+      }
+      cleanups.push(() => p.stop())
+      return p
+    }
+
+    const worker = await agentProcess('worker')
+    const api = await agentProcess('api')
+    const started: string[] = []
+    cleanups.push(async () => {
+      for (const id of started)
+        await client.workflow
+          .getHandle(sessionWorkflowId(id))
+          .terminate('eval over')
+          .catch((err: unknown) => {
+            if (!(err instanceof WorkflowNotFoundError)) throw err
+          })
+    })
+
+    return {
+      close,
+      spawned: () => ({ api: api.spawned, worker: worker.spawned }),
+      async workflow(sessionId) {
+        const described = await client.workflow.getHandle(sessionWorkflowId(sessionId)).describe()
+        return { type: described.type, taskQueue: described.taskQueue }
+      },
+      async run(scenario, runOptions = {}, backend = new EvalBackend()) {
+        current = backend
+        const seen: Sink = { messages: [], decisions: [] }
+        sink = seen
+        const { prompt, script } = scenario.prepare(backend)
+        const startedAt = Date.now()
+        const deadline = startedAt + (runOptions.timeoutMs ?? 300_000)
+        const parked: { requestId: string; toolName: string; toolUseId: string }[] = []
+        let error: string | undefined
+        let sessionId: string | undefined
+        try {
+          const { session, turn } = await api.m.start(EVAL_OWNER, { origin: 'mcp', title: scenario.id, prompt })
+          sessionId = session.id
+          started.push(session.id)
+          if (!turn) throw new Error('the session started no turn')
+          let done = false
+          const ended = () => (done = true)
+          turn.done.then(ended, ended)
+          const answered = new Set<string>()
+          const polled: Polled = {}
+          while (!done) {
+            if (Date.now() > deadline) throw new Error(timedOut(polled))
+            for (const entry of await pollPending(api.m.durable!, session.id, polled)) {
+              if (entry.kind !== 'approval' || answered.has(entry.id)) continue
+              answered.add(entry.id)
+              const id = parseRequestId(entry.id)
+              parked.push({ requestId: entry.id, toolName: entry.tool, toolUseId: id?.store === 'durable' ? id.toolUseId : '' })
+              await respond(api.m, EVAL_OWNER, entry.id, { kind: 'approval', decision: 'deny' })
+            }
+            await Promise.race([turn.done, new Promise((r) => setTimeout(r, 200))])
+          }
+          const outcome = await turn.done
+          if (outcome.kind !== 'result') error = outcome.kind === 'failed' ? `the turn failed: ${outcome.message}` : `the turn ended ${outcome.kind}`
+        } catch (err) {
+          error = err instanceof Error ? err.message : String(err)
+        }
+        const folded = foldMessages(seen.messages)
+        // Each parked call as the model made it: its name and its exact input.
+        const approvals: Outcome['approvals'] = parked.map((p) => {
+          const call = folded.toolCalls.find((c) => c.id === p.toolUseId)
+          return { toolName: call?.name ?? p.toolName, input: call?.input ?? {}, toolUseId: p.toolUseId, tier: call?.tier ?? 'outward' }
+        })
+        const renders = await collectRenders(backend, collectWithin(runOptions, Date.now() - startedAt))
+        return {
+          scenario: scenario.id,
+          ...folded,
+          approvals,
+          decisions: seen.decisions,
+          backend,
+          renders,
+          ...(error !== undefined ? { error: sessionId ? `${error} (session ${sessionId})` : error } : {}),
+          durationMs: Date.now() - startedAt,
+          script,
+          ...(sessionId ? { sessionId } : {}),
+        }
+      },
+    }
+  } catch (err) {
+    await close()
+    throw err
+  }
 }

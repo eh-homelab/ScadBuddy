@@ -2,8 +2,9 @@
 name: AI evals
 
 # Opt-in live evals of the agent (issue #259, docs/ai/evals.md): the scenarios
-# in agent/evals/scenarios.ts, answered by a real Claude model through the real
-# harness, scored by deterministic checks. NOT part of required CI and never
+# in agent/evals/scenarios.ts, answered by a real Claude model, each in a session
+# on the one runtime (an AgentSession, agent/evals/durable.ts), scored by
+# deterministic checks. NOT part of required CI and never
 # a merge gate (`CI Summary` does not know about this workflow).
 #
 # Why only `workflow_dispatch`:
@@ -13,7 +14,7 @@ name: AI evals
 #     so the secret below is never exposed to code from a fork PR;
 #   - the deterministic half of the same harness (scripted model, fake
 #     Anthropic endpoint) already runs on every PR in `ci.yml`'s `agent` job as
-#     agent/test/evals.test.ts.
+#     agent/test/evals.durable.e2e.test.ts.
 #
 # The credential is the repository secret SCADBUDDY_EVAL_ANTHROPIC_API_KEY,
 # passed to the one step that needs it. Without the secret the run SKIPS every
@@ -28,15 +29,6 @@ on:
         description: "Claude model id or alias (blank: the Agent SDK's default)"
         required: false
         type: string
-      mode:
-        description: "Session mode the scenarios run in (docs/ai/evals.md)"
-        required: false
-        type: choice
-        default: both
-        options:
-          - both
-          - classic
-          - durable
 
 permissions:
   contents: read
@@ -50,9 +42,9 @@ jobs:
     name: Live AI evals
     runs-on: ubuntu-latest
     # The scenarios run one at a time, each up to vitest's 6 minutes
-    # (vitest.evals.config.ts, live.eval.ts): 5 scenarios in each of two modes are
-    # an hour, after checkout, install, the image build and the durable stack's
-    # start below. Keep headroom so a slow model fails a scenario, not the job.
+    # (vitest.evals.config.ts, live.eval.ts): 6 scenarios are 36 minutes, after
+    # checkout, install, the image build and the eval stack's start below. Keep
+    # headroom so a slow model fails a scenario, not the job.
     timeout-minutes: 120
     defaults:
       run:
@@ -168,20 +160,11 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      # The durable mode (#2320, evals/durable.ts) runs agent-durable's worker under
-      # uv; without it it skips. uv is pinned as in ci.yml's `agent` job; bump together.
-      - name: Set up uv
-        if: ${{ steps.key.outputs.present == 'true' && inputs.mode != 'classic' }}
-        uses: astral-sh/setup-uv@v10.3.2
-        with:
-          enable-cache: true
-          cache-dependency-glob: agent-durable/uv.lock
-
-      # The durable mode starts its own Temporal dev server from this CLI. Copied out
+      # The eval stack (evals/durable.ts) starts its own Temporal dev server from this CLI. Copied out
       # of the test image built above (#2467), so the Dockerfile's
       # TEMPORAL_CLI_VERSION stays the only pin.
       - name: Take the Temporal CLI from the test image
-        if: ${{ steps.key.outputs.present == 'true' && inputs.mode != 'classic' }}
+        if: ${{ steps.key.outputs.present == 'true' }}
         run: |
           set -euo pipefail
           id="$(docker create scadbuddy:evals-test)"
@@ -190,7 +173,7 @@ jobs:
           docker cp "$id:/usr/local/bin/temporal" "$RUNNER_TEMP/temporal"
           "$RUNNER_TEMP/temporal" --version
 
-      # `inputs.model` and `inputs.mode` reach the run as environment variables,
+      # `inputs.model` reaches the run as an environment variable,
       # never interpolated into the script.
       - name: Run the live evals
         env:
@@ -198,8 +181,7 @@ jobs:
           SCADBUDDY_EVAL_MODEL: ${{ inputs.model }}
           SCADBUDDY_EVAL_REPORT: ${{ runner.temp }}/eval-report.json
           SCADBUDDY_EVAL_BACKEND_URL: ${{ steps.key.outputs.present == 'true' && 'http://127.0.0.1:18080' || '' }}
-          SCADBUDDY_EVAL_MODE: ${{ inputs.mode || 'both' }}
-          # The durable stack's own throwaway database (it copies a migrated
+          # The eval stack's own throwaway database (it copies a migrated
           # template, so it needs CREATEDB: the service's superuser has it).
           SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_evals
           SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
@@ -222,11 +204,11 @@ jobs:
           {
             echo "## AI evals: $(jq -r '"\(.passed)/\(.total) passed"' "$REPORT")"
             echo
-            echo "| Scenario | Mode | Result | Model | Failed checks |"
-            echo "|---|---|---|---|---|"
+            echo "| Scenario | Result | Model | Failed checks |"
+            echo "|---|---|---|---|"
             # A literal | in a title or check name would split the table cell.
             jq -r 'def cell: tostring | gsub("\\|"; "\\|");
-              .scenarios[] | "| \(.title | cell) | \(.mode // "classic" | cell) | \(if .pass then "pass" else "FAIL" end) | \(.model // "unknown" | cell) | \([.checks[] | select(.pass | not) | .name] | join("; ") | cell) |"' "$REPORT"
+              .scenarios[] | "| \(.title | cell) | \(if .pass then "pass" else "FAIL" end) | \(.model // "unknown" | cell) | \([.checks[] | select(.pass | not) | .name] | join("; ") | cell) |"' "$REPORT"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the report

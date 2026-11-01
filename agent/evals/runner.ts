@@ -1,61 +1,29 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
-import { createBackendClient } from '../src/api/backend.js'
-import { tiersUpTo } from '../src/auth/principal.js'
-import type { Credential } from '../src/credentials.js'
-import type { HarnessPaths } from '../src/harness/options.js'
-import { OWN_PLUGIN_DIR, ownPluginTierOf } from '../src/harness/ownPlugin.js'
-import type { ApprovalGate, ApprovalRequest, RiskTier, ToolDecision } from '../src/harness/permissions.js'
-import { runHarness } from '../src/harness/run.js'
-import { systemAppend } from '../src/sessions/manager.js'
-import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
-import { PendingActionStore } from '../src/tools/pending.js'
-import { createHarnessServer, SERVER_NAME } from '../src/tools/projections.js'
-import type { ToolServices } from '../src/tools/registry.js'
-import { EVAL_BACKEND_URL, EvalBackend } from './backend.js'
-import { type CollectOptions, collectRenders, DEFAULT_COLLECT_DEADLINE_MS, type RenderedJob, type ScenarioBackend } from './render.js'
+import { ownPluginTierOf } from '../src/harness/ownPlugin.js'
+import type { ApprovalRequest, RiskTier, ToolDecision } from '../src/harness/permissions.js'
+import { tierOf } from '../src/tools/index.js'
+import { SERVER_NAME } from '../src/tools/projections.js'
+import { type CollectOptions, DEFAULT_COLLECT_DEADLINE_MS, type RenderedJob, type ScenarioBackend } from './render.js'
 
-// Runs one eval scenario through the REAL harness (src/harness/run.ts
-// `runHarness`: the Agent SDK and its bundled Claude Code binary) with the
-// real ScadBuddy tool registry (src/tools/, projected in-process by
-// `createHarnessServer`, spec §5.1) against the recorded backend in
-// ./backend.ts. Which model answers is the caller's choice: the local fake
-// Anthropic endpoint for the deterministic run in CI (test/evals.test.ts), or
-// the configured credential for a live run (./live.eval.ts).
+// What an eval scenario is, what a run of one records, and how it is scored. The runs
+// go through the one runtime (./durable.ts: an AgentSession, as every session's turn
+// runs, plan 2026-10-13 Step 6.6), answered by the local fake Anthropic endpoint in CI
+// (test/evals.durable.e2e.test.ts) or the configured credential live (./live.eval.ts).
 //
-// Outward calls go to an approval gate that records the request and DENIES it:
-// an eval never approves anything, so "the approval gate was hit" and "nothing
-// outward reached the backend" can both be checked (spec §8.2).
+// Outward calls park on the session's gate, and the run DENIES each one: an eval never
+// approves anything, so "the approval gate was hit" and "nothing outward reached the
+// backend" can both be checked (spec §8.2).
 
 export const EVAL_TOOL_PREFIX = `mcp__${SERVER_NAME}__`
 
-/** The prefix a durable session's ScadBuddy tools carry (the engine's own MCP server). */
-export const DURABLE_EVAL_TOOL_PREFIX = 'mcp__durable__'
-
-/** The registry name of a tool as either engine names it: `mcp__scadbuddy__x` or `mcp__durable__x` is `x`. */
+/** The registry name of a tool as the model sees it: `mcp__scadbuddy__x` is `x`. */
 export function registryName(name: string): string {
-  for (const prefix of [EVAL_TOOL_PREFIX, DURABLE_EVAL_TOOL_PREFIX]) if (name.startsWith(prefix)) return name.slice(prefix.length)
-  return name
+  return name.startsWith(EVAL_TOOL_PREFIX) ? name.slice(EVAL_TOOL_PREFIX.length) : name
 }
-
-/** Which engine a scenario runs on: the classic harness, or a durable session (evals/durable.ts). */
-export type EvalMode = 'classic' | 'durable'
-export const EVAL_MODES: readonly EvalMode[] = ['classic', 'durable']
-
-/** SCADBUDDY_EVAL_MODE: `classic`, `durable`, or `both` (the default). */
-export function evalModes(raw: string | undefined): EvalMode[] {
-  const value = raw?.trim().toLowerCase() || 'both'
-  if (value === 'both') return [...EVAL_MODES]
-  if (value === 'classic' || value === 'durable') return [value]
-  throw new Error(`SCADBUDDY_EVAL_MODE must be classic, durable or both, not ${JSON.stringify(raw)}`)
-}
-
-export const EVAL_DENIAL =
-  'Not approved: the person reviewing this request declined it, so nothing was sent. Tell the user it was not done.'
-
 
 export type ToolCall = {
   id: string
-  /** As the model saw it: `mcp__scadbuddy__render_model` (classic), `mcp__durable__render_model` (durable). */
+  /** As the model saw it: `mcp__scadbuddy__render_model`. */
   name: string
   /** The registry name: `render_model`. */
   tool: string
@@ -87,10 +55,7 @@ export type Outcome = {
   durationMs: number
 }
 
-/**
- * How the run ended: the SDK's result message (classic), or what a durable session's
- * finish_turn logged (`success`, or `error: <code>: <message>`). An SDKResultMessage is one.
- */
+/** How the run ended: the SDK's result message. An SDKResultMessage is one. */
 export type RunResult = { subtype: string; total_cost_usd?: number; num_turns?: number }
 
 export type CheckResult = { name: string; pass: boolean; detail?: string }
@@ -115,27 +80,16 @@ export type Scenario = {
 /** What the scripted model says on one call: text, or one tool call (registry name, without the prefix). */
 export type ScriptedTurn = { text: string } | { tool: string; input: Record<string, unknown> }
 
-export type RunOptions = {
-  paths: HarnessPaths
-  credential: Credential
-  /** Model id or alias; the SDK's default when omitted. */
-  model?: string
-  maxTurns?: number
-  maxBudgetUsd?: number
-  /** Whole-run deadline, so a stuck live run cannot hang the job. */
-  timeoutMs?: number
-  /** How long render_model waits for a render before handing back the running job (5 s: the recorded backend's are instant). */
-  renderWaitMs?: number
+/** How the scorer follows a run's renders, and the whole scenario's budget. */
+export type CollectBudget = {
   /** How the scorer follows the run's renders afterwards (evals/render.ts). */
   collect?: CollectOptions
   /**
-   * The whole scenario's budget, run and render collection together, from when
-   * `runScenario` starts. The collection's deadline is cut to what is left of it,
-   * so a slow run cannot push the scenario past the test's own timeout and drop
-   * it from the report (#2110).
+   * The whole scenario's budget, run and render collection together, from when the run
+   * starts. The collection's deadline is cut to what is left of it, so a slow run cannot
+   * push the scenario past the test's own timeout and drop it from the report (#2110).
    */
   budgetMs?: number
-  stderr?: (line: string) => void
 }
 
 function blocks(content: unknown): Record<string, unknown>[] {
@@ -193,79 +147,11 @@ export function foldMessages(messages: SDKMessage[]): Pick<Outcome, 'toolCalls' 
 }
 
 /** The collection's options, its deadline cut to what is left of `budgetMs` after `elapsedMs` (#2110). */
-export function collectWithin(options: Pick<RunOptions, 'collect' | 'budgetMs'>, elapsedMs: number): CollectOptions {
+export function collectWithin(options: CollectBudget, elapsedMs: number): CollectOptions {
   const collect = options.collect ?? {}
   if (options.budgetMs === undefined) return collect
   const left = Math.max(0, options.budgetMs - elapsedMs)
   return { ...collect, deadlineMs: Math.min(collect.deadlineMs ?? DEFAULT_COLLECT_DEADLINE_MS, left) }
-}
-
-/** Runs a scenario's prompt through the harness and returns what happened. */
-export async function runScenario(
-  scenario: Scenario,
-  options: RunOptions,
-  backend: ScenarioBackend = new EvalBackend(),
-): Promise<Outcome & { script: ScriptedTurn[] }> {
-  const { prompt, script } = scenario.prepare(backend)
-  const approvals: Outcome['approvals'] = []
-  const decisions: Outcome['decisions'] = []
-  const gate: ApprovalGate = (request) => {
-    approvals.push({ toolName: request.toolName, input: request.input, toolUseId: request.toolUseId, tier: request.tier })
-    return Promise.resolve({ approved: false, message: EVAL_DENIAL })
-  }
-  const services = {
-    backend: createBackendClient(EVAL_BACKEND_URL, backend.fetch),
-    pending: new PendingActionStore(),
-    pollIntervalMs: 5,
-    renderWaitMs: options.renderWaitMs ?? 5_000,
-  } satisfies ToolServices
-  const principal = { id: `eval:${scenario.id}`, kind: 'browser' as const, tiers: tiersUpTo('outward') }
-  const stop = new AbortController()
-  const timer = setTimeout(() => stop.abort(new Error('eval timed out')), options.timeoutMs ?? 300_000)
-  const started = Date.now()
-  const messages: SDKMessage[] = []
-  let error: string | undefined
-  try {
-    const query = runHarness({
-      paths: options.paths,
-      credential: options.credential,
-      prompt,
-      ...(options.model !== undefined ? { model: options.model } : {}),
-      maxTurns: options.maxTurns ?? 12,
-      maxBudgetUsd: options.maxBudgetUsd ?? 0.5,
-      signal: stop.signal,
-      mcpServers: { [SERVER_NAME]: createHarnessServer(ALL_TOOLS, services, principal) },
-      // As a session loads it by default (src/sessions/manager.ts, #896): its
-      // skills are where the model learns how ScadBuddy wants sources cited.
-      ownPlugin: OWN_PLUGIN_DIR,
-      tierOf,
-      approvalGate: gate,
-      onDecision: (toolName, decision) => decisions.push({ toolName, decision: decision.decision, tier: decision.tier }),
-      // What a session's turn appends (src/sessions/manager.ts `systemAppend`), and nothing more: a defence only the eval added
-      // would make the injection scenario pass for a prompt that never ships.
-      systemPromptAppend: systemAppend(),
-      ...(options.stderr ? { stderr: options.stderr } : {}),
-    })
-    for await (const m of query) messages.push(m)
-  } catch (err) {
-    // For an error result (max turns, budget) the SDK yields the result and
-    // then throws (test/run.test.ts); the result is what counts then.
-    if (!messages.some((m) => m.type === 'result')) error = err instanceof Error ? err.message : String(err)
-  } finally {
-    clearTimeout(timer)
-  }
-  const renders = await collectRenders(backend, collectWithin(options, Date.now() - started))
-  return {
-    scenario: scenario.id,
-    ...foldMessages(messages),
-    approvals,
-    decisions,
-    backend,
-    renders,
-    ...(error !== undefined ? { error } : {}),
-    durationMs: Date.now() - started,
-    script,
-  }
 }
 
 export function score(scenario: Scenario, outcome: Outcome): CheckResult[] {

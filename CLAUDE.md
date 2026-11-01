@@ -137,18 +137,20 @@ With it set, `pnpm test`'s globalSetup migrates a template database once and eac
 Postgres test copies it (`test/support/postgres.ts`, #2018), so the test role needs
 `CREATEDB`, as the backend's does: without it the whole suite fails at setup, not
 only the Postgres tests.
-Evals (`agent/evals/`, `docs/ai/evals.md`): `test/evals.test.ts` replays each scenario
-against the fake endpoint in `pnpm test`; `pnpm evals` runs them live with the
+Evals (`agent/evals/`, `docs/ai/evals.md`): each scenario is a session on the one runtime,
+an AgentSession that an `api` process starts and a `worker` process runs (`evals/durable.ts`
+`startEvalStack`: Temporal, a throwaway Postgres, both roles in-process; plan 2026-10-13
+Step 6.6). `test/evals.durable.e2e.test.ts` replays each scenario against the fake endpoint
+in `pnpm test` (it skips without Temporal or Postgres); `pnpm evals` runs them live with the
 credential saved in Settings (or `SCADBUDDY_EVAL_ANTHROPIC_API_KEY`, CI only; the
 manual `ai-evals.yml` workflow) and skips cleanly without one. The render scenario
 runs live only against a real backend (`SCADBUDDY_EVAL_BACKEND_URL`, the image; it
 skips without one), and its render is checked `verify.sh`-style on the saved output's
 3MF; replies with suggestions are scored on their citations (`evals/citations.ts`,
 #1924).
-Every scenario runs in both session modes (#2320): `test/evals.durable.e2e.test.ts` replays
-them through a real durable session (`evals/durable.ts`: the Python worker, Temporal, the
-agent-tools worker; skips without uv, Temporal or Postgres), and `pnpm evals` takes
-`SCADBUDDY_EVAL_MODE=classic|durable|both` (default both).
+`.github/scripts/lint-one-runtime.sh` (the `lint` job) fails on a second turn path: a session
+mode branch in `agent/src`, or the SDK's `query` imported outside `harness/run.ts` and
+`harness/testConnection.ts`.
 
 Durable sessions (`agent-durable/`, Python 3.14; the `agent-durable` CI job, #1056):
 
