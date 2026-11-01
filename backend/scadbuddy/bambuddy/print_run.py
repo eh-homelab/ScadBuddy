@@ -51,7 +51,11 @@ from scadbuddy.bambuddy.extruders import (
     slicer_volume_types,
     with_sides,
 )
-from scadbuddy.bambuddy.filament_profiles import profile_overrides, unknown_profiles
+from scadbuddy.bambuddy.filament_profiles import (
+    profile_overrides,
+    slot_filament_overrides,
+    unknown_profiles,
+)
 from scadbuddy.bambuddy.filaments import (
     MAX_PLATES,
     FilamentOptions,
@@ -1161,8 +1165,17 @@ async def check_print(
                 if inventory is not None
                 else []
             ),
-            # #717: what the run will say of a profile it cannot apply.
-            *(await profile_overrides(client, process, request.filament_profiles, read=read))[1],
+            # #717: what the run will say of a profile it cannot apply, and (#2799) of
+            # its filament settings on Bambuddy's slicer.
+            *(
+                await profile_overrides(
+                    client,
+                    process,
+                    request.filament_profiles,
+                    read=read,
+                    native_slicer=settings.slicer_backend == "native",
+                )
+            ).warnings,
             # #1899: and of a support setting it cannot apply.
             *(
                 await support_overrides(
@@ -1279,7 +1292,15 @@ async def _native_check(
                     request.choices.bed_type, prepared.printer_model, prepared.printer_name
                 )
             ),
-            *(await profile_overrides(None, process, request.filament_profiles, read=read))[1],
+            *(
+                await profile_overrides(
+                    None,
+                    process,
+                    request.filament_profiles,
+                    read=read,
+                    native_slicer=settings.slicer_backend == "native",
+                )
+            ).warnings,
             *(
                 await support_overrides(
                     None,
@@ -2646,8 +2667,8 @@ async def plan_run(
     # #717: a profile that cannot apply is skipped with a warning, never refused.
     # One read of the preset's values for the profiles and the supports (#2804 review).
     read = values_for(None if native_run else client, native=profiles)
-    from_profiles, profile_warnings = await profile_overrides(
-        client, process, request.filament_profiles, read=read
+    from_profiles, profile_warnings, applied_profiles = await profile_overrides(
+        client, process, request.filament_profiles, read=read, native_slicer=native_slicing
     )
     # The source places, recolors and uploads what it prints (#105, #126, #476), into
     # the project's folder when there is one (#79, #316). Never `planned_project` on a
@@ -2791,6 +2812,13 @@ async def plan_run(
             filament_presets=resolved.filament_presets,
             filament_colours=resolved.filament_colours,
             bed_type=resolved.bed_type,
+            # #2799: a profile's filament settings go into the matching slots' filament
+            # files, which only the native slicer slices with.
+            filament_overrides=(
+                slot_filament_overrides(applied_profiles, options, request.filament_plan)
+                if native_slicing
+                else {}
+            ),
             process_overrides={
                 **from_profiles,
                 **{

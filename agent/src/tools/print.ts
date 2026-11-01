@@ -565,8 +565,11 @@ export const printTools: Tool[] = [
     description:
       'Filament profiles (#717): named process changes the print dialog suggests for a spool, e.g. Silk PLA\'s ' +
       'slower outer wall. Each lists which spools it is for (`match`: the material, and a word in the spool\'s ' +
-      'subtype or slicer preset), the settings it changes, each with its cited sources, and advice it cannot ' +
-      'apply (`notes`). Apply one with print_output\'s `filament_profiles`, only when the user wants it.',
+      'subtype or slicer preset), the process settings it changes, each with its cited sources, the filament ' +
+      'settings it sets in the matching slots\' filament presets (`filament_settings`, e.g. Silk\'s 235 °C ' +
+      'nozzle; applied by the native slicer only, and on Bambuddy\'s the run warns profile-not-applied), and ' +
+      'advice it cannot apply (`notes`). Apply one with print_output\'s `filament_profiles`, only when the ' +
+      'user wants it.',
     input: z.object({}),
     risk: 'read',
     source: 'ScadBuddy\'s built-in profiles, quoting the pages they cite',

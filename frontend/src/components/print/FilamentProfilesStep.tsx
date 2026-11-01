@@ -17,7 +17,8 @@ function current(change: Change): string | null {
  * each passage quoted from it. */
 function sourcesOf(profile: ProfileSuggestion['profile']): { url: string; title: string; quotes: string[] }[] {
   const pages = new Map<string, { url: string; title: string; quotes: string[] }>()
-  for (const source of [...profile.settings, ...(profile.notes ?? [])].flatMap((entry) => entry.sources ?? [])) {
+  const entries = [...profile.settings, ...(profile.filament_settings ?? []), ...(profile.notes ?? [])]
+  for (const source of entries.flatMap((entry) => entry.sources ?? [])) {
     const page = pages.get(source.url) ?? { url: source.url, title: source.title, quotes: [] }
     if (!page.quotes.includes(source.quote)) page.quotes.push(source.quote)
     pages.set(source.url, page)
@@ -85,7 +86,20 @@ export function FilamentProfilesStep({
                       </li>
                     )
                   })}
+                  {/* #2799: set in the matching slots' filament presets, by the native slicer only. */}
+                  {(profile.filament_settings ?? []).map((setting) => (
+                    <li key={setting.key}>
+                      {setting.label} (the spool's filament): → {setting.value}
+                      {setting.unit ? ` ${setting.unit}` : ''}
+                    </li>
+                  ))}
                 </ul>
+              )}
+              {!unapplicable && preview?.filament_applied === false && (profile.filament_settings ?? []).length > 0 && (
+                <p className="mt-0.5 ml-6 text-muted-foreground" data-testid={`${id}-filament-not-applied`}>
+                  {(profile.filament_settings ?? []).map((setting) => setting.label).join(' and ')} not applied:{' '}
+                  {preview.filament_reason}.
+                </p>
               )}
               {suggestion.unchecked && (
                 <p className="mt-0.5 ml-6 text-muted-foreground">
