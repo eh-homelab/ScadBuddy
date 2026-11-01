@@ -268,7 +268,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `QueueFullError`), `submit.py` (`RenderService`, what the routes type against as
   `RenderDep`: submit starts `render-<render_key>` with update-with-start; the
   workflow's first (local) activity inserts the row, identical requests join it as
-  claims, and a supersede sends the old execution `release`, #1053; with `reuse_finished`
+  claims, and a supersede sends the old execution `release`, #1053; a withdrawal
+  (`withdraw`, `POST /jobs/{id}/withdraw` with an `Idempotency-Key`, the agent's
+  `withdraw_render`, the Customize page's Cancel) sends it `release` with `cancelled`,
+  and the last claim withdrawn cancels the job, #4968; with `reuse_finished`
   (the render route, an order's quote) a `done` job of the key whose refs still hold its
   result answers at once, its `reused_at` keeping it from the prune,
   `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output

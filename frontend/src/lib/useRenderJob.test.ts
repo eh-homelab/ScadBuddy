@@ -76,6 +76,55 @@ describe('useRenderJob', () => {
     vi.restoreAllMocks()
   })
 
+  it('cancel withdraws the job it follows, and the render settles cancelled (#4968)', async () => {
+    let status: Job['status'] = 'running'
+    vi.spyOn(api, 'getJob').mockImplementation(async (id) => job(id, status))
+    const withdraw = vi.spyOn(api, 'withdrawJob').mockImplementation(async (id) => {
+      status = 'cancelled'
+      return job(id, 'cancelled')
+    })
+    const { result } = mount({ slug: 'demo', params: { w: 1 } })
+    await settle()
+    expect(result.current.rendering).toBe(true)
+    await act(async () => {
+      await result.current.cancel()
+    })
+    await settle()
+    expect(withdraw).toHaveBeenCalledWith(JOB_A)
+    expect(result.current.job?.status).toBe('cancelled')
+    expect(result.current.rendering).toBe(false)
+    // Settled: nothing left to withdraw.
+    await act(async () => {
+      await result.current.cancel()
+    })
+    expect(withdraw).toHaveBeenCalledTimes(1)
+  })
+
+  it('drops every hold on a withdrawn job another caller still renders (review of #5119)', async () => {
+    vi.spyOn(api, 'getJob').mockImplementation(async (id) => job(id, 'running'))
+    // Another claimant keeps it running: the withdrawal took only this page's claim.
+    const withdraw = vi.spyOn(api, 'withdrawJob').mockImplementation(async (id) => job(id, 'running'))
+    const { result, rerender } = mount({ slug: 'demo', params: { w: 1 } })
+    await settle()
+    let withdrawn: string | undefined
+    await act(async () => {
+      withdrawn = await result.current.cancel()
+    })
+    await settle()
+    expect(withdrawn).toBe(JOB_A)
+    // Not followed any more: no Cancel to press, and a second one sends nothing.
+    expect(result.current.rendering).toBe(false)
+    await act(async () => {
+      await result.current.cancel()
+    })
+    expect(withdraw).toHaveBeenCalledTimes(1)
+    // The next render supersedes nothing: the withdrawn job's claims are others'.
+    rerender({ slug: 'demo', params: { w: 2 } })
+    await settle()
+    expect(submit).toHaveBeenCalledTimes(2)
+    expect(submit.mock.calls[1]?.[3]).toBeUndefined()
+  })
+
   it('submits inputs: the params plus the UI state', async () => {
     const params = { name: 'Hi' }
     const extra = { tab: 'lid' }

@@ -396,6 +396,11 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       ...output(field(result, 'output'), slug),
     ]
   },
+  // #4968: the caller's claim is gone whether or not the job was cancelled by it.
+  withdraw_render: (input) => {
+    const job = str(input.job_id)
+    return job ? [{ type: 'render_job', id: job, action: 'modified', model: null }] : []
+  },
   save_output: (input, result) => output(result, str(input.slug)),
   // #1864: nothing is recorded until the arrange is saved; a still-running one is not.
   arrange: (_input, result) => output(field(result, 'output'), str(field(result, 'slug'))),

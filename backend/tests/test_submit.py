@@ -45,6 +45,7 @@ from scadbuddy.core.tracing import use_traceparent
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.render import submit as submit_module
 from scadbuddy.render.job_models import (
+    CANCELLED_ERROR,
     SUPERSEDED_ERROR,
     Job,
     JobNotFoundError,
@@ -400,6 +401,88 @@ async def test_a_resent_supersede_releases_the_old_job_once(
 
     assert again.id == first.id
     assert kept.state in ("pending", "running") and kept.claims == 1
+
+
+async def test_withdrawing_the_last_claim_cancels_the_render(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    patient_release: None,
+) -> None:
+    """#4968: a withdrawal sends `release` with `cancelled`; with no claim left the
+    job is cancelled and its execution ends."""
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        gate = asyncio.Event()
+        async with _worker(client, queue, ProjectingActivities(deps, block_main=gate)):
+            job = await service.submit(SLUG, {"width": _w()})
+            # At once: the release may meet a workflow task that fails as an event lands
+            # (`UnhandledCommand`), which Temporal answers `WorkflowNotReady`.
+            withdrawn = await service.withdraw(job.id, request_id=uuid.uuid4().hex)
+            assert job.workflow_id is not None
+            handle = client.get_workflow_handle(job.workflow_id, run_id=job.workflow_run_id)
+            await asyncio.wait_for(handle.result(), timeout=30)
+            closed = (await handle.describe()).status
+            gate.set()
+        await service.aclose()
+
+    assert (withdrawn.state, withdrawn.error, withdrawn.claims) == (
+        "cancelled",
+        CANCELLED_ERROR,
+        0,
+    )
+    stored = await asyncio.to_thread(projection.read, job.id)
+    assert (stored.state, stored.error) == ("cancelled", CANCELLED_ERROR)
+    assert closed == WorkflowExecutionStatus.COMPLETED
+    sample = {"kind": "render", "outcome": "cancelled"}
+    assert _sample(service.metrics, "scadbuddy_render_jobs_finished_total", sample) == 1
+
+
+async def test_withdrawing_one_of_two_claims_keeps_the_render(
+    make_service: ServiceFactory,
+    deps: WorkerDeps,
+    projection: JobProjection,
+    patient_release: None,
+) -> None:
+    """Another caller still waits on the job: the withdrawal takes one claim, and a
+    re-send with the same key takes none more."""
+    width = _w()
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        gate = asyncio.Event()
+        async with _worker(client, queue, ProjectingActivities(deps, block_main=gate)):
+            job = await service.submit(SLUG, {"width": width})
+            assert (await service.submit(SLUG, {"width": width})).id == job.id
+            request = uuid.uuid4().hex
+            kept = await service.withdraw(job.id, request_id=request)
+            again = await service.withdraw(job.id, request_id=request)
+            gate.set()
+            done = await _settled(projection, job.id)
+        await service.aclose()
+
+    assert kept.state in ("pending", "running") and kept.claims == 1
+    assert again.claims == 1
+    assert done.state == "done", done.error
+
+
+async def test_withdrawing_a_settled_job_answers_it_unchanged(
+    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
+) -> None:
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        service = make_service(client, queue)
+        async with _worker(client, queue, ProjectingActivities(deps)):
+            job = await service.submit(SLUG, {"width": _w()})
+            done = await _settled(projection, job.id)
+            assert job.workflow_id is not None
+            handle = client.get_workflow_handle(job.workflow_id, run_id=job.workflow_run_id)
+            await asyncio.wait_for(handle.result(), timeout=30)
+            answer = await service.withdraw(job.id, request_id=uuid.uuid4().hex)
+        await service.aclose()
+
+    assert done.state == answer.state == "done"
 
 
 async def test_a_release_blocked_in_the_workflow_does_not_hold_the_submit(

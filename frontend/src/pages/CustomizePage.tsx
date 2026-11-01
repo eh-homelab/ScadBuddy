@@ -395,10 +395,31 @@ export function CustomizePage() {
     error: renderError,
     busy: renderBusy,
     retry: retryRender,
+    cancel: cancelRender,
     settledFor,
     jobFor,
     stage: renderStage,
   } = useRenderJob(slug, renderable ? debounced : undefined, version, extra)
+  // #4968 — "Cancel" on a render in flight withdraws the page's claim on it.
+  const [cancelling, setCancelling] = useState(false)
+  // Keyed by the job pressed for, so a refusal never shows against a later render.
+  const [cancelError, setCancelError] = useState<{ jobId: string | undefined; message: string } | undefined>(
+    undefined,
+  )
+  const [withdrawn, setWithdrawn] = useState<string | undefined>(undefined)
+  const cancelInFlight = useCallback(
+    (jobId: string | undefined) => {
+      setCancelling(true)
+      setCancelError(undefined)
+      cancelRender()
+        .then((id) => setWithdrawn((previous) => id ?? previous))
+        .catch((cause: unknown) =>
+          setCancelError({ jobId, message: cause instanceof Error ? cause.message : String(cause) }),
+        )
+        .finally(() => setCancelling(false))
+    },
+    [cancelRender],
+  )
   // Armed only while the values would render: retryRender does nothing without them.
   useRenderAutoRetry(renderError, rendering, retryRender, debounced, renderable)
   // One object per refusal, so a font field's install error answers this one only (#2215).
@@ -1004,6 +1025,10 @@ export function CustomizePage() {
         covered={full && flyout ? FLYOUT_WIDTH : undefined}
         rejected={Boolean(renderError)}
         blocked={invalid ?? undefined}
+        onCancel={() => cancelInFlight(job?.id)}
+        cancelling={cancelling}
+        cancelError={cancelError && cancelError.jobId === job?.id ? cancelError.message : undefined}
+        withdrawn={withdrawn}
       />
     </Suspense>
   )

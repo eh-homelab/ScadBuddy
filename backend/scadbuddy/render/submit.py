@@ -6,8 +6,9 @@ the workflow's first activity inserts the `render_jobs` row and its `accepted`
 Update answers it, so a row exists only once its execution does and nothing needs
 reconciling. An identical request that reaches the open execution joins it as one more
 claim (workflow state); one whose render has already finished is answered with that
-`done` job while its refs still hold its result (#4870), with no run. A supersede sends
-the job's execution its `release` Update, and the last one cancels it. The projection
+`done` job while its refs still hold its result (#4870), with no run. A supersede, or a
+withdrawal (`withdraw`, #4968), sends the job's execution its `release` Update, and the
+last one cancels it. The projection
 publishes every ``job.*`` event in its own transaction; nothing is announced here.
 """
 
@@ -48,6 +49,7 @@ from scadbuddy.core.tracing import (
 from scadbuddy.library.previews import source_key
 from scadbuddy.render.inputs import InputsError, arrange_key, inputs_key, legacy_inputs
 from scadbuddy.render.job_models import (
+    CANCELLED_ERROR,
     SUPERSEDED_ERROR,
     Job,
     JobNotFoundError,
@@ -85,6 +87,7 @@ from scadbuddy.workflows.commands import (
     follow_update,
     late_answer,
     start_command,
+    workflow_not_ready,
 )
 from scadbuddy.workflows.models import (
     CLOSING,
@@ -93,6 +96,7 @@ from scadbuddy.workflows.models import (
     MigrateRequest,
     MigrateResult,
     ReleaseAnswer,
+    ReleaseReason,
     RenderAnswer,
     RenderStart,
 )
@@ -128,6 +132,8 @@ CLOSING_WAIT = 5.0
 #: How long a release waits on its Update: `rpc_timeout` bounds each poll, not the
 #: Update, and the SDK polls again (review #1066 (8) 1).
 RELEASE_BOUND = RPC_TIMEOUT.total_seconds() + CONNECT_MARGIN_SECONDS
+#: How long a release refused by a run whose workflow task failed waits to send again.
+NOT_READY_RETRY = 0.2
 #: Every Temporal call a submit makes (both starts, the wait between them, the release)
 #: answers within this; past it one describe (`DESCRIBE_SECONDS`) says whether the
 #: request is still accepting or Temporal unavailable, and the two stay below Envoy's
@@ -556,30 +562,67 @@ class RenderService:
                 exc_info=True,
             )
 
-    async def _release(self, job: Job, request_id: str | None) -> Job | None:
-        """Take the superseding request's claim off ``job``: the cancelled job when it
-        was the last. With ``request_id`` the Update id is the request's, so a re-sent
-        request releases once (review #1066 finding 1)."""
+    async def withdraw(self, job_id: str, *, request_id: str) -> Job:
+        """Withdraw one caller's claim on ``job_id`` (#4968): its execution is sent
+        `release` with ``cancelled``, and the last claim withdrawn cancels the job,
+        whose run then ends. ``request_id`` is the Update's id, so a re-sent withdrawal
+        takes one claim, not two. Answers the job as it now stands; a settled one is
+        answered unchanged. `JobNotFoundError` for an unknown id."""
+        job = await asyncio.to_thread(self.store.read, job_id)
+        if job.state not in ("pending", "running"):
+            return job
+        cancelled = await self._release(job, request_id, "cancelled")
+        if cancelled is not None:
+            return cancelled
+        return await asyncio.to_thread(self.store.read, job_id)
+
+    async def _release(
+        self, job: Job, request_id: str | None, reason: ReleaseReason = "superseded"
+    ) -> Job | None:
+        """Take one claim off ``job`` (the superseding request's, or a withdrawn one):
+        the cancelled job when it was the last. With ``request_id`` the Update id is the
+        request's, so a re-sent request releases once (review #1066 finding 1)."""
+        outcome: RenderOutcome = "superseded" if reason == "superseded" else "cancelled"
         if job.workflow_run_id is None:
             # A row an older release inserted, whose workflow is `render-<id>`.
             legacy = await asyncio.to_thread(
-                self.store.release_claim, job.id, slug=job.slug, error=SUPERSEDED_ERROR
+                self.store.release_claim,
+                job.id,
+                slug=job.slug,
+                error=SUPERSEDED_ERROR if reason == "superseded" else CANCELLED_ERROR,
             )
             if legacy is not None:
-                self._settled(legacy, "superseded")
+                self._settled(legacy, outcome)
                 await self._cancel_workflow(legacy)
             return legacy
         assert job.workflow_id is not None
         handle = self.client.get_workflow_handle(job.workflow_id, run_id=job.workflow_run_id)
         try:
             async with asyncio.timeout(RELEASE_BOUND):
-                answer: ReleaseAnswer = await handle.execute_update(
-                    RELEASE_UPDATE,
-                    "superseded",
-                    id=f"{request_id}:release:{job.id}" if request_id is not None else None,
-                    result_type=ReleaseAnswer,
-                    rpc_timeout=RPC_TIMEOUT,
-                )
+                while True:
+                    try:
+                        answer: ReleaseAnswer = await handle.execute_update(
+                            RELEASE_UPDATE,
+                            reason,
+                            id=f"{request_id}:release:{job.id}" if request_id is not None else None,
+                            result_type=ReleaseAnswer,
+                            rpc_timeout=RPC_TIMEOUT,
+                        )
+                        break
+                    except RPCError as error:
+                        # Refused, not admitted, while a workflow task of the run failed
+                        # (an `UnhandledCommand` when an event lands mid-task, #4968): the
+                        # next task recovers, so the same Update is sent again.
+                        if not workflow_not_ready(error):
+                            raise
+                        # Counted and logged: a task that fails for good (nondeterminism)
+                        # holds every release for the whole `RELEASE_BOUND`.
+                        self.metrics.store_errors.labels("release_not_ready").inc()
+                        logger.info(
+                            "a render's release met a failed workflow task; sending it again",
+                            extra={"job_id": job.id},
+                        )
+                        await asyncio.sleep(NOT_READY_RETRY)
         except RPCError as error:
             if execution_gone(error):
                 return None  # it has closed: settled, nothing to release
@@ -591,7 +634,7 @@ class RenderService:
             self.metrics.store_errors.labels("cancel_workflow").inc()
             raise CommandStillAcceptingError(job.workflow_id) from error
         if answer.cancelled is not None:
-            self._settled(answer.cancelled, "superseded")
+            self._settled(answer.cancelled, outcome)
         return answer.cancelled
 
     async def settle(self) -> None:
