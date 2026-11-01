@@ -309,10 +309,12 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session arc
       const handed = await call(you, 'sessions_handoff', { session_id: id, to: 'token:0e5a3c1e-1111-4222-8333-944455556666' })
       expect(handed.isError).toBe(true)
       expect(text(handed)).toMatch(/archived/)
+      // A transcript to fork, which this scripted session's turn may not have written yet.
+      await m.store.append({ projectKey: 'p', sessionId: id }, [{ type: 'user', uuid: 'u1', message: {} }])
       const forked = await call(you, 'sessions_fork', { session_id: id })
-      // Past any archive check: whether it then forks (a copy-on-write fork needs only a transcript to
-      // read, plan Step 6.5) or finds none in this scripted session, it is never refused as archived.
-      expect(text(forked)).not.toMatch(/is archived/)
+      // Past any archive check: the fork reads the archived parent's transcript through the cut (plan Step 6.5).
+      expect(forked.isError).toBeFalsy()
+      expect(text(forked)).toContain(`"parent_id": "${id}"`)
     })
   })
 })

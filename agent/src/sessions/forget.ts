@@ -91,6 +91,8 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
     if (subject.startsWith('flow-')) await tx`DELETE FROM ai_flow_blobs WHERE subject = ${subject}`
     return tx`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
   })
+  // Again: copyForkRanges read the key to open the transcript, which cached it in this process.
+  deps.keys?.forget(subject)
   let workflow: Forgotten['workflow'] = 'not_reached'
   if (deps.client) {
     const client = deps.client

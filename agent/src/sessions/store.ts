@@ -296,22 +296,41 @@ function firstRows(segments: Segment[], n: number): Segment[] {
 /**
  * The rows of `sessionId`'s main transcript, in the order it loads: its inherited rows (a
  * forgotten parent's range, copied in), then its parent's transcript through the cut, then
- * its own. `sql` is one snapshot, so a copy committed meanwhile is read either as the link or
- * as the rows, never both.
+ * its own; for a fork of a fork, the parent's is built the same way from its own parent. Two
+ * statements however long the chain: its links, then every row of the sessions on it. `sql` is
+ * one snapshot, so a copy committed meanwhile is read either as the link or as the rows, never
+ * both. Only the rows a load takes are opened (`openSegments`).
  */
 async function segmentsOf(sql: TransactionSql, sessionId: string): Promise<Segment[]> {
-  const [link] = isUuid(sessionId)
-    ? await sql<{ parent: string | null; cut: number | null }[]>`
-        SELECT fork_parent_id::text AS parent, fork_cut AS cut FROM ai_sessions WHERE id = ${sessionId}::uuid`
+  // From the session up to the first ancestor that is no fork. Links are only ever made to an
+  // existing session at an insert and only ever cleared, so the chain has no cycle.
+  const chain: { id: string; cut: number | null }[] = isUuid(sessionId)
+    ? await sql<{ id: string; cut: number | null }[]>`
+        WITH RECURSIVE chain (id, parent, cut, depth) AS (
+          SELECT id, fork_parent_id, fork_cut, 0 FROM ai_sessions WHERE id = ${sessionId}::uuid
+          UNION ALL
+          SELECT s.id, s.fork_parent_id, s.fork_cut, c.depth + 1 FROM ai_sessions s JOIN chain c ON s.id = c.parent
+        )
+        SELECT id::text AS id, cut FROM chain ORDER BY depth`
     : []
-  const rows = await sql<(EntryRow & { inherited: boolean })[]>`
-    SELECT id::text AS id, uuid, entry, sealed, inherited FROM ai_session_entries
-    WHERE session_id = ${sessionId} AND subpath = ''
-    ORDER BY inherited DESC, ai_session_entries.id`
-  const inherited = rows.filter((row) => row.inherited)
-  const own = rows.filter((row) => !row.inherited)
-  const through = link?.parent ? firstRows(await segmentsOf(sql, link.parent), link.cut ?? 0) : []
-  return [{ owner: sessionId, rows: inherited }, ...through, { owner: sessionId, rows: own }].filter((s) => s.rows.length > 0)
+  if (chain.length === 0) chain.push({ id: sessionId, cut: null })
+  const rows = await sql<(EntryRow & { session_id: string; inherited: boolean })[]>`
+    SELECT session_id, id::text AS id, uuid, entry, sealed, inherited FROM ai_session_entries
+    WHERE session_id IN ${sql(chain.map((link) => link.id))} AND subpath = ''
+    ORDER BY session_id, inherited DESC, ai_session_entries.id`
+  // Built from the far end: each fork takes the first `cut` of the transcript before it.
+  let through: Segment[] = []
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const owner = chain[i]!.id
+    const mine = rows.filter((row) => row.session_id === owner)
+    const cut = chain[i]!.cut
+    through = [
+      { owner, rows: mine.filter((row) => row.inherited) },
+      ...(cut === null ? [] : firstRows(through, cut)),
+      { owner, rows: mine.filter((row) => !row.inherited) },
+    ].filter((s) => s.rows.length > 0)
+  }
+  return through
 }
 
 async function openSegments(keyOf: KeyOf, segments: Segment[]): Promise<SessionStoreEntry[]> {
@@ -402,9 +421,16 @@ export async function copyForkRanges(tx: TransactionSql, keys: PayloadKeys | und
               inherited: true,
             }
           })
-          await tx`
+          // A uuid the fork already holds as its own row stays there, after the inherited rows, not
+          // among them: Claude Code's first turn on a fork writes none of the parent's again
+          // (test/forkCow.pg.test.ts), so a skipped row is said, not expected.
+          const written = await tx`
             INSERT INTO ai_session_entries ${tx(rows, 'id', 'project_key', 'session_id', 'subpath', 'uuid', 'entry_type', 'sealed', 'inherited')}
-            ON CONFLICT (session_id, subpath, uuid) WHERE uuid IS NOT NULL DO NOTHING`
+            ON CONFLICT (session_id, subpath, uuid) WHERE uuid IS NOT NULL DO NOTHING
+            RETURNING id`
+          if (written.length < rows.length) {
+            console.error(`session transcripts: fork ${child.id} already held ${rows.length - written.length} of the entries copied from ${parentId}; its own rows of them were kept`)
+          }
         }
       }
       await tx`UPDATE ai_sessions SET fork_parent_id = NULL, fork_cut = NULL WHERE id = ${child.id}::uuid`
