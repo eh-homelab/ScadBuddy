@@ -25,7 +25,7 @@ import { type ClaimedSession, runningDurableTurn, TAB_WAIT_S, type TurnOutcome, 
 import { scrubForLog } from './sdkEvents.js'
 import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
-import type { Placement, SessionDirectory } from '../workspace/directory.js'
+import { type Placement, type SessionDirectory, watchCaps } from '../workspace/directory.js'
 
 // An AgentSession's turn on this replica (unified runtime spec 2026-10-13 §5.2, §5.5): what
 // the `session_turn` activity runs (temporal/session/turnActivity.ts). The turn is a classic
@@ -127,16 +127,8 @@ export const NOT_ASKED = 'The question was not asked: the session is no longer t
 export const INPUT_POLL_MS = 1_000
 /** The gate's question tool (gate/entry.ts ASK_USER): AskUserQuestion and the subagents' ask_user park as it. */
 const GATE_ASK = 'ask_user'
-/** How often a running turn checks its working directory against the workspace cap. */
-export const DIR_CHECK_MS = 15_000
-/** Every this many checks (each minute), a running turn also writes its directory back. */
+/** Every this many cap checks (each minute, directory.ts DIR_CHECK_MS), a running turn also writes its directory back. */
 const DIR_SYNC_EVERY = 4
-/**
- * How long one check's walk may take before the directory counts as past the cap and the turn is
- * stopped (fail closed): a walk stops at the entry cap (20,000 lstat calls by default), well under a second on the
- * worker's emptyDir, so one this slow is a hung disk or a tree built to stall it.
- */
-export const DIR_WALK_TIMEOUT_MS = 10_000
 /** How many skipped files' reasons one log line names; a flood of them is counted, not listed. */
 const LOGGED_REASONS = 5
 
@@ -201,9 +193,9 @@ export type TurnHostDeps = {
    * the process's own, unsynced.
    */
   directory?: Pick<SessionDirectory, 'place' | 'writeBack' | 'done' | 'usage'>
-  /** Tests only: how often a running turn checks its directory against the workspace cap (DIR_CHECK_MS). */
+  /** Tests only: how often a running turn checks its directory against the workspace cap (directory.ts DIR_CHECK_MS). */
   dirCheckMs?: number
-  /** Tests only: how long one check's walk may take (DIR_WALK_TIMEOUT_MS). */
+  /** Tests only: how long one check's walk may take (directory.ts DIR_WALK_TIMEOUT_MS). */
   dirWalkTimeoutMs?: number
 }
 
@@ -565,79 +557,41 @@ export class TurnHost {
     fence.unref()
     let outcome: TurnOutcome = { kind: 'failed', message: 'the turn could not finish' }
     let result: SDKResultMessage | undefined
-    let capCheck: ReturnType<typeof setInterval> | undefined
+    let stopCaps: (() => void) | undefined
     try {
       placed = await this.#place(id)
       // A directory past the workspace cap stops the turn: what it holds then is written back
       // up to the cap, and the rest removed (directory.ts), so this disk stays bounded.
       if (placed) {
-        const checking = { placed, measuring: false, syncing: false }
-        let checks = 0
-        const walkTimeoutMs = this.#deps.dirWalkTimeoutMs ?? DIR_WALK_TIMEOUT_MS
+        let syncing = false
         const stop = (why: string, message: string) => {
           if (controller.signal.aborted) return
           console.warn(`session directory cap: session ${id}'s working directory ${why}; the turn is stopped`)
           controller.abort(new Error(message))
         }
-        // Every DIR_CHECK_MS, never fewer: what a process can write between two checks is the
-        // overrun past the cap the worker's emptyDir must leave room for (clusters' sizeLimit).
-        // The walk is lstat-only and stops counting once past the cap (`usage`), so it stays cheap.
-        capCheck = setInterval(() => {
-          // One walk at a time: a walk still running when the next tick comes is not walked again
-          // over it, and one that outlives DIR_WALK_TIMEOUT_MS stops the turn, so a hung walk never
-          // ends enforcement. The timer's write-back has a flag of its own and never holds the walk's.
-          if (checking.measuring) return
-          checks += 1
-          const syncing = checks % DIR_SYNC_EVERY === 0
-          checking.measuring = true
-          let timeout: ReturnType<typeof setTimeout> | undefined
-          const timedOut = new Promise<'timeout'>((resolve) => {
-            timeout = setTimeout(() => resolve('timeout'), walkTimeoutMs)
-            timeout.unref()
-          })
-          void Promise.race([this.#deps.directory!.usage(checking.placed), timedOut]).then(
-            (usage) => {
-              if (usage === 'timeout') {
-                stop(
-                  `could not be measured within ${walkTimeoutMs} ms`,
-                  `the session's working directory could not be measured within ${walkTimeoutMs} ms, so it counts as past the workspace cap`,
-                )
-                return
-              }
-              const { bytes, cap, maxEntries, overEntries } = usage
-              if (bytes <= cap && !overEntries) {
-                // A long turn with no park still writes back now and then: a lost pod then loses less.
-                if (syncing && !checking.syncing) {
-                  checking.syncing = true
-                  void sync(false).then(
-                    () => {},
-                    () => {},
-                  ).finally(() => {
-                    checking.syncing = false
-                  })
-                }
-                return
-              }
-              if (overEntries) {
-                stop(`holds too many entries (past ${maxEntries})`, `the session's working directory holds too many entries (past ${maxEntries})`)
-              } else {
-                stop(`holds ${bytes} bytes, past the workspace's ${cap}`, `the session's working directory grew past the workspace cap (${cap} bytes)`)
-              }
-            },
-            () => {},
-          ).finally(() => {
-            clearTimeout(timeout)
-            // A timed-out walk keeps the flag: the turn is stopping, and no tick walks over the hung one.
-            if (!controller.signal.aborted) checking.measuring = false
-          })
-        }, this.#deps.dirCheckMs ?? DIR_CHECK_MS)
-        capCheck.unref()
+        stopCaps = watchCaps(this.#deps.directory!, placed, {
+          ...(this.#deps.dirCheckMs === undefined ? {} : { checkMs: this.#deps.dirCheckMs }),
+          ...(this.#deps.dirWalkTimeoutMs === undefined ? {} : { walkTimeoutMs: this.#deps.dirWalkTimeoutMs }),
+          over: stop,
+          // A long turn with no park still writes back each minute: a lost pod then loses less. The
+          // write-back has a flag of its own and never holds the walks up.
+          under: (checks) => {
+            if (checks % DIR_SYNC_EVERY !== 0 || syncing) return
+            syncing = true
+            // sync logs its own failures (#writeBack).
+            void sync(false)
+              .catch(() => {})
+              .finally(() => {
+                syncing = false
+              })
+          },
+        })
       }
       let run: Awaited<ReturnType<CoreTurn['run']>>
       try {
         run = await core.run(prompt)
       } finally {
-        clearInterval(capCheck)
+        stopCaps?.()
         // Not once cut off: the placement that holds the turn now has the directory.
         await sync(true)
       }
@@ -689,7 +643,7 @@ export class TurnHost {
       throw err
     } finally {
       clearInterval(fence)
-      clearInterval(capCheck)
+      stopCaps?.()
       if (placed) this.#deps.directory?.done(placed, { cutOff: fenced() })
       control.cancelled.removeEventListener('abort', onCancel)
       core.end(outcome, result)

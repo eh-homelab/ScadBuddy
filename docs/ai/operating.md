@@ -1536,7 +1536,11 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     directories cost inodes and walk time but no bytes). The check runs every 15 s
     (`DIR_CHECK_MS`) and is never skipped. A tick is skipped only while the previous walk still
     runs. A walk that takes longer than 10 s (`DIR_WALK_TIMEOUT_MS`) counts as past the cap and
-    stops the turn (fail closed). The minute's write-back runs beside the walks and never holds
+    stops the turn (fail closed), as does a walk that fails. A Monitor command's directory is
+    checked the same way (`watchCaps`), between turns too: past a cap, the command is killed and
+    the monitor ends failed. A directory or file that a process made unreadable to its owner
+    (`chmod 000`) gets its owner's permissions back before it is walked, read or removed. The
+    minute's write-back runs beside the walks and never holds
     them up. A walk uses lstat only, and it stops counting once past either cap. So a turn can overrun its cap by at most its
     write rate times 15 s, and the emptyDir's `sizeLimit` must leave room for that. Each refusal logs a line starting
     `session directory cap:`. A session's directory is removed once its warm process on that

@@ -70,6 +70,95 @@ const CAPPED: ReadonlySet<WorkspaceErrorCode> = new Set(['too_large', 'quota'])
  */
 export const MAX_ENTRIES = MAX_SEGMENTS * WORKSPACE_MAX_FILES
 
+/** How often a running turn, or a Monitor command, checks its working directory against the workspace caps. */
+export const DIR_CHECK_MS = 15_000
+/**
+ * How long one check's walk may take before the directory counts as past the cap (fail closed):
+ * a walk stops at the entry cap (20,000 lstat calls by default), well under a second on the
+ * worker's emptyDir, so one this slow is a hung disk or a tree built to stall it.
+ */
+export const DIR_WALK_TIMEOUT_MS = 10_000
+
+/**
+ * Checks `placement`'s directory against the workspace caps every `checkMs` (DIR_CHECK_MS, never
+ * fewer: what a process can write between two checks is the overrun the worker's emptyDir must
+ * leave room for) until the returned stop. `over` is called once, when it is past a cap, when a
+ * walk outlives `walkTimeoutMs`, or when a walk fails (a tree made unreadable, say): each counts as
+ * past the cap, so nothing a process does there ends enforcement. One walk at a time: a tick while
+ * one runs is skipped. `under` gets the count of checks so far after each one under the caps.
+ */
+export function watchCaps(
+  directory: Pick<SessionDirectory, 'usage'>,
+  placement: Placement,
+  options: {
+    checkMs?: number
+    walkTimeoutMs?: number
+    over: (why: string, message: string) => void
+    under?: (checks: number) => void
+  },
+): () => void {
+  const walkTimeoutMs = options.walkTimeoutMs ?? DIR_WALK_TIMEOUT_MS
+  let measuring = false
+  let done = false
+  let checks = 0
+  const over = (why: string, message: string) => {
+    if (done) return
+    done = true
+    clearInterval(timer)
+    options.over(why, message)
+  }
+  const timer = setInterval(() => {
+    if (measuring || done) return
+    measuring = true
+    checks += 1
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    const timedOut = new Promise<'timeout'>((resolve) => {
+      timeout = setTimeout(() => resolve('timeout'), walkTimeoutMs)
+      timeout.unref()
+    })
+    void Promise.race([directory.usage(placement), timedOut])
+      .then(
+        (usage) => {
+          if (usage === 'timeout') {
+            over(
+              `could not be measured within ${walkTimeoutMs} ms`,
+              `the session's working directory could not be measured within ${walkTimeoutMs} ms, so it counts as past the workspace cap`,
+            )
+          } else if (usage.overEntries) {
+            over(`holds too many entries (past ${usage.maxEntries})`, `the session's working directory holds too many entries (past ${usage.maxEntries})`)
+          } else if (usage.bytes > usage.cap) {
+            over(`holds ${usage.bytes} bytes, past the workspace's ${usage.cap}`, `the session's working directory grew past the workspace cap (${usage.cap} bytes)`)
+          } else if (!done) options.under?.(checks)
+        },
+        (err: unknown) => {
+          const why = err instanceof Error ? err.message : String(err)
+          over(`could not be measured (${why})`, `the session's working directory could not be measured, so it counts as past the workspace cap`)
+        },
+      )
+      .finally(() => {
+        clearTimeout(timeout)
+        // Past a cap (a hung walk among them), nothing walks again.
+        if (!done) measuring = false
+      })
+  }, options.checkMs ?? DIR_CHECK_MS)
+  timer.unref()
+  return () => {
+    done = true
+    clearInterval(timer)
+  }
+}
+
+/**
+ * Gives a directory a process here made unreadable to its owner (`chmod 000`) back its owner's
+ * rwx before it is read: the uid is the agent's, so no walk, write-back or removal fails on it.
+ * A directory swapped for a link between the lstat and the chmod would have its target's mode
+ * widened for the owner only; the containment checks around every read and write still hold.
+ */
+async function ownDir(abs: string): Promise<void> {
+  const st = await lstat(abs).catch(() => undefined)
+  if (st?.isDirectory() && (st.mode & 0o700) !== 0o700) await chmod(abs, (st.mode & 0o7777) | 0o700)
+}
+
 /**
  * The paths a write-back could not offer to the record for now (`unavailable`, say): not past a
  * cap and not lost to a newer record (`conflict`). Their copy here is the only one, so it is kept.
@@ -112,13 +201,17 @@ export function sessionDirOf(root: string, sessionId: string): string {
 
 /** Removes a session's directory and all in it (forgetSubject, the sweep). */
 export async function removeSessionDir(root: string, sessionId: string): Promise<void> {
-  await rm(sessionDirOf(root, sessionId), { recursive: true, force: true })
+  const dir = sessionDirOf(root, sessionId)
+  // Every directory readable and writable again first, or `rm` fails under one made unreadable.
+  await measure(dir).catch(() => {})
+  await rm(dir, { recursive: true, force: true })
 }
 
 /** Every entry under `dir`, never following a link: the regular files at workspace paths, and the rest. */
 async function walk(dir: string): Promise<Walked> {
   const out: Walked = { files: new Map(), strays: [], bytes: 0 }
   const visit = async (abs: string, rel: string[]): Promise<void> => {
+    await ownDir(abs)
     let entries
     try {
       entries = await readdir(abs, { withFileTypes: true })
@@ -152,6 +245,7 @@ async function measure(dir: string, limit = Infinity, maxEntries = Infinity): Pr
   const over = () => total > limit || count > maxEntries
   const visit = async (abs: string): Promise<void> => {
     if (over()) return
+    await ownDir(abs)
     let entries
     try {
       entries = await readdir(abs, { withFileTypes: true })
@@ -188,9 +282,18 @@ async function within(inside: string, at: string): Promise<boolean> {
  */
 async function readRegular(inside: string, abs: string, max: number): Promise<{ bytes: Buffer } | { size: number } | undefined> {
   if (!(await within(inside, path.dirname(abs)).catch(() => false))) return undefined
+  const openIt = () => open(abs, constants.O_RDONLY | constants.O_NOFOLLOW)
   let handle
   try {
-    handle = await open(abs, constants.O_RDONLY | constants.O_NOFOLLOW)
+    handle = await openIt().catch(async (err: unknown) => {
+      // A file a process here made unreadable to its owner (`chmod 000`): the uid is the agent's,
+      // so it is given back its owner's read and opened again (never through a link: O_NOFOLLOW).
+      if ((err as NodeJS.ErrnoException).code !== 'EACCES') throw err
+      const st = await lstat(abs)
+      if (!st.isFile()) throw err
+      await chmod(abs, (st.mode & 0o7777) | 0o600)
+      return openIt()
+    })
   } catch (err) {
     if (missing(err) || (err as NodeJS.ErrnoException).code === 'ELOOP') return undefined
     throw err

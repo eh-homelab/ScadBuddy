@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, writeFileSync } from 'node:fs'
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
+import { MockActivityEnvironment } from '@temporalio/testing'
+import { BG_MONITOR_COMMAND, backgroundActivities } from '../src/background/activities.js'
 import { ensureSessionDir } from '../src/harness/stateDirs.js'
 import { SessionBlobs } from '../src/sessions/blobs.js'
 import { forgetSubject } from '../src/sessions/forget.js'
@@ -506,6 +508,71 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     const sessionsDir = await root()
     const dir = await ensureSessionDir({ stateDir: await root(), sessionsDir }, randomUUID())
     expect((await stat(dir)).mode & 0o777).toBe(0o700)
+  })
+
+  it('a tree a process made unreadable is measured, written back and removed all the same', async () => {
+    const id = await session()
+    const capped = new SessionFiles(db.sql, { limits: { fileMaxBytes: 4096, workspaceMaxBytes: 1536 } })
+    const dirs = new SessionDirectory(capped, await root())
+    const turn = await dirs.place(id)
+    await mkdir(path.join(turn.dir, 'd'))
+    await writeFile(path.join(turn.dir, 'd', 'big'), Buffer.alloc(4000, 'b'))
+    await writeFile(path.join(turn.dir, 'kept.txt'), 'kept')
+    await chmod(path.join(turn.dir, 'kept.txt'), 0o000)
+    await chmod(path.join(turn.dir, 'd'), 0o000)
+    expect((await dirs.usage(turn)).bytes).toBeGreaterThan(1536)
+    const back = await dirs.writeBack(turn)
+    expect(back.written).toEqual(['kept.txt'])
+    dirs.done(turn)
+    await dirs.remove(id)
+    expect(existsSync(turn.dir)).toBe(false)
+  })
+
+  it('a walk that fails stops the turn as one past the cap does (fail closed)', async () => {
+    const dir = await root()
+    const { result, warned } = await cappedTurn(
+      {
+        place: async (sessionId: string) => ({ sessionId, dir, base: new Map<string, string>() }),
+        writeBack: noWriteBack,
+        usage: () => Promise.reject(Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' })),
+        done: () => {},
+      },
+      { dirCheckMs: 20, stopAfterMs: 2_000 },
+    )
+    expect(JSON.stringify(result)).toContain('could not be measured')
+    expect(warned.some((w) => w.startsWith('session directory cap:'))).toBe(true)
+  })
+
+  it('a monitor command that fills the directory between turns is killed and ends failed', async () => {
+    const id = await session()
+    const sessionsDir = await root()
+    const capped = new SessionFiles(db.sql, { limits: { workspaceMaxBytes: 100_000 } })
+    const directory = new SessionDirectory(capped, sessionsDir)
+    const task = {
+      id: randomUUID(),
+      sessionId: id,
+      kind: 'monitor',
+      description: 'fills the disk',
+      spec: { command: 'i=0; while true; do i=$((i+1)); head -c 50000 /dev/zero > "f-$i"; sleep 0.02; done', timeoutMs: 20_000, queue: 'q' },
+      state: 'active',
+    }
+    const store = { get: async () => task, appendEvent: async () => true }
+    const acts = backgroundActivities({
+      store: store as never,
+      tz: 'UTC',
+      send: async () => ({ result: 'sent' }),
+      paths: { stateDir: await root(), sessionsDir },
+      directory,
+      dirCheckMs: 20,
+    })
+    const warn = console.warn
+    console.warn = () => {}
+    try {
+      const out = (await new MockActivityEnvironment().run(acts[BG_MONITOR_COMMAND], { taskId: task.id })) as { end: unknown }
+      expect(out.end).toMatchObject({ outcome: 'failed', reason: expect.stringContaining('workspace cap') })
+    } finally {
+      console.warn = warn
+    }
   })
 
   it('a file skipped at every write-back of a placement is logged once', async () => {
