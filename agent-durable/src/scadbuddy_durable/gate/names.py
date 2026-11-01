@@ -1,4 +1,4 @@
-"""DurableSession's gate handlers, as the agent service sends them (agent/src/gate/names.ts)."""
+"""A session workflow's gate handlers, as the agent service sends them (agent/src/gate/names.ts)."""
 
 from __future__ import annotations
 

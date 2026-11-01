@@ -1,6 +1,6 @@
 """A parked durable call as the gate keeps it (spec 2026-10-01 §6.6, "Reads").
 
-``build_entry`` is what DurableSession runs when the plugin's ``pending_approvals()``
+``build_entry`` is what the retired Python turn ran when the plugin's ``pending_approvals()``
 gains a call: the workflow state the validator reads, and what ``open_input`` writes.
 An ``approval`` carries its summary and input hash, never its input, and no prompt.
 An ``answer`` carries its prompt (the question, or the attention message) on purpose,

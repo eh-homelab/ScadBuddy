@@ -8,8 +8,6 @@ from typing import Any
 
 import psycopg
 import pytest
-import pytest_asyncio
-from temporalio.testing import WorkflowEnvironment
 
 from scadbuddy_durable.worker import connector
 
@@ -56,17 +54,3 @@ async def connect(agent_db: Conn) -> Callable[[], AbstractAsyncContextManager[Co
     row = await cur.fetchone()
     assert row is not None
     return connector(os.environ["SCADBUDDY_TEST_DATABASE_URL"], row[0])
-
-
-@pytest_asyncio.fixture(scope="session", loop_scope="session")
-async def temporal_env() -> AsyncIterator[WorkflowEnvironment]:
-    """A Temporal dev server for the session (``requires_temporal``), from the CLI the
-    agent's tests use (SCADBUDDY_TEST_TEMPORAL_DEV_SERVER)."""
-    path = os.environ.get("SCADBUDDY_TEST_TEMPORAL_DEV_SERVER")
-    if not path:
-        pytest.skip("SCADBUDDY_TEST_TEMPORAL_DEV_SERVER is not set")
-    env = await WorkflowEnvironment.start_local(dev_server_existing_path=path)
-    try:
-        yield env
-    finally:
-        await env.shutdown()

@@ -1,4 +1,4 @@
-"""The tool-call gate (spec 2026-10-01 §6.6): what DurableSession's handlers use.
+"""The tool-call gate (spec 2026-10-01 §6.6): the Python port of the agent's gate.
 
 Ports the agent's ``src/gate/`` (ids, the validator, the handler names); the shared
 vectors in ``agent/test/fixtures/pending-input-vectors.json`` pin the two together.

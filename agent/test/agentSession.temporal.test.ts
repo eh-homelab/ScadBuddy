@@ -47,9 +47,7 @@ import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './suppo
 // sent, or is the real activity where a test reads the event log.
 
 const WORKFLOWS = fileURLToPath(new URL('../src/temporal/workflows.ts', import.meta.url))
-const STANDIN_WORKFLOWS = fileURLToPath(new URL('./support/durableSessionWorkflows.ts', import.meta.url))
 const FIXTURES = new URL('./fixtures/agent_session_histories/', import.meta.url)
-const STANDIN_QUEUE = 'durable-standin'
 /** The one replica's session host queue (spec §5.2), which `acquire_worker` hands out. */
 const HOST = sessionHostQueue('agent-session-test')
 const PG_SKIP = TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`
@@ -144,7 +142,6 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
         },
         {},
       ),
-      await make(STANDIN_QUEUE, {}, { workflowsPath: STANDIN_WORKFLOWS }),
     ]
     running = workers.map((w) => w.run())
   }, 180_000)
@@ -753,7 +750,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
         settings: { get: <T>() => Promise.resolve(undefined as T) },
         run: scriptedRunner(() => ({ throws: 'a durable turn ran in the classic harness' })).runner,
       })
-      m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, store: m.store, taskQueue: STANDIN_QUEUE, sessionQueue: SESSION_QUEUE, liveHosts: polledHosts(env.client, HOST) })
+      m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, sessionQueue: SESSION_QUEUE, liveHosts: polledHosts(env.client, HOST) })
       return m
     }
 
@@ -782,26 +779,59 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket\n\n[page: /]', 'and a lid'])
     })
 
-    it('moves a session recorded as DurableSession to AgentSession at its next send (plan Step 7.2)', async () => {
+    it('refuses `closed` a send to a session still recorded as DurableSession, and starts no workflow (plan Step 8.1)', async () => {
       const m = await durableManager()
       finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
-      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
-      // As a session an earlier release recorded as DurableSession, whose workflow never started.
-      await db.sql`UPDATE ai_sessions SET runtime = 'durable' WHERE id = ${session.id}`
-      const turn = await m.send(session.id, browser, 'one')
-      expect(await turn.done).toMatchObject({ kind: 'result' })
-      expect(await describe_(session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
-      expect(await runtimeOf(session.id)).toBe('unified')
-      expect(turns.map((t) => t.message?.text)).toEqual(['one'])
-      // One whose DurableSession ran turns and is gone lost its conversation: refused, never started empty.
-      const { session: gone } = await m.start(browser, { origin: 'chat', title: 'g' })
-      await db.sql`UPDATE ai_sessions SET runtime = 'durable', durable_offset = 3 WHERE id = ${gone.id}`
-      await expect(m.send(gone.id, browser, 'two')).rejects.toMatchObject({ code: 'closed' })
-      await expect(handleOf(gone.id).describe()).rejects.toBeInstanceOf(WorkflowNotFoundError)
-      expect(await runtimeOf(gone.id)).toBe('durable')
+      // As the DurableSessions that closed before plan Step 7.2's migration: whether or not one ran a turn.
+      for (const offset of [0, 3]) {
+        const { session } = await m.start(browser, { origin: 'chat', title: `t${offset}` })
+        await db.sql`UPDATE ai_sessions SET runtime = 'durable', durable_offset = ${offset} WHERE id = ${session.id}`
+        await expect(m.send(session.id, browser, 'one')).rejects.toMatchObject({ code: 'closed', message: expect.stringMatching(/fork it, or continue in a new chat/) })
+        await expect(handleOf(session.id).describe()).rejects.toBeInstanceOf(WorkflowNotFoundError)
+        const [row] = await db.sql<{ runtime: string; status: string; durable_turn_id: string | null }[]>`
+          SELECT runtime, status, durable_turn_id FROM ai_sessions WHERE id = ${session.id}`
+        expect(row).toEqual({ runtime: 'durable', status: 'idle', durable_turn_id: null })
+        // No `user.turn` was written for it; the give-back's status is the last event.
+        const log = (await m.events.read(session.id)).map((e) => e.event)
+        expect(log.filter((e) => e.type === 'user.turn')).toEqual([])
+        expect(log.at(-1)).toMatchObject({ type: 'session.status', status: 'idle' })
+      }
+      expect(turns).toEqual([])
     })
 
-    it("reads an AgentSession's turn as active while it runs, and a DurableSession's as before (PR 5042's review)", async () => {
+    it('forks a session still recorded as DurableSession, with no transcript, into an AgentSession that runs with no model context (plan Step 8.1)', async () => {
+      const m = await durableManager()
+      finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
+      const { session: parent } = await m.start(browser, { origin: 'chat', title: 'old' })
+      await db.sql`UPDATE ai_sessions SET runtime = 'durable', durable_offset = 4 WHERE id = ${parent.id}`
+      // Its panel's turns, as the DurableSession's events left them.
+      await m.events.append(parent.id, [
+        { v: 1, type: 'user.turn', sessionId: parent.id, turnId: 't1', text: 'make a box', author: browser },
+        { v: 1, type: 'assistant.text.delta', sessionId: parent.id, messageId: 'durable-2', delta: 'a box' },
+        { v: 1, type: 'assistant.text.done', sessionId: parent.id, messageId: 'durable-2' },
+        { v: 1, type: 'user.turn', sessionId: parent.id, turnId: 't2', text: 'taller', author: browser },
+        { v: 1, type: 'assistant.text.delta', sessionId: parent.id, messageId: 'durable-4', delta: 'taller box' },
+        { v: 1, type: 'assistant.text.done', sessionId: parent.id, messageId: 'durable-4' },
+      ])
+      expect(await m.store.load({ projectKey: '', sessionId: parent.id })).toBeNull()
+
+      const child = await m.fork(parent.id, browser, { upTo: 'durable-2' })
+      const [row] = await db.sql<{ runtime: string; fork_parent_id: string | null; parent_id: string | null }[]>`
+        SELECT runtime, fork_parent_id, parent_id FROM ai_sessions WHERE id = ${child.id}`
+      // An AgentSession that reads nothing of its parent's (it has no transcript), linked as its fork.
+      expect(row).toEqual({ runtime: 'unified', fork_parent_id: null, parent_id: parent.id })
+      const texts = (await m.events.read(child.id)).flatMap(({ event: e }) => (e.type === 'user.turn' ? [e.text] : e.type === 'assistant.text.delta' ? [e.delta] : []))
+      expect(texts).toEqual(['make a box', 'a box'])
+      expect(await m.store.load({ projectKey: '', sessionId: child.id })).toBeNull()
+
+      // Its first turn runs on its own AgentSession.
+      const turn = await m.send(child.id, browser, 'and a lid')
+      expect(await turn.done).toMatchObject({ kind: 'result' })
+      expect(await describe_(child.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
+      expect(turns.map((t) => [t.sessionId, t.message?.text])).toEqual([[child.id, 'and a lid']])
+    })
+
+    it("reads an AgentSession's turn as active while it runs (PR 5042's review)", async () => {
       const m = await durableManager()
       finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
       const running = held()
@@ -817,26 +847,6 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       running.release()
       await turn!.done
       expect((await m.get(session.id, browser)).turnActive).toBe(false)
-    })
-
-    it('moves a session that existed before the runtime column, with offset 0 and a Python workflow, to AgentSession', async () => {
-      const m = await durableManager()
-      finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
-      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
-      // As a row from before the column: no runtime, nothing output yet, its workflow running.
-      await db.sql`UPDATE ai_sessions SET runtime = NULL, durable_offset = 0 WHERE id = ${session.id}`
-      await env.client.workflow.start('DurableSession', { workflowId: sessionWorkflowId(session.id), taskQueue: STANDIN_QUEUE, args: [{}] })
-      const migration = await readFile(new URL('../src/db/migrations/20261014T0837Z_session_runtime.sql', import.meta.url), 'utf8')
-      for (const statement of migration.replace(/^--.*$/gm, '').split(';').map((x) => x.trim()).filter((x) => x.startsWith('UPDATE'))) {
-        await db.sql.unsafe(statement)
-      }
-      expect(await runtimeOf(session.id)).toBe('durable')
-      const turn = await m.send(session.id, browser, 'hello')
-      expect(await turn.done).toMatchObject({ kind: 'result' })
-      // Its DurableSession, which committed nothing, was ended; the turn ran in its AgentSession.
-      expect(await describe_(session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
-      expect(await runtimeOf(session.id)).toBe('unified')
-      expect(turns.map((t) => t.message?.text)).toEqual(['hello'])
     })
 
     it('a call whose turn ended while it was described writes nothing: the session stays idle and takes the next send', async () => {

@@ -18,10 +18,8 @@ import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { SETTING_MODEL } from '../src/sessions/manager.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import type { SessionStatus } from '../src/sessions/protocol.js'
 import { readBambu3mf, readZip, writeZip } from '../evals/threemf.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { foldEvents, type Logged } from './support/pythonDurableStack.js'
 
 // The two scorers #1924 adds to the evals (docs/ai/evals.md, "Citation
 // scoring" and "Real-render checks"), tested on their own, and the checks and
@@ -314,59 +312,6 @@ describe('the eval run: a gate that cannot be read (#2465)', () => {
 
     await pollPending({ pendingInput: () => Promise.resolve([]) }, 's', polled)
     expect(timedOut(polled)).toBe('eval timed out')
-  })
-})
-
-describe("a DurableSession's turn errors (support/pythonDurableStack.ts, #2465)", () => {
-  const base = { v: 1, sessionId: 's' }
-  const result: Logged = { ...base, type: 'session.result', costUsd: 0.1, turns: 1 }
-  const failed: Logged = { ...base, type: 'error', code: 'turn_failed', message: 'boom' }
-  const status: Logged = { ...base, type: 'session.status', status: 'idle' }
-  const fold = (log: Logged[]) => foldEvents(log, new Map()).result?.subtype
-
-  it('scores a failed turn as failed whichever of its error and result is logged first', () => {
-    expect(fold([result, failed, status])).toBe('error: turn_failed: boom')
-    expect(fold([failed, result, status])).toBe('error: turn_failed: boom')
-  })
-
-  it("keeps one turn's error out of the next turn's result", () => {
-    // Only these fail without the reset: the error would carry into the next result.
-    expect(fold([failed, status, result, status])).toBe('success')
-    expect(fold([failed, result, status, result, status])).toBe('success')
-  })
-
-  it("keeps a turn's error across its own park, before its result", () => {
-    // Typed, so a status the stack never logs does not compile (review #2970).
-    const at = (s: SessionStatus): Logged => ({ ...base, type: 'session.status', status: s })
-    for (const park of ['waiting_approval', 'waiting_input'] as const) {
-      expect(fold([failed, at(park), at('running'), result, status])).toBe('error: turn_failed: boom')
-    }
-  })
-})
-
-describe("a DurableSession: a segment's own calls (agent-durable runner.py SegmentCalls)", () => {
-  const base = { v: 1, sessionId: 's' }
-  const call = (id: string, name: string, more: Record<string, unknown> = {}): Logged => ({
-    ...base,
-    type: 'tool.call',
-    id,
-    name,
-    input: {},
-    risk: 'read',
-    ...more,
-  })
-
-  it("counts the agent's own calls by the names a classic run uses, never a subagent's", () => {
-    const log = [
-      call('1', 'render_model'),
-      call('2', 'Skill'),
-      call('3', 'Agent'),
-      call('4', 'mcp__scadbuddy__get_model', { parent: '3' }),
-      call('5', 'mcp__scadbuddy__get_model'),
-      call('6', 'mcp__scadbuddy_images__view_images'),
-    ]
-    const names = foldEvents(log, new Map()).toolCalls.map((c) => c.name)
-    expect(names).toEqual(['mcp__durable__render_model', 'Skill', 'Agent', 'mcp__scadbuddy_images__view_images'])
   })
 })
 

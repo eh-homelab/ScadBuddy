@@ -101,7 +101,7 @@ import {
 } from './temporal/payloadCodec.js'
 import { DurableGate } from './gate/durable.js'
 import { SessionBlobs } from './sessions/blobs.js'
-import { DURABLE_TASK_QUEUE, DurableTurns } from './sessions/durable.js'
+import { DurableTurns } from './sessions/durable.js'
 import { DurableRunningSweep, durableDescriber } from './sessions/durableSweep.js'
 import { sweepOrphanedSessionKeys } from './sessions/forget.js'
 import { PendingInputSweep, temporalDescriber } from './gate/sweep.js'
@@ -728,8 +728,6 @@ const turnToolDeps = temporal
               builtins: {
                 files: workspace,
                 audit,
-                // A durable session's Monitor commands run in agent-durable, where its Bash does.
-                ...(backgroundTasks ? { background: { tasks: backgroundTasks, tz: agentTimezone(), commandQueue: DURABLE_TASK_QUEUE } } : {}),
                 nested: (context: { session: string; flow?: string }) =>
                   nestedQueries({
                     paths,
@@ -954,8 +952,6 @@ if (sessions && temporalClient && payloadKeys && database) {
     events: sessions.events,
     audit,
     ended: (id) => sessions.endClassicLeftovers(id),
-    // Where a DurableSession's conversation goes when its next send moves it to AgentSession (Step 7.2).
-    store: sessions.store,
     // A unified session is ready while some replica hosts its turns (§5.2), this one or a worker's (§14.3).
   })
 }

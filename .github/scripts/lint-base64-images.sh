@@ -28,7 +28,6 @@ agent/src/builtins/files.ts	image: \{ data: file.bytes.toString\(.base64.\)	the 
 agent/src/temporal/toolActivities.ts	source: \{ type: 'base64', media_type: block.mimeType	decodes an MCP result's image into a session blob (inbound); the result names it
 agent/src/temporal/payloadCodec.ts	const b64 = 	the Temporal payload codec: sealed ciphertext, not images
 agent-durable/src/scadbuddy_durable/codec.py	return base64.b64encode\(data\)	the Temporal payload codec: sealed ciphertext, not images
-agent-durable/src/scadbuddy_durable/session/runner.py	"data": base64.b64encode\(i.data\)	the model boundary: view_user_images/view_tool_images return MCP image content from blobs read by name
 backend/scadbuddy/workflows/payload_codec.py	return base64.b64encode\(data\)	the Temporal payload codec: sealed ciphertext, not images
 backend/scadbuddy/flows/operations.py	return base64.b64encode\(seal_bytes	a sealed answer, not an image
 backend/scadbuddy/library/settings_store.py	"(secret|dek)": base64.b64encode\(envelope	a sealed secret, not an image

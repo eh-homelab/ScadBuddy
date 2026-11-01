@@ -256,8 +256,7 @@ updates:
         update-types: ["version-update:semver-major", "version-update:semver-minor"]
       # python (the agent-durable stage) moves with agent-durable/pyproject.toml's
       # requires-python, its uv.lock and mypy's python_version, re-locked and
-      # re-verified against temporalio-claude-agent-sdk and the bundled
-      # claude-agent-sdk — none of which Dependabot can do from a FROM-line bump
+      # re-tested, none of which Dependabot can do from a FROM-line bump
       # alone (#4731 landed a 3.14 -> 3.15 Dockerfile-only bump that uv.lock's
       # own `requires-python = "==3.14.*"` would have refused to build).
       - dependency-name: "python"

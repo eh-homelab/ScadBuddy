@@ -1,6 +1,4 @@
-import type { SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import {
-  isGrpcDeadlineError,
   type Client,
   WithStartWorkflowOperation,
   WorkflowExecutionAlreadyStartedError,
@@ -17,7 +15,6 @@ import { TASK_QUEUE } from '../temporal/names.js'
 import { liveHostQueues } from '../temporal/session/affinity.js'
 import { SESSION_QUEUE, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
-import { DurableMigration, type MigrateDeps } from './migrateDurable.js'
 import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow } from './durableSweep.js'
 import { cancelOrphanedEntries } from '../gate/sweep.js'
 import type { AuditSink } from '../audit/log.js'
@@ -26,65 +23,37 @@ import type { UserImage } from './images.js'
 import { POOL_BUDGET, POOL_COST, SessionError, type SessionRecord, type Turn, type TurnOutcome } from './manager.js'
 import { event, type Owner, type SentImage, type SessionStatus } from './protocol.js'
 
-// A durable session's turns (spec 2026-10-01 §6, plan 5c PR 3): what SessionManager
-// does instead of running the harness when a session's mode is `durable`. The turn
-// runs in agent-durable's DurableSession workflow, `session-<id>` on the `agent` queue;
-// this service only hands it the message and reads its end from the event log.
+// A session's turns (unified runtime spec 2026-10-13 §5, plan Step 6.3): every session is an
+// AgentSession, `session-<id>` on `agent-sessions`; this service hands it the message and reads
+// the turn's end from the event log. (The name is from when DurableSession, agent-durable's
+// Python workflow, ran them: plan Step 8.1 retired it.)
 //
-// - send (Ruling 7): claim the row (`status = 'running'`, no turn_id or lease: the
-//   workflow owns the turn), put the turn's images in ai_session_blobs (the claim
-//   check the segment runner reads by name, Ruling 5), write `user.turn` and
-//   `session.status running`, then update-with-start `send_message` (update id: the
-//   turn id), starting the workflow on the first message. Once a turn has run
-//   (`durable_offset` moved) it is a plain Update: a workflow removed by retention is
-//   refused `closed`, never restarted empty (Ruling 18). Only a definite refusal (the
-//   validator's `busy`, a failed Update, an ended workflow) gives the claim back. An
-//   Update not accepted in time keeps it: Temporal may already hold the message, which a
-//   worker delivers later, so the turn is handed back and `done` follows the log.
-//   No `cancel_input` is sent here (Ruling 8): a send is refused `busy` while a turn
-//   runs, and only a running turn has entries.
-// - `done` follows the event log from the turn's own `session.status running` to the
-//   status `finish_turn` writes, and is read only when asked for.
-// - interrupt: `cancel_input`, then the `interrupt` Signal, which is recorded even while
-//   no worker runs.
-// - fork (#2688): the parent's conversation is read from its workflow (`fork_point`, a
-//   page at a time), and the child's workflow is started with a copy of it as the
-//   agent's state, sealed under the child's own key like every payload of `session-<child>`.
-// - handoff: after the owner change is committed, `cancel_input`, best-effort; when
-//   it goes unanswered the `interrupt` Signal ends the parked calls (and the turn).
+// - send: claim the row (`status = 'running'`, no turn_id or lease: the workflow owns the turn),
+//   put the turn's images in ai_session_blobs (the claim check, by name), write `user.turn` and
+//   `session.status running`, then update-with-start `send_message` (update id: the turn id),
+//   starting the workflow on the first message. Once a turn has run (`durable_offset` moved) it
+//   is a plain Update: a workflow removed by retention is refused `closed`, never restarted empty
+//   (#2078). Only a definite refusal (the validator's `busy`, a failed Update, an ended workflow)
+//   gives the claim back. An Update not accepted in time keeps it: Temporal may already hold the
+//   message, which a worker delivers later, so the turn is handed back and `done` follows the log.
+// - `done` follows the event log from the turn's own `session.status running` to the status the
+//   turn's end writes, and is read only when asked for.
+// - interrupt: the `interrupt_requested` flag the turn's replica reads, then the `interrupt`
+//   Signal, which is recorded even while no worker runs.
+// - handoff: after the owner change is committed, `cancel_input`, best-effort, and the new owner
+//   told to the gate; when it goes unanswered the `interrupt` Signal ends the parked calls.
 //
-// Which workflow runs a session is its `runtime` column (unified runtime spec 2026-10-13
-// §5.1, plan Step 6.3). Every session is an AgentSession on `agent-sessions`: a new one gets
-// `unified` at insert, and a session that has run no DurableSession turn gets it at its first
-// send, a classic one too (its transcript is in ai_session_entries, which the turn resumes).
-// A session whose DurableSession has run a turn (`durable_offset` > 0, runtime `durable`) is
-// moved to AgentSession at its next send, before the turn (Step 7.2, migrateDurable.ts): its
-// conversation goes into ai_session_entries, its DurableSession ends, and its AgentSession starts
-// under the same id. Nothing in the service sends a turn to a DurableSession any more (only the
-// tests of agent-durable's Python turn, `durableSends`). The gate calls, the
-// Updates after the first and the signals are by workflow id, the same for both types.
-//
-// The wire shapes are agent-durable's session/models.py (`SessionStart`, `Message`,
-// `ImageRef`, `Owner`). No prompt, image or tool content is logged or traced here.
+// A session's `runtime` column names its workflow type. A new one gets `unified` at insert, and
+// one with none (a classic session's) gets it at its first send: its transcript is in
+// ai_session_entries, which the turn resumes. A row still `durable` is a DurableSession that
+// closed before plan Step 7.2 moved the open ones (six in production on 2026-11-01, all
+// archived, none with a transcript): no worker runs its workflow, so a send is refused `closed`
+// and a fork of it starts an AgentSession (manager.ts `fork`). No prompt, image or tool content
+// is logged or traced here.
 
-export const DURABLE_WORKFLOW = 'DurableSession'
-export const DURABLE_TASK_QUEUE = 'agent'
 export const SEND_MESSAGE_UPDATE = 'send_message'
-/** `ai_sessions.runtime`: the workflow type a session runs as. */
+/** `ai_sessions.runtime`: AgentSession (`unified`), or a closed DurableSession (`durable`, see the header). */
 export type SessionRuntime = 'durable' | 'unified'
-export const FORK_POINT_QUERY = 'fork_point'
-/** The most characters of entries one `fork_point` page carries: under Temporal's 512 KiB warning. */
-const FORK_PAGE_CHARS = 384 * 1024
-/**
- * How long each of a send's migration calls may take (Step 7.2). A Query on a DurableSession no
- * worker holds in its cache replays the whole history first: 13 s for one of 1,982 entries in
- * production on 2026-11-01, past the 10 s a send gives an Update.
- */
-const MIGRATE_CALL_MS = 30_000
-/** How long a send waits for a migrated DurableSession to close (Step 7.2); the backfill waits 120 s. */
-const SEND_SETTLE_MS = 20_000
-/** How often reading the parent's pages starts again when a turn commits while they are read. */
-const FORK_READS = 3
 
 /** How long a readiness answer is reused (plan 5d Ruling 2): one Temporal call per window, not per start. */
 const READY_TTL_MS = 15_000
@@ -102,79 +71,35 @@ const WORKFLOW_TASK_QUEUE = 1
 /** temporal.api.enums.v1.TaskQueueType.TASK_QUEUE_TYPE_ACTIVITY */
 const ACTIVITY_TASK_QUEUE = 2
 
-/** What the workflow's validator refuses a second turn with (models.py, workflow.py). */
+/** What the workflow's validator refuses a second turn with (temporal/session/workflow.ts). */
 const BUSY = 'busy'
 const RUNNING: readonly SessionStatus[] = ['running', 'waiting_approval', 'waiting_input']
 export const SETTLED: readonly SessionStatus[] = ['idle', 'failed', 'done']
 
-/** `value` with every object's keys sorted, at every depth: two equal states serialise alike. */
-function canonical(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonical)
-  if (value === null || typeof value !== 'object') return value
-  return Object.fromEntries(
-    Object.entries(value)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([k, v]) => [k, canonical(v)]),
-  )
-}
-
 type WireOwner = { kind: string; id: string; label: string }
 type ImageRef = { name: string; mediaType: string }
 
-/** A tool result the plugin holds for Claude (its `ToolOutcome`), passed through as it is. */
-type ToolOutcome = { content: unknown; is_error: boolean; blocks: unknown[] | null }
-
-/**
- * What the agent still owes at its checkpoint (#4173): the results its next segment
- * delivers (a stopped turn's paused calls), whether that segment continues in a copy of
- * the session, and the calls that already ran, as the plugin's `AgentState` keeps them.
- */
-export type Owed = { pending: Record<string, ToolOutcome>; fork_next: boolean; recent_call_ids: string[] }
-
-/**
- * The part of the plugin's `AgentState` a fork seeds (#2688): the Claude session, where it
- * was last committed, its transcript entries as JSON text, as the workflow keeps them, and
- * what it still owes there (#4173).
- */
-export type ForkedAgent = { session_id: string; checkpoint: string; conversation: string[] } & Owed
-
-/** DurableSession's input (models.py `SessionStart`); the agent's state starts empty, or a fork's copy. */
+/** AgentSession's input (temporal/session/models.ts `SessionStart`). */
 export type SessionStart = {
   session_id: string
   creator: WireOwner
   owner: WireOwner
   max_turns: number
   system_append: string | null
-  agent?: ForkedAgent
 }
 
-/** One page of `fork_point` (models.py `ForkPoint`). */
-type ForkPointPage = { session_id: string | null; checkpoint: string | null; busy: boolean; total: number; entries: string[] } & Partial<Owed>
-
-/** A durable session's committed conversation, for a fork. */
-export type ForkSource = {
-  /** The Claude session the entries belong to, and the entry it was last committed at. */
-  claudeSessionId: string
-  checkpoint: string
-  /** A turn runs: what it has written past the checkpoint is not in `entries`' committed part yet. */
-  busy: boolean
-  entries: SessionStoreEntry[]
-  /** What the agent owes at `checkpoint` (the first page's): only a child cut there takes it. */
-  owed: Owed
-}
-
-/** The `send_message` Update's argument (models.py `Message`); each turn carries its own append (#2525). */
+/** The `send_message` Update's argument (temporal/session/models.ts); each turn carries its own append (#2525). */
 export type DurableMessage = {
   turn_id: string
   text: string
   author: WireOwner
   images: ImageRef[]
   system_append: string | null
-  /** A turn a flow run sent (#2481, models.py `FlowTurn`); absent for any other. */
+  /** A turn a flow run sent (#2481, `FlowTurn`); absent for any other. */
   flow?: FlowTurn
-  /** AgentSession only (temporal/session/models.ts): the user's words, which memory is recalled against. */
-  words?: string
-  /** AgentSession only: the sender's trace, so the turn's spans are its children as a classic turn's are. */
+  /** The user's words, which memory is recalled against. */
+  words: string
+  /** The sender's trace, so the turn's spans are its children as a classic turn's are. */
   traceparent?: string
 }
 type SendAnswer = { accepted: boolean; turn_id: string }
@@ -200,8 +125,6 @@ export type DurableTurnsDeps = {
   client: Client
   sql: Sql
   events: EventLog
-  /** Tests only: a queue other than `agent`. */
-  taskQueue?: string
   /** Tests only: a queue other than `agent-sessions`. */
   sessionQueue?: string
   /** Tests only: a queue other than `agent-tools`, where `acquire_worker` runs. */
@@ -222,19 +145,6 @@ export type DurableTurnsDeps = {
   describe?: DescribeSession
   /** Run when a Stop ended a lost turn: what a classic one left parked (SessionManager.endClassicLeftovers). */
   ended?: (sessionId: string) => Promise<unknown>
-  /**
-   * The sealing transcript store (SessionManager.store) a DurableSession's conversation is moved
-   * into at its next send (Step 7.2). Without it such a send is refused `unavailable`.
-   */
-  store?: MigrateDeps['store']
-  /** Tests only: how long a send's migration waits for a DurableSession to close (default 20 s). */
-  settleTimeoutMs?: number
-  /**
-   * Tests only (test/support/durableSessionTurns.ts): a `durable` session's turns keep going to
-   * its DurableSession, as before Step 7.2, for the tests of agent-durable's Python turn, which
-   * Phase 8 retires with them. Never set in the service.
-   */
-  durableSends?: boolean
 }
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
@@ -256,15 +166,12 @@ export class DurableTurns {
   readonly #ended: ((sessionId: string) => Promise<unknown>) | undefined
   readonly #gate: DurableGate
   readonly #blobs: SessionBlobs
-  readonly #taskQueue: string
   readonly #sessionQueue: string
   readonly #toolsQueue: string
   readonly #liveHosts: () => Promise<ReadonlySet<string>>
   readonly #sendTimeoutMs: number
-  readonly #ready = new Map<SessionRuntime, { until: number; why: string | undefined }>()
+  #ready: { until: number; why: string | undefined } | undefined
   readonly #describe: DescribeSession
-  readonly #migration: DurableMigration | undefined
-  readonly #durableSends: boolean
 
   constructor(deps: DurableTurnsDeps) {
     this.#client = deps.client
@@ -274,74 +181,50 @@ export class DurableTurns {
     this.#ended = deps.ended
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
     this.#blobs = new SessionBlobs(deps.sql)
-    this.#taskQueue = deps.taskQueue ?? DURABLE_TASK_QUEUE
     this.#sessionQueue = deps.sessionQueue ?? SESSION_QUEUE
     this.#toolsQueue = deps.toolsQueue ?? TASK_QUEUE
     this.#liveHosts = deps.liveHosts ?? (() => liveHostQueues(deps.client))
     this.#sendTimeoutMs = deps.sendTimeoutMs ?? 10_000
     this.#describe = deps.describe ?? durableDescriber(deps.client)
-    this.#durableSends = deps.durableSends === true
-    this.#migration = deps.store
-      ? new DurableMigration({
-          client: deps.client,
-          sql: deps.sql,
-          store: deps.store,
-          events: deps.events,
-          audit: deps.audit,
-          sessionQueue: this.#sessionQueue,
-          callTimeoutMs: Math.max(this.#sendTimeoutMs, MIGRATE_CALL_MS),
-          // A sender waits at most this long for the DurableSession to close; a close that takes
-          // longer answers `unavailable`, and the next send goes on from where it stopped.
-          settleTimeoutMs: deps.settleTimeoutMs ?? SEND_SETTLE_MS,
-        })
-      : undefined
   }
 
   /**
-   * Why a new durable session of `runtime` could not run now, or undefined when it could (plan
-   * 5d Ruling 2): a fresh poller on every queue its turns need. Until there is one, a turn
-   * would wait on a queue no one reads, so the manager falls back or refuses at start instead.
-   *
-   * - `durable` (DurableSession): agent-durable's workflow worker on `agent`.
-   * - `unified` (AgentSession, spec 2026-10-13 §5.1-5.2): the `agent-sessions` workflow worker;
-   *   the shared `agent-tools` activity worker, where `acquire_worker` places the turn; and at
-   *   least one session host, `agent-sessions.<identity>`, on any replica (`liveHosts`). The
-   *   process that sends may host none: the API's (§14.3, plan Step 6.1) runs no turn.
+   * Why a new session could not run now, or undefined when it could (plan 5d Ruling 2): a fresh
+   * poller on every queue its turns need (spec 2026-10-13 §5.1-5.2): the `agent-sessions`
+   * workflow worker; the shared `agent-tools` activity worker, where `acquire_worker` places the
+   * turn; and at least one session host, `agent-sessions.<identity>`, on any replica
+   * (`liveHosts`). The process that sends may host none: the API's (§14.3, plan Step 6.1) runs no
+   * turn. Until there is one, a turn would wait on a queue no one reads, so the manager refuses at
+   * start instead.
    *
    * An answer from Temporal is reused for READY_TTL_MS, no answer for UNANSWERED_TTL_MS, so one
-   * blip does not refuse explicit durable starts for long. Only a poller seen within
-   * POLLER_FRESH_MS counts: Temporal keeps listing one for minutes after its worker has gone.
+   * blip does not refuse starts for long. Only a poller seen within POLLER_FRESH_MS counts:
+   * Temporal keeps listing one for minutes after its worker has gone.
    */
-  async unready(runtime: SessionRuntime = 'durable'): Promise<string | undefined> {
-    const cached = this.#ready.get(runtime)
+  async unready(): Promise<string | undefined> {
+    const cached = this.#ready
     if (cached && Date.now() < cached.until) return cached.why
     let why: string | undefined
     let answered = true
     try {
-      if (runtime === 'durable') {
-        if (!(await this.#polled(this.#taskQueue, WORKFLOW_TASK_QUEUE))) {
-          why = `no durable session worker (agent-durable) polls Temporal's "${this.#taskQueue}" queue`
+      const needed: [string, number, string][] = [
+        [this.#sessionQueue, WORKFLOW_TASK_QUEUE, 'session workflow worker'],
+        [this.#toolsQueue, ACTIVITY_TASK_QUEUE, 'agent-tools worker'],
+      ]
+      for (const [queue, type, what] of needed) {
+        if (!(await this.#polled(queue, type))) {
+          why = `no ${what} polls Temporal's "${queue}" queue`
+          break
         }
-      } else {
-        const needed: [string, number, string][] = [
-          [this.#sessionQueue, WORKFLOW_TASK_QUEUE, 'session workflow worker'],
-          [this.#toolsQueue, ACTIVITY_TASK_QUEUE, 'agent-tools worker'],
-        ]
-        for (const [queue, type, what] of needed) {
-          if (!(await this.#polled(queue, type))) {
-            why = `no ${what} polls Temporal's "${queue}" queue`
-            break
-          }
-        }
-        if (!why && (await this.#liveHosts()).size === 0) {
-          why = 'no session host worker (agent-sessions.<identity>) polls Temporal, so no replica can run a unified session\'s turns'
-        }
+      }
+      if (!why && (await this.#liveHosts()).size === 0) {
+        why = 'no session host worker (agent-sessions.<identity>) polls Temporal, so no replica can run a unified session\'s turns'
       }
     } catch {
       why = 'Temporal did not answer'
       answered = false
     }
-    this.#ready.set(runtime, { until: Date.now() + (answered ? READY_TTL_MS : UNANSWERED_TTL_MS), why })
+    this.#ready = { until: Date.now() + (answered ? READY_TTL_MS : UNANSWERED_TTL_MS), why }
     return why
   }
 
@@ -373,8 +256,8 @@ export class DurableTurns {
     // `archived_at` is tested here too: an archive that commits after the manager's check
     // must not let a turn start on a chat the panel no longer lists (#2118).
     // The runtime is recorded by the first send: AgentSession for a session whose DurableSession
-    // ran nothing, else that DurableSession. Any mode: a classic session goes on as an
-    // AgentSession, once a classic turn still running on an older replica has let its lease go.
+    // ran nothing (a classic session's too, once a classic turn still running on an older replica
+    // has let its lease go), else `durable`, which is refused below.
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string; runtime: SessionRuntime }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
        UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(), turn_started_at = now(),
@@ -398,12 +281,12 @@ export class DurableTurns {
     )
     if (!claimed) return undefined
     let seq = 0
-    let runtime = claimed.runtime
-    let ranTurn = Number(claimed.durable_offset) > 0
+    const ranTurn = Number(claimed.durable_offset) > 0
     try {
-      if (runtime === 'durable' && !this.#durableSends) {
-        ranTurn = await this.#migrate(id, ranTurn)
-        runtime = 'unified'
+      if (claimed.runtime === 'durable') {
+        // A DurableSession that closed before plan Step 7.2 (see the header): its conversation
+        // was never moved, and nothing runs its workflow now.
+        throw new SessionError('closed', `session ${id}'s conversation ended with the old session runtime; fork it, or continue in a new chat`)
       }
       await this.#blobs.put(id, blobs).catch(() => {
         throw new SessionError('unavailable', `the images for session ${id} could not be stored; send it again in a moment`)
@@ -420,42 +303,21 @@ export class DurableTurns {
         event({ type: 'session.status', sessionId: id, status: 'running' }),
       ])
       seq = seqs.at(-1) ?? 0
-      await this.#sendMessage(session, turn, sent, ranTurn, runtime)
+      await this.#sendMessage(session, turn, sent, ranTurn)
     } catch (err) {
-      if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq, runtime)
+      if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq)
       // The refusal is what the caller hears, whatever the give-back meets.
       await this.#giveBack(id, claimed.prior_status).catch(() => {
         console.warn(`durable send: session ${id}'s claim could not be given back`)
       })
       throw err
     }
-    return this.#turn(id, turn.turnId, seq, runtime)
+    return this.#turn(id, turn.turnId, seq)
   }
 
-  /**
-   * Moves a claimed session's DurableSession to AgentSession before its turn (Step 7.2); whether
-   * the session's workflow has run a turn after it, as `#sendMessage` takes it. Its workflow gone
-   * after a turn ran (failed, ended, or removed by retention) is `closed`, as before: its
-   * conversation is lost. With no workflow and no turn run, the turn starts its AgentSession.
-   */
-  async #migrate(id: string, ranTurn: boolean): Promise<boolean> {
-    if (!this.#migration) {
-      throw new SessionError('unavailable', `session ${id} must be moved to the new session runtime first, and this agent service cannot write its transcript; try again in a moment`)
-    }
-    const outcome = await this.#migration.migrate(id)
-    if (outcome === 'lost' || (outcome === 'none' && ranTurn)) {
-      throw new SessionError('closed', `session ${id}'s workflow has ended; continue in a new chat`)
-    }
-    if (outcome === 'none') {
-      await this.#sql`UPDATE ai_sessions SET runtime = 'unified' WHERE id = ${id} AND runtime = 'durable'`
-      return false
-    }
-    return true
-  }
-
-  #turn(id: string, turnId: string, seq: number, runtime: SessionRuntime): Turn {
+  #turn(id: string, turnId: string, seq: number): Turn {
     let done: Promise<TurnOutcome> | undefined
-    const outcome = () => this.#outcome(id, seq, runtime)
+    const outcome = () => this.#outcome(id, seq)
     return {
       turnId,
       // Read only when asked for: a follower per turn nobody waits on would poll for nothing.
@@ -472,7 +334,7 @@ export class DurableTurns {
    * workflow not found was removed by retention after it ended, and starting
    * `session-<id>` again would run the session's history-holding chat empty (#2078).
    */
-  async #sendMessage(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[], ranTurn: boolean, runtime: SessionRuntime): Promise<void> {
+  async #sendMessage(session: SessionRecord, turn: DurableTurn, sent: readonly SentImage[], ranTurn: boolean): Promise<void> {
     const start: SessionStart = {
       session_id: session.id,
       creator: wire(session.creator),
@@ -486,18 +348,16 @@ export class DurableTurns {
       turn_id: turn.turnId,
       text: turn.text,
       author: wire(turn.author),
-      // The full images, which the segment runner reads by name (Ruling 5); the previews are the panel's.
+      // The full images, which the turn reads by name; the previews are the panel's.
       images: sent.map((s) => ({ name: s.name!, mediaType: s.mediaType! })),
       system_append: turn.systemAppend,
       ...(turn.flow ? { flow: { run_id: turn.flow.run_id, call_id: turn.flow.call_id } } : {}),
-      // DurableSession's model takes no such field.
-      ...(runtime === 'unified' ? { words: turn.prompt } : {}),
-      ...(runtime === 'unified' && traceparent ? { traceparent } : {}),
+      words: turn.prompt,
+      ...(traceparent ? { traceparent } : {}),
     }
-    const unified = runtime === 'unified'
-    const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(unified ? SESSION_WORKFLOW : DURABLE_WORKFLOW, {
+    const operation = new WithStartWorkflowOperation<(start: SessionStart) => Promise<void>>(SESSION_WORKFLOW, {
       workflowId: sessionWorkflowId(session.id),
-      taskQueue: unified ? this.#sessionQueue : this.#taskQueue,
+      taskQueue: this.#sessionQueue,
       args: [start],
       workflowIdConflictPolicy: 'USE_EXISTING',
       // A session whose workflow ended (failed, or terminated) lost its conversation:
@@ -533,101 +393,6 @@ export class DurableTurns {
     }
   }
 
-  /**
-   * The parent's committed conversation (#2688), read from its workflow a page at a time.
-   * Undefined when it has none: no workflow (no turn ever ran, or retention removed it),
-   * or nothing committed yet. A turn that commits while the pages are read changes the
-   * count, and the read starts again.
-   */
-  async forkSource(sessionId: string): Promise<ForkSource | undefined> {
-    const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
-    const page = (start: number) =>
-      this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
-        handle.query<ForkPointPage, [{ start: number; limit: number }]>(FORK_POINT_QUERY, { start, limit: FORK_PAGE_CHARS }),
-      )
-    try {
-      for (let read = 0; read < FORK_READS; read++) {
-        const first = await page(0)
-        if (!first.session_id || !first.checkpoint || first.total === 0) return undefined
-        const texts = [...first.entries]
-        let moved = false
-        while (texts.length < first.total) {
-          const next = await page(texts.length)
-          if (next.total !== first.total || next.checkpoint !== first.checkpoint || next.entries.length === 0) {
-            moved = true
-            break
-          }
-          texts.push(...next.entries)
-        }
-        // What the agent owes is on the first page only, and can change with no new entry
-        // (a turn that starts and stops): read over several pages, it must still be what it
-        // was, or the entries and it may not be one state. One page is one Query.
-        if (!moved && texts.length > first.entries.length) {
-          const again = await page(0)
-          // Keys sorted at every depth: the same state in another key order is no change.
-          const owedOf = (p: ForkPointPage) => JSON.stringify(canonical([p.pending ?? {}, p.fork_next ?? false, p.recent_call_ids ?? []]))
-          moved = again.total !== first.total || again.checkpoint !== first.checkpoint || again.busy !== first.busy || owedOf(again) !== owedOf(first)
-        }
-        if (moved) continue
-        return {
-          claudeSessionId: first.session_id,
-          checkpoint: first.checkpoint,
-          busy: first.busy,
-          entries: texts.map((t) => JSON.parse(t) as SessionStoreEntry),
-          // A worker from before #4173 sends none: nothing owed it can say.
-          owed: { pending: first.pending ?? {}, fork_next: first.fork_next ?? false, recent_call_ids: first.recent_call_ids ?? [] },
-        }
-      }
-    } catch (err) {
-      if (err instanceof WorkflowNotFoundError) return undefined
-      // #3739: the cause is the one thing that says why a fork keeps failing, so it is
-      // logged; the caller hears only which of the two it was.
-      console.warn(`durable fork: session ${sessionId}'s workflow could not be read: ${String(err)}`)
-      if (isGrpcDeadlineError(err)) {
-        throw new SessionError('unavailable', `no durable session worker answered for session ${sessionId} in time to fork it; try again in a moment`)
-      }
-      throw new SessionError('unavailable', `session ${sessionId}'s workflow could not be read to fork it; try again in a moment`)
-    }
-    throw new SessionError('busy', `session ${sessionId} kept moving while it was read; fork it again once its turn ends`)
-  }
-
-  /**
-   * Starts a fork's workflow with the conversation it carries (#2688), before its first
-   * message: that message's update-with-start then finds it running (`USE_EXISTING`).
-   * Refused `unavailable` when Temporal does not take it in time.
-   */
-  async startFork(child: SessionRecord, agent: ForkedAgent): Promise<void> {
-    const start: SessionStart = {
-      session_id: child.id,
-      creator: wire(child.creator),
-      owner: wire(child.owner),
-      max_turns: child.maxTurns,
-      // Each message carries the append as Settings stand when it is sent (#2525).
-      system_append: null,
-      agent,
-    }
-    // Its workflow is a DurableSession whatever the flag says, so its first send must not pick the type again.
-    await this.#sql`UPDATE ai_sessions SET runtime = 'durable' WHERE id = ${child.id}`
-    try {
-      await this.#client.withDeadline(Date.now() + this.#sendTimeoutMs, () =>
-        this.#client.workflow.start<(start: SessionStart) => Promise<void>>(DURABLE_WORKFLOW, {
-          workflowId: sessionWorkflowId(child.id),
-          taskQueue: this.#taskQueue,
-          args: [start],
-          workflowIdReusePolicy: 'REJECT_DUPLICATE',
-        }),
-      )
-    } catch {
-      // Taken or not, a fork whose workflow is in doubt is not handed out: its first
-      // message would start it empty.
-      await this.#client.workflow
-        .getHandle(sessionWorkflowId(child.id))
-        .terminate('the fork was not completed')
-        .catch(() => {})
-      throw new SessionError('unavailable', `the fork of session ${child.id} could not be started; try again in a moment`)
-    }
-  }
-
   /** Gives back a claim whose message the workflow refused (Ruling 7), to the status it had. */
   async #giveBack(id: string, prior: SessionStatus): Promise<void> {
     const released = await this.#sql`
@@ -635,8 +400,8 @@ export class DurableTurns {
     if (released.count > 0) await this.#events.append(id, [event({ type: 'session.status', sessionId: id, status: prior })])
   }
 
-  /** The turn's end, as finish_turn wrote it (agent-durable session/activities.py). */
-  async #outcome(id: string, afterSeq: number, runtime: SessionRuntime): Promise<TurnOutcome> {
+  /** The turn's end, as `session.finish_turn` wrote it (temporal/session/finishActivity.ts). */
+  async #outcome(id: string, afterSeq: number): Promise<TurnOutcome> {
     const controller = new AbortController()
     let result: { costUsd: number; turns: number } | undefined
     let error: { code?: string; message: string } | undefined
@@ -657,10 +422,9 @@ export class DurableTurns {
     if (error?.code === 'turn_failed' || status === 'failed') {
       return { kind: 'failed', message: error?.message ?? 'the turn failed' }
     }
-    // An AgentSession's outcome carries the session's own spend, as a classic turn's does: its
-    // event's is the lineage's (the meter), which a fork shares with its parent (#823).
-    // DurableSession's finish_turn writes the outcome's figure in the event.
-    const [own] = runtime === 'unified' ? await this.#sql<{ cost_usd: number }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${id}` : []
+    // The outcome carries the session's own spend, as a classic turn's does: its event's is the
+    // lineage's (the meter), which a fork shares with its parent (#823).
+    const [own] = await this.#sql<{ cost_usd: number }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${id}`
     return {
       kind: 'result',
       // A result subtype classic reports for an end that leaves the session idle (AgentSession carries it, turnHost.ts).

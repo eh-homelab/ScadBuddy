@@ -90,4 +90,27 @@ expect_pass "testConnection's query" harness/testConnection.ts "import { query }
 query(opts)"
 expect_pass "a .sql migration naming session_mode" db/migrations/x.sql "ALTER TABLE ai_sessions DROP COLUMN session_mode;"
 
+# The Python turn back in agent-durable/ (plan Step 8.1): a tree with an empty agent/src
+# and one file, agent-durable/<path>, with <content>.
+durable() {
+  local want="$1" why="$2"
+  rm -rf "${work:?}/t"
+  mkdir -p "$work/t/agent/src" "$work/t/agent-durable/$(dirname "$3")"
+  printf '%s\n' "$4" >"$work/t/agent-durable/$3"
+  if "$here/lint-one-runtime.sh" "$work/t" >/dev/null 2>&1; then got=pass; else got=fail; fi
+  if [ "$got" != "$want" ]; then
+    echo "FAIL: ${got}ed, but should $want: $why"
+    fail=1
+  fi
+}
+durable fail "an import of claude_agent_sdk" src/scadbuddy_durable/x.py "from claude_agent_sdk import query"
+durable fail "a plain import of claude_agent_sdk" src/scadbuddy_durable/x.py "import claude_agent_sdk"
+durable fail "the Temporal plugin" src/scadbuddy_durable/x.py "from temporalio.claude_agent_sdk import ClaudeAgentPlugin"
+durable fail "the Temporal plugin as a module" tests/test_x.py "    from temporalio import claude_agent_sdk"
+durable fail "DurableSession named in code" src/scadbuddy_durable/x.py "workflows=[DurableSession]"
+durable fail "DurableSession named in a docstring" src/scadbuddy_durable/x.py '"""What DurableSession runs."""'
+durable fail "a dependency on the SDK" pyproject.toml 'dependencies = ["claude-agent-sdk==0.2.164"]'
+durable pass "the codec's temporalio imports" src/scadbuddy_durable/codec.py "from temporalio.converter import PayloadCodec"
+durable pass "AgentSession named" tests/test_codec.py 'workflow_type="AgentSession"'
+
 exit "$fail"

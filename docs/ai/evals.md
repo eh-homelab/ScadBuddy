@@ -90,10 +90,9 @@ permission seam's own, as each call ran (`onDecision`,
 
 Until plan Step 6.6 the scenarios also ran on the classic harness and on agent-durable's
 `DurableSession` (`SCADBUDDY_EVAL_MODE`). Since Step 6.3 no new session is either, so
-both runs are gone. A `DurableSession` an earlier release started keeps running on
-agent-durable until Step 7.2 migrates it; its built-ins are still tested on that stack
-([`agent/test/support/pythonDurableStack.ts`](../../agent/test/support/pythonDurableStack.ts),
-`test/builtins.durable.e2e.test.ts`).
+both runs are gone; Step 7.2 moved the open DurableSessions to AgentSession, and Step 8.1
+retired the Python turn. An allowed package's built-ins are tested on AgentSession
+([`agent/test/parity.temporal.test.ts`](../../agent/test/parity.temporal.test.ts)).
 
 ### Deterministic run (CI)
 
