@@ -3,7 +3,7 @@ import type { Sql } from 'postgres'
 import { type AuditSink, SYSTEM_ACTOR } from '../audit/log.js'
 import type { EventLog } from '../sessions/eventLog.js'
 import { event, type ServerEvent } from '../sessions/protocol.js'
-import { inputResolved } from './classic.js'
+import { inputResolved } from './projection.js'
 import { parseRequestId } from './ids.js'
 
 // The orphan sweep of ai_pending_input (spec 2026-10-01 §6.6, "The projection"): a row

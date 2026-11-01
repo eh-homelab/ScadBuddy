@@ -70,7 +70,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     mode: z.enum(SESSION_MODES).optional(),
   }),
   z.object({ v, type: z.literal('approval.decision'), sessionId, id: answerId, approve: z.boolean() }),
-  // #940: the user's answer to an AskUserQuestion (questions/service.ts).
+  // #940: the user's answer to an AskUserQuestion (gate/questions.ts).
   z.object({
     v,
     type: z.literal('question.answer'),

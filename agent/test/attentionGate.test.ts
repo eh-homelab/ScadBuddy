@@ -138,7 +138,7 @@ describe('an AgentSession turn`s attention gate', () => {
     expect(h.ended).toEqual([])
   })
 
-  // #5051's review: the limit stops holding its lock for the open past a bound (questions/service.ts
+  // #5051's review: the limit stops holding its lock for the open past a bound (gate/questions.ts
   // OPEN_WAIT_MS), and the open may still be withdrawing the request it replaces then.
   it('a request whose open outlasts the limit`s wait parks once the request it replaces is withdrawn', async () => {
     const withdrawing = deferred<void>()

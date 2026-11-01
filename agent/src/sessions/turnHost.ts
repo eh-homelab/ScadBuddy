@@ -14,7 +14,7 @@ import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
 import type { FinishedCall } from '../tools/activityProjection.js'
 import { TOOL_CALL_RESULT_TOOL } from '../temporal/toolCall.js'
 import type { QuestionGate, QuestionRequest, QuestionVerdict, UserQuestion } from '../harness/questions.js'
-import type { QuestionService } from '../questions/service.js'
+import type { QuestionService } from '../gate/questions.js'
 import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
 import type { DecidedCall, DecidedRun } from '../temporal/toolActivities.js'
 import { NO_CAPACITY, SESSION_GONE, SHUTTING_DOWN_FAILURE } from '../temporal/session/names.js'
@@ -72,7 +72,7 @@ import type { WarmEntry } from './warm.js'
 // reply, the tab's return (`reconnected`, which the process whose hub sees the tab sends as the
 // Update `tab_reconnected`, manager.ts `resolveTabWaits`), or the entry's timer, whose `stop` and
 // `wait` end the turn. A `done` summary waits for nothing and outlives its turn, so it is posted
-// as classic's is (questions/service.ts), never through the workflow, whose entries end with
+// as classic's is (gate/questions.ts), never through the workflow, whose entries end with
 // their turn. A released one is told in the continuation in the words its call would have read.
 //
 // Release (§5.4 "Release"). A hold lasts `park_hold_seconds` (the input's parkHoldSeconds);
@@ -116,7 +116,7 @@ export function restartedPrompt(finished: readonly FinishedCall[]): string {
 
 /** What a call that cannot park here reads: an attention request or a tab wait, or a turn with no way to its workflow. */
 export const NO_PARKS = 'this session cannot wait for an approval or an answer yet, so the call was not run'
-/** What a question is told when the session is no longer the user's, or its turn ended: classic's words (questions/service.ts). */
+/** What a question is told when the session is no longer the user's, or its turn ended: classic's words (QuestionService before plan Step 9.7). */
 export const NOT_ASKED = 'The question was not asked: the session is no longer the user’s, or its turn ended.'
 /** How often a held call reads its entry's response row besides the NOTIFY (approvals/service.ts's waiter's 1 s). */
 export const INPUT_POLL_MS = 1_000

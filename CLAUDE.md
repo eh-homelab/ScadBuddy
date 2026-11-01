@@ -723,13 +723,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   decides, via `src/approvals/service.ts` and the `ai_approvals` table, #258; outside
   a session they are denied as "needs approval"; the built-in `AskUserQuestion`, given
   only to sessions the browser user owns, parks there too until the user answers in the
-  panel, via `src/harness/questions.ts`, `src/questions/service.ts` and `ai_questions`,
-  #940, and never outlives its turn; the agent's `request_user_attention` tool, #815,
-  `src/harness/attention.ts`, parks on the same gate as an `ai_questions` row of kind
-  `attention`, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
-  `stop` end the turn; its `done` reason waits for nothing and outlives its turn, shown
-  beside the badge's waiting count (not in it) until dismissed, at most
-  `DONE_POSTS_PER_TURN` a turn, carrying `src/questions/doneSummary.ts`'s record of what the turn
+  panel, via `src/harness/questions.ts` and the session workflow's gate (an `ai_pending_input`
+  entry, the request's record, plan Step 9.7), #940, and never outlives its turn; the agent's
+  `request_user_attention` tool, #815, `src/harness/attention.ts`, parks on the same gate as a
+  `wait_for_user` entry, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
+  `stop` end the turn; its `done` reason waits for nothing and outlives its turn, an `ai_questions`
+  row (`src/gate/questions.ts`), shown beside the badge's waiting count (not in it) until dismissed, at most
+  `DONE_POSTS_PER_TURN` a turn, carrying `src/gate/doneSummary.ts`'s record of what the turn
   touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
   the one read of every parked call, approvals and answers, that the badge counts, and
   `POST /api/v1/ai/pending-input/{request_id}` the one respond route the panel answers

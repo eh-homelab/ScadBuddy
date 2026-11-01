@@ -8,10 +8,10 @@ import { parseRequestId, type RequestId } from '../gate/ids.js'
 import { WorkflowNotFoundError } from '@temporalio/common'
 import { REFUSAL_STATUS, RESPONSE_MAX, RespondRefusal, validateRespond } from '../gate/validate.js'
 import type { OriginPolicy } from '../http/origins.js'
-import { QuestionError } from '../questions/service.js'
+import { QuestionError } from '../gate/questions.js'
 import type { SessionManager } from '../sessions/manager.js'
 import { canSee, type InputOutcome, type Owner, PROTOCOL_VERSION } from '../sessions/protocol.js'
-import { approvalEntry, questionEntry } from '../gate/classic.js'
+import { approvalEntry, questionEntry } from '../gate/projection.js'
 import { responseHash } from '../gate/canonical.js'
 import { DurableUnavailable } from '../gate/durable.js'
 import type { PendingInputEntry } from '../gate/projection.js'
@@ -77,7 +77,7 @@ const NOT_READY = 'the AI database is unreachable or its migrations have not app
 
 /**
  * The response body. `summaries_truncated`: more undismissed `done` summaries
- * are pending than are listed (questions/service.ts PENDING_CAP), so a count
+ * are pending than are listed (gate/questions.ts PENDING_CAP), so a count
  * of them is a lower bound.
  */
 export type PendingInputPage = { entries: PendingInputEntry[]; summaries_truncated: boolean }

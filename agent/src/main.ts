@@ -565,11 +565,6 @@ const stopSweeper = !role.http ? undefined : sessions?.approvals.startSweeper(AP
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', sweepErrorText(err)),
 })
-// Questions past `question_expiry_seconds` whose turn is gone (spec §6.6): cancelled, never answered.
-const stopQuestionSweeper = !role.http ? undefined : sessions?.questions.startSweeper(APPROVAL_SWEEP_MS, {
-  ...(database ? { ready: database.ready } : {}),
-  onError: (err) => console.error('question expiry sweep failed:', (err as Error).message),
-})
 // A flow run's call whose hop at its starting session is over goes to the person (#2482).
 const stopEscalationSweeper = !role.http ? undefined : sessions?.escalations.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
@@ -1150,7 +1145,6 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
 
 async function stop(): Promise<void> {
   stopSweeper?.()
-  stopQuestionSweeper?.()
   stopEscalationSweeper?.()
   stopOrphanSweep?.()
   stopPluginSessionSweep?.()

@@ -10,10 +10,11 @@ import { attentionCard, type AttentionSpec, parseAttention, timedOutText } from 
 import { ATTENTION_TOOL, type QuestionGate, type QuestionRequest, type QuestionVerdict } from '../src/harness/questions.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
-import { loadDoneSummary } from '../src/questions/doneSummary.js'
-import { ATTENTION_RATE_LIMIT, ATTENTION_RATE_WINDOW_S, DONE_POSTS_PER_TURN, PENDING_CAP, TAB_WAIT_RATE_LIMIT } from '../src/questions/service.js'
+import { loadDoneSummary } from '../src/gate/doneSummary.js'
+import { ATTENTION_RATE_LIMIT, ATTENTION_RATE_WINDOW_S, DONE_POSTS_PER_TURN, PENDING_CAP, TAB_WAIT_RATE_LIMIT } from '../src/gate/questions.js'
 import { pendingInput, respond } from '../src/routes/pendingInput.js'
 import { ASK_USER, TIMEOUT_MIN_S, WAIT_FOR_USER } from '../src/gate/entry.js'
+import { durableRequestId } from '../src/gate/ids.js'
 import { TAB_WAIT_CALL } from '../src/sessions/attentionGate.js'
 import { CLAIMED_AT, resolveTabWaits, runningDurableTurn, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
 import { browserTools } from '../src/tools/browser.js'
@@ -115,7 +116,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   /** The user's own words in reply. */
   const replyText = (m: SessionManager, requestId: string, text: string) => respond(m, browser, requestId, { kind: 'answer', text })
   /** How an AgentSession's entry ended (ai_input_responses). */
-  /** How a done summary names an AgentSession's timed-out entry: its tool_use id's tail, in plain words (questions/doneSummary.ts). */
+  /** How a done summary names an AgentSession's timed-out entry: its tool_use id's tail, in plain words (gate/doneSummary.ts). */
   const shown = (requestId: string) => requestId.split(':').at(-1)!.slice(-8).replace(/_/g, ' ')
   const ended = async (requestId: string) =>
     (await db.sql<{ outcome: string; response: unknown; reason: string | null; responder: { kind: string } }[]>`
@@ -674,23 +675,6 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
     expect(page.entries).toHaveLength(PENDING_CAP)
   })
 
-  it('a timed done row (a replica on an older image) is cancelled when its turn ends; an untimed one is not', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising() })
-    const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
-    const turnId = '00000000-0000-4000-8000-0000000000aa'
-    await db.sql`
-      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout, expires_at)
-      VALUES (gen_random_uuid(), ${session.id}, ${turnId}, ${ATTENTION_TOOL}, 'toolu_old', '[]', 'attention', 'done', 'proceed', now() + interval '5 minutes')`
-    await db.sql`
-      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary)
-      VALUES (gen_random_uuid(), ${session.id}, ${turnId}, ${ATTENTION_TOOL}, 'toolu_new', '[]', 'attention', 'done', 'x')`
-    expect(await m.questions.cancelPending(session.id, 'the turn ended', { turnId })).toBe(1)
-    expect(await db.sql`SELECT tool_use_id, outcome FROM ai_questions WHERE session_id = ${session.id} ORDER BY tool_use_id`).toEqual([
-      { tool_use_id: 'toolu_new', outcome: null },
-      { tool_use_id: 'toolu_old', outcome: 'cancelled' },
-    ])
-  })
-
   it("a later turn's done summary does not replace one that recorded unattended actions", async () => {
     let n = 0
     const turns = (run: HarnessRun): AsyncIterable<SDKMessage> =>
@@ -953,16 +937,21 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
     )
   })
 
+  /**
+   * A `wait_for_user` entry the gate resolved just now, in another session: what the rate limits
+   * count (gate/questions.ts attentionLimit). A `tab:` call id is a browser call's tab wait.
+   */
+  const resolvedWait = (sessionId: string, toolUseId: string) => db.sql`
+    INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder, reason, tool, requested_at)
+    VALUES (${durableRequestId(sessionId, 'run-old', toolUseId)}, ${sessionId}, 'answer', 'timed_out',
+            ${db.sql.json({ kind: 'system', id: 'scadbuddy', label: 'ScadBuddy' })}, 'old', ${WAIT_FOR_USER}, now())`
+
   it('refuses past the per-user rate limit without parking, and audits the refusal (#1205)', async () => {
     const audit = new AuditLog({ sql: db.sql })
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20, audit })
     const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
     for (let i = 0; i < ATTENTION_RATE_LIMIT; i++) {
-      await db.sql`
-        INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout,
-                                  expires_at, outcome, reason, resolved_at)
-        VALUES (gen_random_uuid(), ${other.id}, gen_random_uuid(), ${ATTENTION_TOOL}, ${`toolu_old${i}`}, '[]',
-                'attention', 'done', 'proceed', now(), 'timed_out', 'old', now())`
+      await resolvedWait(other.id, `toolu_old${i}`)
     }
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
@@ -977,11 +966,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: SHORT_S }) }), approvalPollMs: 20 })
     const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
     for (let i = 0; i < ATTENTION_RATE_LIMIT - 1; i++) {
-      await db.sql`
-        INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout,
-                                  expires_at, outcome, reason, resolved_at)
-        VALUES (gen_random_uuid(), ${other.id}, gen_random_uuid(), ${ATTENTION_TOOL}, ${`toolu_old${i}`}, '[]',
-                'attention', 'done', 'proceed', now(), 'timed_out', 'old', now())`
+      await resolvedWait(other.id, `toolu_old${i}`)
     }
     const [a, b] = await Promise.all([
       m.start(browser, { origin: 'chat', prompt: 'one' }),
@@ -1110,8 +1095,8 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
     await expectPanelAccepts(log)
   }, LONG_MS)
 
-  // #1380: the hub calls reconnected() on every attach and pairing, almost always with nothing waiting.
-  it('reconnected() with no open tab_disconnected request returns 0 and writes no event, audit row or status', async () => {
+  // #1380: the hub ends tab waits on every attach and pairing, almost always with nothing waiting.
+  it('a tab back with no open tab_disconnected request ends nothing and writes no event, audit row or status', async () => {
     const audit = new AuditLog({ sql: db.sql })
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising(), approvalPollMs: 20, audit })
     const { session } = await m.start(browser, { origin: 'chat', title: 'idle' })
@@ -1123,7 +1108,9 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
               'attention', 'tab_disconnected', 'proceed', now(), 'timed_out', 'old', now())`
     await db.sql`UPDATE ai_sessions SET status = 'waiting_input' WHERE id = ${session.id}`
     const before = await events(m, session.id)
-    expect(await m.questions.reconnected(session.id)).toBe(0)
+    const tabs: { onSessionTab: ((sessionId: string) => Promise<unknown>) | undefined } = { onSessionTab: undefined }
+    resolveTabWaits(tabs, m)
+    expect(await tabs.onSessionTab!(session.id)).toBe(0)
     expect(await events(m, session.id)).toEqual(before)
     expect(await db.sql`SELECT 1 FROM ai_audit WHERE kind = 'question'`).toEqual([])
     expect(await db.sql`SELECT status FROM ai_sessions WHERE id = ${session.id}`).toEqual([{ status: 'waiting_input' }])
@@ -1279,11 +1266,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
     const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
     // The model's limit is all but used up: its own request is the last it may make.
     for (let i = 0; i < ATTENTION_RATE_LIMIT - 1; i++) {
-      await db.sql`
-        INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout,
-                                  expires_at, outcome, reason, resolved_at)
-        VALUES (gen_random_uuid(), ${other.id}, gen_random_uuid(), ${ATTENTION_TOOL}, ${`toolu_old${i}`}, '[]',
-                'attention', 'done', 'proceed', now(), 'timed_out', 'old', now())`
+      await resolvedWait(other.id, `toolu_old${i}`)
     }
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await parkedBoth
@@ -1417,11 +1400,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
     })
     const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
     for (let i = 0; i < TAB_WAIT_RATE_LIMIT; i++) {
-      await db.sql`
-        INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, on_timeout,
-                                  expires_at, outcome, reason, resolved_at)
-        VALUES (gen_random_uuid(), ${other.id}, gen_random_uuid(), 'mcp__scadbuddy__browser_snapshot', ${`toolu_old${i}`}, '[]',
-                'attention', 'tab_disconnected', 'proceed', now(), 'timed_out', 'old', now())`
+      await resolvedWait(other.id, `tab:toolu_old${i}`)
     }
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done

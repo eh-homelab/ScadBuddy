@@ -23,7 +23,7 @@ import { ATTENTION_DESCRIPTION, ATTENTION_TOOL_NAME, ATTENTION_TOOL_SHAPE, type 
 // subagents list its server in their `tools`.
 //
 // A run gets the tool only with a QuestionGate (a session turn: the panel is
-// where the user answers, questions/service.ts); a bare run has no one to ask
+// where the user answers, gate/questions.ts); a bare run has no one to ask
 // and is not offered it. The gate parks the call until the user answers or the
 // turn ends; anything but an answer reaches the model as the tool's error,
 // so a question nobody answered is never taken for a choice.

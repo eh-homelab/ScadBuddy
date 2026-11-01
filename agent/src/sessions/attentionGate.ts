@@ -1,14 +1,14 @@
 import { RECONNECTED_REASON, redact, TIMEOUT_MIN_S, WAIT_FOR_USER } from '../gate/entry.js'
 import type { AttentionSpec } from '../harness/attention.js'
 import { ATTENTION_TOOL, type QuestionRequest, type QuestionVerdict } from '../harness/questions.js'
-import type { QuestionService } from '../questions/service.js'
+import type { QuestionService } from '../gate/questions.js'
 import type { OpenInputArgs } from '../temporal/session/models.js'
 
 // An AgentSession turn's attention requests that wait (#5003, spec 2026-10-13 §5.4):
 // request_user_attention, and a browser call's wait for its tab (sessions/manager.ts
 // `waitForTab`, built on this gate as on classic's), each the gate's `wait_for_user` entry,
 // opened through the session's workflow and held on its row (sessions/turnHost.ts, whose park
-// and hold these are). What each call reads is classic's (questions/service.ts `gate`,
+// and hold these are). What each call reads is classic's (QuestionService `gate` before plan Step 9.7,
 // harness/attention.ts):
 //   - a reply is the answer; `reconnected` (the row's response, gate/entry.ts
 //     RECONNECTED_RESPONSE) is the tab's return, never an answer;
@@ -30,7 +30,7 @@ import type { OpenInputArgs } from '../temporal/session/models.js'
 export const ATTENTION_GRACE_MS = 30_000
 /** A tab wait's call id is this plus the browser call's tool_use id: an entry of its own, never that call's (whose approval may have parked under its id). */
 export const TAB_WAIT_CALL = 'tab:'
-/** Why an open attention request ended when a newer one for its reason opened (classic's words, questions/service.ts `gate`). */
+/** Why an open attention request ended when a newer one for its reason opened (classic's words, QuestionService `gate` before plan Step 9.7). */
 export const SUPERSEDED = 'replaced by a newer request for the same reason'
 
 /** An entry's response row, as resolve_input (or a grant, or the flow's refusal) wrote it. */
@@ -97,7 +97,7 @@ export function attentionGate(deps: AttentionGateDeps): (request: QuestionReques
   /**
    * request_user_attention, or a browser call's wait for its tab (see the header): its card,
    * its timer, its ends. `until` (performance.now ms): a joiner asking again on its own keeps
-   * the deadline it was first asked with, as classic's does (questions/service.ts `gate`).
+   * the deadline it was first asked with, as classic's did (QuestionService `gate` before plan Step 9.7).
    */
   const attend = async (request: QuestionRequest, attention: Wait, until?: number): Promise<QuestionVerdict> => {
     if (stop.aborted) return { answered: false, message: 'The turn is stopping; the question was not asked.' }
@@ -133,7 +133,7 @@ export function attentionGate(deps: AttentionGateDeps): (request: QuestionReques
     let parking: ReturnType<AttentionGateDeps['park']> | undefined
     /**
      * Replaces this side's open request for the reason and opens the entry; done once the entry is
-     * open or the park ended. Once only: the limit may stop waiting on it (questions/service.ts
+     * open or the park ended. Once only: the limit may stop waiting on it (gate/questions.ts
      * OPEN_WAIT_MS) while the withdraw it starts with still runs, and the call then waits on it here.
      */
     let opening: Promise<void> | undefined
