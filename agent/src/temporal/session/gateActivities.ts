@@ -1,4 +1,6 @@
 import type { Sql } from 'postgres'
+import type { AppendHook } from '../../sessions/busEvents.js'
+import { EventLog } from '../../sessions/eventLog.js'
 import {
   DEFAULT_APPROVAL_EXPIRY_SECONDS,
   MAX_APPROVAL_EXPIRY_SECONDS,
@@ -39,6 +41,14 @@ export async function gateSettings(sql: Sql): Promise<GateSettings> {
     approvalExpiryS: seconds(value(SETTING_APPROVAL_EXPIRY_SECONDS), DEFAULT_APPROVAL_EXPIRY_SECONDS, MIN_APPROVAL_EXPIRY_SECONDS, MAX_APPROVAL_EXPIRY_SECONDS),
     questionExpiryS: seconds(value(SETTING_QUESTION_EXPIRY_SECONDS), DEFAULT_QUESTION_EXPIRY_SECONDS, MIN_QUESTION_EXPIRY_SECONDS, MAX_QUESTION_EXPIRY_SECONDS),
   }
+}
+
+/**
+ * The gate's GateDb as main.ts builds it: the session manager's event log, or with none (no
+ * credentials) a log of its own that only publishes, so a write still reaches the bus (#3365).
+ */
+export function gateDb(sql: Sql, events: EventLog | undefined, onAppend: AppendHook | undefined): GateDb {
+  return { sql, events: events ?? new EventLog(sql, onAppend ? { onAppend } : {}) }
 }
 
 /** `db.events` is this replica's session event log, so a write wakes its followers at once (#3365). */

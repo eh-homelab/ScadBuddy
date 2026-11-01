@@ -29,8 +29,11 @@ import { type GateEntry, RespondRefusal, type Role, validateRespond } from './va
 // Events go through the agent's own EventLog (#3365): appended in the transaction that
 // writes the rows they report, so both commit together, and told to the log once it has
 // committed (`committed`), which wakes this replica's followers and publishes `session.*`
-// under this replica's id, as every other append does. Python sends that NOTIFY inside the
-// transaction, under the id `agent-durable`.
+// under this replica's id, as every other append does; a rolled-back transaction does neither.
+// A batch that leaves no waiting or settled status (a second entry in a session already
+// waiting, a resolution back to `running`) is a `session.message`, throttled per session like
+// any other (busEvents.ts); `scadbuddy_input` above is what a parked call waits on, and it is
+// not. Python sends its NOTIFY inside the transaction, at once, under the id `agent-durable`.
 
 const PROTOCOL_VERSION = 1
 export const INPUT_CHANNEL = 'scadbuddy_input'

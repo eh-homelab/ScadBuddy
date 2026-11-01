@@ -20,6 +20,8 @@ import { type BusEvent } from '../src/events/bus.js'
 import { PgEventListener } from '../src/events/pgListener.js'
 import { followSessionEvents, SessionEventPublisher } from '../src/sessions/busEvents.js'
 import { EventLog } from '../src/sessions/eventLog.js'
+import { gateDb, sessionGateActivities } from '../src/temporal/session/gateActivities.js'
+import { SESSION_GATE_ACTIVITIES } from '../src/temporal/session/names.js'
 import type { Owner, ServerEvent } from '../src/sessions/protocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
@@ -339,6 +341,32 @@ describe.skipIf(!TEST_DATABASE_URL)(
         }
       }
 
+      it('a rolled-back write neither wakes a follower nor publishes', async () => {
+        const a = await replica()
+        const sid = await newSession(sql)
+        const args = open(sid)
+        await openInput(a.gate, args)
+        const watching = await follower(a.log, sid)
+        const sent = a.publisher.sent
+        // The approval's audit row is written after its events are appended: failing it rolls them back.
+        await sql.unsafe(`
+          CREATE FUNCTION refuse_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$;
+          CREATE TRIGGER refuse_audit BEFORE INSERT ON ai_audit FOR EACH ROW EXECUTE FUNCTION refuse_audit();`)
+        await expect(resolveInput(a.gate, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })).rejects.toThrow('refused')
+        await expect(watching.next('input.resolved')).rejects.toThrow('no input.resolved')
+        expect(a.publisher.sent).toBe(sent)
+        expect(await count(sql, 'ai_pending_input')).toBe(1)
+        expect((await events(sql, sid)).filter((e) => e.type === 'input.resolved')).toHaveLength(0)
+      })
+
+      it("publishes through main.ts's log of its own when there is no session manager", async () => {
+        const publisher = new SessionEventPublisher(sql, { throttleMs: 10 })
+        closers.push(() => publisher.close())
+        const sid = await newSession(sql)
+        expect(await sessionGateActivities(gateDb(sql, undefined, publisher.onAppend))[SESSION_GATE_ACTIVITIES.open](open(sid))).toBe(true)
+        expect(publisher.sent).toBe(1)
+      })
+
       it("wakes this replica's follower itself, with no bus to do it", async () => {
         const a = await replica()
         const sid = await newSession(sql)
@@ -350,7 +378,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await watching.next('input.resolved')
       })
 
-      it("is announced under this replica's own id: its own consumer skips it, another replica's (an older build's too) wakes", async () => {
+      it("is announced under this replica's own id: its own consumer skips it, another replica's wakes", async () => {
         const a = await replica({ bus: true })
         const b = await replica({ bus: true })
         const sid = await newSession(sql)
@@ -362,7 +390,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await expect.poll(() => b.heard.filter((e) => e.session_id === sid).map((e) => [e.kind, e.replica]), { timeout: 5_000 }).toEqual([
           ['session.waiting', a.publisher.replica],
         ])
-        // The consumer at sha-7626da9 is the same test (busEvents.ts followSessionEvents): an id not its own wakes.
+        // B stands for an older build too: busEvents.ts at sha-7626da9 is byte-identical (git show), its
+        // followSessionEvents skipping only its own id.
         expect(a.publisher.replica).not.toBe(b.publisher.replica)
         await resolveInput(a.gate, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })
         await Promise.all([onA.next('input.resolved'), onB.next('input.resolved')])

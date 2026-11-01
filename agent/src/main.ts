@@ -59,7 +59,6 @@ import { PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
-import { EventLog } from './sessions/eventLog.js'
 import { resolveTabWaits, SessionManager, type SessionManagerDeps, SETTING_MODEL } from './sessions/manager.js'
 import { readStartSettings, wireRuntimeSync } from './sessions/runtimeSync.js'
 import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
@@ -75,7 +74,7 @@ import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type 
 import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
-import { sessionGateActivities } from './temporal/session/gateActivities.js'
+import { gateDb, sessionGateActivities } from './temporal/session/gateActivities.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from './temporal/session/affinity.js'
 import { startHostWorkers } from './temporal/session/hostWorkers.js'
 import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
@@ -908,10 +907,7 @@ const temporalWorker =
           // AgentSession's gate (its writers and timers) and its turn end (unified runtime §5.1, flagged off until phase 6).
           // Its events through this replica's event log, so they wake its followers at once and
           // go on the bus under its id (#3365); with no session manager, a log that only publishes.
-          ...sessionGateActivities({
-            sql: temporal.sql,
-            events: sessions?.events ?? new EventLog(temporal.sql, sessionEvents ? { onAppend: sessionEvents.onAppend } : {}),
-          }),
+          ...sessionGateActivities(gateDb(temporal.sql, sessions?.events, sessionEvents?.onAppend)),
           ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),
           ...(sessionAcquire ?? {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
