@@ -29,7 +29,7 @@ import {
   type RiskTier,
   type TierResolver,
 } from './permissions.js'
-import { confineGuard } from './confine.js'
+import { CONFINED_TOOLS, confineGuard } from './confine.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
 import { webFetchEgressHook } from './webFetchEgress.js'
 import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, type QuestionGate, questionServer } from './questions.js'
@@ -445,7 +445,8 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   }
   const browser = run.browser
   // The native file tools' paths first: a call outside the session directory is refused whatever else says.
-  const confine = run.nativeTools?.length && run.cwd !== undefined ? confineGuard(run.cwd) : undefined
+  // With no working directory the file tools are not offered (`builtins` below), and refused if called.
+  const confine = run.nativeTools?.length ? confineGuard(run.cwd) : undefined
   const guard: InputGuard | undefined =
     confine || browser
       ? async (name, input) => (await confine?.(name, input)) ?? (browser ? browser.check(name, input) : undefined)
@@ -524,7 +525,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       ...(loadsPlugins(run) ? OWN_PLUGIN_TOOLS : []),
       ...(questions ? [ASK_USER_QUESTION] : []),
       ...(run.allowedPluginPaths?.length ? (run.builtinTools ?? []) : []),
-      ...(run.nativeTools ?? []).map((t) => t.name),
+      ...(run.nativeTools ?? []).map((t) => t.name).filter((name) => run.cwd !== undefined || !CONFINED_TOOLS.has(name)),
       ...(run.nestedTools ?? []),
     ]),
   ]

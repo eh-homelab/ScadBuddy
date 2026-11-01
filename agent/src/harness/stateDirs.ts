@@ -69,7 +69,16 @@ export async function linkTaskList(paths: HarnessPaths, sessionDir: string, sess
   if (st?.isSymbolicLink() && (await readlink(link)) === target) return
   if (st?.isDirectory()) {
     for (const name of await readdir(link)) {
-      if (!name.startsWith('.')) await copyFile(path.join(link, name), path.join(target, name), constants.COPYFILE_EXCL).catch(() => {})
+      if (name.startsWith('.')) continue
+      try {
+        await copyFile(path.join(link, name), path.join(target, name), constants.COPYFILE_EXCL)
+      } catch (err) {
+        // One already in the directory is the newer copy. Any other failure keeps the old
+        // list where it is, unlinked, rather than remove what was not moved.
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue
+        console.warn(`task list of session ${sessionId}: cannot move ${name} into its working directory (${(err as NodeJS.ErrnoException).code ?? String(err)}); left in ${link}`)
+        return
+      }
     }
   }
   if (st) await rm(link, { recursive: true, force: true })

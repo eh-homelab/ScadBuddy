@@ -942,10 +942,15 @@ session's Claude Code process offers its own built-ins, each an item of the acce
 | `Bash`, `PowerShell` | `off` |
 
 - They run in the session's working directory (§13), the process's cwd. The permission
-  seam refuses a file tool's path outside it: an absolute path elsewhere, `..`, or a link
-  whose target is outside
+  seam refuses a file tool's path outside it: an absolute path elsewhere, `..`, a link
+  whose target is outside, or a path, Glob pattern or Grep glob that starts with `~`
   ([`agent/src/harness/confine.ts`](../../agent/src/harness/confine.ts), an input guard in
-  both canUseTool and the PreToolUse hook). A link swapped in between the check and the
+  both canUseTool and the PreToolUse hook). Claude Code expands a leading `~` to HOME, the
+  state directory with its config and transcripts; Glob's and Grep's `path` reach the seam
+  unexpanded and the tool expands them after (measured on Claude Code 2.1.310,
+  `agent/test/nativeBuiltins.sdk.test.ts`; `$HOME` and `~user` were not expanded). A turn
+  with no working directory is offered none of the file tools, and the seam refuses them.
+  A link swapped in between the check and the
   tool's own open is still followed; only a process the session runs (a Monitor command, an
   allowed package's `Bash`) can make one.
 - `Bash` and `PowerShell` are `off` because Claude Code's sandbox cannot run in the worker

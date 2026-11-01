@@ -130,6 +130,36 @@ describe.skipIf(cliMissing !== undefined)("Claude Code's own built-ins in a sess
     expect(JSON.stringify(toolResults())).not.toContain('the key')
   }, 60_000)
 
+  // Measured on 2.1.310: Read and Write expand `~` before the seam, but Glob's and Grep's
+  // `path` reach it as `~` and the tool then searches HOME (the state dir); `$HOME`,
+  // `${HOME}`, `~user` and a `~` in a pattern are taken as names in the directory.
+  it('refuses a path that starts at a home directory', async () => {
+    const { paths, cwd } = await session()
+    await writeFile(path.join(paths.stateDir, 'marker'), 'HOME-MARKER')
+    steps = [
+      { toolUse: { name: 'Read', input: { file_path: '~/marker' } } },
+      { toolUse: { name: 'Glob', input: { pattern: 'marker', path: '~' } } },
+      // Read takes `~root/x` as a name in the directory and stops at "File does not exist"
+      // before the seam; Glob's `path` reaches it.
+      { toolUse: { name: 'Glob', input: { pattern: '*', path: '~root' } } },
+      { toolUse: { name: 'Grep', input: { pattern: 'MARKER', path: '~' } } },
+      { toolUse: { name: 'Grep', input: { pattern: 'MARKER', path: '~/marker' } } },
+      { toolUse: { name: 'Write', input: { file_path: '~/written', content: 'w' } } },
+    ]
+    const { decisions } = await turn({ paths, cwd })
+    expect(decisions.map(([n, d]) => `${n}:${d.decision}`)).toEqual(['Read:deny', 'Glob:deny', 'Glob:deny', 'Grep:deny', 'Grep:deny', 'Write:deny'])
+    expect(toolResults().map((b) => JSON.stringify(b.content)).filter((t) => t.includes(paths.stateDir) && !t.includes('reaches only'))).toEqual([])
+    expect(existsSync(path.join(paths.stateDir, 'written'))).toBe(false)
+  }, 60_000)
+
+  it('offers no file tool to a turn with no working directory', async () => {
+    const { paths } = await session()
+    steps = []
+    const { offered } = await turn({ paths, cwd: undefined as unknown as string })
+    expect(offered).toEqual(expect.arrayContaining(['TaskCreate', 'TaskList']))
+    for (const name of ['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep']) expect(offered).not.toContain(name)
+  }, 60_000)
+
   it('parks Bash as outward when a package switches it on', async () => {
     const { paths, cwd } = await session()
     const asked: ApprovalRequest[] = []

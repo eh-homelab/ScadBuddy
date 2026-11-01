@@ -898,7 +898,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     (`src/access/nativeBuiltins.ts`; `resolver.ts` `native`, `live.ts`). Their paths are
     confined to the session's working directory by the seam (`src/harness/confine.ts`, an
     `InputGuard` in both canUseTool and the PreToolUse hook: `..`, absolute paths and links
-    out are refused). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
+    out are refused, and so is any path, Glob pattern or Grep glob starting with `~`, which
+    Claude Code expands to HOME after the seam for Glob and Grep, measured on 2.1.310; with
+    no working directory the file tools are not offered). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
     worker pod (no bwrap, and `unshare --mount` is refused under AppArmor; measured
     2026-11-01), so a sandbox pod (#779) comes first. An allowed package's `builtinTools`
     only switch an `off` one on, at its package tier (`outward` by default); they no longer
