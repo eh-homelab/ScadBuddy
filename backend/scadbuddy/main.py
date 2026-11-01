@@ -287,16 +287,20 @@ def sweep_assets(state: AppState, stop: threading.Event | None = None) -> list[s
     if stopped(stop):
         return []
     jobs = state.render.store.list_jobs()
-    params = [job.params for job in jobs] + state.presets.saved_params()
+    # Whole inputs, not only their `params`: a template UI's own state can name an
+    # upload too (#725). A job's `params` beside them, for a row whose inputs are `{}`.
+    records: list[Mapping[str, Any]] = [job.inputs for job in jobs]
+    records += [job.params for job in jobs]
+    records += state.presets.saved_inputs()
     try:
         # Every order item's inputs (#4249, orders spec §3.3). Fails closed: without
         # them the sweep would take an ordered upload, so a store that cannot answer
         # (or no orders component at all) skips this pass, as `stopped` does.
-        item_inputs = list(state.components.get(ORDERS).store.item_inputs())
+        records += state.components.get(ORDERS).store.item_inputs()
     except Exception:
         logger.exception("skipping the asset sweep: the orders' inputs could not be read")
         return []
-    referenced = referenced_asset_ids(state.paths, params, item_inputs)
+    referenced = referenced_asset_ids(state.paths, records)
     if stopped(stop):
         return []
     removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace, stop=stop)
