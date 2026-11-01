@@ -54,6 +54,7 @@ describe('order tools (#4249)', () => {
       'order_item_quote',
       'order_item_accept_quote',
       'order_accept',
+      'order_item_print',
       'order_item_fulfil',
       'order_item_unfulfil',
       'order_ship',
@@ -74,6 +75,7 @@ describe('order tools (#4249)', () => {
       order_item_quote: 'write',
       order_item_accept_quote: 'outward',
       order_accept: 'outward',
+      order_item_print: 'outward',
       order_item_fulfil: 'outward',
       order_item_unfulfil: 'outward',
       order_ship: 'outward',
@@ -422,6 +424,36 @@ describe('pricing tools (#4250)', () => {
       { ...ctx(), commandFollowMs: 0 },
     )
     expect(firstText(answer)).toMatchObject({ status: 'running', operation_id: OPERATION })
+  })
+
+  it("prints an item (#4719): the dialog's choices with a key, followed to the attempt", async () => {
+    const keys: (string | null)[] = []
+    let body: unknown
+    const ATTEMPT = { id: 'f1', attempt: 1, outcome: 'unknown', quantity: 0, copies: 2, print_run_id: 'r1' }
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/print`, async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        body = await request.json()
+        return HttpResponse.json({ id: OPERATION, status: 'running' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/${OPERATION}`, () =>
+        HttpResponse.json({ id: OPERATION, status: 'succeeded', result: ATTEMPT }),
+      ),
+    )
+    const { filaments: _priced, ...dialog } = SLICE
+    const answer = await tool('order_item_print').execute({ order_id: ORDER, item_id: ITEM, ...dialog }, ctx())
+    expect(firstText(answer)).toEqual(ATTEMPT)
+    expect(keys).toHaveLength(1)
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+    // Copies and plates are the item's: the tool sends none.
+    expect(body).toEqual({
+      ...dialog,
+      filament_plan: { ...dialog.filament_plan, force_colour_match: false },
+      choices: { nozzles: [{ size: '0.4', flow: 'standard' }] },
+    })
+    expect(tool('order_item_print').summarize?.({ order_id: ORDER, item_id: ITEM, ...dialog } as never)).toContain(
+      'on Bambuddy printer 1',
+    )
   })
 
   it('records a typed price in manual mode, and takes exactly one mode', async () => {

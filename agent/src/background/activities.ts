@@ -12,7 +12,8 @@ import { redact } from '../secrets.js'
 import { SessionError, type SessionManager } from '../sessions/manager.js'
 import { endNotice, eventNotice, type MonitorEnd, runCommand, runSocket, socketAddresses } from './monitor.js'
 import { nextFire } from './schedule.js'
-import { backgroundWorkflowId } from './service.js'
+import { backgroundWorkflowId, isScheduled } from './service.js'
+import { scheduleEnd, scheduleTask, unscheduleTask } from './temporal.js'
 import type { BackgroundTask, BackgroundTaskStore } from './store.js'
 import type { WorkflowAgents } from './workflowAgents.js'
 import { readScript, runScript, type ScriptHost } from './workflowRunner.js'
@@ -34,6 +35,8 @@ export const BG_MONITOR_END = 'bg_monitor_end'
 export const BG_DELIVER = 'bg_deliver'
 export const WF_RUN = 'wf_run'
 export const WF_END = 'wf_end'
+export const BG_SCHEDULE = 'bg_schedule'
+export const BG_UNSCHEDULE = 'bg_unschedule'
 /** Signalled by a monitor's source when it recorded an event (temporal/backgroundTask.ts). */
 export const BG_EVENTS_SIGNAL = 'bg_events'
 
@@ -441,6 +444,28 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
         clearTimeout(expiry)
         ctx.cancellationSignal.removeEventListener('abort', onCancel)
       }
+    },
+
+    /**
+     * Makes an active recurring cron job a Schedule on this workflow's queue (plan 2026-10-13
+     * Step 9.8); false for any other task, whose workflow keeps firing it, and for a job with
+     * no occurrence left before its expiry, which that workflow's bg_next ends.
+     */
+    async [BG_SCHEDULE](input: { taskId: string }): Promise<boolean> {
+      const t = await deps.store.get(input.taskId)
+      if (!t || t.state !== 'active' || !isScheduled(t) || scheduleEnd(t, now()) !== undefined) return false
+      const ctx = Context.current()
+      await scheduleTask(ctx.client, t, ctx.info.taskQueue)
+      return true
+    },
+
+    /**
+     * Deletes an ended cron job's Schedule, so it starts no more fires. By the ids in the
+     * fire's workflow id, not the row: a Schedule made just before its session was forgotten
+     * has no row left, and is deleted all the same.
+     */
+    async [BG_UNSCHEDULE](input: { taskId: string; sessionId: string }): Promise<void> {
+      await unscheduleTask(Context.current().client, { id: input.taskId, sessionId: input.sessionId })
     },
 
     /** Records a Workflow's end as Claude Code's notice, for bg_deliver to send. */

@@ -92,18 +92,23 @@ describe('TemporalTabRelay', () => {
     expect(await relay.forward('tab-1', { op: 'status' }, options())).toBeUndefined()
   })
 
-  it('refuses a call with no sealed Temporal client, and reads no owner row (#4868): it fails closed', async () => {
+  it('with no sealed Temporal client, a tab on another replica is refused (fail closed) and a status read is "not connected"', async () => {
     const owners = memoryOwners()
     owners.rows.set('tab-1', 'agent-tools.b')
-    const ownerOf = vi.spyOn(owners, 'ownerOf')
     const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', log: () => {} })
     expect(await relay.forward('tab-1', call, options())).toMatchObject({
       op: 'call',
       outcome: { ok: false, error: { code: 'no_browser', message: expect.stringMatching(/SCADBUDDY_SECRET_KEY_FILE/) } },
     })
-    // A status read answers "not connected".
     expect(await relay.forward('tab-1', { op: 'status' }, options())).toBeUndefined()
-    expect(ownerOf).not.toHaveBeenCalled()
+  })
+
+  it('with no sealed Temporal client, a tab no replica holds (or this one holds) is the plain "not connected"', async () => {
+    const owners = memoryOwners()
+    owners.rows.set('tab-here', 'agent-tools.a')
+    const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', log: () => {} })
+    expect(await relay.forward('tab-none', call, options())).toBeUndefined()
+    expect(await relay.forward('tab-here', call, options())).toBeUndefined()
   })
 
   it("answers no_answer, and logs, when the owner's row cannot be read: the tool never throws", async () => {

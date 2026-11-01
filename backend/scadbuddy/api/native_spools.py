@@ -1,20 +1,15 @@
 """ScadBuddy's own spool inventory (#4643, tier B of #3818): the records of the native
 spool provider (`spools/native.py`, `spools/spool_providers.py`), plain reads and writes.
 
-Every write refreshes the native provider's cached records at once
-(`SpoolStore.replace_records`, as the refresh does), so the print dialog's overlay shows
-the edit without waiting for the ``spool-providers`` Schedule. It does so even when the
-shelf is now empty, which the Schedule skips (`NativeProvider.configured`), so the last
-spool deleted or archived leaves the overlay too. A refresh that fails is recorded as
-the provider's, as the Schedule's would be, and the write stands. Nothing here reaches
-Bambuddy.
+Every write re-caches the native provider's records at once (`spool_providers.recache`),
+so the print dialog's overlay shows the edit without waiting for the ``spool-providers``
+Schedule, and the last spool deleted or archived leaves the overlay too. Nothing here
+reaches Bambuddy.
 """
 
 from __future__ import annotations
 
 import asyncio
-import logging
-from datetime import UTC, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Response, status
@@ -27,9 +22,7 @@ from scadbuddy.spools.native import (
     NativeSpoolExistsError,
     NativeSpoolPatch,
 )
-from scadbuddy.spools.spool_providers import NAME, native_provider
-
-logger = logging.getLogger(__name__)
+from scadbuddy.spools.spool_providers import native_provider, recache
 
 router = APIRouter(prefix="/native-spools", tags=["spools"])
 
@@ -43,16 +36,7 @@ def _taken() -> ApiError:
 
 
 async def _refreshed(spools: Spools) -> None:
-    provider = native_provider(spools)
-    try:
-        records = await provider.records()
-        await spools.store.replace_records(NAME, records, datetime.now(UTC))
-    except Exception as error:
-        failure = type(error).__name__
-        logger.warning(
-            "could not refresh ScadBuddy's own spools", extra={"provider": NAME, "error": failure}
-        )
-        await spools.store.failed(NAME, datetime.now(UTC), failure)
+    await recache(spools)
 
 
 @router.get(

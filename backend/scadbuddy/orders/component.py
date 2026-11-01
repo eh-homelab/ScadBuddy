@@ -5,7 +5,8 @@ does, since `Components.build_all` runs before the lifespan opens anything. The 
 uploads reads every item's inputs through `store` (``main.sweep_assets``); the routes
 reach `store` and `lifecycle` (every transition, publishing on the core's bus) through
 `OrdersDep`. ``refs`` holds a slice quote's sliced files (#4250), which the lifecycle
-releases as §3.4 says. ``integrations`` is the Bambuddy seam (#4253, §8): chosen for
+releases as §3.4 says. Running, it follows every print an item's attempt started
+(``printing.py`` ``listen_for_prints``, #4719). ``integrations`` is the Bambuddy seam (#4253, §8): chosen for
 the running ``bambuddy_url``, and chosen again when that changes, which ``api/runtime.py``
 applies on every ``settings.changed``, so no restart is needed to light it up.
 """
@@ -27,6 +28,7 @@ from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.orders.integrations import OrderIntegrations, choose
 from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.pricebook import PriceBookReader
+from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 
@@ -103,9 +105,12 @@ def _build(core: Core, components: Components) -> OrdersComponent:
 
 @asynccontextmanager
 async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
+    # The print path's follow (#4719): an item follows the print its attempt started.
+    remove = listen_for_prints(orders.core.events, orders.lifecycle)
     try:
         yield
     finally:
+        await remove()
         await asyncio.to_thread(orders.close)
 
 

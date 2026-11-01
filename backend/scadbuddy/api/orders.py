@@ -3,8 +3,9 @@ Rulings 1-3, 8-12): orders, their line items, manual quotes, fulfilment attempts
 shipments, payments and the audit line; the price book, the slice quote and the rough
 estimate (#4250, §5).
 
-Plain reads and writes, but for the slice quote, which is the ``order_item_quote``
-operation (``orders/operations.py``) through ``run_operation``. Every write goes through
+Plain reads and writes, but for the slice quote and an item's print, the
+``order_item_quote`` and ``order_item_print`` operations (``orders/operations.py``)
+through ``run_operation``. Every write goes through
 the lifecycle (``orders/lifecycle.py``), which locks the order, derives its status and
 publishes ``order.changed`` / ``order_item.changed`` after commit; a refusal arrives as a
 `LifecycleError` and leaves as a 409 problem typed
@@ -46,6 +47,7 @@ from scadbuddy.api.operations import (
     run_operation,
 )
 from scadbuddy.api.runtime import apply_runtime
+from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import SettingsPatch
@@ -84,8 +86,9 @@ from scadbuddy.orders.models import (
     Shipment,
     SpoolImport,
 )
-from scadbuddy.orders.operations import ORDER_ITEM_QUOTE
+from scadbuddy.orders.operations import ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
 from scadbuddy.orders.pricing import estimate_grams, to_minor
+from scadbuddy.orders.printing import print_request_id
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
@@ -1034,6 +1037,58 @@ async def accept_quote(order_id: str, item_id: str, quote_id: str, orders: Order
     _path(order_id, item_id, quote_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.accept_quote(order_id, item_id, quote_id, by))
+
+
+# -- printing an item (§5.4) ------------------------------------------------------------------
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/print",
+    response_model=Fulfilment,
+    summary="Print an item from its accepted quote",
+    responses=OPERATION_RESPONSES,
+)
+async def print_item(
+    order_id: str,
+    item_id: str,
+    body: PrintRunRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Fulfilment | JSONResponse:
+    """The ``order_item_print`` operation (#4719, §5.4): a print run of the item's output
+    with the print dialog's spools and choices in the body, started as
+    ``POST /print/outputs/{id}/run`` starts one, for every plate and the quantity still
+    to print (the body's ``copies``, plates and ``request_id`` are the item's, not the
+    caller's). Answers with the attempt it recorded, the item `queued`; the item then
+    follows the run (`printing`, `printed` or `failed`), and a print whose end could not
+    be read is settled by ``PATCH``ing the attempt. Refused before anything starts: 404
+    for an unknown order or item; 409 ``order_not_accepted``, ``order_on_hold``,
+    ``order_closed``/``order_cancelled``, ``item_custom``, ``item_not_open``,
+    ``item_not_approved`` (one printing already), ``item_made`` (its attempts made its
+    quantity: accept them), ``print_request_conflict`` (the key's print is another
+    item's), and ``requote_needed`` (no accepted quote, its output gone,
+    or a slice quote whose sliced file is gone or no longer the file it priced); and the
+    print run's own refusals, as the print route answers them."""
+    _path(order_id, item_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[ORDER_ITEM_PRINT],
+        subject=subject_of(item_id),
+        request={
+            "order_id": order_id,
+            "item_id": item_id,
+            "request": body.model_dump(mode="json", exclude_unset=True),
+            # The print run's key: a re-send (the same Idempotency-Key) repeats its run.
+            # Without a key `run_operation` answers 428 before this is read.
+            "request_id": print_request_id(item_id, idempotency_key or ""),
+            # Ruling 12: who it is for comes from the author header, never the body.
+            "by": current_actor().model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Fulfilment)
 
 
 # -- fulfilment attempts (§6.1 by hand) ------------------------------------------------------
