@@ -447,6 +447,41 @@ describe('assistant panel', () => {
     expect(document.title).toBe('ScadBuddy')
   })
 
+  it('raises an OS notification for an attention request opened while hidden; a click opens the panel (#815)', async () => {
+    const made: { title: string; onclick: (() => void) | null; close: () => void }[] = []
+    vi.stubGlobal(
+      'Notification',
+      class {
+        static permission = 'granted'
+        onclick: (() => void) | null = null
+        readonly title: string
+        constructor(title: string) {
+          this.title = title
+          made.push(this)
+        }
+        close() {}
+      },
+    )
+    const hidden = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    const focus = vi.spyOn(window, 'focus').mockImplementation(() => {})
+    try {
+      renderShell()
+      await screen.findByRole('button', { name: 'Assistant' })
+      setPendingAnswers(0, 1)
+      act(() => {
+        window.dispatchEvent(new Event('focus'))
+      })
+      await waitFor(() => expect(made).toHaveLength(1))
+      expect(made[0]!.title).toBe('The assistant lost its ScadBuddy tab')
+      act(() => made[0]!.onclick?.())
+      expect(await screen.findByRole('complementary', { name: 'Assistant' })).toBeInTheDocument()
+    } finally {
+      vi.unstubAllGlobals()
+      hidden.mockRestore()
+      focus.mockRestore()
+    }
+  })
+
   it('shows the badge embedded in Bambuddy, but leaves the frame\'s unseen title alone (#815)', async () => {
     setPendingApprovals(1)
     document.title = 'ScadBuddy'

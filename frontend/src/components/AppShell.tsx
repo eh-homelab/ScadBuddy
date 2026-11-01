@@ -30,8 +30,10 @@ import {
   WORKING_LABEL,
   RunsWaitingContext,
   ApprovalsWaitingContext,
+  type AttentionNotice,
   type PendingApproval,
 } from '../agent/attention'
+import { useAttentionNotifications } from '../agent/attentionNotifications'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
   ASSISTANT_SHORTCUT_ARIA,
@@ -99,6 +101,7 @@ const AgentLink = lazy(async () => ({ default: (await import('./AgentLink')).Age
 const PANEL_ID = 'assistant-panel'
 /** One empty list, so the approvals' context and toasts do not change while none waits. */
 const NO_APPROVALS: readonly PendingApproval[] = []
+const NO_NOTICES: readonly AttentionNotice[] = []
 
 interface Props {
   embedded?: boolean
@@ -212,6 +215,17 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     setFocusKey((k) => k + 1)
   }, [])
   const openHandled = useCallback(() => setOpenRequest(null), [])
+  // #815 — an OS notification for an attention request that opens while this page is hidden;
+  // a click opens its session. Not when embedded: a cross-origin frame cannot ask for the permission.
+  const notices = attention.counts === null ? null : (attention.counts.notices ?? NO_NOTICES)
+  const openNotice = useCallback(
+    (sessionId: string | null) => {
+      if (sessionId) setOpenRequest({ sessionId })
+      openPanel()
+    },
+    [openPanel],
+  )
+  useAttentionNotifications(notices, shown && !embedded, openNotice)
   const opener = useMemo<AssistantOpener | null>(
     () =>
       shown

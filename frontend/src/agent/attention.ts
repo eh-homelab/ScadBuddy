@@ -12,9 +12,11 @@ import { isDoneSummary, PendingInputSchema } from './chat/protocol'
  * questions, and its attention requests (`request_user_attention`). So the badge
  * means "things waiting for you", not only approvals.
  *
- * This is the in-app channel only. OS notifications and the tab-disconnected trigger
- * are #815's later parts. Durable sessions' entries are in the same read; one past its
- * timer whose worker has not resolved it yet is `expiring` and not counted.
+ * The in-app channel; the same read's attention requests (a `tab_disconnected` wait
+ * among them) are its `notices`, which `attentionNotifications.ts` raises as OS
+ * notifications while the page is hidden. Durable sessions' entries are in the same
+ * read; one past its timer whose worker has not resolved it yet is `expiring` and not
+ * counted.
  */
 
 export const ATTENTION_PATH = '/api/v1/ai/pending-input'
@@ -40,6 +42,18 @@ export interface PendingCounts {
   runs?: RunWaiting[]
   /** #4813 — the approvals in no session and no flow run, which no feed shows (`ApprovalsWaitingContext`). */
   unattached?: PendingApproval[]
+  /** #815 — the attention requests waiting on the user, by request id: what an OS notification announces. */
+  notices?: AttentionNotice[]
+}
+
+/** #815 — an attention request waiting on the user (a `tab_disconnected` wait among them), as a notification shows it. */
+export interface AttentionNotice {
+  /** The pending-input request id, `question:<id>` or a durable one. */
+  id: string
+  /** The session it is in, which a click on the notification opens; null when the agent does not say. */
+  sessionId: string | null
+  reason: string
+  message: string
 }
 
 /** What waits on the user: everything but the done summaries. */
@@ -160,6 +174,18 @@ function unattached(entries: readonly PendingEntry[]): PendingApproval[] {
   return approvals
 }
 
+/** The attention requests that wait on the user, as `read` counts them; never a done summary. */
+function notices(entries: readonly PendingEntry[]): AttentionNotice[] {
+  const out: AttentionNotice[] = []
+  for (const entry of entries) {
+    const a = entry.attention
+    if (entry.kind !== 'answer' || !a || !entry.id || entry.expiring || entry.run?.hop === 'parent') continue
+    if (isDoneSummary(a.reason, a.on_timeout !== null)) continue
+    out.push({ id: entry.id, sessionId: typeof entry.session_id === 'string' ? entry.session_id : null, reason: a.reason, message: entry.prompt ?? '' })
+  }
+  return out
+}
+
 async function read(signal: AbortSignal): Promise<PendingCounts | null> {
   try {
     const response = await fetch(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
@@ -183,6 +209,8 @@ async function read(signal: AbortSignal): Promise<PendingCounts | null> {
     if (runs.length > 0) counts.runs = runs
     const loose = unattached(parsed.data.entries)
     if (loose.length > 0) counts.unattached = loose
+    const waiting = notices(parsed.data.entries)
+    if (waiting.length > 0) counts.notices = waiting
     return counts
   } catch {
     return null
