@@ -736,7 +736,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   URL, for parse-time tags only (a lazy chunk's CSS is `staleChunks.ts`'s, #4874). Editing
   that script changes the hash; `src/entryReload.test.ts` names the new one.
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
-  as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
+  as the Dockerfile's `agent` target and run as a sidecar container of the API pod (role
+  `api`) and as the `scadbuddy-agent-worker` Deployment (role `worker`, clusters#3014). `src/config.ts`
   reads only infrastructure variables (`ENV_VARS`): `SCADBUDDY_DATABASE_URL`,
   `SCADBUDDY_BACKEND_URL`, `SCADBUDDY_SECRET_KEY_FILE`,
   `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` (rotation), `SCADBUDDY_PUBLIC_URL` (the same
@@ -750,6 +751,28 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `AgentSession` turn; `worker` runs the turn workers and serves only
   `src/runtime/health.ts` (`/healthz`, `/readyz`). `test/agentRole.temporal.test.ts` runs
   one of each on one dev server; a change to what a turn reaches in-process must keep it.
+  One runtime (#2726, spec 2026-10-13, plan `docs/superpowers/plans/2026-10-13-unified-agent-runtime.md`):
+  every session is an `AgentSession` workflow, `session-<id>` on `agent-sessions`
+  (`src/temporal/session/workflow.ts`, deployment `scadbuddy-agent`, AUTO_UPGRADE: a change goes
+  behind `patched()`, and `test/fixtures/agent_session_histories/` replays). Each turn is its
+  `session_turn` activity on the session host queue `agent-sessions.<hostname>` that
+  `acquire_worker` reserved a warm place on (`affinity.ts`, §5.2), run by
+  `sessions/turnHost.ts` over `turnCore.ts` and `turnRunner.ts` (the turn's assembly) on the
+  replica's warm Claude Code process (`sessions/warm.ts` `WarmSessions`, sized by the
+  `session-runtime` settings, `runtimeSettings.ts`; a process is recycled when its fingerprint,
+  transcript tail or budget changes). A park holds the process for `park_hold_seconds`, then
+  closes it and the activity returns `released`; once every held call is decided, the turn is
+  placed again with a `parked` continuation that runs each approved call once (§5.4). A turn
+  lost with its pod is placed again with a `restarted` continuation, which resumes with
+  `RESTARTED_PROMPT` once its message is in the transcript (§5.5). Every tool call
+  of a turn on Temporal is a `ToolCall` workflow of its own, `session-<id>-call-<tool_use_id>`
+  (`temporal/toolCall.ts`, `tools/activityProjection.ts`, plan Steps 9.2 and 9.3; the
+  `tools_as_activities` switch is gone, Step 9.9); without Temporal the calls run in the turn's
+  process. A session's working directory is `<SCADBUDDY_SESSION_DIR>/<id>/` (see the workspace
+  below). Spans: `agent.turn` (with `scadbuddy.continuation` on a continued placement),
+  `agent.turn.spawn` (`warm.outcome`), `agent.turn.release` and each ToolCall's
+  `agent.tool/<name>` with `scadbuddy.task_queue`, which `deploy/grafana/scadbuddy-agent.json`
+  charts.
   `src/app.ts` is the Hono server (`/healthz` and `/mcp`). Every other route group is a
   `src/routes/<name>.ts` that exports `route` (`routes/module.ts`) and is found without
   an edit to `app.ts`: among them `credentials.ts` (`/api/v1/ai/credentials`),
@@ -763,10 +786,15 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
   those equal). `src/harness/options.ts` builds every query's SDK options
   (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
-  top of it (credential via the per-query `env` only, `maxTurns`, `maxBudgetUsd`,
+  top of it (never the credential in Claude Code's env: each run leases a token on the
+  loopback credential gateway, `src/gateway/server.ts` and `tokens.ts`, plan Step 9.4, which
+  adds the credential and meters the spend, so the env carries only `ANTHROPIC_BASE_URL` and
+  that token; `maxTurns`, `maxBudgetUsd`,
   abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
-  `PreToolUse` hook; outward calls in a session PARK in `canUseTool` until a human
-  decides, via `src/approvals/service.ts` and the `ai_approvals` table, #258; outside
+  `PreToolUse` hook; outward calls in a session PARK in `canUseTool` on the session
+  workflow's gate until a human decides (`sessions/turnHost.ts`, the Update `open_input`;
+  its `ai_pending_input` row is the request's record, plan Step 9.7), #258; `/mcp`'s outward
+  calls are `src/approvals/service.ts`'s `ai_approvals` rows, run by `confirm_action`; outside
   a session they are denied as "needs approval"; the built-in `AskUserQuestion`, given
   only to sessions the browser user owns, parks there too until the user answers in the
   panel, via `src/harness/questions.ts` and the session workflow's gate (an `ai_pending_input`
@@ -818,11 +846,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     session's owner with its turn's tiers; `mode` is not read, since every session is an
     AgentSession from plan Step 6.3), or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
     run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
-    approval; no browser tools)), a durable turn's other tools (#2320,
-    `turnTools.ts`, built by `turnServers.ts` as a classic turn builds them (its `builtins`
-    and `listing` paths served only the retired Python turn and go with `turnPackages.ts` in
-    plan Step 9.3): remote plugins
-    through the forwarder and `http_request`): `turn_tools` lists them per turn as
+    approval; no browser tools)), a turn's other tools (#2320, plan Step 9.3,
+    `turnTools.ts`, built by `turnServers.ts`: remote plugins
+    through the forwarder, packages' http MCP servers and `http_request`): `listTurnTools` lists them per turn as
     `<server>__<tool>`, `turn_tool_tier` tiers a call from its input before it may park,
     and each call is the worker's `default` activity `turn:<server>__<tool>`, which builds
     the servers again and checks tier, principal and approval as it runs (a `flow-<id>`
@@ -842,10 +868,15 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `src/gate/`: request ids (`ids.ts`: `approval:`, `question:`, `durable:<session>:<run>:<tool_use_id>`),
     the `respond` validator shared with agent-durable (`validate.ts`; `role.ts`;
     `test/fixtures/pending-input-vectors.json` pins the two languages together),
-    the classic entries (`classic.ts`), the durable projection read (`projection.ts`,
-    `ai_pending_input`), the Temporal client of a session's gate handlers (`durable.ts`
-    `DurableGate`) and the orphan sweep (`sweep.ts`). `routes/pendingInput.ts` serves
-    both reads and `respond`. `input.requested` / `input.resolved` are logged in both modes and never
+    the entry shapes and the projection read (`projection.ts`, `ai_pending_input`), the
+    record's writers (`store.ts`: `ai_pending_input.gate` is an entry's record and
+    `decideInput` decides it in one transaction, then the Signal `input_decided` wakes the
+    workflow, which also re-reads it through `gate.read_input`, plan Step 9.7), the Temporal
+    client of a session's gate handlers (`durable.ts` `DurableGate`), the `done` summaries and
+    attention limits (`questions.ts`, `doneSummary.ts`, `waiting.ts`; `gate/classic.ts` and
+    `questions/` were folded in, #5110) and the orphan sweep (`sweep.ts`). The workflow's half is
+    `temporal/session/gate.ts` (`SessionGate`) and `gateActivities.ts`. `routes/pendingInput.ts` serves
+    both reads and `respond`. `input.requested` / `input.resolved` are logged and never
     sent on the chat socket (`routes/chat.ts` `sentToPanel`).
   - Durable payloads (#1056 phase 5c, spec §6.5): `src/temporal/payloadCodec.ts` seals
     every payload of a `session-<uuid>` / `flow-<uuid>` workflow under that subject's
@@ -868,7 +899,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     with its session, copied by a fork; or `principal:<kind>:<id>` outside a session,
     swept 24 h after its last write) and a checked `path`; caps
     `workspace_file_max_bytes`/`workspace_max_bytes` and `WORKSPACE_MAX_FILES` (5,000). Reached as
-    `ToolServices.workspace` (so in-process, `/mcp` and the durable activities alike),
+    `ToolServices.workspace` (so in-process, `/mcp` and the tool activities alike),
     with `workspaceOf(ctx)`; the `workspace_*` tools are `src/tools/workspace.ts`, and
     `http_request`'s `save_to_workspace` gets the session's from `sessions/manager.ts`.
     Never a file on the pod; a session's working directory, `<SCADBUDDY_SESSION_DIR>/<id>/`
@@ -923,9 +954,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     re-fetched from the pin. Install stores the pin unapproved; approving needs the
     exact commit and hash. `vet.ts` adds rules on top of `harness/plugins.ts`. Tests
     use local git repos (`test/support/gitRepo.ts`). Their MCP servers' http ones go
-    through the forwarder (`plugins/packages/mcp.ts`); `temporal/turnPackages.ts` shares a
-    package under `<payload dir>/plugins/<content hash>/` for the retired Python turn
-    (Step 8.2 removes it).
+    through the forwarder (`plugins/packages/mcp.ts`), and on Temporal each call is a
+    `turn:<server>__<tool>` ToolCall.
   - Claude Code's own built-ins (plan 2026-10-13 Step 9.6): every session offers `Read`,
     `Glob`, `Grep` and the task list (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`) at
     `read`, and `Write`, `Edit` and `NotebookEdit` at `write`, native in its Claude Code
@@ -949,14 +979,17 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     The agent still provides `WebFetch` and `WebSearch` (egress-checked, decision Q2) and the
     background ones in place of Claude Code's (`src/builtins/server.ts`, in-process
     `builtin` server, `mcp__builtin__<Name>`). `CronCreate`, `CronDelete`,
-    `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own in both modes
-    (`src/background/`: `ai_background_tasks`, one `BackgroundTask` workflow per task on
-    `agent-tools` that sends the prompt when due and the session is idle; a Monitor's source
+    `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own
+    (`src/background/`: `ai_background_tasks`; a recurring cron is a Temporal Schedule
+    `bgtask-<session>-<id>` whose `BackgroundFire` sends the prompt when the session is idle
+    (`background/temporal.ts`, plan Step 9.8, its older jobs converted at start by
+    `convertCronTasks`), and a wakeup or a one-shot cron one `BackgroundTask` workflow on
+    `agent-tools`; a Monitor's source
     runs where the session's Bash runs, the replica's own queue, its events in
     `ai_background_events`; a Workflow's
     script runs in QuickJS (`workflowRunner.ts`, never Node's `vm`), each `agent()` a child chat
-    (`workflowAgents.ts`), its results journalled in `ai_workflow_calls`; a classic turn
-    gets them as the in-process `builtin` server in place of Claude Code's, which end
+    (`workflowAgents.ts`), its results journalled in `ai_workflow_calls`; every turn
+    gets them as the in-process `builtin` server in place of Claude Code's, which would end
     with its process; the panel's list and cancel are `routes/backgroundTasks.ts`).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway

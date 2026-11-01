@@ -29,8 +29,8 @@ import { AGENT_SESSIONS_SKIP, agentSessions, agentSessionsEnv } from './support/
 import { AuditLog } from '../src/audit/log.js'
 
 // A turn's ScadBuddy tool calls as activities (unified runtime plan 2026-10-13 Step 9.2, decision
-// Q1): with `tools_as_activities` on, each call of an AgentSession turn (the real SDK and its
-// bundled Claude Code, against the fake Anthropic endpoint) is a ToolCall workflow of its own,
+// Q1): each call of an AgentSession turn (the real SDK and its bundled Claude Code, against the
+// fake Anthropic endpoint) is a ToolCall workflow of its own,
 // `session-<uuid>-call-<tool_use_id>`, whose one activity `tool:<name>` runs on a worker that is
 // not the turn's: here a worker of this file's own, on a queue of its own.
 
@@ -178,7 +178,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
       sql: db.sql,
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-tool-calls-token-0123456789abcdef' }),
-      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === 'tools_as_activities' ? true : key === 'turn_max_seconds' ? TURN_MAX_SECONDS : undefined) as T) },
+      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === 'turn_max_seconds' ? TURN_MAX_SECONDS : undefined) as T) },
       ...harnessTools(services(), TOOLS),
       toolCalls: () => start,
       approvalPollMs: 50,

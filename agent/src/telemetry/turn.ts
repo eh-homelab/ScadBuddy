@@ -51,6 +51,8 @@ export const TURN_SPAN = 'agent.turn'
 export const RESUME_SPAN = 'agent.turn.resume'
 /** The warm cache's acquire for a turn (spec 2026-10-13 §5.3): `warm.outcome` is hit, miss or recycle, `warm.reason` why a recycle. */
 export const WARM_SPAN = 'agent.turn.spawn'
+/** A turn whose process closed on a long park or a shutdown (spec 2026-10-13 §5.4 "Release"): `scadbuddy.parked_calls` is how many it held. */
+export const RELEASE_SPAN = 'agent.turn.release'
 
 export function toolSpanName(tool: string): string {
   return `agent.tool/${tool}`
@@ -69,6 +71,8 @@ export type TurnTraceOptions = {
    * Required (#3244): a caller that left it out would put the session's total on the turn.
    */
   before: { costUsd: number; turns: number }
+  /** An AgentSession placement that continues its turn (spec 2026-10-13 §5.4, §5.5): `parked` or `restarted`, on the first segment. */
+  continuation?: string
 }
 
 type Segment = {
@@ -127,6 +131,7 @@ export class TurnTrace implements GateTrace {
     this.#tierOf = options.tierOf
     this.#before = options.before
     this.#segment = this.#open(TURN_SPAN, 0, options.parent, [])
+    if (options.continuation !== undefined) this.#segment.span.setAttribute('scadbuddy.continuation', options.continuation)
   }
 
   #ids(): Attributes {
@@ -143,6 +148,14 @@ export class TurnTrace implements GateTrace {
     segment.span.setAttributes({ ...attributes, 'scadbuddy.tool_calls': segment.tools })
     segment.span.end()
     segment.ended = true
+  }
+
+  /**
+   * One `agent.turn.release` span under the last segment: the turn let its process go on a long
+   * park or a shutdown, holding `parked` calls (sessions/turnHost.ts). After finish(), as the release is decided then.
+   */
+  released(parked: number): void {
+    tracer().startSpan(RELEASE_SPAN, { attributes: { ...this.#ids(), 'scadbuddy.parked_calls': parked } }, this.context()).end()
   }
 
   /** The open segment's context: what the turn's own work runs under. */

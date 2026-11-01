@@ -41,9 +41,9 @@ import {
 
 // The rest of a turn's tools as activities (#2320). A turn hands Claude Code more MCP
 // servers than ScadBuddy's own (sessions/turnRunner.ts): the remote plugins and the
-// packages' http servers through the loopback forwarder, and `http_request`. With
-// `tools_as_activities` on (plan 2026-10-13 Step 9.3), and for a flow run, they are
-// offered as tools whose calls are activities:
+// packages' http servers through the loopback forwarder, and `http_request`. For a session
+// turn on Temporal (plan 2026-10-13 Step 9.3), and for a flow run, they are offered as tools
+// whose calls are activities:
 //
 //   - `listTurnTools` lists them, in the turn's own process: each server's tools, named
 //     `<server>__<tool>` as Claude Code would name them after `mcp__`, and the queue a
@@ -507,7 +507,7 @@ function inputObject(input: unknown): Record<string, unknown> {
 
 /**
  * The turn's tools beside ScadBuddy's own (#2320): each server's, named `<server>__<tool>`, with
- * the queue a pinned server's calls run on. A session turn with `tools_as_activities` on lists
+ * the queue a pinned server's calls run on. A session turn on Temporal lists
  * them in its own process (sessions/turnRunner.ts, plan 2026-10-13 Step 9.3), so a pinned server
  * is pinned to the replica the turn runs on. With `only`, the servers of those names alone are
  * listed (no other is connected to).
@@ -639,9 +639,10 @@ export function turnToolActivity(deps: TurnToolsDeps): (input: unknown) => Promi
     const asCall = toolCallOf(context.info.workflowExecution?.workflowId)
     if (asCall) {
       try {
-        // Under the call's span in the turn's trace, as a ScadBuddy tool's ToolCall runs (toolActivities.ts).
+        // Under the call's span in the turn's trace, with the queue it ran on, as a ScadBuddy tool's ToolCall runs (toolActivities.ts).
         const traceparent = ((raw ?? {}) as Partial<ToolCallArgs>).traceparent
-        return await withSpan(`agent.tool/${name}`, { parent: contextFrom(traceparent, otelContext.active()), attributes: { 'scadbuddy.tool': name } }, () =>
+        const attributes = { 'scadbuddy.tool': name, 'scadbuddy.task_queue': context.info.taskQueue }
+        return await withSpan(`agent.tool/${name}`, { parent: contextFrom(traceparent, otelContext.active()), attributes }, () =>
           runTurnTool(deps, name, asCall.toolUseId, raw, asCall),
         )
       } catch (err) {

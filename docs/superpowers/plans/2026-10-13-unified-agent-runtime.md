@@ -1471,6 +1471,17 @@ The old Tasks 9.3 and 9.4.
 **Tests:** `lint-dashboard.sh`, `link-check` on the touched docs, and the agent suite.
 **Rollout:** docs. **Depends on:** Steps 9.2–9.8. **Closes:** none.
 
+**As built (#5177).** The dashboard's "Session runtime" row needed spans the code did not
+emit yet, so the PR adds them: `agent.turn.release` (`RELEASE_SPAN`, `TurnTrace.released`,
+from `sessions/turnHost.ts` when a turn is released), `scadbuddy.continuation` on a
+continued placement's `agent.turn`, and `scadbuddy.task_queue` on each ToolCall activity's
+`agent.tool/<name>`. The warm hit ratio is `rate() by (span.warm.outcome)` stacked to 100%,
+since a TraceQL target cannot divide and the lint admits no expression target. The flag was
+already on in prod (2026-11-01); its removal also takes away the off switch, and rolling
+back means reverting the PR (#5155 tracks the first real call through the path).
+`docs/ai/headless-browser.md` and the Settings → Assistant → Runtime help text named the
+flag or the old runtime too, and are updated with the listed docs.
+
 ---
 
 ## Phase 10: Drop retired columns and tables (PR 10, `chore(agent): drop the durable-era columns`)

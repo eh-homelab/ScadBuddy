@@ -497,6 +497,7 @@ export class TurnHost {
       turnId,
       principal,
       userText: input.message?.words ?? input.message?.text ?? text,
+      ...(input.continuation ? { continuation: input.continuation.kind } : {}),
       signal: controller.signal,
       interrupt: () => controller.abort(new Error('the turn was interrupted')),
       gates: (ctx) =>
@@ -629,6 +630,7 @@ export class TurnHost {
       if (released && (why === undefined || why === 'shutdown')) {
         for (const entry of entries) void this.#deps.core.warm.abandon(entry, RELEASED_TEXT, 'close')
         await this.#deps.core.warm.landed(id)
+        core.traced.released(parks.taken.length)
         return { status: 'released', hostQueue: this.#deps.hostQueue, parked: parks.taken }
       }
       if (why === 'shutdown') throw ApplicationFailure.retryable(CUT_TEXT.shutdown, SHUTTING_DOWN_FAILURE, { pushed: entries.length > 0 })

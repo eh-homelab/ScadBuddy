@@ -29,9 +29,8 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { browser, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, agentSessionsEnv } from './support/agentSessions.js'
 
-// A turn's plugin and http tools as activities (unified runtime plan 2026-10-13 Step 9.3): with
-// `tools_as_activities` on, an AgentSession turn (the real SDK and its bundled Claude Code against
-// the fake Anthropic endpoint) is given in-process proxies of its remote plugins in place of the
+// A turn's plugin and http tools as activities (unified runtime plan 2026-10-13 Step 9.3): an
+// AgentSession turn (the real SDK and its bundled Claude Code against the fake Anthropic endpoint) is given in-process proxies of its remote plugins in place of the
 // plugins themselves, and each call is a ToolCall whose activity `turn:<server>__<tool>` builds the
 // server again where it runs. A server that keeps a session (every remote plugin here, as
 // Playwright MCP's) is pinned to the turn's own replica's queue, so its state lasts the turn.
@@ -136,7 +135,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's plug
       sql: db.sql,
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-turn-tool-call-token-0123456789ab' }),
-      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === 'tools_as_activities' ? true : undefined) as T) },
+      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       ...harnessTools(services(), []),
       remotePlugins,
       packagePlugins,
