@@ -166,6 +166,7 @@ import type {
   SourceCheck,
   SourceFile,
   StoreUsage,
+  GitRemoteStatus,
   UpstreamMerge,
   UpstreamStatus,
   UrlImport,
@@ -1425,6 +1426,8 @@ export const api = {
   /** #296 — the upload store's size against its caps, for Settings. */
   getAssetUsage: () => request<AssetUsage>('/assets/usage'),
   getStoreUsage: () => request<StoreUsage>('/store/usage'),
+  /** #4974 — how far the off-box git remote is behind the model and flow history. */
+  getGitRemote: () => request<GitRemoteStatus>('/settings/git-remote'),
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,

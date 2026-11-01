@@ -550,6 +550,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `flows/history.py` is the Reset preview, not git). Both repositories are shared by
   every replica over NFS, so each writer holds a Postgres lock that carries the last HEAD
   (`library/repo_lock.py`: `models_repo_head`, and `flows_coordinator`'s `flows_repo_head`).
+  The off-box copy (#4974) is `git_remote/` (`push.py` `RemotePush`, `store.py`
+  `git_remote_pushes`): `GitRepo.after_commit` asks for a push on a thread once the write
+  lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
+  `GET /settings/git-remote` is the lag. `GitRepo.push` never forces, allows only the URL's
+  protocol and hands the token (`git_remote_token`, a sealed secret; a save needs the KEK)
+  to git through `CREDENTIAL_HELPER` from the child's env, never the argv.
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so

@@ -615,6 +615,11 @@ class SettingsPatch(BaseModel):
     #: Write-only, like the Bambuddy key; ``""`` clears it.
     google_fonts_api_key: str | None = None
     fonts_catalogue_ttl: float | None = None
+    #: The off-box copy of the history (#4974); the token is write-only, ``""`` clears
+    #: it, and saving one needs the KEK (`api/settings.py`).
+    git_remote_url: str | None = None
+    git_remote_username: str | None = Field(default=None, max_length=256)
+    git_remote_token: str | None = Field(default=None, max_length=4096)
     event_log_retention_seconds: float | None = None
     event_log_retention_rows: int | None = None
     flow_approval_timeout_seconds: int | None = None
