@@ -1705,7 +1705,7 @@ describe('PrintPicker · Printer', () => {
 
     expect(await optionDisabled(user, screen.getByLabelText('Printer'), /^Garage/)).toBe(true)
     await user.click(screen.getByLabelText('Printer'))
-    expect(await screen.findByRole('option', { name: /^Garage/ })).toHaveTextContent('not in Bambuddy')
+    expect(await screen.findByRole('option', { name: /^Garage/ })).toHaveTextContent('not printable over the LAN yet')
     // A row neither Bambuddy nor the LAN reaches is not a printer to offer (#4340 review M3).
     expect(screen.queryByRole('option', { name: /^Attic/ })).toBeNull()
   })
@@ -5204,7 +5204,35 @@ describe('PrintPicker · the hot path without Bambuddy', () => {
     expect(choices.urls.every((url) => !new URL(url).searchParams.has('printer'))).toBe(true)
     expect(checks.bodies.every((body) => body['printer'] !== lanOnly.id)).toBe(true)
     expect(screen.queryByText(/sends it to the printer over the LAN/)).not.toBeInTheDocument()
-    expect(await optionDisabled(user, printer, /not in Bambuddy, so not yet printable from here/)).toBe(true)
+    expect(await optionDisabled(user, printer, /not printable over the LAN yet/)).toBe(true)
+    // No reasons from the server: the dialog says none of its own.
+    expect(screen.queryByTestId('lan-blocked')).not.toBeInTheDocument()
+  })
+
+  it('says what the server says a LAN-only row lacks, each with a link to the setting', async () => {
+    setHotPath(true)
+    const lanOnly = { ...HOT_PRINTER, bambuddy_printer_id: null, bambuddy_active: false }
+    server.use(
+      http.get('/api/v1/printers', () => HttpResponse.json([lanOnly])),
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          lan_printers: [],
+          lan_blocked: [{ printer: lanOnly.id, reasons: ['slicer_backend', 'no_access_code'], seen_at: null }],
+        }),
+      ),
+    )
+    renderPicker()
+    await loaded()
+    const said = await screen.findByTestId('lan-blocked')
+    expect(said).toHaveTextContent(
+      `${lanOnly.name} is not in Bambuddy and cannot print over the LAN yet: the slicer backend is not native (Settings); it has no access code (Settings).`,
+    )
+    const links = within(said).getAllByRole('link', { name: 'Settings' })
+    expect(links.map((link) => link.getAttribute('href'))).toEqual([
+      '/settings/library#projects',
+      '/settings/printing#printers',
+    ])
   })
 
   it('keeps another printer chosen after it opened on the native one, while its read is out', async () => {

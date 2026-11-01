@@ -111,6 +111,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { cn } from '@/lib/utils'
 import { Spinner } from './ui/spinner'
 import { bambuddyBase, bambuddyLink, webUrls } from '../lib/bambuddyLinks'
+import { lanBlockReason } from '../lib/lanBlock'
+import { Link } from 'react-router'
 
 /**
  * The print dialog, spool-first (docs/superpowers/specs/2026-09-27-spool-first-print-design.md).
@@ -393,6 +395,15 @@ export function PrintPicker({
   const lanOnly = registryRows.filter((row) => row.lan_host != null && row.bambuddy_printer_id == null)
   /** #3818 — of those, the ones the server says a run reaches: choosable. */
   const lanChoosable = lanOnly.filter((row) => nativeRows.includes(row))
+  /**
+   * #3823 — the rest, each with the server's reasons a run does not reach it
+   * (`ChoicesView.lan_blocked`, `print_run.lan_block`): only rows it names, never a guess.
+   */
+  const lanBlocked = lanOnly.flatMap((row) => {
+    if (lanChoosable.includes(row)) return []
+    const block = choices?.lan_blocked?.find((entry) => entry.printer === row.id)
+    return block ? [{ row, block }] : []
+  })
   /**
    * #3818 Task 9 — the `printer_id` every run, check, background-slice, batch-step,
    * analysis (#4629), arrange and quote (#4551) body sends beside `printer`: none beside a
@@ -1605,13 +1616,36 @@ export function PrintPicker({
                             ) : (
                               <SelectItem key={row.id} value={`registry:${row.id}`} disabled>
                                 {row.name}
-                                {row.model ? ` (${row.model})` : ''}: not in Bambuddy, so not yet printable from here
+                                {row.model ? ` (${row.model})` : ''}: not printable over the LAN yet
                               </SelectItem>
                             ),
                           )}
                         </SelectContent>
                       </Select>
                     </div>
+                  )}
+                  {lanBlocked.length > 0 && (
+                    <ul className="grid gap-1 text-xs text-muted-foreground" data-testid="lan-blocked">
+                      {lanBlocked.map(({ row, block }) => (
+                        <li key={row.id}>
+                          {row.name} is not in Bambuddy and cannot print over the LAN yet:{' '}
+                          {block.reasons.map((reason, index) => {
+                            const said = lanBlockReason(reason, block.seen_at)
+                            return (
+                              <span key={reason}>
+                                {index > 0 && '; '}
+                                {said.text} (
+                                <Link to={said.href} className="underline">
+                                  Settings
+                                </Link>
+                                )
+                              </span>
+                            )
+                          })}
+                          .
+                        </li>
+                      ))}
+                    </ul>
                   )}
                   {printerId !== null && <PlateClearNotice printerId={printerId} />}
 

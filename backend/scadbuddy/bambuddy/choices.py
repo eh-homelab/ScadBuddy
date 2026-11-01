@@ -41,9 +41,11 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.print_run import (
     NATIVE_SLICER_UNAVAILABLE,
+    LanBlock,
     RunRoute,
     filament_options,
     lan_printers,
+    lan_reach,
     read_status,
 )
 from scadbuddy.bambuddy.print_source import OutputSource, PrintSource
@@ -135,6 +137,9 @@ class ChoicesView(BaseModel):
     #: (`print_run.lan_printers`): a print on one is filed in a native folder with no
     #: project. Empty until plan 3a Task 9, while every run goes through Bambuddy.
     lan_printers: list[str] = Field(default_factory=list)
+    #: #3823 — every other physical registry printer, with why a run on it is not native
+    #: (`print_run.lan_block`): the dialog says what a LAN-only one lacks, never guessing.
+    lan_blocked: list[LanBlock] = Field(default_factory=list)
 
 
 def filament_presets_by_size(catalogue: Catalogue) -> dict[str, list[FilamentPresetOption]]:
@@ -434,12 +439,23 @@ async def _last_bed_type(client: BambuddyClient, printer_id: int) -> str | None:
 async def with_lan_printers(
     view: ChoicesView, settings: StoredSettings, printers: Printers | None
 ) -> ChoicesView:
-    """``view`` with the registry printers a run would reach over the LAN (#3818)."""
-    if not native_backends(settings) or printers is None:
-        # No run is native on these backends (D2): the registry is not read.
+    """``view`` with the registry printers a run would reach over the LAN (#3818), and
+    why each other one is not reached (#3823). The registry is read on every backend:
+    on Bambuddy's no row is native, and the backends are among the reasons."""
+    if printers is None:
         return view
-    rows = await lan_printers(settings, printers.store, printers.reports)
-    return view.model_copy(update={"lan_printers": rows})
+    try:
+        rows, blocked = await lan_reach(settings, printers.store, printers.reports)
+    except Exception as unread:
+        if native_backends(settings):
+            raise
+        # On Bambuddy's backends no run needs the registry: the reasons only add to the
+        # view, as `offering_lan_printers`' offer does.
+        logger.warning(
+            "could not read the registry to say why", extra={"error": type(unread).__name__}
+        )
+        return view
+    return view.model_copy(update={"lan_printers": rows, "lan_blocked": blocked})
 
 
 @asynccontextmanager
