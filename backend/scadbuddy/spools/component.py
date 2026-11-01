@@ -9,7 +9,9 @@ from typing import Annotated
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
+from scadbuddy.printers.component import PRINTERS
 from scadbuddy.spools.providers import SpoolProvider, TraySource, discover_providers
+from scadbuddy.spools.seen import ReportTrays
 from scadbuddy.spools.store import SpoolStore
 
 
@@ -17,9 +19,9 @@ from scadbuddy.spools.store import SpoolStore
 class Spools:
     store: SpoolStore
     providers: list[SpoolProvider]
-    #: Every printer's trays from its latest report, for the refresh's ``seen`` half;
-    #: ``None`` until the printer registry's report store is on main (plan 2026-10-16
-    #: Task 6), and the refresh then reads providers only.
+    #: Every printer's trays from its latest report, for the refresh's ``seen`` half
+    #: (`spools/seen.py`, over the printer registry's report store); ``None`` in a
+    #: process that runs no refresh (the print worker), which reads providers only.
     trays: TraySource | None = None
 
 
@@ -30,6 +32,7 @@ def _build(core: Core, components: Components) -> Spools:
     return Spools(
         store=SpoolStore(core.projection.pool),
         providers=discover_providers(core, components),
+        trays=ReportTrays(components.get(PRINTERS)),
     )
 
 

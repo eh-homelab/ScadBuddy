@@ -12,21 +12,10 @@ from uuid import UUID
 
 from scadbuddy.bambuddy.models import PrinterStatus
 from scadbuddy.bambuddy.trays import seen_trays
-from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import PrinterRow
-from scadbuddy.printers.status import status_from_report
 from scadbuddy.spools.component import Spools
 from scadbuddy.spools.models import Overlay
-
-
-def report_status(
-    row: PrinterRow, report: tuple[dict[str, Any], datetime], *, now: datetime
-) -> PrinterStatus:
-    """``row``'s status from its stored report (`PrinterReportStore.get`)."""
-    data, seen_at = report
-    return status_from_report(
-        row, LanReport(serial=row.serial, received_at=seen_at, print=data), now=now
-    )
+from scadbuddy.spools.seen import report_status
 
 
 def located(spools: Spools, row: PrinterRow) -> dict[str, str]:
