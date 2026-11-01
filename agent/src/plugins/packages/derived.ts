@@ -18,9 +18,8 @@ import type { LoadedPackage } from './install.js'
 // overwrites the other's, in a folder named after the package, because Claude Code 2.1.310
 // names a root skill with no frontmatter `name` by its folder (`_7t`) and a plugin with no
 // manifest name by its folder too ("this plugin is named after its directory"; both read
-// with `strings -n 20` in SDK 0.3.310's bundled `claude`). The durable share keeps the same
-// layout (temporal/turnPackages.ts `sharePackage`), so both runtimes, and every access
-// variant, give such a skill one name: vet.ts `rootSkillName`.
+// with `strings -n 20` in SDK 0.3.310's bundled `claude`). So every access variant gives such
+// a skill one name: vet.ts `rootSkillName`.
 
 /**
  * What a derived copy leaves out, by name: skills (commands too) and subagents as
@@ -100,8 +99,7 @@ export function builtinAccessOf(name: string, loaded: readonly LoadedPackage[], 
 /**
  * The built-ins a turn offers none of (#4757): those whose access across the allowed
  * packages naming them (`builtinAccessOf`, an unset package counting `outward`) is `off`. One
- * set for the turn: a classic turn leaves them out of its `builtinTools`, a durable one out
- * of every package it shares (temporal/turnPackages.ts `sharePackage`).
+ * set for the turn, which leaves them out of its `builtinTools`.
  */
 export function builtinsOffOf(loaded: readonly LoadedPackage[], access: ReadonlyMap<string, PackageAccess>): Set<string> {
   const named = new Set(loaded.filter((p) => p.allowed).flatMap((p) => p.builtinTools))
@@ -130,7 +128,7 @@ export function declaresRemoteServers(dir: string): boolean {
   return declaredConfigs(dir).mcp.some(({ map }) => serverEntries(map).some(([, c]) => isRecord(c) && isRemoteEntry(c)))
 }
 
-/** Marks a package copy as just used: its folder's mtime is what turnPackages.ts `sweepPackageCopies` reads. */
+/** Marks a package copy as just used: its folder's mtime is what packageServers.ts `sweepPackageCopies` reads. */
 export async function touch(dir: string): Promise<void> {
   const now = new Date()
   await utimes(dir, now, now).catch(() => {})
@@ -308,7 +306,7 @@ export function copyPath(root: string, hash: string, name: string): string {
  * `target` sees a whole copy: one there that hashes to `want` (another turn's, perhaps in
  * use) is kept as it is and `tmp` is left for the caller to remove; one that does not is
  * moved aside whole before `tmp` is renamed in. Nothing is removed in place. Its folder
- * (`<hex>`) is touched first: its mtime is what turnPackages.ts `sweepPackageCopies` keeps
+ * (`<hex>`) is touched first: its mtime is what packageServers.ts `sweepPackageCopies` keeps
  * it by (#2395), so a sweep that takes it after the touch sees the use and puts it back.
  */
 export async function placeCopy(tmp: string, target: string, want: string): Promise<void> {

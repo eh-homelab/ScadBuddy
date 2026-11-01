@@ -122,15 +122,14 @@ describe.skipIf(skip)(`plugin package install on Temporal${TEMPORAL_SKIP}`, () =
   }, 90_000)
 })
 
-// A durable turn's package server tools (#2171): turn_tool_tier answers what ai_access
+// A turn's package server tools (#2171): turn_tool_tier answers what ai_access
 // stores for `package:<pkg>/mcp:<server>`, run in a mock activity context.
-describe("a package's MCP server tools in a durable turn (#2171)", () => {
+describe("a package's MCP server tools as turn tools (#2171)", () => {
   it("turn_tool_tier answers a package server tool's stored tier, and outward when none is stored", async () => {
     const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
     const mcp = await startFakeMcp({ extraTools: ['a'] })
     const forwarder = await PluginForwarder.start()
     const dir = mkdtempSync(path.join(os.tmpdir(), 'pkg-turn-'))
-    const root = mkdtempSync(path.join(os.tmpdir(), 'pkg-turn-root-'))
     try {
       mkdirSync(path.join(dir, '.claude-plugin'))
       writeFileSync(path.join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'notes' }))
@@ -144,8 +143,6 @@ describe("a package's MCP server tools in a durable turn (#2171)", () => {
         servers: turnServers({
           packages: {
             load,
-            root,
-            localRoot: root,
             forward: (loaded) => forwardPackageServers(loaded, forwarder, async () => ['127.0.0.1'], { access: resolver }),
           },
         }),
@@ -164,7 +161,6 @@ describe("a package's MCP server tools in a durable turn (#2171)", () => {
       await forwarder.close()
       await mcp.close()
       rmSync(dir, { recursive: true, force: true })
-      rmSync(root, { recursive: true, force: true })
     }
   })
 })

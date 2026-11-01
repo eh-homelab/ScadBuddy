@@ -18,7 +18,6 @@ import { roleParts } from './runtime/role.js'
 import { BrowserOrigins } from './browser/store.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { CredentialPool } from './harness/fallback.js'
-import { nestedQueries } from './builtins/nested.js'
 import { managerAgents } from './background/workflowAgents.js'
 import { backgroundActivities, managerSender } from './background/activities.js'
 import { agentTimezone } from './background/schedule.js'
@@ -41,7 +40,7 @@ import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview,
 import { reviewsByHash } from './access/packageProvider.js'
 import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
-import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
+import { headerSecretVariants, loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
@@ -59,8 +58,7 @@ import { PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
 import { storedModel } from './routes/model.js'
 import { followSessionEvents, SessionEventPublisher } from './sessions/busEvents.js'
-import { resolveTabWaits, SessionManager, SETTING_MODEL } from './sessions/manager.js'
-import { poolRemainingUsd } from './sessions/turnShared.js'
+import { resolveTabWaits, SessionManager, type SessionManagerDeps, SETTING_MODEL } from './sessions/manager.js'
 import { readStartSettings, wireRuntimeSync } from './sessions/runtimeSync.js'
 import { drainRetains, type MemoryOptions } from './memory/hindsight.js'
 import { shutdown } from './shutdown.js'
@@ -83,11 +81,11 @@ import { sessionTurnActivity } from './temporal/session/turnActivity.js'
 import { TurnHost } from './sessions/turnHost.js'
 import { SessionDirectory } from './workspace/directory.js'
 import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
-import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/turnPackages.js'
-import { forwardPackageServers } from './plugins/packages/mcp.js'
+import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/packageServers.js'
+import { forwardPackageServers, packageHeaderSecrets } from './plugins/packages/mcp.js'
 import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
 import { SessionClients } from './temporal/sessionClients.js'
-import { type ListedTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
+import { type ListedTools, listTurnTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
 import { AgentWorker, workerIdentity } from './temporal/worker.js'
 import {
   dropPayloadKey,
@@ -481,6 +479,8 @@ const memory: MemoryOptions | undefined = undefined
 // How a turn's ScadBuddy call runs as its ToolCall workflow (plan 2026-10-13 Step 9.2), once the
 // Temporal client below exists; read by each turn that has `tools_as_activities` on.
 let toolCallStart: ToolCallStarter | undefined
+// And how its plugin and http tools are listed for their proxies (Step 9.3), once turnToolDeps exists.
+let turnToolList: NonNullable<SessionManagerDeps['turnTools']> | undefined
 const sessions =
   database && credentials
     ? new SessionManager({
@@ -493,6 +493,9 @@ const sessions =
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
         toolCalls: () => toolCallStart,
+        // Listed as the agent-tools activities that run their calls list them (Step 9.3), on this
+        // replica's own queue for a pinned server; problems are the turn's own to say (pluginCheck).
+        turnTools: (context, only) => (turnToolList ? turnToolList(context, only) : Promise.reject(new Error('no Temporal, so no turn tool runs as an activity'))),
         // Settings → Tools & plugins' overrides of the built-in tools (#1953), per turn.
         builtInTools: () => builtInTools.policy(),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
@@ -724,8 +727,28 @@ const durableCredentialSecrets = async () => {
 // A durable session's MCP client on each remote plugin, kept on the replica its calls
 // are pinned to (#2581): a stateful plugin (Playwright MCP) keeps its page between calls.
 const turnClients = new SessionClients<ListedTools>()
-/** How long a ToolCall's tool waits for its turn's plugin and package secrets to be gathered. */
-const TURN_SECRETS_MS = 30_000
+/**
+ * What a ToolCall's tool redacts beside the credentials (plan 2026-10-13 Step 9.2): the header
+ * values of the remote plugins and package http servers a turn reaches, as the turn redacts them,
+ * read from their stores alone: no address check, no forwarder route, no plugin contacted. The
+ * turn's own forwarder URLs never reach Claude Code with the turn's tools proxied (Step 9.3).
+ */
+const turnHeaderSecrets = async (): Promise<string[]> => {
+  const out: string[] = []
+  if (plugins) {
+    const { plugins: enabled } = await plugins.enabled(kek.ok ? kek.kek : undefined)
+    for (const plugin of enabled) if (plugin.header) out.push(...headerSecretVariants(plugin.header.value))
+  }
+  if (pluginPackages) {
+    const loaded = await loadPackagesForRun(pluginPackages, packageInstaller)
+    try {
+      out.push(...packageHeaderSecrets(loaded.loaded))
+    } finally {
+      loaded.release()
+    }
+  }
+  return out
+}
 const turnToolDeps = temporal
   ? {
       sessions: new PgSessionOwners(temporal.sql),
@@ -739,38 +762,11 @@ const turnToolDeps = temporal
         credentialSecrets: durableCredentialSecrets,
         // This pod's own disk, as a classic turn's: the calls are pinned here (hostQueue).
         httpRequest: { saveRoot: path.join(paths.stateDir, DURABLE_TURNS_DIR), sql: temporal.sql, audit, ...(workspace ? { files: workspace } : {}) },
-        // Shared with agent-durable on the payload volume, which its runner loads them from.
         ...(pluginPackages
           ? {
               packages: {
                 load: () => loadPackagesForRun(pluginPackages, packageInstaller),
-                root: config.payloadDir ? path.join(config.payloadDir, SHARED_PACKAGES) : undefined,
-                localRoot: path.join(paths.stateDir, 'plugins-local'),
                 forward: (loaded) => forwardPackageServers(loaded, pluginForwarder, undefined, { access: accessResolver }),
-              },
-            }
-          : {}),
-        // An allowed package's other built-ins (#2393), on the session's workspace and credential.
-        ...(workspace && credentials
-          ? {
-              builtins: {
-                files: workspace,
-                audit,
-                nested: (context: { session: string; flow?: string }) =>
-                  nestedQueries({
-                    paths,
-                    credentials: new CredentialPool({ repo: credentials, kek, audit }),
-                    ...(context.flow ? {} : { sessionId: context.session }),
-                    // Counted in the session's cost, which its budget reads, as a classic turn counts Claude Code's own calls.
-                    ...(context.flow
-                      ? {}
-                      : {
-                          spent: async (cost: number) => {
-                            await temporal.sql`UPDATE ai_sessions SET cost_usd = cost_usd + ${cost} WHERE id = ${context.session}`
-                          },
-                          remaining: () => poolRemainingUsd(temporal.sql, context.session),
-                        }),
-                  }),
               },
             }
           : {}),
@@ -795,6 +791,10 @@ const turnToolDeps = temporal
         : {}),
     }
   : undefined
+if (turnToolDeps) {
+  const deps = turnToolDeps
+  turnToolList = (context, only) => listTurnTools({ ...deps, report: undefined }, context, only)
+}
 // AgentSession's turns are hosted here only with both halves (§5.2): acquire_worker on agent-tools
 // hands out SESSION_HOST_QUEUE, so it is offered only where the session host worker below serves it.
 const sessionHosting = turnHost && sessions && operationStore && turnToolDeps ? { turnHost, warm: sessions.warm } : undefined
@@ -863,14 +863,7 @@ const temporalWorker =
           // redacted of the turn's plugin and package tokens as an in-process call is.
           ...toolCallActivities(ALL_TOOLS, {
             ...durableToolDeps,
-            turnSecrets: async (session, owner) => {
-              const set = await turnToolDeps.servers({ session, owner, signal: AbortSignal.timeout(TURN_SECRETS_MS) })
-              try {
-                return set.secrets
-              } finally {
-                await set.release()
-              }
-            },
+            turnSecrets: turnHeaderSecrets,
           }),
           ...gateActivities({
             audit,

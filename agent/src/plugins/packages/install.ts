@@ -481,7 +481,7 @@ export type PackagesForRun = {
   allowedPaths: string[]
   /** The Claude Code built-ins the allowed packages name, for the turn's `tools` (run.ts `builtinTools`). */
   builtinTools: string[]
-  /** Each loaded package with its pin's hash, for a durable turn (temporal/turnPackages.ts). */
+  /** Each loaded package with its pin's hash: its MCP servers' (plugins/packages/mcp.ts, temporal/packageServers.ts). */
   loaded: LoadedPackage[]
   problems: string[]
   /** Call when the turn has ended: its package directories may then be pruned. */

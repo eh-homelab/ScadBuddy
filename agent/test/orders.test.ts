@@ -7,6 +7,7 @@ import { ALL_TOOLS } from '../src/tools/index.js'
 import type { Tool, ToolContext } from '../src/tools/registry.js'
 import { ToolError } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
+import { memoryWorkspace } from './helpers/workspace.js'
 
 // Orders phase 1 (#4249, spec 2026-10-18 §7.3, plan Ruling 14): one tool per route group,
 // tiered as the spec reads: a record the shop keeps is `write`, a step that commits the shop
@@ -514,5 +515,130 @@ describe('pricing tools (#4250)', () => {
     const answer = await tool('order_estimate').execute({ output_id: 'a'.repeat(32), filament_id: FILAMENT }, ctx())
     expect(firstText(answer)).toEqual(estimate)
     expect(new URL(url).searchParams.get('filament_id')).toBe(FILAMENT)
+  })
+})
+
+// #4722 (spec 2026-10-18 §7.3): a file from the session workspace onto an order or an item,
+// streamed into the multipart route as every workspace upload is (tools/workspaceUploads.ts).
+describe('order attachment tools (#4722)', () => {
+  const ATTACHMENT = 'a77ac4ed-1111-4222-8333-944455556666'
+
+  function withWorkspace(files: Record<string, Buffer>, mediaType = 'image/png') {
+    const ws = memoryWorkspace(files, mediaType)
+    return { ...ws, ctx: { ...ctx(), workspace: ws.workspace } as ToolContext }
+  }
+
+  function textFields(form: FormData): Record<string, string> {
+    return Object.fromEntries([...form.entries()].filter((e): e is [string, string] => typeof e[1] === 'string'))
+  }
+
+  it('tiers attaching and editing as write, removing as outward, and covers every attachment write', () => {
+    expect(tool('order_attach').risk).toBe('write')
+    expect(tool('order_attachment_update').risk).toBe('write')
+    expect(tool('order_attachment_delete').risk).toBe('outward')
+    expect(Object.keys(tool('order_attach').shape)).toEqual(expect.arrayContaining(['workspace_path', 'workspace_sha256']))
+    const routes = ALL_TOOLS.flatMap((t) => t.routes)
+    for (const operation of [
+      'POST /api/v1/orders/{order_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/attachments',
+      'PATCH /api/v1/orders/{order_id}/attachments/{attachment_id}',
+      'DELETE /api/v1/orders/{order_id}/attachments/{attachment_id}',
+      'PUT /api/v1/orders/{order_id}/items/{item_id}/delivered',
+    ]) {
+      expect(routes).toContain(operation)
+      expect(NOT_A_TOOL.map((n) => n.operation)).not.toContain(operation)
+    }
+  })
+
+  it('streams a workspace file onto an item as a command, with its role and caption', async () => {
+    const seen: { key: string | null; fields: Record<string, string>; file: { name: string; size: number } }[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/attachments`, async ({ request }) => {
+        const form = await request.formData()
+        const file = form.get('file') as File
+        seen.push({ key: request.headers.get('Idempotency-Key'), fields: textFields(form), file: { name: file.name, size: file.size } })
+        return HttpResponse.json({ id: ATTACHMENT, order_id: ORDER, item_id: ITEM, filename: file.name })
+      }),
+    )
+    const { ctx: c, ref } = withWorkspace({ 'photos/finished.png': Buffer.from('png bytes') })
+    const result = await tool('order_attach').execute(
+      { order_id: ORDER, item_id: ITEM, ...ref('photos/finished.png'), role: 'finished', caption: 'Done' },
+      c,
+    )
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.key).toBeTruthy()
+    expect(seen[0]!.fields).toEqual({ role: 'finished', caption: 'Done' })
+    expect(seen[0]!.file).toEqual({ name: 'finished.png', size: 9 })
+    expect(firstText(result)).toMatchObject({
+      id: ATTACHMENT,
+      workspace_file: { path: 'photos/finished.png', size_bytes: 9, media_type: 'image/png' },
+    })
+  })
+
+  it('attaches to the order itself without an item, under the filename given', async () => {
+    let name = ''
+    let fields: Record<string, string> = {}
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/attachments`, async ({ request }) => {
+        const form = await request.formData()
+        name = (form.get('file') as File).name
+        fields = textFields(form)
+        return HttpResponse.json({ id: ATTACHMENT, order_id: ORDER, item_id: null })
+      }),
+    )
+    const { ctx: c, ref } = withWorkspace({ 'downloads/x.bin': Buffer.from('%PDF-1.7') }, 'application/pdf')
+    await tool('order_attach').execute({ order_id: ORDER, ...ref('downloads/x.bin'), filename: 'drawing.pdf' }, c)
+    expect(name).toBe('drawing.pdf')
+    expect(fields).toEqual({})
+  })
+
+  it('refuses a file that changed since it was read, before anything is sent', async () => {
+    const { ctx: c } = withWorkspace({ 'a.png': Buffer.from('x') })
+    await expect(
+      tool('order_attach').execute({ order_id: ORDER, workspace_path: 'a.png', workspace_sha256: 'b'.repeat(64) }, c),
+    ).rejects.toThrow('changed since it was read')
+  })
+
+  it('captions, re-roles, marks delivered and removes an attachment through their routes', async () => {
+    const calls: string[] = []
+    server.use(
+      http.patch(`${BACKEND}/api/v1/orders/${ORDER}/attachments/${ATTACHMENT}`, async ({ request }) => {
+        calls.push(`PATCH ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ id: ATTACHMENT, caption: 'Packed', role: 'packed' })
+      }),
+      http.put(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/delivered`, async ({ request }) => {
+        calls.push(`DELIVERED ${JSON.stringify(await request.json())}`)
+        return HttpResponse.json({ id: ITEM, delivered_attachment_id: ATTACHMENT })
+      }),
+      http.delete(`${BACKEND}/api/v1/orders/${ORDER}/attachments/${ATTACHMENT}`, () => {
+        calls.push('DELETE')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    const edited = await tool('order_attachment_update').execute(
+      { order_id: ORDER, attachment_id: ATTACHMENT, caption: 'Packed', role: 'packed' },
+      ctx(),
+    )
+    expect(firstText(edited)).toEqual({ attachment: { id: ATTACHMENT, caption: 'Packed', role: 'packed' } })
+    const marked = await tool('order_attachment_update').execute(
+      { order_id: ORDER, attachment_id: ATTACHMENT, item_id: ITEM, delivered: true },
+      ctx(),
+    )
+    expect(firstText(marked)).toEqual({ item: { id: ITEM, delivered_attachment_id: ATTACHMENT } })
+    await tool('order_attachment_update').execute({ order_id: ORDER, attachment_id: ATTACHMENT, item_id: ITEM, delivered: false }, ctx())
+    const gone = await tool('order_attachment_delete').execute({ order_id: ORDER, attachment_id: ATTACHMENT }, ctx())
+    expect(firstText(gone)).toEqual({ deleted: ATTACHMENT })
+    expect(calls).toEqual([
+      'PATCH {"caption":"Packed","role":"packed"}',
+      `DELIVERED {"attachment_id":"${ATTACHMENT}"}`,
+      'DELIVERED {"attachment_id":null}',
+      'DELETE',
+    ])
+    await expect(tool('order_attachment_update').execute({ order_id: ORDER, attachment_id: ATTACHMENT }, ctx())).rejects.toThrow(
+      'nothing to change',
+    )
+    await expect(
+      tool('order_attachment_update').execute({ order_id: ORDER, attachment_id: ATTACHMENT, delivered: true }, ctx()),
+    ).rejects.toThrow('item_id')
   })
 })

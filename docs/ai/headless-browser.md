@@ -175,22 +175,22 @@ Playwright MCP with `--isolated` gives each MCP session a fresh browser context.
   next call, and the next turn, as it would be for a person using Playwright MCP from
   Claude Code.
 
-How a durable session keeps it (`agent/src/temporal/sessionClients.ts`):
+How a session keeps it with `tools_as_activities` on (`agent/src/temporal/sessionClients.ts`):
 
-- The agent replica that lists a turn's tools holds one connected MCP client per
-  (durable session, plugin, plugin config). The turn's listing and every call use it.
-  It has its own forwarder route, so the route outlives the activity that opened it.
+- The agent replica the turn runs on lists its tools in its own process and holds one
+  connected MCP client per (session, plugin, plugin config). The turn's listing and every
+  call use it. It has its own forwarder route, so the route outlives the activity that
+  opened it.
 - Every remote plugin's calls are pinned to that replica's own task queue
-  (`agent-tools.<host>`), the mechanism `http_request` already uses. The next turn is
-  listed on that queue first, so the pin carries over. If that replica does not pick
-  the listing up within 5 s, it is gone: the turn is listed anywhere, and its plugins
-  start new MCP sessions there. The browser state is lost; nothing fails.
+  (`agent-tools.<host>`), the mechanism `http_request` already uses. A turn that runs on
+  another replica lists there, and its plugins start new MCP sessions there. The browser
+  state is lost; nothing fails. A call whose replica is gone is refused after 30 s
+  (`PINNED_START_MS`) rather than waiting.
 - A client is ended with the session `DELETE` (`terminateSession`), then closed:
-  when the durable session ends (`turn_tools_close`, run on the pinned replica), after
-  10 minutes unused (`CLIENT_IDLE_MS`), when the plugin's config changes or it is
+  after 10 minutes unused (`CLIENT_IDLE_MS`), when the plugin's config changes or it is
   disabled or removed, when the replica holds more than 64 (`MAX_KEPT_CLIENTS`, least
   recently used first), and when the agent stops. A Playwright MCP browser context
-  therefore lives as long as the durable session uses it, and no longer.
+  therefore lives as long as the session uses it, and no longer.
 - If the server no longer knows the session (a 404 on its id, after a Playwright MCP
   restart for example), or the request could not be sent at all, the call never ran:
   the agent opens a new MCP session and runs it once more. Its result starts with a
