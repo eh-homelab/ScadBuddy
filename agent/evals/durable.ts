@@ -105,8 +105,8 @@ export type EvalRunOptions = CollectBudget & {
 
 export type EvalStack = {
   run(scenario: Scenario, options?: EvalRunOptions, backend?: ScenarioBackend): Promise<Outcome & { script: ScriptedTurn[]; sessionId?: string }>
-  /** The type and task queue of `session-<id>`'s latest run. */
-  workflow(sessionId: string): Promise<{ type: string; taskQueue: string }>
+  /** The type, task queue and status of `session-<id>`'s latest run. */
+  workflow(sessionId: string): Promise<{ type: string; taskQueue: string; status: string }>
   /** How many Claude Code processes each process spawned. */
   spawned(): { api: number; worker: number }
   close(): Promise<void>
@@ -349,12 +349,24 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
           })
     })
 
+    /** Ends a session's turn: interrupted as the panel's stop does, then its workflow terminated. */
+    async function endSession(id: string, turn: Promise<unknown> | undefined): Promise<void> {
+      await api.m.interrupt(id, EVAL_OWNER).catch(() => false)
+      await Promise.race([turn?.catch(() => {}), new Promise((r) => setTimeout(r, 10_000))])
+      await client.workflow
+        .getHandle(sessionWorkflowId(id))
+        .terminate('the eval run is over')
+        .catch((err: unknown) => {
+          if (!(err instanceof WorkflowNotFoundError)) throw err
+        })
+    }
+
     return {
       close,
       spawned: () => ({ api: api.spawned, worker: worker.spawned }),
       async workflow(sessionId) {
         const described = await client.workflow.getHandle(sessionWorkflowId(sessionId)).describe()
-        return { type: described.type, taskQueue: described.taskQueue }
+        return { type: described.type, taskQueue: described.taskQueue, status: described.status.name }
       },
       async run(scenario, runOptions = {}, backend = new EvalBackend()) {
         current = backend
@@ -366,8 +378,10 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
         const parked: { requestId: string; toolName: string; toolUseId: string }[] = []
         let error: string | undefined
         let sessionId: string | undefined
+        let pending: Promise<unknown> | undefined
         try {
           const { session, turn } = await api.m.start(EVAL_OWNER, { origin: 'mcp', title: scenario.id, prompt })
+          pending = turn?.done
           sessionId = session.id
           started.push(session.id)
           if (!turn) throw new Error('the session started no turn')
@@ -391,6 +405,9 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
           if (outcome.kind !== 'result') error = outcome.kind === 'failed' ? `the turn failed: ${outcome.message}` : `the turn ended ${outcome.kind}`
         } catch (err) {
           error = err instanceof Error ? err.message : String(err)
+          // A turn still running past the deadline would go on spending its budget, and its later
+          // calls would reach the next run's backend: interrupt it, and end its workflow.
+          if (sessionId) await endSession(sessionId, pending)
         }
         const folded = foldMessages(seen.messages)
         // Each parked call as the model made it: its name and its exact input.

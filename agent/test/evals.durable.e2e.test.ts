@@ -55,6 +55,8 @@ describe.skipIf(skip !== undefined)(`eval scenarios through AgentSession, script
   let fake: FakeAnthropic
   let stack: EvalStack
   let script: ScriptedTurn[] = []
+  /** A model that never answers, for the deadline's test. */
+  let hang = false
 
   /**
    * The scripted model: the Nth call that offers the ScadBuddy tools gets script[N], N being
@@ -64,6 +66,7 @@ describe.skipIf(skip !== undefined)(`eval scenarios through AgentSession, script
   function reply(request: RecordedRequest): Reply {
     const offersTools = request.body?.tools?.some((t) => t.name.startsWith(EVAL_TOOL_PREFIX))
     if (!offersTools) return { text: 'ok' }
+    if (hang) return { hang: true }
     const step = request.body?.messages?.filter((m) => m.role === 'assistant').length ?? 0
     const turn = script[step] ?? { text: 'Done.' }
     return 'tool' in turn ? { toolUse: { name: `${EVAL_TOOL_PREFIX}${turn.tool}`, input: turn.input } } : turn
@@ -79,19 +82,20 @@ describe.skipIf(skip !== undefined)(`eval scenarios through AgentSession, script
   }, 60_000)
 
   /** Runs `scenario`, replaying `override` in place of its own script when given. */
-  async function play(scenario: Scenario, override?: (own: ScriptedTurn[]) => ScriptedTurn[], setup?: (backend: EvalBackend) => void) {
+  async function play(scenario: Scenario, override?: (own: ScriptedTurn[]) => ScriptedTurn[], setup?: (backend: EvalBackend) => void, timeoutMs = 120_000) {
     const backend = new EvalBackend()
     setup?.(backend)
     const own = scenario.prepare(new EvalBackend()).script
     script = override ? override(own) : own
     const from = fake.messageCalls().length
-    const outcome = await stack.run(scenario, { timeoutMs: 120_000 }, backend)
+    const outcome = await stack.run(scenario, { timeoutMs }, backend)
     const results = score(scenario, outcome)
     return { outcome, results, failed: results.filter((r) => !r.pass).map((r) => r.name), calls: fake.messageCalls().slice(from) }
   }
 
   for (const scenario of SCENARIOS) {
     it(`${scenario.id}: the scripted run passes every check`, async () => {
+      const spawnedBefore = stack.spawned()
       const { outcome, results, calls } = await play(scenario)
       expect(results.filter((r) => !r.pass), formatReport(scenario.id, results)).toEqual([])
       // The tools the script called really ran, through the session.
@@ -125,15 +129,22 @@ describe.skipIf(skip !== undefined)(`eval scenarios through AgentSession, script
         expect(system).not.toMatch(/ScadBuddy assistant/)
       }
       // One runtime: the session was an AgentSession on agent-sessions, its turn run by the
-      // worker process; the api process started it and spawned no Claude Code.
-      expect(await stack.workflow(outcome.sessionId!)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
-      expect(stack.spawned()).toMatchObject({ api: 0 })
+      // worker process, in a Claude Code of its own; the api process started it and spawned none.
+      expect(await stack.workflow(outcome.sessionId!)).toMatchObject({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
+      expect(stack.spawned()).toEqual({ api: spawnedBefore.api, worker: spawnedBefore.worker + 1 })
     }, 180_000)
   }
 
-  it('one api process started every session and one worker process ran every turn', () => {
-    expect(stack.spawned()).toEqual({ api: 0, worker: SCENARIOS.length })
-  })
+  it("a run past its deadline ends its session's turn, so nothing of it reaches the next run", async () => {
+    hang = true
+    try {
+      const { outcome } = await play(printStops, undefined, undefined, 3_000)
+      expect(outcome.error).toContain('eval timed out')
+      expect((await stack.workflow(outcome.sessionId!)).status).not.toBe('RUNNING')
+    } finally {
+      hang = false
+    }
+  }, 180_000)
 
   it('customise: the backend rendered the requested parameters, asking nothing', async () => {
     const { outcome } = await play(customise)

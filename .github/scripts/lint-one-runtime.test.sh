@@ -42,6 +42,10 @@ SDK="'@anthropic-ai/claude-agent-sdk'"
 expect_fail "mode === 'durable' in the harness" harness/x.ts "if (session.mode === 'durable') run()"
 expect_fail "mode == 'classic'" sessions/y.ts "const c = mode == 'classic'"
 expect_fail "mode !== 'durable'" sessions/y.ts "if (row.mode !== 'durable') return"
+expect_fail "a double-quoted mode" sessions/y.ts 'if (row.mode === "durable") return'
+# shellcheck disable=SC2016 # the backticks are the fixture's TypeScript, not an expansion
+expect_fail "a template-literal mode" sessions/y.ts 'if (row.mode === `classic`) return'
+expect_fail "a double-quoted case" sessions/y.ts 'switch (m) { case "classic": break }'
 expect_fail "a case of a mode" sessions/y.ts "switch (row.mode) {
   case 'durable':
     return
