@@ -585,6 +585,42 @@ export const orderTools: Tool[] = [
     },
   }),
   defineTool({
+    name: 'order_item_print',
+    label: 'Print an order line item',
+    description:
+      "Print an approved line item of an accepted order from its accepted quote (#4719): a print run of the item's " +
+      "output with the print dialog's choices (printer, a spool per slot, nozzles and quality, as print_output takes " +
+      'them), every plate, for the quantity still to print. Answers with the attempt it recorded (outcome unknown, ' +
+      'nothing made yet), the item queued; the item then follows the print (printing, then printed or failed), and ' +
+      'a print whose end could not be read is settled with order_item_fulfil. Refused with `requote_needed` (no ' +
+      "accepted quote, the item's output gone, or a slice quote whose sliced file is gone or changed: quote it " +
+      'again), `item_not_approved` (printing already), `item_made` (its attempts made its quantity: accept them), ' +
+      '`order_not_accepted` and `order_on_hold`, and the print run\'s own refusals. Outward: it prints.',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      printer_id: sliceQuote.shape.printer_id,
+      printer: sliceQuote.shape.printer,
+      filament_plan: sliceQuote.shape.filament_plan,
+      choices: printChoices,
+    }),
+    risk: 'outward',
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/print'],
+    summarize: ({ order_id, item_id, printer, printer_id }) =>
+      `Print item ${item_id} of order ${order_id}` +
+      (printer ? ` on printer ${printer}` : printer_id !== undefined ? ` on Bambuddy printer ${printer_id}` : ''),
+    handler: async ({ order_id, item_id, ...request }, ctx) =>
+      json(
+        await command(ctx, `print item ${item_id}`, (headers) =>
+          ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/print', {
+            params: { path: { order_id, item_id } },
+            body: request as never,
+            headers,
+          }),
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_item_unfulfil',
     label: 'Undo a line item\'s fulfilment',
     description:

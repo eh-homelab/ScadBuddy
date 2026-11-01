@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -15,15 +15,13 @@ from temporalio.client import Client
 from temporalio.common import RetryPolicy
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
 
-from scadbuddy.bambuddy.follow import FOLLOW_ACTIVITY, MAX_AGE, FollowInput
-from scadbuddy.render.projection import JobProjection
+from scadbuddy.bambuddy.follow import FOLLOW_ACTIVITY, FollowInput
 from scadbuddy.workflows import follow as follow_module
 from scadbuddy.workflows.follow import (
     FollowPrint,
     follow,
     follow_id,
     follow_queue,
-    resume_followed,
 )
 from tests.support.temporal import temporal_client
 
@@ -191,74 +189,6 @@ async def test_follows_try_once_per_output_while_temporal_is_unreachable(
     await asyncio.gather(*follows.starting)
     assert calls == [output, output]
     assert sum("could not follow a print" in r.message for r in caplog.records) == 2
-
-
-@pytest.mark.requires_postgres
-async def test_resume_followed_starts_recent_prints_and_clears_the_old_log(
-    client: Client, pg_conninfo: str
-) -> None:
-    projection = JobProjection(pg_conninfo, pool_size=2)
-    await asyncio.to_thread(projection.open)
-    now = datetime.now(UTC)
-    recent, stale = uuid.uuid4().hex, uuid.uuid4().hex
-    with projection.pool.connection() as conn:
-        conn.execute(
-            "INSERT INTO print_watches (output_id, printed_at) VALUES (%s, %s), (%s, %s)",
-            (recent, now - timedelta(hours=1), stale, now - MAX_AGE - timedelta(hours=1)),
-        )
-    queue = f"follow-{uuid.uuid4().hex[:8]}"
-    fake = FakeFollow()
-    fake.end.set()
-    try:
-        async with serving(client, queue, fake):
-            resumed = await resume_followed(projection.pool, client, queue, now)
-            await client.get_workflow_handle(follow_id(recent)).result()
-        with projection.pool.connection() as conn:
-            left = conn.execute("SELECT count(*) AS n FROM print_watches").fetchone()
-    finally:
-        await asyncio.to_thread(projection.close)
-    assert resumed == [recent]
-    assert left is not None and left["n"] == 0
-    assert [a.output_id for a in fake.attempts] == [recent]
-
-
-@pytest.mark.requires_postgres
-async def test_resume_followed_keeps_a_print_whose_follow_did_not_start(
-    pg_conninfo: str,
-) -> None:
-    """A start that fails leaves its row for the next boot's hand-over."""
-    projection = JobProjection(pg_conninfo, pool_size=2)
-    await asyncio.to_thread(projection.open)
-    output = uuid.uuid4().hex
-    now = datetime.now(UTC)
-    with projection.pool.connection() as conn:
-        conn.execute(
-            "INSERT INTO print_watches (output_id, printed_at) VALUES (%s, %s)",
-            (output, now - timedelta(hours=1)),
-        )
-    lazy = await Client.connect("127.0.0.1:1", lazy=True)
-    try:
-        resumed = await resume_followed(projection.pool, lazy, "nowhere", now)
-        with projection.pool.connection() as conn:
-            left = conn.execute("SELECT output_id FROM print_watches").fetchall()
-    finally:
-        await asyncio.to_thread(projection.close)
-    assert resumed == []
-    assert [row["output_id"] for row in left] == [output]
-
-
-@pytest.mark.requires_postgres
-async def test_resume_followed_once_the_old_log_is_dropped(pg_conninfo: str) -> None:
-    projection = JobProjection(pg_conninfo, pool_size=2)
-    await asyncio.to_thread(projection.open)
-    lazy = await Client.connect("127.0.0.1:1", lazy=True)
-    try:
-        with projection.pool.connection() as conn:
-            conn.execute("DROP TABLE print_watches")
-        resumed = await resume_followed(projection.pool, lazy, "nowhere", datetime.now(UTC))
-    finally:
-        await asyncio.to_thread(projection.close)
-    assert resumed == []
 
 
 async def test_follow_starts_one_execution_and_leaves_it_running(client: Client) -> None:

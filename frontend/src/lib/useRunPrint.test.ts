@@ -110,6 +110,13 @@ describe('useRunPrint', () => {
     ).not.toHaveProperty('accepted_fixes')
   })
 
+  it("remembers a LAN-only printer's plate by its registry id (#4971)", async () => {
+    const { result } = renderHook(() => useRunPrint({ ...input(), printerId: null, registryPrinter: 'lan-row' }))
+    await act(() => result.current.run())
+
+    await waitFor(() => expect(api.putPrinterBedType).toHaveBeenCalledWith('lan-row', 'Textured PEI Plate'))
+  })
+
   it('a 422 refuses these choices until one of them changes', async () => {
     runPrint.mockRejectedValueOnce(new ApiError(422, 'No process for 0.2 mm.'))
     const { result, rerender } = renderHook((props) => useRunPrint(props), {

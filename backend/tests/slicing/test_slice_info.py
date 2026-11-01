@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from scadbuddy.core.problems import ApiError
-from scadbuddy.slicing.slice_info import filament_changes, plate_gcode, read_sliced
+from scadbuddy.slicing.slice_info import filament_changes, plate_gcode, plate_grams, read_sliced
 from tests.support.sliced3mf import sliced_3mf, with_corrupt_member
 
 ONE = sliced_3mf(plates={1: (3600, [12.5, 3.0])}, gcode={1: b"M620 S0A\nM620 S1A\nM620 S0A\n"})
@@ -133,3 +133,22 @@ def test_a_gcode_that_cannot_be_inflated_reads_as_unknown_changes() -> None:
     )
     read = read_sliced(payload, 3)
     assert (read.grams_by_slot, read.filament_changes) == ({3: 0.5}, None)
+
+
+@pytest.mark.parametrize(
+    ("name", "plate_id"),
+    [("plate3-one-filament.gcode.3mf", 3), ("plate2-two-filaments.gcode.3mf", 2)],
+)
+def test_plate_grams_are_read_sliceds_without_the_gcode(name: str, plate_id: int) -> None:
+    """#4643: what a LAN start's spool use is read from, as the print's dialog reads it."""
+    payload = (NATIVE / name).read_bytes()
+    assert (
+        plate_grams(io.BytesIO(payload), plate_id) == read_sliced(payload, plate_id).grams_by_slot
+    )
+
+
+def test_plate_grams_of_what_cannot_be_read_are_none() -> None:
+    two = sliced_3mf(plates={1: (60, [1.0]), 2: (60, [1.0])}, gcode={1: b"", 2: b""})
+    assert plate_grams(two, 3) == {}
+    assert plate_grams(b"not a zip", 1) == {}
+    assert plate_grams(ONE, 1) == {1: 12.5, 2: 3.0}

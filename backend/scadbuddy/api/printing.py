@@ -245,10 +245,16 @@ class PrinterBedTypePut(BaseModel):
 
 
 class PrinterBedType(BaseModel):
-    """The plate remembered on one printer (#83)."""
+    """The plate remembered on one printer (#83): ``printer_id`` its Bambuddy printer,
+    ``printer`` its registry printer (#4971), either ``None`` when it has none."""
 
-    printer_id: int
+    printer_id: int | None = None
+    printer: str | None = None
     bed_type: str | None = None
+
+
+#: The largest Bambuddy printer id (``printers.bambuddy_printer_id`` is an ``integer``).
+_BAMBUDDY_ID_MAX = 2**31 - 1
 
 
 class PrinterRackAlgorithmPut(BaseModel):
@@ -419,16 +425,38 @@ def put_model_project(
     summary="Remember the plate on this printer",
 )
 def put_printer_bed_type(
-    printer_id: int, body: PrinterBedTypePut, store: SettingsStoreDep
+    printer_id: Annotated[
+        str, Path(description="A registry printer's id, or a Bambuddy printer's (#4971).")
+    ],
+    body: PrinterBedTypePut,
+    store: SettingsStoreDep,
+    registry: PrintersDep,
 ) -> PrinterBedType:
     """What the picker last printed on this printer with (#83), which it opens on next.
 
     ScadBuddy's own memory, because Bambuddy's printer status reports no plate type.
-    Needs no Bambuddy, like the model's other remembered choices.
+    Needs no Bambuddy, like the model's other remembered choices. The path names a
+    registry printer, so a LAN-only one remembers its plate too (#4971), or a Bambuddy
+    printer by its integer id, as before; the plate is kept under both where the registry
+    links them. 404 for a registry id the registry does not hold.
     """
-    settings = store.set_printer_bed_type(printer_id, body.bed_type)
+    bambuddy_id: int | None
+    if printer_id.isascii() and printer_id.isdecimal():
+        bambuddy_id = int(printer_id)
+        if bambuddy_id > _BAMBUDDY_ID_MAX:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+        linked = registry.store.by_bambuddy_id(bambuddy_id)
+        printer = linked.id if linked is not None else None
+    else:
+        row = registry.store.get(printer_id)
+        if row is None:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+        printer, bambuddy_id = row.id, row.bambuddy_printer_id
+    settings = store.set_printer_bed_type(bambuddy_id, body.bed_type, printer=printer)
     return PrinterBedType(
-        printer_id=printer_id, bed_type=settings.printer_bed_types.get(str(printer_id))
+        printer_id=bambuddy_id,
+        printer=printer,
+        bed_type=settings.bed_type_of(printer=printer, bambuddy_printer_id=bambuddy_id),
     )
 
 
@@ -1125,6 +1153,35 @@ async def _waiting_run(runs: PrintCommands, run_id: str) -> PrintRun:
     if lan_control(run) is None:
         raise ApiError(status.HTTP_409_CONFLICT, NOTHING_WAITING)
     return run
+
+
+async def end_gone_sequences(runs: PrintCommands) -> None:
+    """Record every native run with prints still to start whose ``PrintLanSequence`` is
+    gone as stopped (`SEQUENCE_GONE_STOP`), as a control sent to it would (#4337): a
+    sequence terminated, or never started, writes no end of its own, and its run would
+    otherwise keep its subject's files in use for good. Only once the run's own
+    ``PrintRun`` execution has closed: until then it may still start the sequence, which
+    it does after it records the run succeeded (`workflows/printing.py`)."""
+    for run_id, workflow_id in await runs.store.lan_waiting_runs():
+        if workflow_id is None or await _execution_open(runs, workflow_id):
+            continue
+        await _to_sequence(runs, run_id, _leave_running)
+
+
+async def _execution_open(runs: PrintCommands, workflow_id: str) -> bool:
+    """Whether workflow ``workflow_id``'s latest execution is running; one gone (past
+    its retention) is not."""
+    try:
+        described = await runs.client.get_workflow_handle(workflow_id).describe()
+    except RPCError as error:
+        if execution_gone(error):
+            return False
+        raise
+    return described.status == WorkflowExecutionStatus.RUNNING
+
+
+async def _leave_running(handle: WorkflowHandle[Any, Any]) -> None:
+    """A running sequence is asked nothing."""
 
 
 async def _to_sequence(

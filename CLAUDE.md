@@ -449,13 +449,22 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded
   trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
-  off the path). `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
+  off the path): Bambuddy's inventory and ScadBuddy's own (`native_spools`,
+  `spools/native.py`, provider `native` in `spools/spool_providers.py`, routes
+  `api/native_spools.py`, #4643; each write re-caches it at once; a LAN start saves its
+  slots' grams in `native_spool_uses`, taken off once the run settles with that start
+  `done`, `native_use_hook`; the editor is Settings' `components/settings/NativeSpools.tsx`).
+  `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
   command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
   presets and a process preset's values in Bambuddy's shapes (`local` presets are not
   offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
-  native library (nothing deletes it yet, #4337). The Customize page, the dialog's
+  native library, marked with its run's subject (`library_files.print_subject`, as is
+  its slice); `print_library/sweep.py` `sweep_print_copies` (housekeeping
+  `NATIVE_COPIES_SWEEP`, #4337) trashes a folder's superseded copies and what nothing
+  records, as Bambuddy's inbox keeps its copies; a moved, restored or copied one is the
+  person's (no subject). The Customize page, the dialog's
   first read and its analysis, and the Prints page's queue and history panels ask
   Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
   A LAN print's records (#4644, #4543): `print_succeed` writes its `output_last_prints`
@@ -673,6 +682,21 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
   times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
+  Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
+  (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
+  `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)
+  starts the item's output's print through `api/printing.py` `accept_run`, never a path of
+  its own, its `request_id` from the operation's key. The item is claimed first, under the
+  order's lock (`Lifecycle.claim_print`: the attempt keyed by `print_request_id`, the quote's
+  file held by `(order_item_fulfilment, <id>)`, the item `queued`), so one print starts per
+  item; then the run is attached (`attach_print`) or a refused start releases the claim
+  (`release_print`); a retry re-checks a run-less claim before it starts (refused, it
+  attaches the run its request made if one exists, else releases), a key's claim on
+  another item is `print_request_conflict`, and a run-less claim's `PATCH` waits for its
+  operation (`print_starting`). The item follows the run from
+  `print_runs` and `print_outcomes` only (`Lifecycle.follow_print`, the component's
+  `listen_for_prints`), never by asking a printer or Bambuddy. Agent `order_item_print`
+  (outward); frontend `components/orders/PrintItem.tsx` over `PrintPicker`'s `itemPrint`.
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked

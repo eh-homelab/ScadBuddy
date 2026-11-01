@@ -628,24 +628,7 @@ async def reconcile_lost_runs(
     #1061): terminated in the Temporal UI, it never runs ``print_fail``. One still
     running is left to end its row itself, and so is one whose workflow still runs
     under a later run id: a reset continues the same row there. Returns how many it
-    ended.
-
-    First, a row a pre-#1052 pod inserted and stopped beating is ended too (review #1061
-    (3) 2), as one that may have queued: a stalled pod may yet queue it (review #1316
-    2a). Those never had an execution, so they are logged here and not counted (review
-    #1316 (11) 4)."""
-    upgraded = 0
-    # One row that cannot be ended is logged and left for the next pass; the rest are
-    # still ended (review #1316 (9) 3a). The pre-#1052 rows need only Postgres, so a
-    # Temporal that does not answer never holds them up (review #1316 (10) 1).
-    for run_id in await store.stale_pre_1052_runs():
-        try:
-            if (await store.fail_pre_1052(run_id)).status == "failed":
-                upgraded += 1
-        except Exception:
-            logger.exception("could not end a pre-#1052 print run", extra={"run_id": run_id})
-    if upgraded:
-        logger.warning("ended print runs a pre-#1052 pod left running", extra={"count": upgraded})
+    ended."""
 
     async def end(run_id: str) -> bool:
         return (await store.fail_lost(run_id)).status == "failed"

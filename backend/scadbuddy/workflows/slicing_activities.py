@@ -527,7 +527,15 @@ class RunActivities:
                     )
                     if earlier is not None:
                         return earlier.id
-                    return (await native.upload(name, body, planned.folder_id)).id
+                    # The run's subject (#4337), whatever became of the copy since; a
+                    # history from before it names none, and the copy's mark is read (a
+                    # library file printed as it is has none: the file's own subject).
+                    subject = (
+                        input.subject or await native.subject_of(copy_id) or f"library:{copy_id}"
+                    )
+                    return (
+                        await native.upload(name, body, planned.folder_id, print_subject=subject)
+                    ).id
                 settings = await asyncio.to_thread(lambda: self._settings_store().load())
                 async with client_for(settings) as client:
                     name = _sliced_name((await client.library_file(copy_id)).filename, input)

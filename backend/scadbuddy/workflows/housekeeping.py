@@ -155,6 +155,12 @@ QUOTE_HOLDS_PATCH = "housekeeping-reap-quote-holds"
 #: or a payload.
 PRINTER_SYNC_SWEEP = "housekeeping_sync_bambuddy_printers"
 PRINTER_SYNC_PATCH = "housekeeping-sync-bambuddy-printers"
+#: #4337: the lifetime of a native run's per-print copies and slices
+#: (`print_library.sweep.sweep_print_copies`): a folder's superseded copies and what
+#: nothing records go to the native trash. Last, behind its own patch; on the sweeps'
+#: Schedule only, so it obeys their switch as the asset sweep does: it trashes files.
+NATIVE_COPIES_SWEEP = "housekeeping_sweep_native_copies"
+NATIVE_COPIES_PATCH = "housekeeping-sweep-native-copies"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -177,6 +183,7 @@ SWEEPS = (
     PRINTER_WATCHES_SWEEP,
     QUOTE_HOLDS_SWEEP,
     PRINTER_SYNC_SWEEP,
+    NATIVE_COPIES_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -249,6 +256,10 @@ QUOTE_HOLDS_TIMEOUT = timedelta(minutes=2)
 #: Two Bambuddy lists, then per printer with an empty LAN link a read and one probe
 #: (`printers.component.PROBE_TIMEOUT`, 10 s), each in turn.
 PRINTER_SYNC_TIMEOUT = timedelta(minutes=5)
+#: Two describes per LAN run with prints still to start (`end_gone_sequences`; few run at
+#: once); a few reads, then a trash, and per folder with superseded copies a lock, a read,
+#: a trash and a forget per copy.
+NATIVE_COPIES_TIMEOUT = timedelta(minutes=5)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -281,6 +292,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return QUOTE_HOLDS_TIMEOUT
     if sweep == PRINTER_SYNC_SWEEP:
         return PRINTER_SYNC_TIMEOUT
+    if sweep == NATIVE_COPIES_SWEEP:
+        return NATIVE_COPIES_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -325,6 +338,8 @@ class Housekeeping:
             if sweep == QUOTE_HOLDS_SWEEP and not workflow.patched(QUOTE_HOLDS_PATCH):
                 continue
             if sweep == PRINTER_SYNC_SWEEP and not workflow.patched(PRINTER_SYNC_PATCH):
+                continue
+            if sweep == NATIVE_COPIES_SWEEP and not workflow.patched(NATIVE_COPIES_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

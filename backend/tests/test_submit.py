@@ -57,7 +57,6 @@ from scadbuddy.render.job_models import (
 from scadbuddy.render.jobs import INITIAL_RENDER_ESTIMATE, SnapshotUnavailableError
 from scadbuddy.render.projection import (
     CLOSED_ERROR,
-    LEGACY_UNSTARTED_ERROR,
     JobProjection,
     run_closed,
     workflow_id_for,
@@ -1288,19 +1287,24 @@ async def test_superseding_an_arrange_through_submit_counts_it_as_arrange(
 async def test_an_arrange_the_reconciler_fails_is_counted_as_arrange(
     make_service: ServiceFactory, projection: JobProjection
 ) -> None:
-    """#3464, #3487 review: the reconciler's fail path (``settle_legacy``) hands
+    """#3464, #3487 review: the reconciler's fail path (``settle_closed``) hands
     ``_settled`` the arrange row itself, so its failure counts under
     ``kind="arrange"``, not as a render."""
     async with temporal_client() as client:
         service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
         orphan = _legacy(projection, kind="arrange")
+        with psycopg.connect(projection.conninfo) as conn:
+            conn.execute(
+                "UPDATE render_jobs SET workflow_run_id = %s WHERE id = %s",
+                (uuid.uuid4().hex, orphan.id),
+            )
         _aged(projection, orphan.id)
-        failed = await service.settle_legacy()
+        failed = await service.settle_closed()
         await service.aclose()
 
     assert failed == [orphan.id]
     stored = await asyncio.to_thread(projection.read, orphan.id)
-    assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
+    assert (stored.state, stored.error) == ("failed", CLOSED_ERROR)
     sample = service.metrics.registry.get_sample_value
     as_arrange = {"kind": "arrange", "outcome": "failed"}
     assert sample("scadbuddy_render_jobs_finished_total", as_arrange) == 1
@@ -1743,7 +1747,7 @@ class _SlowAccept(ProjectingActivities):
 
 
 def _aged(projection: JobProjection, *job_ids: str) -> None:
-    """Older than `LEGACY_GRACE`: past any older API's insert-then-start."""
+    """Older than `VISIBILITY_GRACE`: past any lag of the listing of open runs."""
     with psycopg.connect(projection.conninfo) as conn:
         conn.execute(
             "UPDATE render_jobs SET created_at = now() - interval '1 hour' WHERE id = ANY(%s)",
@@ -1776,77 +1780,15 @@ async def test_an_older_builds_start_renders_its_row_on_this_worker(
     assert described.status == WorkflowExecutionStatus.COMPLETED
 
 
-async def test_settle_legacy_fails_only_old_rows_no_workflow_will_run(
-    make_service: ServiceFactory, projection: JobProjection
-) -> None:
-    """Past `LEGACY_GRACE`, a row naming no workflow, or one Temporal does not have
-    running, is orphaned. A younger row may be between the older API's insert and its
-    start (review #1066 1.2), and a running one is that build's. A row that build moved
-    to running and whose workflow then closed is failed too (review #1066 (5) 2.1)."""
-    async with temporal_client() as client:
-        queue = f"t-{uuid.uuid4().hex[:8]}"
-        service = make_service(client, queue)
-        orphan, draining, ancient, fresh, stalled = (_legacy(projection) for _ in range(5))
-        with psycopg.connect(projection.conninfo) as conn:
-            conn.execute("UPDATE render_jobs SET workflow_id = NULL WHERE id = %s", (ancient.id,))
-            conn.execute("UPDATE render_jobs SET state = 'running' WHERE id = %s", (stalled.id,))
-        _aged(projection, orphan.id, draining.id, ancient.id, stalled.id)
-        # The old build's execution of `draining`: no worker here, so it stays running.
-        await client.start_workflow(
-            "TemplatePipeline", id=workflow_id_for(draining.id), task_queue=queue
-        )
-        try:
-            failed = await service.settle_legacy()
-        finally:
-            await client.get_workflow_handle(workflow_id_for(draining.id)).terminate()
-        await service.aclose()
-
-    assert sorted(failed) == sorted([orphan.id, ancient.id, stalled.id])
-    # Counted, so an operator can alert on it (review #1066 (9) 5).
-    assert _settle_failed(service.metrics, "legacy") == 3
-    assert _failed_jobs(service.metrics) == 3
-    for job_id in (orphan.id, ancient.id):
-        stored = await asyncio.to_thread(projection.read, job_id)
-        assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
-    stored = await asyncio.to_thread(projection.read, stalled.id)
-    assert (stored.state, stored.error) == ("failed", CLOSED_ERROR)
-    for job_id in (draining.id, fresh.id):
-        assert (await asyncio.to_thread(projection.read, job_id)).state == "pending"
-
-
-async def test_an_old_legacy_row_whose_workflow_never_ran_does_not_block_its_key(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
-) -> None:
-    """The pending key holds one row per render key (expand/contract): a legacy row
-    past `LEGACY_GRACE` whose workflow Temporal does not have is failed by the next
-    render of its key, which then runs (lead follow-up to review #1066 1.1)."""
-    params: dict[str, ParamValue] = {"width": _w()}
-    old = legacy_row(
-        projection, Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now())
-    )
-    _aged(projection, old.id)
-    async with temporal_client() as client:
-        queue = f"t-{uuid.uuid4().hex[:8]}"
-        service = make_service(client, queue)
-        async with _worker(client, queue, ProjectingActivities(deps)):
-            job = await service.submit(SLUG, params)
-            done = await _settled(projection, job.id)
-        await service.aclose()
-
-    assert done.state == "done", done.error
-    stored = await asyncio.to_thread(projection.read, old.id)
-    assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
-
-
 async def test_a_database_outage_at_the_accept_is_still_accepting_not_a_500(
     make_service: ServiceFactory,
     deps: WorkerDeps,
     projection: JobProjection,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Postgres out of reach past the accept's retries is transient, as an older build's
-    row is: the request is still accepting, not a 500 render-unstartable that tells
-    clients not to send it again (review #1066 (11), the same class as 2)."""
+    """Postgres out of reach past the accept's retries is transient: the request is
+    still accepting, not a 500 render-unstartable that tells clients not to send it
+    again (review #1066 (11))."""
 
     def unreachable(*_: object, **__: object) -> Job:
         raise psycopg.OperationalError("connection refused")
@@ -1864,89 +1806,12 @@ async def test_a_database_outage_at_the_accept_is_still_accepting_not_a_500(
     assert acts.accepts >= ACCEPT_RETRY.maximum_attempts
 
 
-async def test_an_old_legacy_row_whose_workflow_runs_keeps_its_key_until_it_closes(
-    make_service: ServiceFactory,
-    deps: WorkerDeps,
-    projection: JobProjection,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """While the older build's workflow of a legacy row on the key still runs,
-    `render_accept` retries rather than failing that row; once it closes without
-    settling it, the next attempt fails the row and inserts its own (review #1066 4.1)."""
-    defaults = commands_module.start_command.__kwdefaults__
-    assert defaults is not None
-    monkeypatch.setitem(defaults, "deadline", timedelta(seconds=1))
-    params: dict[str, ParamValue] = {"width": _w()}
-    old = legacy_row(
-        projection, Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now())
-    )
-    _aged(projection, old.id)
-    async with temporal_client() as client:
-        queue = f"t-{uuid.uuid4().hex[:8]}"
-        service = make_service(client, queue)
-        # The old build's execution: on a queue no worker polls, so it stays running.
-        legacy = await client.start_workflow(
-            "TemplatePipeline", id=workflow_id_for(old.id), task_queue=f"{queue}-old"
-        )
-        acts = ProjectingActivities(deps)
-        async with _worker(client, queue, acts):
-            with pytest.raises(CommandStillAcceptingError):
-                await service.submit(SLUG, params)
-            # The 1 s deadline can lapse before a loaded worker runs the first
-            # `render_accept`; wait for that attempt rather than racing it.
-            async with asyncio.timeout(60):
-                while acts.accepts < 1:
-                    await asyncio.sleep(0.1)
-            waiting = await asyncio.to_thread(projection.read, old.id)
-            tries = acts.accepts
-            await legacy.terminate()
-            async with asyncio.timeout(60):
-                while (await asyncio.to_thread(projection.read, old.id)).state == "pending":
-                    await asyncio.sleep(0.1)
-            jobs = await asyncio.to_thread(projection.list_jobs)
-            new = next(job for job in jobs if job.id != old.id)
-            done = await _settled(projection, new.id)
-        await service.aclose()
-
-    assert waiting.state == "pending" and tries >= 1
-    stored = await asyncio.to_thread(projection.read, old.id)
-    assert (stored.state, stored.error) == ("failed", LEGACY_UNSTARTED_ERROR)
-    assert done.state == "done", done.error
-
-
-async def test_a_legacy_row_whose_workflow_runs_answers_still_accepting_past_the_retries(
-    make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
-) -> None:
-    """A legacy row on the key whose older build's workflow still runs (a draining
-    worker's) outlives `ACCEPT_RETRY`: the request is still accepting, re-sent with its
-    key, never a 500 `render-unstartable` (review #1066 (11) 2)."""
-    params: dict[str, ParamValue] = {"width": _w()}
-    old = legacy_row(
-        projection, Job(id=uuid.uuid4().hex, slug=SLUG, params=params, created_at=now())
-    )
-    async with temporal_client() as client:
-        queue = f"t-{uuid.uuid4().hex[:8]}"
-        service = make_service(client, queue)
-        # The old build's execution: on a queue no worker polls, so it stays running.
-        legacy = await client.start_workflow(
-            "TemplatePipeline", id=workflow_id_for(old.id), task_queue=f"{queue}-old"
-        )
-        async with _worker(client, queue, ProjectingActivities(deps)):
-            with pytest.raises(CommandStillAcceptingError):
-                await service.submit(SLUG, params, request_id=uuid.uuid4().hex)
-        await legacy.terminate()
-        await service.aclose()
-
-    assert _sample(service.metrics, "scadbuddy_render_accept_pending_total", RENDER) == 1
-    assert (await asyncio.to_thread(projection.read, old.id)).state == "pending"
-
-
 async def test_rows_nothing_will_settle_are_failed_without_a_restart(
     make_service: ServiceFactory, deps: WorkerDeps, projection: JobProjection
 ) -> None:
     """The housekeeping prune also fails a row whose execution closed without settling
-    it (terminated by hand), and a legacy row an older API inserted after this one
-    booted (review #1066 1.2). A row whose execution runs is left alone."""
+    it (terminated by hand) (review #1066 1.2). A row whose execution runs is left
+    alone."""
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
         service = make_service(client, queue)
@@ -1955,8 +1820,6 @@ async def test_rows_nothing_will_settle_are_failed_without_a_restart(
         try:
             async with _worker(client, queue, ProjectingActivities(deps, hold_running=held)):
                 job = await service.submit(SLUG, {"width": _w()})
-                late = _legacy(projection)
-                _aged(projection, late.id)
                 await service.prune()
                 running = await asyncio.to_thread(projection.read, job.id)
                 assert job.workflow_id is not None
@@ -1967,14 +1830,12 @@ async def test_rows_nothing_will_settle_are_failed_without_a_restart(
                 _aged(projection, job.id)
                 await service.prune()
                 closed = await _settled(projection, job.id, timeout=10)
-                orphan = await _settled(projection, late.id, timeout=10)
                 held.set()
         finally:
             await service.aclose()
 
     assert running.state == "pending"
     assert (closed.state, closed.error) == ("failed", CLOSED_ERROR)
-    assert (orphan.state, orphan.error) == ("failed", LEGACY_UNSTARTED_ERROR)
 
 
 async def test_a_settle_pass_asks_only_about_rows_whose_run_is_not_open(
@@ -2469,15 +2330,14 @@ async def test_with_no_valid_span_rows_carry_no_traceparent(
 
 
 def _unsettled_and_stale(projection: JobProjection) -> None:
-    """An aged row of a ``render-<render_key>`` run and an aged legacy row: each pass
-    asks Temporal about one."""
-    unsettled, stale = _legacy(projection), _legacy(projection)
+    """An aged row of a ``render-<render_key>`` run: the pass asks Temporal about it."""
+    unsettled = _legacy(projection)
     with psycopg.connect(projection.conninfo) as conn:
         conn.execute(
             "UPDATE render_jobs SET workflow_run_id = %s WHERE id = %s",
             (uuid.uuid4().hex, unsettled.id),
         )
-    _aged(projection, unsettled.id, stale.id)
+    _aged(projection, unsettled.id)
 
 
 async def test_start_does_not_wait_for_the_settle_pass_while_temporal_is_unreachable(
@@ -2513,8 +2373,7 @@ async def test_a_settle_pass_while_temporal_is_unreachable_is_bounded(
         await service.settle()
     assert time.monotonic() - began < 30
     assert all(job.state == "pending" for job in await asyncio.to_thread(projection.list_jobs))
-    for settle_pass in ("closed", "legacy"):
-        assert _settle_errors(service.metrics, settle_pass) == 1
+    assert _settle_errors(service.metrics, "closed") == 1
 
 
 @pytest.mark.parametrize(

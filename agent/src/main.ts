@@ -23,7 +23,7 @@ import { backgroundActivities, managerSender } from './background/activities.js'
 import { agentTimezone } from './background/schedule.js'
 import { BackgroundTasks } from './background/service.js'
 import { BackgroundTaskStore } from './background/store.js'
-import { temporalTaskRunner } from './background/temporal.js'
+import { runCronPasses, temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -436,18 +436,22 @@ const tokens =
 const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
 
 // A session's background tasks (CronCreate, ScheduleWakeup, Monitor, TaskStop), in either mode:
-// each a `BackgroundTask` workflow on agent-tools that sends its prompt when due. Its
-// payloads are task ids only, so its client has no codec.
-const backgroundTasks =
+// a recurring cron job a Schedule, any other a `BackgroundTask` workflow, on agent-tools, that
+// sends its prompt when due. Their payloads are task ids only, so their client has no codec.
+const backgroundClient =
   config.temporalAddress && database
-    ? new BackgroundTasks({
-        store: new BackgroundTaskStore(database.sql),
-        runner: temporalTaskRunner(
-          new Client({ connection: Connection.lazy({ address: config.temporalAddress }), namespace: config.temporalNamespace }),
-          TASK_QUEUE,
-        ),
-      })
+    ? new Client({ connection: Connection.lazy({ address: config.temporalAddress }), namespace: config.temporalNamespace })
     : undefined
+const backgroundTasks =
+  backgroundClient && database
+    ? new BackgroundTasks({ store: new BackgroundTaskStore(database.sql), runner: temporalTaskRunner(backgroundClient, TASK_QUEUE) })
+    : undefined
+// Decision Q11 (plan 2026-10-13 Step 9.8): the recurring cron jobs made before Schedules become
+// Schedules now, not at their next occurrence; then, hourly, the jobs whose last occurrence was
+// missed are ended. Idempotent, so every replica may run it.
+if (backgroundClient && backgroundTasks) {
+  runCronPasses({ client: backgroundClient, store: backgroundTasks.store, taskQueue: TASK_QUEUE }, { info: console.log, error: console.error })
+}
 // Sessions (#300) and their approvals (#258): started from the assistant
 // panel's socket (routes/chat.ts), the session routes (routes/sessions.ts)
 // and the `sessions_*` tools (tools/sessions.ts).

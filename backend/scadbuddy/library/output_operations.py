@@ -253,8 +253,9 @@ def output_kinds(state: AppState, components: Components) -> list[OperationKind]
         if running:
             raise ApiError(
                 status.HTTP_409_CONFLICT,
-                f"print run {running[0]} of this output is still running, and its sliced"
-                " file is in ScadBuddy's library: delete the output once the run has ended",
+                f"print run {running[0]} of this output is still running, or has prints"
+                " still to start, and its sliced files are in ScadBuddy's library: delete"
+                " the output once the run has ended",
                 run_id=running[0],
             )
         return {}
