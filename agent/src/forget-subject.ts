@@ -40,6 +40,7 @@ try {
   const kek = await loadKek(config.secretKeyFile)
   const previous = config.previousSecretKeyFile ? await loadKek(config.previousSecretKeyFile, 'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE') : undefined
   if (!kek.ok) console.error(`forget-subject: ${kek.reason}; a session with forks cannot be forgotten`)
+  if (previous && !previous.ok) console.error(`forget-subject: ${previous.reason}; a key wrapped under the previous key cannot be opened`)
   const keys = kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previous?.ok ? previous.kek : undefined }) : undefined
   const done = await forgetSubject({ sql: database.sql, client, keys, payloads, turnDirs }, subject)
   console.log(JSON.stringify({ subject, ...done }))
