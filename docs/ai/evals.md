@@ -103,9 +103,13 @@ runs every scenario on the eval stack with the fake Anthropic endpoint
 replaying the scenario's script. The Nth model call gets the Nth scripted turn. It also
 checks that each recorded tool result is the text the model was given back, that the
 gateway token alone reached the endpoint, that the system append reached the model, and
-that each session was an `AgentSession` whose turn the `worker` process ran. It is part
+that each session was an `AgentSession` whose turn the `worker` process ran. A run past
+its deadline interrupts its session's turn and terminates its workflow, so the turn
+neither spends more budget nor reaches the next run's backend. It is part
 of `pnpm test`, and skips without a Temporal CLI or `SCADBUDDY_TEST_DATABASE_URL`. The
-`agent` job in `ci.yml` has both, so it runs on every PR.
+`agent` job in `ci.yml` has both, so it runs on every PR. A local `pnpm test` without
+them runs no scenario at all (until Step 6.6, `test/evals.test.ts` replayed them on the
+classic harness without either); see CLAUDE.md for the Postgres and Temporal to start.
 
 It also runs **negative controls**. These replay a misbehaving model and assert that the
 checks catch it:
