@@ -24,7 +24,7 @@ import { backgroundActivities, managerSender } from './background/activities.js'
 import { agentTimezone } from './background/schedule.js'
 import { BackgroundTasks } from './background/service.js'
 import { BackgroundTaskStore } from './background/store.js'
-import { convertCronTasks, temporalTaskRunner } from './background/temporal.js'
+import { runCronPasses, temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -451,11 +451,10 @@ const backgroundTasks =
     ? new BackgroundTasks({ store: new BackgroundTaskStore(database.sql), runner: temporalTaskRunner(backgroundClient, TASK_QUEUE) })
     : undefined
 // Decision Q11 (plan 2026-10-13 Step 9.8): the recurring cron jobs made before Schedules become
-// Schedules now, not at their next occurrence. Idempotent, so every replica may run it.
+// Schedules now, not at their next occurrence; then, hourly, the jobs whose last occurrence was
+// missed are ended. Idempotent, so every replica may run it.
 if (backgroundClient && backgroundTasks) {
-  void convertCronTasks({ client: backgroundClient, store: backgroundTasks.store, taskQueue: TASK_QUEUE })
-    .then((n) => n > 0 && console.log(`background: ${n} cron job${n === 1 ? '' : 's'} converted to Schedules`))
-    .catch((err: unknown) => console.error(`background: the cron jobs could not be converted to Schedules: ${err instanceof Error ? err.message : String(err)}`))
+  runCronPasses({ client: backgroundClient, store: backgroundTasks.store, taskQueue: TASK_QUEUE }, { info: console.log, error: console.error })
 }
 // Sessions (#300) and their approvals (#258): started from the assistant
 // panel's socket (routes/chat.ts), the session routes (routes/sessions.ts)

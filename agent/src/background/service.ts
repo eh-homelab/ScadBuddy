@@ -15,8 +15,10 @@ export const backgroundWorkflowId = (sessionId: string, taskId: string) => `bgta
 export const BACKGROUND_FIRE_WORKFLOW = 'BackgroundFire'
 /**
  * The Schedule's action's workflow id; Temporal adds each fire's time (`-<RFC 3339>`), which
- * the fire reads its task from (temporal/backgroundTask.ts `fireTaskId`). It carries no
- * arguments, so nothing of the task is in a fire's input.
+ * the fire reads its session and task from (temporal/backgroundTask.ts `fireTask`). It
+ * carries no arguments, so nothing of the task is in a fire's input. Its payloads are left
+ * unsealed on purpose (payloadCodec.ts `subjectOf` names no subject for it): they are the
+ * task's id and the fire's outcome, never the prompt, which each activity reads from the row.
  */
 export const backgroundFireId = (sessionId: string, taskId: string) => `bgfire-${sessionId}-${taskId}`
 
@@ -28,7 +30,8 @@ export type StartedTask = Pick<BackgroundTask, 'id' | 'kind' | 'sessionId' | 'sp
 
 /** What runs the tasks: Temporal in the service (temporal.ts), a stand-in in tests. */
 export type TaskRunner = {
-  start(task: StartedTask): Promise<void>
+  /** `end`: the task has nothing to run (a recurring job with no occurrence before its expiry), so its row ends `done` with that detail. */
+  start(task: StartedTask): Promise<void | { end: string }>
   /** Cancels a task's workflow, or deletes its Schedule; one that is not running is left as it is. */
   cancel(task: Pick<BackgroundTask, 'id' | 'sessionId'>): Promise<void>
   /** Ends a task's workflow, or its Schedule and its running fire, at once, running nothing more (the session is being forgotten). */
@@ -47,11 +50,16 @@ export class BackgroundTasks {
   async create(t: NewTask): Promise<BackgroundTask | undefined> {
     const row = await this.store.create(t)
     if (!row) return undefined
+    let started: void | { end: string }
     try {
-      await this.#runner.start(row)
+      started = await this.#runner.start(row)
     } catch (err) {
       await this.store.finish(row.id, 'failed', `it could not be started: ${(err as Error).message}`)
       throw err
+    }
+    if (started) {
+      await this.store.finish(row.id, 'done', started.end)
+      return { ...row, state: 'done', detail: started.end }
     }
     return row
   }

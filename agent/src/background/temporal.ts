@@ -1,5 +1,5 @@
 import { type Client, ScheduleAlreadyRunning, ScheduleNotFoundError, WorkflowNotFoundError } from '@temporalio/client'
-import { agentTimezone } from './schedule.js'
+import { agentTimezone, nextFire, scheduleCrons } from './schedule.js'
 import {
   BACKGROUND_FIRE_WORKFLOW,
   BACKGROUND_WORKFLOW,
@@ -22,13 +22,25 @@ import type { BackgroundTask, BackgroundTaskStore } from './store.js'
  */
 export const CRON_CATCHUP = '1 minute'
 
+/**
+ * Why a recurring cron job has no occurrence left before its expiry, or undefined while it
+ * has one: a Schedule ends at the expiry and no fire runs after it, so such a job's row is
+ * ended here, not by a fire (bg_next's rule).
+ */
+export function scheduleEnd(task: Pick<BackgroundTask, 'spec' | 'expiresAt'>, now = new Date()): string | undefined {
+  const at = nextFire(String(task.spec.cron), now, String(task.spec.tz ?? agentTimezone()))
+  if (!at) return 'its schedule never fires again'
+  if (task.expiresAt && at > task.expiresAt) return 'expired after 7 days'
+  return undefined
+}
+
 /** Creates a recurring cron job's Schedule; one already there is left as it is (idempotent). Whether it made one. */
 export async function scheduleTask(client: Client, task: StartedTask, taskQueue: string, retryMs?: number): Promise<boolean> {
   try {
     await client.schedule.create({
       scheduleId: backgroundWorkflowId(task.sessionId, task.id),
       spec: {
-        cronExpressions: [String(task.spec.cron)],
+        cronExpressions: scheduleCrons(String(task.spec.cron)),
         timezone: String(task.spec.tz ?? agentTimezone()),
         ...(task.expiresAt ? { endAt: task.expiresAt } : {}),
       },
@@ -84,6 +96,8 @@ export function temporalTaskRunner(client: Client, taskQueue: string, retryMs?: 
   return {
     async start(task) {
       if (isScheduled(task)) {
+        const end = scheduleEnd(task)
+        if (end !== undefined) return { end }
         await scheduleTask(client, task, taskQueue, retryMs)
         return
       }
@@ -105,16 +119,62 @@ export function temporalTaskRunner(client: Client, taskQueue: string, retryMs?: 
   }
 }
 
+export type CronPassDeps = { client: Client; store: Pick<BackgroundTaskStore, 'activeRecurringCrons' | 'finish'>; taskQueue: string }
+
 /**
- * The start-time pass of decision Q11: every active recurring cron job still fired by its
- * `BackgroundTask` workflow becomes a Schedule, then the workflow is ended. Idempotent: a job
- * converted already keeps its Schedule, and its workflow is gone. How many Schedules it made.
+ * The pass over every active recurring cron job (decision Q11 of plan 2026-10-13 Step 9.8).
+ * A job still fired by its `BackgroundTask` workflow becomes a Schedule, then the workflow is
+ * ended. A job with no occurrence left before its expiry (its last one missed, as in a
+ * Temporal outage longer than CRON_CATCHUP) is ended, and its Schedule deleted. Idempotent: a
+ * job converted already keeps its Schedule, and its workflow is gone. How many Schedules it made.
  */
-export async function convertCronTasks(deps: { client: Client; store: Pick<BackgroundTaskStore, 'activeRecurringCrons'>; taskQueue: string }): Promise<number> {
+export async function convertCronTasks(deps: CronPassDeps, now = new Date()): Promise<number> {
   let n = 0
   for (const task of await deps.store.activeRecurringCrons()) {
-    if (await scheduleTask(deps.client, task, deps.taskQueue)) n += 1
+    const end = scheduleEnd(task, now)
+    if (end !== undefined) {
+      await deps.store.finish(task.id, 'done', end)
+      await unscheduleTask(deps.client, task)
+    } else if (await scheduleTask(deps.client, task, deps.taskQueue)) {
+      n += 1
+    }
     await ended(deps.client.workflow.getHandle(backgroundWorkflowId(task.sessionId, task.id)).terminate('converted to a Schedule (plan 2026-10-13 Step 9.8)'))
   }
   return n
+}
+
+/** How often the pass runs: it ends the jobs whose last occurrence was missed. */
+export const CRON_PASS_MS = 60 * 60 * 1000
+const CRON_PASS_FIRST_RETRY_MS = 5_000
+
+/**
+ * Runs convertCronTasks now and then every CRON_PASS_MS; a pass that fails (Temporal or the
+ * database unreachable at start) is retried sooner, its wait doubling up to CRON_PASS_MS.
+ * Returns what stops it.
+ */
+export function runCronPasses(deps: CronPassDeps, log: { info: (msg: string) => void; error: (msg: string) => void }): () => void {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let stopped = false
+  const next = (inMs: number, retryMs: number): void => {
+    if (stopped) return
+    timer = setTimeout(() => run(retryMs), inMs)
+    timer.unref?.()
+  }
+  const run = (retryMs: number): void => {
+    void convertCronTasks(deps).then(
+      (n) => {
+        if (n > 0) log.info(`background: ${n} cron job${n === 1 ? '' : 's'} converted to Schedules`)
+        next(CRON_PASS_MS, CRON_PASS_FIRST_RETRY_MS)
+      },
+      (err: unknown) => {
+        log.error(`background: the cron pass failed, retried in ${Math.round(retryMs / 1000)} s: ${err instanceof Error ? err.message : String(err)}`)
+        next(retryMs, Math.min(retryMs * 2, CRON_PASS_MS))
+      },
+    )
+  }
+  run(CRON_PASS_FIRST_RETRY_MS)
+  return () => {
+    stopped = true
+    clearTimeout(timer)
+  }
 }

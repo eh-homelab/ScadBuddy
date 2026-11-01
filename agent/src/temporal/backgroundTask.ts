@@ -32,7 +32,7 @@ type Activities = {
   bg_deliver(input: { taskId: string; waitedMs: number }): Promise<DeliverResult>
   wf_end(input: { taskId: string; outcome: Exclude<WorkflowOutcome, { status: 'gone' }> }): Promise<void>
   bg_schedule(input: { taskId: string }): Promise<boolean>
-  bg_unschedule(input: { taskId: string }): Promise<void>
+  bg_unschedule(input: { taskId: string; sessionId: string }): Promise<void>
 }
 
 type Source = (input: { taskId: string }) => Promise<MonitorResult>
@@ -96,9 +96,10 @@ export async function BackgroundTask(input: { taskId: string; kind?: string; ret
   }
 }
 
-/** The task a Schedule's fire is for, from its workflow id: `bgfire-<session>-<task>-<fire time>` (background/service.ts). */
-export function fireTaskId(workflowId: string): string | undefined {
-  return /^bgfire-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-([0-9a-f]{8})-/.exec(workflowId)?.[1]
+/** The session and task a Schedule's fire is for, from its workflow id: `bgfire-<session>-<task>-<fire time>` (background/service.ts). */
+export function fireTask(workflowId: string): { sessionId: string; taskId: string } | undefined {
+  const m = /^bgfire-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-([0-9a-f]{8})-/.exec(workflowId)
+  return m ? { sessionId: m[1]!, taskId: m[2]! } : undefined
 }
 
 /**
@@ -108,8 +109,9 @@ export function fireTaskId(workflowId: string): string | undefined {
  * past its 7 days) ends its row and its Schedule.
  */
 export async function BackgroundFire(input?: { retryMs?: number }): Promise<void> {
-  const taskId = fireTaskId(workflowInfo().workflowId)
-  if (taskId === undefined) return
+  const fire = fireTask(workflowInfo().workflowId)
+  if (fire === undefined) return
+  const { taskId } = fire
   const retryMs = input?.retryMs ?? BUSY_RETRY_MS
   const due = Date.now()
   for (;;) {
@@ -117,7 +119,7 @@ export async function BackgroundFire(input?: { retryMs?: number }): Promise<void
     if (fired.result === 'sent' || fired.result === 'skipped') break
     if (fired.result === 'end') {
       await acts.bg_finish({ taskId, state: fired.state, detail: fired.reason })
-      await acts.bg_unschedule({ taskId })
+      await acts.bg_unschedule(fire)
       return
     }
     await sleep(retryMs)
@@ -125,7 +127,7 @@ export async function BackgroundFire(input?: { retryMs?: number }): Promise<void
   const step = await acts.bg_next({ taskId })
   if ('end' in step) {
     await acts.bg_finish({ taskId, state: 'done', detail: step.end })
-    await acts.bg_unschedule({ taskId })
+    await acts.bg_unschedule(fire)
   }
 }
 

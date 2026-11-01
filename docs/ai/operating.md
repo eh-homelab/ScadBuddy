@@ -969,7 +969,13 @@ ends, so a classic turn gets these in place of its own too (`mcp__builtin__<Name
 recurring cron job is a Temporal Schedule `bgtask-<session>-<id>` (its cron in the task's
 timezone, ending at its expiry) whose every fire is a short `BackgroundFire` workflow
 (`background/temporal.ts`, unified runtime plan Step 9.8; jobs made before it are converted
-at start); any other task is a `BackgroundTask` workflow `bgtask-<session>-<id>`
+at start, and an hourly pass ends any job whose last occurrence before its expiry was
+missed). A job with no occurrence before its expiry (a monthly one, say) is not kept.
+A cron takes numbers, `*`, ranges, steps, lists and month or day names. `L`, `W`, `#` and
+`?` are refused, because Temporal refuses them or reads them differently. A job whose day
+fields are both restricted is two Schedule expressions, so it fires when either day field
+matches, as standard cron does (`background/schedule.ts` `scheduleCrons`). A fire's
+payloads are its task id and outcome only, so they are not sealed. Any other task is a `BackgroundTask` workflow `bgtask-<session>-<id>`
 (`temporal/backgroundTask.ts`). When the task is due it sends
 the prompt as the session's next message, as the one who made it and only while they
 still own the session, once the session is idle (asked again every 30 s; a cron

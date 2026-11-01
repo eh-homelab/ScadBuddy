@@ -65,6 +65,8 @@ export async function cronCreate(
   if (!t) return full()
   const when = describeCron(input.cron)
   const zone = `Times are in ${ctx.tz}.`
+  // A recurring job whose first occurrence is past its 7 days (a monthly or yearly one) ends at once.
+  if (t.state !== 'active') return error(`Recurring job ${t.id} (${when}) was not kept: ${t.detail ?? 'it ended'}. ${zone}`)
   return {
     text: recurring
       ? `Scheduled recurring job ${t.id} (${when}). ${KEPT} Auto-expires after 7 days. Use CronDelete to cancel sooner. ${zone}`

@@ -20,10 +20,48 @@ export function agentTimezone(): string {
 
 export class CronError extends Error {}
 
-/** The next time `cron` fires strictly after `after`, or undefined if it never does. */
-export function nextFire(cron: string, after: Date, tz: string): Date | undefined {
+// What a field may hold: numbers, `*`, ranges, steps and lists, and names in the month and
+// day-of-week fields. The rest of cron-parser's syntax (`L`, `W`, `#`, `?`) is refused,
+// because a recurring job is a Temporal Schedule (background/temporal.ts), and Temporal
+// refuses `L`, `W` and `?` and reads `#` its own way (measured against the Temporal CLI
+// 1.5 dev server, 2026-11-01).
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
+const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
+const FIELD_NAMES: readonly (readonly string[])[] = [[], [], [], MONTHS, DAYS]
+
+function plainField(field: string, names: readonly string[]): boolean {
+  return field
+    .split(/[,/-]/)
+    .every((part) => part === '*' || /^\d+$/.test(part) || names.includes(part.toLowerCase()))
+}
+
+function fieldsOf(cron: string): string[] {
   const fields = cron.trim().split(/\s+/)
   if (fields.length !== 5) throw new CronError(`Invalid cron expression '${cron}'. Expected 5 fields: M H DoM Mon DoW.`)
+  const odd = fields.findIndex((f, i) => !plainField(f, FIELD_NAMES[i]!))
+  if (odd >= 0) {
+    throw new CronError(
+      `Invalid cron expression '${cron}': field ${odd + 1} ('${fields[odd]}') may hold only numbers, *, ranges (a-b), steps (/n), lists (a,b) and month or day names.`,
+    )
+  }
+  return fields
+}
+
+/**
+ * The cron expressions of a job's Schedule. When neither day field is `*`, cron-parser
+ * fires when either matches (as standard cron does) and Temporal only when both do
+ * (measured as above; a step such as `*\/2` counts as restricted in both), so such a job
+ * is two expressions, one per day field, whose union is cron-parser's.
+ */
+export function scheduleCrons(cron: string): string[] {
+  const [m, h, dom, mon, dow] = fieldsOf(cron)
+  if (dom === '*' || dow === '*') return [[m, h, dom, mon, dow].join(' ')]
+  return [`${m} ${h} ${dom} ${mon} *`, `${m} ${h} * ${mon} ${dow}`]
+}
+
+/** The next time `cron` fires strictly after `after`, or undefined if it never does. */
+export function nextFire(cron: string, after: Date, tz: string): Date | undefined {
+  const fields = fieldsOf(cron)
   let expression
   try {
     expression = CronExpressionParser.parse(fields.join(' '), { currentDate: after, tz, strict: false })
