@@ -17,6 +17,7 @@ import type {
   PrintRunRequest,
   PrintRunResult,
   PrintSequence,
+  OrderItemPrintRequest,
   SliceQuoteRequest,
   SupportsChoice,
   PrimeTowerChoice,
@@ -251,6 +252,19 @@ interface Props {
     /** Settles once the quote is accepted (or done); rejects with a refusal from its check. */
     start: (body: SliceQuoteRequest) => Promise<void>
   }
+  /**
+   * #4719 — the dialog as an order item's print (spec 2026-10-18 §5.4): Print posts the
+   * item's `print` (the `order_item_print` operation) with the dialog's own printer, spools
+   * and choices in place of the output's run. The item prints every plate, the quantity
+   * still to print, so neither is chosen here. `start` settles once the attempt is
+   * recorded, and rejects with the refusal (`requote_needed`, a print run's own), which
+   * the dialog shows with its choices kept.
+   */
+  itemPrint?: {
+    orderId: string
+    itemId: string
+    start: (body: OrderItemPrintRequest) => Promise<void>
+  }
 }
 
 /** No registry rows: one constant, so a render without them keeps its dependencies. */
@@ -282,6 +296,7 @@ export function PrintPicker({
   queue = false,
   content,
   quote,
+  itemPrint,
 }: Props) {
   /** §7 — the output a Re-arrange made of the one passed in, printed in its place. */
   const [arranged, setArranged] = useState<Output | null>(null)
@@ -838,6 +853,8 @@ export function PrintPicker({
   const queueUrl = result?.bambuddy_url ?? null
   /** #4250 — quote mode: the price book's filaments, and the one chosen per slot. */
   const quoting = quote !== undefined
+  /** #4719 — either mode hands its request to the page: every plate, no project chosen. */
+  const handing = quoting || itemPrint !== undefined
   const priceBook = useAsync(() => (open && quoting ? api.priceBook() : Promise.resolve(null)), [open, quoting])
   const [priced, setPriced] = useState<Record<string, string>>({})
   const [quoteBusy, setQuoteBusy] = useState(false)
@@ -1343,6 +1360,26 @@ export function PrintPicker({
     }
   }
 
+  /** #4719 — Print an order item: the dialog's choices, posted as the item's print. */
+  async function runItemPrint() {
+    if (!itemPrint || !printChoices) return
+    setQuoteBusy(true)
+    setQuoteError(null)
+    try {
+      await itemPrint.start({
+        ...(registryPrinter ? { printer: registryPrinter } : {}),
+        printer_id: sentPrinterId,
+        filament_plan: { slots: plan, force_colour_match: false },
+        choices: printChoices,
+      })
+      close()
+    } catch (cause) {
+      setQuoteError(refusalText(cause))
+    } finally {
+      setQuoteBusy(false)
+    }
+  }
+
   function close() {
     // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
     // reopen with Print enabled and send the print a second time (#539 review).
@@ -1373,7 +1410,9 @@ export function PrintPicker({
       ? undefined
       : quoting
         ? 'Choose the spools to slice with and the price-book filament for each slot. ScadBuddy slices every plate and prices it; nothing is queued.'
-        : sliced
+        : itemPrint
+          ? "Choose the spools. Every plate prints, as many as the item still needs; the item then follows the print."
+          : sliced
         ? 'This file is sliced already. Choose the spools, and Bambuddy queues it as it is.'
         : native
           ? // #3818 — the hot path: ScadBuddy's own slicer, and the printer over the LAN.
@@ -1398,6 +1437,22 @@ export function PrintPicker({
             >
               {quoteBusy && <Spinner />}
               Quote
+            </Button>
+          </>
+        ) : itemPrint ? (
+          <>
+            <Button type="button" variant="outline" onClick={close} disabled={quoteBusy}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void runItemPrint()}
+              disabled={quoteBusy || loading || !choices || !planReady || !printChoices || Boolean(sliced)}
+              data-testid="run-item-print"
+              {...USER_ONLY}
+            >
+              {quoteBusy && <Spinner />}
+              Print
             </Button>
           </>
         ) : batch ? (
@@ -1496,7 +1551,7 @@ export function PrintPicker({
         className={cn('flex max-h-[calc(100dvh-2rem)] flex-col gap-0 p-0', split ? 'sm:max-w-[1120px]' : 'sm:max-w-lg')}
       >
         <DialogHeader className="shrink-0 border-b px-5 py-4">
-          <DialogTitle>{quoting ? 'Quote from a slice' : batch ? batch.title : queue ? 'Queue' : 'Print'}</DialogTitle>
+          <DialogTitle>{quoting ? 'Quote from a slice' : itemPrint ? 'Print the line item' : batch ? batch.title : queue ? 'Queue' : 'Print'}</DialogTitle>
           {description && <DialogDescription>{description}</DialogDescription>}
         </DialogHeader>
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
@@ -1774,13 +1829,13 @@ export function PrintPicker({
                 </p>
               )}
 
-              {quoting && plates.length > 1 && (
+              {handing && plates.length > 1 && (
                 <p className="text-sm text-muted-foreground" data-testid="quote-every-plate">
-                  Every plate is sliced and priced.
+                  {quoting ? 'Every plate is sliced and priced.' : 'Every plate is printed.'}
                 </p>
               )}
 
-              {!quoting && plates.length > 1 && source && (
+              {!handing && plates.length > 1 && source && (
                 <PlatesToPrint
                   plates={plates}
                   value={plate}
@@ -1839,8 +1894,8 @@ export function PrintPicker({
               {choices && (
                 <>
                   {/* #1660 — Simple hides the project step, but not where the print is filed. */}
-                  {!quoting && !picker.advanced && changingProject && projectPicker}
-                  {!quoting && !picker.advanced && !changingProject && filedUnderLabel !== null && (
+                  {!handing && !picker.advanced && changingProject && projectPicker}
+                  {!handing && !picker.advanced && !changingProject && filedUnderLabel !== null && (
                     <p className="text-sm text-muted-foreground" data-testid="print-filed-under">
                       Filed under: <span className="text-foreground">{filedUnderLabel}</span>{' '}
                       <Button
@@ -1862,7 +1917,7 @@ export function PrintPicker({
 
                   {/* #3635 — Simple mode shows no Options, but never hides a remembered
                       one that holds the job. */}
-                  {!quoting && !picker.advanced && (
+                  {!handing && !picker.advanced && (
                     <PrintOptionsDisclosure
                       heldOnly
                       known={remembered}
@@ -1960,7 +2015,7 @@ export function PrintPicker({
                         </>
                       )}
 
-                      {!quoting && (
+                      {!handing && (
                         <>
                           <PrintOptionsDisclosure
                             subject={subject}

@@ -27,8 +27,8 @@ Money = int
 OrderStatus = Literal[
     "draft", "quoted", "accepted", "in_production", "ready", "shipped", "closed", "cancelled"
 ]
-#: Every §3.5 state: `queued`, `printing` and `printed` wait for the print path (phase
-#: 3, plan Ruling 4); phase 1 reaches the others.
+#: Every §3.5 state: `queued`, `printing` and `printed` are the print path's
+#: (``order_item_print``, #4719), which the item follows from its run.
 ItemStatus = Literal[
     "draft",
     "quoted",
@@ -344,6 +344,17 @@ class Fulfilment(BaseModel):
     accepted_at: datetime | None
     created_by: Actor
     created_at: datetime
+    #: The print run that queued or started it (§5.4, #4719); None for an attempt
+    #: recorded by hand. The item follows the run while ``finished_at`` is unset.
+    print_run_id: str | None = None
+    #: The accepted quote's sliced file the run printed from (§6.1), held by
+    #: ``(order_item_fulfilment, <id>)``; None for a ``manual`` quote, which names no file.
+    sliced_sha256: str | None = None
+    sliced_blob_key: str | None = None
+    #: The registry printer the run named, when it named one.
+    printer: str | None = None
+    #: How many the run was sent; ``quantity`` is what it made, set when it settles.
+    copies: int | None = None
 
 
 class ShipmentItem(BaseModel):

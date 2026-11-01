@@ -18,15 +18,18 @@ import logging
 import uuid
 from collections.abc import Mapping
 from contextlib import aclosing
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from fastapi import status
+from fastapi import Response, status
 
 from scadbuddy.bambuddy.client import client_for, maybe_client
 from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
 from scadbuddy.bambuddy.print_run import PrintRunRequest, registry_printer, slice_route
 from scadbuddy.bambuddy.print_source import OutputSource
+from scadbuddy.bambuddy.runs import PrintRun
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import declares_pipeline
@@ -38,6 +41,7 @@ from scadbuddy.orders import attachments
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor, Reference
+from scadbuddy.orders.printing import print_check
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.quote import (
     MAX_SLICED_BYTES,
@@ -63,6 +67,10 @@ logger = logging.getLogger(__name__)
 
 ORDER_ITEM_QUOTE = "order_item_quote"
 ORDER_ATTACHMENT_ADD = "order_attachment_add"
+ORDER_ITEM_PRINT = "order_item_print"
+#: One ``order_item_print`` run: the print run's accept, which answers within the command
+#: deadline, and the attempt's row. Its slices and queueing are the print run's own.
+PRINT_TIMEOUT = timedelta(minutes=5)
 
 
 def _slice_failed(plate_id: int, failure: str | None) -> ApiError:
@@ -305,6 +313,80 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         dumped: dict[str, Any] = quote.model_dump(mode="json")
         return dumped
 
+    async def item_print_check(request: dict[str, Any]) -> dict[str, Any]:
+        """§5.4's refusals (``orders/printing.py`` ``print_check``), then the printer the
+        run would refuse, as a quote's check refuses it."""
+        orders = components.get(ORDERS)
+        body = PrintRunRequest.model_validate(request["request"])
+        checked = await print_check(
+            orders.store,
+            core.outputs,
+            core.store.blobs,
+            request["order_id"],
+            request["item_id"],
+            schema_of=lambda reference: reference_schema(core, reference),
+        )
+        if body.printer is not None:
+            settings = await asyncio.to_thread(core.settings_store.load)
+            await registry_printer(
+                body.printer, body.printer_id, settings, components.get(PRINTERS).store
+            )
+        return checked
+
+    async def item_print_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """The print run started as the print route starts one (``accept_run``), its
+        attempt recorded, then the follow asked once, for a run that ended before the
+        attempt's row existed (its event found nothing to move)."""
+        # Here, not at the top: the orders package imports nothing of `api/` as it loads
+        # (`orders/__init__.py`); this run is the one place it reaches the print route.
+        from scadbuddy.activity.component import ACTIVITY
+        from scadbuddy.api.printing import accept_run
+        from scadbuddy.workflows.print_models import SourceSpec
+
+        orders = components.get(ORDERS)
+        body = PrintRunRequest.model_validate(
+            {
+                **request["request"],
+                # §5.4: the quantity still to print, of the whole output (a quote is the
+                # whole output's price), keyed by the operation so a retry or a re-send
+                # repeats its run.
+                "copies": checked["copies"],
+                "all_plates": True,
+                "plate_ids": None,
+                "request_id": request["request_id"],
+            }
+        )
+        output_id = checked["output_id"]
+        run = await accept_run(
+            core.print_runs,
+            Response(),
+            subject=PrintSubject.output(output_id),
+            slug=checked["slug"],
+            request=body,
+            source=SourceSpec(kind="output", output_id=output_id),
+            activity=components.get(ACTIVITY),
+        )
+        # A follow URL (a `JSONResponse`) answers only a request that asked for one.
+        assert isinstance(run, PrintRun)
+        try:
+            attempt = await to_thread_to_end(
+                lambda: orders.lifecycle.start_print_attempt(
+                    request["order_id"],
+                    request["item_id"],
+                    Actor.model_validate(request["by"]),
+                    print_run_id=run.id,
+                    copies=checked["copies"],
+                    sliced_sha256=checked["sliced_sha256"],
+                    sliced_blob_key=checked["sliced_blob_key"],
+                    printer=run.printer,
+                )
+            )
+        except LifecycleError as error:
+            raise refused(error) from None
+        followed = await asyncio.to_thread(orders.lifecycle.follow_print, run.id)
+        dumped: dict[str, Any] = (followed or attempt).model_dump(mode="json")
+        return dumped
+
     async def attachment_check(request: dict[str, Any]) -> dict[str, Any]:
         """The order, and the item when one is named, are there (nothing written)."""
         store = components.get(ORDERS).store
@@ -390,6 +472,17 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             # The render and every plate's slice outlast the command deadline: the
             # caller follows the operation anyway.
             answers_running=True,
+        ),
+        OperationKind(
+            ORDER_ITEM_PRINT,
+            item_print_check,
+            item_print_run,
+            # A retry repeats the same print run (its `request_id` is the operation's),
+            # so a start that found Temporal busy is tried again, never printed twice.
+            run_attempts=3,
+            queue="library",
+            run_timeout=PRINT_TIMEOUT,
+            where="the printer's queue and the item's attempts",
         ),
     ]
 

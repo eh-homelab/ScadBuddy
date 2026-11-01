@@ -36,6 +36,16 @@ const ENDED = new Set<OrderStatus>(['closed', 'cancelled'])
 const DERIVED = new Set<OrderStatus>(['accepted', 'in_production', 'ready', 'shipped'])
 export const SETTLED = new Set(['fulfilled', 'cancelled'])
 const FULFILLABLE = new Set(['approved', 'failed'])
+/** #4719 — the print path's states: an attempt is edited, or accepted once printed, in them. */
+const PRINTING = new Set(['queued', 'printing', 'printed'])
+
+/** `Lifecycle._after`: the status the item's latest attempt gives it. */
+function after(latest: Fulfilment, current: string): OrderItem['status'] {
+  if (latest.outcome === 'failed') return 'failed'
+  if (!latest.print_run_id) return 'approved'
+  if (latest.outcome === 'succeeded' || latest.outcome === 'partial') return 'printed'
+  return PRINTING.has(current) ? (current as OrderItem['status']) : 'queued'
+}
 
 const encodeCursor = (o: Order) => btoa(`${o.created_at}|${o.id}`).replaceAll('+', '-').replaceAll('/', '_')
 function decodeCursor(cursor: string): [string, string] | null {
@@ -821,10 +831,10 @@ export const handlers = [
       const attempt = state.fulfilments.find((f) => f.id === params.f && f.order_item_id === found.id)
       if (!attempt) throw new Refused('fulfilment_not_found', `no attempt ${String(params.f)} of item ${found.id}`, [], true)
       if (attempt.accepted_at) throw new Refused('fulfilment_accepted', `attempt ${attempt.attempt} is accepted`)
-      if (!FULFILLABLE.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      if (!FULFILLABLE.has(found.status) && !PRINTING.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
       Object.assign(attempt, { quantity: body.quantity, outcome: body.outcome, failure_reason: body.failure_reason ?? null, started_at: body.started_at ?? null, finished_at: body.finished_at ?? null, notes: body.notes ?? '' })
       const latest = attemptsOf(found.id).at(-1)!
-      found.status = latest.outcome === 'failed' ? 'failed' : 'approved'
+      found.status = after(latest, found.status)
       event(order, 'fulfilment.updated', { item_id: found.id, fulfilment_id: attempt.id, attempt: attempt.attempt, outcome: attempt.outcome })
       rederive(order)
       return attempt
@@ -841,15 +851,70 @@ export const handlers = [
       if (!attempt) throw new Refused('fulfilment_not_found', `no attempt ${String(params.f)} of item ${found.id}`, [], true)
       if (attempt.accepted_at) throw new Refused('fulfilment_accepted', `attempt ${attempt.attempt} is already accepted`)
       if (attempt.outcome === 'failed') throw new Refused('fulfilment_failed', `attempt ${attempt.attempt} failed; nothing was made`)
-      if (!FULFILLABLE.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      if (!FULFILLABLE.has(found.status) && found.status !== 'printed') throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
       attempt.accepted_at = now()
       const made = attemptsOf(found.id).filter((f) => f.accepted_at).reduce((sum, f) => sum + f.quantity, 0)
       if (made >= found.quantity) found.status = 'fulfilled'
+      else if (found.status === 'printed') found.status = 'approved'
       event(order, 'fulfilment.accepted', { item_id: found.id, fulfilment_id: attempt.id, attempt: attempt.attempt, made })
       rederive(order)
       return attempt
     }),
   ),
+  // #4719 — `order_item_print` (`orders/printing.py` `print_check`, then
+  // `Lifecycle.start_print_attempt`): answered at once with the attempt, the item queued.
+  // The mock prints nothing, so the item stays queued until an attempt is edited by hand.
+  http.post('/api/v1/orders/:id/items/:item/print', async ({ request, params }) => {
+    if (!request.headers.get('Idempotency-Key')) {
+      return problem(request, 428, 'This request needs an Idempotency-Key header', 'https://scadbuddy.dev/problems/idempotency-key-required')
+    }
+    await request.json()
+    try {
+      const order = lock(String(params.id))
+      notEnded(order)
+      if (!DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)
+      notOnHold(order)
+      const found = itemOf(order, String(params.item))
+      if (found.reference === null) throw new Refused('item_custom', `item ${found.id} is a custom item`, [found.id])
+      if (!FULFILLABLE.has(found.status)) {
+        throw new Refused(SETTLED.has(found.status) ? 'item_not_open' : 'item_not_approved', `item ${found.id} is ${found.status}`, [found.id])
+      }
+      const attempts = attemptsOf(found.id)
+      const copies = found.quantity - attempts.filter((f) => f.outcome === 'succeeded' || f.outcome === 'partial').reduce((sum, f) => sum + f.quantity, 0)
+      if (copies < 1) throw new Refused('item_made', `item ${found.id}'s attempts made its ${found.quantity} already: accept them`, [found.id])
+      const quote = quotesOf(found.id).find((q) => q.accepted)
+      if (!quote || found.output_id === null) {
+        throw new Refused('requote_needed', `item ${found.id} needs a new quote before it prints`, [found.id])
+      }
+      const attempt: Fulfilment = {
+        id: newId('f'),
+        order_item_id: found.id,
+        attempt: attempts.length + 1,
+        quantity: 0,
+        outcome: 'unknown',
+        failure_reason: null,
+        started_at: now(),
+        finished_at: null,
+        notes: '',
+        accepted_at: null,
+        created_by: BROWSER,
+        created_at: now(),
+        print_run_id: newId('run'),
+        copies,
+        sliced_sha256: quote.sliced_sha256,
+        sliced_blob_key: quote.sliced_blob_key,
+        printer: null,
+      }
+      state.fulfilments.push(attempt)
+      found.status = 'queued'
+      found.updated_at = now()
+      event(order, 'print.started', { item_id: found.id, fulfilment_id: attempt.id, attempt: attempt.attempt, print_run_id: attempt.print_run_id, copies })
+      rederive(order)
+      return HttpResponse.json(attempt)
+    } catch (error) {
+      return refused(request, error)
+    }
+  }),
   // `Lifecycle.unfulfil_item` (#4952): the latest accepted attempt is no longer counted.
   http.post('/api/v1/orders/:id/items/:item/unfulfil', ({ request, params }) =>
     transition(request, () => {

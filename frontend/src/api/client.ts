@@ -198,6 +198,7 @@ import type {
   PolicyUpdate,
   PriceBook,
   Quote,
+  OrderItemPrintRequest,
   SliceQuoteRequest,
   Shipment,
   ShipmentEdit,
@@ -2157,6 +2158,11 @@ export const api = {
       undefined,
       onAccepted,
     ),
+  /** #4719 — the `order_item_print` operation: a print run of the item's output with the
+   * dialog's choices, every plate, the quantity still to print; followed to the attempt
+   * it recorded, the item `queued`. */
+  printItem: (orderId: string, itemId: string, body: OrderItemPrintRequest) =>
+    command<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/print`, { method: 'POST', body: JSON.stringify(body) }),
   /**
    * #4736 — the slice quotes still running, as the activity index lists them: each row's
    * `subject` is `order_item:<id>`, its `id` `operation:<operation id>`. Running quotes are

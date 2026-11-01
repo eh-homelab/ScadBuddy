@@ -1,0 +1,362 @@
+"""Printing an order item (#4719, spec 2026-10-18 §5.4): the attempt a print run starts,
+the item following the run from what the print path recorded (``print_runs``,
+``print_outcomes``), and ``order_item_print``'s check."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import time
+import uuid
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
+
+import pytest
+
+from scadbuddy.core.events import BusResync, PrintEvent, PrintOutcome, PrintRunEvent
+from scadbuddy.core.problems import ApiError
+from scadbuddy.library.outputs import OutputMeta
+from scadbuddy.orders.lifecycle import (
+    FULFILMENT_HOLDER,
+    QUOTE_HOLDER,
+    FulfilmentInput,
+    LifecycleError,
+)
+from scadbuddy.orders.models import Fulfilment, Order, OrderItem
+from scadbuddy.orders.printing import listen_for_prints, print_check, print_request_id
+from scadbuddy.orders.quote import OutputsRead
+from scadbuddy.orders.store import OrderStore
+from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.store.refs import BlobRefs
+from tests.conftest import PgPool
+from tests.orders.test_lifecycle import BY, Shop, _slice_quote
+
+pytestmark = pytest.mark.requires_postgres
+
+SUBJECT = "out-1"
+
+
+@pytest.fixture(name="shop")
+def _shop(rows: OrderStore, pool: PgPool) -> Shop:
+    return Shop(rows, BlobRefs(pool))
+
+
+def run_row(pool: PgPool, *, status: str = "running", detail: str | None = None) -> str:
+    """A ``print_runs`` row as the print route's run writes it."""
+    run_id = uuid.uuid4().hex
+    error = None if detail is None else f'{{"status": 422, "detail": "{detail}"}}'
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, error)"
+            " VALUES (%s, %s, %s, %s, %s::jsonb)",
+            (run_id, SUBJECT, run_id, status, error),
+        )
+    return run_id
+
+
+def set_run(pool: PgPool, run_id: str, status: str, detail: str | None = None) -> None:
+    error = None if detail is None else f'{{"status": 422, "detail": "{detail}"}}'
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE print_runs SET status = %s, error = %s::jsonb WHERE id = %s",
+            (status, error, run_id),
+        )
+
+
+def settle(pool: PgPool, run_id: str, outcome: str) -> None:
+    """``print_outcomes``' row, as the follow of every path records it (#2665)."""
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_outcomes (run_id, subject, slug, outcome) VALUES (%s, %s, %s, %s)",
+            (run_id, SUBJECT, "demo", outcome),
+        )
+
+
+def started(shop: Shop, order: Order, item: OrderItem, run_id: str, copies: int = 1) -> Fulfilment:
+    return shop.lifecycle.start_print_attempt(
+        order.id,
+        item.id,
+        BY,
+        print_run_id=run_id,
+        copies=copies,
+        sliced_sha256="a" * 64,
+        sliced_blob_key="quote-a",
+        printer=None,
+    )
+
+
+def held(pool: PgPool, kind: str) -> dict[str, str]:
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT holder_id, key FROM blob_refs WHERE holder_kind = %s", (kind,)
+        ).fetchall()
+    return {row["holder_id"]: row["key"] for row in rows}
+
+
+def test_a_print_records_its_attempt_and_queues_the_item(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted(quantity=2)
+    run_id = run_row(pool)
+    attempt = started(shop, order, item, run_id, copies=2)
+    assert (attempt.attempt, attempt.quantity, attempt.outcome) == (1, 0, "unknown")
+    assert (attempt.print_run_id, attempt.copies) == (run_id, 2)
+    assert attempt.sliced_blob_key == "quote-a" and attempt.started_at is not None
+    assert shop.get_item(item).status == "queued"
+    # §3.5's "any item past `approved`".
+    assert shop.get(order).status == "in_production"
+    assert held(pool, FULFILMENT_HOLDER) == {attempt.id: "quote-a"}
+    assert "print.started" in shop.kinds(order)
+    # A re-sent operation repeats its run, and records nothing twice.
+    assert started(shop, order, item, run_id, copies=2) == attempt
+    assert len(shop.rows.fulfilments(item.id)) == 1
+
+
+def test_a_print_needs_an_approved_item_on_an_accepted_order(shop: Shop, pool: PgPool) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    with pytest.raises(LifecycleError) as refused:
+        started(shop, order, item, run_row(pool))
+    assert refused.value.slug == "order_not_accepted"
+    order, item = shop.accepted()
+    started(shop, order, item, run_row(pool))
+    with pytest.raises(LifecycleError) as again:
+        started(shop, order, item, run_row(pool))
+    assert again.value.slug == "item_not_approved"
+
+
+def test_the_item_follows_its_print_to_printed(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted(quantity=2)
+    run_id = run_row(pool)
+    started(shop, order, item, run_id, copies=2)
+    assert shop.lifecycle.follow_print(run_id) is None
+    # A print moving before its run queued it is not this run's print yet.
+    assert shop.lifecycle.follow_print(run_id, progressed=True) is None
+    set_run(pool, run_id, "succeeded")
+    assert shop.lifecycle.follow_print(run_id) is None
+    assert shop.get_item(item).status == "queued"
+    shop.lifecycle.follow_print(run_id, progressed=True)
+    assert shop.get_item(item).status == "printing"
+    settle(pool, run_id, "finished")
+    settled = shop.lifecycle.follow_print(run_id)
+    assert settled is not None
+    assert (settled.outcome, settled.quantity) == ("succeeded", 2)
+    assert settled.finished_at is not None
+    assert shop.get_item(item).status == "printed"
+    # Heard again (another replica, a resync): nothing moves.
+    assert shop.lifecycle.follow_print(run_id) is None
+    shop.lifecycle.accept_fulfilment(order.id, item.id, settled.id, BY)
+    assert shop.get_item(item).status == "fulfilled"
+    assert shop.get(order).status == "ready"
+
+
+def test_a_failed_run_or_print_fails_the_attempt(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted()
+    run_id = run_row(pool)
+    started(shop, order, item, run_id)
+    set_run(pool, run_id, "failed", "no spool for slot 2")
+    failed = shop.lifecycle.follow_print(run_id)
+    assert failed is not None
+    assert (failed.outcome, failed.failure_reason) == ("failed", "no spool for slot 2")
+    assert shop.get_item(item).status == "failed"
+    # A reprint is a new attempt, from `failed`.
+    second = run_row(pool, status="succeeded")
+    started(shop, order, item, second)
+    assert shop.get_item(item).status == "queued"
+    settle(pool, second, "cancelled")
+    cancelled = shop.lifecycle.follow_print(second)
+    assert cancelled is not None and cancelled.outcome == "failed"
+    assert cancelled.failure_reason == "the print was cancelled"
+    assert shop.get_item(item).status == "failed"
+
+
+def test_an_unread_end_waits_for_a_person(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted()
+    run_id = run_row(pool, status="succeeded")
+    attempt = started(shop, order, item, run_id)
+    settle(pool, run_id, "unknown")
+    ended = shop.lifecycle.follow_print(run_id)
+    assert ended is not None and ended.outcome == "unknown" and ended.finished_at is not None
+    assert shop.get_item(item).status == "queued"
+    # Settled by hand (§5.4: PATCH the attempt).
+    shop.lifecycle.update_fulfilment(
+        order.id, item.id, attempt.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+    )
+    assert shop.get_item(item).status == "printed"
+
+
+def test_a_persons_edit_stands_over_the_follow(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted()
+    run_id = run_row(pool, status="succeeded")
+    attempt = started(shop, order, item, run_id)
+    shop.lifecycle.update_fulfilment(
+        order.id, item.id, attempt.id, FulfilmentInput(quantity=1, outcome="succeeded"), BY
+    )
+    settle(pool, run_id, "failed")
+    assert shop.lifecycle.follow_print(run_id) is None
+    assert shop.get_item(item).status == "printed"
+
+
+def test_a_cancelled_item_keeps_its_print_record(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted()
+    run_id = run_row(pool, status="succeeded")
+    started(shop, order, item, run_id)
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    settle(pool, run_id, "finished")
+    settled = shop.lifecycle.follow_print(run_id)
+    assert settled is not None and settled.outcome == "succeeded"
+    assert shop.get_item(item).status == "cancelled"
+
+
+def test_an_accepted_part_leaves_the_rest_to_print(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted(quantity=3)
+    run_id = run_row(pool, status="succeeded")
+    attempt = started(shop, order, item, run_id, copies=3)
+    shop.lifecycle.update_fulfilment(
+        order.id, item.id, attempt.id, FulfilmentInput(quantity=2, outcome="partial"), BY
+    )
+    assert shop.get_item(item).status == "printed"
+    shop.lifecycle.accept_fulfilment(order.id, item.id, attempt.id, BY)
+    assert shop.get_item(item).status == "approved"
+
+
+def test_the_listener_follows_every_print_event(shop: Shop, pool: PgPool) -> None:
+    async def scenario() -> None:
+        order, item = shop.accepted()
+        run_id = run_row(pool, status="succeeded")
+        started(shop, order, item, run_id)
+        remove = listen_for_prints(shop.bus, shop.lifecycle)
+        try:
+            shop.bus.publish(PrintEvent(kind="print.progress", output_id=SUBJECT, slug="demo"))
+            await _until(lambda: shop.get_item(item).status == "printing")
+            settle(pool, run_id, "finished")
+            shop.bus.publish(
+                PrintOutcome(output_id=SUBJECT, slug="demo", run_id=run_id, outcome="finished")
+            )
+            await _until(lambda: shop.get_item(item).status == "printed")
+
+            # A run that fails is heard on `print.run`; a lost event on the resync.
+            order2, item2 = shop.accepted()
+            failed = run_row(pool)
+            started(shop, order2, item2, failed)
+            set_run(pool, failed, "failed", "refused")
+            shop.bus.publish(PrintRunEvent(output_id=SUBJECT, slug="demo", run_id=failed))
+            await _until(lambda: shop.get_item(item2).status == "failed")
+            order3, item3 = shop.accepted()
+            lost = run_row(pool, status="succeeded")
+            started(shop, order3, item3, lost)
+            settle(pool, lost, "finished")
+            shop.bus.publish(BusResync())
+            await _until(lambda: shop.get_item(item3).status == "printed")
+        finally:
+            await remove()
+
+    asyncio.run(scenario())
+
+
+async def _until(done: Any, timeout: float = 60.0) -> None:
+    """Until ``done`` holds; ``timeout`` only catches a follow that never moves."""
+    deadline = time.monotonic() + timeout
+    while not await asyncio.to_thread(done):
+        assert time.monotonic() < deadline, "the follow never moved the item"
+        await asyncio.sleep(0.02)
+
+
+# -- the check -------------------------------------------------------------------------------
+
+
+class Outputs:
+    """``OutputsRead`` over one output, the reference's render unless told otherwise."""
+
+    def __init__(self, item: OrderItem, *, gone: bool = False) -> None:
+        assert item.reference is not None
+        self.reference = item.reference
+        self.gone = gone
+
+    def get(self, output_id: str) -> OutputMeta:
+        if self.gone:
+            raise OSError(output_id)
+        meta = SimpleNamespace(slug=self.reference.slug, model_version=self.reference.commit)
+        return cast(OutputMeta, meta)
+
+    def inputs(self, output_id: str) -> dict[str, Any]:
+        return dict(self.reference.inputs)
+
+    def arranged_from(self, output_id: str) -> list[str]:
+        return []
+
+
+def _check(
+    shop: Shop, order: Order, item: OrderItem, blobs: LocalBlobStore, outputs: OutputsRead
+) -> dict[str, Any]:
+    return asyncio.run(print_check(shop.rows, outputs, blobs, order.id, item.id))
+
+
+def _with_output(shop: Shop, item: OrderItem) -> OrderItem:
+    with shop.rows.transaction() as conn:
+        return shop.rows.update_item(conn, item.id, output_id=uuid.uuid4().hex)
+
+
+def _slice_accepted(shop: Shop, blobs: LocalBlobStore, payload: bytes) -> tuple[Order, OrderItem]:
+    order = shop.order()
+    item = _with_output(shop, shop.item(order, 2))
+    quote = _slice_quote(shop, order, item, key="quote-a")
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    (blobs.dir_for("quote-a") / "sliced.3mf").write_bytes(payload)
+    return shop.lifecycle.accept_order(order.id, BY), shop.get_item(item)
+
+
+def _refusal(call: Any) -> str:
+    with pytest.raises(ApiError) as refused:
+        call()
+    return str(refused.value.type).rsplit("/", 1)[-1]
+
+
+def test_the_check_reads_the_quotes_file(shop: Shop, pool: PgPool, tmp_path: Path) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    # `_slice_quote` records the digest "a" * 64: no file reads to it.
+    order, item = _slice_accepted(shop, blobs, b"sliced")
+    outputs = Outputs(item)
+    assert _refusal(lambda: _check(shop, order, item, blobs, outputs)) == "requote_needed"
+    with shop.rows.transaction() as conn:
+        conn.execute(
+            "UPDATE order_item_quotes SET sliced_sha256 = %s WHERE order_item_id = %s",
+            (hashlib.sha256(b"sliced").hexdigest(), item.id),
+        )
+    checked = _check(shop, order, item, blobs, outputs)
+    assert (checked["copies"], checked["output_id"]) == (2, item.output_id)
+    assert checked["sliced_blob_key"] == "quote-a"
+    # The output the item prints is gone: the quote no longer stands for what would print.
+    gone = Outputs(item, gone=True)
+    assert _refusal(lambda: _check(shop, order, item, blobs, gone)) == "requote_needed"
+    # The file the sweep took while the quote was released.
+    blobs.remove("quote-a")
+    assert _refusal(lambda: _check(shop, order, item, blobs, outputs)) == "requote_needed"
+    assert held(pool, QUOTE_HOLDER)
+
+
+def test_the_check_prints_what_is_left(shop: Shop, pool: PgPool, tmp_path: Path) -> None:
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    order = shop.order()
+    item = _with_output(shop, shop.item(order, 3))
+    shop.quoted(order, item)
+    outputs = Outputs(item)
+    assert _refusal(lambda: _check(shop, order, item, blobs, outputs)) == "order_not_accepted"
+    order = shop.lifecycle.accept_order(order.id, BY)
+    # A manual quote names no file: the print slices at its start.
+    assert _check(shop, order, item, blobs, outputs)["sliced_sha256"] is None
+    shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="partial"), BY
+    )
+    assert _check(shop, order, item, blobs, outputs)["copies"] == 2
+    shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=2, outcome="succeeded"), BY
+    )
+    assert _refusal(lambda: _check(shop, order, item, blobs, outputs)) == "item_made"
+    shop.lifecycle.hold(order.id, BY)
+    assert _refusal(lambda: _check(shop, order, item, blobs, outputs)) == "order_on_hold"
+
+
+def test_a_print_request_id_is_the_operations() -> None:
+    assert print_request_id("k") == print_request_id("k") != print_request_id("j")
+    assert len(print_request_id("k" * 500)) <= 128
