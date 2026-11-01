@@ -282,6 +282,7 @@ def _view(
     last: str | None,
     model: str | None,
     remembered: ModelPrintChoices | None,
+    registry_printer: str | None = None,
 ) -> ChoicesView:
     processes = {
         size: sorted(
@@ -295,7 +296,7 @@ def _view(
     }
     bed = (
         last
-        or (settings.printer_bed_types.get(str(printer_id)) if printer_id is not None else None)
+        or settings.bed_type_of(printer=registry_printer, bambuddy_printer_id=printer_id)
         or DEFAULT_BED
     )
     bed_types = list(bed_types_for(model))
@@ -375,6 +376,7 @@ async def native_choices_for(
         last=None,
         model=route.row.model,
         remembered=remembered,
+        registry_printer=route.row.id,
     )
 
 

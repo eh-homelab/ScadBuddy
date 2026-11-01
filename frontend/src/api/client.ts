@@ -1712,9 +1712,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** #83 — the plate on this printer, which the picker opens on next; `null` forgets it. */
-  putPrinterBedType: (printerId: number, bedType: string | null) =>
-    request<PrinterBedType>(`/print/printers/${printerId}/bed-type`, {
+  /**
+   * #83 — the plate on this printer, which the picker opens on next; `null` forgets it. The
+   * printer is its Bambuddy id or its registry id (#4971).
+   */
+  putPrinterBedType: (printerId: number | string, bedType: string | null) =>
+    request<PrinterBedType>(`/print/printers/${seg(String(printerId))}/bed-type`, {
       method: 'PUT',
       body: JSON.stringify({ bed_type: bedType }),
     }),
