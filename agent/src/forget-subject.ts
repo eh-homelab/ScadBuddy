@@ -4,7 +4,8 @@ import { connectDatabase } from './db.js'
 import { forgetSubject } from './sessions/forget.js'
 import path from 'node:path'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
-import { FilePayloadStore } from './temporal/payloadCodec.js'
+import { loadKek } from './secrets.js'
+import { FilePayloadStore, PgPayloadKeys } from './temporal/payloadCodec.js'
 import { DURABLE_TURNS_DIR, removeTurnDir } from './temporal/turnServers.js'
 
 // `node dist/forget-subject.js session-<uuid>`: an operator's forgetSubject
@@ -34,7 +35,13 @@ try {
   if (!payloads) console.error('forget-subject: SCADBUDDY_PAYLOAD_DIR is not set; stored payloads stay (unreadable)')
   // This pod's saved http bodies; another pod's go to its own sweep (sweepTurnDirs).
   const turnDirs = (s: string) => removeTurnDir(path.join(DEFAULT_STATE_DIR, DURABLE_TURNS_DIR), s)
-  const done = await forgetSubject({ sql: database.sql, client, payloads, turnDirs }, subject)
+  // The data keys copy a session's transcript into the forks that read through it before its key
+  // goes (sessions/store.ts copyForkRanges); a session with forks is not forgotten without them.
+  const kek = await loadKek(config.secretKeyFile)
+  const previous = config.previousSecretKeyFile ? await loadKek(config.previousSecretKeyFile, 'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE') : undefined
+  if (!kek.ok) console.error(`forget-subject: ${kek.reason}; a session with forks cannot be forgotten`)
+  const keys = kek.ok ? new PgPayloadKeys(database.sql, kek.kek, { previous: previous?.ok ? previous.kek : undefined }) : undefined
+  const done = await forgetSubject({ sql: database.sql, client, keys, payloads, turnDirs }, subject)
   console.log(JSON.stringify({ subject, ...done }))
 } finally {
   await connection?.close()

@@ -639,21 +639,25 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     await turn!.done
 
     const child = await a.fork(parent.id, browser)
-    const rows = await db.sql<{ sealed: boolean; plain: boolean }[]>`
+    // Copy-on-write (plan Step 6.5, test/forkCow.pg.test.ts): the child reads the parent's through the cut.
+    const rowsOf = () => db.sql<{ sealed: boolean; plain: boolean }[]>`
       SELECT sealed IS NOT NULL AS sealed, entry IS NOT NULL AS plain FROM ai_session_entries WHERE session_id = ${child.id}`
-    expect(rows.length).toBeGreaterThan(0)
-    expect(rows.every((r) => r.sealed && !r.plain)).toBe(true)
-
-    const keys = testPayloadKeys(db.sql)
-    const asParent = new PostgresSessionStore(db.sql, { keys: { keyFor: (_subject, create) => keys.keyFor(`session-${parent.id}`, create) } })
-    await expect(asParent.load({ projectKey: '', sessionId: child.id })).rejects.toBeInstanceOf(SealError)
-    const asChild = new PostgresSessionStore(db.sql, { keys })
-    expect((await asChild.load({ projectKey: '', sessionId: child.id }))!.length).toBeGreaterThan(0)
+    expect(await rowsOf()).toEqual([])
 
     await (await a.send(child.id, browser, 'go left')).done
     const call = conversation(fake.messageCalls().at(-1))
     expect(call).toContain('walk to the fork')
     expect(call).toContain('go left')
+
+    // What the child added is sealed under its own key; the parent's opens under the parent's.
+    const rows = await rowsOf()
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.every((r) => r.sealed && !r.plain)).toBe(true)
+    const keys = testPayloadKeys(db.sql)
+    const asParent = new PostgresSessionStore(db.sql, { keys: { keyFor: (_subject, create) => keys.keyFor(`session-${parent.id}`, create) } })
+    await expect(asParent.load({ projectKey: '', sessionId: child.id })).rejects.toBeInstanceOf(SealError)
+    const asChild = new PostgresSessionStore(db.sql, { keys })
+    expect((await asChild.load({ projectKey: '', sessionId: child.id }))!.length).toBeGreaterThan(0)
   }, 60_000)
 
   it('forks from a reply (#793): the child keeps the turns through it, and the model sees only those', async () => {

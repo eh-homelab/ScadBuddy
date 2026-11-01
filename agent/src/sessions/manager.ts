@@ -4,11 +4,9 @@ import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
 import {
   type EffortLevel,
-  forkSession as sdkForkSession,
   type McpSdkServerConfigWithInstance,
   type SDKMessage,
   type SDKResultMessage,
-  type SessionStoreEntry,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@opentelemetry/api'
 import type { Sql } from 'postgres'
@@ -28,7 +26,7 @@ import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { MemoryOptions } from '../memory/hindsight.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
 import type { PackageServers } from '../plugins/packages/mcp.js'
-import { isUuid, sessionWorkDir } from '../harness/stateDirs.js'
+import { isUuid } from '../harness/stateDirs.js'
 import { ApprovalService, type GrantCheck } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
 import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
@@ -77,7 +75,7 @@ import { FlowQueue } from '../flows/queue.js'
 //   start     create a session (and optionally send its first turn)
 //   send      add a user turn: one turn at a time per session, owner only
 //   get/list  what a principal may see
-//   fork      branch a session (SDK `forkSession`), parent recorded
+//   fork      branch a session (copy-on-write: the parent's transcript through the cut, store.ts), parent recorded
 //   interrupt stop the running turn, from any replica, by any watcher
 //   handoff   move ownership explicitly: to the browser user at once, to
 //             another MCP principal as an offer only it may accept
@@ -1151,6 +1149,8 @@ export class SessionManager {
       mode: SessionMode
       /** Fixed now rather than at the first send: a fork of an AgentSession session is one too. */
       runtime?: SessionRuntime
+      /** A fork that reads its parent's transcript through the cut (store.ts): the parent, and how many of its entries. */
+      forkOf?: { parentId: string; cut: number }
     },
     options: { rateLimited?: boolean; budgetOf?: SessionRecord } = {},
   ): Promise<SessionRecord> {
@@ -1159,20 +1159,34 @@ export class SessionManager {
     // budget_usd only as a fallback; the root's is the one that counts (POOL_BUDGET).
     const from = options.budgetOf
     const budgetUsd = from ? from.budgetUsd : fresh
+    const forkOf = fields.forkOf
     const insert = async (sql: Sql) => {
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-                                 status, title, tags, scope, parent_id, mode, runtime, max_turns, budget_usd, budget_root_id)
+                                 status, title, tags, scope, parent_id, mode, runtime, max_turns, budget_usd, budget_root_id,
+                                 fork_parent_id, fork_cut)
         VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
                 ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
                 ${sql.json(fields.scope as never)}, ${fields.parentId}, ${fields.mode}, ${fields.runtime ?? null}, ${maxTurns}, ${budgetUsd},
-                ${from ? sql`(SELECT coalesce(budget_root_id, id) FROM ai_sessions WHERE id = ${from.id})` : null})`
+                ${from ? sql`(SELECT coalesce(budget_root_id, id) FROM ai_sessions WHERE id = ${from.id})` : null},
+                ${forkOf?.parentId ?? null}, ${forkOf?.cut ?? null})`
     }
-    if (options.rateLimited) {
+    if (options.rateLimited || forkOf) {
       await this.deps.sql.begin(async (tx) => {
-        // Per owner, held until commit, so concurrent starts count each other.
-        await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`ai_sessions.start:${principal.kind}:${principal.id}`}, 0))`
-        await this.withinNewSessionLimit(principal, tx as unknown as Sql)
+        if (options.rateLimited) {
+          // Per owner, held until commit, so concurrent starts count each other.
+          await tx`SELECT pg_advisory_xact_lock(hashtextextended(${`ai_sessions.start:${principal.kind}:${principal.id}`}, 0))`
+          await this.withinNewSessionLimit(principal, tx as unknown as Sql)
+        }
+        if (forkOf) {
+          // Under the parent's lock, shared, as an append is (store.ts appendNow): a forget of the
+          // parent either went first, and its tombstone refuses the fork here, or waits for this to
+          // commit and then finds the fork to copy its range into (copyForkRanges).
+          const subject = `session-${forkOf.parentId}`
+          await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(subject)}))`
+          const [forgotten] = await tx`SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject}`
+          if (forgotten) throw new SessionError('not_found', `session ${forkOf.parentId} was forgotten; it cannot be forked`)
+        }
         await insert(tx as unknown as Sql)
       })
     } else {
@@ -1530,11 +1544,10 @@ export class SessionManager {
   }
 
   /**
-   * Branches a session: the SDK's `forkSession()` copies the transcript into a
-   * new session id through this store (sdk.d.ts: "Fork a session into a new
-   * branch with fresh UUIDs"; "When provided, read/write session data via this
-   * store"). The child is owned by whoever forked it, records its parent, and
-   * starts with the parent's conversation events so attach shows its history.
+   * Branches a session. The child copies no transcript: it records the cut (`fork_parent_id`,
+   * `fork_cut`), and the store reads the parent's entries through it, then the child's own
+   * (store.ts, plan 2026-10-13 Step 6.5). The child is owned by whoever forked it, records its
+   * parent, and starts with the parent's conversation events so attach shows its history.
    *
    * Only the browser user's "continue in a new chat" (`freshBudget`, the HTTP
    * route) gives the child a budget of its own. Like `raiseBudget`, that is
@@ -1549,8 +1562,8 @@ export class SessionManager {
    * is a `resource` row on the child (action `session_fork`).
    */
   /**
-   * Removes a fork that failed before it was announced: its transcript copy (not keyed to
-   * it), its row (whose cascade takes the rest), and the payload key its transcript or its
+   * Removes a fork that failed before it was announced: any transcript rows of its own (not
+   * keyed to it; a fork made since Step 6.5 has none before its first turn), its row (whose cascade takes the rest), and the payload key its transcript or its
    * files were sealed under. No tombstone: no session takes that id again.
    */
   private async dropFailedFork(childId: string): Promise<void> {
@@ -1586,7 +1599,8 @@ export class SessionManager {
     // whose first send has not run has no workflow (`runtime` is set by that send), so no
     // conversation either: the transcript's check says so.
     const durable = parent.runtime === 'durable' ? await this.durableForkPoint(parent, options.upTo) : undefined
-    let classic: { transcript: SessionStoreEntry[]; upToMessageId: string | undefined } | undefined
+    // Where the child's transcript is cut: how many of the parent's entries, as the parent loads them, it reads.
+    let cut: number | undefined
     let history: ServerEvent[] | undefined
     if (durable) {
       history = durable.history
@@ -1595,12 +1609,13 @@ export class SessionManager {
       if (!transcript) {
         throw new SessionError('no_transcript', `session ${id} has no transcript to fork yet; send it a turn first`)
       }
+      // Through the entry the SDK's forkSession({upToMessageId}) sliced at (forkPoint.ts), inclusive.
       const upToMessageId = options.upTo === undefined ? undefined : transcriptCut(transcript, options.upTo)
       history = await forkHistory(this.events, id, options.upTo)
       if (!history || (options.upTo !== undefined && upToMessageId === undefined)) {
         throw new SessionError('invalid', `session ${id} has no finished reply ${options.upTo} to fork from`)
       }
-      classic = { transcript, upToMessageId }
+      cut = upToMessageId === undefined ? transcript.length : transcript.findIndex((e) => e.uuid === upToMessageId) + 1
     }
     // A fork of a spent lineage could not run a turn; say why now rather than at its first send.
     if (!fresh && parent.costUsd >= parent.budgetUsd) {
@@ -1613,7 +1628,7 @@ export class SessionManager {
     }
     const title = options.title?.trim() || `${parent.title || 'session'} (fork)`
     // A fork is a new session and counts against the same limit as a start (PR #715
-    // review). Checked first too, so a refused fork leaves no SDK copy behind; the
+    // review). Checked first too, so a refused fork leaves nothing behind; the
     // insert's check under the lock is the one that holds.
     await this.withinNewSessionLimit(principal, this.deps.sql)
     const fields = { origin: options.origin ?? parent.origin, title, tags: parent.tags, scope: parent.scope, parentId: parent.id }
@@ -1635,15 +1650,14 @@ export class SessionManager {
         throw err
       }
     } else {
-      const { sessionId: forkedId } = await sdkForkSession(id, {
-        sessionStore: this.store,
-        dir: sessionWorkDir(this.deps.paths, id),
-        title,
-        ...(classic?.upToMessageId === undefined ? {} : { upToMessageId: classic.upToMessageId }),
-      })
-      // The SDK transcript's copy, a classic parent's or an AgentSession's: the child is an
-      // AgentSession, as every new session is (plan Step 6.3).
-      child = await this.insert(forkedId, principal, { ...fields, mode: 'durable', runtime: 'unified' }, insertOptions)
+      // A classic parent's transcript or an AgentSession's, read through the cut: the child is an
+      // AgentSession, as every new session is (plan Step 6.3). Forks made before Step 6.5 hold a copy.
+      child = await this.insert(
+        randomUUID(),
+        principal,
+        { ...fields, mode: 'durable', runtime: 'unified', forkOf: { parentId: id, cut: cut ?? 0 } },
+        insertOptions,
+      )
       try {
         // Its workspace files (#2329), so the fork carries on with what the parent had.
         await this.files.copy(id, child.id)

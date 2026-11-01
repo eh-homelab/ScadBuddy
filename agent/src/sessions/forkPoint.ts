@@ -5,8 +5,9 @@ import type { ServerEvent } from './protocol.js'
 // Fork from a message (#793, docs/superpowers/specs/2026-10-09-session-switcher-design.md §1):
 // `up_to` is the panel's assistant message id, `<API message id>:<block index>`
 // (sessions/sdkEvents.ts). Claude Code writes each content block of a reply as a
-// transcript entry carrying that API `message.id`, so the id maps onto the entry whose
-// `uuid` the SDK's `forkSession({upToMessageId})` slices at (inclusive).
+// transcript entry carrying that API `message.id`, so the id maps onto the entry a fork's
+// cut takes last (manager.ts `fork`), as the SDK's `forkSession({upToMessageId})` slices
+// at that entry's `uuid` (inclusive).
 
 /** The longest `up_to` a fork takes: an API message id and a block index, with room to spare. */
 export const MESSAGE_ID_MAX = 300
