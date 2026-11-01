@@ -29,14 +29,14 @@ function policy(): PricingPolicy {
   }
 }
 
-function book(): PriceBook {
+function book(includeArchived = false): PriceBook {
   const currency = mockSettings().orders_currency
   return {
     currency,
     minor_exponent: minorExponent(currency),
     policy: policy(),
     rough_estimate_factor: mockSettings().rough_estimate_factor,
-    filaments: state.filaments.filter((f) => !f.archived_at),
+    filaments: state.filaments.filter((f) => includeArchived || !f.archived_at),
   }
 }
 
@@ -107,7 +107,7 @@ function priced(colours: { slot: number; filament_id?: string | null }[], curren
 }
 
 export const handlers = [
-  http.get(`${base}/price-book`, () => HttpResponse.json(book())),
+  http.get(`${base}/price-book`, ({ request }) => HttpResponse.json(book(new URL(request.url).searchParams.get('include_archived') === 'true'))),
   http.put(`${base}/price-book`, async ({ request }) => {
     const body = (await request.json()) as Partial<PolicyUpdate> & Record<string, unknown>
     const allowed = ['machine_rate_per_hour', 'setup_fee', 'labour_per_item', 'markup_percent', 'rounding', 'rough_estimate_factor']
@@ -149,7 +149,7 @@ export const handlers = [
       created_at: now(),
       updated_at: now(),
     }
-    const taken = state.filaments.find((f) => identity(f) === identity(made))
+    const taken = state.filaments.find((f) => !f.archived_at && identity(f) === identity(made))
     if (taken) {
       return problem(request, 409, `a filament with that material, subtype, brand and colour exists: ${taken.id}`, PROBLEMS + 'filament_exists', { filament_id: taken.id })
     }
@@ -162,7 +162,7 @@ export const handlers = [
     if (!found) return problem(request, 404, `no filament '${String(params.id)}'`)
     if (body.cost_per_kg != null && !DECIMAL.test(body.cost_per_kg)) return fieldProblem(request, 'cost_per_kg', 'Value error, the value must be at least 0')
     const next = { ...found, ...Object.fromEntries(Object.entries(body).filter(([, v]) => v !== undefined)), updated_at: now() } as Filament
-    const taken = state.filaments.find((f) => f.id !== found.id && identity(f) === identity(next))
+    const taken = state.filaments.find((f) => f.id !== found.id && !f.archived_at && !next.archived_at && identity(f) === identity(next))
     if (taken) {
       return problem(request, 409, `a filament with that material, subtype, brand and colour exists: ${taken.id}`, PROBLEMS + 'filament_exists', { filament_id: taken.id })
     }
@@ -173,6 +173,17 @@ export const handlers = [
     const found = state.filaments.find((f) => f.id === params.id)
     if (!found) return problem(request, 404, `no filament '${String(params.id)}'`)
     found.archived_at ??= now()
+    found.updated_at = now()
+    return HttpResponse.json(found)
+  }),
+  http.post(`${base}/price-book/filaments/:id/unarchive`, ({ request, params }) => {
+    const found = state.filaments.find((f) => f.id === params.id)
+    if (!found) return problem(request, 404, `no filament '${String(params.id)}'`)
+    const taken = state.filaments.find((f) => f.id !== found.id && !f.archived_at && identity(f) === identity(found))
+    if (taken) {
+      return problem(request, 409, `a filament with that material, subtype, brand and colour exists: ${taken.id}`, PROBLEMS + 'filament_exists', { filament_id: taken.id })
+    }
+    found.archived_at = null
     found.updated_at = now()
     return HttpResponse.json(found)
   }),
