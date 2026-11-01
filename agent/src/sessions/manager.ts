@@ -404,8 +404,9 @@ export type SessionRecord = {
   scope: Record<string, unknown>
   parentId: string | null
   /**
-   * Always `durable`: every session runs as an AgentSession (plan Step 6.3). The wire keeps
-   * the field; the column it was read from is dropped (plan Phase 10).
+   * Deprecated on the wire: always `durable`, since every session runs as an AgentSession (plan
+   * Step 6.3). The column it was read from is dropped in plan Phase 10; the field can go once
+   * the panel and the sessions_* tools stop reading it.
    */
   mode: SessionMode
   /**

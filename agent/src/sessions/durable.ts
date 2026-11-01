@@ -351,8 +351,10 @@ export class DurableTurns {
       taskQueue: this.#sessionQueue,
       args: [start],
       workflowIdConflictPolicy: 'USE_EXISTING',
-      // A session whose workflow ended (failed, or terminated) lost its conversation:
-      // never started afresh under the same session.
+      // A session whose workflow ended (failed, or terminated) is refused `closed` while Temporal
+      // still holds that run: its end (a failure, a terminate) is what the panel shows, and a send
+      // must not paper over it at once. Once retention removes the run, a send starts it again
+      // and the turn resumes from ai_session_entries (see the header).
       workflowIdReusePolicy: 'REJECT_DUPLICATE',
     })
     // The turn id as the update id: a re-send of the same turn is the same Update.
