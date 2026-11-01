@@ -816,6 +816,15 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     plan Step 6.5), so forgetting a parent first copies each fork's range into it under
     the fork's key (`copyForkRanges`, `inherited` rows), and refuses without the KEK. A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
+  - DurableSession to AgentSession (plan 2026-10-13 Step 7.2, #4772):
+    `src/sessions/migrateDurable.ts` moves a session whose `runtime` is `durable` at its
+    next send (`cancel_input(migrated)`, the conversation paged through `fork_point`, cut as
+    the plugin's next segment would seed it and appended to `ai_session_entries` under the
+    session's own id with its `mcp__durable__` tool names renamed, `end`, then AgentSession
+    under the same workflow id). Operators run `node dist/migrate-durable-sessions.js
+    --dry-run` (Queries only) and then without the flag, from a pod with the KEK; Phase 8
+    waits for its `open_durable_sessions: 0`. Only `test/support/durableSessionTurns.ts`
+    (`durableSends`) still sends a turn to a DurableSession, for the Python turn's tests.
   - The workspace (#2329, `docs/ai/operating.md` §13): `src/workspace/store.ts`
     `SessionFiles` over `ai_session_files`, keyed by `workspace` (`session:<id>`, gone
     with its session, copied by a fork; or `principal:<kind>:<id>` outside a session,

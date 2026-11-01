@@ -17,6 +17,7 @@ import { TASK_QUEUE } from '../temporal/names.js'
 import { liveHostQueues } from '../temporal/session/affinity.js'
 import { SESSION_QUEUE, SESSION_WORKFLOW } from '../temporal/session/names.js'
 import { SessionBlobs, sentImageBlobs } from './blobs.js'
+import { DurableMigration, type MigrateDeps } from './migrateDurable.js'
 import { type DescribeSession, durableDescriber, endLostTurn, RUNNING_GRACE_MS, type RunningRow } from './durableSweep.js'
 import { cancelOrphanedEntries } from '../gate/sweep.js'
 import type { AuditSink } from '../audit/log.js'
@@ -56,9 +57,12 @@ import { event, type Owner, type SentImage, type SessionStatus } from './protoco
 // §5.1, plan Step 6.3). Every session is an AgentSession on `agent-sessions`: a new one gets
 // `unified` at insert, and a session that has run no DurableSession turn gets it at its first
 // send, a classic one too (its transcript is in ai_session_entries, which the turn resumes).
-// A session whose DurableSession has run a turn (`durable_offset` > 0) keeps going to that
-// workflow, for life, until Step 7.2. The gate calls, the Updates after the first and the
-// signals are by workflow id, the same for both types.
+// A session whose DurableSession has run a turn (`durable_offset` > 0, runtime `durable`) is
+// moved to AgentSession at its next send, before the turn (Step 7.2, migrateDurable.ts): its
+// conversation goes into ai_session_entries, its DurableSession ends, and its AgentSession starts
+// under the same id. Nothing in the service sends a turn to a DurableSession any more (only the
+// tests of agent-durable's Python turn, `durableSends`). The gate calls, the
+// Updates after the first and the signals are by workflow id, the same for both types.
 //
 // The wire shapes are agent-durable's session/models.py (`SessionStart`, `Message`,
 // `ImageRef`, `Owner`). No prompt, image or tool content is logged or traced here.
@@ -71,6 +75,8 @@ export type SessionRuntime = 'durable' | 'unified'
 export const FORK_POINT_QUERY = 'fork_point'
 /** The most characters of entries one `fork_point` page carries: under Temporal's 512 KiB warning. */
 const FORK_PAGE_CHARS = 384 * 1024
+/** How long a send waits for a migrated DurableSession to close (Step 7.2); the backfill waits 120 s. */
+const SEND_SETTLE_MS = 20_000
 /** How often reading the parent's pages starts again when a turn commits while they are read. */
 const FORK_READS = 3
 
@@ -210,6 +216,19 @@ export type DurableTurnsDeps = {
   describe?: DescribeSession
   /** Run when a Stop ended a lost turn: what a classic one left parked (SessionManager.endClassicLeftovers). */
   ended?: (sessionId: string) => Promise<unknown>
+  /**
+   * The sealing transcript store (SessionManager.store) a DurableSession's conversation is moved
+   * into at its next send (Step 7.2). Without it such a send is refused `unavailable`.
+   */
+  store?: MigrateDeps['store']
+  /** Tests only: how long a send's migration waits for a DurableSession to close (default 20 s). */
+  settleTimeoutMs?: number
+  /**
+   * Tests only (test/support/durableSessionTurns.ts): a `durable` session's turns keep going to
+   * its DurableSession, as before Step 7.2, for the tests of agent-durable's Python turn, which
+   * Phase 8 retires with them. Never set in the service.
+   */
+  durableSends?: boolean
 }
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
@@ -238,6 +257,8 @@ export class DurableTurns {
   readonly #sendTimeoutMs: number
   readonly #ready = new Map<SessionRuntime, { until: number; why: string | undefined }>()
   readonly #describe: DescribeSession
+  readonly #migration: DurableMigration | undefined
+  readonly #durableSends: boolean
 
   constructor(deps: DurableTurnsDeps) {
     this.#client = deps.client
@@ -253,6 +274,21 @@ export class DurableTurns {
     this.#liveHosts = deps.liveHosts ?? (() => liveHostQueues(deps.client))
     this.#sendTimeoutMs = deps.sendTimeoutMs ?? 10_000
     this.#describe = deps.describe ?? durableDescriber(deps.client)
+    this.#durableSends = deps.durableSends === true
+    this.#migration = deps.store
+      ? new DurableMigration({
+          client: deps.client,
+          sql: deps.sql,
+          store: deps.store,
+          events: deps.events,
+          audit: deps.audit,
+          sessionQueue: this.#sessionQueue,
+          callTimeoutMs: this.#sendTimeoutMs,
+          // A sender waits at most this long for the DurableSession to close; a close that takes
+          // longer answers `unavailable`, and the next send goes on from where it stopped.
+          settleTimeoutMs: deps.settleTimeoutMs ?? SEND_SETTLE_MS,
+        })
+      : undefined
   }
 
   /**
@@ -356,7 +392,13 @@ export class DurableTurns {
     )
     if (!claimed) return undefined
     let seq = 0
+    let runtime = claimed.runtime
+    let ranTurn = Number(claimed.durable_offset) > 0
     try {
+      if (runtime === 'durable' && !this.#durableSends) {
+        ranTurn = await this.#migrate(id, ranTurn)
+        runtime = 'unified'
+      }
       await this.#blobs.put(id, blobs).catch(() => {
         throw new SessionError('unavailable', `the images for session ${id} could not be stored; send it again in a moment`)
       })
@@ -372,16 +414,37 @@ export class DurableTurns {
         event({ type: 'session.status', sessionId: id, status: 'running' }),
       ])
       seq = seqs.at(-1) ?? 0
-      await this.#sendMessage(session, turn, sent, Number(claimed.durable_offset) > 0, claimed.runtime)
+      await this.#sendMessage(session, turn, sent, ranTurn, runtime)
     } catch (err) {
-      if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq, claimed.runtime)
+      if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq, runtime)
       // The refusal is what the caller hears, whatever the give-back meets.
       await this.#giveBack(id, claimed.prior_status).catch(() => {
         console.warn(`durable send: session ${id}'s claim could not be given back`)
       })
       throw err
     }
-    return this.#turn(id, turn.turnId, seq, claimed.runtime)
+    return this.#turn(id, turn.turnId, seq, runtime)
+  }
+
+  /**
+   * Moves a claimed session's DurableSession to AgentSession before its turn (Step 7.2); whether
+   * the session's workflow has run a turn after it, as `#sendMessage` takes it. Its workflow gone
+   * after a turn ran (failed, ended, or removed by retention) is `closed`, as before: its
+   * conversation is lost. With no workflow and no turn run, the turn starts its AgentSession.
+   */
+  async #migrate(id: string, ranTurn: boolean): Promise<boolean> {
+    if (!this.#migration) {
+      throw new SessionError('unavailable', `session ${id} must be moved to the new session runtime first, and this agent service cannot write its transcript; try again in a moment`)
+    }
+    const outcome = await this.#migration.migrate(id)
+    if (outcome === 'lost' || (outcome === 'none' && ranTurn)) {
+      throw new SessionError('closed', `session ${id}'s workflow has ended; continue in a new chat`)
+    }
+    if (outcome === 'none') {
+      await this.#sql`UPDATE ai_sessions SET runtime = 'unified' WHERE id = ${id} AND runtime = 'durable'`
+      return false
+    }
+    return true
   }
 
   #turn(id: string, turnId: string, seq: number, runtime: SessionRuntime): Turn {
