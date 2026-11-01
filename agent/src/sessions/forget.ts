@@ -1,6 +1,7 @@
 import type { Client } from '@temporalio/client'
 import type { Sql } from 'postgres'
 import { backgroundWorkflowId } from '../background/service.js'
+import { unscheduleTask } from '../background/temporal.js'
 import { terminateOpenToolCalls, workflowNotFound as notFound } from '../tools/activityProjection.js'
 import { type PayloadKeys, payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
 import { copyForkRanges, ForksNeedKeys, hasForks } from './store.js'
@@ -60,6 +61,8 @@ async function endBackgroundTasks(deps: ForgetDeps, sessionId: string): Promise<
     UPDATE ai_background_tasks SET state = 'cancelled', detail = 'the chat was forgotten', next_at = NULL, updated_at = now()
      WHERE session_id = ${sessionId} AND state = 'active' RETURNING id`
   for (const { id } of ended) {
+    // A recurring cron job's Schedule and its running fire (plan 2026-10-13 Step 9.8), or any task's workflow.
+    if (deps.client) await unscheduleTask(deps.client, { id, sessionId }, 'forgotten (forgetSubject)')
     try {
       await deps.client?.workflow.getHandle(backgroundWorkflowId(sessionId, id)).terminate('forgotten (forgetSubject)')
     } catch (err) {

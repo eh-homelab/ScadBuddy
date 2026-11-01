@@ -1,20 +1,37 @@
 import { type BackgroundTask, type BackgroundTaskStore, type NewTask } from './store.js'
 
 // A session's background tasks as the tools and the panel use them: a task is a row
-// (store.ts) and a Temporal workflow `bgtask-<session id>-<id>` that fires it
-// (temporal/backgroundTask.ts). Creating starts the workflow; cancelling cancels it,
-// and the workflow ends the row.
+// (store.ts) and what fires it on Temporal: a recurring cron job is a Schedule
+// `bgtask-<session id>-<id>` whose every fire is a short `BackgroundFire` workflow
+// (plan 2026-10-13 Step 9.8); any other task is a workflow `bgtask-<session id>-<id>`
+// (temporal/backgroundTask.ts). Creating starts it; cancelling ends it, and the fire or the
+// workflow ends the row.
 
 export const BACKGROUND_WORKFLOW = 'BackgroundTask'
 /** Names the session, so the payload codec seals the task's payloads under its key. */
 export const backgroundWorkflowId = (sessionId: string, taskId: string) => `bgtask-${sessionId}-${taskId}`
 
+/** One fire of a recurring cron job's Schedule. */
+export const BACKGROUND_FIRE_WORKFLOW = 'BackgroundFire'
+/**
+ * The Schedule's action's workflow id; Temporal adds each fire's time (`-<RFC 3339>`), which
+ * the fire reads its task from (temporal/backgroundTask.ts `fireTaskId`). It carries no
+ * arguments, so nothing of the task is in a fire's input.
+ */
+export const backgroundFireId = (sessionId: string, taskId: string) => `bgfire-${sessionId}-${taskId}`
+
+/** Whether a task is fired by a Schedule: a recurring cron job. */
+export const isScheduled = (task: Pick<BackgroundTask, 'kind' | 'spec'>): boolean => task.kind === 'cron' && task.spec.recurring !== false
+
+/** What a runner needs of a task to start it. */
+export type StartedTask = Pick<BackgroundTask, 'id' | 'kind' | 'sessionId' | 'spec' | 'expiresAt'>
+
 /** What runs the tasks: Temporal in the service (temporal.ts), a stand-in in tests. */
 export type TaskRunner = {
-  start(task: Pick<BackgroundTask, 'id' | 'kind' | 'sessionId'>): Promise<void>
-  /** Cancels a task's workflow; one that is not running is left as it is. */
+  start(task: StartedTask): Promise<void>
+  /** Cancels a task's workflow, or deletes its Schedule; one that is not running is left as it is. */
   cancel(task: Pick<BackgroundTask, 'id' | 'sessionId'>): Promise<void>
-  /** Ends a task's workflow at once, running nothing more (the session is being forgotten). */
+  /** Ends a task's workflow, or its Schedule and its running fire, at once, running nothing more (the session is being forgotten). */
   terminate(task: Pick<BackgroundTask, 'id' | 'sessionId'>, reason: string): Promise<void>
 }
 

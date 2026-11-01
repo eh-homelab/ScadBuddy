@@ -965,8 +965,12 @@ session, in both modes (`agent/src/background/`). Claude Code keeps its own jobs
 process ("Session-only (not written to disk, dies when Claude exits)"), which a turn
 ends, so a classic turn gets these in place of its own too (`mcp__builtin__<Name>`, the
 `builtin` in-process server, `sessions/manager.ts`). Each task is a row of
-`ai_background_tasks` and a `BackgroundTask` workflow `bgtask-<id>` on `agent-tools`
-(`temporal/backgroundTask.ts`), which carries only the id: when the task is due it sends
+`ai_background_tasks` and what fires it on `agent-tools`, which carries only the id: a
+recurring cron job is a Temporal Schedule `bgtask-<session>-<id>` (its cron in the task's
+timezone, ending at its expiry) whose every fire is a short `BackgroundFire` workflow
+(`background/temporal.ts`, unified runtime plan Step 9.8; jobs made before it are converted
+at start); any other task is a `BackgroundTask` workflow `bgtask-<session>-<id>`
+(`temporal/backgroundTask.ts`). When the task is due it sends
 the prompt as the session's next message, as the one who made it and only while they
 still own the session, once the session is idle (asked again every 30 s; a cron
 occurrence is given up after an hour busy). Bounds: 10 active tasks per session;

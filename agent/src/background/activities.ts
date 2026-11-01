@@ -11,7 +11,8 @@ import { redact } from '../secrets.js'
 import { SessionError, type SessionManager } from '../sessions/manager.js'
 import { endNotice, eventNotice, type MonitorEnd, runCommand, runSocket, socketAddresses } from './monitor.js'
 import { nextFire } from './schedule.js'
-import { backgroundWorkflowId } from './service.js'
+import { backgroundWorkflowId, isScheduled } from './service.js'
+import { scheduleTask, unscheduleTask } from './temporal.js'
 import type { BackgroundTask, BackgroundTaskStore } from './store.js'
 import type { WorkflowAgents } from './workflowAgents.js'
 import { readScript, runScript, type ScriptHost } from './workflowRunner.js'
@@ -33,6 +34,8 @@ export const BG_MONITOR_END = 'bg_monitor_end'
 export const BG_DELIVER = 'bg_deliver'
 export const WF_RUN = 'wf_run'
 export const WF_END = 'wf_end'
+export const BG_SCHEDULE = 'bg_schedule'
+export const BG_UNSCHEDULE = 'bg_unschedule'
 /** Signalled by a monitor's source when it recorded an event (temporal/backgroundTask.ts). */
 export const BG_EVENTS_SIGNAL = 'bg_events'
 
@@ -404,6 +407,24 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
         clearTimeout(expiry)
         ctx.cancellationSignal.removeEventListener('abort', onCancel)
       }
+    },
+
+    /**
+     * Makes an active recurring cron job a Schedule on this workflow's queue (plan 2026-10-13
+     * Step 9.8); false for any other task, whose workflow keeps firing it.
+     */
+    async [BG_SCHEDULE](input: { taskId: string }): Promise<boolean> {
+      const t = await deps.store.get(input.taskId)
+      if (!t || t.state !== 'active' || !isScheduled(t)) return false
+      const ctx = Context.current()
+      await scheduleTask(ctx.client, t, ctx.info.taskQueue)
+      return true
+    },
+
+    /** Deletes an ended cron job's Schedule, so it starts no more fires. */
+    async [BG_UNSCHEDULE](input: { taskId: string }): Promise<void> {
+      const t = await deps.store.get(input.taskId)
+      if (t) await unscheduleTask(Context.current().client, t)
     },
 
     /** Records a Workflow's end as Claude Code's notice, for bg_deliver to send. */
