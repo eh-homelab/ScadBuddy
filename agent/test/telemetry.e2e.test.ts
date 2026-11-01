@@ -133,12 +133,16 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent traci
   const lastContent = (r: RecordedRequest) => JSON.stringify(r.body?.messages?.at(-1)?.content ?? '')
   const named = (name: string) => spans.getFinishedSpans().filter((s) => s.name === name)
 
-  async function approve(app: Hono, id: string): Promise<void> {
-    const res = await app.request(`/api/v1/ai/pending-input/${encodeURIComponent(id)}`, {
+  async function decide(app: Hono, id: string, body: Record<string, unknown>): Promise<Response> {
+    return app.request(`/api/v1/ai/pending-input/${encodeURIComponent(id)}`, {
       method: 'POST',
       headers: { ...UI, 'content-type': 'application/json' },
-      body: JSON.stringify({ kind: 'approval', decision: 'approve' }),
+      body: JSON.stringify({ kind: 'approval', ...body }),
     })
+  }
+
+  async function approve(app: Hono, id: string): Promise<void> {
+    const res = await decide(app, id, { decision: 'approve' })
     expect(res.status, await res.clone().text()).toBe(200)
   }
 
@@ -208,6 +212,47 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent traci
       `00-${decision.spanContext().traceId}-${ping!.spanContext().spanId}-01`,
     )
     expect(exportedText(spans)).not.toContain(SENTINEL)
+  }, 90_000)
+
+  it('a decision that lands before the park recorded its span context ends each span once, in order (#5045)', async () => {
+    script = (r) => (lastContent(r).includes('tool_result') ? { text: 'done' } : { toolUse: { name: 'mcp__scadbuddy__ping_backend', input: { job: 'x' } } })
+    // The entry's span-context write is held 3 s, before it locks the row: the decision comes first.
+    await db.sql.unsafe(`
+      CREATE FUNCTION hold_traceparent() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(3); RETURN NULL; END $$;
+      CREATE TRIGGER hold_traceparent BEFORE UPDATE OF traceparent ON ai_pending_input FOR EACH STATEMENT EXECUTE FUNCTION hold_traceparent();`)
+    const m = await agent()
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ping it' })
+    const [approvalId] = await required(m, session.id, 1)
+    await approve(routes(m), approvalId!)
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    // Past the held write, so a late parked() would have run.
+    await new Promise((resolve) => setTimeout(resolve, 3_500))
+
+    const tools = named('agent.tool/mcp__scadbuddy__ping_backend').map((s) => s.attributes['scadbuddy.outcome'])
+    expect(tools.sort()).toEqual(['ok', 'parked'])
+    const segments = [...named('agent.turn'), ...named('agent.turn.resume')].map((s) => [s.name, s.attributes['scadbuddy.outcome']])
+    expect(segments).toEqual([
+      ['agent.turn', 'parked'],
+      ['agent.turn.resume', 'success'],
+    ])
+  }, 90_000)
+
+  it('a refused decision then a good one: the resume is the second decision`s child (#5045)', async () => {
+    script = (r) => (lastContent(r).includes('tool_result') ? { text: 'done' } : { toolUse: { name: 'mcp__scadbuddy__ping_backend', input: { job: 'y' } } })
+    const m = await agent()
+    const app = routes(m)
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ping it' })
+    const [approvalId] = await required(m, session.id, 1)
+    // Bound to another input: refused, and the entry stays parked.
+    const wrong = await decide(app, approvalId!, { decision: 'approve', input_hash: 'f'.repeat(64) })
+    expect(wrong.status, await wrong.clone().text()).toBe(409)
+    await approve(app, approvalId!)
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+
+    const decisions = named('agent.approval')
+    expect(decisions.map((d) => d.attributes['scadbuddy.outcome'])).toEqual(['unknown', 'approved'])
+    const resume = await waitForSpan(spans, (s) => s.name === 'agent.turn.resume')
+    expect(resume.parentSpanContext?.spanId).toBe(decisions[1]!.spanContext().spanId)
   }, 90_000)
 
   it('a turn that parks twice yields segments 0, 1 and 2, each under its own decision', async () => {

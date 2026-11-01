@@ -3,7 +3,7 @@ import type { SDKResultMessage } from '@anthropic-ai/claude-agent-sdk'
 import { ApplicationFailure } from '@temporalio/common'
 import { context as otelContext } from '@opentelemetry/api'
 import type { Sql, TransactionSql } from 'postgres'
-import type { GateTrace, ParkTrace } from '../approvals/service.js'
+import type { GateTrace } from '../approvals/service.js'
 import { contextFrom } from '../telemetry/trace.js'
 import { turnCostEntry } from '../audit/turn.js'
 import { redact, WAIT_FOR_USER } from '../gate/entry.js'
@@ -615,7 +615,10 @@ export class TurnHost {
         parked = await park({ id: request.toolUseId, name: request.toolName, input }, AbortSignal.any([stop, request.signal]), {
           opened: (rid) => {
             entered = true
-            void this.#traceEntry(rid, traced)
+            // Ended at once, as classic's park is (approvals/service.ts): a decision that lands
+            // before the write below returns then finds the spans ended, never the resume's (#5045).
+            traced.parked(rid)
+            void this.#traceEntry(rid, traced.traceparent)
           },
         })
       } catch (err) {
@@ -720,17 +723,15 @@ export class TurnHost {
   }
 
   /**
-   * The parked call's span context on its entry, then the span and the segment ended (#5041):
-   * the decision links to it, as classic's links to `ai_approvals.traceparent`. Best effort: an
-   * entry the write misses is decided all the same, its decision a root.
+   * The parked call's span context on its entry (#5041): the decision links to it, as classic's
+   * links to `ai_approvals.traceparent`. Best effort: an entry the write misses, or one decided
+   * before it lands, is decided all the same, its decision a root.
    */
-  async #traceEntry(requestId: string, traced: ParkTrace): Promise<void> {
-    if (traced.traceparent) {
-      await this.#deps.sql`UPDATE ai_pending_input SET traceparent = ${traced.traceparent} WHERE request_id = ${requestId}`.catch((err: unknown) => {
-        this.#deps.core.stderr?.(`parked call ${requestId}: its span context was not recorded: ${describe(err)}\n`)
-      })
-    }
-    traced.parked(requestId)
+  async #traceEntry(requestId: string, traceparent: string | undefined): Promise<void> {
+    if (!traceparent) return
+    await this.#deps.sql`UPDATE ai_pending_input SET traceparent = ${traceparent} WHERE request_id = ${requestId}`.catch((err: unknown) => {
+      this.#deps.core.stderr?.(`parked call ${requestId}: its span context was not recorded: ${describe(err)}\n`)
+    })
   }
 
   #pause(requestId: string, signal: AbortSignal): Promise<void> {
