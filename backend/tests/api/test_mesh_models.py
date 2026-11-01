@@ -94,9 +94,9 @@ def edit(
     return response
 
 
-def test_a_painted_scene_notes_only_where_its_painting_is_not_carried_whole(
-    client: TestClient,
-) -> None:
+def test_a_painted_scene_has_no_paint_note_even_mirrored(client: TestClient) -> None:
+    """A mirrored object's painting is carried whole (#4976), so mirroring one adds no
+    note; what a render cannot carry, its warnings say."""
     slug = upload(client, data=painted_3mf(), filename="carrot.3mf").json()["slug"]
     scene = client.get(f"/api/v1/models/{slug}/scene").json()
     assert scene["scene"]["objects"][0]["parts"][0]["painted"] is True
@@ -105,8 +105,7 @@ def test_a_painted_scene_notes_only_where_its_painting_is_not_carried_whole(
         edit(client, slug, {"edit": "transform", "object": "o1", "scale": [-1, 1, 1]}).status_code
         == 200
     )
-    [note] = client.get(f"/api/v1/models/{slug}/scene").json()["notes"]
-    assert note.startswith("o1 (") and "is mirrored" in note
+    assert client.get(f"/api/v1/models/{slug}/scene").json()["notes"] == []
 
 
 def save_tall(client: TestClient, slug: str) -> None:
