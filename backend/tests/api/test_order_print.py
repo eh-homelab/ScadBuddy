@@ -17,8 +17,11 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy.runs import PrintRun
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.events import PrintOutcome
 from scadbuddy.orders.lifecycle import FULFILMENT_HOLDER
+from scadbuddy.orders.operations import existing_run, print_body
 from tests.api.conftest import follow_operation
 from tests.api.test_customers import create as create_customer
 from tests.api.test_order_quote import COPY, BambuddySlices, sliced_plate, two_colours
@@ -176,3 +179,46 @@ def test_a_slice_quote_prints_and_holds_its_sliced_file(bambuddy: TestClient) ->
             (FULFILMENT_HOLDER, attempt["id"]),
         ).fetchall()
     assert [row["key"] for row in held] == [quote["sliced_blob_key"]]
+
+
+def _lookup(client: TestClient, item: Item, request: dict[str, Any], copies: int) -> Any:
+    """``existing_run`` as a refused retry asks it, on the app's own loop and client."""
+    state = _state(client)
+
+    async def run() -> PrintRun | None:
+        return await existing_run(
+            state.print_runs, PrintSubject.output(item.output_id), print_body(request, copies)
+        )
+
+    assert client.portal is not None
+    return client.portal.call(run)
+
+
+def _operation_request(client: TestClient, item: Item, key: str) -> dict[str, Any]:
+    with _state(client).projection.pool.connection() as conn:
+        row = conn.execute(
+            "SELECT request FROM operations WHERE kind = 'order_item_print' AND subject = %s"
+            " ORDER BY created_at DESC LIMIT 1",
+            (f"order_item:{item.item['id']}",),
+        ).fetchone()
+    assert row is not None, key
+    request: dict[str, Any] = row["request"]
+    return request
+
+
+def test_a_retry_finds_the_run_its_request_made(bambuddy: TestClient) -> None:
+    """The lookup a refused retry makes before it releases its claim (#5149 review): the
+    run the print path recorded for the request, by its key, or none."""
+    slice_routes()
+    queue_route()
+    item = Item(bambuddy)
+    attempt = printed(item, key="print-1")
+    run = follow_run(bambuddy, attempt["print_run_id"])
+    assert run["status"] == "succeeded", run
+    request = _operation_request(bambuddy, item, "print-1")
+    found = _lookup(bambuddy, item, request, attempt["copies"])
+    assert found is not None and found.id == attempt["print_run_id"]
+    # Another request (a key never sent) made no run, so a claim of it is released.
+    other = {**request, "request_id": request["request_id"][:-4] + "beef"}
+    assert other["request_id"] != request["request_id"]
+    assert _lookup(bambuddy, item, other, attempt["copies"]) is None

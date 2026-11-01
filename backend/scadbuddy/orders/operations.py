@@ -63,6 +63,7 @@ from scadbuddy.slicing.component import NO_CONTENT_STORE, SLICING
 from scadbuddy.store.cache import StaleBlobError
 
 if TYPE_CHECKING:
+    from scadbuddy.api.deps import PrintCommands
     from scadbuddy.core.components import Components, Core
 
 logger = logging.getLogger(__name__)
@@ -263,6 +264,48 @@ class _Renders:
         return self.core.render.store.read(job_id)
 
 
+def print_body(request: Mapping[str, Any], copies: int) -> PrintRunRequest:
+    """The print run's request for one ``order_item_print`` (its operation's
+    ``request``): §5.4's quantity still to print, of the whole output (a quote is the
+    whole output's price), keyed by the operation so a retry or a re-send repeats its
+    run."""
+    return PrintRunRequest.model_validate(
+        {
+            **request["request"],
+            "copies": copies,
+            "all_plates": True,
+            "plate_ids": None,
+            "request_id": request["request_id"],
+        }
+    )
+
+
+async def existing_run(
+    runs: PrintCommands, subject: PrintSubject, body: PrintRunRequest
+) -> PrintRun | None:
+    """The run ``body``'s start made, if it made one: its row by the run's key, as the
+    print route finds a repeat (``api/printing.py`` ``accept_run``). A workflow still
+    accepting with no row yet may still print, so it is a 503 for the retry, never a
+    release."""
+    key = run_key(subject.run_subject, body)
+    found = await runs.store.find(key, has_request_id=True)
+    if found is not None:
+        return found
+    try:
+        described = await runs.client.get_workflow_handle(f"print-{key}").describe()
+    except RPCError as error:
+        if error.status == RPCStatusCode.NOT_FOUND:
+            return None
+        raise
+    if described.status == WorkflowExecutionStatus.RUNNING:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "this item's print is still being accepted; try again",
+        )
+    # Closed since the read above: it recorded its row, or it printed nothing.
+    return await runs.store.find(key, has_request_id=True)
+
+
 def order_kinds(core: Core, components: Components) -> list[OperationKind]:
     """The orders' kinds, bound to this process's state."""
 
@@ -349,41 +392,10 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         subject = PrintSubject.output(output_id)
 
         def body(copies: int) -> PrintRunRequest:
-            return PrintRunRequest.model_validate(
-                {
-                    **request["request"],
-                    # §5.4: the quantity still to print, of the whole output (a quote is
-                    # the whole output's price), keyed by the operation so a retry or a
-                    # re-send repeats its run.
-                    "copies": copies,
-                    "all_plates": True,
-                    "plate_ids": None,
-                    "request_id": request["request_id"],
-                }
-            )
+            return print_body(request, copies)
 
         async def existing(copies: int) -> PrintRun | None:
-            """The run this request's start made, if it made one: its row by the run's
-            key, as the print route finds a repeat. A workflow still accepting with no
-            row yet may still print, so it is a 503 for the retry, never a release."""
-            key = run_key(subject.run_subject, body(copies))
-            found = await core.print_runs.store.find(key, has_request_id=True)
-            if found is not None:
-                return found
-            try:
-                handle = core.print_runs.client.get_workflow_handle(f"print-{key}")
-                described = await handle.describe()
-            except RPCError as error:
-                if error.status == RPCStatusCode.NOT_FOUND:
-                    return None
-                raise
-            if described.status == WorkflowExecutionStatus.RUNNING:
-                raise ApiError(
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    "this item's print is still being accepted; try again",
-                )
-            # Closed since the read above: it recorded its row, or it printed nothing.
-            return await core.print_runs.store.find(key, has_request_id=True)
+            return await existing_run(core.print_runs, subject, body(copies))
 
         async def start(copies: int) -> PrintRun:
             run = await accept_run(
