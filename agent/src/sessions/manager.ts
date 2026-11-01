@@ -650,7 +650,7 @@ export type SessionManagerDeps = {
    * list them (temporal/turnTools.ts `listTurnTools`), for the in-process proxies a turn with
    * `tools_as_activities` gets in place of its plugins and http_request (plan 2026-10-13 Step 9.3).
    */
-  turnTools?: (context: { session: string; owner: Owner; signal: AbortSignal }, only: ReadonlySet<string>) => Promise<Pick<TurnToolsResult, 'tools'>>
+  turnTools?: (context: { session: string; owner: Owner; signal: AbortSignal }, only: ReadonlySet<string>) => Promise<Pick<TurnToolsResult, 'tools' | 'unlisted'>>
   /**
    * What an outward call parks, for a registry tool that resolves its arguments (#4442,
    * tools/harness.ts `prepareApproval`): bound to the turn's principal, as `mcpServers` is.
