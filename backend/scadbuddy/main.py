@@ -152,7 +152,6 @@ from scadbuddy.workflows.client import (
     sandboxed_runner,
 )
 from scadbuddy.workflows.flow_triggers import VersionedFlowTriggerFire
-from scadbuddy.workflows.follow import resume_followed
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
     ATTACHMENTS_SWEEP,
@@ -1241,48 +1240,21 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
                 await asyncio.wait_for(stop.wait(), PRINT_WORKER_RECONNECT)
 
 
-async def _hand_off_watches(state: AppState, client: Client) -> None:
-    """Follow on Temporal the prints the old in-process watcher recorded (#268)."""
-    try:
-        resumed = await resume_followed(
-            state.projection.pool,
-            client,
-            state.settings.temporal_task_queue_bambuddy,
-            datetime.now(UTC),
-        )
-        if resumed:
-            logger.info(
-                "following on Temporal the prints the old watcher followed",
-                extra={"output_ids": resumed},
-            )
-    except Exception:
-        logger.exception("could not hand the old watcher's prints to FollowPrint")
-
-
 def serves_print_queue(settings: Settings) -> bool:
     """Whether the API process serves the ``bambuddy`` queue itself (#1060)."""
     return settings.temporal_worker_inprocess or settings.temporal_print_worker_inprocess
 
 
 async def _print_upkeep(state: AppState, stop: asyncio.Event) -> None:
-    """What the API does for print runs whoever serves their queue (#1060): hand the old
-    watcher's prints to ``FollowPrint`` once and, beside it, end the runs and operations
-    whose execution closed without ending them, until ``stop``. Postgres and a client only."""
+    """What the API does for print runs whoever serves their queue (#1060): end the runs
+    and operations whose execution closed without ending them, until ``stop``. Postgres
+    and a client only."""
     client = await _connect_until(state, stop, "print upkeep")
     if client is None:
         return
     ops = state.components.get(OPERATIONS)
-    # Beside the reconciler (review #1091 4): each follow it starts may wait out an RPC
-    # timeout on a slow Temporal.
-    handoff = asyncio.create_task(_hand_off_watches(state, client))
-    try:
-        where = {name: kind.where for name, kind in ops.kinds.items()}
-        await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop, where)
-    finally:
-        # A row whose follow did not start stays for the next boot.
-        handoff.cancel()
-        with suppress(asyncio.CancelledError):
-            await handoff
+    where = {name: kind.where for name, kind in ops.kinds.items()}
+    await _end_lost_runs_until(client, state.print_runs.store, ops.store, stop, where)
 
 
 #: The ``library`` worker's workflows beside ``Housekeeping`` (`library_worker` adds it),

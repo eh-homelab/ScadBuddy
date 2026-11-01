@@ -613,13 +613,15 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   before the new API starts. An older API beside it would restart this release's
   waiting renders as its own (its reconciler) and count requests into them that the
   workflow never sees (its insert). The older render workers may keep running: they
-  finish the renders pinned to their build. A pending row of the older API's that no
-  workflow will run is failed, once it is 30 s old, by the next render of its key or
-  the API's next pass over such rows.
-- **Upgrading from a release with the in-process print watcher** (before #1053): roll
-  it out with `Recreate` (old replicas at 0 first). An old pod still logs prints to
-  `print_watches` after the new one hands that log to `FollowPrint` at start, and
-  those prints would go unfollowed until someone opens their progress.
+  finish the renders pinned to their build.
+- **Upgrading past #1142** (the first contract step of the durable rollout): upgrade
+  from a release that already has #1053. Its migration drops the `render_jobs_pending_key`
+  index and the old print watcher's `print_watches` log, which the previous release
+  never names, and fails the print runs a pre-#1052 pod left `running` and the renders
+  a pre-#1053 API left unsettled, as upgraded. It may roll out beside the previous
+  release. `print_runs.heartbeat_at`, `render_jobs.params` and
+  `workflow_definitions.script` stay, unread, until a later release drops them; that one
+  needs this one deployed everywhere first.
 
 ### Bambuddy writes on the `bambuddy` queue (#1052, #1053, #1060)
 
