@@ -48,9 +48,12 @@ class Uploaded(Protocol):
 
 class LibraryWrites(Protocol):
     """A per-print file's upload: it names no output and is not filed (#4312 review I3),
-    so nothing written through it can pass for an output's filed copy."""
+    so nothing written through it can pass for an output's filed copy. It carries the
+    ``print_subject`` whose run uploads it (#4337), which is how its lifetime finds it."""
 
-    async def upload(self, filename: str, data: BinaryIO, folder_id: int | None) -> Uploaded: ...
+    async def upload(
+        self, filename: str, data: BinaryIO, folder_id: int | None, *, print_subject: str
+    ) -> Uploaded: ...
 
 
 class NativeCopies(LibraryReads, LibraryListingSource, LibraryWrites, Protocol):
@@ -63,8 +66,9 @@ class NativeCopies(LibraryReads, LibraryListingSource, LibraryWrites, Protocol):
     async def template_folder(self, name: str) -> Uploaded: ...
 
     async def per_print_files(self, folder_id: int | None) -> list[LibraryListRow]:
-        """The live files directly in ``folder_id`` that name no output and are not filed:
-        per-print copies and slices, and files a person uploaded."""
+        """The live files directly in ``folder_id`` a run put there (``print_subject``,
+        #4337) that name no output and are not filed: per-print copies and slices, never
+        a file a person uploaded, copied, moved or restored."""
         ...
 
 

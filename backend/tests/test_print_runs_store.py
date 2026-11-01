@@ -173,6 +173,43 @@ async def test_lan_waiting_reads_each_printers_newest_run_with_prints_to_start(
     assert await store.lan_waiting([]) == {}
 
 
+async def test_a_run_with_prints_still_to_start_is_still_using_its_files(
+    store: PrintRunStore,
+) -> None:
+    """#4337: a LAN run succeeds once its first print starts, and starts the rest from its
+    sliced files later (#4541), so until it has started (or stopped) every one it still
+    uses them, as a running run does: an output delete refuses while it waits, and the
+    per-print copies' sweep leaves its subject alone."""
+    waiting = RESULT.model_copy(update={"path": "native", "lan_waiting": [1]})
+    stopped = waiting.model_copy(
+        update={"lan_stopped": LanStopped(stage="cancelled", message="Stopped.")}
+    )
+    subjects = {
+        "running": PrintSubject.output("o-running"),
+        "waiting": PrintSubject.library(1_000_000_042),
+        "stopped": PrintSubject.output("o-stopped"),
+        "done": PrintSubject.output("o-done"),
+    }
+    for run_id, subject in subjects.items():
+        await store.insert_accepted(
+            run_id,
+            subject=subject,
+            key=run_id,
+            slug="demo",
+            workflow_id=f"print-{run_id}",
+            workflow_run_id="w",
+            retention=None,
+        )
+    await store.succeed("waiting", "demo", waiting)
+    await store.succeed("stopped", "demo", stopped)
+    await store.succeed("done", "demo", RESULT)
+
+    assert await store.subjects_in_use() == {"o-running", "library:1000000042"}
+    assert [r.id for r in await store.running_for("library:1000000042")] == ["waiting"]
+    assert await store.running_for("o-stopped") == []
+    assert await store.running_for("o-done") == []
+
+
 async def test_start_enqueue_marks_may_have_queued_on_a_later_failure(store: PrintRunStore) -> None:
     run = await accept(store)
     await store.start_enqueue(run.id)

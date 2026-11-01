@@ -457,7 +457,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
   presets and a process preset's values in Bambuddy's shapes (`local` presets are not
   offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
-  native library (nothing deletes it yet, #4337). The Customize page, the dialog's
+  native library, marked with its run's subject (`library_files.print_subject`, as is
+  its slice); `print_library/sweep.py` `sweep_print_copies` (housekeeping
+  `NATIVE_COPIES_SWEEP`, #4337) trashes a folder's superseded copies and what nothing
+  records, as Bambuddy's inbox keeps its copies; a moved, restored or copied one is the
+  person's (no subject). The Customize page, the dialog's
   first read and its analysis, and the Prints page's queue and history panels ask
   Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
   A LAN print's records (#4644, #4543): `print_succeed` writes its `output_last_prints`
