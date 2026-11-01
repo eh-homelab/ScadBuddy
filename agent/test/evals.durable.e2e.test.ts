@@ -168,6 +168,8 @@ describe.skipIf(skip !== undefined)(`eval scenarios through AgentSession, script
     expect(outcome.approvals).toHaveLength(1)
     expect(outcome.approvals[0]).toMatchObject({ toolName: `${EVAL_TOOL_PREFIX}print_output`, tier: 'outward' })
     expect(outcome.approvals[0]?.input).toEqual(outcome.toolCalls[0]?.input)
+    // The tier seam's own verdict on it: parked for a human.
+    expect(outcome.decisions).toContainEqual({ toolName: `${EVAL_TOOL_PREFIX}print_output`, decision: 'needs_approval', tier: 'outward' })
     expect(outcome.toolCalls[0]).toMatchObject({ ok: false, result: expect.stringContaining('The user denied') })
     expect(JSON.stringify(calls.at(-1)?.body?.messages ?? [])).toContain('it was not run')
     expect(outcome.backend.requests(/\/print\//)).toEqual([])

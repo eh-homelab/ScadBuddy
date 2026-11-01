@@ -42,8 +42,20 @@ SDK="'@anthropic-ai/claude-agent-sdk'"
 expect_fail "mode === 'durable' in the harness" harness/x.ts "if (session.mode === 'durable') run()"
 expect_fail "mode == 'classic'" sessions/y.ts "const c = mode == 'classic'"
 expect_fail "mode !== 'durable'" sessions/y.ts "if (row.mode !== 'durable') return"
+expect_fail "a case of a mode" sessions/y.ts "switch (row.mode) {
+  case 'durable':
+    return
+}"
 expect_fail "sessionModeOf" sessions/y.ts "const m = sessionModeOf(row)"
 expect_fail "session_mode in code" sessions/y.ts "await settings.get('session_mode')"
+
+# A root without agent/src (a wrong path, a moved tree) fails rather than finds nothing.
+rm -rf "${work:?}/t"
+mkdir -p "$work/t"
+if "$here/lint-one-runtime.sh" "$work/t" >/dev/null 2>&1; then
+  echo "FAIL: passed, but should fail: a root without agent/src"
+  fail=1
+fi
 
 # The SDK's query outside the harness's two call sites, in every form.
 expect_fail "a named import of query" sessions/q.ts "import { query } from $SDK

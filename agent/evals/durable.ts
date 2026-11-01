@@ -66,7 +66,8 @@ import { type CollectBudget, collectWithin, foldMessages, type Outcome, type Sce
 // Every parked outward call is denied through the pending-input route's `respond`, as the
 // browser user denies one in the panel; the model then gets the session's refusal ("The user
 // denied ..."). The outcome is folded from the worker's Claude Code message stream
-// (runner.ts `foldMessages`), so it records what the model saw, its init message included.
+// (runner.ts `foldMessages`), so it records what the model saw, its init message included,
+// and its decisions are the tier seam's own (HarnessRun `onDecision`).
 
 /** Who starts an eval's session: the browser user, with every tier. */
 const EVAL_OWNER: Owner = { kind: 'browser', id: 'browser', label: 'Eval' }
@@ -110,6 +111,9 @@ export type EvalStack = {
   spawned(): { api: number; worker: number }
   close(): Promise<void>
 }
+
+/** What the Claude Code a run's session spawned yielded, and the seam's decisions on its calls. */
+type Sink = { messages: SDKMessage[]; decisions: Outcome['decisions'] }
 
 /** One agent process of a role, as main.ts builds it. */
 type AgentProcess = { m: SessionManager; spawned: number; stop(): Promise<void> }
@@ -196,7 +200,7 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
 
     // Each run's backend, and the message stream of the Claude Code its session spawned.
     let current: ScenarioBackend = new EvalBackend()
-    let messages: SDKMessage[] = []
+    let sink: Sink = { messages: [], decisions: [] }
     const services = {
       backend: createBackendClient(EVAL_BACKEND_URL, (input, init) => current.fetch(input, init)),
       pending: new PendingActionStore(),
@@ -220,8 +224,19 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
       const p: AgentProcess = { spawned: 0 } as AgentProcess
       const run: QueryRunner = (spawn) => {
         p.spawned++
-        const into = messages
-        return tapped(runHarness({ ...spawn, ...(options.stderr ? { stderr: options.stderr } : {}) }), (m) => into.push(m))
+        const into = sink
+        return tapped(
+          runHarness({
+            ...spawn,
+            // The tier seam's verdict on each call, as it ran (harness/permissions.ts).
+            onDecision: (toolName, decision) => {
+              spawn.onDecision?.(toolName, decision)
+              into.decisions.push({ toolName, decision: decision.decision, tier: decision.tier })
+            },
+            ...(options.stderr ? { stderr: options.stderr } : {}),
+          }),
+          (m) => into.messages.push(m),
+        )
       }
       p.m = new SessionManager({
         sql: pool.sql,
@@ -343,8 +358,8 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
       },
       async run(scenario, runOptions = {}, backend = new EvalBackend()) {
         current = backend
-        const seen: SDKMessage[] = []
-        messages = seen
+        const seen: Sink = { messages: [], decisions: [] }
+        sink = seen
         const { prompt, script } = scenario.prepare(backend)
         const startedAt = Date.now()
         const deadline = startedAt + (runOptions.timeoutMs ?? 300_000)
@@ -357,7 +372,8 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
           started.push(session.id)
           if (!turn) throw new Error('the session started no turn')
           let done = false
-          void turn.done.finally(() => (done = true))
+          const ended = () => (done = true)
+          turn.done.then(ended, ended)
           const answered = new Set<string>()
           const polled: Polled = {}
           while (!done) {
@@ -376,7 +392,7 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
         } catch (err) {
           error = err instanceof Error ? err.message : String(err)
         }
-        const folded = foldMessages(seen)
+        const folded = foldMessages(seen.messages)
         // Each parked call as the model made it: its name and its exact input.
         const approvals: Outcome['approvals'] = parked.map((p) => {
           const call = folded.toolCalls.find((c) => c.id === p.toolUseId)
@@ -387,11 +403,7 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
           scenario: scenario.id,
           ...folded,
           approvals,
-          decisions: folded.toolCalls.map((c) => ({
-            toolName: c.name,
-            decision: approvals.some((a) => a.toolUseId === c.id) ? ('needs_approval' as const) : ('allow' as const),
-            tier: c.tier,
-          })),
+          decisions: seen.decisions,
           backend,
           renders,
           ...(error !== undefined ? { error: sessionId ? `${error} (session ${sessionId})` : error } : {}),

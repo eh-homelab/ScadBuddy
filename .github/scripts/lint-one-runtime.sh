@@ -5,9 +5,13 @@
 set -euo pipefail
 root="${1:-.}"
 fail=0
-# --include='*.ts' already leaves out the .sql migrations. A comment line (`//`, `/*`, ` *`)
-# is not a branch, so the comments that still name the old setting pass.
-if grep -rnE "mode ?[!=]==? ?'(durable|classic)'|sessionModeOf|session_mode" "$root/agent/src" --include='*.ts' \
+# A wrong root would find nothing and pass.
+[ -d "$root/agent/src" ] || { echo "no agent/src under $root" >&2; exit 1; }
+# A branch is a comparison with a mode (`mode === 'durable'`, `mode != 'classic'`) or a case
+# of one (`case 'durable':`). --include='*.ts' already leaves out the .sql migrations. A
+# comment line (`//`, `/*`, ` *`) is not a branch, so the comments that still name the old
+# setting pass.
+if grep -rnE "mode ?[!=]==? ?'(durable|classic)'|case '(durable|classic)'|sessionModeOf|session_mode" "$root/agent/src" --include='*.ts' \
     | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*)'; then
   echo "a session mode branch is back: every session is an AgentSession" >&2
   fail=1

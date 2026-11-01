@@ -84,7 +84,9 @@ browser user denies one: an eval never approves anything. The model then gets th
 session's refusal, `The user denied <tool>; it was not run. …`
 ([`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)). The outcome is
 folded from the worker's Claude Code message stream, so it records what the model saw,
-the init message's model and Claude Code version included.
+the init message's model and Claude Code version included. Its tier decisions are the
+permission seam's own, as each call ran (`onDecision`,
+[`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)).
 
 Until plan Step 6.6 the scenarios also ran on the classic harness and on agent-durable's
 `DurableSession` (`SCADBUDDY_EVAL_MODE`). Since Step 6.3 no new session is either, so
