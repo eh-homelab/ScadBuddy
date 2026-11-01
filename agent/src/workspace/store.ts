@@ -614,6 +614,21 @@ export class SessionFiles {
         )
       }
       this.#checkFiles(held?.files ?? 0)
+      // A file and a directory never share a name: a working directory (workspace/directory.ts)
+      // cannot hold both, and the one it dropped would read as deleted at its write-back.
+      const parents = name.split('/').slice(0, -1).map((_, i, segments) => segments.slice(0, i + 1).join('/'))
+      const [clash] = await tx<{ path: string }[]>`
+        SELECT path FROM ai_session_files
+        WHERE workspace = ${key} AND (path = ANY(${parents}::text[]) OR starts_with(path, ${`${name}/`}))
+        LIMIT 1`
+      if (clash) {
+        throw new WorkspaceError(
+          'conflict',
+          clash.path.length < name.length
+            ? `${clash.path} is a file, so ${name} cannot be under it; nothing was written`
+            : `${name} is a directory (it holds ${clash.path}), so it cannot be a file too; nothing was written`,
+        )
+      }
       const [row] = await tx<Row[]>`
         INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, blob_key, key_sealed, key_kek_id, sha256, size, source)
         VALUES (${key}, ${sessionId}, ${name}, ${mediaType}, ${placed.data}, ${placed.blobKey}, ${placed.keySealed}, ${placed.kekId},

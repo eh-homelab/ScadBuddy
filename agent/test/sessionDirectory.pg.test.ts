@@ -5,6 +5,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
+import { ensureSessionDir } from '../src/harness/stateDirs.js'
 import { SessionBlobs } from '../src/sessions/blobs.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import type { SessionManager } from '../src/sessions/manager.js'
@@ -136,7 +137,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     ].sort())
     expect(existsSync(path.join(turn.dir, 'b-over-quota.txt'))).toBe(false)
     expect(existsSync(path.join(turn.dir, 'c-too-large.txt'))).toBe(false)
-    expect(await dirs.usage(turn)).toEqual({ bytes: 1000, cap: 1536 })
+    expect(await dirs.usage(turn)).toEqual({ bytes: 1000, cap: 1536, maxEntries: 20_000 })
     expect((await capped.list(ws(id))).map((f) => f.path)).toEqual(['a-fits.txt'])
   })
 
@@ -445,7 +446,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       },
       usage: async () => {
         walks += 1
-        return { bytes: over ? 5_000 : 0, cap: 1_000 }
+        return { bytes: over ? 5_000 : 0, cap: 1_000, maxEntries: 50 }
       },
       done: () => {},
     }
@@ -453,6 +454,58 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     expect(timerWriteBacks).toBe(1)
     expect(walks).toBeGreaterThan(4)
     expect(JSON.stringify(result)).toContain('grew past the workspace cap')
+  })
+
+  it('a workspace never holds a file and a directory of the same name', async () => {
+    const id = await session()
+    await files.write(ws(id), 'notes/a.txt', Buffer.from('a'))
+    await expect(files.write(ws(id), 'notes', Buffer.from('n'))).rejects.toMatchObject({ code: 'conflict' })
+    await files.write(ws(id), 'plain', Buffer.from('p'))
+    await expect(files.write(ws(id), 'plain/b.txt', Buffer.from('b'))).rejects.toMatchObject({ code: 'conflict' })
+    expect((await files.list(ws(id))).map((f) => f.path).sort()).toEqual(['notes/a.txt', 'plain'])
+  })
+
+  it("an older workspace holding both `x` and `x/…` loses neither at a placed turn's write-backs", async () => {
+    const id = await session()
+    await files.write(ws(id), 'notes/a.txt', Buffer.from('a'))
+    // A row from before the write refused the collision.
+    await db.sql`
+      INSERT INTO ai_session_files (workspace, session_id, path, media_type, data, blob_key, key_sealed, key_kek_id, sha256, size, source)
+      SELECT workspace, session_id, 'notes', media_type, data, blob_key, key_sealed, key_kek_id, sha256, size, source
+      FROM ai_session_files WHERE workspace = ${`session:${id}`} AND path = 'notes/a.txt'`
+    const dirs = new SessionDirectory(files, await root())
+    const turn = await dirs.place(id)
+    await dirs.writeBack(turn, { prune: false })
+    await dirs.writeBack(turn)
+    dirs.done(turn)
+    const again = await dirs.place(id)
+    await dirs.writeBack(again)
+    dirs.done(again)
+    expect((await files.list(ws(id))).map((f) => f.path).sort()).toEqual(['notes', 'notes/a.txt'])
+  })
+
+  it("the sweep never removes the directory of a session with a warm process here, however idle", async () => {
+    const id = await session()
+    const dirs = new SessionDirectory(files, await root(), { warm: () => true })
+    const turn = await dirs.place(id)
+    dirs.done(turn)
+    expect(await dirs.sweep(db.sql, 1_000, Date.now() + 48 * 3600_000)).toEqual([])
+    expect(existsSync(turn.dir)).toBe(true)
+  })
+
+  it("the entry cap follows the workspace's file quota: four entries a file", async () => {
+    const id = await session()
+    const dirs = new SessionDirectory(new SessionFiles(db.sql, { maxFiles: 10 }), await root())
+    const turn = await dirs.place(id)
+    for (let i = 0; i < 41; i++) await writeFile(path.join(turn.dir, `e-${i}`), '')
+    expect(await dirs.usage(turn)).toMatchObject({ overEntries: true, maxEntries: 40 })
+    dirs.done(turn)
+  })
+
+  it('a classic turn or a monitor makes its session directory 0700', async () => {
+    const sessionsDir = await root()
+    const dir = await ensureSessionDir({ stateDir: await root(), sessionsDir }, randomUUID())
+    expect((await stat(dir)).mode & 0o777).toBe(0o700)
   })
 
   it('a file skipped at every write-back of a placement is logged once', async () => {
@@ -465,7 +518,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
         writeBacks += 1
         return { written: [], deleted: [], skipped, strays: 0, bytes: 0 }
       },
-      usage: async () => ({ bytes: 0, cap: 1_000 }),
+      usage: async () => ({ bytes: 0, cap: 1_000, maxEntries: 50 }),
       done: () => {},
     }
     const { warned } = await cappedTurn(directory, { dirCheckMs: 10, stopAfterMs: 400 })
@@ -520,7 +573,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       {
         place: async (sessionId: string) => ({ sessionId, dir, base: new Map<string, string>() }),
         writeBack: noWriteBack,
-        usage: async () => ({ bytes: 0, cap: 1_000, overEntries: true }),
+        usage: async () => ({ bytes: 0, cap: 1_000, maxEntries: 50, overEntries: true }),
         done: () => {},
       },
       { dirCheckMs: 20 },
@@ -554,7 +607,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       // Far under the cap at the first check (a quarter), then a burst past it: no check is skipped.
       usage: async () => {
         walks += 1
-        return walks === 1 ? { bytes: 250, cap: 1_000 } : { bytes: 10_000, cap: 1_000 }
+        return walks === 1 ? { bytes: 250, cap: 1_000, maxEntries: 50 } : { bytes: 10_000, cap: 1_000, maxEntries: 50 }
       },
       done: (p: unknown) => {
         done.push(p)

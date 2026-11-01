@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, open, readdir, realpath, rm, stat, utimes } from '
 import path from 'node:path'
 import type { Sql } from 'postgres'
 import { isUuid } from '../harness/uuid.js'
-import { sha256, type SessionFiles, WORKSPACE_PATH_MAX, WorkspaceError, type WorkspaceErrorCode, type WorkspaceRef } from './store.js'
+import { sha256, type SessionFiles, WORKSPACE_PATH_MAX, WorkspaceError, type WorkspaceErrorCode, WORKSPACE_MAX_FILES, type WorkspaceRef } from './store.js'
 
 // A session's working directory, Claude Code's `cwd` (plan 2026-10-13 Step 9.5, #4773 R3,
 // decision Q5 as built): `<root>/<session id>/`, where root is SCADBUDDY_SESSION_DIR (a capped
@@ -68,7 +68,7 @@ const CAPPED: ReadonlySet<WorkspaceErrorCode> = new Set(['too_large', 'quota'])
  * at most 20,000 entries and can never make a directory this check stops; past that is a turn's
  * own scratch tree. A walk of that many lstat calls stays well under the 15 s between two checks.
  */
-export const MAX_ENTRIES = 20_000
+export const MAX_ENTRIES = MAX_SEGMENTS * WORKSPACE_MAX_FILES
 
 /**
  * The paths a write-back could not offer to the record for now (`unavailable`, say): not past a
@@ -277,7 +277,9 @@ export class SessionDirectory {
     this.#files = files
     this.#root = root
     this.#warm = options.warm ?? (() => false)
-    this.#maxEntries = options.maxEntries ?? MAX_ENTRIES
+    // Four entries a file (MAX_SEGMENTS: the file and at most three parent directories), so a
+    // placement of a full workspace never makes a directory the entry check stops.
+    this.#maxEntries = options.maxEntries ?? MAX_SEGMENTS * files.maxFiles
     const sql = options.sql
     this.#exists = sql ? async (id) => (await sql`SELECT 1 FROM ai_sessions WHERE id = ${id}`).length > 0 : () => Promise.resolve(true)
   }
@@ -395,8 +397,12 @@ export class SessionDirectory {
     for (const [rel, abs] of found.files) {
       if (!held.has(rel) && !unsynced.has(rel) && !monitored) await rm(abs, { force: true })
     }
+    // A file named as another file's directory (a record from before the write refused it, store.ts):
+    // a directory cannot be both, so the file is left out here and out of the base, and no
+    // write-back can read its absence as a deletion. The tools and the panel still reach it.
+    const parents = new Set(record.flatMap((f) => f.path.split('/').slice(0, -1).map((_, i, segments) => segments.slice(0, i + 1).join('/'))))
     for (const file of record) {
-      if (unsynced.has(file.path)) continue
+      if (unsynced.has(file.path) || parents.has(file.path)) continue
       const there = found.files.get(file.path)
       const current = there === undefined ? undefined : await readRegular(dir, there, file.size)
       if (current && 'bytes' in current && sha256(current.bytes) === file.sha256) {
@@ -500,10 +506,11 @@ export class SessionDirectory {
    * stops once past either, so a turn's check every 15 s stays cheap however large the tree grows:
    * `bytes` is exact only up to the cap, never a measure of the directory past it.
    */
-  async usage(placement: Placement): Promise<{ bytes: number; cap: number; overEntries?: boolean }> {
+  async usage(placement: Placement): Promise<{ bytes: number; cap: number; maxEntries: number; overEntries?: boolean }> {
     const { workspaceMaxBytes } = await this.#files.limits()
     const { bytes, entries } = await measure(placement.dir, workspaceMaxBytes, this.#maxEntries)
-    return entries > this.#maxEntries ? { bytes, cap: workspaceMaxBytes, overEntries: true } : { bytes, cap: workspaceMaxBytes }
+    const out = { bytes, cap: workspaceMaxBytes, maxEntries: this.#maxEntries }
+    return entries > this.#maxEntries ? { ...out, overEntries: true } : out
   }
 
   /** Removes the session's directory (forgetSubject). */
@@ -557,7 +564,8 @@ export class SessionDirectory {
     const removed: string[] = []
     for (const id of ids) {
       const gone = await this.#serial(id, async () => {
-        if (this.#busy.has(id)) return false
+        // Never under a warm process here, as `evict`: its cwd stays however long it idles.
+        if (this.#busy.has(id) || this.#warm(id)) return false
         if (live.has(id)) {
           const placedAt = await stat(sessionDirOf(this.#root, id)).then((st) => st.mtimeMs, () => now)
           if (now - placedAt < idleMs) return false

@@ -25,7 +25,7 @@ import { type ClaimedSession, runningDurableTurn, TAB_WAIT_S, type TurnOutcome, 
 import { scrubForLog } from './sdkEvents.js'
 import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
-import { MAX_ENTRIES, type Placement, type SessionDirectory } from '../workspace/directory.js'
+import type { Placement, SessionDirectory } from '../workspace/directory.js'
 
 // An AgentSession's turn on this replica (unified runtime spec 2026-10-13 §5.2, §5.5): what
 // the `session_turn` activity runs (temporal/session/turnActivity.ts). The turn is a classic
@@ -133,7 +133,7 @@ export const DIR_CHECK_MS = 15_000
 const DIR_SYNC_EVERY = 4
 /**
  * How long one check's walk may take before the directory counts as past the cap and the turn is
- * stopped (fail closed): a walk stops at MAX_ENTRIES lstat calls, well under a second on the
+ * stopped (fail closed): a walk stops at the entry cap (20,000 lstat calls by default), well under a second on the
  * worker's emptyDir, so one this slow is a hung disk or a tree built to stall it.
  */
 export const DIR_WALK_TIMEOUT_MS = 10_000
@@ -604,7 +604,7 @@ export class TurnHost {
                 )
                 return
               }
-              const { bytes, cap, overEntries } = usage
+              const { bytes, cap, maxEntries, overEntries } = usage
               if (bytes <= cap && !overEntries) {
                 // A long turn with no park still writes back now and then: a lost pod then loses less.
                 if (syncing && !checking.syncing) {
@@ -619,7 +619,7 @@ export class TurnHost {
                 return
               }
               if (overEntries) {
-                stop(`holds too many entries (past ${MAX_ENTRIES})`, `the session's working directory holds too many entries (past ${MAX_ENTRIES})`)
+                stop(`holds too many entries (past ${maxEntries})`, `the session's working directory holds too many entries (past ${maxEntries})`)
               } else {
                 stop(`holds ${bytes} bytes, past the workspace's ${cap}`, `the session's working directory grew past the workspace cap (${cap} bytes)`)
               }

@@ -1563,6 +1563,10 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   workspace, the file cap no larger; both in one transaction, each a `settings` audit row;
   [`agent/src/routes/workspaceSettings.ts`](../../agent/src/routes/workspaceSettings.ts)).
   Each is read at every write. Size the database for them.
+- A file and a directory never share a name. A write of `notes` while `notes/a.txt` exists, or
+  of `notes/a.txt` while the file `notes` exists, is refused `conflict`, because a session's
+  working directory cannot hold both. In an older workspace that holds both, a placement leaves
+  the file `notes` out of the directory and out of its write-back, so it is never read as deleted.
 - Tools, with their tiers: `workspace_list` and `workspace_read` (read),
   `workspace_write`, `workspace_edit` and `workspace_delete` (write), and
   `workspace_save` (read: it saves an output's 3MF, a model's file, thumbnail or media,

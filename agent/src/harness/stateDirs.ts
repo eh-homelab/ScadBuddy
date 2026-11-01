@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { access, mkdir, rm } from 'node:fs/promises'
+import { access, chmod, mkdir, rm } from 'node:fs/promises'
 import path from 'node:path'
 import { isUuid } from './uuid.js'
 import { claudeConfigDir, pluginCacheDir, scratchDir, type HarnessPaths } from './options.js'
@@ -52,7 +52,9 @@ export async function removeLegacyBrowserDir(paths: HarnessPaths): Promise<void>
 export async function ensureSessionDir(paths: HarnessPaths, sessionId: string): Promise<string> {
   const dir = sessionWorkDir(paths, sessionId)
   try {
-    await mkdir(dir, { recursive: true })
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    // Its owner's only (workspace/directory.ts): mkdir's mode is not applied to a directory that was there.
+    await chmod(dir, 0o700)
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? String(err)
     throw new StateDirError(`cannot create the session working directory ${dir} (${code})`)
