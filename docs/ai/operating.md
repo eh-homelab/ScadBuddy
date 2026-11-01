@@ -232,8 +232,9 @@ main on 2026-11-01:
   There is no session mode: since plan Step 6.3 nothing reads `ai_sessions.mode` or the
   `session_mode` setting, the panel has no mode picker, and `sessions_start` takes `mode`
   and ignores it. The Python `DurableSession` retired in Phase 8, and its open sessions
-  moved to `AgentSession` in Phase 7 (62 in prod, 2026-11-01). `agent-durable` runs no
-  turn and stays at zero replicas.
+  moved to `AgentSession` in Phase 7 (the prod backfill of plan Step 7.2 moved 62 of 62 and left
+  none open, as #2726's checklist records). `agent-durable` runs no turn and stays at zero
+  replicas.
 - **Workers.** Turns run on the `scadbuddy-agent-worker` Deployment (role `worker`, §1),
   never in the API pod's `agent` container (role `api`). A send goes to the session's
   workflow through Temporal, so any `api` replica may take it.

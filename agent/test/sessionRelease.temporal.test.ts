@@ -44,6 +44,7 @@ import { testPayloadKeys } from './support/payloadKeys.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, tempPaths } from './support/sessions.js'
 import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP, polledHosts } from './support/temporal.js'
+import { flushTracing, resetTracing, testTracing } from './support/tracing.js'
 
 // A park that outlasts its hold releases the process (unified runtime spec 2026-10-13 §5.4
 // "Release" and "Continue after a release", plan Task 5.4), end to end: AgentSession on a
@@ -73,6 +74,8 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 const READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const SHIP = 'mcp__scadbuddy__ship'
 const sha = (s: string) => createHash('sha256').update(s).digest('hex')
+// The turn's spans, for the agent dashboard's releases and continued turns (plan Step 9.9).
+const spans = testTracing()
 
 /** The last message of a request: what the model is answering now. */
 const lastMessage = (r: RecordedRequest) => JSON.stringify(r.body?.messages?.at(-1) ?? null)
@@ -357,8 +360,9 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
   }
 
   it('a released approval resumes, and its call runs once, keyed by its request id, and the model reads how it went', async () => {
+    await resetTracing()
     script = shipsTheBox('shipped, thanks')
-    const { started, entry } = await released()
+    const { started, id, entry } = await released()
     const asked = fake.messageCalls().length
     expect(await respond(entry.id, { kind: 'approval', decision: 'approve' })).toEqual({ status: 200, body: expect.objectContaining({ outcome: 'approved' }) })
     expect(await started.turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
@@ -373,6 +377,11 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     // The released call's result interrupted the turn: no request answered it.
     expect(fake.messageCalls().map(lastMessage).filter((last) => last.includes('the turn paused, and you will be told how it ended'))).toEqual([])
     expect(await listed()).toEqual([])
+    // One release span for the first placement, and the second placement's turn span says it continued a park.
+    await flushTracing()
+    const ours = spans.getFinishedSpans().filter((s) => s.attributes['scadbuddy.session_id'] === id)
+    expect(ours.filter((s) => s.name === 'agent.turn.release').map((s) => s.attributes['scadbuddy.parked_calls'])).toEqual([1])
+    expect(ours.filter((s) => s.name === 'agent.turn').map((s) => s.attributes['scadbuddy.continuation'])).toEqual([undefined, 'parked'])
   })
 
   it("the closed process wrote the parked call's synthetic result into the transcript (spec §12)", async () => {

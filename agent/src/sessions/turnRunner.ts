@@ -118,7 +118,11 @@ export type FingerprintParts = {
   raisedTiers: string[]
   /** Whether the run has the http_request tool (#827). */
   httpRequest: boolean
-  /** Whether its ScadBuddy tool calls run as activities (plan 2026-10-13 Step 9.2): the in-process server a process keeps is spawned with it. */
+  /**
+   * Whether its ScadBuddy tool calls run as activities (plan 2026-10-13 Step 9.2): the in-process
+   * server a process keeps is spawned with it. No longer a setting (Step 9.9): true whenever the
+   * turn had a Temporal starter (`deps.toolCalls`).
+   */
   toolsAsActivities: boolean
   /** http_request's stored access in ai_access (#2171), its tier when one is set; null when none is stored. */
   httpTier: ToolAccess | null

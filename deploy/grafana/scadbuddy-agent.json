@@ -438,7 +438,7 @@
           "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
           "queryType": "traceql",
           "metricsQueryType": "range",
-          "query": "{resource.service.name=\"scadbuddy-agent\" && span.scadbuddy.task_queue != nil} | rate() by (span.scadbuddy.task_queue)",
+          "query": "{resource.service.name=\"scadbuddy-agent\" && span.scadbuddy.tool != nil && span.scadbuddy.task_queue != nil} | rate() by (span.scadbuddy.task_queue)",
           "limit": 20
         }
       ]
