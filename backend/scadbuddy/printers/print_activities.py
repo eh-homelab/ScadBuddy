@@ -87,6 +87,8 @@ from scadbuddy.rack.usage import (
     settle_lan_print,
 )
 from scadbuddy.render.bambu3mf import PROJECT_SETTINGS_NAME
+from scadbuddy.slicing.slice_info import plate_grams
+from scadbuddy.spools.native import NativeSpoolStore, spool_uses
 from scadbuddy.workflows.print_activities import heartbeating, raised_as
 from scadbuddy.workflows.print_models import (
     FAILED,
@@ -270,6 +272,7 @@ class LanActivities:
             count = project_filament_count(spool)
             spool.seek(0)
             rack = read_rack_plan(spool, input.plate_id)
+            grams = plate_grams(spool, input.plate_id)  # type: ignore[arg-type]
             spool.seek(0)
             try:
                 md5 = await heartbeating(lan.upload(spool, f"{UPLOAD_DIR}{input.remote_name}"))  # type: ignore[arg-type]
@@ -282,6 +285,7 @@ class LanActivities:
             filament_count=count,
             rack=rack,
             run_id=input.run_id,
+            grams_by_slot=grams,
         )
 
     @activity.defn(name=LAN_PRINT_ACTIVITY)
@@ -314,7 +318,9 @@ class LanActivities:
                     raise self._print_error(row, code)
                 raise _failed(f"{row.name} reports this print stopped.")
             if state in TAKEN_STATES:
-                # Its pick was saved by the attempt that sent it.
+                # Its pick was saved by the attempt that sent it; its spool use is saved
+                # again, which keeps what that attempt saved.
+                await self._save_uses(input)
                 return self._named(
                     LanStarted(subtask_name=input.subtask_name, started_at=first.received_at),
                     input,
@@ -341,7 +347,25 @@ class LanActivities:
                 await self._save_picks(row, input, picks)
             raise
         await self._save_picks(row, input, picks)
+        await self._save_uses(input)
         return self._named(started.model_copy(update={"warnings": warnings}), input)
+
+    async def _save_uses(self, input: LanPrintInput) -> None:
+        """What the start uses of ScadBuddy's own spools (#4643), under its run and its
+        ``subtask_name``, settled once the run's print settles
+        (`spools.spool_providers.native_use_hook`). Advisory, never raising."""
+        run_id = input.uploaded.run_id
+        uses = spool_uses(input.spools, input.uploaded.grams_by_slot)
+        if run_id is None or not uses:
+            return
+        try:
+            store = NativeSpoolStore(self.d.settings_store.pool)
+            await asyncio.to_thread(store.record_uses, run_id, input.subtask_name, uses)
+        except Exception as error:
+            logger.warning(
+                "could not save what a LAN print uses of the native spools",
+                extra={"run_id": run_id, "error": type(error).__name__},
+            )
 
     @staticmethod
     def _named(started: LanStarted, input: LanPrintInput) -> LanStarted:

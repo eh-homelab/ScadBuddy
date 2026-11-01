@@ -451,7 +451,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
   off the path): Bambuddy's inventory and ScadBuddy's own (`native_spools`,
   `spools/native.py`, provider `native` in `spools/spool_providers.py`, routes
-  `api/native_spools.py`, #4643; each write re-caches it at once). `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
+  `api/native_spools.py`, #4643; each write re-caches it at once; a LAN start saves its
+  slots' grams in `native_spool_uses`, taken off once the run settles with that start
+  `done`, `native_use_hook`; the editor is Settings' `components/settings/NativeSpools.tsx`).
+  `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
   command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's

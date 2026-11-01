@@ -376,6 +376,10 @@ export type QuoteLine = Schemas['QuoteLine']
 export type Filament = Schemas['Filament']
 export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3'>
 export type FilamentPatch = Partial<Schemas['FilamentPatch']>
+/** ScadBuddy's own spools (#4643), the native spool provider's records; not Bambuddy's inventory. */
+export type NativeSpool = Schemas['NativeSpool']
+export type NativeSpoolCreate = Schemas['NativeSpoolCreate']
+export type NativeSpoolPatch = Schemas['NativeSpoolPatch']
 export type PricingPolicy = Schemas['PricingPolicy']
 /** `PUT /orders/price-book`: the whole policy, and the estimate's factor when sent. */
 export type PolicyUpdate = Defaulted<Schemas['PolicyUpdate'], 'rough_estimate_factor'>

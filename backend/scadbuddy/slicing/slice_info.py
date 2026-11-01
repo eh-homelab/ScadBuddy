@@ -207,6 +207,29 @@ class NativeSliceRead(BaseModel):
     filament_changes: int | None = None
 
 
+def plate_grams(payload: bytes | BinaryIO, plate_id: int) -> dict[int, float]:
+    """``plate_id``'s grams per slot as :func:`read_sliced` reads them, without reading
+    the G-code's body: what a LAN start's spool use is (#4643). Empty for a file or a
+    plate that cannot be read."""
+    try:
+        read = read_filaments(_file(payload), sliced=True)
+    except UnreadableFilamentsError:
+        return {}
+    profile = read.profile
+    if profile is None or not profile.plates:
+        return {}
+    plate = profile.plates[0] if len(profile.plates) == 1 else profile.plate(plate_id)
+    if plate is None:
+        return {}
+    grams = {slot.slot_id: slot.used_grams for slot in read.sliced.get(plate.index, [])}
+    try:
+        with zipfile.ZipFile(_file(payload)) as archive:
+            printed = printed_filaments(archive, plate.index)
+    except (*_MEMBER_ERRORS, KeyError):
+        printed = PrintedFilaments()
+    return _on_printed(grams, printed)
+
+
 def read_sliced(payload: bytes | BinaryIO, plate_id: int) -> NativeSliceRead:
     """``plate_id``'s time, grams and filament changes. The only plate of a file of one
     is read whatever its number; a plate a file of several lacks is a 404; a file that
