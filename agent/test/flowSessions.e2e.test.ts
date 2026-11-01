@@ -21,7 +21,6 @@ import { turnToolActivities } from '../src/temporal/turnTools.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { DURABLE_TOOLS } from '../src/tools/manifest.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { AGENT_SESSIONS_SKIP, agentSessions, agentSessionsEnv } from './support/agentSessions.js'
@@ -222,7 +221,7 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
       namespace: 'default',
       taskQueue: TOOLS_QUEUE,
       activities: {
-        ...toolActivities(DURABLE_TOOLS, {
+        ...toolActivities(ALL_TOOLS, {
           services,
           sessions: new PgSessionOwners(db.sql),
           approvals: new PgApprovalRecords(db.sql),

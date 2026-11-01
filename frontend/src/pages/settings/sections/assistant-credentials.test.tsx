@@ -2,7 +2,6 @@ import { screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { renderSettingsSection } from '../testing'
 import { Component as AssistantCredentials } from './assistant-credentials'
-import { Component as DurableSubagents } from './durable-subagents'
 import { Component as Images } from './images'
 import { Component as Memory } from './memory'
 import { Component as Model } from './model'
@@ -30,7 +29,6 @@ describe('Assistant sections', () => {
         <RenderLimits />
         <Images />
         <Workspace />
-        <DurableSubagents />
         <Memory />
       </>,
       { route: '/settings/assistant' },

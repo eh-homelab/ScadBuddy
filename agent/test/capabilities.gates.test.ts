@@ -13,9 +13,7 @@ import { originPolicy } from '../src/http/origins.js'
 import { BuiltInTools } from '../src/plugins/builtInTools.js'
 import { CAPABILITIES_PATH } from '../src/routes/capabilities.js'
 import { FLOW_TOOLS_PATH } from '../src/routes/flowTools.js'
-import { subagentServer } from '../src/routes/subagentMcp.js'
 import { kekFromBase64 } from '../src/secrets.js'
-import { mintSubagentToken, subagentKey, verifySubagentToken } from '../src/temporal/subagentToken.js'
 import { toolActivities } from '../src/temporal/toolActivities.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { TOOL_TIER_ACTIVITY } from '../src/temporal/toolTier.js'
@@ -219,33 +217,4 @@ describe('builtin:browser switched off, at every gate (#4757)', () => {
     expect(await ask(other.name)).toEqual({ tier: other.risk, disabled: false })
   })
 
-  it('builtin:browser switched off answers disabled from the subagent loopback', async () => {
-    const { tools, svc, off } = browserRig()
-    const key = subagentKey(kek)
-    const owner = { kind: 'browser' as const, id: 'browser', label: 'You' }
-    const turn = '6a1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d'
-    const server = subagentServer(
-      {
-        sessions: { ownerOf: async (id) => (id === SESSION ? { ...owner, turnTiers: null } : undefined) },
-        running: async () => true,
-        currentTiers: async () => undefined,
-        keys: () => [key],
-        tools,
-        services: svc,
-        audit: { record: vi.fn(async () => {}), hash: () => 'h', summarise: () => 's' } as never,
-      },
-      verifySubagentToken(mintSubagentToken(key, { session: SESSION, turn, owner }, Date.now() / 1000 + 600), [key])!,
-    )
-    const [c, s] = InMemoryTransport.createLinkedPair()
-    await server.connect(s)
-    const client = new Client({ name: 't', version: '1' })
-    await client.connect(c)
-    const call = async () => {
-      const r = (await client.callTool({ name: browser.name, arguments: {} })) as { isError?: boolean; content: { text: string }[] }
-      return { error: r.isError === true, text: r.content.map((x) => x.text).join('') }
-    }
-    expect(await call()).toMatchObject({ error: false })
-    await off()
-    expect(await call()).toEqual({ error: true, text: expect.stringMatching(/disabled in Settings/) as unknown })
-  })
 })

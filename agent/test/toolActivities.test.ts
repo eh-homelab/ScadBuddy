@@ -9,12 +9,8 @@ import { TabHub } from '../src/bridge/hub.js'
 import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import type { TouchedCall } from '../src/sessions/touched.js'
-import { answerResult } from '../src/gate/answers.js'
-import { answeredText, timedOutText } from '../src/harness/attention.js'
-import { answersText } from '../src/harness/questions.js'
 import type { FlowRuns } from '../src/temporal/flowRuns.js'
 import { BACKEND_UNAVAILABLE, decidedCalls, DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
-import { DURABLE_ONLY_TOOLS } from '../src/tools/answerTools.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
 import { browserTools } from '../src/tools/browser.js'
 import { PendingActionStore } from '../src/tools/pending.js'
@@ -462,14 +458,11 @@ describe('flow runs in tool activities', () => {
     expect(h.audits).toEqual([])
   })
 
-  it('refuses the browser and answer tools: a flow has no tab and no session', async () => {
-    const tools = [...browserTools, ...DURABLE_ONLY_TOOLS]
-    const h = harness({ flows: flowRuns() }, tools)
-    for (const name of ['browser_click', DURABLE_ONLY_TOOLS[0]!.name]) {
-      const refused = await failure(env(FLOW, 'tool-call_1').run(h.activities[name]!, {}))
-      expect(refused.nonRetryable).toBe(true)
-      expect(refused.type).toBe('NotForFlows')
-    }
+  it('refuses the browser tools: a flow has no tab', async () => {
+    const h = harness({ flows: flowRuns() }, browserTools)
+    const refused = await failure(env(FLOW, 'tool-call_1').run(h.activities.browser_click!, {}))
+    expect(refused.nonRetryable).toBe(true)
+    expect(refused.type).toBe('NotForFlows')
     expect(h.audits).toEqual([])
   })
 
@@ -573,34 +566,6 @@ describe('the gate in tool activities', () => {
     const h = harness()
     await env().run(h.activities.whoami!, {})
     expect(h.audits[0]).toMatchObject({ requestId: REQUEST, toolUseId: 'toolu_01' })
-  })
-
-  it("returns an answer tool's recorded answer, never its handler's, and fails a call nobody answered", async () => {
-    const asked: string[] = []
-    const answers = {
-      result: async (requestId: string, tool: string, input: unknown) => {
-        asked.push(requestId)
-        return answerResult(
-          requestId === REQUEST ? { outcome: 'answered', response: { answers: ['Red', 'Both'] }, reason: null } : undefined,
-          tool,
-          input,
-        )
-      },
-    }
-    const h = harness({ answers }, [...TOOLS, ...DURABLE_ONLY_TOOLS])
-    const questions = [
-      { question: 'Which colour?', header: 'Colour', options: [{ label: 'Red', description: 'r' }, { label: 'Blue', description: 'b' }], multiSelect: false },
-      { question: 'Which parts?', header: 'Parts', options: [{ label: 'Both', description: 'x' }, { label: 'Lid', description: 'y' }], multiSelect: false },
-    ]
-    const content = await env().run(h.activities.ask_user!, { questions })
-    expect(content).toBe(answersText({ 'Which colour?': 'Red', 'Which parts?': 'Both' }))
-    expect(asked).toEqual([REQUEST])
-    expect(h.audits).toEqual([expect.objectContaining({ action: 'ask_user', requestId: REQUEST, outcome: 'ok' })])
-    const failed = await failure(env(undefined, 'tool-toolu_02').run(h.activities.wait_for_user!, { reason: 'blocked', message: 'stuck' }))
-    expect(failed.nonRetryable).toBe(true)
-    expect(failed.message).toMatch(/did not answer/)
-    // Without the database, an answer tool refuses.
-    await failure(env().run(harness({}, DURABLE_ONLY_TOOLS).activities.ask_user!, { questions }))
   })
 
   it('describes a call with the summary and hash a classic approval would carry', async () => {
@@ -990,26 +955,6 @@ describe('print_output through the durable gate (#4442 gate review)', () => {
       expect(refused.message).toContain('Garage is Bambuddy printer 5, not printer_id 2')
       expect(state.posted).toEqual([])
     })
-  })
-})
-
-describe('answerResult', () => {
-  it('turns a recorded outcome into the tool result the model reads', () => {
-    expect(answerResult({ outcome: 'answered', response: { answers: ['Print it'] }, reason: null }, 'wait_for_user', {})).toEqual({
-      ok: true,
-      text: answeredText('Print it'),
-    })
-    expect(answerResult({ outcome: 'timed_out', response: null, reason: null }, 'wait_for_user', { timeout_s: 60 })).toEqual({
-      ok: true,
-      text: timedOutText(60),
-    })
-    // A timer never answers a question, and a cancel is an error.
-    expect(answerResult({ outcome: 'timed_out', response: null, reason: null }, 'ask_user', {}).ok).toBe(false)
-    expect(answerResult({ outcome: 'cancelled', response: null, reason: 'a new turn' }, 'ask_user', {})).toEqual({
-      ok: false,
-      text: 'The user did not answer: a new turn.',
-    })
-    expect(answerResult({ outcome: 'answered', response: { answers: [] }, reason: null }, 'ask_user', {}).ok).toBe(false)
   })
 })
 

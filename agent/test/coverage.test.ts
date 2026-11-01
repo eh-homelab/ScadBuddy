@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AGENT_ROUTES, NOT_A_TOOL, PENDING_ROUTES } from '../src/tools/coverage.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { DURABLE_TOOLS } from '../src/tools/manifest.js'
 import { connect, testApp } from './helpers/mcp.js'
 
 // The openapi coverage check (spec §5.1, issue #251): every /api/v1 operation
@@ -139,7 +138,7 @@ describe('agent route coverage', () => {
 
 describe('tool labels', () => {
   it('gives every tool a label', () => {
-    for (const t of DURABLE_TOOLS) {
+    for (const t of ALL_TOOLS) {
       const label = t.label
       expect(typeof label, t.name).toBe('string')
       expect(label.trim().length, t.name).toBeGreaterThan(0)
@@ -153,9 +152,9 @@ describe('tool labels', () => {
   })
 
   it('labels are unique', () => {
-    const labels = DURABLE_TOOLS.map((t) => t.label.toLowerCase())
+    const labels = ALL_TOOLS.map((t) => t.label.toLowerCase())
     const dup = labels.filter((l, i) => labels.indexOf(l) !== i)
     expect(dup).toEqual([])
-    expect(new Set(labels).size).toBe(DURABLE_TOOLS.length)
+    expect(new Set(labels).size).toBe(ALL_TOOLS.length)
   })
 })

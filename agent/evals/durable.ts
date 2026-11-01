@@ -41,7 +41,7 @@ import { gateActivities, PgApprovalRecords, PgSessionOwners } from '../src/tempo
 import { turnToolActivities, turnToolActivity, type TurnToolsDeps } from '../src/temporal/turnTools.js'
 import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
 import { harnessTools } from '../src/tools/harness.js'
-import { DURABLE_TOOLS } from '../src/tools/manifest.js'
+import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { fixedCredentials } from '../test/support/fixedCredentials.js'
@@ -282,7 +282,7 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
             ...common,
             taskQueue: TASK_QUEUE,
             activities: {
-              ...gateActivities({ audit, sessions: new PgSessionOwners(pool.sql), tools: DURABLE_TOOLS, services }),
+              ...gateActivities({ audit, sessions: new PgSessionOwners(pool.sql), tools: ALL_TOOLS, services }),
               ...sessionGateActivities(pool.sql),
               ...sessionFinishActivities(pool.sql, p.m.events),
               ...acquire,

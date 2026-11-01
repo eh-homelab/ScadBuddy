@@ -417,14 +417,6 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
       "A flow run's queue is the person's (spec 2026-10-11 §4.2): no grant decides it. The starter session " +
       'is sent the calls waiting for it in an escalation turn and answers with escalation_respond.',
   },
-  {
-    route: 'GET /api/v1/ai/settings/durable-subagents',
-    reason: "Settings → Durable subagents: deployment wiring for the agent-durable worker, for the operator.",
-  },
-  {
-    route: 'PUT /api/v1/ai/settings/durable-subagents',
-    reason: 'Widens which network peers may call the agent: an operator decision made in Settings, never by an agent.',
-  },
   // Settings → Tools & plugins (#2171).
   ...['GET /api/v1/ai/capabilities', 'GET /api/v1/ai/capabilities/{source}', 'GET /api/v1/ai/capabilities/{source}/items/{item}'].map(
     (route) => ({ route, reason: CAPABILITIES_READ }),

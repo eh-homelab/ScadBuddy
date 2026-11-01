@@ -21,9 +21,7 @@ import {
   type ToolRun,
   type ToolServices,
 } from '../tools/registry.js'
-import type { AnswerReader } from '../gate/answers.js'
 import { durableRequestId, flowRequestId } from '../gate/ids.js'
-import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
 import { turnPrincipal } from '../tools/harness.js'
 import { FLOW_IMAGES_MAX, type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
@@ -160,8 +158,6 @@ export type ToolActivityDeps = {
   audit?: Pick<AuditLog, 'record' | 'hash' | 'summarise'> | undefined
   /** Flow runs' starters and decisions (flowRuns.ts); a flow's call is refused without it. */
   flows?: FlowRuns | undefined
-  /** The recorded answers an `answer` tool returns (gate/answers.ts); those tools refuse without it. */
-  answers?: AnswerReader | undefined
   /**
    * What an owner holds now (auth/tokens.ts `liveTokenTiers`): a turn's tiers are cut to
    * it, and a flow's token starter runs with it (#2320). Undefined: not kept anywhere.
@@ -372,7 +368,7 @@ type Caller = {
  * was given, so an approval of the parked call authorises no other tool or input.
  */
 async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, toolUseId: string): Promise<Caller> {
-  if (DURABLE_ONLY_NAMES.has(tool.name) || tool.name.startsWith('browser_')) {
+  if (tool.name.startsWith('browser_')) {
     throw ApplicationFailure.nonRetryable(`${tool.name} is not for flows: a flow has no session and no browser tab`, NOT_FOR_FLOWS)
   }
   // #2258: without the execution's run id the request id (`flow:<run>:<execution>:<call>`)
@@ -429,7 +425,6 @@ async function runAsActivity(
     const { session, owner, turnTiers: sent, turnId } = await durableSession(tool.name, deps.sessions)
     // The call's gate entry, if it parked (spec §6.6): its approver, or its answer, is recorded under this id.
     const requestId = durableRequestId(session, workflowExecution?.runId ?? '', toolUseId)
-    if (DURABLE_ONLY_NAMES.has(tool.name)) return answerAsActivity(tool, input, deps, { session, owner, toolUseId, requestId })
     caller = { owner, session, requestId, approvals: deps.approvals, tiers: await turnTiers(owner, sent, deps), turnId }
   }
   const { session } = caller
@@ -645,7 +640,7 @@ export function decidedCalls(tools: readonly Tool[], deps: ToolActivityDeps): (c
   const lookup = (name: string): Tool | undefined => byName.get(name)
   return async (call) => {
     const tool = call.tool.startsWith(HARNESS_PREFIX) ? lookup(call.tool.slice(HARNESS_PREFIX.length)) : undefined
-    if (!tool || DURABLE_ONLY_NAMES.has(tool.name)) {
+    if (!tool) {
       return { ran: false, text: `${call.tool} cannot be run outside the conversation, so it was not run` }
     }
     // The approval is looked up by request id, so the id must be this session's entry for this
@@ -684,40 +679,6 @@ export function decidedCalls(tools: readonly Tool[], deps: ToolActivityDeps): (c
     const keep = deps.blobs ? { session: call.sessionId, blobs: deps.blobs, toolUseId: call.toolUseId } : undefined
     return { ran: true, ok: true, text: await resultText(run.result.content, keep) }
   }
-}
-
-/**
- * An `answer` tool's call (ask_user, wait_for_user): DurableSession parked it and the
- * user answered, or its timer ended it, before it was let through; the result is what
- * was recorded, never a handler's (gate/answers.ts).
- */
-async function answerAsActivity(
-  tool: Tool,
-  input: unknown,
-  deps: ToolActivityDeps,
-  call: { session: string; owner: Owner; toolUseId: string; requestId: string },
-): Promise<unknown> {
-  if (!deps.answers) throw ApplicationFailure.nonRetryable(`${tool.name} needs the database its answers are recorded in`, TOOL_ERROR)
-  const startedAt = new Date()
-  const answer = await deps.answers.result(call.requestId, tool.name, input)
-  const parsed = parsedOrRaw(tool, input)
-  await deps.audit?.record({
-    kind: 'tool_call',
-    action: tool.name,
-    surface: 'harness',
-    actor: call.owner,
-    sessionId: call.session,
-    toolUseId: call.toolUseId,
-    requestId: call.requestId,
-    tier: tool.risk,
-    inputHash: deps.audit.hash(tool.name, parsed),
-    inputSummary: deps.audit.summarise(tool.name, parsed),
-    outcome: answer.ok ? 'ok' : 'refused',
-    startedAt,
-    finishedAt: new Date(),
-  })
-  if (!answer.ok) throw ApplicationFailure.nonRetryable(answer.text, TOOL_ERROR)
-  return answer.text
 }
 
 /**

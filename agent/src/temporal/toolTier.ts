@@ -1,6 +1,5 @@
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure } from '@temporalio/common'
-import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
 import type { ToolAccess } from '../access/model.js'
 import type { AccessResolver } from '../access/resolver.js'
 import { effectiveTool, type Risk, type Tool, type ToolServices } from '../tools/registry.js'
@@ -27,7 +26,7 @@ export function toolTierActivity(
     const name = (input as { tool?: unknown } | null | undefined)?.tool
     if (typeof name !== 'string') throw ApplicationFailure.nonRetryable(`${TOOL_TIER_ACTIVITY} takes {tool: string}`, 'ToolError')
     const tool = byName.get(name)
-    if (tool === undefined || DURABLE_ONLY_NAMES.has(name)) {
+    if (tool === undefined) {
       throw ApplicationFailure.nonRetryable(`${name} is not one of ScadBuddy's own tools`, 'ToolError')
     }
     const { risk, disabled } = await effectiveTool(tool, services)

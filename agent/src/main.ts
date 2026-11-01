@@ -80,16 +80,11 @@ import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHo
 import { sessionTurnActivity } from './temporal/session/turnActivity.js'
 import { TurnHost } from './sessions/turnHost.js'
 import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
-import { memoryActivities } from './temporal/memoryActivities.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/turnPackages.js'
 import { forwardPackageServers } from './plugins/packages/mcp.js'
-import { subagentKey } from './temporal/subagentToken.js'
-import { pgRunning } from './routes/subagentMcp.js'
 import { DURABLE_TURNS_DIR, sweepTurnDirs, turnServers } from './temporal/turnServers.js'
 import { SessionClients } from './temporal/sessionClients.js'
 import { type ListedTools, turnToolActivities, turnToolActivity } from './temporal/turnTools.js'
-import { DURABLE_TOOLS } from './tools/manifest.js'
-import { PgAnswers } from './gate/answers.js'
 import { AgentWorker, workerIdentity } from './temporal/worker.js'
 import {
   dropPayloadKey,
@@ -472,8 +467,7 @@ if (role.http && database && dataKeys) {
 } else if (role.http && database) {
   console.warn('session transcripts: no secret key, so the existing rows are not sealed')
 }
-// Automatic Hindsight memory's hook knobs: one value for classic turns (SessionManager)
-// and durable ones (memoryActivities), so a knob set here applies to both (#2420).
+// Automatic Hindsight memory's hook knobs for every turn (SessionManager, #2420).
 // Undefined: the defaults.
 const memory: MemoryOptions | undefined = undefined
 
@@ -661,7 +655,6 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
       approvals: new PgApprovalRecords(temporal.sql),
       flows: new PgFlowRuns(temporal.sql),
       audit,
-      answers: new PgAnswers(temporal.sql),
       currentTiers: liveTokenTiers(tokens),
       // A result's images, for the durable segment's view_tool_images (#2320).
       blobs: new SessionBlobs(temporal.sql),
@@ -680,7 +673,7 @@ const turnHost =
         images: new SessionBlobs(temporal.sql),
         hostQueue: SESSION_HOST_QUEUE,
         ...(events ? { listen: (channel: string, onNotify: (payload: string) => void) => events.listenAlso(channel, onNotify) } : {}),
-        ...(durableToolDeps ? { runCall: decidedCalls(DURABLE_TOOLS, durableToolDeps) } : {}),
+        ...(durableToolDeps ? { runCall: decidedCalls(ALL_TOOLS, durableToolDeps) } : {}),
         // A `done` summary, posted as a classic turn's (#5003).
         questions: sessions.questions,
       })
@@ -823,13 +816,13 @@ const temporalWorker =
         // Polled as this replica: a poller listing names it (affinity.ts `liveHostQueues`, pluginSessions.ts).
         identity: workerIdentity(replicaIdentity()),
         activities: {
-          ...toolActivities(DURABLE_TOOLS, durableToolDeps),
+          ...toolActivities(ALL_TOOLS, durableToolDeps),
           ...gateActivities({
             audit,
             sessions: new PgSessionOwners(temporal.sql),
             workspace,
             // A tool that resolves what it names parks that, by name (#4442).
-            tools: DURABLE_TOOLS,
+            tools: ALL_TOOLS,
             services: durableToolDeps.services,
             // Resolved with the tiers the owner holds now, as the call will run (#4442 gate review).
             currentTiers: durableToolDeps.currentTiers,
@@ -842,19 +835,6 @@ const temporalWorker =
           // each call the `default` activity `turn:<server>__<tool>`.
           ...turnToolActivities(turnToolDeps),
           default: turnToolActivity(turnToolDeps),
-          // A durable turn's automatic Hindsight memory (#2320): recall at its start,
-          // retain at its end, as a classic turn's memory hooks do.
-          ...(sessions && durableRemotePlugins
-            ? memoryActivities({
-                sessions: new PgSessionOwners(temporal.sql),
-                events: sessions.events,
-                remotePlugins: durableRemotePlugins,
-                credentialSecrets: durableCredentialSecrets,
-                audit,
-                settings,
-                memory,
-              })
-            : {}),
           // A flow's agent(...) and ask_session(...) (#1057, 6g): beside the tools, never one.
           ...flowSessionActivities({ sql: temporal.sql, flows: new PgFlowRuns(temporal.sql) }),
           ...operationActivities(commandKinds, operationStore),
@@ -1066,20 +1046,6 @@ const app = !role.http
   },
   // The tools a flow may call at their tiers now, for the API beside it (#2704, routes/flowTools.ts): loopback only.
   flowTools: { tools: ALL_TOOLS, services: toolServices },
-  // A durable segment's subagents' ScadBuddy tools (#2320, routes/subagentMcp.ts): loopback only.
-  ...(database && kek.ok
-    ? {
-        subagentMcp: {
-          sessions: new PgSessionOwners(database.sql),
-          running: pgRunning(database.sql),
-          currentTiers: liveTokenTiers(tokens),
-          keys: () => [subagentKey(kek.kek), ...(previousKek?.ok ? [subagentKey(previousKek.kek)] : [])],
-          tools: ALL_TOOLS,
-          services: toolServices,
-          ...(audit ? { audit } : {}),
-        },
-      }
-    : {}),
   mcp: {
     tools: ALL_TOOLS,
     resources,

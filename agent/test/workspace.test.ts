@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { dirBodies, runHttpRequest, withDefaults } from '../src/harness/httpRequest.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { DURABLE_TOOLS } from '../src/tools/manifest.js'
 import { runTool, type ToolContext } from '../src/tools/registry.js'
 import { safeName } from '../src/tools/workspace.js'
 import { decodeText, guessMediaType, workspaceOf, workspacePath, WorkspaceError } from '../src/workspace/store.js'
@@ -75,7 +74,7 @@ describe('the workspace tools', () => {
       workspace_delete: 'write',
       workspace_save: 'read',
     })
-    for (const name of Object.keys(tiers)) expect(DURABLE_TOOLS.some((t) => t.name === name)).toBe(true)
+    for (const name of Object.keys(tiers)) expect(ALL_TOOLS.some((t) => t.name === name)).toBe(true)
   })
 
   it('refuse without a workspace store', async () => {
@@ -111,7 +110,7 @@ describe('uploads take a workspace file (#2329 part 2)', () => {
       const t = byName(name)
       expect(Object.keys(t.shape)).toEqual(expect.arrayContaining(['workspace_path', 'workspace_sha256']))
       expect(t.description).toContain('workspace_path')
-      expect(DURABLE_TOOLS.some((d) => d.name === name)).toBe(true)
+      expect(ALL_TOOLS.some((d) => d.name === name)).toBe(true)
     }
     expect(Object.fromEntries(UPLOADS.map((n) => [n, byName(n).risk]))).toEqual({
       upload_asset: 'write',

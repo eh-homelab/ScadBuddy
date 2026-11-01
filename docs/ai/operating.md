@@ -724,30 +724,8 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   ([§11](#11-automatic-hindsight-memory));
   `session_mode` is no longer read: since plan Step 6.3 every session is an
   `AgentSession` (spec 2026-10-13 §10.1), and its route and Settings section are gone;
-  `durable_subagents`, `{url, peers}`: the URL an `agent-durable` worker gives its
-  subagents for ScadBuddy's tools (null: its `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL`), and
-  the addresses or CIDR ranges besides loopback the agent answers on
-  `/internal/durable/subagent-mcp` (empty: loopback only, a worker in the agent's pod),
-  which Settings → Durable subagents writes through
-  `PUT /api/v1/ai/settings/durable-subagents`
-  ([`agent/src/routes/durableSubagents.ts`](../../agent/src/routes/durableSubagents.ts)). A
-  durable session needs Temporal, the KEK and an `agent-durable` worker polling the
-  `agent` queue; without them a session whose mode came from this default runs classic
-  and says why (`session.started` `modeFallback`, `mode_fallback` on `POST /sessions`
-  and `sessions_start`), while one that asked for `durable` is refused 503
-  (plan `2026-10-09-durable-phase-5d-mode.md`). Both modes get the same tools, plugins
-  (a browser among them, as the `playwright` remote plugin, #2568), packages,
-  `http_request`, Hindsight, subagents and settings (#2320, spec 2026-10-01 §6.3b), with
-  two differences: a durable subagent has ScadBuddy's own tools
-  only, through the agent's loopback server (`routes/subagentMcp.ts`), since the Temporal
-  plugin refuses a subagent the turn's durable tools; and of the built-ins an
-  `allow_refused` package names, a durable turn does not offer the ones that work in the
-  background of a classic turn's Claude Code and are not yet provided (`PushNotification`),
-  and says which it left out. Every other one is offered, each
-  parked for approval (#2393, below); `CronCreate`, `CronDelete`, `CronList`,
-  `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own in both modes (below). The worker check counts only a
-  poller Temporal saw in the last 70 s (it lists one for minutes after its worker has
-  gone), so an `agent-durable` that died counts for at most about that long;
+  `durable_subagents` is no longer read: it configured the retired Python turn's
+  subagent loopback, which plan Step 8.2 removed with its route and Settings section;
   and `mcp_oidc`, the
   OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
   `PUT /api/v1/ai/mcp/oidc` writes. `approval_expiry_seconds` has no route yet.
@@ -1324,28 +1302,9 @@ Upstream's knobs are kept as `MemoryHookConfig` (`DEFAULT_MEMORY_HOOK_CONFIG`). 
 ScadBuddy's own: `retainMode` is `'transcript'` (the default, above) or `'result'`,
 upstream's behaviour of retaining only the last result with no document id.
 
-**In a durable session** (#2320, superseding #825) the turn's Claude Code runs in
-`agent-durable`, which has none of ScadBuddy's hooks. So the agent builds the same hooks
-and calls them from two activities on `agent-tools`
-([`agent/src/temporal/memoryActivities.ts`](../../agent/src/temporal/memoryActivities.ts)),
-which the `DurableSession` workflow calls around each turn, behind the patch
-`memory-2320`:
-
-- `memory_recall` runs before the prompt is sent. It recalls against the user's words
-  in that turn's `user.turn` event, and returns the same `<hindsight_memories>` block.
-  The workflow appends that block to the prompt.
-- `memory_retain` runs after the turn's events are written and before `finish_turn`.
-  It runs the Stop hook over the session's transcript, rebuilt from its event log
-  (`transcriptOf`: user turns, the assistant's text, and the main agent's tool calls).
-  It upserts `conversation:<ScadBuddy session id>`. The activity returns once the retain
-  is enqueued, as the hook does in a classic turn, so the turn is marked done without
-  waiting on Hindsight; the retain lands after, in the agent process, under the 15 s
-  retain limit and the shutdown drain.
-
-Each recall and retain gets the same audit row and `memory` event as in a classic
-turn. Neither is retried (beyond the one shorter recall above), and neither ever fails the turn: a failure is recorded and
-the turn goes on with no memories. Only the recalled block enters the workflow's history,
-sealed by the session's payload codec.
+Every session is an AgentSession (plan 2026-10-13 Step 6.3), whose turn runs in the
+agent with these hooks, as above. The retired Python turn's `memory_recall` and
+`memory_retain` activities (#2320) were removed in plan Step 8.2.
 
 ## Tool access (`ai_access`, #2171)
 

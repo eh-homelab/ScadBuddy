@@ -10,7 +10,7 @@ parking.
 
 The plugin hands the workflow the model's arguments unchecked, and the workflow holds
 no secret to redact them with (it never holds the credential). So an ``answer`` call's
-input is checked against the tool's declared shape (agent/src/tools/answerTools.ts)
+input is checked against the tool's declared shape (agent/src/gate/entry.ts)
 before any of it is kept: every string bounded, ``reason`` and ``on_timeout`` from
 their sets. Anything else is refused to the model, never parked, and a refusal names
 the field, never its value (security review of 5b, plan 5c Ruling 9).

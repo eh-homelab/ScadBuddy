@@ -16,7 +16,7 @@ import { memoryAccess, rowsFromOverrides } from './support/memoryAccess.js'
 const SESSION = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
 const tool = (name: string, risk: 'read' | 'write' | 'outward'): Tool =>
   defineTool({ name, label: name, description: name, input: z.object({}), risk, routes: [], handler: async () => json({ ran: name }) })
-const TOOLS = [tool('look', 'read'), tool('send', 'outward'), tool('ask_user', 'read')]
+const TOOLS = [tool('look', 'read'), tool('send', 'outward')]
 
 function rig() {
   const { access } = memoryAccess()
@@ -77,7 +77,6 @@ describe("a durable session's tool tier (#2171)", () => {
     const session = env(`session-${SESSION}`)
     const unknown = await failure(session.run(activity, { tool: 'no_such_tool' }))
     expect([unknown.type, unknown.nonRetryable]).toEqual(['ToolError', true])
-    expect((await failure(session.run(activity, { tool: 'ask_user' }))).type).toBe('ToolError')
     expect((await failure(session.run(activity, {}))).type).toBe('ToolError')
   })
 })

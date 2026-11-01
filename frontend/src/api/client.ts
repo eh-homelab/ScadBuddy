@@ -42,7 +42,6 @@ import type {
   SessionLimits,
   SessionRuntime,
   BlankTemplate,
-  DurableSubagentsSetting,
   SessionResource,
   ResourceRef,
   InstalledFamily,
@@ -2662,15 +2661,6 @@ export const api = {
   /** Cancels one; the session's owner only. */
   cancelAiBackgroundTask: (id: string, taskId: string) =>
     request<{ task: BackgroundTask }>(`/ai/sessions/${seg(id)}/background-tasks/${seg(taskId)}`, { method: 'DELETE' }),
-
-  /** Where durable subagents reach ScadBuddy's tools, served by the agent service. */
-  getDurableSubagents: () => request<DurableSubagentsSetting>('/ai/settings/durable-subagents'),
-
-  putDurableSubagents: (setting: DurableSubagentsSetting) =>
-    request<DurableSubagentsSetting>('/ai/settings/durable-subagents', {
-      method: 'PUT',
-      body: JSON.stringify(setting),
-    }),
 
   /** #1917 — the Claude model the assistant uses (`null`: Claude Code's default), served by the agent service. */
   getModelSetting: () => request<ModelSetting>('/ai/settings/model'),

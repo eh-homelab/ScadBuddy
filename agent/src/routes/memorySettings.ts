@@ -15,9 +15,8 @@ import { ready, type RouteModule } from './module.js'
 // /api/v1/ai/settings/memory: the longest automatic Hindsight recall query, in
 // characters (memory/hindsight.ts `capRecallQuery`). The Claude Code Hindsight plugin's
 // `recallMaxQueryChars`, with its default (800) and its `0` for no cut. Stored in
-// `ai_settings` under `memory_recall_max_query_chars`, which both session modes read at
-// each turn (sessions/manager.ts `memoryHooks`, temporal/memoryActivities.ts), so a
-// change applies to the next turn.
+// `ai_settings` under `memory_recall_max_query_chars`, which every turn reads
+// (sessions/manager.ts `memoryHooks`), so a change applies to the next turn.
 //
 //   GET /api/v1/ai/settings/memory   { recall_max_query_chars, default, max }  (the default when unset)
 //   PUT /api/v1/ai/settings/memory   body { recall_max_query_chars: 0..MAX, an integer }
