@@ -57,4 +57,43 @@ describe('Uploads', () => {
     expect(put.mock.calls[0]?.[0]).toEqual({ media_upload_max_bytes: 500_000_000 })
     put.mockRestore()
   })
+
+  it('edits the asset fetch allowlist, a domain a line, "none" for none and empty for the defaults (#959)', async () => {
+    const defaults = 'game-icons.net\ngithub.com\nraw.githubusercontent.com\nopenmoji.org'
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderSettingsSection(<Uploads />, { route })
+    const domains = await screen.findByLabelText('Fetch assets from')
+    expect(domains).toHaveValue(defaults)
+    const save = () => within(region('Uploads')).getByRole('button', { name: 'Save Uploads' })
+    // The next edit starts once the save has landed and its fields are re-seeded.
+    const landed = async (call: number) => {
+      await put.mock.results[call]?.value
+      await waitFor(() => expect(within(region('Uploads')).getByText(/Saved at/)).toBeInTheDocument())
+    }
+
+    // Pasted: each keystroke re-renders all of Settings (#1485).
+    await user.clear(domains)
+    await user.paste('example.com, icons.example.org\n\nexample.com')
+    await user.click(save())
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(1))
+    expect(put.mock.calls[0]?.[0]).toEqual({ asset_fetch_domains: ['example.com', 'icons.example.org'] })
+    await waitFor(() => expect(domains).toHaveValue('example.com\nicons.example.org'))
+    await landed(0)
+
+    await user.clear(domains)
+    await user.paste('none')
+    await user.click(save())
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
+    expect(put.mock.calls[1]?.[0]).toEqual({ asset_fetch_domains: [] })
+    await waitFor(async () => expect((await api.getSettings()).asset_fetch_domains).toEqual([]))
+    await waitFor(() => expect(domains).toHaveValue('none'))
+    await landed(1)
+
+    await user.clear(domains)
+    await user.click(save())
+    await waitFor(() => expect(put).toHaveBeenCalledTimes(3))
+    expect(put.mock.calls[2]?.[0]).toEqual({ asset_fetch_domains: null })
+    await waitFor(() => expect(domains).toHaveValue(defaults))
+    put.mockRestore()
+  })
 })
