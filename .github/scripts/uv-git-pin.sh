@@ -3,8 +3,9 @@
 # (run on backend/, for its temporal-agent-harness pin: harness-pin.yml)
 #
 # Fails when a uv project's git-pinned dependency commit no longer resolves (a
-# commit only a draft PR references can vanish; spec 2026-10-01 §6.2). `uv lock --check` reads only the lockfile and passes even for a
-# commit that is gone, so this also fetches every locked source with no cache,
+# commit only a draft PR references can vanish; spec 2026-10-01 §6.2).
+# `uv lock --check` reads only the lockfile and passes even for a commit
+# that is gone, so this also fetches every locked source with no cache,
 # into a throwaway environment that installs nothing from the project itself.
 set -euo pipefail
 project="${1:?usage: uv-git-pin.sh <project dir>}"

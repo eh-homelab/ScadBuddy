@@ -257,7 +257,9 @@ export class DurableTurns {
     // must not let a turn start on a chat the panel no longer lists (#2118).
     // The runtime is recorded by the first send: AgentSession for a session whose DurableSession
     // ran nothing (a classic session's too, once a classic turn still running on an older replica
-    // has let its lease go), else `durable`, which is refused below.
+    // has let its lease go), else `durable`, which is refused below. `durable` stays right after
+    // Step 8.1: such a row's conversation is in its DurableSession's history, not in
+    // `ai_session_entries`, so an AgentSession would run on with none of it.
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string; runtime: SessionRuntime }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
        UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(), turn_started_at = now(),

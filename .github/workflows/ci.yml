@@ -891,7 +891,7 @@ jobs:
           done
           body="$(curl --fail --silent --show-error http://127.0.0.1:18082/healthz)"
           echo "$body"
-          jq -e '.status == "ok"' <<<"$body" >/dev/null
+          jq -e '.status == "ok" and .worker == "none"' <<<"$body" >/dev/null
 
       - name: Tear down
         if: always()
