@@ -25,7 +25,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.45,<2",
     "opentelemetry-instrumentation-fastapi>=0.66b0,<0.67",
     "opentelemetry-instrumentation-psycopg>=0.66b0,<0.67",
-    "temporalio[opentelemetry]>=1.33.0,<1.35",
+    "temporalio[opentelemetry]>=1.33.0,<1.36",
     "cryptography>=44,<51",
     # temporal-agent-harness by a full SHA, as phase 5 pins its SDK (plan
     # 2026-10-09-durable-phase-6-flows.md Ruling 1): main past 0.6.0, for c0f148f9 (#171),
