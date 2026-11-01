@@ -67,6 +67,8 @@ export type CoreTurnArgs = {
   principal: TurnPrincipal
   /** The user's words without the page context: what memory is recalled against. */
   userText: string
+  /** The kind of continuation this placement is (an AgentSession's `parked` or `restarted`), for the turn's span. */
+  continuation?: string
   /** The turn's own stop: an interrupt, a lost claim, a shutdown. */
   signal: AbortSignal
   /** What the process's `signalInterrupt` does (an attention request ending the turn). */
@@ -151,6 +153,7 @@ export class CoreTurn {
       tierOf: (name) => eventTierOf(name) ?? 'outward',
       // What tallyTurn subtracts for the audit row, so the span's cost is this turn's (#2376).
       before: { costUsd: args.session.ownCostUsd, turns: args.session.turns },
+      ...(args.continuation !== undefined ? { continuation: args.continuation } : {}),
     })
   }
 

@@ -76,7 +76,8 @@ export function SessionRuntimeSetting() {
           <p id="session-runtime-help" className="text-xs text-muted-foreground">
             A replica keeps up to this many assistant processes warm between turns, each for the idle time given; 0
             starts every turn cold. A change applies to the warm processes at once; a running turn is never stopped by it.
-            The park hold and the longest turn are read by later versions of the assistant.
+            A turn waiting for your answer keeps its process for the park hold, then lets it go and goes on once you
+            answer. A turn that runs past the longest turn ends there.
           </p>
         </SettingBody>
         <SaveFooter saving={saving} disabled={!changed} saved={saved && !changed ? 'Saved.' : null} error={error} />

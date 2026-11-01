@@ -484,6 +484,13 @@ on its **HTTP requests** card: **By call (default)** runs GET and HEAD at once a
 for your approval on anything else, and **Enabled** turns the tool off or on (see
 [Tool access](#tool-access)). **AI activity** is the log of what the assistant did, under **Settings → Audits**.
 
+**Settings → Assistant → Runtime** tunes how replies run
+([operating.md §1.2](ai/operating.md#12-where-a-sessions-turns-run)). **Park hold** is how
+long a reply that waits for you keeps its place (default 5 minutes). **Warm processes per
+replica** and **Warm process idle time** keep chats quick to answer between messages.
+**Longest turn** ends a reply that runs longer (default 2 hours). Every chat runs the
+same way; there is no mode to pick.
+
 ### The assistant panel
 
 Once the credential works, an **Assistant** button appears at the top right. It and
@@ -529,6 +536,9 @@ still there
 - A session another agent started over MCP shows **Controlled by …**. Press **Take
   over** to send it messages yourself
   ([agent-sessions.md §2](ai/agent-sessions.md#2-who-sees-and-controls-what)).
+- A reply keeps going when ScadBuddy restarts or is updated mid-reply. It picks up on
+  another server, and the assistant is told which steps already finished, so it checks
+  before it repeats one. **Stop** still ends it.
 
 ### What needs your approval
 
@@ -539,6 +549,11 @@ any settings or credential change). The first two run at once. Anything that lea
 ScadBuddy, any plugin tool not marked otherwise, and every mutating HTTP request stops
 and shows **Needs your approval** in the chat, with **Approve** and **Deny**. If nobody
 decides in time, it is not run. There is no "always allow".
+
+You need not answer at once. After the park hold (5 minutes by default, see
+[Adding the Claude credential](#adding-the-claude-credential)) the reply pauses and the
+card stays. When you approve or deny, the reply goes on from there: an approved step runs
+once, and the assistant is told how each step went.
 
 The assistant can also stop to ask you something ("A question for you", answered with
 **Send answer**), or call for your attention ("The assistant needs you: …"). The

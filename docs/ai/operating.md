@@ -27,17 +27,16 @@ covers the same ground more briefly.
   - `all` (the default): everything, as every pod ran before the roles.
   - `api`: the HTTP server (the routes, the chat and bridge sockets, `/mcp`, the
     loopback `/internal/*` routes), its sweeps and start-time passes, and its own
-    `agent-tools.<hostname>` queue (browser calls for its tabs, a classic session's
-    Monitor commands, a DurableSession's pinned calls). It polls neither
+    `agent-tools.<hostname>` queue (browser calls for its tabs). It polls neither
     `agent-sessions` nor the shared `agent-tools`, nor a session host queue, so it runs
-    no `AgentSession` turn. Classic sessions still run where they are sent, until Step 6.3.
+    no `AgentSession` turn (§1.2).
   - `worker`: the Temporal workers that run turns (`agent-tools`, `agent-sessions`,
     `agent-sessions.<hostname>`, `agent-tools.<hostname>`), and over HTTP only
     `/healthz` and `/readyz` on port 8081 (§5). A worker pod is not beside the backend,
     so its `SCADBUDDY_BACKEND_URL` must name the backend's cluster address. A worker runs
-    none of the HTTP side's sweeps (the session lease reaper, the durable running and
-    pending-input orphan sweeps, approval and question expiry, audit retention), so keep
-    at least one `api` (or `all`) replica running whenever workers run.
+    none of the HTTP side's sweeps (the running-session and pending-input orphan sweeps,
+    approval expiry, audit retention), so keep at least one `api` (or `all`) replica
+    running whenever workers run.
 - **Port 8081**, fixed. The comment on `PORT` in [`agent/src/main.ts`](../../agent/src/main.ts)
   calls it "part of the pod contract with the ingress (spec §4.2)". The Dockerfile
   `EXPOSE`s 8081.
@@ -67,11 +66,10 @@ covers the same ground more briefly.
 - **Shutdown.** On `SIGTERM`/`SIGINT` the listener drains for up to 10 s, then the
   database pool closes. The exit code is non-zero if the drain timed out (`main.ts`;
   [`agent/src/shutdown.ts`](../../agent/src/shutdown.ts)).
-  A restart ends every turn the replica was running, and with it every question and
-  attention request those turns were waiting on: none is asked again. That includes an
-  attention request with `on_timeout: 'wait'`, which otherwise waits up to a day
-  (`WAIT_CEILING_S`, [`agent/src/harness/attention.ts`](../../agent/src/harness/attention.ts))
-  while holding the session's lease and its Claude Code process (#1220).
+  A worker's running turns get 12 s to finish (`TURN_DRAIN_MS`), and any still running is
+  then cut and goes on on another replica (§1.2, "Restarts"). A parked call is released, not
+  lost: its entry stays open, and the turn goes on once it is decided, wherever a worker
+  runs then.
 - **Activity heartbeats across a rollout.** Since #4200 every activity on the agent's
   Temporal worker beats every 10 s (`heartbeatingActivities` in
   [`agent/src/temporal/worker.ts`](../../agent/src/temporal/worker.ts)), and a flow's
@@ -222,6 +220,80 @@ The same checks as a Playwright spec are `frontend/e2e/real-agent.spec.ts`, adde
 preview server, `frontend/vite.config.ts` routes the same way on one local origin
 (`SCADBUDDY_BACKEND_URL` and `SCADBUDDY_AGENT_URL` override the two targets).
 
+### 1.2 Where a session's turns run
+
+There is one session runtime (epic #2726; spec
+[2026-10-13](../superpowers/specs/2026-10-13-unified-agent-runtime-design.md) §5 and §14,
+plan [2026-10-13](../superpowers/plans/2026-10-13-unified-agent-runtime.md)). As merged on
+main on 2026-11-01:
+
+- **Every session is an `AgentSession` workflow**, `session-<id>` on the `agent-sessions`
+  queue ([`agent/src/temporal/session/workflow.ts`](../../agent/src/temporal/session/workflow.ts)).
+  There is no session mode: since plan Step 6.3 nothing reads `ai_sessions.mode` or the
+  `session_mode` setting, the panel has no mode picker, and `sessions_start` takes `mode`
+  and ignores it. The Python `DurableSession` retired in Phase 8, and its open sessions
+  moved to `AgentSession` in Phase 7 (the prod backfill of plan Step 7.2 moved 62 of 62 and left
+  none open, as #2726's checklist records). `agent-durable` runs no turn and stays at zero
+  replicas.
+- **Workers.** Turns run on the `scadbuddy-agent-worker` Deployment (role `worker`, §1),
+  never in the API pod's `agent` container (role `api`). A send goes to the session's
+  workflow through Temporal, so any `api` replica may take it.
+- **Placement.** Each turn is the workflow's `session_turn` activity. `acquire_worker`, on
+  the shared `agent-tools`, reserves a place in the answering replica's warm cache and
+  returns that replica's own queue, `agent-sessions.<hostname>`, where the turn then runs
+  ([`affinity.ts`](../../agent/src/temporal/session/affinity.ts), spec §5.2). A replica
+  whose every warm process runs a turn refuses with `NoCapacity`, so another may answer.
+- **Warm processes.** Each replica keeps up to `warm_max_per_replica` Claude Code processes
+  alive between turns, each closed after `warm_idle_seconds` idle
+  ([`agent/src/sessions/warm.ts`](../../agent/src/sessions/warm.ts) `WarmSessions`, spec
+  §5.3). A turn reuses its session's process (`hit`), starts one (`miss`), or replaces one
+  whose assembly, transcript tail or budget changed (`recycle`). Settings → Assistant →
+  Runtime sets these four values (`GET`/`PUT /api/v1/ai/settings/session-runtime`,
+  [`agent/src/routes/sessionRuntime.ts`](../../agent/src/routes/sessionRuntime.ts)): Park
+  hold (`park_hold_seconds`, default 300, 30 to 3600), Warm processes per replica (default
+  8, 0 to 32; 0 makes every turn cold), Warm process idle time (default 600 s) and Longest
+  turn (`turn_max_seconds`, default 7200 s). A turn past its longest time ends there; it is
+  not placed again, since that could triple its spend.
+- **Tool calls.** Each tool call of a turn is a `ToolCall` workflow of its own,
+  `session-<id>-call-<tool_use_id>`, whose one activity runs the tool on whichever worker
+  takes it ([`agent/src/temporal/toolCall.ts`](../../agent/src/temporal/toolCall.ts),
+  [`agent/src/tools/activityProjection.ts`](../../agent/src/tools/activityProjection.ts),
+  plan Steps 9.2 and 9.3): ScadBuddy's tools as `tool:<name>`, a turn's remote plugins,
+  package http servers and `http_request` as `turn:<server>__<tool>`. A call whose server
+  keeps state on the pod (`http_request`, the browser) runs on the replica's own
+  `agent-tools.<hostname>`. A pod that dies while its turn waits loses the turn, not the
+  call. The `tools_as_activities` setting that switched this on is gone (Step 9.9; it was on
+  in prod from 2026-11-01): without Temporal, as in a dev run, the calls run in the turn's
+  process.
+- **Parks.** An outward call, a question or an attention request parks on the workflow's
+  gate (§7, `ai_pending_input`). The turn holds its process for `park_hold_seconds`. Past
+  that, or at a shutdown, it is released: the process is closed and the activity returns
+  `released`, while the entries stay open. Once each is decided, the turn is placed again
+  with a `parked` continuation: each approved call runs once, through the tool layer, keyed
+  by its request id, and the model is told in one message how each went (spec §5.4,
+  [`agent/src/sessions/turnHost.ts`](../../agent/src/sessions/turnHost.ts)).
+- **Restarts.** A turn whose pod or process is lost (a deploy, a crash, a stalled
+  heartbeat) is placed again with a `restarted` continuation, on another replica when one
+  is live. Once its message is in the transcript it resumes with "The agent service
+  restarted during this turn…" (`RESTARTED_PROMPT`), naming the calls that had finished
+  as ToolCalls, so the model need not repeat them (spec §5.5).
+- **Working directory.** A turn's Claude Code runs in the session's directory on its
+  worker, `<SCADBUDDY_SESSION_DIR>/<id>/`, a copy of the workspace that each placement
+  fills (§13).
+- **Spend.** The credential never reaches Claude Code: each run leases a token on the
+  loopback credential gateway, which adds the credential and meters what each request
+  costs ([`agent/src/gateway/server.ts`](../../agent/src/gateway/server.ts), plan Step 9.4).
+- **Dashboard.** The "Session runtime" row of `deploy/grafana/scadbuddy-agent.json` charts
+  the warm hit ratio, spawn p50 and p95 by `warm.outcome`, releases per hour
+  (`agent.turn.release`), continued turns by kind (`agent.turn`'s
+  `scadbuddy.continuation`) and tool activities by queue (`scadbuddy.task_queue`), from
+  TraceQL metrics.
+
+Since #5173 (Phase 11) `agent-tools` is versioned with `agent-sessions` (deployment
+`scadbuddy-agent`), and the host queues stay unversioned. #5174 (Phase 10, part 1) removed
+the last readers of `ai_sessions.mode`, `turn_id`, `lease_until` and `durable_offset`; once
+its drop PR merges, those columns are gone. Neither changes the behaviour above.
+
 ## 2. Environment variables
 
 `ENV_VARS` in [`agent/src/config.ts`](../../agent/src/config.ts) lists the only
@@ -369,15 +441,7 @@ is `classifyFailure()` in
 No further attempt starts once the turn's `maxTurns` or budget is used up. A turn that
 fails mid-way (after tool calls ran) resumes the session on the next credential with a
 short "continue" prompt, so no tool runs twice and the prompt is not sent twice. Each
-credential is tried at most once per turn. In a durable session, while another
-credential could still take the segment over, the assistant's text reaches the
-transcript only at the next tool call or at the end of the segment, not block by
-block, so a refused credential's notice never shows (#2945). A durable segment records
-what its credential met as a classic turn does, so Settings shows the same "used" time
-and state in both modes (#2320): an answer stamps it used, a 429 cools it down for the
-default 60 s, and a refusal or a 5xx is its `last_error`. It runs no probe, so it never
-disables a key and never learns a rate limit's real reset time; a classic turn's probe
-does both. Every disable, cooldown,
+credential is tried at most once per turn. Every disable, cooldown,
 recovery and fallback is an audit row of kind `credential` (`CredentialPool`), named
 like `credential 2 (API key …abcd)`, never with the secret. When no credential is
 usable, a turn fails with a message naming each one's state and the soonest time one
@@ -559,13 +623,6 @@ In an `api` process, `temporal` reports its own `agent-tools.<hostname>` worker.
   recorded sha256 check (`MigrationChecksumError`), and `main.ts` exits 1 on it. So
   does a ledger still keyed by position (before #491) that holds a row main never had
   (`MigrationLedgerError`): that database ran an unmerged branch's migration.
-- **The agent migrates before agent-durable writes.** agent-durable runs no migrations
-  of its own but writes columns the agent's create, such as
-  `ai_input_responses.response_hash` (`20261015T1500Z_input_response_hash.sql`, #3724),
-  which `resolve_input` sets on every respond. So roll the agent out first. If
-  agent-durable runs ahead of that migration, every respond fails in its handler: the
-  route answers 503, the entry stays pending, and it goes through once the agent has
-  migrated.
 
 ## 6. Origin allowlist and trusted proxies
 
@@ -739,9 +796,15 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   through the chat socket, the session routes and the `sessions_*` tools
   ([agent-sessions.md](agent-sessions.md)). Every event-log append is also announced
   as `session.*` on `scadbuddy_events` (NOTIFY only, no table).
-- `ai_approvals`: approvals of outward calls, from session turns and from `/mcp`
-  prepares (#471, `20260928T0734Z_approvals.sql`; see
-  [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
+- `ai_approvals`: approvals of `/mcp` prepares (#471, `20260928T0734Z_approvals.sql`; see
+  [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)). A session turn's
+  calls park on its workflow's gate instead.
+- `ai_pending_input` and `ai_input_responses`: the gate's open entries and their
+  responses (spec 2026-10-01 §6.6). An entry's `gate` column is its record (plan Step 9.7,
+  `20261101T1303Z_pending_input_record.sql`): the respond route decides it in one
+  transaction (`decideInput` in [`agent/src/gate/store.ts`](../../agent/src/gate/store.ts))
+  and wakes the workflow with the Signal `input_decided`; the workflow also reads it back
+  on a timer, so a lost wake costs a delay, not the decision.
   `traceparent` is the parked call's tool span and `decision_traceparent` the decision's
   `agent.approval` span (#988); both are internal and never in an approval view.
 - `ai_mcp_tokens`: MCP bearer tokens (#251, `20260928T0734Z_mcp_tokens.sql`), one row per token with its
@@ -812,10 +875,8 @@ its $1.00 budget.") and offers:
   reads the parent's entries through that cut under the parent's key, and stores only
   what it adds. Forgetting the parent (`forgetSubject`) first copies the range each fork
   reads into that fork, sealed under the fork's own key, so it needs the KEK mounted
-  while the parent has forks. Forks made before this hold a copy. A fork runs in its parent's mode: a durable parent's conversation is read
-  from its workflow (the `fork_point` Query) and the child's workflow starts with a copy,
-  sealed under the child's own key (#2688); its replies are matched to the transcript by
-  their text, and a parent whose turn is running forks at its last finished reply.
+  while the parent has forks. Forks made before this hold a copy. A parent whose turn is
+  running forks at its last finished reply.
   Each fork, from this route or the `sessions_fork` tool, is a `resource`
   audit row (action `session_fork`), written once the fork is complete; a rename or
   mark-done (`PATCH /api/v1/ai/sessions/:id`) is one with action `session_update`.
@@ -920,10 +981,10 @@ loaded plugin that still declares an http server (`harness/run.ts`). An allowed
 package's local servers still start as declared.
 
 **Turn tools (#2320).** A flow run's `tool('<server>__<tool>', …)`, and a session turn's
-calls with `tools_as_activities` on (unified runtime plan Step 9.3), reach a package's MCP
+calls on Temporal (unified runtime plan Step 9.3, §1.2), reach a package's MCP
 servers as turn tools, as a remote plugin's
 ([`agent/src/temporal/packageServers.ts`](../../agent/src/temporal/packageServers.ts)). The
-copies durable sessions shared on the payload volume (`<SCADBUDDY_PAYLOAD_DIR>/plugins/`)
+copies the retired Python turn shared on the payload volume (`<SCADBUDDY_PAYLOAD_DIR>/plugins/`)
 are swept until none is left. They are
 named `plugin_<package>_<server>` and are outward. http ones go through the same
 forwarder (above), and their forwarder URLs and headers are redacted like a plugin's. A
@@ -996,9 +1057,9 @@ The one-shot queries' cost is added to the session's `cost_usd`, which its budge
 as a turn counts Claude Code's own calls.
 
 `CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are kept by the
-session, in both modes (`agent/src/background/`). Claude Code keeps its own jobs in its
+session (`agent/src/background/`). Claude Code keeps its own jobs in its
 process ("Session-only (not written to disk, dies when Claude exits)"), which a turn
-ends, so a classic turn gets these in place of its own too (`mcp__builtin__<Name>`, the
+ends, so every turn gets these in place of its own (`mcp__builtin__<Name>`, the
 `builtin` in-process server, `sessions/manager.ts`). Each task is a row of
 `ai_background_tasks` and what fires it on `agent-tools`, which carries only the id: a
 recurring cron job is a Temporal Schedule `bgtask-<session>-<id>` (its cron in the task's
@@ -1025,10 +1086,9 @@ the session's data key; archiving the chat or marking it done ends its tasks, an
 `forgetSubject` ends them and terminates their workflows before it deletes the key.
 
 A `Monitor` is a task of the same kind whose source runs as one heartbeating activity
-where the session's Bash runs: a classic session's command in its session directory on
+where the session's Bash runs: a command in the session's directory on
 the replica that ran the turn (`agent-tools.<hostname>`, `background/monitor.ts`), a
-durable session's in agent-durable's working directory (`scadbuddy_durable/background.py`,
-on the `agent` queue), a WebSocket on any agent (egress-checked, loopback refused, and connected only to the addresses the
+WebSocket on any agent (egress-checked, loopback refused, and connected only to the addresses the
 check passed, with no redirect). A line is cut at 8000 characters and the rest of it
 dropped, and so is a batch, so a command that never writes a newline holds no more. The
 command gets a shell's environment only (`PATH`, `HOME`, `LANG`, `LC_ALL`, `TZ`, `TERM`),
@@ -1043,9 +1103,9 @@ session's next message once it is idle (Claude Code
 shows them mid-turn; here they wait for the turn to end), and the watch's end last.
 One message carries at most 64k characters of events (`DELIVER_MAX_CHARS`, `store.ts`)
 and says how many follow; the rest go in the next once the session is idle again.
-A classic session's command runs on one replica's queue, so a rollout that replaces that
+A command runs on one replica's queue, so a rollout that replaces that
 pod ends it as `failed` (its heartbeat stops and it is not retried): re-arm it after a
-deploy. A durable session's command and any WebSocket are not tied to one pod this way.
+deploy. A WebSocket is not tied to one pod this way.
 A `Workflow` is a task of the same kind too (Claude Code's tool, its texts measured on
 2.1.296). Its script runs as one heartbeating activity on any agent (`wf_run`), in
 QuickJS compiled to WebAssembly (`background/workflowRunner.ts`), never in the service's
@@ -1054,18 +1114,16 @@ sandbox included, is not a boundary. Inside it there is no `process`, `require`,
 file or clock (`new Date()`, `Date.now()` and `Math.random()` throw, as Claude Code's
 do), memory is capped at 64 MiB, and a stretch that runs 5 s without awaiting is
 stopped. Each `agent()` is a chat of its own under the session (`SessionManager.startChild`,
-`background/workflowAgents.ts`): the session's mode, its budget (the lineage's, as a
-fork's), owned by whoever started the workflow, so its tool calls park in the gate as
+`background/workflowAgents.ts`): its budget is the lineage's, as a fork's, owned by whoever started the workflow, so its tool calls park in the gate as
 theirs do. Its task is framed as Claude Code's harness frames it, its instructions are
 Claude Code's for a workflow subagent, and its result is its final reply; with
 `schema`, the JSON object it replies with, checked (`z.fromJSONSchema`) and asked for
 again twice at most. At most 4 run at once and 50 in all, and a run expires after 6 hours.
 An agent's `model` and `effort` are its chat's own (`ai_sessions.agent_model`,
-`agent_effort`, read by a classic turn and by the durable runner in place of Settings');
+`agent_effort`, read by its turns in place of Settings');
 `agentType` names the plugin's subagent definition (`agents/<name>.md`) the chat's turns run
-as: the definition passed in `agents` and named by `agent` (`harness/agentDefinitions.ts`
-in a classic turn, `--agents`/`--agent` in a durable segment; Claude Code 2.1.296 does not
-take a plugin's own agent for the main thread, measured); `general-purpose` is none, and an
+as: the definition passed in `agents` and named by `agent` (`harness/agentDefinitions.ts`;
+Claude Code 2.1.296 does not take a plugin's own agent for the main thread, measured); `general-purpose` is none, and an
 unknown name fails the call with the list there is; `isolation: 'worktree'` fails
 the call as `EnterWorktree` does, the workspace being no git repository. Each result is
 journalled (`ai_workflow_calls`, by the call's key and occurrence), so a retry of the
@@ -1076,13 +1134,10 @@ since a worker that died never ran its agents' cleanup (#3395).
 The script is kept in the workspace (`/workspace/_claude/workflows/<name>-wf_<id>.js`),
 which `scriptPath` and `workflow({scriptPath})` read. Its end is Claude Code's
 `<task-notification>`, sent as a monitor's events are.
-`PushNotification` is not provided yet, and the session says so. The
-Temporal plugin owns the engine's settings, so a durable turn cannot set
-`disableSkillShellExecution`, and skill shell injection follows Claude Code's default
-there. Only an allowed package can carry one (`vet.ts` refuses it everywhere else), and
-it runs only with `Bash` offered, as in a classic turn (run.ts `builtinTools`). This was
-not measured in a durable engine. Each listing touches the copies it shares, and each
-query the `plugins-local/` copy it loads; every replica removes, once an hour, the copies
+`PushNotification` is not provided yet, and the session says so. Skill shell injection
+is off (`disableSkillShellExecution`, `harness/options.ts`) except for an allowed
+package (`vet.ts` refuses it everywhere else), and then runs only with `Bash` offered
+(run.ts `builtinTools`). Each query touches the `plugins-local/` copy it loads; every replica removes, once an hour, the copies
 on the volume and its own `plugins-local/` copies that nothing has touched for 7 days,
 and copies left half-made for an hour (`sweepPackageCopies`, #2395; a copy is moved aside and checked again before it goes, so a turn sharing it at that moment keeps it). An enabled package
 is shared again at its next turn.
@@ -1116,8 +1171,7 @@ user sets them in Settings → Tools & plugins → Packages
   1 MiB (`LISTING_PACKAGES_BUDGET`, half Temporal's payload limit). Packages are taken in
   name order: one that would take the total past 1 MiB is not loaded, and the turn says
   so; the others still are. `loadPackagesForRun`
-  ([`install.ts`](../../agent/src/plugins/packages/install.ts)) decides this once for
-  classic and durable turns, so both leave out the same packages.
+  ([`install.ts`](../../agent/src/plugins/packages/install.ts)) decides this once per turn.
 - **The derived copy.** A turn loads a copy of each package that leaves out its http
   servers and every hook, skill, subagent and local server that is off
   (`derivedPackage` in [`agent/src/plugins/packages/derived.ts`](../../agent/src/plugins/packages/derived.ts)).
@@ -1136,22 +1190,18 @@ user sets them in Settings → Tools & plugins → Packages
   lost, and the listings of servers it lost. A review stored by an older vet cannot name
   its items, so for it no item row is deleted. Rows an older replica's approval leaves go
   with the next write to that package by this code; there is no sweep.
-- **Skill, Agent and Task calls are judged per call, in both runtimes.** A call that names
+- **Skill, Agent and Task calls are judged per call.** A call that names
   a skill or subagent that is off, or one of a package that is switched off, is refused
-  from its next call. A classic turn refuses it at the permission seam
-  ([`agent/src/access/live.ts`](../../agent/src/access/live.ts)). A durable turn refuses it
-  in the segment runner's own `PreToolUse` hook (`CallAccess` in
-  `agent-durable/src/scadbuddy_durable/session/runner.py`), which reads `ai_access` per
-  call and refuses the call when the read fails. One rule (`offCallItem`,
-  `off_call_item`) is pinned for both languages by the `calls` set of
-  `agent/test/fixtures/access-vectors.json`. The call's name is read as Claude Code
+  from its next call, at the permission seam
+  ([`agent/src/access/live.ts`](../../agent/src/access/live.ts); the rule `offCallItem` is
+  pinned by the `calls` set of `agent/test/fixtures/access-vectors.json`). The call's name is read as Claude Code
   2.1.310 reads it (the comments on `calledName` and `agentTypeForm` in `items.ts`):
   - Skill: trimmed by JavaScript's `trim()` set, one leading `/` dropped, then matched
     exactly, by name or alias.
   - Agent and Task: matched exactly; else every subagent whose name is equal after NFKC,
     lower case and without white space, dashes or underscores. The call is refused when
     any match it reaches is off.
-- **Hooks change per turn, in both runtimes.** No SDK option drops one plugin hook from a
+- **Hooks change per turn.** No SDK option drops one plugin hook from a
   running query (spec §2), so a hook switched off is left out of the next turn's copy.
 - **Built-ins.** Claude Code's own built-ins are items of `builtin:claude-code` (§9). For a
   pin approved with `allow_refused`, each Claude Code built-in it names is also an item
@@ -1159,43 +1209,19 @@ user sets them in Settings → Tools & plugins → Packages
   while that item is `off`, as the switch that turns it on. Where several packages of the
   turn name one built-in, the strictest wins (`off` > `outward` > `write` > `read`), and a
   package that names it with no row counts as `outward` (`strictest` in `items.ts`). Each
-  call takes its access as it is then:
-  - A classic turn decides at the permission seam.
-  - A durable turn asks the `builtin_tier` activity
-    ([`agent/src/temporal/toolTier.ts`](../../agent/src/temporal/toolTier.ts)) for `Bash`
-    and `PowerShell`, at most 3 attempts, then parks
-    (`agent-durable/src/scadbuddy_durable/session/workflow.py`, behind
-    `workflow.patched("builtin-access-4757")`). The other built-ins are the `builtin` turn
-    tools, judged by the turn server's tier.
-  - Skill, Agent and Task as built-ins run inside the segment: an outward call parks
-    through the segment runner's hook and the workflow's `builtin_call` Update, behind the
-    same patch. So an outward package built-in parks for approval in both modes.
-    A large input parks too (#5000). The Update's argument goes through the client's
-    data converter, and Temporal's External Storage moves every payload at or over
-    `OFFLOAD_BYTES` (128 KiB) out of history
-    ([`payload_store.py`](../../agent-durable/src/scadbuddy_durable/payload_store.py)).
-    In temporalio 1.34.0 (the version `agent-durable/uv.lock` pins),
-    `_build_update_workflow_execution_request` in
-    [`temporalio/client/_impl.py`](https://github.com/temporalio/sdk-python/blob/1.34.0/temporalio/client/_impl.py)
-    encodes the arguments with `DataConverter.encode` in
-    [`temporalio/converter/_data_converter.py`](https://github.com/temporalio/sdk-python/blob/1.34.0/temporalio/converter/_data_converter.py).
-    That step seals each payload, then stores the large ones. History then holds a
-    reference only.
-    `test_a_hooked_call_over_the_offload_size_parks_with_history_holding_a_reference`
-    in `agent-durable/tests/test_session_workflow.py` measures this on a dev server.
-    Only a worker without `SCADBUDDY_PAYLOAD_DIR` (so with no packages) still refuses an
-    input over 128 KiB unasked (`BUILTIN_CALL_INPUT_MAX`), so its history stays bounded.
+  call takes its access as it is then, at the permission seam; an outward one parks for
+  approval on the session's gate (§1.2).
 - **Package servers.** Each server is a child source `package:<name>/mcp:<server>`,
   on by default while the package is approved. A server switched off is hidden at turn
   start and refused per call, fail closed: by the forwarder
   ([`agent/src/plugins/forwarder.ts`](../../agent/src/plugins/forwarder.ts)), by
   `turn_tool_tier` and by the turn activity
   ([`agent/src/temporal/turnTools.ts`](../../agent/src/temporal/turnTools.ts)). A read
-  that fails refuses the call. Every path refuses it in one sentence, a classic turn's
+  that fails refuses the call. Every path refuses it in one sentence
   (`toolOffReason` in [`agent/src/access/items.ts`](../../agent/src/access/items.ts)). A
   tool set off, a served built-in switched off, or a tool its server no longer lists is
   refused at `turn_tool_tier`, never parked. An allowed package's local (stdio) servers
-  take the same switch and stored tool access in both runtimes (`localPackageServers` in
+  take the same switch and stored tool access (`localPackageServers` in
   `packageServers.ts`; a turn's copy leaves an off one out). Their tools are not listed on
   the page, since that would start the package's process outside a turn; until set, they
   are `outward`. "List tools" lists an http server's tools
@@ -1219,15 +1245,7 @@ user sets them in Settings → Tools & plugins → Packages
 
 **Rolling deploy.** Every write lands in `ai_access` or `ai_plugin_packages`, which old
 and new replicas read, so none is lost. An older replica ignores the new switches and
-items until it is replaced. Roll the agent before agent-durable:
-
-- An older agent-durable refuses the `<hex>/<name>` folders the new agent shares, so
-  packages are left out of durable turns until agent-durable rolls (fail closed).
-- A listing from a pre-#4757 agent names no items, so a new durable worker lets an off
-  package skill load until that agent is replaced.
-- An older agent-durable has no `own_off` and no `CallAccess`. A skill or subagent of
-  ScadBuddy's own plugin that is switched off on the new page still loads and runs in
-  durable turns until agent-durable rolls. A classic turn refuses it at once.
+items until it is replaced.
 
 Settings has an "Assistant plugins" area with two sections: "Plugin packages"
 ([`frontend/src/components/settings/PluginPackages.tsx`](../../frontend/src/components/settings/PluginPackages.tsx))
@@ -1239,11 +1257,10 @@ remote MCP plugins. A built-in tool's access is changed in Settings → Tools & 
 (`/api/v1/ai/capabilities`, below); `PATCH /plugins/{name}` takes none of it (#4828). The overrides are
 `ai_access` rows (`builtin:scadbuddy`, or `builtin:browser` for the browser tools; see
 "Tool access" below), applied at the
-harness seam, on `/mcp` and in the durable `agent-tools` activities. Under the patch
-`tool-access-2171`, every registry call in a durable session stops at the gate, which asks
-`tool_tier` for the tool's access as it is then and lets the call through unless it is
-`outward` (`agent-durable/src/scadbuddy_durable/session/workflow.py`, module docstring).
-So a tool raised to `outward` parks, and one lowered stops parking, from its next call.
+harness seam, on `/mcp` and in the ToolCall activities, which read the tool's access again
+as they run (`toolCallActivities` in
+[`agent/src/temporal/toolActivities.ts`](../../agent/src/temporal/toolActivities.ts)). So a
+tool raised to `outward` parks, and one lowered stops parking, from its next call.
 Adding, removing,
 testing or re-pointing a built-in answers 409 with `built_in: true`.
 You install, review, approve and re-pin packages there. The approval dialog shows the
@@ -1328,7 +1345,7 @@ with the forwarder).
   Settings → Assistant → Hindsight memory writes it to `ai_settings`
   `memory_recall_max_query_chars` through `PUT /api/v1/ai/settings/memory`
   ([`agent/src/routes/memorySettings.ts`](../../agent/src/routes/memorySettings.ts)), and
-  both session modes read it at each turn. The bank's own limit is in tokens,
+  every turn reads it. The bank's own limit is in tokens,
   `HINDSIGHT_API_RECALL_MAX_QUERY_TOKENS` on the Hindsight server (default 500, counted
   with tiktoken), which refuses a longer query with HTTP 400 `Query too long: N tokens
   exceeds maximum of M`. Since the two are set apart (and punctuation-dense text such as
@@ -1366,9 +1383,8 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   `*` row: it is `ai_plugin_packages.enabled`, served as the package source's `enabled`
   (#4757, [`agent/src/access/packageProvider.ts`](../../agent/src/access/packageProvider.ts)).
 - `builtin:browser`'s switch holds at every gate (#4757): while it is off, every browser
-  tool is `off` at the classic seam, on `/mcp`, in durable turns and in flow runs
-  (`registryOverrides` in `agent/src/access/resolve.ts`; `BROWSER_SOURCE` in
-  `agent-durable/src/scadbuddy_durable/session/access.py`).
+  tool is `off` at the seam, on `/mcp`, in the ToolCall activities and in flow runs
+  (`registryOverrides` in `agent/src/access/resolve.ts`).
 - In `package:<name>` and `builtin:own-plugin`, an item's kind is its prefix
   (`agent/src/access/items.ts`): `skill:<name>`, `subagent:<name>` and
   `hook:<event>:<id>` take `on` or `off`; `builtin:<Tool>` takes a tool's access. A
@@ -1382,8 +1398,7 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   On the registry sources (`builtin:scadbuddy`, `builtin:browser`), a row that the copy
   migration wrote (`updated_by` is `migration:2171`) counts only when it is `off` or above
   the declared tier. A copied lower tier is ignored, because the old registry overrides
-  could only raise (`toolAccess` in `agent/src/access/resolve.ts`;
-  `tool_access` in `agent-durable/src/scadbuddy_durable/session/access.py`). A row the
+  could only raise (`toolAccess` in `agent/src/access/resolve.ts`). A row the
   user writes later counts in either direction.
 - `on` is also allowed on a single item, but only in `package:*` sources and in
   `builtin:own-plugin` (its skills, subagents and hooks). The table's CHECK enforces this
@@ -1395,9 +1410,8 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
 - Only overrides are stored. The resolver reads the rows at each call, so a change applies
   from the next call, in either direction, also in a turn or flow run under way
   (spec §4.4; `agent/src/access/resolver.ts`).
-- The same access holds from every caller: main agent, subagent, classic or durable turn,
-  flow run and `/mcp` (spec §4.1, §4.5). agent-durable reads the same rows
-  (`agent-durable/src/scadbuddy_durable/session/access.py`).
+- The same access holds from every caller: main agent, subagent, a turn, a flow run and
+  `/mcp` (spec §4.1, §4.5).
 - The old keys no longer decide. These are `ai_settings` `builtin_tools.scadbuddy`,
   `scadbuddy_plugin_enabled`, `http_request_enabled` and `printer_camera_enabled`, and
   `ai_plugins` `enabled`, `tool_tiers` and `disabled_tools`. Migration
@@ -1491,8 +1505,7 @@ call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
 - Limits: 30 s per request by default (the model may ask for up to 120 s), 5
   redirects, 1 MiB inline and 20 MiB read. A binary body is a workspace file (§13,
   #2511), never base64 in the result. A longer text body is saved in
-  Postgres (`ai_session_http_bodies`, #2374), the 10 newest per session, classic and
-  durable alike, so any replica pages it with `http_response_read`. That is up to
+  Postgres (`ai_session_http_bodies`, #2374), the 10 newest per session, so any replica pages it with `http_response_read`. That is up to
   10 × 20 MiB of plaintext `bytea` a session: size the database for it beside the other
   per-session storage. The rows go with the session. A flow run's bodies stay on the
   replica that ran the call, under `durable-turns/flow-<id>/http/`, removed by every
@@ -1507,7 +1520,7 @@ call (`agent/src/access/live.ts`), so `off` refuses a call in a turn under way.
 ## 13. The workspace (#2329)
 
 The assistant keeps files of its own in `ai_session_files`, in Postgres rather than on
-the pod's disk, so every replica, classic and durable sessions and `/mcp` see the same
+the pod's disk, so every replica, every session and `/mcp` see the same
 files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), tools in
 [`agent/src/tools/workspace.ts`](../../agent/src/tools/workspace.ts)).
 
@@ -1629,10 +1642,9 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   `workspace_save` (read: it saves an output's 3MF, a model's file, thumbnail or media,
   a print's image, timelapse or file, or a Bambuddy library file into the workspace
   through the backend's own routes, so the bytes never pass through the model).
-  `workspace_read` pages text as `read_file` does, returns an image as an image (a
-  durable session gets its name, to see it with `view_tool_images`, #2402), and only the
+  `workspace_read` pages text as `read_file` does, returns an image as an image (#2402), and only the
   metadata of other binary files. `workspace_edit` is made against the sha256 the model read.
-- `http_request` takes `save_to_workspace: "<path>"` (classic and durable sessions, #2496;
+- `http_request` takes `save_to_workspace: "<path>"` (a session's workspace, #2496;
   a flow run's starter's own workspace, #2511): the whole body
   becomes a workspace file instead of a saved body (§12). A binary body (anything not
   text, an image included) is stored the same way without it (#2511), at
@@ -1665,11 +1677,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   one of the agent's credentials (`ToolServices.secrets`, below): `workspace_read`
   redacts them, and an upload would otherwise carry them into a README, a source file,
   an asset or Bambuddy. The refusal names the upload, never the credential.
-- `workspace_read` redacts every saved Claude credential's secret from text (and, in a
-  classic turn, the turn's plugin tokens) before the model sees it
+- `workspace_read` redacts every saved Claude credential's secret from text (and the
+  turn's plugin tokens) before the model sees it
   (`ToolServices.secrets`, `main.ts`).
 - Paths are at most four `/`-separated segments of `[A-Za-z0-9_][A-Za-z0-9_.-]*`, checked
-  by the store and by the table. No Claude Code built-in reaches the workspace.
+  by the store and by the table. Claude Code's own file tools (§9) reach the workspace only
+  through the session's directory, the copy below, which is written back by sha256.
 - The panel's **Files** (part 3,
   [`agent/src/routes/sessionFiles.ts`](../../agent/src/routes/sessionFiles.ts)) is a
   session's workspace over HTTP, for the browser user, guarded as the session routes

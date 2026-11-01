@@ -118,8 +118,8 @@ async function refusals<T>(run: () => Promise<T>): Promise<T> {
 const IN_A_TURN: Pick<Owner, 'kind' | 'id'> = { kind: 'anonymous', id: '' }
 
 /**
- * Whether a session's own model made the call: a classic turn (`harness`) or a durable
- * session's tool activity (`workflow`, #1055). Only /mcp sets no gate.
+ * Whether a session's own model made the call: in the turn's process (`harness`) or as its
+ * ToolCall's activity (`workflow`, #1055). Only /mcp sets no gate.
  */
 function inSession(ctx: ToolContext): boolean {
   return ctx.gate !== undefined
@@ -374,8 +374,7 @@ export const sessionTools: Tool[] = [
       "tools run with this caller's tiers; an outward action waits for a decision: a human's in the ScadBuddy UI, " +
       'or sessions_approve/sessions_deny from a token holding the approval grant. ' +
       'Returns the session and, with a prompt, the turn; read the reply with sessions_get or sessions_attach. ' +
-      '`mode` picks classic or durable; omitted, the default in ScadBuddy Settings applies, and `mode_fallback` ' +
-      'says why a default durable session runs classic.',
+      'Every session runs as a Temporal workflow that survives restarts; `mode` is taken and ignored.',
     input: z.object({
       prompt: z.string().min(1).max(MESSAGE_MAX).optional().describe('The first user message.'),
       // #2477: references only, as sessions_send's, sent with the prompt.

@@ -491,7 +491,7 @@ if (role.http && database && dataKeys) {
 const memory: MemoryOptions | undefined = undefined
 
 // How a turn's ScadBuddy call runs as its ToolCall workflow (plan 2026-10-13 Step 9.2), once the
-// Temporal client below exists; read by each turn that has `tools_as_activities` on.
+// Temporal client below exists; read by each turn (until then, its calls run in-process).
 let toolCallStart: ToolCallStarter | undefined
 // And how its plugin and http tools are listed for their proxies (Step 9.3), once turnToolDeps exists.
 let turnToolList: NonNullable<SessionManagerDeps['turnTools']> | undefined
