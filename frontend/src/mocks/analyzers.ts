@@ -397,6 +397,7 @@ export function analysisReport(
         diagnostic_id: row.id,
         diagnostic_key: row.key,
         fix_id: applied?.fix_id ?? '',
+        decision_id: applied?.id ?? '',
         scope: applied?.scope ?? scopes[scopes.length - 1]!,
         change,
       }))

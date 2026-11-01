@@ -1205,6 +1205,22 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(t.summarize(args)).not.toContain('prime tower')
   })
 
+  it('sends the accepted analyzer fixes it is given and names them in its approval line (#284)', async () => {
+    const chosen: { body?: unknown } = {}
+    const plain: { body?: unknown } = {}
+    const fix = 'c'.repeat(32)
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    const t = tool('print_output')
+    server.use(...capturedRun(chosen))
+    await t.execute({ ...args, accepted_fixes: [fix] }, ctx())
+    server.use(...capturedRun(plain))
+    await t.execute(args, ctx())
+    expect((chosen.body as { accepted_fixes?: unknown }).accepted_fixes).toEqual([fix])
+    expect(plain.body).not.toHaveProperty('accepted_fixes')
+    expect(t.summarize({ ...args, accepted_fixes: [fix] })).toContain(`, applying 1 accepted analyzer fix (${fix})`)
+    expect(t.summarize(args)).not.toContain('analyzer fix')
+  })
+
   it('sends a new request_id per call, so the same choices again are a new print (#470)', async () => {
     const first: { body?: { request_id?: string } } = {}
     const second: { body?: { request_id?: string } } = {}
