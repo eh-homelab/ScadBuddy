@@ -6,9 +6,10 @@ uploads reads every item's inputs through `store` (``main.sweep_assets``); the r
 reach `store` and `lifecycle` (every transition, publishing on the core's bus) through
 `OrdersDep`. ``refs`` holds a slice quote's sliced files (#4250), which the lifecycle
 releases as §3.4 says. Running, it follows every print an item's attempt started
-(``printing.py`` ``listen_for_prints``, #4719). ``integrations`` is the Bambuddy seam (#4253, §8): chosen for
-the running ``bambuddy_url``, and chosen again when that changes, which ``api/runtime.py``
-applies on every ``settings.changed``, so no restart is needed to light it up.
+(``printing.py`` ``listen_for_prints``, #4719). ``integrations`` is the Bambuddy seam
+(#4253, §8): chosen for the running ``bambuddy_url``, and chosen again when that
+changes, which ``api/runtime.py`` applies on every ``settings.changed``, so no restart
+is needed to light it up.
 """
 
 from __future__ import annotations
