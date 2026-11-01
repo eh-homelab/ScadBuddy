@@ -703,6 +703,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `print_runs` and `print_outcomes` only (`Lifecycle.follow_print`, the component's
   `listen_for_prints`), never by asking a printer or Bambuddy. Agent `order_item_print`
   (outward); frontend `components/orders/PrintItem.tsx` over `PrintPicker`'s `itemPrint`.
+  Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
+  that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
+  `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
+  the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
+  live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
+  or updates filament records from the spools, on click only (`PriceBook.spool_import`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked

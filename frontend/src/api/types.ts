@@ -386,6 +386,8 @@ export type PricingPolicy = Schemas['PricingPolicy']
 /** `PUT /orders/price-book`: the whole policy, and the estimate's factor when sent. */
 export type PolicyUpdate = Defaulted<Schemas['PolicyUpdate'], 'rough_estimate_factor'>
 export type PriceBook = Schemas['PriceBook']
+export type SpoolImport = Schemas['SpoolImport']
+export type SpoolImportRow = Schemas['SpoolImportRow']
 /** `POST …/items/{item}/quote`: the print dialog's choices, and a price-book filament per
  * colour slot (`colours[].slot`, from 0). */
 export type SliceQuoteRequest = Schemas['SliceQuoteRequest']

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from '../../api/client'
-import type { Filament, FilamentInput } from '../../api/types'
+import type { Filament, FilamentInput, SpoolImportRow } from '../../api/types'
 import { useAsync } from '../../lib/useAsync'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -53,8 +53,24 @@ function bodyOf(draft: Draft): FilamentInput | string {
 }
 
 /** `PLA Basic`, with the colour's name when it has one. */
-export function filamentLabel(filament: Pick<Filament, 'material' | 'subtype' | 'colour_name' | 'brand'>): string {
+export function filamentLabel(filament: { material: string; subtype?: string | null; colour_name?: string | null; brand?: string | null }): string {
   return [filament.brand, filament.material, filament.subtype, filament.colour_name].filter(Boolean).join(' ')
+}
+
+const ACTIONS: Record<SpoolImportRow['action'], string> = { created: 'added', updated: 'updated', unchanged: 'unchanged', skipped: 'skipped' }
+const REASONS: Record<NonNullable<SpoolImportRow['reason']>, string> = {
+  no_colour: 'its spools have only a colour name, no colour',
+  no_price: 'none of its spools has a price',
+  too_long: 'a name is longer than a filament record takes (100 characters)',
+}
+
+/** One line of an import's answer: what happened to a filament, and the spread of its spools' prices. */
+function importLine(row: SpoolImportRow): string {
+  const name = filamentLabel(row) || row.material
+  if (row.action === 'skipped') return `${name}: skipped, ${row.reason ? REASONS[row.reason] : 'nothing to import'}`
+  const price = row.action === 'updated' ? `${row.previous_cost_per_kg} → ${row.cost_per_kg}` : row.cost_per_kg
+  const spread = row.min_cost_per_kg && row.max_cost_per_kg ? ` (spools priced ${row.min_cost_per_kg} to ${row.max_cost_per_kg}; the newest spool's price)` : ''
+  return `${name}: ${ACTIONS[row.action]} at ${price} per kg${spread}`
 }
 
 /**
@@ -62,7 +78,9 @@ export function filamentLabel(filament: Pick<Filament, 'material' | 'subtype' | 
  * Settings page's Orders section: what a kilogram of each costs, and its density for the
  * rough estimate. A record is never deleted, only archived: a quote priced with it keeps
  * its lines, and an item may still name it. "Show archived" lists the archived ones, each
- * with an Unarchive that brings the same record back (#4977).
+ * with an Unarchive that brings the same record back (#4977). With Bambuddy linked
+ * (`spool_import`), "Import from spools" makes or updates one record per filament of its
+ * spool inventory, on click only: a quote never reads Bambuddy (#4253, spec §8.3).
  */
 export function FilamentsEditor() {
   const [showArchived, setShowArchived] = useState(false)
@@ -71,6 +89,7 @@ export function FilamentsEditor() {
   const [editing, setEditing] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [imported, setImported] = useState<SpoolImportRow[] | null>(null)
   const filaments = book.data?.filaments ?? []
 
   async function act(action: () => Promise<unknown>) {
@@ -80,6 +99,20 @@ export function FilamentsEditor() {
       await action()
       setDraft(EMPTY)
       setEditing(null)
+      book.refresh()
+    } catch (err) {
+      setError(refusalText(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Not `act`: a draft being typed stays.
+  async function importSpools() {
+    setBusy(true)
+    setError(null)
+    try {
+      setImported((await api.importSpools()).rows)
       book.refresh()
     } catch (err) {
       setError(refusalText(err))
@@ -160,7 +193,14 @@ export function FilamentsEditor() {
 
   return (
     <section className="flex flex-col gap-2" aria-label="Filaments">
-      <h4 className="text-sm font-medium">Filaments</h4>
+      <div className="flex items-center justify-between gap-2">
+        <h4 className="text-sm font-medium">Filaments</h4>
+        {book.data?.spool_import && (
+          <Button size="xs" variant="outline" disabled={busy} onClick={() => void importSpools()}>
+            Import from spools
+          </Button>
+        )}
+      </div>
       <p className="text-xs text-muted-foreground">
         What a kilogram of each filament costs, in {book.data?.currency ?? 'the orders currency'}. A slice quote prices each colour at the filament it names; archiving one hides it from new quotes until it is unarchived.
       </p>
@@ -172,6 +212,19 @@ export function FilamentsEditor() {
         <p role="alert" className="text-[13px] text-warn">
           The price book could not be read: {book.error.message}
         </p>
+      )}
+      {imported && (
+        <div role="status" aria-label="Spool import" className="text-xs text-muted-foreground">
+          {imported.length === 0 ? (
+            <p>Bambuddy has no spools to import.</p>
+          ) : (
+            <ul className="list-disc pl-4">
+              {imported.map((row) => (
+                <li key={row.spool_ids.join(',')}>{importLine(row)}</li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
       <DataTable
         label="Filaments"
