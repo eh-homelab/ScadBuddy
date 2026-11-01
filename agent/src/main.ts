@@ -52,6 +52,7 @@ import { TabHub } from './bridge/hub.js'
 import { TemporalTabRelay } from './bridge/relay.js'
 import { PostgresTabOwnerStore } from './bridge/tabOwners.js'
 import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
+import { PostgresTabImageStore } from './bridge/tabImages.js'
 import { PgMcpSessionRelay } from './mcp/sessionRelay.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
@@ -316,6 +317,9 @@ const tabs = new TabHub({
   // A durable session's browser_* calls run on whichever replica took the
   // activity, so the tab its chat socket paired is read from Postgres (#2086).
   sessionTabs: database ? new PostgresSessionTabStore(database.sql) : undefined,
+  // A browser_screenshot's image, stored by the replica holding the tab for the one
+  // whose call asked (#254, bridge/tabImages.ts).
+  images: database ? new PostgresTabImageStore(database.sql) : undefined,
 })
 toolServices.browser = tabs
 // What each session touched (#931, sessions/touched.ts), from its tool calls.

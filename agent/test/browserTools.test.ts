@@ -1,4 +1,5 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { createHash } from 'node:crypto'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { z } from 'zod'
@@ -9,7 +10,10 @@ import type { PairingStore } from '../src/bridge/pairings.js'
 import type { AgentFrame } from '../src/bridge/protocol.js'
 import type { TabRelay } from '../src/bridge/relay.js'
 import type { SessionTabStore } from '../src/bridge/sessionTabs.js'
+import { MemoryEventSource } from '../src/events/bus.js'
+import { ResourceHub } from '../src/resources/hub.js'
 import { ChatConnection } from '../src/routes/chat.js'
+import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { browserTools, STALE_TAB_HINT, tabBackNotRun } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
@@ -243,10 +247,12 @@ describe('forwarding to the tab', () => {
     await conn.receive(JSON.stringify({ v: 1, type: 'state', route: '/', live: [] }))
     await conn.receive('not json')
     await conn.receive(Buffer.from('binary'))
+    await conn.receive(42)
     expect(frames.map((f) => f.type === 'error' && f.message)).toEqual([
       'send hello first',
       'ignored a malformed frame: frame is not JSON',
-      'frames must be JSON text',
+      'send hello first',
+      'frames must be JSON text or image bytes',
     ])
     expect(hub.connected()).toEqual([])
   })
@@ -792,7 +798,10 @@ describe('/mcp callers pair by code (spec §8.5)', () => {
     const pairings = new InMemoryPairingStore()
     const hub = new TabHub({ pairings })
     const t = await tab(hub, TAB, (call) => ({ ok: true, result: { tool: call.tool } }))
-    const { app, tokens } = testApp({ services: services({ browser: hub }) })
+    const { app, tokens } = testApp({
+      services: services({ browser: hub }),
+      mcp: { resources: new ResourceHub(new MemoryEventSource()) },
+    })
     const { token, record } = await tokens.mint({ name: 'laptop', tier })
     const principal = principalFor(record.id, tier)
     const client = await connect(app, { headers: { authorization: `Bearer ${token}` } })
@@ -801,7 +810,7 @@ describe('/mcp callers pair by code (spec §8.5)', () => {
       const result = (await client.callTool({ name, arguments: args })) as { isError?: boolean; content: unknown[] }
       return { isError: result.isError ?? false, body: firstText(result), text: text(result) }
     }
-    return { hub, t, pairings, principal, callTool }
+    return { hub, t, pairings, principal, callTool, client }
   }
 
   const pairingsFrame = (t: Awaited<ReturnType<typeof tab>>) =>
@@ -861,6 +870,67 @@ describe('/mcp callers pair by code (spec §8.5)', () => {
     expect((await callTool('browser_pair')).text).toMatch(/needs the "write" tier/)
     expect((await callTool('browser_click', { role: 'button', name: 'Render' })).text).toMatch(/needs the "write" tier/)
     expect(t.calls()).toEqual([])
+  })
+
+  it('serves the paired tab\'s snapshot as scadbuddy://browser/paired/snapshot, and no other tab (#254)', async () => {
+    const { t, pairings, principal, client } = await setup('read')
+    const uri = 'scadbuddy://browser/paired/snapshot'
+    // Before pairing: the tool's own "no browser attached", as an error.
+    await expect(client.readResource({ uri })).rejects.toThrow(/no browser attached/)
+    await expect(client.subscribeResource({ uri })).rejects.toThrow(/Resource not found/)
+    const request = await pairings.request(principal)
+    await pairings.accept(request.id, request.code, TAB)
+    const { contents } = await client.readResource({ uri })
+    expect(contents[0]).toMatchObject({ uri, mimeType: 'application/json' })
+    expect(JSON.parse(unwrapUntrusted((contents[0] as { text: string }).text))).toEqual({ tool: 'snapshot' })
+    expect(t.calls()).toMatchObject([{ tool: 'snapshot', args: {} }])
+    // A tab id (or anything else) names no resource: the caller is never shown one.
+    await expect(client.readResource({ uri: `scadbuddy://browser/${TAB}/snapshot` })).rejects.toMatchObject({ code: -32002 })
+    await expect(client.subscribeResource({ uri: `scadbuddy://browser/${TAB}/snapshot` })).rejects.toMatchObject({ code: -32002 })
+    expect(t.calls()).toHaveLength(1)
+    await client.subscribeResource({ uri })
+    const completion = await client.complete({
+      ref: { type: 'ref/resource', uri: 'scadbuddy://browser/{tab}/snapshot' },
+      argument: { name: 'tab', value: '' },
+    })
+    expect(completion.completion.values).toEqual(['paired'])
+  })
+
+  it('returns a screenshot over /mcp as image content (#254)', async () => {
+    const pairings = new InMemoryPairingStore()
+    const hub = new TabHub({ pairings })
+    const bytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('pixels')])
+    const name = `${createHash('sha256').update(bytes).digest('hex')}.png`
+    const frames: AgentFrame[] = []
+    const conn: TabConnection = hub.open((frame) => {
+      frames.push(frame)
+      if (frame.type !== 'call') return
+      queueMicrotask(() => {
+        void conn.receive(JSON.stringify({ v: 1, type: 'image', id: frame.id, name, mediaType: 'image/png', size: bytes.length }))
+        void conn.receive(bytes)
+        const result = { image: { name, mediaType: 'image/png' }, width: 2, height: 1, hidden: 0 }
+        void conn.receive(JSON.stringify({ v: 1, type: 'result', id: frame.id, outcome: { ok: true, result } }))
+      })
+    })
+    await conn.receive(JSON.stringify({ v: 1, type: 'hello', tabId: TAB, route: '/', live: ['screenshot'] }))
+    const { app, tokens } = testApp({ services: services({ browser: hub }) })
+    const { token, record } = await tokens.mint({ name: 'laptop', tier: 'read' })
+    const request = await pairings.request(principalFor(record.id, 'read'))
+    await pairings.accept(request.id, request.code, TAB)
+    const client = await connect(app, { headers: { authorization: `Bearer ${token}` } })
+    closers.push(() => client.close())
+    const result = (await client.callTool({ name: 'browser_screenshot', arguments: {} })) as {
+      isError?: boolean
+      content: { type: string; data?: string; mimeType?: string; text?: string }[]
+    }
+    expect(result.isError ?? false).toBe(false)
+    const image = result.content.find((c) => c.type === 'image')!
+    expect(image.mimeType).toBe('image/png')
+    expect(Buffer.from(image.data!, 'base64').equals(bytes)).toBe(true)
+    // After the envelope's preamble and the image, the rest of the answer as JSON.
+    const texts = result.content.filter((c) => c.type === 'text')
+    expect(JSON.parse(unwrapUntrusted(texts.at(-1)!.text!))).toEqual({ width: 2, height: 1, hidden: 0 })
+    expect(frames.filter((f) => f.type === 'error')).toEqual([])
   })
 
   it('lets a read-tier token point at a control: browser_highlight reaches the tab ungated (#1919)', async () => {
