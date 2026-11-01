@@ -8,6 +8,8 @@ import { notifyWarmEvict } from '../sessions/warmEvict.js'
 import { assertHostAllowed, EgressError, isPrivateAddress, type Resolver, systemResolver } from '../http/egress.js'
 import { RISK_TIERS, type RiskTier, type TierResolver } from '../harness/permissions.js'
 import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecret } from '../secrets.js'
+import { OAuthError } from './oauth.js'
+import { GrantError, type PluginOAuth, type TokenSource } from './oauthStore.js'
 
 // The plugin registry (issue #297): "provide an endpoint and we'll add the
 // plugin/skills to the harness". Stored in Postgres, `ai_plugins`
@@ -58,6 +60,14 @@ import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecr
 // was edited in the database fails to open instead of sending the token to a
 // new host; for the same reason a route that changes the URL or the header
 // name must be given the secret again. No route returns it (spec §8.6).
+//
+// OAUTH (#780). Instead of a header, a plugin may be signed in from Settings (OAuth 2.1 per
+// the MCP authorization spec; plugins/oauth.ts, oauthStore.ts, table `ai_plugin_oauth`).
+// Its tokens never leave the agent either: a run gets `RemotePlugin.oauth`, the token
+// source the forwarder asks for a fresh `Authorization` value per request, and `header`
+// holds the value at load (for the redaction lists and the memory client). A plugin has a
+// header or a grant, never both: saving a header signs it out, and a URL change drops the
+// grant (it was issued for the old resource).
 
 export const PLUGIN_KINDS = ['remote_mcp'] as const
 export type PluginKind = (typeof PLUGIN_KINDS)[number]
@@ -182,6 +192,22 @@ export type PluginSummary = {
   updated_at: string
   /** Which KEK sealed the secret; null when there is none. Never put in a route body. */
   kekId: string | null
+  /** The OAuth sign-in (#780), or null when the plugin has none. */
+  oauth: OAuthStatus | null
+}
+
+/** A plugin's OAuth sign-in as routes may see it: no token, no client secret. */
+export type OAuthStatus = {
+  status: 'connected' | 'error'
+  /** Why it must be signed in again (`error`), or null. */
+  error: string | null
+  issuer: string
+  scope: string | null
+  registration: 'dynamic' | 'configured'
+  /** Whether the agent holds a refresh token, so it renews the access token itself. */
+  refreshes: boolean
+  expires_at: string | null
+  connected_at: string
 }
 
 /**
@@ -218,6 +244,8 @@ export type RemotePlugin = {
   name: string
   url: string
   header?: { name: string; value: string }
+  /** A signed-in plugin's token source (#780): the forwarder asks it for each request's header. */
+  oauth?: TokenSource
   toolTiers: Record<string, RiskTier>
   disabledTools: string[]
 }
@@ -414,6 +442,21 @@ type Row = {
   updated_at: Date
   /** The plugin's `remote:<name>` rows of ai_access (#2171): its enabled flag, tiers and disabled tools. */
   access_rows: AccessRow[]
+  /** Its ai_plugin_oauth row's public columns (#780), or null. */
+  oauth: OAuthRow | null
+}
+
+type OAuthRow = {
+  status: 'connected' | 'error'
+  last_error: string | null
+  issuer: string
+  scope: string | null
+  registration: 'dynamic' | 'configured'
+  has_refresh: boolean
+  access_expires_at: string | null
+  connected_at: string
+  grant_id: string
+  plugin_url: string
 }
 
 // The plugin's ai_access rows, read with its row. The prefix is remoteSource's.
@@ -421,10 +464,17 @@ const ACCESS_ROWS = `(SELECT coalesce(jsonb_agg(jsonb_build_object('source', a.s
     'updated_by', a.updated_by)), '[]'::jsonb)
   FROM ai_access a WHERE a.source = '${remoteSource('')}' || ai_plugins.name) AS access_rows`
 
-const SUMMARY_COLUMNS = `name, kind, url, auth_header, kek_id, last4,
-  created_at, updated_at, ${ACCESS_ROWS}`
+// The public columns of its sign-in (#780): never the sealed ones.
+const OAUTH_ROW = `(SELECT jsonb_build_object('status', o.status, 'last_error', o.last_error, 'issuer', o.issuer,
+    'scope', o.scope, 'registration', o.registration, 'has_refresh', o.has_refresh,
+    'access_expires_at', o.access_expires_at, 'connected_at', o.connected_at, 'grant_id', o.grant_id,
+    'plugin_url', o.plugin_url)
+  FROM ai_plugin_oauth o WHERE o.plugin = ai_plugins.name) AS oauth`
 
-const ALL_COLUMNS = `*, ${ACCESS_ROWS}`
+const SUMMARY_COLUMNS = `name, kind, url, auth_header, kek_id, last4,
+  created_at, updated_at, ${ACCESS_ROWS}, ${OAUTH_ROW}`
+
+const ALL_COLUMNS = `*, ${ACCESS_ROWS}, ${OAUTH_ROW}`
 
 /** The plugin's access as ai_access gives it. */
 function access(row: Pick<Row, 'name' | 'access_rows'>): { enabled: boolean; toolTiers: Record<string, RiskTier>; disabledTools: string[] } {
@@ -457,6 +507,18 @@ function summary(row: Omit<Row, 'secret_sealed' | 'dek_sealed'>): PluginSummary 
     created_at: row.created_at.toISOString(),
     updated_at: row.updated_at.toISOString(),
     kekId: row.kek_id,
+    oauth: row.oauth
+      ? {
+          status: row.oauth.status,
+          error: row.oauth.last_error,
+          issuer: row.oauth.issuer,
+          scope: row.oauth.scope,
+          registration: row.oauth.registration,
+          refreshes: row.oauth.has_refresh,
+          expires_at: row.oauth.access_expires_at === null ? null : new Date(row.oauth.access_expires_at).toISOString(),
+          connected_at: new Date(row.oauth.connected_at).toISOString(),
+        }
+      : null,
   }
 }
 
@@ -527,10 +589,29 @@ export async function loadEnabledPlugins(
 
 export type RewrapResult = { rewrapped: number; failed: number }
 
+export type PluginStoreOptions = {
+  /** Signs plugins in and gives their tokens (#780); without it a signed-in plugin is not loaded. */
+  oauth?: PluginOAuth
+}
+
 export class PluginStore implements PluginRepo {
   private readonly sql: Sql
-  constructor(sql: Sql) {
+  readonly oauth: PluginOAuth | undefined
+  constructor(sql: Sql, options: PluginStoreOptions = {}) {
     this.sql = sql
+    this.oauth = options.oauth
+  }
+
+  /**
+   * Gives an opened plugin its sign-in (#780): the token source, and the header as it is now.
+   * Throws GrantError (sign in again) or OAuthError (the token endpoint is unreachable).
+   */
+  private async signIn(row: Row, plugin: RemotePlugin, kek: Kek | undefined): Promise<RemotePlugin> {
+    if (!row.oauth || plugin.header) return plugin
+    if (row.oauth.status === 'error') throw new GrantError(row.oauth.last_error ?? 'its sign-in failed')
+    if (!this.oauth) throw new GrantError('OAuth sign-in is not available in this process')
+    const source = this.oauth.source(row.name, row.url, row.oauth.grant_id, kek)
+    return { ...plugin, oauth: source, header: await source.header() }
   }
 
   async list(): Promise<PluginSummary[]> {
@@ -643,6 +724,11 @@ export class PluginStore implements PluginRepo {
         WHERE name = ${name}`
       // The last listing was the old server's (#4994): the page lists none until the next test.
       if (url !== current.url) await tx`DELETE FROM ai_tool_listings WHERE source = ${remoteSource(name)}`
+      // A sign-in was for the old resource; a header replaces it (#780): either way it goes.
+      if (url !== current.url || (patch.secret !== undefined && patch.secret !== null)) {
+        await tx`DELETE FROM ai_plugin_oauth_flows WHERE plugin = ${name}`
+        await tx`DELETE FROM ai_plugin_oauth WHERE plugin = ${name}`
+      }
       await this.writeAccess(tx, name, { tiers, disabled, enabled }, updatedBy(context), {
         enabled: patch.enabled !== undefined,
         tools: patch.tool_tiers !== undefined || patch.disabled_tools !== undefined,
@@ -726,9 +812,10 @@ export class PluginStore implements PluginRepo {
     })
   }
 
+  /** Throws SealError, and for a signed-in plugin GrantError or OAuthError (`signIn`). */
   async reveal(name: string, kek: Kek | undefined): Promise<RemotePlugin | undefined> {
     const [row] = await this.sql.unsafe<Row[]>(`SELECT ${ALL_COLUMNS} FROM ai_plugins WHERE name = $1`, [name])
-    return row ? openPlugin(row, kek) : undefined
+    return row ? this.signIn(row, openPlugin(row, kek), kek) : undefined
   }
 
   /** Every plugin ai_access turns on, opened; one that cannot be opened is reported in `problems`, not loaded. */
@@ -738,10 +825,15 @@ export class PluginStore implements PluginRepo {
     const problems: string[] = []
     for (const row of rows.filter((r) => access(r).enabled)) {
       try {
-        plugins.push(openPlugin(row, kek))
+        plugins.push(await this.signIn(row, openPlugin(row, kek), kek))
       } catch (err) {
-        if (!(err instanceof SealError)) throw err
-        problems.push(`plugin ${row.name} was not loaded: its secret cannot be opened (${err.message})`)
+        if (err instanceof SealError) {
+          problems.push(`plugin ${row.name} was not loaded: its secret cannot be opened (${err.message})`)
+        } else if (err instanceof GrantError) {
+          problems.push(`plugin ${row.name} was not loaded: it needs signing in again in Settings (${err.message})`)
+        } else if (err instanceof OAuthError) {
+          problems.push(`plugin ${row.name} was not loaded: its access token could not be renewed (${err.message})`)
+        } else throw err
       }
     }
     return { plugins, problems }

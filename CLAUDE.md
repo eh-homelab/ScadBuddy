@@ -872,7 +872,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     plugin's URL or secret: it gets `http://127.0.0.1:<port>/p/<token>` on the loopback
     forwarder (`src/plugins/forwarder.ts`), which pins the checked address, refuses
     redirects and 401/OAuth discovery, and adds the header (Claude Code's own MCP client
-    follows both with the header). Claude Code renames tool-name characters outside
+    follows both with the header). A plugin with no header may be signed in with OAuth
+    instead (#780, `src/plugins/oauth.ts`, `oauthStore.ts`, `ai_plugin_oauth`): only
+    Settings starts discovery (`POST …/:name/oauth/start`, then the browser's
+    `/api/v1/ai/plugin-oauth/authorize` and `/callback`, `routes/pluginOAuth.ts`), the
+    tokens stay sealed in the agent, and the forwarder asks the plugin's `oauth` token
+    source for each request's header; a refused refresh marks the grant for "Sign in again". Claude Code renames tool-name characters outside
     `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
     colliding tools are hidden. Unlisted plugin tools are `outward`.
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live

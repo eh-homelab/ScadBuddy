@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import { aiPlugins, type RemotePlugin } from '../../api/aiPlugins'
 import { aiCapabilities, type RefreshResult, type SourceView } from '../../api/capabilities'
@@ -34,6 +34,13 @@ import { Spinner } from '../ui/spinner'
  * `readOnlyHint` is only shown as a suggestion, as MCP says annotations from untrusted servers are
  * untrusted. The endpoint's own controls, which handle its secret, are user-only; a tool's access
  * and the plugin's switch are not (#4208).
+ *
+ * A plugin without a header can be signed in instead (#780): "Sign in" opens the agent's one-use
+ * link in a new window, where the person signs in at the plugin's authorization server; the agent
+ * keeps the tokens (sealed) and the forwarder adds a fresh one per request, so neither this page
+ * nor Claude Code ever holds one. The card polls the plugin until the sign-in lands. A sign-in the
+ * server later refused reads "Sign in again". A server without dynamic client registration (GitHub)
+ * needs the person's own OAuth app: its client id and secret, with the callback URL shown.
  */
 
 const REMOTE = (source: SourceView) => source.kind === 'remote'
@@ -141,6 +148,160 @@ function RegisterForm({ onCreated }: { onCreated: (plugin: RemotePlugin) => void
   )
 }
 
+/** How often, and for how long, the card looks for a sign-in finished in its window. */
+const SIGN_IN_POLL_MS = 2_000
+const SIGN_IN_WAIT_MS = 10 * 60_000
+
+function SignIn({ plugin, onPlugin }: { plugin: RemotePlugin; onPlugin: (plugin: RemotePlugin) => void }) {
+  const [ownApp, setOwnApp] = useState(false)
+  const [clientId, setClientId] = useState('')
+  const [clientSecret, setClientSecret] = useState('')
+  const [busy, setBusy] = useState<'start' | 'out' | null>(null)
+  /** The `connected_at` before the window opened, while the card waits for a new one. */
+  const [waitingFrom, setWaitingFrom] = useState<string | null | undefined>(undefined)
+  const [error, setError] = useState<string | null>(null)
+  const callback = `${window.location.origin}/api/v1/ai/plugin-oauth/callback`
+  const waiting = waitingFrom !== undefined
+  // The latest callback, so a render does not restart the poll.
+  const onPluginRef = useRef(onPlugin)
+  useEffect(() => {
+    onPluginRef.current = onPlugin
+  }, [onPlugin])
+
+  useEffect(() => {
+    if (waitingFrom === undefined) return
+    const started = Date.now()
+    const timer = window.setInterval(() => {
+      if (Date.now() - started > SIGN_IN_WAIT_MS) {
+        window.clearInterval(timer)
+        setWaitingFrom(undefined)
+        return
+      }
+      aiPlugins.getRemote(plugin.name).then(
+        (next) => {
+          if (next.oauth && next.oauth.connected_at !== waitingFrom) {
+            window.clearInterval(timer)
+            setWaitingFrom(undefined)
+            onPluginRef.current(next)
+          }
+        },
+        () => {},
+      )
+    }, SIGN_IN_POLL_MS)
+    return () => window.clearInterval(timer)
+  }, [waitingFrom, plugin.name])
+
+  async function start() {
+    // Opened in the click, before the request: a window opened after an await is a blocked pop-up.
+    const win = window.open('', '_blank')
+    setBusy('start')
+    setError(null)
+    try {
+      const started = await aiPlugins.startSignIn(plugin.name, {
+        ...(ownApp && clientId.trim() ? { client_id: clientId.trim() } : {}),
+        ...(ownApp && clientId.trim() && clientSecret ? { client_secret: clientSecret } : {}),
+      })
+      if (!win) throw new Error('The sign-in window was blocked: allow pop-ups for ScadBuddy and try again.')
+      // The authorization server's page must not reach back into this one.
+      win.opener = null
+      win.location.href = started.authorize_url
+      setClientSecret('')
+      setWaitingFrom(plugin.oauth?.connected_at ?? null)
+    } catch (caught) {
+      win?.close()
+      setError(message(caught))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  async function signOut() {
+    setBusy('out')
+    setError(null)
+    try {
+      await aiPlugins.signOut(plugin.name)
+      onPlugin(await aiPlugins.getRemote(plugin.name))
+    } catch (caught) {
+      setError(message(caught))
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const failed = plugin.oauth?.status === 'error'
+  return (
+    <div className="mt-2 space-y-2" aria-label={`Sign-in for ${plugin.name}`} role="group">
+      {failed && (
+        <p role="alert" className="text-xs text-warn">
+          Sign-in needs renewing: {plugin.oauth?.error ?? 'the server refused it'}
+        </p>
+      )}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" variant="outline" onClick={() => void start()} disabled={busy !== null} aria-busy={busy === 'start'} {...USER_ONLY}>
+          {busy === 'start' && <Spinner />}
+          {plugin.oauth ? 'Sign in again' : 'Sign in'}
+        </Button>
+        {plugin.oauth && (
+          <Button size="sm" variant="ghost" onClick={() => void signOut()} disabled={busy !== null} aria-busy={busy === 'out'} {...USER_ONLY}>
+            {busy === 'out' && <Spinner />}
+            Sign out
+          </Button>
+        )}
+        <Button size="sm" variant="ghost" onClick={() => setOwnApp(!ownApp)} aria-expanded={ownApp} {...USER_ONLY}>
+          {ownApp ? 'Use registration' : 'Use my own OAuth app'}
+        </Button>
+      </div>
+      {waiting && (
+        <p role="status" className="text-xs text-muted-foreground">
+          Finish signing in in the window that opened…
+        </p>
+      )}
+      {ownApp && (
+        <div className="grid gap-3 sm:grid-cols-2" {...USER_ONLY}>
+          <p className="text-xs text-muted-foreground sm:col-span-2">
+            For a server without dynamic registration (GitHub): register an OAuth app (a GitHub App gives expiring
+            tokens limited to the repositories it is installed on) with the callback URL{' '}
+            <span className="sb-num break-all">{callback}</span>
+          </p>
+          <div>
+            <Label htmlFor={`oauth-client-${plugin.name}`} className="mb-1.5 font-normal">
+              Client ID
+            </Label>
+            <Input id={`oauth-client-${plugin.name}`} value={clientId} onChange={(event) => setClientId(event.target.value)} className="sb-num" />
+          </div>
+          <div>
+            <Label htmlFor={`oauth-secret-${plugin.name}`} className="mb-1.5 font-normal">
+              Client secret
+            </Label>
+            <Input
+              id={`oauth-secret-${plugin.name}`}
+              type="password"
+              autoComplete="off"
+              value={clientSecret}
+              onChange={(event) => setClientSecret(event.target.value)}
+              placeholder="(optional)"
+              className="sb-num"
+            />
+          </div>
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="text-xs text-warn">
+          {error}
+        </p>
+      )}
+    </div>
+  )
+}
+
+/** The Auth line: the header and its last four, the sign-in, or none. */
+function authLine(plugin: RemotePlugin): string {
+  if (plugin.auth) return `${plugin.auth.header}: …${plugin.auth.last4}`
+  if (plugin.oauth?.status === 'connected') return `Signed in with ${plugin.oauth.issuer}`
+  if (plugin.oauth) return `Sign-in failed (${plugin.oauth.issuer})`
+  return 'None'
+}
+
 /** A test's line: its result (with how many tools it listed) and the server it reached. */
 function testSummary(test: RefreshResult['test']): string {
   return `${test.detail}${test.server ? ` (${test.server.name} ${test.server.version})` : ''}`
@@ -152,6 +313,7 @@ function RemoteCard({
   readError,
   onSource,
   onRemoved,
+  onPlugin,
 }: {
   plugin: RemotePlugin
   /** The plugin's capabilities source, once read. */
@@ -160,6 +322,8 @@ function RemoteCard({
   readError: string | undefined
   onSource: (source: SourceView) => void
   onRemoved: (name: string) => void
+  /** The plugin as a sign-in or sign-out left it. */
+  onPlugin: (plugin: RemotePlugin) => void
 }) {
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -234,10 +398,11 @@ function RemoteCard({
             <dt className="text-muted-foreground">Endpoint</dt>
             <dd className="sb-num break-all">{plugin.url}</dd>
             <dt className="text-muted-foreground">Auth</dt>
-            <dd className="sb-num">{plugin.auth ? `${plugin.auth.header}: …${plugin.auth.last4}` : 'None'}</dd>
+            <dd className="sb-num">{authLine(plugin)}</dd>
             <dt className="text-muted-foreground">Tools</dt>
             <dd className="sb-num">{plugin.tool_prefix}*</dd>
           </dl>
+          {!plugin.auth && <SignIn plugin={plugin} onPlugin={onPlugin} />}
           {test && (
             // #3048: the test's line; the rows it listed stay folded under the source's summary.
             <p role="status" className={test.ok ? 'mt-2 text-xs text-ok' : 'mt-2 text-xs text-warn'}>
@@ -328,6 +493,8 @@ export function RemotePluginsPanel() {
     }
   }, [unreadKey])
 
+  const onPlugin = (next: RemotePlugin) => state.setData((state.data ?? []).map((p) => (p.name === next.name ? next : p)))
+
   const onRemoved = (name: string) => {
     state.setData((state.data ?? []).filter((p) => p.name !== name))
     setOwn(({ [sourceId(name)]: _gone, ...rest }) => rest)
@@ -367,6 +534,7 @@ export function RemotePluginsPanel() {
                 readError={readErrors[plugin.name]}
                 onSource={onSource}
                 onRemoved={onRemoved}
+                onPlugin={onPlugin}
               />
             ))}
           </ul>
