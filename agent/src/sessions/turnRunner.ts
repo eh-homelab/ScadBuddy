@@ -16,7 +16,7 @@ import { type AccessRow, BUILTIN_SOURCES, packageServerSource, packageSource, ty
 import { type CallPlugin, offCallItem, subagentItem } from '../access/items.js'
 import type { PackageAccess } from '../access/resolver.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
-import { NATIVE_NAMES, nativeBuiltinTools } from '../access/nativeBuiltins.js'
+import { NATIVE_NAMES, TASK_TOOLS, nativeBuiltinTools } from '../access/nativeBuiltins.js'
 import { liveAccess } from '../access/live.js'
 import { SeamLedger } from '../harness/seamLedger.js'
 import { HTTP_SERVER, HTTP_TOOL, httpAccessTierOf, httpRequestServer, httpTierOf } from '../harness/httpRequest.js'
@@ -533,7 +533,7 @@ export class TurnRunner {
         ]),
       )
       // Claude Code's task list in the session directory, so it moves with it (Step 9.6, stateDirs.ts).
-      await linkTaskList(this.deps.paths, cwd, id)
+      if (nativeTools.some((t) => TASK_TOOLS.has(t.name))) await linkTaskList(this.deps.paths, cwd, id)
       // The turn's ScadBuddy calls as activities (plan 2026-10-13 Step 9.2), each given the gate
       // entry the seam approved it on, and bounded by the turn's own limit. Without a starter (no
       // Temporal), they run here.

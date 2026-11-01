@@ -906,8 +906,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     no working directory the file tools are not offered). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
     worker pod (no bwrap, and `unshare --mount` is refused under AppArmor; measured
     2026-11-01), so a sandbox pod (#779) comes first. An allowed package's `builtinTools`
-    only switch an `off` one on, at its package tier (`outward` by default); they no longer
-    decide what exists. The task list is `$CLAUDE_CONFIG_DIR/tasks/<session id>/` (measured
+    only switch on one that is `off` by default, at its package tier (`outward` by default),
+    never one a person switched off (the source, or the item's row); they no longer decide
+    what exists. The task list is `$CLAUDE_CONFIG_DIR/tasks/<session id>/` (measured
     on SDK 0.3.310), linked to the session directory's `_claude/tasks/`
     (`stateDirs.ts` `linkTaskList`), so it moves with the workspace.
     **Breaking for package authors:** the `builtin__<Name>` file and task tools of the

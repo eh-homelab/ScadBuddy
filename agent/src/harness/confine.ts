@@ -68,6 +68,8 @@ export function confineGuard(root: string | undefined): InputGuard {
     return (toolName) =>
       Promise.resolve(PATHS[toolName] ? { deny: `${toolName} is not available: this turn has no working directory.` } : undefined)
   }
+  // Resolved once per turn: the session directory is placed before the turn and replaced only
+  // between turns (workspace/directory.ts), so it is the same directory for this guard's life.
   let realRoot: Promise<string> | undefined
   const deny = (tool: string, why: string): GuardVerdict => ({
     deny: `${tool} reaches only the session's working directory (${root}): ${why}`,

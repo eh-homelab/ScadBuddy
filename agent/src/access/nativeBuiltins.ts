@@ -24,6 +24,7 @@ export const NATIVE_BUILTINS: readonly NativeBuiltin[] = [
   { name: 'Read', access: 'read', label: 'Read a file', description: "Reads a file of the session's working directory." },
   { name: 'Glob', access: 'read', label: 'Find files', description: "Lists the session directory's files that match a glob pattern." },
   { name: 'Grep', access: 'read', label: 'Search files', description: "Searches the session directory's files with a regular expression." },
+  // The task tools write, but only the session's own task list (no file, nothing outward), so `read`.
   { name: 'TaskCreate', access: 'read', label: 'Add a task', description: "Adds a task to the session's task list." },
   { name: 'TaskGet', access: 'read', label: 'Read a task', description: "Reads one task of the session's task list." },
   { name: 'TaskList', access: 'read', label: 'List the tasks', description: "Lists the session's task list." },
@@ -47,6 +48,9 @@ export const NATIVE_BUILTINS: readonly NativeBuiltin[] = [
 
 export const NATIVE_NAMES: ReadonlySet<string> = new Set(NATIVE_BUILTINS.map((b) => b.name))
 
+/** The task-list tools: a turn that has one gets its list linked into the session directory (stateDirs.ts `linkTaskList`). */
+export const TASK_TOOLS: ReadonlySet<string> = new Set(['TaskCreate', 'TaskGet', 'TaskList', 'TaskUpdate'])
+
 /** One built-in's access now: its item under `builtin:claude-code`, and the packages that name it (resolver.ts `native`). */
 export type NativeAccess = {
   native(name: string, declared: ToolAccess, packages: readonly string[]): Promise<ToolAccess>
@@ -55,7 +59,8 @@ export type NativeAccess = {
 /**
  * The built-ins a turn offers Claude Code, each at its tier: every one whose access is not
  * `off`. `named` is each built-in the turn's allowed packages name, with those packages: a
- * package can switch an `off` one on, never one off.
+ * package can switch on one `off` by default, never one a person switched off, and never one off
+ * (resolver.ts `native`).
  */
 export async function nativeBuiltinTools(
   access: NativeAccess,

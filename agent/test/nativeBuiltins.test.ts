@@ -2,7 +2,9 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, symlink, writeFile } 
 import os from 'node:os'
 import path from 'node:path'
 import { describe, expect, it } from 'vitest'
+import type { AccessRow } from '../src/access/model.js'
 import { NATIVE_BUILTINS, nativeBuiltinTools } from '../src/access/nativeBuiltins.js'
+import { AccessResolver } from '../src/access/resolver.js'
 import { confineGuard } from '../src/harness/confine.js'
 import { claudeConfigDir } from '../src/harness/options.js'
 import { TASK_LIST_DIR, ensureStateDirs, linkTaskList } from '../src/harness/stateDirs.js'
@@ -166,5 +168,28 @@ describe("the task list's link into the session directory", () => {
     }
     expect((await lstat(old)).isDirectory()).toBe(true)
     expect(await readFile(path.join(old, '1.json'), 'utf8')).toContain('kept')
+  })
+})
+
+describe('AccessResolver.native, over stored rows', () => {
+  const CC = 'builtin:claude-code'
+  const row = (source: string, item: string, access: string): AccessRow => ({ source, item, access, updated_by: 'test' })
+  const resolver = (rows: AccessRow[]) => new AccessResolver({ rows: (sources) => Promise.resolve(rows.filter((r) => sources.includes(r.source))) })
+
+  it('is the default with no row, and the row over the default', async () => {
+    expect(await resolver([]).native('Read', 'read', [])).toBe('read')
+    expect(await resolver([row(CC, 'Write', 'outward')]).native('Write', 'write', [])).toBe('outward')
+    expect(await resolver([row(CC, 'Read', 'off')]).native('Read', 'read', [])).toBe('off')
+  })
+
+  it("switches a built-in off by default on for a package that names it, at the package's tier", async () => {
+    expect(await resolver([]).native('Bash', 'off', ['shell'])).toBe('outward')
+    expect(await resolver([row('package:shell', 'builtin:Bash', 'write')]).native('Bash', 'off', ['shell'])).toBe('write')
+  })
+
+  it('keeps it off for a package when the source is switched off, or its own row says off', async () => {
+    expect(await resolver([row(CC, '*', 'off')]).native('Bash', 'off', ['shell'])).toBe('off')
+    expect(await resolver([row(CC, '*', 'off')]).native('Read', 'read', ['shell'])).toBe('off')
+    expect(await resolver([row(CC, 'Bash', 'off')]).native('Bash', 'off', ['shell'])).toBe('off')
   })
 })

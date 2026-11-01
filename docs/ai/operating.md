@@ -959,9 +959,10 @@ session's Claude Code process offers its own built-ins, each an item of the acce
   root filesystem propagation: Permission denied" (AppArmor `cri-containerd.apparmor.d`,
   enforce), and the image has no `bwrap`. Unsandboxed, `Bash` could read the KEK mount and
   every session's directory. A sandbox pod (#779) comes first.
-- An `allow_refused` package's `builtinTools` only switch an `off` built-in on, at the
-  package's own tier for it (`outward` by default, so each call parks). They no longer
-  decide which built-ins exist.
+- An `allow_refused` package's `builtinTools` only switch on a built-in that is `off` by
+  default, at the package's own tier for it (`outward` by default, so each call parks).
+  The source switched off, or the item's own row set to `off`, keeps it off whatever a
+  package names. They no longer decide which built-ins exist.
 - The task list. Measured on the bundled Claude Code (SDK 0.3.310): `TaskCreate` keeps it
   in `$CLAUDE_CONFIG_DIR/tasks/<session id>/<n>.json`, in neither the transcript nor the
   cwd. The config directory is the pod's own, so that path is a link to the session
