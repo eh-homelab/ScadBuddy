@@ -822,7 +822,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     the plugin's next segment would seed it and appended to `ai_session_entries` under the
     session's own id with its `mcp__durable__` tool names renamed, `end`, then AgentSession
     under the same workflow id). Operators run `node dist/migrate-durable-sessions.js
-    --dry-run` (Queries only) and then without the flag, from a pod with the KEK; Phase 8
+    --dry-run` (Queries only) and then with `--stop-on-failure`, from a pod with the KEK; Phase 8
     waits for its `open_durable_sessions: 0`. Only `test/support/durableSessionTurns.ts`
     (`durableSends`) still sends a turn to a DurableSession, for the Python turn's tests.
   - The workspace (#2329, `docs/ai/operating.md` §13): `src/workspace/store.ts`
