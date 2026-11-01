@@ -473,7 +473,10 @@ async def pollers_elsewhere(
     """The workers of ``build_id`` other than ``identities`` (the asking worker's own)
     that polled ``task_queue``'s workflow tasks in the last ``within`` seconds:
     `DescribeTaskQueue`'s pollers, which name each one's identity and build (measured on
-    prod, 2026-10-27)."""
+    prod, 2026-10-27). A stopping worker leaves its pinned runs only to one of them that
+    `any_serving` finds unmarked (#4869): in a rollout the build is still current while
+    the new pods, of the next build, start, and none of them serves a run pinned to this
+    one."""
     described = await client.workflow_service.describe_task_queue(
         DescribeTaskQueueRequest(
             namespace=client.namespace,
@@ -500,43 +503,6 @@ def any_serving(
     seconds (`mark_draining`), so it serves rather than drains (#4948)."""
     marked_since = datetime.now(UTC) - timedelta(seconds=marked_within)
     return any(identity not in marks or marks[identity] < marked_since for identity in others)
-
-
-async def polled_elsewhere(
-    client: Client,
-    task_queue: str,
-    *,
-    deployment_name: str,
-    build_id: str,
-    identities: Collection[str],
-    marked_within: float,
-    within: float = POLLER_SEEN_WITHIN,
-) -> bool:
-    """Whether another worker of ``build_id`` serves ``task_queue``: one of
-    `pollers_elsewhere` that `any_serving` finds unmarked. A stopping worker leaves its
-    pinned runs to such a worker only (#4869): in a rollout the build is still current
-    while the new pods, of the next build, start, and none of them serves a run pinned to
-    this one.
-
-    A poller marked draining does not count (#4948): two pods of one build that stop
-    together would each count the other. The marks are read only once another poller is
-    found; when they cannot be read, the answer is False."""
-    others = await pollers_elsewhere(
-        client,
-        task_queue,
-        deployment_name=deployment_name,
-        build_id=build_id,
-        identities=identities,
-        within=within,
-    )
-    if not others:
-        return False
-    try:
-        marks = await draining_marks(client, deployment_name=deployment_name, build_id=build_id)
-    except RPCError:
-        logger.warning("could not read this build's drain marks", exc_info=True)
-        return False
-    return any_serving(others, marks, marked_within=marked_within)
 
 
 async def is_current(
