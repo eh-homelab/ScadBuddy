@@ -2,8 +2,8 @@
 -- what the previous build never names: the render pending key is no conflict target of
 -- its inserts, and its print-watcher hand-off checks `to_regclass('print_watches')`
 -- first. The columns that build still reads and writes (`print_runs.heartbeat_at`,
--- `render_jobs.params`, `workflow_definitions.script`) are dropped by a later file,
--- once this release is deployed everywhere (#5139).
+-- `render_jobs.params` and a flow version's script) are dropped by a later file, once
+-- this release is deployed everywhere (#5139).
 --
 -- #1052 (#1061): a run a pre-#1052 pod left running has no execution to end it, and
 -- may have queued (the words `bambuddy/runs.py` gave it as `UPGRADE_INTERRUPTED`); this
