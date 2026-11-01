@@ -101,6 +101,7 @@ from scadbuddy.slicing.start import native_slice_starter
 from scadbuddy.slicing.store import NativeSliceStore
 from scadbuddy.spools.component import Spools
 from scadbuddy.spools.providers import SettingsOnly, discover_providers
+from scadbuddy.spools.spool_providers import native_use_hook
 from scadbuddy.spools.store import SpoolStore
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.bambuddy import RenderSettingsSource
@@ -1180,6 +1181,13 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
 
         return await lan_first(lan, subject.run_subject, bambuddy)
 
+    # A native run's plan lays the providers' records over its trays (#4551): the same
+    # providers the API discovers, over this worker's settings. Its follow takes what a
+    # native print used off ScadBuddy's own spools (#4643).
+    spools = Spools(
+        store=SpoolStore(pool),
+        providers=discover_providers(SettingsOnly(settings_store), None),
+    )
     follower = Follower(
         outputs=outputs,
         observer=observer,
@@ -1188,7 +1196,11 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         events=events,
         on_settled=[settle_hook(rack, links, settings_store.load)],
         # A LAN print's last print and rack picks follow its reads (#4644, #4543).
-        on_read=[lan_last_print(OutputPrintStore(pool)), lan_settle_hook(rack)],
+        on_read=[
+            lan_last_print(OutputPrintStore(pool)),
+            lan_settle_hook(rack),
+            native_use_hook(spools),
+        ],
         newest_failed=newest_failed_from(
             print_runs, settings_store.load, latest=recent_runs.latest
         ),
@@ -1224,12 +1236,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             native=native,
             printers=printers,
             reports=reports,
-            # A native run's plan lays the providers' records over its trays (#4551):
-            # the same providers the API discovers, over this worker's settings.
-            spools=Spools(
-                store=SpoolStore(pool),
-                providers=discover_providers(SettingsOnly(settings_store), None),
-            ),
+            spools=spools,
         )
     )
     # A LAN print's sliced blob, through the API's internal route with a token signed

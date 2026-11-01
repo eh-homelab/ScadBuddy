@@ -3,7 +3,8 @@ records the native spool provider (`spools/spool_providers.py`) offers the overl
 
 Unlike ``spool_provider_records``, which is a cache each provider's refresh rewrites,
 these are the records themselves: a person keeps them (``/api/v1/native-spools``,
-`api/native_spools.py`), and nothing else writes them yet. A record's RFID keys are
+`api/native_spools.py`), and a native print takes what it used off them
+(``native_spool_uses``, :meth:`NativeSpoolStore.settle_uses`). A record's RFID keys are
 cleaned as the overlay cleans a tray's (`spools.models.clean_tray_uuid`,
 `clean_tag_uid`), so a record a person types from a tray's report finds that tray's
 spool; one unarchived record holds a key (the migration's partial unique indexes).
@@ -12,9 +13,9 @@ spool; one unarchived record holds a key (the migration's partial unique indexes
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import UUID
 
 from psycopg import Connection, errors
@@ -23,6 +24,10 @@ from psycopg_pool import ConnectionPool
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 from scadbuddy.spools.models import SpoolSnapshot, clean_tag_uid, clean_tray_uuid
+
+if TYPE_CHECKING:
+    from scadbuddy.bambuddy.filaments import SpoolOption
+
 
 Conn = Connection[DictRow]
 
@@ -133,6 +138,34 @@ class NativeSpool(BaseModel):
         )
 
 
+class SpoolUse(BaseModel):
+    """What one slot of a LAN start uses of a native spool (``native_spool_uses``)."""
+
+    slot_id: int
+    spool_id: UUID
+    grams: float
+
+
+def spool_uses(spools: Mapping[int, SpoolOption], grams: Mapping[int, float]) -> list[SpoolUse]:
+    """Each slot's use of the native spool in its tray, by slot: the overlay's native
+    record of the slot's chosen tray (`SpoolOption.records`, found there by RFID or a
+    person's tray link), and the grams the sliced plate gives the slot
+    (`slicing.slice_info.plate_grams`). A slot with no native record, or that prints
+    nothing, uses none."""
+    uses: list[SpoolUse] = []
+    for slot_id in sorted(spools):
+        record = spools[slot_id].records.get("native")
+        used = grams.get(slot_id, 0.0)
+        if record is None or used <= 0:
+            continue
+        try:
+            spool_id = UUID(record.record_id)
+        except ValueError:
+            continue
+        uses.append(SpoolUse(slot_id=slot_id, spool_id=spool_id, grams=used))
+    return uses
+
+
 class NativeSpoolExistsError(ValueError):
     """An unarchived spool already carries the tag."""
 
@@ -216,3 +249,65 @@ class NativeSpoolStore:
         with self._pool.connection() as conn:
             cursor = conn.execute("DELETE FROM native_spools WHERE id = %s", (spool_id,))
         return cursor.rowcount > 0
+
+    # -- what native prints use ------------------------------------------------------
+
+    def record_uses(self, run_id: str, subtask_name: str, uses: Sequence[SpoolUse]) -> None:
+        """What a LAN start uses, as the printer takes it. A start saved already (an
+        attempt that starts again) keeps its rows; a spool deleted since is left out."""
+        if not uses:
+            return
+        with self._pool.connection() as conn, conn.transaction():
+            for use in uses:
+                conn.execute(
+                    "INSERT INTO native_spool_uses (run_id, subtask_name, slot_id, spool_id, grams)"
+                    " SELECT %s, %s, %s, id, %s FROM native_spools WHERE id = %s"
+                    " ON CONFLICT DO NOTHING",
+                    (run_id, subtask_name, use.slot_id, use.grams, use.spool_id),
+                )
+
+    def settle_uses(self, run_id: str, stages: Sequence[str]) -> set[UUID]:
+        """Settle ``run_id``'s uses once its print has settled: ``stages`` is how each of
+        its LAN starts ended, in the order its result lists them
+        (``print_runs.result.lan``, as the follow's progress reads them). A start that
+        ended ``done`` takes its grams off its spools (never below 0, and not from a
+        spool whose weight is not kept); every other start takes nothing. Each row is
+        settled once, under its row lock, so two readers of one print take it off once.
+        The spools whose weight changed."""
+        with self._pool.connection() as conn, conn.transaction():
+            pending = conn.execute(
+                "SELECT subtask_name, slot_id, spool_id, grams FROM native_spool_uses"
+                " WHERE run_id = %s AND settled_at IS NULL FOR UPDATE",
+                (run_id,),
+            ).fetchall()
+            if not pending:
+                return set()
+            row = conn.execute(
+                "SELECT result->'lan' AS lan FROM print_runs WHERE id = %s", (run_id,)
+            ).fetchone()
+            starts = row["lan"] if row is not None and isinstance(row["lan"], list) else []
+            done = {
+                start.get("subtask_name")
+                for start, stage in zip(starts, stages, strict=False)
+                if isinstance(start, dict) and stage == "done"
+            }
+            taken: dict[UUID, float] = {}
+            for use in pending:
+                applied = use["subtask_name"] in done
+                conn.execute(
+                    "UPDATE native_spool_uses SET settled_at = now(), applied = %s"
+                    " WHERE run_id = %s AND subtask_name = %s AND slot_id = %s",
+                    (applied, run_id, use["subtask_name"], use["slot_id"]),
+                )
+                if applied:
+                    taken[use["spool_id"]] = taken.get(use["spool_id"], 0.0) + use["grams"]
+            changed: set[UUID] = set()
+            for spool_id, grams in taken.items():
+                updated = conn.execute(
+                    "UPDATE native_spools SET remaining_g = GREATEST(remaining_g - %s, 0),"
+                    " updated_at = now() WHERE id = %s AND remaining_g IS NOT NULL RETURNING id",
+                    (grams, spool_id),
+                ).fetchone()
+                if updated is not None:
+                    changed.add(spool_id)
+        return changed

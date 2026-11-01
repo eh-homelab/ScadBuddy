@@ -177,6 +177,9 @@ import type {
   Filament,
   FilamentInput,
   FilamentPatch,
+  NativeSpool,
+  NativeSpoolCreate,
+  NativeSpoolPatch,
   Fulfilment,
   FulfilmentInput,
   OrderAttachment,
@@ -1768,6 +1771,14 @@ export const api = {
   /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
   getSpoolInventory: (includeArchived = false) =>
     request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
+  /** #4643 — ScadBuddy's own spools, the native spool provider's records. */
+  nativeSpools: (includeArchived = false) =>
+    request<NativeSpool[]>(`/native-spools${includeArchived ? '?include_archived=true' : ''}`),
+  createNativeSpool: (body: NativeSpoolCreate) =>
+    request<NativeSpool>('/native-spools', { method: 'POST', body: JSON.stringify(body) }),
+  updateNativeSpool: (id: string, body: NativeSpoolPatch) =>
+    request<NativeSpool>(`/native-spools/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteNativeSpool: (id: string) => request<void>(`/native-spools/${seg(id)}`, { method: 'DELETE' }),
 
   /**
    * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,
