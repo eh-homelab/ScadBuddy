@@ -43,7 +43,9 @@ def leak(serial: str) -> str:
 class Leaky:
     """A store whose every call fails with a serial in its message, as a database's might."""
 
-    async def seen(self, printer_id: int, serials: Iterable[str]) -> None:
+    async def seen(
+        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
+    ) -> None:
         raise RuntimeError(leak(next(iter(serials))))
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:

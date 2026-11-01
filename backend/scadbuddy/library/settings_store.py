@@ -35,7 +35,7 @@ import json
 import logging
 import time
 import types
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, LiteralString, Self, Union, get_args, get_origin
@@ -262,11 +262,21 @@ class ModelPrintChoices(BaseModel):
     """
 
     printer_id: int | None = None
+    #: The registry printer (#4971), kept only for one with no Bambuddy id (a LAN-only
+    #: printer): while the previous build may still write ``printer_id``, that id wins.
+    printer: str | None = Field(default=None, max_length=64)
     filament_plan: list[SlotChoice] = Field(default_factory=list)
     nozzles: list[NozzleChoice] = Field(default_factory=list, max_length=2)
     tier: Tier | None = None
     process_name: str | None = Field(default=None, max_length=200)
     print_sequence: PrintSequence | None = None
+
+    @model_validator(mode="after")
+    def _one_printer_key(self) -> Self:
+        """A printer with a Bambuddy id is remembered by it alone (#4971)."""
+        if self.printer_id is not None and self.printer is not None:
+            self.printer = None
+        return self
 
     @field_validator("nozzles")
     @classmethod
@@ -426,8 +436,13 @@ class StoredSettings(BambuddyIds):
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     #: Stringified Bambuddy printer id -> how ScadBuddy picks that printer's rack nozzle
     #: (#836). Stored like ``printer_print_options``, one key at a time in the jsonb
-    #: ``settings`` row: no table of its own, and not in ``OWN_TABLES``.
+    #: ``settings`` row: no table of its own, and not in ``OWN_TABLES``. A printer with no
+    #: Bambuddy id (LAN-only) is keyed by its registry id in both maps (#4971); one that
+    #: has one keeps its Bambuddy key while the previous build reads it.
     printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
+    #: The default printer as a registry id (#4971), set only for a printer with no
+    #: Bambuddy id: one that has one is ``printer_id``, which the previous build reads.
+    default_printer: str | None = None
 
     @field_validator(
         "print_run_retention_seconds",
@@ -501,11 +516,19 @@ class StoredSettings(BambuddyIds):
             return None
         return self.printer_bed_types.get(str(bambuddy_printer_id))
 
-    def rack_algorithm(self, printer_id: int | None) -> RackAlgorithm:
-        """The printer's remembered rack algorithm, else Least used (spec §4)."""
-        if printer_id is None:
-            return DEFAULT_ALGORITHM
-        return self.printer_rack_algorithms.get(str(printer_id), DEFAULT_ALGORITHM)
+    def rack_algorithm(self, printer_id: int | None, printer: str | None = None) -> RackAlgorithm:
+        """The printer's remembered rack algorithm, else Least used (spec §4): by its
+        Bambuddy id, else by its registry id (#4971)."""
+        return _printer_entry(self.printer_rack_algorithms, printer_id, printer) or (
+            DEFAULT_ALGORITHM
+        )
+
+    def printer_options(
+        self, printer_id: int | None, printer: str | None = None
+    ) -> PrintOptions | None:
+        """The printer's remembered print options (#88): by its Bambuddy id, else by its
+        registry id (#4971)."""
+        return _printer_entry(self.printer_print_options, printer_id, printer)
 
     @field_validator("asset_fetch_domains")
     @classmethod
@@ -542,6 +565,16 @@ class StoredSettings(BambuddyIds):
         return _s3_settings(functools.partial(getattr, self))
 
 
+def _printer_entry[T](
+    entries: Mapping[str, T], printer_id: int | None, printer: str | None
+) -> T | None:
+    """A per-printer map's entry (#4971): the Bambuddy key, which both builds write,
+    else the registry key a printer with no Bambuddy id is stored under."""
+    if printer_id is not None and (found := entries.get(str(printer_id))) is not None:
+        return found
+    return entries.get(printer) if printer is not None else None
+
+
 class SettingsPatch(BaseModel):
     """An omitted field is left alone; an explicit ``null`` clears it; ``reset`` names
     env-seeded fields to put back on the deployment's value (#322).
@@ -564,6 +597,9 @@ class SettingsPatch(BaseModel):
     public_url: str | None = None
     library_folder_id: int | None = None
     printer_id: int | None = None
+    #: The default printer by registry id (#4971); the route stores a printer that has a
+    #: Bambuddy id as ``printer_id`` instead, so the two never disagree.
+    default_printer: str | None = Field(default=None, max_length=64)
     default_plate: str | None = None
     #: ``null`` puts it back to millimetres.
     display_unit: DisplayUnit | None = None
@@ -1024,7 +1060,12 @@ class SettingsStore:
         return self._written("printer_bed_type")
 
     def set_printer_rack_algorithm(
-        self, printer_id: int, algorithm: RackAlgorithm | None, version: int | None = None
+        self,
+        printer_id: int | str,
+        algorithm: RackAlgorithm | None,
+        version: int | None = None,
+        *,
+        stale: Sequence[str] = (),
     ) -> RackAlgorithm:
         """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it.
         Returns the printer's algorithm now.
@@ -1038,7 +1079,11 @@ class SettingsStore:
         Bounded by ``RACK_ALGORITHM_WRITE_TIMEOUT`` for the pool wait and again for the
         write, so it commits well inside the print dialog's give-up or not at all
         (#1129). Nothing is read back afterwards: an unbounded read of every setting
-        could outlast the give-up on a save that has already landed."""
+        could outlast the give-up on a save that has already landed.
+
+        ``printer_id`` is the map's key: a Bambuddy id, or the registry id of a printer
+        with none (#4971). ``stale`` keys are removed in the same write: a linked
+        printer's registry-id entry from before it was linked."""
         bound_ms = int(RACK_ALGORITHM_WRITE_TIMEOUT * 1000)
         key = str(printer_id)
         with (
@@ -1063,6 +1108,8 @@ class SettingsStore:
                         f"a newer rack-algorithm save is stored for printer {printer_id}"
                     )
             _put_entry(conn, "printer_rack_algorithms", key, algorithm)
+            for gone in stale:
+                _put_entry(conn, "printer_rack_algorithms", gone, None)
         emit(self.events, SettingsChanged(section="printer_rack_algorithm"))
         return algorithm or DEFAULT_ALGORITHM
 
@@ -1125,7 +1172,12 @@ class SettingsStore:
         emit(self.events, SettingsChanged(section="model_project"))
 
     def save_print_options(
-        self, scope: OptionScope, key: str | None, options: PrintOptions
+        self,
+        scope: OptionScope,
+        key: str | None,
+        options: PrintOptions,
+        *,
+        stale: Sequence[str] = (),
     ) -> StoredSettings:
         """Replace one scope's print-option overrides.
 
@@ -1148,6 +1200,9 @@ class SettingsStore:
                     raise ValueError(f"the {scope!r} scope needs a key")
                 field = "printer_print_options" if scope == "printer" else "model_print_options"
                 _put_entry(conn, field, key, value)
+                # A linked printer's registry-id entry from before it was linked (#4971).
+                for gone in stale:
+                    _put_entry(conn, field, gone, None)
         return self._written("print_options")
 
     def forget_remembered(self) -> StoredSettings:

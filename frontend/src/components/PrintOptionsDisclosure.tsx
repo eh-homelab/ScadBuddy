@@ -42,6 +42,11 @@ interface Props {
    * the server says which one the per-printer scope keys on: the printer set in Settings.
    */
   printerId?: number | null
+  /**
+   * #4971 — the registry printer, which keys the per-printer scope of a printer with no
+   * Bambuddy id (a LAN-only one).
+   */
+  registryPrinter?: string | null
   /** Per-send overrides. Owned by the parent, which is what puts them on the wire. */
   value: PrintOptions
   onChange: (next: PrintOptions) => void
@@ -97,6 +102,7 @@ const HOLDING: readonly { name: OptionName; title: string; effect: string }[] = 
 export function PrintOptionsDisclosure({
   subject,
   printerId,
+  registryPrinter = null,
   value,
   onChange,
   onEffective,
@@ -144,7 +150,7 @@ export function PrintOptionsDisclosure({
   // The per-printer scope only applies once the printer is known; with none chosen and
   // none in Settings, saving there would go nowhere — hence the disabled option and the note below.
   const resolvedPrinterId = printerId ?? serverPrinterId
-  const printerKey = resolvedPrinterId === null ? null : String(resolvedPrinterId)
+  const printerKey = resolvedPrinterId == null ? registryPrinter : String(resolvedPrinterId)
   // The scope state can still say "This printer" when no printer is known (it opens on
   // it). Falling back here means a click always does
   // something visible, rather than hitting a guard and changing nothing on screen.

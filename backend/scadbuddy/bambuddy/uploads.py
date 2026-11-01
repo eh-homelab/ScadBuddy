@@ -114,9 +114,12 @@ class LostStart(BaseModel):
 
 
 class ProjectTarget(BaseModel):
-    """The printer and nozzle a Bambuddy project last printed on (#317)."""
+    """The printer and nozzle a Bambuddy project last printed on (#317). ``printer_id``
+    is its Bambuddy printer, ``0`` for one with none (a LAN-only printer), which then has
+    only ``printer``, its registry id (#4971)."""
 
     printer_id: int
+    printer: str | None = None
     nozzle_diameter: str | None = None
     #: Its ``NozzlePlan`` (#2166), as JSON: this module is below the plan's.
     nozzle_plan: dict[str, Any] | None = None
@@ -545,7 +548,9 @@ class BambuddyUploadStore:
     def _project_targets(self) -> dict[int, ProjectTarget]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT project_id, printer_id, nozzle_diameter, nozzle_plan"
+                "SELECT project_id, printer_id,"
+                " CASE WHEN printer_id = 0 THEN printer::text END AS printer,"
+                " nozzle_diameter, nozzle_plan"
                 " FROM project_print_targets ORDER BY project_id"
             ).fetchall()
         return {row["project_id"]: ProjectTarget.model_validate(row) for row in rows}
@@ -562,8 +567,9 @@ class BambuddyUploadStore:
     def _project_target(self, project_id: int) -> ProjectTarget | None:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT printer_id, nozzle_diameter, nozzle_plan FROM project_print_targets"
-                " WHERE project_id = %s",
+                "SELECT printer_id, CASE WHEN printer_id = 0 THEN printer::text END AS printer,"
+                " nozzle_diameter, nozzle_plan"
+                " FROM project_print_targets WHERE project_id = %s",
                 (project_id,),
             ).fetchone()
         if row is None:
@@ -574,14 +580,15 @@ class BambuddyUploadStore:
         with self._pool.connection() as conn:
             conn.execute(
                 "INSERT INTO project_print_targets"
-                " (project_id, printer_id, nozzle_diameter, nozzle_plan)"
-                " VALUES (%s, %s, %s, %s) ON CONFLICT (project_id) DO UPDATE"
-                " SET printer_id = EXCLUDED.printer_id,"
+                " (project_id, printer_id, printer, nozzle_diameter, nozzle_plan)"
+                " VALUES (%s, %s, %s, %s, %s) ON CONFLICT (project_id) DO UPDATE"
+                " SET printer_id = EXCLUDED.printer_id, printer = EXCLUDED.printer,"
                 " nozzle_diameter = EXCLUDED.nozzle_diameter,"
                 " nozzle_plan = EXCLUDED.nozzle_plan, updated_at = now()",
                 (
                     project_id,
                     target.printer_id,
+                    target.printer,
                     target.nozzle_diameter,
                     Jsonb(target.nozzle_plan) if target.nozzle_plan is not None else None,
                 ),

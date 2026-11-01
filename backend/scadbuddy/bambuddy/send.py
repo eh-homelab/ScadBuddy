@@ -1288,6 +1288,8 @@ def resolve_print_options(
     scope: str | None,
     printer_id: int | None,
     request_scope: PrintOptions,
+    *,
+    printer: str | None = None,
 ) -> PrintOptions:
     """global → per-printer → per-subject → per-request, least specific first.
 
@@ -1297,7 +1299,7 @@ def resolve_print_options(
     """
     return resolve(
         settings.print_options,
-        settings.printer_print_options.get(str(printer_id)) if printer_id is not None else None,
+        settings.printer_options(printer_id, printer),
         settings.model_print_options.get(scope) if scope is not None else None,
         request_scope,
     )

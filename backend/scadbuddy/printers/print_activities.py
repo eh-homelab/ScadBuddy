@@ -303,10 +303,9 @@ class LanActivities:
         except (OSError, aiomqtt.MqttError, TimeoutError, ConnectionError):
             raise _unsure(f"{row.name} could not be reached over the LAN.") from None
         printer = status_from_report(row, first, now=first.received_at)
-        if row.bambuddy_printer_id is not None:
-            # The rack's hotends seen, once per report read, under the id the rack
-            # tables key on (#836): whatever the plate prints from, as prepare_run does.
-            await record_seen(self.d.rack, row.bambuddy_printer_id, printer)
+        # The rack's hotends seen, once per report read (#836), under both of the
+        # printer's ids (#4971): whatever the plate prints from, as prepare_run does.
+        await record_seen(self.d.rack, row.bambuddy_printer_id, printer, row.id)
         before = first.print
         error_before = _int(before.get("print_error"))
         if before.get("subtask_name") == input.subtask_name:
@@ -384,7 +383,7 @@ class LanActivities:
         if run_id is None or not picks:
             return
         await save_lan_picks(
-            self.d.rack, run_id, input.subtask_name, row.bambuddy_printer_id, picks
+            self.d.rack, run_id, input.subtask_name, row.bambuddy_printer_id, picks, row.id
         )
 
     async def _taken(

@@ -328,7 +328,7 @@ def _view(
             if remembered is not None
             else ModelPrintChoices()
         ),
-        rack_algorithm=settings.rack_algorithm(printer_id),
+        rack_algorithm=settings.rack_algorithm(printer_id, registry_printer),
         sliced=(ready.sliced_profile or SlicedProfile()) if ready.is_sliced else None,
     )
 
@@ -363,8 +363,7 @@ async def native_choices_for(
         overlay=overlay,
         provider_labels=provider_labels,
     )
-    if route.printer_id is not None:
-        await record_seen(rack, route.printer_id, status)
+    await record_seen(rack, route.printer_id, status, route.row.id)
     printers = [
         Printer(id=row.bambuddy_printer_id, name=row.name, model=row.model)
         for row in rows

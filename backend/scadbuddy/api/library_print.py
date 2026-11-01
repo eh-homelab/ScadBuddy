@@ -64,6 +64,7 @@ from scadbuddy.api.printing import (
     native_filaments,
     newest_run,
     opening_route,
+    remembered_printer,
 )
 from scadbuddy.api.prints import MEDIA_RESPONSES, _proxy
 from scadbuddy.bambuddy.catalogue import (
@@ -1125,12 +1126,10 @@ async def get_library_choices(
     settings = store.load()
     remembered = store.library_choices(file_id)
     native = await library.serving_native()
-    route = await opening_route(
-        settings,
-        printers,
-        printer=printer,
-        printer_id=printer_id or (remembered.printer_id if remembered else None),
-    )
+    # The remembered printer opens a native route only: Bambuddy's choices fall back
+    # from a remembered printer that is gone themselves (`choices_for`).
+    opening, opening_id = remembered_printer(printer, printer_id, remembered)
+    route = await opening_route(settings, printers, printer=opening, printer_id=opening_id)
     if route is not None:
         own = await native_library_source(
             file_id, native, store, uploads, paths, budget=budget, downloads=downloads
