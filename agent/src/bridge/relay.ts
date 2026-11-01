@@ -136,6 +136,8 @@ const SEALING_NEEDED =
   'no browser attached: the tab is connected to another agent replica, and reaching it there needs the agent ' +
   "service's secret key (SCADBUDDY_SECRET_KEY_FILE), which seals the call's contents in Temporal. Ask the operator to mount it."
 
+const NO_SEALING: RelayAnswer = { op: 'call', outcome: { ok: false, error: { code: 'no_browser', message: SEALING_NEEDED } } }
+
 const NO_ANSWER: RelayAnswer = {
   op: 'call',
   outcome: {
@@ -249,7 +251,7 @@ export class TemporalTabRelay implements TabRelay {
     if (jsonBytes(request) > MAX_BRIDGE_BYTES) return request.op === 'call' ? tooLarge('request') : undefined
     const sealing = this.#client
     // Refused rather than sent to Temporal unsealed; a status read answers "not connected".
-    if (!sealing) return request.op === 'call' ? { op: 'call', outcome: { ok: false, error: { code: 'no_browser', message: SEALING_NEEDED } } } : undefined
+    if (!sealing) return request.op === 'call' ? NO_SEALING : undefined
     try {
       const answer = await this.#viaTemporal(sealing, tabId, request, options.signal)
       if (answer === 'failed') return request.op === 'call' ? NO_ANSWER : undefined

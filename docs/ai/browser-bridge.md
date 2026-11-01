@@ -396,7 +396,7 @@ sequenceDiagram
   tab's route and live tools.
 - **The Postgres relay is gone (#4868):** the relay of #1916 (rows in
   `ai_bridge_messages`, NOTIFY `scadbuddy_bridge`) ran beside this path for one release
-  of #4780. No replica sends or answers it now. While a replica of the build before
+  of #4780. No replica of this build sends or answers it. While a replica of the build before
   #4868 still runs, a call it sends that way finds nobody to take it and answers "not
   connected" after 3 s; the tabs of both builds have `ai_tab_owners` rows, so that is
   only a tab that no replica holds. The table stays for one more release,
@@ -437,8 +437,9 @@ reaches an agent.
   with `catalog.ts`, tiers, forwarding, "no browser attached", the timeout, a dropped
   or replaced tab, the harness and `/mcp` projections, `tab.bind`, and pairing by code).
   The Postgres store: [`bridgePairings.pg.test.ts`](../../agent/test/bridgePairings.pg.test.ts).
-  Two replicas on one database:
-  [`bridgeRelay.pg.test.ts`](../../agent/test/bridgeRelay.pg.test.ts).
+  Two replicas through Temporal:
+  [`bridgeRelay.temporal.test.ts`](../../agent/test/bridgeRelay.temporal.test.ts), and the
+  relay alone: [`bridgeRelay.test.ts`](../../agent/test/bridgeRelay.test.ts).
 - The round trip in Node:
   [`agent/test/bridge.e2e.test.ts`](../../agent/test/bridge.e2e.test.ts) runs the tab's
   own `bridge.ts` and `link.ts` over a real socket against the agent's real server: an

@@ -97,6 +97,9 @@ covers the same ground more briefly.
   [browser-bridge.md](browser-bridge.md#replicas)). The Postgres relay of #1916 ran
   beside it for one release, and #4868 removed it: every replica since then claims its
   tabs in `ai_tab_owners`, so a call finds the owner there or answers "not connected".
+  A new replica's tab has no row until its host worker polls, so for those first seconds
+  of its start a call from another replica answers "not connected" (an old replica could
+  reach it through the Postgres relay before).
   `ai_bridge_messages` stays until #5109, because a replica of the build before #4868
   still writes it for a tab it finds no live owner for. `agent-tools` is unversioned,
   so while an old replica still polls it, it can take a `BridgeCall` workflow task. It
