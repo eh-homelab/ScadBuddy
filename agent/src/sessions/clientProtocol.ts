@@ -64,8 +64,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
      */
     images: AttachmentRefsSchema.optional(),
     /**
-     * Plan 5d: the new session's mode (spec §6.1). Absent, the `session_mode`
-     * setting's applies; with `sessionId` it is refused (routes/chat.ts).
+     * Taken and ignored (plan Step 6.3): every session is an AgentSession. Kept so a
+     * tab of an earlier release that still sends it is not refused.
      */
     mode: z.enum(SESSION_MODES).optional(),
   }),

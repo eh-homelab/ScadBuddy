@@ -31,7 +31,8 @@ import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
-import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, sessionWorkflow } from './support/agentSessions.js'
+import { SESSION_QUEUE, SESSION_WORKFLOW } from '../src/temporal/session/names.js'
 
 // Sessions end to end: the real Agent SDK and its bundled Claude Code binary,
 // pointed at the local fake Anthropic endpoint as a gateway (as
@@ -531,6 +532,71 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     expect(limited.status).toBe(429)
   })
 
+  /** The runtime a session's row records (`ai_sessions.runtime`). */
+  const runtimeOf = async (id: string) => (await db.sql<{ runtime: string | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${id}`)[0]?.runtime
+  const AGENT_SESSION = { type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE }
+
+  /**
+   * A classic session as an earlier release left one: its turns in ai_session_entries and its
+   * events in the log, no runtime and no workflow. A fork's copy of `parentId` is exactly that,
+   * once its row says classic.
+   */
+  async function classicSession(m: SessionManager, parentId: string): Promise<string> {
+    const copy = await m.fork(parentId, agentA)
+    await db.sql`UPDATE ai_sessions SET mode = 'classic', runtime = NULL WHERE id = ${copy.id}`
+    await expect(sessionWorkflow(copy.id)).rejects.toThrow()
+    return copy.id
+  }
+
+  it('a session created with mode classic runs as AgentSession', async () => {
+    script = () => ({ text: 'hello' })
+    const a = await replica()
+    const { session, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'hi', mode: 'classic' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(session.mode).toBe('durable')
+    expect(await runtimeOf(session.id)).toBe('unified')
+    expect(await sessionWorkflow(session.id)).toEqual(AGENT_SESSION)
+  }, 60_000)
+
+  it("a classic session's next send resumes its old turns", async () => {
+    let n = 0
+    script = () => ({ text: `answer ${++n}` })
+    const a = await replica()
+    const { session: first, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'remember the word teapot' })
+    await turn!.done
+    const id = await classicSession(a, first.id)
+
+    const next = await (await a.send(id, agentA, 'what was the word?')).done
+    expect(next).toMatchObject({ kind: 'result', subtype: 'success' })
+    // The model request carries its old turns.
+    const sent = conversation(fake.messageCalls().at(-1))
+    expect(sent).toContain('remember the word teapot')
+    expect(sent).toContain('answer 1')
+    expect(sent).toContain('what was the word?')
+    // From this send on it is an AgentSession.
+    expect(await runtimeOf(id)).toBe('unified')
+    expect(await sessionWorkflow(id)).toEqual(AGENT_SESSION)
+  }, 90_000)
+
+  it('fork works for every AgentSession', async () => {
+    script = (r) => ({ text: conversation(r).includes('go left') ? 'went left' : 'at the fork' })
+    const a = await replica()
+    const { session: parent, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'walk to the fork' })
+    await turn!.done
+    const classic = await classicSession(a, parent.id)
+    // An AgentSession that ran, and a classic session that never did: each child is an AgentSession.
+    for (const from of [parent.id, classic]) {
+      const child = await a.fork(from, agentA)
+      expect(child).toMatchObject({ parentId: from, mode: 'durable' })
+      expect(await runtimeOf(child.id)).toBe('unified')
+      expect(await (await a.send(child.id, agentA, 'go left')).done).toMatchObject({ kind: 'result', subtype: 'success' })
+      const sent = conversation(fake.messageCalls().at(-1))
+      expect(sent).toContain('walk to the fork')
+      expect(sent).toContain('go left')
+      expect(await sessionWorkflow(child.id)).toEqual(AGENT_SESSION)
+    }
+  }, 120_000)
+
   it('forks a session: the child records its parent, has the history, and diverges', async () => {
     script = (r) => ({ text: conversation(r).includes('left') ? 'went left' : conversation(r).includes('right') ? 'went right' : 'at the fork' })
     const a = await replica()
@@ -689,12 +755,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
   it('keeps a turn stopped by a restart in the transcript, so the next turn on another replica has it', async () => {
     let n = 0
     script = (r) => (conversation(r).includes('kettle') && ++n === 1 ? { hang: true } : { text: `answer ${n}` })
-    // A classic turn's own shutdown: an AgentSession turn moves to a live replica instead
-    // (sessionAffinity.temporal.test.ts, "a dead home is re-acquired after schedule-to-start").
     const a = await replica()
     const b = await replica()
-    classicTurns(a)
-    classicTurns(b)
     const { session, turn } = await a.start(agentA, { origin: 'mcp', prompt: 'remember the word teapot' })
     await turn!.done
     // Turn 2 is still with the "model" when the restart comes (2026-09-30).
@@ -703,8 +765,12 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
       await new Promise((r) => setTimeout(r, 50))
     }
     await a.stopTurns({ graceMs: 0, abortWaitMs: 10_000 })
-    expect(await cut.done).toEqual({ kind: 'interrupted' })
-    expect(await b.get(session.id, agentA)).toMatchObject({ status: 'idle', turnActive: false })
+    // Its AgentSession re-places the turn on a live host (sessionAffinity.temporal.test.ts, "a dead
+    // home is re-acquired after schedule-to-start"); this file's stack has one host queue, which
+    // replica A held, so the turn ends here instead.
+    expect(await cut.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/shutting down/) })
+    await expect.poll(async () => (await b.get(session.id, agentA)).status).toBe('failed')
+    expect(await b.get(session.id, agentA)).toMatchObject({ turnActive: false })
 
     // Replica B resumes from Postgres: the cut-off turn's prompt is there,
     // because stopTurns waited for the aborted query to end (and flush).

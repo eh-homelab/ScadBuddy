@@ -4,12 +4,14 @@ import { sessionWorkflowId } from '../gate/durable.js'
 import type { EventLog } from './eventLog.js'
 import { event, type ServerEvent } from './protocol.js'
 
-// The sweep of durable sessions left `running` (#2001, plan 5c Ruling 16). A durable
-// turn takes no lease, so SessionManager.reapExpired never sees one; its end is
-// finish_turn's, run by `session-<id>`. A claim is left with no turn behind it when the
+// The sweep of sessions left `running` (#2001, plan 5c Ruling 16). A turn takes no lease
+// (plan Step 6.3: every session is an AgentSession); its end is finish_turn's, run by
+// `session-<id>`. A classic turn left by an earlier release, once its lease runs out, is
+// swept the same way: a row with a live lease (`turn_id`, `lease_until` ahead) is left to
+// the pod that holds it, and its next send then runs as an AgentSession. A claim is left with no turn behind it when the
 // workflow ends (terminated, failed, reset) before finish_turn runs, or when a kept
 // claim's update-with-start never reached Temporal, so the workflow was never started.
-// Every later send is then refused `busy`. Each pass, a durable row `running`, or parked
+// Every later send is then refused `busy`. Each pass, a row `running`, or parked
 // on a call (`waiting_approval`, `waiting_input`: a gone workflow answers neither, #4133),
 // with no write for `graceMs` is described; when its workflow is closed, not found, or open
 // but holding no turn (its `turn` Query: the kept claim's Update never reached it,
@@ -81,8 +83,8 @@ export async function endLostTurn(
   ]
   const done = await sql.begin(async (tx) => {
     const [claimed] = await tx`
-      UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, updated_at = now()
-      WHERE id = ${row.id} AND mode = 'durable' AND status IN ${tx(TURN_STATUSES)}
+      UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, turn_id = NULL, lease_until = NULL, updated_at = now()
+      WHERE id = ${row.id} AND status IN ${tx(TURN_STATUSES)} AND (turn_id IS NULL OR lease_until IS NULL OR lease_until <= now())
         AND event_seq = ${row.event_seq}
       RETURNING id`
     return claimed ? await events.append(row.id, tail, tx) : undefined
@@ -129,7 +131,7 @@ export class DurableRunningSweep {
     const { sql, events } = this.#deps
     const page = (after: string) => sql<RunningRow[]>`
       SELECT id, event_seq, durable_offset FROM ai_sessions
-      WHERE mode = 'durable' AND status IN ${sql(TURN_STATUSES)} AND id::text > ${after}
+      WHERE status IN ${sql(TURN_STATUSES)} AND (turn_id IS NULL OR lease_until IS NULL OR lease_until <= now()) AND id::text > ${after}
         AND updated_at < now() - make_interval(secs => ${this.#graceMs / 1000})
       ORDER BY id::text LIMIT ${this.#batch}`
     let rows = await page(this.#after)

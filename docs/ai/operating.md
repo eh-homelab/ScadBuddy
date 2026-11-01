@@ -722,10 +722,8 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   characters (default 800, 0 for no cut, at most 100000), which Settings → Assistant →
   Hindsight memory writes through `PUT /api/v1/ai/settings/memory`
   ([§11](#11-automatic-hindsight-memory));
-  `session_mode`, the mode a new session gets when whoever starts it names none
-  (`durable` unless it says `classic`), which Settings → Assistant session mode writes
-  through `PUT /api/v1/ai/settings/session-mode`
-  ([`agent/src/routes/sessionMode.ts`](../../agent/src/routes/sessionMode.ts));
+  `session_mode` is no longer read: since plan Step 6.3 every session is an
+  `AgentSession` (spec 2026-10-13 §10.1), and its route and Settings section are gone;
   `durable_subagents`, `{url, peers}`: the URL an `agent-durable` worker gives its
   subagents for ScadBuddy's tools (null: its `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL`), and
   the addresses or CIDR ranges besides loopback the agent answers on

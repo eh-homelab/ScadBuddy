@@ -24,7 +24,7 @@ import { ready, type RouteModule } from './module.js'
 // as it is when the call runs. Narrow the network to the agent-durable pods with a
 // NetworkPolicy on the agent's port.
 //
-// Guarded and audited like the other AI settings routes (sessionMode.ts).
+// Guarded and audited like the other AI settings routes (sessionLimits.ts).
 
 export const DURABLE_SUBAGENTS_PATH = '/api/v1/ai/settings/durable-subagents'
 // agent-durable reads it too (scadbuddy_durable/session/runner.py SUBAGENTS_KEY).

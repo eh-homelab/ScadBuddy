@@ -133,9 +133,9 @@ export async function pendingInput(
 }
 
 /**
- * One session's entries, as `principal` may see them: a durable session's from its
- * workflow (DurableUnavailable when its worker does not answer), a classic one's
- * from its stores. Undefined when there is no such session for the principal.
+ * One session's entries, as `principal` may see them, from its workflow's gate
+ * (DurableUnavailable when its worker does not answer). Undefined when there is no such
+ * session for the principal.
  */
 export async function sessionPendingInput(
   sessions: SessionManager,
@@ -148,18 +148,16 @@ export async function sessionPendingInput(
   const grant = principal.kind !== 'browser' && (await sessions.approvals.holdsGrant(principal))
   const own = canSee(principal, { owner: session.owner, creator: session.creator, offer: null })
   if (principal.kind !== 'browser' && !grant && !own) return undefined
-  if (session.mode === 'durable') {
-    if (!sessions.durable) throw new DurableUnavailable("durable sessions need Temporal, and this agent service has none configured")
-    const entries = await sessions.durable.pendingInput(sessionId)
-    if (principal.kind === 'browser' || own) return { entries, summaries_truncated: false }
-    // A grant holder that does not own the session sees its approvals only, as in the
-    // aggregate, and none of a flow run's, which are the person's (#2482).
-    // One query for every entry, not one per approval (#2863).
-    const approvals = entries.filter((e) => e.kind === 'approval')
-    const inRun = await sessions.projection.inRunOf(approvals.map((e) => e.id))
-    return { entries: approvals.filter((e) => !inRun.has(e.id)), summaries_truncated: false }
-  }
-  return pendingInput(sessions, principal, { sessionId })
+  // Every session is an AgentSession (plan Step 6.3): its entries are the gate's.
+  if (!sessions.durable) throw new DurableUnavailable("sessions need Temporal, and this agent service has none configured")
+  const entries = await sessions.durable.pendingInput(sessionId)
+  if (principal.kind === 'browser' || own) return { entries, summaries_truncated: false }
+  // A grant holder that does not own the session sees its approvals only, as in the
+  // aggregate, and none of a flow run's, which are the person's (#2482).
+  // One query for every entry, not one per approval (#2863).
+  const approvals = entries.filter((e) => e.kind === 'approval')
+  const inRun = await sessions.projection.inRunOf(approvals.map((e) => e.id))
+  return { entries: approvals.filter((e) => !inRun.has(e.id)), summaries_truncated: false }
 }
 
 /** A response's cap (gate/validate.ts, plan 5b ruling 1). */
@@ -343,7 +341,7 @@ async function respondDurable(
   stale: RespondError,
 ): Promise<RespondResult> {
   const session = await sessions.projection.session(parsed.sessionId)
-  if (!session || session.mode !== 'durable') throw stale
+  if (!session) throw stale
   const grant = principal.kind !== 'browser' && (await sessions.approvals.holdsGrant(principal))
   const role = roleOf(principal, session, grant)
   // A flow run's calls are the person's (#2482, spec 2026-10-11 §4.2): no approval grant

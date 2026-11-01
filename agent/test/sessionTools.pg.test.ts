@@ -21,7 +21,7 @@ import type { HarnessRun } from '../src/harness/run.js'
 import { createBackendClient } from '../src/api/backend.js'
 import type { ToolServices } from '../src/tools/registry.js'
 import { BACKEND } from './helpers/mcp.js'
-import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, withoutTemporal } from './support/agentSessions.js'
 
 // The `sessions_*` tools (#300) end to end: real /mcp clients with bearer
 // tokens, a real SessionManager on Postgres (with a scripted stand-in for the
@@ -281,18 +281,17 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${session.id}`).toHaveLength(2)
     })
 
-    it("takes a new session's mode, and says when the default ran classic (plan 5d)", async () => {
+    it("takes and ignores a new session's mode (plan Step 6.3)", async () => {
       const { agent, sessions } = await setup()
-      // The mode setting's own rules, with no Temporal: the in-process turn (plan 5d).
-      classicTurns(sessions)
       const a = await agent('write')
-      const fell = ok<{ session: { mode: string }; mode_fallback?: string }>(await a.call('sessions_start', { title: 'a' }))
-      expect(fell.session.mode).toBe('classic')
-      expect(fell.mode_fallback).toMatch(/durable sessions need Temporal/)
-      const classic = ok<Record<string, unknown>>(await a.call('sessions_start', { title: 'b', mode: 'classic' }))
-      expect(classic).toMatchObject({ session: { mode: 'classic' } })
-      expect(classic).not.toHaveProperty('mode_fallback')
-      expect(errorText(await a.call('sessions_start', { title: 'c', mode: 'durable' }))).toMatch(/Temporal/)
+      for (const mode of [undefined, 'classic', 'durable']) {
+        const started = ok<Record<string, unknown>>(await a.call('sessions_start', { title: 'a', ...(mode ? { mode } : {}) }))
+        expect(started).toMatchObject({ session: { mode: 'durable' } })
+        expect(started).not.toHaveProperty('mode_fallback')
+      }
+      // Without Temporal, a new session is refused (spec 2026-10-13 §10.1).
+      withoutTemporal(sessions)
+      expect(errorText(await a.call('sessions_start', { title: 'c', mode: 'classic' }))).toMatch(/Temporal/)
     })
 
     it("shows a caller only the sessions it may see; another agent's are 'no session'", async () => {

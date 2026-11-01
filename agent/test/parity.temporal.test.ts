@@ -22,7 +22,8 @@ import { type FakeMcp, startFakeMcp } from './support/fakeMcp.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser, manager, stopManagers, tempPaths } from './support/sessions.js'
-import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, sessionWorkflow } from './support/agentSessions.js'
+import { SESSION_QUEUE, SESSION_WORKFLOW } from '../src/temporal/session/names.js'
 
 // Plan Step 6.3's parity pins (#2320, #2660): an AgentSession turn, on the real SDK and its
 // bundled Claude Code (pointed at the local fake Anthropic endpoint), gets every tool a classic
@@ -149,14 +150,22 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`an AgentSessi
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
     expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect((await m.get(session.id, browser)).runtime).toBe('unified')
+    // The turn ran on its AgentSession workflow, whose turns TurnHost runs on the host queue.
+    expect(await sessionWorkflow(session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
 
-    const offered = tools(turnCalls()[0])
+    // The main thread's first request, not a side request of Claude Code's.
+    const main = turnCalls()[0]!
+    expect(isSubagent(main)).toBe(false)
+    const offered = tools(main)
     expect(offered).toEqual(expect.arrayContaining([...PLUGIN_TOOLS, HTTP_TOOL_NAME, ...BROWSER_TOOLS.map((t) => `mcp__scadbuddy__${t.name}`)]))
     // The package's skill and subagent: the Skill and Agent tools come with them (#2320).
     expect(offered).toEqual(expect.arrayContaining(['Skill', 'Agent']))
     // Every built-in the allowed package names, not only Bash: Claude Code's own, or ScadBuddy's
     // in its place (src/builtins: WebFetch through the egress check).
     expect(BUILTINS.filter((b) => !offered.includes(b) && !offered.includes(`mcp__builtin__${b}`))).toEqual([])
+    // WebFetch is ScadBuddy's, through the egress check; Claude Code's own is never offered.
+    expect(offered).toContain('mcp__builtin__WebFetch')
+    expect(offered).not.toContain('WebFetch')
     // Hindsight: recalled against the user's words before the prompt, and the turn retained after it.
     expect(hindsight.recalls().map((r) => (r.body as { query: string }).query)).toEqual(['make a box'])
     await expect.poll(() => hindsight.retains().length).toBeGreaterThan(0)
@@ -180,19 +189,27 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`an AgentSessi
       .poll(
         async () => {
           ;[entry] = await db.sql<{ request_id: string; tool: string }[]>`
-            SELECT request_id, tool FROM ai_pending_input WHERE session_id = ${session.id}`
+            SELECT request_id, tool FROM ai_pending_input
+             WHERE session_id = ${session.id} AND tool = 'mcp__my-memory__retain'`
           return entry?.tool
         },
         { timeout: 60_000 },
       )
       .toBe('mcp__my-memory__retain')
     expect(mcp.calls).toEqual([])
+    expect((await m.get(session.id, browser)).runtime).toBe('unified')
 
-    const sub = fake.messageCalls().find(isSubagent)
-    expect(tools(sub)).toEqual(expect.arrayContaining([...PLUGIN_TOOLS, HTTP_TOOL_NAME, ...BROWSER_TOOLS.map((t) => `mcp__scadbuddy__${t.name}`)]))
+    const subagentTools = [...PLUGIN_TOOLS, HTTP_TOOL_NAME, ...BROWSER_TOOLS.map((t) => `mcp__scadbuddy__${t.name}`)]
+    // The subagent ran (its definition's body is in its system prompt), and was offered the tools.
+    expect(fake.messageCalls().filter(isSubagent).length).toBeGreaterThan(0)
+    for (const sub of fake.messageCalls().filter(isSubagent)) expect(tools(sub)).toEqual(expect.arrayContaining(subagentTools))
 
     expect(await respond(m, browser, entry!.request_id, { kind: 'approval', decision: 'deny' })).toMatchObject({ outcome: 'denied' })
     expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
     expect(mcp.calls).toEqual([])
+    // The subagent was told the call was denied, in the result of the call it made.
+    const told = fake.messageCalls().filter(isSubagent).map(lastContent).find((c) => c.includes('tool_result'))
+    expect(told).toContain('The user denied mcp__my-memory__retain')
+    for (const sub of fake.messageCalls().filter(isSubagent)) expect(tools(sub)).toEqual(expect.arrayContaining(subagentTools))
   }, 120_000)
 })

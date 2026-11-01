@@ -261,13 +261,9 @@ const unstopped = new Set<SessionManager>()
 /**
  * A manager over the test's database. In a describe that called `agentSessions()`
  * (support/agentSessions.ts) its sessions run on AgentSession on that file's Temporal dev
- * server, unless `classic` keeps it to the in-process turn (a test of that turn's own lease,
- * reaper or approvals).
+ * server; elsewhere it has no Temporal, so it starts no session (spec 2026-10-13 §10.1).
  */
-export function manager(
-  deps: Partial<SessionManagerDeps> & Pick<SessionManagerDeps, 'sql' | 'paths'>,
-  options: { classic?: boolean } = {},
-): SessionManager {
+export function manager(deps: Partial<SessionManagerDeps> & Pick<SessionManagerDeps, 'sql' | 'paths'>): SessionManager {
   const m = new SessionManager({
     credentials: fixedCredentials({ kind: 'anthropic_api_key', secret: 'sk-ant-test' }),
     renewMs: 50,
@@ -275,7 +271,7 @@ export function manager(
     payloadKeys: testPayloadKeys(deps.sql),
     ...deps,
   })
-  if (!options.classic) serveManager(m, deps)
+  serveManager(m, deps)
   unstopped.add(m)
   return m
 }

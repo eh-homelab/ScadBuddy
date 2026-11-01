@@ -11,11 +11,13 @@ import { ChatConnection } from '../src/routes/chat.js'
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { UNTRUSTED_CONTENT_POLICY } from '../src/safety/untrusted.js'
 import { DurableTurns } from '../src/sessions/durable.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, withoutTemporal } from './support/agentSessions.js'
+import { DurableSessionTurns } from './support/durableSessionTurns.js'
 import { SessionFiles } from '../src/workspace/store.js'
 import { type DescribeSession, DurableRunningSweep, durableDescriber } from '../src/sessions/durableSweep.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import type { UserImage } from '../src/sessions/images.js'
-import { type SessionManager, type SessionRecord, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
+import { type SessionManager, type SessionRecord } from '../src/sessions/manager.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 import { frontendClientMessages } from './support/frontendProtocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -42,11 +44,13 @@ const PNG_NAME = `${createHash('sha256').update(Buffer.from(PNG, 'base64')).dige
 
 type Recorded = { start: Record<string, unknown>; messages: Record<string, unknown>[]; calls: string[]; forkPointPage0Queries: number }
 
+/** A stored `session_mode`, which nothing reads since plan Step 6.3. */
 const mode = (value: string | undefined) => ({
-  get: <T>(key: string) => Promise.resolve((key === SETTING_SESSION_MODE ? value : undefined) as T),
+  get: <T>(key: string) => Promise.resolve((key === 'session_mode' ? value : undefined) as T),
 })
 
-describe.skipIf(!TEST_DATABASE_URL)(`a session's mode at insert${PG_SKIP}`, () => {
+describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP)(`a session's mode at insert${PG_SKIP}${AGENT_SESSIONS_SKIP}`, () => {
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   beforeEach(async () => {
@@ -57,41 +61,29 @@ describe.skipIf(!TEST_DATABASE_URL)(`a session's mode at insert${PG_SKIP}`, () =
     await drop()
   })
 
-  it('is durable by default and with any value but classic, so it falls back to classic without Temporal', async () => {
-    for (const value of [undefined, 'durable', 'nonsense']) {
-      const m = manager({ sql: db.sql, paths: await tempPaths(), settings: mode(value) })
-      const { session, modeFallback } = await m.start(browser, { origin: 'chat', title: 't' })
-      expect(session.mode).toBe('classic')
-      expect(modeFallback).toMatch(/durable sessions need Temporal/)
-      // Said where the panel reads it, so the user sees which mode ran.
-      const [started] = await m.events.read(session.id, 0)
-      expect(started?.event).toMatchObject({ type: 'session.started', mode: 'classic', modeFallback })
+  it('is an AgentSession whatever `session_mode` says and whatever mode the caller names (plan Step 6.3)', async () => {
+    for (const value of [undefined, 'durable', 'classic', 'nonsense']) {
+      for (const asked of [undefined, 'classic', 'durable'] as const) {
+        const m = manager({ sql: db.sql, paths: await tempPaths(), settings: mode(value), newSessions: { max: 100, windowMs: 60_000 } })
+        const { session } = await m.start(browser, { origin: 'chat', title: 't', ...(asked ? { mode: asked } : {}) })
+        expect(session.mode).toBe('durable')
+        const [row] = await db.sql<{ runtime: string | null }[]>`SELECT runtime FROM ai_sessions WHERE id = ${session.id}`
+        expect(row?.runtime).toBe('unified')
+        const [started] = await m.events.read(session.id, 0)
+        expect(started?.event).toMatchObject({ type: 'session.started', mode: 'durable' })
+        expect(started?.event).not.toHaveProperty('modeFallback')
+      }
     }
   })
 
-  it('is classic with no fallback when the setting says classic', async () => {
+  it('refuses a new session `unavailable` without Temporal or the key, and inserts nothing', async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), settings: mode('classic') })
-    const { session, modeFallback } = await m.start(browser, { origin: 'chat', title: 't' })
-    expect(session.mode).toBe('classic')
-    expect(modeFallback).toBeUndefined()
-    const [started] = await m.events.read(session.id, 0)
-    expect(started?.event).toMatchObject({ type: 'session.started', mode: 'classic' })
-    expect(started?.event).not.toHaveProperty('modeFallback')
-  })
-
-  it('refuses a durable start the caller asked for without Temporal or the key, and inserts nothing', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), settings: mode('durable') })
-    await expect(m.start(browser, { origin: 'chat', title: 't', mode: 'durable' })).rejects.toMatchObject({
+    withoutTemporal(m)
+    await expect(m.start(browser, { origin: 'chat', title: 't', mode: 'classic' })).rejects.toMatchObject({
       code: 'unavailable',
       status: 503,
     })
     expect(await db.sql`SELECT id FROM ai_sessions`).toHaveLength(0)
-  })
-
-  it('lets StartOptions.mode pick classic over the setting', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), settings: mode('durable') })
-    const { session } = await m.start(browser, { origin: 'chat', title: 't', mode: 'classic' })
-    expect(session.mode).toBe('classic')
   })
 })
 
@@ -133,7 +125,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       // A durable turn never runs here: the classic runner would fail the test.
       run: scriptedRunner(() => ({ throws: 'a durable turn ran in the classic harness' })).runner,
     })
-    m.durableTurns = new DurableTurns({
+    m.durableTurns = new DurableSessionTurns({
       client: env.client,
       sql: db.sql,
       events: m.events,
@@ -456,7 +448,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
 
   it('writes nothing on Stop when the gone workflow is open again by the time it is described (#4131 review)', async () => {
     const m = await durableManager()
-    m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: QUEUE, describe: async () => 'open' })
+    m.durableTurns = new DurableSessionTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: QUEUE, describe: async () => 'open' })
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
     await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() - interval '5 minutes' WHERE id = ${session.id}`
     expect(session.mode).toBe('durable')
@@ -473,7 +465,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     const failing: DescribeSession = async () => {
       throw new Error('describe failed')
     }
-    m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: QUEUE, describe: failing })
+    m.durableTurns = new DurableSessionTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: QUEUE, describe: failing })
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
     await db.sql`UPDATE ai_sessions SET status = 'running', updated_at = now() - make_interval(mins => ${minutesAgo}) WHERE id = ${session.id}`
     expect(session.mode).toBe('durable')
@@ -1035,18 +1027,19 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect(described.slice(4)).toEqual(sorted.slice(0, 2).map((id) => sessionWorkflowId(id)))
   }, 60_000)
 
-  it('falls back from the default, and refuses an asked-for durable start, while no durable worker polls', async () => {
+  it('refuses a new session `unavailable` while no session worker polls, and inserts nothing (plan Step 6.3)', async () => {
     const m = await durableManager()
-    m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: `nobody-${randomUUID()}` })
-    const { session, modeFallback } = await m.start(browser, { origin: 'chat', title: 't' })
-    expect(session.mode).toBe('classic')
-    expect(modeFallback).toMatch(/no durable session worker/)
-    await expect(m.start(browser, { origin: 'chat', title: 't', mode: 'durable' })).rejects.toMatchObject({
-      code: 'unavailable',
+    m.durableTurns = new DurableTurns({
+      client: env.client,
+      sql: db.sql,
+      events: m.events,
+      sessionQueue: `nobody-${randomUUID()}`,
     })
-    // With the stand-in polling its queue, the default is durable.
-    const durable = await durableManager()
-    expect((await durable.start(browser, { origin: 'chat', title: 't' })).session.mode).toBe('durable')
+    await expect(m.start(browser, { origin: 'chat', title: 't' })).rejects.toMatchObject({
+      code: 'unavailable',
+      message: expect.stringMatching(/no session workflow worker/),
+    })
+    expect(await db.sql`SELECT id FROM ai_sessions`).toHaveLength(0)
   }, 60_000)
 })
 

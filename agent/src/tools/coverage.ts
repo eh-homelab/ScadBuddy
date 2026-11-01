@@ -418,16 +418,6 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
       'is sent the calls waiting for it in an escalation turn and answers with escalation_respond.',
   },
   {
-    route: 'GET /api/v1/ai/settings/session-mode',
-    reason:
-      "Settings → Assistant's default session mode (plan 5d), for the user. An agent picks its own " +
-      "session's mode with sessions_start's `mode`, and sessions_start says when the default ran classic.",
-  },
-  {
-    route: 'PUT /api/v1/ai/settings/session-mode',
-    reason: 'Changes how every new session runs: an operator decision made in Settings, never by an agent.',
-  },
-  {
     route: 'GET /api/v1/ai/settings/durable-subagents',
     reason: "Settings → Durable subagents: deployment wiring for the agent-durable worker, for the operator.",
   },

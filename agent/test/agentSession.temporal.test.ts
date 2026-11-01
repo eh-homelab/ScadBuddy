@@ -13,7 +13,7 @@ import { PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../src/gate/names.js'
 import { openInput, type OpenInput, resolveInput, type ResolveInput } from '../src/gate/store.js'
 import type { Database } from '../src/db.js'
 import { DurableTurns } from '../src/sessions/durable.js'
-import { type SessionManager, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
+import { type SessionManager } from '../src/sessions/manager.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
@@ -29,7 +29,6 @@ import {
   SEND_MESSAGE_UPDATE,
   SESSION_FINISH_ACTIVITY,
   SESSION_QUEUE,
-  UNIFIED_SESSIONS_SETTING,
   SESSION_SETTINGS_ACTIVITY,
   SESSION_TURN_ACTIVITY,
   SESSION_WORKFLOW,
@@ -747,17 +746,11 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       await drop()
     })
 
-    const flag = async (value: boolean | undefined) => {
-      await db.sql`DELETE FROM ai_settings WHERE key = ${UNIFIED_SESSIONS_SETTING}`
-      // Set in the database, never by a route: no route or tool writes this key (unifiedSessionsFlag.pg.test.ts).
-      if (value) await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(value)})`
-    }
-
     async function durableManager(): Promise<SessionManager> {
       const m = manager({
         sql: db.sql,
         paths: await tempPaths(),
-        settings: { get: <T>(key: string) => Promise.resolve((key === SETTING_SESSION_MODE ? 'durable' : undefined) as T) },
+        settings: { get: <T>() => Promise.resolve(undefined as T) },
         run: scriptedRunner(() => ({ throws: 'a durable turn ran in the classic harness' })).runner,
       })
       m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: STANDIN_QUEUE, sessionQueue: SESSION_QUEUE, liveHosts: polledHosts(env.client, HOST) })
@@ -770,8 +763,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       return { type: d.type, taskQueue: d.taskQueue }
     }
 
-    it('starts a new session as AgentSession on agent-sessions with the flag set, and reads each turn`s end from the event log', async () => {
-      await flag(true)
+    it('starts every new session as AgentSession on agent-sessions, and reads each turn`s end from the event log', async () => {
       const m = await durableManager()
       finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket', context: '[page: /]' })
@@ -790,15 +782,16 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket\n\n[page: /]', 'and a lid'])
     })
 
-    it('keeps a session that started as DurableSession on the Python type and queue after the flag is set', async () => {
-      await flag(undefined)
+    it('keeps a session that started as DurableSession on the Python type and queue', async () => {
       const m = await durableManager()
-      const { session } = await m.start(browser, { origin: 'chat', prompt: 'one' })
+      const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+      // As a session an earlier release started: its first send recorded the Python runtime.
+      await db.sql`UPDATE ai_sessions SET runtime = 'durable' WHERE id = ${session.id}`
+      await m.send(session.id, browser, 'one')
       expect(await describe_(session.id)).toEqual({ type: 'DurableSession', taskQueue: STANDIN_QUEUE })
       expect(await runtimeOf(session.id)).toBe('durable')
       await db.sql`UPDATE ai_sessions SET status = 'idle' WHERE id = ${session.id}`
       await handleOf(session.id).signal('end_turn')
-      await flag(true)
       await m.send(session.id, browser, 'two')
       expect(await describe_(session.id)).toEqual({ type: 'DurableSession', taskQueue: STANDIN_QUEUE })
       expect(await runtimeOf(session.id)).toBe('durable')
@@ -810,8 +803,31 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await describe_(fresh.session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
     })
 
-    it('keeps a session that existed before the migration, with offset 0 and a Python workflow, DurableSession with the flag set', async () => {
-      await flag(true)
+    it("reads an AgentSession's turn as active while it runs, and a DurableSession's as before (PR 5042's review)", async () => {
+      const m = await durableManager()
+      finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
+      const running = held()
+      const started = held()
+      runTurn = async () => {
+        started.release()
+        await running.promise
+        return { status: 'done', hostQueue: '' }
+      }
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hold on' })
+      await started.promise
+      expect((await m.get(session.id, browser)).turnActive).toBe(true)
+      running.release()
+      await turn!.done
+      expect((await m.get(session.id, browser)).turnActive).toBe(false)
+      // A DurableSession's turn holds `durable_turn_id` too, and is read as it was before.
+      const { session: python } = await m.start(browser, { origin: 'chat', title: 'p' })
+      await db.sql`UPDATE ai_sessions SET runtime = 'durable' WHERE id = ${python.id}`
+      await m.send(python.id, browser, 'one')
+      expect(await describe_(python.id)).toEqual({ type: 'DurableSession', taskQueue: STANDIN_QUEUE })
+      expect((await m.get(python.id, browser)).turnActive).toBe(false)
+    })
+
+    it('keeps a session that existed before the migration, with offset 0 and a Python workflow, DurableSession', async () => {
       const m = await durableManager()
       const { session } = await m.start(browser, { origin: 'chat', title: 't' })
       // As a row from before the column: no runtime, nothing output yet, its workflow running.
@@ -829,7 +845,6 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     })
 
     it('a call whose turn ended while it was described writes nothing: the session stays idle and takes the next send', async () => {
-      await flag(true)
       const m = await durableManager()
       finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
       // The real store writes (gate/store.ts), so the row is what a person's panel and the next send see.
@@ -863,7 +878,6 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
     })
 
     it('forks a unified session from its transcript; with none written it refuses as classic does (plan Step 6.3)', async () => {
-      await flag(true)
       const m = await durableManager()
       finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
       const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'hi' })

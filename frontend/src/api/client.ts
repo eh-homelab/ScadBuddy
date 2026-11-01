@@ -42,7 +42,6 @@ import type {
   SessionLimits,
   SessionRuntime,
   BlankTemplate,
-  SessionModeSetting,
   DurableSubagentsSetting,
   SessionResource,
   ResourceRef,
@@ -2663,15 +2662,6 @@ export const api = {
   /** Cancels one; the session's owner only. */
   cancelAiBackgroundTask: (id: string, taskId: string) =>
     request<{ task: BackgroundTask }>(`/ai/sessions/${seg(id)}/background-tasks/${seg(taskId)}`, { method: 'DELETE' }),
-
-  /** Plan 5d — the mode new assistant sessions get by default, served by the agent service. */
-  getSessionMode: () => request<SessionModeSetting>('/ai/settings/session-mode'),
-
-  putSessionMode: (mode: SessionModeSetting['mode']) =>
-    request<SessionModeSetting>('/ai/settings/session-mode', {
-      method: 'PUT',
-      body: JSON.stringify({ mode }),
-    }),
 
   /** Where durable subagents reach ScadBuddy's tools, served by the agent service. */
   getDurableSubagents: () => request<DurableSubagentsSetting>('/ai/settings/durable-subagents'),

@@ -13,8 +13,7 @@ import { CredentialStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
 import { kekFromBase64 } from '../src/secrets.js'
-import { DurableTurns } from '../src/sessions/durable.js'
-import { type SessionManager, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
+import { type SessionManager } from '../src/sessions/manager.js'
 import { PgFlowRuns } from '../src/temporal/flowRuns.js'
 import { flowSessionActivities } from '../src/temporal/flowSessions.js'
 import { PgPayloadKeys, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
@@ -24,6 +23,7 @@ import { turnToolActivities } from '../src/temporal/turnTools.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { DURABLE_TOOLS, writeManifest } from '../src/tools/manifest.js'
 import { PendingActionStore } from '../src/tools/pending.js'
+import { DurableSessionTurns } from './support/durableSessionTurns.js'
 import { durableHealthPort, notStarted } from './support/durableHealth.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
@@ -222,11 +222,11 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
     sessions = manager({
       sql: db.sql,
       paths: await tempPaths(),
-      settings: { get: <T>(key: string) => Promise.resolve((key === SETTING_SESSION_MODE ? 'durable' : undefined) as T) },
+      settings: { get: <T>() => Promise.resolve(undefined as T) },
     })
     gate = new DurableGate(client)
     sessions.durable = gate
-    sessions.durableTurns = new DurableTurns({ client, sql: db.sql, events: sessions.events, sendTimeoutMs: 60_000 })
+    sessions.durableTurns = new DurableSessionTurns({ client, sql: db.sql, events: sessions.events, sendTimeoutMs: 60_000 })
     const services = {
       backend: createBackendClient('http://backend.invalid', async () => new Response(null, { status: 503 })),
       pending: new PendingActionStore(),
@@ -364,15 +364,4 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
        WHERE session_id = ${session.id} AND event::jsonb->>'type' = 'user.turn'`
     expect(turn?.text).toBe(WINDOW_PROMPT)
   }, 300_000)
-
-  it('ask_session() refuses a classic session and sends it nothing', async () => {
-    const { session } = await sessions.start(browser, { origin: 'chat', title: 'classic', mode: 'classic' })
-    expect(session.mode).toBe('classic')
-    const run = await flow('try:', `    await ask_session(${JSON.stringify(session.id)}, 'hi')`, 'except Exception as e:', '    return str(e)')
-    expect(run.status).toBe('succeeded')
-    expect(run.result).toContain(`session ${session.id} is classic; a flow talks only to a durable session`)
-    expect(run.steps.map((s) => [s.fn, s.status])).toEqual([['ask_session', 'failed']])
-    const events = await db.sql`SELECT 1 FROM ai_session_events WHERE session_id = ${session.id} AND event::jsonb->>'type' = 'user.turn'`
-    expect(events).toHaveLength(0)
-  }, 120_000)
 })

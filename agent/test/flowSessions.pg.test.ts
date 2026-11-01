@@ -158,9 +158,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     expect([err.type, err.nonRetryable, err.message]).toEqual([SESSION_REFUSED, true, `session ${sid} is gone; its turn t1 will not finish`])
   })
 
-  it("lets a flow talk only to a durable session its starter owns", async () => {
+  it("lets a flow talk only to a session its starter owns, a classic one an earlier release left included (plan Step 6.3)", async () => {
     expect(await check(await session())).toEqual({ session_id: expect.any(String), mode: 'durable' })
-    for (const sid of [await session({ mode: 'classic' }), await session({ owner: ['bearer', 'token:9'] }), randomUUID()]) {
+    expect(await check(await session({ mode: 'classic' }))).toEqual({ session_id: expect.any(String), mode: 'durable' })
+    for (const sid of [await session({ owner: ['bearer', 'token:9'] }), randomUUID()]) {
       const err = await failure(check(sid))
       expect([err.type, err.nonRetryable]).toEqual([SESSION_REFUSED, true])
       const waited = await failure(turn(sid, 't1'))

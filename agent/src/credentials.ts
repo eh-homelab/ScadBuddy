@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { UNIFIED_SESSIONS_SETTING } from './temporal/session/names.js'
 import type { Sql, TransactionSql } from 'postgres'
 import { type AuditContext, type AuditSink, SYSTEM_ACTOR } from './audit/log.js'
 import { isRuntimeKey, notifyRuntimeSettings } from './sessions/runtimeSettings.js'
@@ -627,14 +626,6 @@ export class CredentialStore implements CredentialRepo {
  * key and the new value: the table holds no secrets by contract (its
  * migration: "Never put a secret here"), and the value is capped.
  */
-/**
- * Keys no write through this store sets, until their phase lands: `unified_sessions` starts
- * new durable sessions on AgentSession (unified runtime spec 2026-10-13), whose fork is not
- * there yet (phase 6). It is set in the database directly, never by a route, tool or this store;
- * a write refused here is a CredentialError (409), which the routes answer as such.
- */
-const READ_ONLY_KEYS: ReadonlySet<string> = new Set([UNIFIED_SESSIONS_SETTING])
-
 /** The settings the routes and the session code read and write (`SettingsStore`); `AppDeps.settings`. */
 export type SettingsRepo = {
   get<T>(key: string): Promise<T | undefined>
@@ -657,7 +648,6 @@ export class SettingsStore {
 
   /** `context` says who wrote it; ScadBuddy itself when omitted. */
   async set(key: string, value: unknown, context?: AuditContext): Promise<void> {
-    if (READ_ONLY_KEYS.has(key)) throw new CredentialError(`the setting ${key} cannot be written yet`, 409)
     const startedAt = new Date()
     let failure: unknown
     try {
@@ -705,7 +695,6 @@ export class SettingsStore {
     check?: (current: { get<T>(key: string): Promise<T | undefined> }) => Promise<boolean>,
     context?: AuditContext,
   ): Promise<boolean> {
-    for (const key of Object.keys(values)) if (READ_ONLY_KEYS.has(key)) throw new CredentialError(`the setting ${key} cannot be written yet`, 409)
     const startedAt = new Date()
     let written: boolean
     try {

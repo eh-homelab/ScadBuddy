@@ -20,7 +20,7 @@ import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { originPolicy } from '../src/http/origins.js'
 import { SessionBlobs } from '../src/sessions/blobs.js'
 import { DurableTurns } from '../src/sessions/durable.js'
-import { type SessionManager, SETTING_SESSION_MODE } from '../src/sessions/manager.js'
+import { type SessionManager } from '../src/sessions/manager.js'
 import type { InputEntry } from '../src/sessions/protocol.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { PostgresSessionStore } from '../src/sessions/store.js'
@@ -30,7 +30,7 @@ import { acquireActivities, releaseActivities } from '../src/temporal/session/af
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
 import { type HostWorkers, startHostWorkers } from '../src/temporal/session/hostWorkers.js'
-import { ACQUIRE_WORKER_ACTIVITY, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, SHUTTING_DOWN_FAILURE, sessionHostQueue, UNIFIED_SESSIONS_SETTING } from '../src/temporal/session/names.js'
+import { ACQUIRE_WORKER_ACTIVITY, SESSION_QUEUE, SESSION_SETTINGS_ACTIVITY, SHUTTING_DOWN_FAILURE, sessionHostQueue } from '../src/temporal/session/names.js'
 import { sessionTurnActivity } from '../src/temporal/session/turnActivity.js'
 import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners } from '../src/temporal/toolActivities.js'
 import { AgentWorker, workerIdentity } from '../src/temporal/worker.js'
@@ -166,7 +166,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
       sql: pool.sql,
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: 'gw-release-test-token' }),
-      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === SETTING_SESSION_MODE ? 'durable' : undefined) as T) },
+      settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       mcpServers: (session) => ({ scadbuddy: createHarnessServer([ship], services(), principal, session.id) }),
       tierOf: (n) => (n === SHIP ? 'outward' : undefined),
       warm: { maxEntries: 8 },
@@ -266,7 +266,6 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
     fake = await startFakeAnthropic((r) => script(r))
     ;({ db, schema, url, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
-    await db.sql`INSERT INTO ai_settings (key, value) VALUES (${UNIFIED_SESSIONS_SETTING}, ${db.sql.json(true)})`
     spawned = 0
     exited = 0
     sends = []

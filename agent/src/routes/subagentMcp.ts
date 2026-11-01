@@ -69,12 +69,12 @@ declare module '../app.js' {
   }
 }
 
-/** `running` over Postgres: durable, on that turn, and running or parked. */
+/** `running` over Postgres: on that turn, and running or parked. */
 export function pgRunning(sql: Sql): SubagentMcpDeps['running'] {
   return async (session, turn) => {
     const rows = await sql`
       SELECT 1 FROM ai_sessions
-      WHERE id = ${session} AND mode = 'durable' AND durable_turn_id = ${turn}
+      WHERE id = ${session} AND durable_turn_id = ${turn}
         AND status IN ('running', 'waiting_approval', 'waiting_input')`
     return rows.length === 1
   }

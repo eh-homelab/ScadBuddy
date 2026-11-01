@@ -553,19 +553,6 @@ export interface RenderLimits {
 }
 
 /**
- * Plan 5d — the mode a new assistant session gets when whoever starts it names none
- * (`GET/PUT /api/v1/ai/settings/session-mode`, agent `src/routes/sessionMode.ts`).
- * `durable_available` says whether a durable session could start now; when not, a
- * session that got durable from this default runs classic and says why
- * (`durable_unavailable_reason`). The PUT sends `mode` only.
- */
-export interface SessionModeSetting {
-  mode: 'classic' | 'durable'
-  durable_available: boolean
-  durable_unavailable_reason?: string
-}
-
-/**
  * Where a durable segment's subagents reach ScadBuddy's tools
  * (`GET/PUT /api/v1/ai/settings/durable-subagents`, agent `src/routes/durableSubagents.ts`).
  * `url` replaces agent-durable's own (null: the pod's loopback); `peers` are the addresses or

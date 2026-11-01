@@ -9,7 +9,7 @@ import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, agentB, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
-import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, withoutTemporal } from './support/agentSessions.js'
 
 // /api/v1/ai/sessions (routes/sessions.ts) over a scripted runner: the routes'
 // own behaviour (guard, status codes, the SSE replay). The real SDK path is
@@ -96,23 +96,20 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
     expect((await m.get(id, browser)).turns).toBe(2)
   })
 
-  it("takes a new session's mode, says when the default fell back, and refuses an unknown one (plan 5d)", async () => {
-    // The mode setting's own rules, with no Temporal: the in-process turn (plan 5d).
-    classicTurns(m)
+  it("takes and ignores a new session's mode, and refuses an unknown one (plan Step 6.3)", async () => {
     const start = (body: unknown) =>
       app.request('/api/v1/ai/sessions', { method: 'POST', headers: JSON_UI, body: JSON.stringify(body) })
-    // No Temporal here: the default (durable) runs classic and says so.
-    const fell = await start({ title: 'a' })
-    expect(fell.status).toBe(201)
-    expect(await fell.json()).toMatchObject({ session: { mode: 'classic' }, mode_fallback: expect.stringMatching(/durable sessions need Temporal/) })
-    const classic = await start({ title: 'b', mode: 'classic' })
-    expect(classic.status).toBe(201)
-    const body = (await classic.json()) as Record<string, unknown>
-    expect(body).toMatchObject({ session: { mode: 'classic' } })
-    expect(body).not.toHaveProperty('mode_fallback')
-    // Asked for, durable is never run as classic instead.
-    expect((await start({ title: 'c', mode: 'durable' })).status).toBe(503)
+    for (const mode of [undefined, 'classic', 'durable']) {
+      const res = await start({ title: 'a', ...(mode ? { mode } : {}) })
+      expect(res.status).toBe(201)
+      const body = (await res.json()) as Record<string, unknown>
+      expect(body).toMatchObject({ session: { mode: 'durable' } })
+      expect(body).not.toHaveProperty('mode_fallback')
+    }
     expect((await start({ title: 'd', mode: 'fast' })).status).toBe(400)
+    // Without Temporal, a new session is refused, whatever mode it names (spec 2026-10-13 §10.1).
+    withoutTemporal(m)
+    expect((await start({ title: 'e', mode: 'classic' })).status).toBe(503)
   })
 
   it('streams the event log as SSE from ?after= / Last-Event-ID', async () => {
@@ -332,19 +329,6 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session rou
     const stop = await app.request(`/api/v1/ai/sessions/${session.id}/interrupt`, { method: 'POST', headers: UI })
     expect(await stop.json()).toEqual({ interrupted: true })
     await waitIdle(session.id)
-  })
-
-  it('settles once the aborted turns have appended their last events (#802)', async () => {
-    // The in-process turn's own shutdown (abortAll, settled).
-    classicTurns(m)
-    next = { hang: true }
-    const { session } = await m.start(browser, { origin: 'chat', prompt: 'wait' })
-    m.abortAll()
-    await m.settled()
-    // Nothing left to append: a shutdown may close the database now.
-    const events = await m.events.read(session.id, 0)
-    expect(events.at(-1)?.event).toMatchObject({ type: 'session.status', status: 'idle' })
-    await expect(m.settled()).resolves.toBeUndefined()
   })
 
   it('takes over a session another principal controls', async () => {

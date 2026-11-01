@@ -8,7 +8,6 @@ import {
   type McpSdkServerConfigWithInstance,
   type SDKMessage,
   type SDKResultMessage,
-  type SDKUserMessage,
   type SessionStoreEntry,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Context } from '@opentelemetry/api'
@@ -30,15 +29,13 @@ import type { MemoryOptions } from '../memory/hindsight.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
 import type { PackageServers } from '../plugins/packages/mcp.js'
 import { isUuid, sessionWorkDir } from '../harness/stateDirs.js'
-import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
+import { ApprovalService, type GrantCheck } from '../approvals/service.js'
 import { QuestionService } from '../questions/service.js'
 import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
 import type { QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
 import type { FlowTurn, TabWait, Tool, WaitForTab } from '../tools/registry.js'
 import type { AuditContext, AuditDeps } from '../audit/log.js'
-import { turnCostEntry } from '../audit/turn.js'
-import type { TurnTrace } from '../telemetry/turn.js'
 import type { AppendHook } from './busEvents.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import {
@@ -49,19 +46,18 @@ import {
   ownerSeenBy,
   publicLabel,
   sameOwner,
-  type SentImage,
   type ServerEvent,
   type SessionMode,
   type SessionStatus,
 } from './protocol.js'
-import { SessionBlobs, sentImageBlobs, type StoredBlob } from './blobs.js'
+import { SessionBlobs, type StoredBlob } from './blobs.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
 import { blobNames, durableReplies, entriesThrough, forkHistory, historyThroughCalls, transcriptCut, unansweredCalls } from './forkPoint.js'
-import { scrubForLog, type TitleResolver } from './sdkEvents.js'
+import type { TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
-import { userPrompt, type UserImage } from './images.js'
+import type { UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
 import type { DurableTurns, ForkedAgent, SessionRuntime } from './durable.js'
@@ -70,7 +66,7 @@ import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
 import { type WarmQuery, WarmSessions } from './warm.js'
 import { notifyWarmEvict } from './warmEvict.js'
-import { CoreTurn, type Refused, tallyTurn, type TurnCoreDeps, wordTail } from './turnCore.js'
+import type { TurnCoreDeps } from './turnCore.js'
 import { POOL_BUDGET, POOL_COST, systemAppend } from './turnShared.js'
 import { FlowQueue } from '../flows/queue.js'
 
@@ -159,15 +155,8 @@ import { FlowQueue } from '../flows/queue.js'
 /** ai_settings keys (non-secret, spec §9). */
 export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
 export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
-/** Which mode a new session runs in when its creator names none: `durable` unless it says `classic` (plan 5d Ruling 1). */
-export const SETTING_SESSION_MODE = 'session_mode'
 export { SESSION_MODES, type SessionMode } from './protocol.js'
 export { BROWSER_TOOLS_GUIDE, MEMORY_TEXT_MAX, memoryText, POOL_BUDGET, POOL_COST, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
-
-/** The stored `session_mode` as a mode: `classic` only when it says so (plan 5d Ruling 1, the owner's default). */
-export function sessionModeOf(stored: unknown): SessionMode {
-  return stored === 'classic' ? 'classic' : 'durable'
-}
 
 /** The largest session budget Settings takes, and the most a raise can take one session's budget to. */
 export const MAX_SESSION_BUDGET_USD = 100
@@ -357,85 +346,8 @@ async function durableTabWaits(sessions: SessionManager, sessionId: string): Pro
   return (await sessions.projection.waitsForTab(sessionId)) ? gate.tabReconnected(sessionId) : 0
 }
 
-/**
- * An attention request's `stop` or `wait` timer ended the turn (#815), not a
- * user's Stop: the session's `interrupted` error says why (#1206).
- */
-class AttentionStop extends Error {}
-
-/** The `interrupted` error's message: why, when an attention request's timer ended the turn. */
-function interruptedMessage(signal: AbortSignal): string {
-  const reason: unknown = signal.reason
-  return reason instanceof AttentionStop ? `the turn ended: ${reason.message}` : 'the turn was interrupted'
-}
-
-function abortMessage(signal: AbortSignal): string {
-  const reason: unknown = signal.reason
-  return reason instanceof Error ? reason.message : 'the turn was interrupted'
-}
-
-export const DEFAULT_LEASE_MS = 60_000
-
-/** A lease's length for a person: "a minute", "90 seconds". */
-export function leaseWords(ms: number): string {
-  const seconds = Math.round(ms / 1000)
-  if (seconds === 60) return 'a minute'
-  if (seconds % 60 === 0) return `${seconds / 60} minutes`
-  return seconds === 1 ? 'a second' : `${seconds} seconds`
-}
-/** A lapsed turn's `turn` row when a new turn took its session before the reaper ran (#3320). */
-export const TAKEN_OVER =
-  'the turn was stopped: its claim on the session lapsed and a new turn took the session (the replica running it stopped, or could not reach the database)'
 /** How long a handoff offer waits for its target (`handoff`). */
 export const HANDOFF_OFFER_TTL_MS = 60 * 60_000
-export const DEFAULT_RENEW_MS = 1_000
-/** A lease renewal this slow is logged (#2375): a minute without one and the reaper ends the turn. */
-export const SLOW_RENEW_MS = 5_000
-
-/**
- * Renews a turn's lease every `everyMs`, one renewal at a time (#2375): one still
- * waiting on a stalled pool is not joined by another every second, which would only
- * queue more on the pool it waits for. A renewal that fails, or takes SLOW_RENEW_MS or
- * more, is logged when it ends, and one still waiting at SLOW_RENEW_MS is logged then,
- * once, so a renewal that never ends shows before the reaper says so (#2981 review).
- * The lease covers several, but a minute of them is what ends the turn, and until now
- * nothing said so. `stop` waits for the one in flight.
- */
-export function renewLoop(renew: () => Promise<void>, everyMs: number, log: (line: string) => void): { stop(): Promise<void> } {
-  let inFlight: Promise<void> | undefined
-  let started = 0
-  let warned = false
-  const timer = setInterval(() => {
-    if (inFlight) {
-      const waited = Date.now() - started
-      if (!warned && waited >= SLOW_RENEW_MS) {
-        warned = true
-        log(`lease renewal still waiting after ${waited} ms`)
-      }
-      return
-    }
-    started = Date.now()
-    warned = false
-    inFlight = renew()
-      .then(
-        () => {
-          const took = Date.now() - started
-          if (took >= SLOW_RENEW_MS) log(`lease renewal took ${took} ms`)
-        },
-        // One line a renewal: a failure says how long it took (#3321).
-        (err: unknown) => log(`lease renewal failed after ${Date.now() - started} ms: ${describe(err)}`),
-      )
-      .finally(() => {
-        inFlight = undefined
-      })
-  }, everyMs)
-  return {
-    async stop() {
-      clearInterval(timer)
-      await inFlight
-    },
-  }
-}
 
 export type SessionErrorCode =
   | 'not_found'
@@ -613,11 +525,7 @@ export type StartOptions = {
   tiers?: readonly Tier[]
   /** With `prompt`: see SendOptions.flow. */
   flow?: FlowTurn
-  /**
-   * The session's mode. Named, it is kept or refused (`unavailable`). Omitted, the
-   * `session_mode` setting's applies, and a durable one this service cannot run now
-   * becomes classic, with the reason in `modeFallback` (plan 5d Ruling 2).
-   */
+  /** Taken and ignored (plan Step 6.3): every session is an AgentSession. */
   mode?: SessionMode
 }
 
@@ -936,10 +844,6 @@ function positive(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
 }
 
-function describe(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
-
 export const TITLE_MAX = 80
 
 /**
@@ -996,27 +900,6 @@ export function listQuery(principal: Owner, filter: ListFilter = {}): { text: st
   return { text, params }
 }
 
-/** A turn running in this process. */
-type LocalTurn = {
-  controller: AbortController
-  /** The turn this is, so the reaper attributes only its own dead turn to it. */
-  turnId: string
-  /**
-   * Set once the turn's claim is gone (a renewal found none, or the reaper took it):
-   * the turn then ends without finish(), whose session-wide approval cancel would
-   * reach a newer turn's (#2981 review).
-   */
-  lost: boolean
-  /**
-   * Set once the SDK has produced the turn's result (or the stream ended):
-   * the turn is finishing on its own, and aborting now would only cut off the
-   * SDK's last transcript appends, so interrupt() leaves it alone and says so.
-   */
-  settling: boolean
-  /** The turn's run, final events included, its claim released; it never rejects (startTurn's `done`). */
-  done?: Promise<TurnOutcome>
-}
-
 /** What a send gets while the service drains for a restart (`drain`). */
 export const RESTARTING = 'the agent service is restarting; send again in a moment'
 
@@ -1053,10 +936,6 @@ export class SessionManager {
    */
   readonly warm: WarmSessions
   private readonly deps: SessionManagerDeps
-  private readonly leaseMs: number
-  private readonly renewMs: number
-  /** Turns running in THIS process, by session id. */
-  private readonly active = new Map<string, LocalTurn>()
   /** Set by `drain`: a restart is coming, so no new turn starts here. */
   private draining = false
   /** What sessions touched (#931), read by `resources`. */
@@ -1091,7 +970,6 @@ export class SessionManager {
       ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
       workspace: this.files,
-      resume: (approval, by) => this.resumeApproved(approval, by),
     })
     this.questions = new QuestionService({
       sql: deps.sql,
@@ -1140,8 +1018,6 @@ export class SessionManager {
       ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.stderr ? { stderr: deps.stderr } : {}),
     }
-    this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
-    this.renewMs = deps.renewMs ?? DEFAULT_RENEW_MS
   }
 
   // -- reads -------------------------------------------------------------------
@@ -1319,34 +1195,6 @@ export class SessionManager {
     return session
   }
 
-  /** The `session_mode` setting (sessionModeOf). */
-  private async modeSetting(): Promise<SessionMode> {
-    return sessionModeOf(await this.deps.settings?.get<unknown>(SETTING_SESSION_MODE))
-  }
-
-  /** Why a new durable session could not run now, or undefined when it could (plan 5d Ruling 2b). */
-  async durableUnready(): Promise<string | undefined> {
-    if (!this.durableTurns) {
-      return 'durable sessions need Temporal (SCADBUDDY_TEMPORAL_ADDRESS) and the secret key; this agent service has not got them'
-    }
-    // As the new session would run: the flag picks AgentSession or DurableSession at its first send.
-    return this.durableTurns.unready(await this.durableTurns.newRuntime())
-  }
-
-  /**
-   * The mode a new session runs in (plan 5d Ruling 2). A durable session this service
-   * cannot run now (no Temporal, no key, no worker polling) is refused when the creator
-   * asked for it, and becomes classic, with the reason, when it came from the setting.
-   */
-  private async startMode(asked: SessionMode | undefined): Promise<{ mode: SessionMode; fallback?: string }> {
-    const mode = asked ?? (await this.modeSetting())
-    if (mode === 'classic') return { mode }
-    const why = await this.durableUnready()
-    if (why === undefined) return { mode }
-    if (asked) throw new SessionError('unavailable', why)
-    return { mode: 'classic', fallback: why }
-  }
-
   /** Throws `rate_limited` when `principal` has made MAX_NEW_SESSIONS in the window. */
   private async withinNewSessionLimit(principal: Owner, sql: Sql): Promise<void> {
     const { max, windowMs } = this.deps.newSessions ?? { max: MAX_NEW_SESSIONS, windowMs: NEW_SESSION_WINDOW_MS }
@@ -1365,18 +1213,21 @@ export class SessionManager {
   async start(
     principal: Owner,
     options: StartOptions,
-  ): Promise<{ session: SessionRecord; turn?: Turn; modeFallback?: string }> {
+  ): Promise<{ session: SessionRecord; turn?: Turn }> {
     const prompt = options.prompt?.trim()
     const id = randomUUID()
     const title = options.title?.trim() || (prompt ? titleFrom(prompt) : '')
-    const { mode, fallback } = await this.startMode(options.mode)
+    // Every session is an AgentSession (plan Step 6.3): `options.mode` is taken and ignored.
+    // One this service cannot run now is refused before anything is inserted (spec §10.1).
+    await this.refuseUnready()
     const session = await this.insert(id, principal, {
       origin: options.origin,
       title,
       tags: options.tags ?? [],
       scope: options.scope ?? {},
       parentId: null,
-      mode,
+      mode: 'durable',
+      runtime: 'unified',
     }, { rateLimited: true })
     await this.events.append(id, [
       event({
@@ -1386,20 +1237,18 @@ export class SessionManager {
         owner: session.owner,
         title,
         budgetUsd: session.budgetUsd,
-        mode,
-        ...(fallback ? { modeFallback: fallback } : {}),
+        mode: session.mode,
       }),
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
-    const said = fallback ? { modeFallback: fallback } : {}
-    if (!prompt) return { session, ...said }
+    if (!prompt) return { session }
     const turn = await this.send(id, principal, prompt, {
       ...(options.context ? { context: options.context } : {}),
       ...(options.images?.length ? { images: options.images } : {}),
       ...(options.tiers ? { tiers: options.tiers } : {}),
       ...(options.flow ? { flow: options.flow } : {}),
     })
-    return { session: await this.get(id, principal), turn, ...said }
+    return { session: await this.get(id, principal), turn }
   }
 
   /**
@@ -1414,11 +1263,12 @@ export class SessionManager {
     options: { title: string; tags?: string[]; agent?: { model?: string | undefined; effort?: string | undefined; type?: string | undefined } },
   ): Promise<SessionRecord> {
     const parent = await this.get(parentId, principal)
+    await this.refuseUnready()
     const id = randomUUID()
     const session = await this.insert(
       id,
       principal,
-      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, mode: parent.mode },
+      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, mode: 'durable', runtime: 'unified' },
       { budgetOf: parent },
     )
     const agent = options.agent
@@ -1446,161 +1296,37 @@ export class SessionManager {
     // Never unarchived by a send (#1885): unarchiving is the owner's explicit PATCH.
     if (before.archivedAt !== null) throw archivedError(id)
     const turnId = randomUUID()
-    if (before.mode === 'durable') {
-      const turn = await this.durableOrRefuse().send(before, {
-        turnId,
-        prompt,
-        text: options.context ? `${prompt}\n\n${options.context}` : prompt,
-        author: principal,
-        images: options.images ?? [],
-        systemAppend: systemAppend(),
-        ...(options.tiers ? { tiers: options.tiers } : {}),
-        ...(options.flow ? { flow: options.flow } : {}),
-      })
-      if (!turn) throw await this.whyNotClaimed(id, principal, before)
-      return turn
-    }
-    const claim = await this.claimSession(
-      id,
-      `UPDATE ai_sessions
-       SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
-           interrupt_requested = false, updated_at = now()
-       FROM prev
-       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND archived_at IS NULL
-         AND ${POOL_COST} < ${POOL_BUDGET} AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}, prev.prev_turn_id`,
-      [id, turnId, principal.kind, principal.id, this.leaseMs],
-    )
-    if (!claim) throw await this.whyNotClaimed(id, principal, before)
-    // The images and their previews are stored once the claim proves the sender owns the
-    // session and may start a turn, so the turn's event can name them (#2479). A store
-    // that fails gives the claim back and refuses the message. (A durable send does the
-    // same under its own claim, durable.ts.)
-    let sent: SentImage[] | undefined
-    if (options.images?.length) {
-      try {
-        sent = await this.storeSentImages(id, options.images)
-      } catch (err) {
-        await this.releaseClaim(id, turnId)
-        throw err
-      }
-    }
-    return this.startTurn(claimed(claim), turnId, prompt, principal, {
-      ...(options.context ? { context: options.context } : {}),
-      ...(options.images?.length && sent ? { images: options.images, sent } : {}),
+    // Every turn runs as an AgentSession on a worker (plan Step 6.3), a classic session's too;
+    // a DurableSession that has run a turn keeps its workflow (durable.ts).
+    const turn = await this.durableOrRefuse().send(before, {
+      turnId,
+      prompt,
+      text: options.context ? `${prompt}\n\n${options.context}` : prompt,
+      author: principal,
+      images: options.images ?? [],
+      systemAppend: systemAppend(),
       ...(options.tiers ? { tiers: options.tiers } : {}),
+      ...(options.flow ? { flow: options.flow } : {}),
     })
-  }
-
-  /**
-   * Claims session `id` with `query`, an UPDATE that takes it when it is free or its
-   * lease has run out (`$1` its id; it joins `FROM prev` and returns `prev.prev_turn_id`),
-   * and reads in the same statement the turn it took over, if any (#3320). An expired lease is either reaped,
-   * and reapExpired writes that turn's `turn` row, or taken here, and this writes it:
-   * each lapsed turn gets exactly one, whichever replica ran it. The CTE locks the row
-   * before the UPDATE runs (joined, so it is read first: one read only in RETURNING
-   * would run after the UPDATE and find nothing to lock), so a reaper's UPDATE and this
-   * one are ordered and only one sees the turn. One statement, not a transaction, so a
-   * claim costs the pool one round trip (#2981 review).
-   */
-  private async claimSession(
-    id: string,
-    query: string,
-    params: (string | number)[],
-  ): Promise<ClaimRow | undefined> {
-    // FOR UPDATE is what keeps a lapsed turn to one `turn` row, not a tuning: without it
-    // the reaper's UPDATE and this one could both read the turn and both write its row.
-    const [row] = await this.deps.sql.unsafe<(ClaimRow & { prev_turn_id: string | null })[]>(
-      `WITH prev AS (SELECT turn_id::text AS prev_turn_id FROM ai_sessions WHERE id = $1 FOR UPDATE)
-       ${query}`,
-      params,
-    )
-    const claim: ClaimRow | undefined = row
-    const taken = row?.prev_turn_id ?? undefined
-    if (claim && taken) {
-      // Not awaited: the send it is on would wait for it. record() settles on its own,
-      // and reports a write that never lands (audit/log.ts).
-      void this.deps.audit?.record({
-        kind: 'turn',
-        action: 'lost_claim',
-        surface: 'harness',
-        actor: { kind: claim.owner_kind, id: claim.owner_id, label: claim.owner_label },
-        sessionId: id,
-        turnId: taken,
-        outcome: 'error',
-        detail: TAKEN_OVER,
-      })
-    }
-    return claim
-  }
-
-  /**
-   * Runs the turn that re-makes an approved call after its turn was lost
-   * (#258: the approval was decided after a restart). Claims the session
-   * like send() does, but for the decider rather than the owner: approving is
-   * what authorises it (approvals/service.ts `decide`). The approval is bound
-   * to the new turn, which alone may use it. Not resumed when the session
-   * cannot start a turn now, or the approval can no longer be used; the
-   * service then voids it and says so. A claim taken and then not used is
-   * released at once.
-   */
-  async resumeApproved(approval: ApprovalRecord, by: Owner): Promise<ResumeResult> {
-    if (!approval.sessionId) return { resumed: false, reason: 'the approval has no session' }
-    if (this.draining) return { resumed: false, reason: RESTARTING }
-    const turnId = randomUUID()
-    const claim = await this.claimSession(
-      approval.sessionId,
-      `UPDATE ai_sessions
-       SET status = 'running', turn_id = $2, lease_until = now() + ($3 * interval '1 millisecond'),
-           interrupt_requested = false, updated_at = now()
-       FROM prev
-       WHERE id = $1 AND status <> 'done' AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
-         AND (turn_id IS NULL OR lease_until <= now())
-       RETURNING ${COLUMNS}, unpriced_cost_usd, agent_model, agent_effort, agent_type, ${CLAIMED_AT}, prev.prev_turn_id`,
-      [approval.sessionId, turnId, this.leaseMs],
-    )
-    if (!claim) {
-      return { resumed: false, reason: 'it is running another turn, is done or archived, or has spent its budget' }
-    }
-    try {
-      if (!(await this.approvals.bindResume(approval.id, turnId))) {
-        await this.releaseClaim(approval.sessionId, turnId)
-        return { resumed: false, reason: 'the approval was already withdrawn, used or out of time' }
-      }
-      const prompt =
-        `${publicLabel(by)} approved ${approval.tool} (approval ${approval.id}) after the turn that asked for it had ` +
-        'ended. Make that same call again now, with exactly the same input: the approval is bound to that input ' +
-        'and is used once. If you no longer need it, say so instead.'
-      const tiers = await this.resumeTiers(approval, record(claim))
-      await this.startTurn(claimed(claim), turnId, prompt, by, { keepResumeTurn: turnId, ...(tiers ? { tiers } : {}) })
-      return { resumed: true }
-    } catch (err) {
-      await this.releaseClaim(approval.sessionId, turnId)
-      return { resumed: false, reason: describe(err) }
-    }
-  }
-
-  /**
-   * The tiers a resumed turn runs with: those of the turn that asked
-   * (`requestedTiers`), so the approved tool is offered again, but only while
-   * that principal still owns the session, and cut down to what it holds now
-   * (`currentTiers`: a revoked token holds nothing). Undefined leaves the
-   * owner's default (auth/principal.ts `harnessPrincipal`).
-   */
-  private async resumeTiers(approval: ApprovalRecord, session: SessionRecord): Promise<readonly Tier[] | undefined> {
-    const requested = approval.requestedTiers
-    if (!requested || !sameOwner(approval.requestedBy, session.owner)) return undefined
-    const now = this.deps.currentTiers ? await this.deps.currentTiers(session.owner) : undefined
-    const tiers = now ? requested.filter((t) => now.includes(t)) : requested
-    return tiers.length > 0 ? tiers : undefined
+    if (!turn) throw await this.whyNotClaimed(id, principal, before)
+    return turn
   }
 
   /** The durable dispatch, or `unavailable` when this service has none (no Temporal or no key). */
+  /**
+   * Refuses `unavailable` a new session this service cannot run now (spec 2026-10-13 §10.1):
+   * no Temporal or key, or no worker an AgentSession needs polls (DurableTurns.unready).
+   */
+  private async refuseUnready(): Promise<void> {
+    const why = await this.durableOrRefuse().unready('unified')
+    if (why) throw new SessionError('unavailable', `sessions cannot run now: ${why}; try again once it does`)
+  }
+
   private durableOrRefuse(): DurableTurns {
     if (this.durableTurns) return this.durableTurns
     throw new SessionError(
       'unavailable',
-      'this session is durable, and this agent service has no Temporal or secret key to run it; try again once it has',
+      'sessions run on Temporal (spec 2026-10-13 §10.1), and this agent service has no Temporal or secret key; try again once it has',
     )
   }
 
@@ -1615,82 +1341,6 @@ export class SessionManager {
       if (err instanceof DurableUnavailable) throw new SessionError('unavailable', err.message)
       throw err
     }
-  }
-
-  /** Gives back a claim no turn ran on (a resume that could not start). */
-  private async releaseClaim(id: string, turnId: string): Promise<void> {
-    const released = await this.deps.sql`
-      UPDATE ai_sessions SET status = 'idle', turn_id = NULL, lease_until = NULL, updated_at = now()
-      WHERE id = ${id} AND turn_id = ${turnId}`
-    if (released.count > 0) await this.events.append(id, [event({ type: 'session.status', sessionId: id, status: 'idle' })])
-  }
-
-  /**
-   * Stores a turn's images and their previews with the session (blobs.ts), as a
-   * tool result's are, and answers what the `user.turn` event names them by
-   * (#2479): the panel loads both by name, from any tab.
-   */
-  private async storeSentImages(id: string, images: readonly UserImage[]): Promise<SentImage[]> {
-    const { blobs, sent } = sentImageBlobs(images)
-    try {
-      await this.blobs.put(id, blobs)
-    } catch (err) {
-      this.deps.stderr?.(`session ${id}: could not store a turn's images: ${err instanceof Error ? err.message : String(err)}\n`)
-      throw new SessionError('unavailable', `the images for session ${id} could not be stored; send it again in a moment`)
-    }
-    return sent
-  }
-
-  private async startTurn(
-    session: ClaimedSession,
-    turnId: string,
-    prompt: string,
-    author: Owner,
-    options: {
-      keepResumeTurn?: string
-      context?: string
-      images?: readonly UserImage[]
-      /** What the `user.turn` event names `images` by, stored already (`storeSentImages`). */
-      sent?: readonly SentImage[]
-      tiers?: readonly Tier[]
-    } = {},
-  ): Promise<Turn> {
-    const id = session.id
-    // A new turn supersedes approvals left pending, or approved and unused,
-    // by one that is gone (claiming proved no turn is live): their calls can
-    // no longer run. A resumed turn keeps the approval bound to it; its
-    // sibling orphans are cancelled with the rest (approvals/service.ts).
-    await this.approvals.cancelPending(
-      id,
-      'superseded by a new turn',
-      options.keepResumeTurn === undefined ? {} : { keepResumeTurn: options.keepResumeTurn },
-    )
-    await this.events.append(id, [
-      event({
-        type: 'user.turn',
-        sessionId: id,
-        turnId,
-        text: prompt,
-        author,
-        ...(options.sent?.length ? { images: [...options.sent] } : {}),
-      }),
-      event({ type: 'session.status', sessionId: id, status: 'running' }),
-    ])
-    const controller = new AbortController()
-    const local: LocalTurn = { controller, turnId, settling: false, lost: false }
-    this.active.set(id, local)
-    const text = options.context ? `${prompt}\n\n${options.context}` : prompt
-    const query = options.images?.length ? userPrompt(text, options.images) : text
-    const done = this.runTurn(session, turnId, query, local, prompt, options.tiers ? { tiers: options.tiers } : {})
-      // Never rejects: callers may ignore `done`, and an unhandled rejection
-      // would take the process down. The lease frees the claim if the
-      // release itself failed.
-      .catch((err: unknown): TurnOutcome => ({ kind: 'failed', message: describe(err) }))
-      .finally(() => {
-        if (this.active.get(id) === local) this.active.delete(id)
-      })
-    local.done = done
-    return { turnId, done }
   }
 
   private async whyNotClaimed(id: string, principal: Owner, before: SessionRecord): Promise<SessionError> {
@@ -1718,255 +1368,6 @@ export class SessionManager {
     )
   }
 
-  private async runTurn(
-    session: ClaimedSession,
-    turnId: string,
-    prompt: string | AsyncIterable<SDKUserMessage>,
-    local: LocalTurn,
-    /** The user's words without the page context: what memory is recalled against. */
-    userText: string,
-    principal: TurnPrincipal,
-  ): Promise<TurnOutcome> {
-    const { controller } = local
-    const id = session.id
-    const sql = this.deps.sql
-    // The turn on the session's warm process (turnCore.ts), under this row's lease.
-    const core = new CoreTurn(this.turnCore, {
-      session,
-      turnId,
-      principal,
-      userText,
-      signal: controller.signal,
-      interrupt: () => controller.abort(new Error('the turn was interrupted')),
-      onSettling: () => {
-        local.settling = true
-      },
-      gates: ({ turn, secrets, trace, shown }) => {
-        const approvalGate = this.approvals.gate({
-          sessionId: id,
-          turnId,
-          requestedBy: session.owner,
-          ...(principal.tiers ? { requestedTiers: principal.tiers } : {}),
-          secrets,
-          signal: controller.signal,
-          trace,
-          shown,
-        })
-        // AskUserQuestion (#940): the run has a question gate only in a session
-        // the browser user owns (TurnRunner), and this turn's answers it.
-        const questionGate = turn.run.questionGate
-          ? this.questions.gate({
-              sessionId: id,
-              turnId,
-              secrets,
-              signal: controller.signal,
-              // An attention request's `stop`/`wait` timer (#815) ends the turn as an interrupt does.
-              stopTurn: (why) => controller.abort(new AttentionStop(why)),
-              // The claim set updated_at = now(): the turn's start by the database's clock.
-              turnStartedAt: session.claimedAt,
-            })
-          : undefined
-        return {
-          approvalGate,
-          approvalFor: (toolUseId) => this.approvals.idForToolUse(id, toolUseId),
-          ...(questionGate
-            ? {
-                questionGate,
-                waitForTab: waitForTab(questionGate, controller.signal, (questionId) => this.questions.reconnected(id, { questionId })),
-              }
-            : {}),
-        }
-      },
-    })
-    let result: SDKResultMessage | undefined
-    let outcome: TurnOutcome = { kind: 'failed', message: 'the turn could not finish' }
-    try {
-      // Lease renewal, and the interrupt flag from other replicas. A database blip
-      // keeps the turn running: the lease covers several misses (renewLoop logs them).
-      const renewal = renewLoop(
-        async () => {
-          const rows = await sql<{ interrupt_requested: boolean }[]>`
-            UPDATE ai_sessions SET lease_until = now() + (${this.leaseMs} * interval '1 millisecond')
-            WHERE id = ${id} AND turn_id = ${turnId}
-            RETURNING interrupt_requested`
-          if (rows.length === 0) {
-            local.lost = true
-            controller.abort(new Error('lost the turn claim'))
-          } else if (rows[0]?.interrupt_requested) {
-            controller.abort(new Error('the turn was interrupted'))
-          }
-        },
-        this.renewMs,
-        (line) => this.deps.stderr?.(`session ${id} turn ${turnId}: ${line}\n`),
-      )
-      let run: Awaited<ReturnType<CoreTurn['run']>>
-      try {
-        run = await core.run(prompt)
-      } finally {
-        await renewal.stop()
-      }
-      result = run.result
-      // The entry was settled on the result, after the SDK's last transcript
-      // append of the turn (warm.ts `settle` waits for the mirror; measured:
-      // `last-prompt` and `cost-state` entries arrive after the `result`
-      // message), so releasing the claim here means the next turn, on any
-      // replica, resumes from a complete transcript.
-      const stopped = controller.signal.aborted ? abortMessage(controller.signal) : undefined
-      const turnUsd = run.spentUsd
-      // Only a turn that did not end on its own can be cut off mid-request;
-      // one that did has every request priced in its result. WebFetch's own
-      // model calls are in no result, so they are added the same way.
-      const cutUsd = (stopped !== undefined || !result ? run.cutUsd : 0) + run.nestedUsd
-      if (local.lost) {
-        outcome = { kind: 'lost_claim' }
-        // Another turn owns the session now, wherever it runs: this process is not kept for it.
-        // Before the charge, which needs the database a lost claim may have lost too (#3849 review).
-        for (const entry of run.served) void this.warm.abandon(entry, 'lost the turn claim')
-        await this.chargeLostTurn(session.id, turnId, result, turnUsd, cutUsd, core.traced)
-        return outcome
-      }
-      // A turn stopped after its refusal was reported is still the caller's.
-      outcome = await this.finish(
-        session,
-        turnId,
-        stopped,
-        stopped === undefined ? undefined : interruptedMessage(controller.signal),
-        result,
-        result && stopped === undefined ? run.refused : undefined,
-        run.failure,
-        run.secrets,
-        turnUsd,
-        cutUsd,
-        core.traced,
-      )
-      // A claim that went after the lost check above: its process is not kept either (#2981 review).
-      if (outcome.kind === 'lost_claim') for (const entry of run.served) void this.warm.abandon(entry, 'lost the turn claim')
-      return outcome
-    } catch (err) {
-      core.traced.fail(err)
-      throw err
-    } finally {
-      core.end(outcome, result)
-    }
-  }
-
-  /**
-   * `stopped` is why the turn was aborted (the abort reason: an interrupt, or
-   * SHUTTING_DOWN), when it was.
-   */
-  private async finish(
-    session: ClaimedSession,
-    turnId: string,
-    stopped: string | undefined,
-    /** The `interrupted` error's message when `stopped`: an attention timer's says so (#1206). */
-    interrupted: string | undefined,
-    result: SDKResultMessage | undefined,
-    /** The failed model request `result` reports, when it reports one (fallback.ts `onRefused`). */
-    refused: Refused | undefined,
-    failure: string | undefined,
-    secrets: readonly string[],
-    /**
-     * What the turn's attempts spent as their results priced it (warmTurn.ts
-     * `spentUsd`): each the difference of its process's cumulative
-     * `total_cost_usd` before and after (spec §6.6; warm.ts `turnCostUsd`), so
-     * a resumed process's carried history and the session's unpriced spend
-     * (#991), which no total holds, are neither counted again nor lost.
-     */
-    turnUsd: number,
-    /**
-     * What the turn spent that no result prices: the request it was cut off in (#991,
-     * unpricedSpend.ts), and its WebFetch's own model calls, in every outcome (#2684).
-     */
-    cutUsd: number,
-    /** The turn's trace: a lost turn's spend that could not be recorded goes on it. */
-    trace: TurnTrace,
-  ): Promise<TurnOutcome> {
-    const id = session.id
-    // An approval still pending here belongs to a call that was waiting when
-    // the turn was aborted: only an abort ends a wait (approvals/service.ts).
-    // A shutdown keeps it, and the session waiting on it, for after the
-    // restart; anything else (an interrupt) cancels it. Measured on SDK
-    // 0.3.283 and 0.3.287 (test/approvals.e2e.test.ts): aborting a query whose canUseTool
-    // is pending fails that call ("Tool permission request failed: AbortError:
-    // Tool permission stream closed before response received"), and Claude
-    // Code may still reach the model and end with a `result` before it exits;
-    // so the harness interrupts first (harness/run.ts stopFirst, #1168), which
-    // ends the turn with no model call. The tool never runs.
-    // Approved-but-unused approvals end with the turn in every case,
-    // including the one a resumed turn was bound to and did not use.
-    // A question never outlives its turn (questions/service.ts), shutdown or not;
-    // a posted `done` summary does, and cancelPending leaves it pending.
-    // Only this turn's: if its claim was lost, a newer turn's question is not ours to cancel.
-    await this.questions.cancelPending(id, stopped ?? 'the turn ended', { refresh: false, turnId })
-    // The approvals are the session's, not this turn's: settled only while this turn still
-    // holds the claim. One the reaper or a send took after runTurn's lost check (#2981
-    // review) leaves them to the turn that has it; the release below would fail anyway.
-    // A claim taken between this read and the cancel below can still cost that newer
-    // turn its approvals: a window of one query, accepted. Holding the row's lock across
-    // the cancel would serialise it with every claim, and the cancel runs on its own
-    // connection, so a lock taken here could wait on itself.
-    const [held] = await this.deps.sql`SELECT 1 FROM ai_sessions WHERE id = ${id} AND turn_id = ${turnId}`
-    if (!held) {
-      await this.chargeLostTurn(id, turnId, result, turnUsd, cutUsd, trace)
-      return { kind: 'lost_claim' }
-    }
-    const keepWaiting = stopped === SHUTTING_DOWN && (await this.approvals.hasPending(id))
-    if (stopped !== SHUTTING_DOWN) {
-      await this.approvals.cancelPending(id, stopped ?? 'the turn ended', { refresh: false })
-    } else {
-      await this.approvals.revokeUnused(id, 'the turn ended')
-    }
-    const tally = tallyTurn(session, { stopped, interrupted, result, refused, failure, secrets, turnUsd, cutUsd })
-    let status: SessionStatus = tally.status
-    const outcome = tally.outcome
-    const { costUsd, turns } = tally
-    const tail = tally.tail.slice(0, -1)
-    if (keepWaiting) status = 'waiting_approval'
-    tail.push(event({ type: 'session.status', sessionId: id, status }))
-
-    // Added, not set: a turn that lost this session's claim earlier may have added its
-    // spend since this one read the row (chargeLostTurn).
-    const [released] = await this.deps.sql<{ id: string }[]>`
-      UPDATE ai_sessions
-      SET status = ${status}, cost_usd = cost_usd + ${costUsd - session.ownCostUsd}, turns = ${turns},
-          unpriced_cost_usd = unpriced_cost_usd + ${cutUsd},
-          turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
-      WHERE id = ${id} AND turn_id = ${turnId}
-      RETURNING id`
-    if (!released) {
-      await this.chargeLostTurn(id, turnId, result, turnUsd, cutUsd, trace)
-      return { kind: 'lost_claim' }
-    }
-    // #1922: what the turn cost, as its own audit row (audit/turn.ts turnCostEntry).
-    await this.deps.audit?.record(
-      turnCostEntry(
-        { sessionId: id, turnId, actor: session.owner },
-        outcome,
-        { costUsd: costUsd - session.ownCostUsd, priced: result !== undefined, estimatedUsd: cutUsd },
-        secrets,
-      ),
-    )
-    // Read again, not from `session`: the user may have raised the budget while the turn
-    // ran, and a fork or the parent sharing it may have spent from it (#823). The meter
-    // shows what the whole lineage has spent, which is what the budget is checked against.
-    const after = await this.row(id)
-    const budgetUsd = after?.budgetUsd ?? session.budgetUsd
-    const spent = after?.costUsd ?? costUsd
-    const worded = wordTail(tail, { spentUsd: spent, budgetUsd })
-    await this.events.append(id, worded.map((e) => scrubForLog(e, secrets)))
-    // A decision that landed while this turn was finishing saw it still
-    // holding the session and took it for parked (approvals/service.ts
-    // decide), so nobody resumes for it: void an approval of this turn's
-    // that nothing used, and settle the status if nothing is pending now. A
-    // decision that lands after the release is an orphan's: decide() resumes
-    // for it, and a row already bound to that resumed turn is skipped here
-    // (revokeUnused `turnId`). Whichever of the two gets the row first wins;
-    // a void is announced, so an approval is never lost silently.
-    await this.approvals.revokeUnused(id, 'it was decided as its turn ended', { turnId })
-    await this.approvals.refreshStatus(id)
-    return outcome
-  }
-
   /**
    * Stops the running turn. Any principal that may see the session may
    * interrupt it (spec §8.6: "interrupt from any watcher"). Resolves false
@@ -1974,28 +1375,7 @@ export class SessionManager {
    */
   async interrupt(id: string, principal: Owner): Promise<boolean> {
     const session = await this.get(id, principal)
-    if (session.mode === 'durable') {
-      return this.durableOrRefuse().interrupt(session, `interrupted by ${publicLabel(principal)}`)
-    }
-    const local = this.active.get(id)
-    if (local) {
-      // Accurate, not optimistic: a turn whose result is already in is
-      // finishing by itself, so this interrupt stops nothing.
-      if (local.settling) return false
-      // Its pending approvals and questions are cancelled as it finishes (finish()).
-      local.controller.abort(new Error(`interrupted by ${publicLabel(principal)}`))
-      return true
-    }
-    if (!session.turnActive) {
-      // No turn: all an interrupt can stop is an approval left pending by a
-      // turn that is gone (a restart), which would otherwise resume it.
-      return (await this.approvals.cancelPending(id, `interrupted by ${publicLabel(principal)}`)) > 0
-    }
-    // Running on another replica: its lease renewal sees the flag.
-    const rows = await this.deps.sql`
-      UPDATE ai_sessions SET interrupt_requested = true
-      WHERE id = ${id} AND turn_id IS NOT NULL AND lease_until > now()`
-    return rows.count > 0
+    return this.durableOrRefuse().interrupt(session, `interrupted by ${publicLabel(principal)}`)
   }
 
   /**
@@ -2097,8 +1477,8 @@ export class SessionManager {
   private async transfer(session: SessionRecord, to: Owner, options: { accepting?: boolean } = {}): Promise<SessionRecord> {
     const { id } = session
     if (sameOwner(session.owner, to) && session.owner.label === to.label && !session.offer) return session
-    // Refused before anything changes when this service cannot reach a durable session's workflow.
-    const durable = session.mode === 'durable' && !sameOwner(session.owner, to) ? this.durableOrRefuse() : undefined
+    // The session's parked calls, if its workflow has any, end with the owner change (durable.ts `handoff`).
+    const durable = !sameOwner(session.owner, to) ? this.durableTurns : undefined
     // Conditional on the owner read above (and, accepting, on the offer still
     // being the live one to `to`), so two concurrent handoffs cannot both apply.
     const offerStill = options.accepting
@@ -2261,9 +1641,9 @@ export class SessionManager {
         title,
         ...(classic?.upToMessageId === undefined ? {} : { upToMessageId: classic.upToMessageId }),
       })
-      // The SDK transcript's copy: an AgentSession parent's child is one too, from its first turn.
-      const unified = parent.runtime === 'unified'
-      child = await this.insert(forkedId, principal, { ...fields, mode: unified ? 'durable' : 'classic', ...(unified ? { runtime: 'unified' as const } : {}) }, insertOptions)
+      // The SDK transcript's copy, a classic parent's or an AgentSession's: the child is an
+      // AgentSession, as every new session is (plan Step 6.3).
+      child = await this.insert(forkedId, principal, { ...fields, mode: 'durable', runtime: 'unified' }, insertOptions)
       try {
         // Its workspace files (#2329), so the fork carries on with what the parent had.
         await this.files.copy(id, child.id)
@@ -2452,19 +1832,11 @@ export class SessionManager {
     return raised
   }
 
-  /** Aborts every turn running in this process (shutdown); each releases its claim as interrupted. */
-  abortAll(): void {
-    for (const { controller } of this.active.values()) controller.abort(new Error(SHUTTING_DOWN))
-  }
+  /** Aborts every turn running in this process (shutdown): an AgentSession's turns are TurnHost's (main.ts), so none. */
+  abortAll(): void {}
 
-  /**
-   * Once every turn running now has finished, its last events appended: what a
-   * shutdown waits for after abortAll(), before it closes the database those appends
-   * use (#802).
-   */
-  async settled(): Promise<void> {
-    await Promise.allSettled([...this.active.values()].map((turn) => turn.done))
-  }
+  /** Once every turn running here has finished: TurnHost's (main.ts), so at once. */
+  async settled(): Promise<void> {}
 
   /** From now on no turn starts in this process: sends get `busy` (RESTARTING). */
   drain(): void {
@@ -2480,153 +1852,15 @@ export class SessionManager {
    * session was left `running` with no event saying why (2026-09-30, a deploy
    * mid-turn). Resolves once every turn has ended or the waits are up.
    */
-  async stopTurns({ graceMs, abortWaitMs, others }: { graceMs: number; abortWaitMs: number; others?: Promise<void> }): Promise<void> {
+  async stopTurns({ others }: { graceMs: number; abortWaitMs: number; others?: Promise<void> }): Promise<void> {
     this.drain()
-    const ended = () => this.settled()
-    const within = (ms: number, work: Promise<unknown>) =>
-      Promise.race([work, new Promise((resolve) => setTimeout(resolve, ms).unref())])
-    await within(graceMs, ended())
-    if (this.active.size > 0) {
-      this.abortAll()
-      await within(abortWaitMs, ended())
-    }
-    // The other turns on these warm processes (an AgentSession's, TurnHost.stop), which keep
-    // their own grace and wait: their processes are not closed under them.
+    // The turns on these warm processes (an AgentSession's, TurnHost.stop), which keep their
+    // own grace and wait: their processes are not closed under them.
     await others
     // The warm processes go with the pod (spec 2026-10-13 §5.3 "shutdown"): the
     // idle ones, and a stopped turn's that is still winding down past its wait.
     await this.warm.close()
   }
 
-  /**
-   * What a turn that lost its claim spent, added to its session all the same (#2981
-   * review): the requests were billed whoever owns the session now. Counted as finish()
-   * counts it, without the claim, and added to the row rather than set, since the turn
-   * that took it over may be writing its own.
-   *
-   * Deliberately no `turnCostEntry` row and no `session.result` event (#3849 review): a
-   * lapsed turn has exactly one `turn` row, the reaper's or the claim's (#3320), so its
-   * spend shows in the session's total only; and the session's events are the newer
-   * turn's now, whose own `session.result` carries the total with this in it. A failed
-   * write is logged, not thrown: the claim is often lost because the database was.
-   */
-  private async chargeLostTurn(
-    id: string,
-    turnId: string,
-    result: SDKResultMessage | undefined,
-    turnUsd: number,
-    cutUsd: number,
-    trace: TurnTrace,
-  ): Promise<void> {
-    const usd = (result ? turnUsd : 0) + cutUsd
-    if (usd <= 0) return
-    try {
-      await this.deps.sql`
-        UPDATE ai_sessions SET cost_usd = cost_usd + ${usd}, unpriced_cost_usd = unpriced_cost_usd + ${cutUsd}
-        WHERE id = ${id}`
-    } catch (err) {
-      this.deps.stderr?.(`session ${id} turn ${turnId}: its spend of ${usd} USD was not recorded: ${describe(err)}\n`)
-      trace.unrecordedSpend(usd)
-    }
-  }
-
-  /**
-   * Ends the turns whose lease ran out. Usually their process died before
-   * finish() (a SIGKILL, an OOM, a pool closed under them), so nothing else
-   * would say the turn stopped. A send could already take such a session over
-   * (its claim accepts an expired lease), but until then its row said `running`
-   * and its log had no end. A live turn renews its lease every `renewMs`, so an
-   * expired one has lost its claim, whether or not it is still running: one
-   * still running on this replica (its renewals stalled, #2375) is stopped
-   * here too, as lost, so it never runs finish() over a newer turn. One UPDATE, so two replicas' reapers never both
-   * take the same row. The session goes to `waiting_approval` when an
-   * approval is still pending (a shutdown keeps those for after the restart,
-   * #258), otherwise `idle`; approved-but-unused approvals of the dead turn
-   * are revoked, as finish() does on a shutdown. Returns the sessions reaped.
-   */
-  async reapExpired(): Promise<string[]> {
-    const rows = await this.deps.sql<
-      { id: string; status: SessionStatus; dead_turn: string; owner_kind: string; owner_id: string; owner_label: string }[]
-    >`
-      WITH dead AS (
-        SELECT id, turn_id FROM ai_sessions
-        WHERE turn_id IS NOT NULL AND lease_until <= now()
-        FOR UPDATE SKIP LOCKED
-      )
-      UPDATE ai_sessions s
-      SET status = CASE
-            WHEN s.status = 'done' THEN 'done'
-            WHEN EXISTS (SELECT 1 FROM ai_approvals a WHERE a.session_id = s.id AND a.decision IS NULL)
-              THEN 'waiting_approval'
-            ELSE 'idle'
-          END,
-          turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
-      FROM dead
-      WHERE s.id = dead.id
-      RETURNING s.id, s.status, dead.turn_id AS dead_turn, s.owner_kind, s.owner_id, s.owner_label`
-    for (const { id, status, dead_turn, owner_kind, owner_id, owner_label } of rows) {
-      // Its cause, as far as this replica can tell (#2375). Only a turn on this one is
-      // known to be alive: its renewals stopped landing. Any other's replica stopped,
-      // or stopped reaching the database; which, this one cannot see.
-      const local = this.active.get(id)
-      const here = local?.turnId === dead_turn ? local : undefined
-      const message = here
-        ? `the turn was stopped: it could not renew its claim on the session for ${leaseWords(this.leaseMs)}, though its replica is running`
-        : 'the turn was stopped: its claim on the session lapsed (the replica running it stopped, or could not reach the database)'
-      if (here) {
-        // Lost before aborted: its runTurn then skips finish(), which would cancel the
-        // approvals of a turn sent since. The two audits split the rows: the local
-        // turn's auditor.finish closes only its open `tool_call` rows, with this
-        // message; the reaper writes the one `turn` row, below. So the lost exit in
-        // runTurn writes no `turn` row of its own: a turn whose session a new turn took
-        // before any reap gets its row from that claim (claimSession, #3320).
-        here.lost = true
-        here.controller.abort(new Error(message))
-      }
-      await this.approvals.revokeUnused(id, 'the turn ended')
-      // The dead turn's questions only (questions/service.ts).
-      await this.questions.cancelPending(id, 'the turn ended', { refresh: false, turnId: dead_turn })
-      await this.events.append(id, [
-        event({
-          type: 'error',
-          sessionId: id,
-          code: 'interrupted',
-          message,
-        }),
-        event({ type: 'session.status', sessionId: id, status }),
-      ])
-      // Its `turn` row, as any other ending has (#2375); its own finish never ran. No
-      // cost on it: the reaper never saw the requests it made. A turn on this replica
-      // adds its own spend to the session when it stops (chargeLostTurn).
-      await this.deps.audit?.record({
-        kind: 'turn',
-        action: 'lost_claim',
-        surface: 'harness',
-        actor: { kind: owner_kind, id: owner_id, label: owner_label },
-        sessionId: id,
-        turnId: dead_turn,
-        outcome: 'error',
-        detail: message,
-      })
-    }
-    return rows.map((r) => r.id)
-  }
-
-  /** Runs `reapExpired` now and every `intervalMs` (main.ts), like the approval sweeper. */
-  startReaper(
-    intervalMs: number,
-    options: { ready?: () => Promise<boolean>; onError?: (err: unknown) => void } = {},
-  ): () => void {
-    const ready = options.ready ?? (() => Promise.resolve(true))
-    const sweep = () => {
-      ready()
-        .then((ok) => (ok ? this.reapExpired() : []))
-        .catch(options.onError ?? (() => {}))
-    }
-    sweep()
-    const timer = setInterval(sweep, intervalMs)
-    timer.unref()
-    return () => clearInterval(timer)
-  }
 }
 

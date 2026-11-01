@@ -10,8 +10,6 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
 import { sessionWorkflowId } from '../src/gate/durable.js'
 import { kekFromBase64 } from '../src/secrets.js'
-import { DurableTurns } from '../src/sessions/durable.js'
-import { SETTING_SESSION_MODE } from '../src/sessions/manager.js'
 import { PgPayloadKeys, SubjectPayloadCodec } from '../src/temporal/payloadCodec.js'
 import { writeManifest } from '../src/tools/manifest.js'
 import { PgSessionOwners } from '../src/temporal/toolActivities.js'
@@ -19,6 +17,7 @@ import { turnServers } from '../src/temporal/turnServers.js'
 import { turnToolActivities, turnToolActivity } from '../src/temporal/turnTools.js'
 import { AgentWorker } from '../src/temporal/worker.js'
 import { createServer as createHttpServer, type Server } from 'node:http'
+import { DurableSessionTurns } from './support/durableSessionTurns.js'
 import { durableHealthPort, notStarted } from './support/durableHealth.js'
 import { expectPanelAccepts, frontendClientMessages } from './support/frontendProtocol.js'
 import { type LiveAgent, openPanelSocket, type PanelSocket, startLiveAgent } from './support/liveAgent.js'
@@ -131,9 +130,9 @@ describe.skipIf(skip !== undefined)(`a durable turn from the chat socket${skip ?
     const sessions = manager({
       sql: db.sql,
       paths: await tempPaths(),
-      settings: { get: <T>(key: string) => Promise.resolve((key === SETTING_SESSION_MODE ? 'durable' : undefined) as T) },
+      settings: { get: <T>() => Promise.resolve(undefined as T) },
     })
-    sessions.durableTurns = new DurableTurns({ client, sql: db.sql, events: sessions.events, sendTimeoutMs: 60_000 })
+    sessions.durableTurns = new DurableSessionTurns({ client, sql: db.sql, events: sessions.events, sendTimeoutMs: 60_000 })
     agent = await startLiveAgent(sessions)
     panel = await openPanelSocket(agent)
 
