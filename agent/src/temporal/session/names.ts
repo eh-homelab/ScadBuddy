@@ -55,6 +55,8 @@ export const SESSION_GATE_ACTIVITIES = {
   grant: 'gate.grant_input',
   deny: 'gate.deny_input',
   resolve: 'gate.resolve_input',
+  /** What was decided for a request whose row is its record (R5): its response row, or null while it is open. */
+  read: 'gate.read_input',
 } as const
 
 /**

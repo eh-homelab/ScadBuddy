@@ -9,6 +9,12 @@ export const INTERRUPT_SIGNAL = 'interrupt'
 /** The session was marked done: its workflow completes once no turn runs (#1056). */
 export const END_SIGNAL = 'end'
 /**
+ * An AgentSession's request was decided in its record (R5, plan Step 9.7): the respond route wrote
+ * the decision, and this wakes the workflow to read it (`gate.read_input`). A Signal, not an
+ * Update: nobody waits on it, and it is kept in the history while no worker runs.
+ */
+export const INPUT_DECIDED_SIGNAL = 'input_decided'
+/**
  * A validator's refusal reaches the client as an ApplicationFailure of type
  * `GateRefused:<code>` (validate.ts RefusalCode), which the route maps to its status.
  */

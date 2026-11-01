@@ -5,6 +5,7 @@ import { busKindOf } from '../sessions/busEvents.js'
 import { responseHash } from './canonical.js'
 import { parseRequestId } from './ids.js'
 import { cut } from './limits.js'
+import { type GateEntry, RespondRefusal, type Role, validateRespond } from './validate.js'
 
 // Every write about a durable entry (durable-agents spec §6.6, "How a durable entry
 // opens and closes"), ported whole from agent-durable's gate/store.py; the SQL is the
@@ -14,6 +15,8 @@ import { cut } from './limits.js'
 //   _resolved :236, _audit :324                   -> resolved, audit
 //   openInput :368, grantInput :478, denyInput :536, resolveInput :577
 //   run_grant_responder :115, flow_responder :119, _actor :132
+// decideInput and readInput are new (R5, plan Step 9.7): the respond route's write of a decision
+// on a row that is its request's record, and the workflow's read of what was decided.
 // Python's Outcome and Kind are InputOutcome and InputEntry['kind']; _WAITING/_SETTLED are
 // busKindOf's (sessions/busEvents.ts). Each function returns what Python's returns: false when nothing was
 // written (already open or resolved, gone, or the grant does not hold).
@@ -63,7 +66,16 @@ export type OpenInput = {
   parentSession?: string | null
   parentPrincipal?: string | null
   outsideReason?: string | null
+  /**
+   * The entry as the validator checks a response against it (R5, plan Step 9.7): with it the row
+   * is the request's record, and the respond route decides it here (decideInput). Absent, the
+   * workflow holds the entry, and a response goes to it as the `respond` Update.
+   */
+  gate?: GateRecord | null
 }
+
+/** What `ai_pending_input.gate` keeps: the validator's view of the entry, without its state (the row's). */
+export type GateRecord = Omit<GateEntry, 'state'>
 
 export type DenyInput = {
   requestId: string
@@ -357,6 +369,8 @@ async function audit(
  */
 export async function openInput(sql: Sql, args: OpenInput): Promise<boolean> {
   await sql.begin(async (tx) => {
+    // The session first, as every resolution takes it (lockSessionOf).
+    await tx`SELECT 1 FROM ai_sessions WHERE id = ${args.sessionId} FOR UPDATE`
     const stale = await tx<PendingRow[]>`
       DELETE FROM ai_pending_input WHERE session_id = ${args.sessionId} AND workflow_run_id <> ${args.workflowRunId}
       RETURNING *, created_at::text AS created_at_text`
@@ -369,14 +383,14 @@ export async function openInput(sql: Sql, args: OpenInput): Promise<boolean> {
         (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary,
          input_hash, prompt, requested_by, responders, attention, expires_at,
          flow_run_id, hop, hop_until, parent_session, parent_principal,
-         outside_reason, hops)
+         outside_reason, hops, gate)
       SELECT ${args.requestId}, ${args.sessionId}::uuid, ${args.workflowId}, ${args.workflowRunId}, ${args.kind},
              ${args.tool}, ${args.summary}, ${args.inputHash}, ${args.prompt}, ${tx.json(args.requestedBy)},
              ${tx.array([...args.responders])}::text[],
              ${args.attention == null ? null : tx.json(args.attention)}::jsonb, ${args.expiresAt}::timestamptz,
              ${args.flowRunId ?? null}, ${args.hop ?? null}, ${args.hopUntil ?? null}::timestamptz,
              ${args.parentSession ?? null}::uuid, ${args.parentPrincipal ?? null}, ${args.outsideReason ?? null},
-             ${tx.json(hops)}
+             ${tx.json(hops)}, ${args.gate == null ? null : tx.json(args.gate as never)}::jsonb
       -- A retried open that lands after its entry was resolved opens nothing.
       WHERE NOT EXISTS (SELECT 1 FROM ai_input_responses WHERE request_id = ${args.requestId})
       ON CONFLICT (request_id) DO NOTHING
@@ -496,13 +510,69 @@ function sameResponder(a: Responder, b: Responder): boolean {
   return a.kind === b.kind && a.id === b.id && a.label === b.label
 }
 
+/**
+ * Takes the lock of the session `requestId`'s entry is in, before anything of the entry. Two
+ * resolutions in one session then queue on it: each writes ai_input_responses (whose foreign key
+ * holds the session row KEY SHARE) and then locks the session row FOR UPDATE (`resolved`), so
+ * taken in that order two of them deadlock (the respond route decides concurrently, R5).
+ */
+async function lockSessionOf(tx: TransactionSql, requestId: string): Promise<void> {
+  await tx`SELECT 1 FROM ai_sessions WHERE id = (SELECT session_id FROM ai_pending_input WHERE request_id = ${requestId}) FOR UPDATE`
+}
+
 /** Resolves the entry; false when it was gone (resolved by another, or never opened). */
 export async function resolveInput(sql: Sql, args: ResolveInput): Promise<boolean> {
   return await sql.begin(async (tx) => {
+    await lockSessionOf(tx, args.requestId)
     const deleted = await tx<PendingRow[]>`DELETE FROM ai_pending_input WHERE request_id = ${args.requestId} RETURNING *, created_at::text AS created_at_text`
     const row = deleted[0]
     if (row === undefined) return false
     await resolved(tx, row, args.outcome, args.responder, args.response, args.reason ?? null, args.rawResponse === undefined ? null : responseHash(args.rawResponse))
     return true
   })
+}
+
+/** A response to a request whose row is its record (decideInput), as the respond route passes it. */
+export type DecideInput = { requestId: string; response: unknown; responder: Responder; role: Role }
+
+/** How decideInput ended: the request's outcome, or `workflow` when its workflow holds the entry (no `gate`). */
+export type Decided = { kind: 'approval' | 'answer'; outcome: InputOutcome } | 'workflow'
+
+/**
+ * Decides a request whose row is its record (R5, plan Step 9.7, decision Q7), as the workflow's
+ * `respond` handler does for an entry it holds: under the row's lock, the gate's validator against
+ * the row's `gate` (state `resolving` once the row is past its timer, which the workflow is about
+ * to write), then the row removed and its resolution written (`resolved`) in the same
+ * transaction. The workflow is woken only after (gate/durable.ts), and a lost wake is made up by
+ * its timer's read. A missing row is RespondRefusal `stale` (ended, or never asked): the route
+ * then says how it ended.
+ */
+export async function decideInput(sql: Sql, args: DecideInput): Promise<Decided> {
+  return await sql.begin(async (tx) => {
+    await lockSessionOf(tx, args.requestId)
+    const [row] = await tx<(PendingRow & { gate: GateRecord | null; expired: boolean })[]>`
+      SELECT *, created_at::text AS created_at_text, expires_at <= now() AS expired
+      FROM ai_pending_input WHERE request_id = ${args.requestId} FOR UPDATE`
+    if (row === undefined) throw new RespondRefusal('stale', `no pending input ${args.requestId}: it is stale or was never asked`)
+    if (row.gate === null) return 'workflow' as const
+    const valid = validateRespond(
+      { ...row.gate, id: row.request_id, kind: row.kind, state: row.expired ? 'resolving' : 'pending' },
+      { requestId: args.requestId, response: args.response, responder: { kind: args.responder.kind as Owner['kind'], id: args.responder.id }, role: args.role },
+    )
+    const outcome: InputOutcome = 'decision' in valid ? (valid.decision === 'approve' ? 'approved' : 'denied') : 'answered'
+    const response = 'decision' in valid ? { decision: valid.decision } : { answers: [...valid.answers] }
+    await tx`DELETE FROM ai_pending_input WHERE request_id = ${args.requestId}`
+    await resolved(tx, row, outcome, args.responder, response, null, responseHash(args.response))
+    return { kind: row.kind, outcome }
+  })
+}
+
+/** A request's resolution as its response row records it: what the workflow's `gate.read_input` returns. */
+export type InputRecord = { outcome: InputOutcome; response: unknown; responder: Responder; reason: string | null }
+
+/** The response row of `requestId`, or null while the request is open (or was never asked). */
+export async function readInput(sql: Sql, args: { requestId: string }): Promise<InputRecord | null> {
+  const [row] = await sql<InputRecord[]>`
+    SELECT outcome, response, responder, reason FROM ai_input_responses WHERE request_id = ${args.requestId}`
+  return row ?? null
 }

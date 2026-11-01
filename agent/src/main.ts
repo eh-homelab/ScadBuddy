@@ -915,8 +915,9 @@ if (tabRelay && hostWorkers) {
   }, 200)
   polling.unref()
 }
-// A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6).
-if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient)
+// A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6), and
+// a recorded entry's decision in its row (R5, plan Step 9.7).
+if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { sql: database.sql } : {})
 // The browser relay's calls go through Temporal only sealed, each under a key of its own
 // that is deleted once the caller has the answer (#4780): so only with the codec.
 if (tabRelay && temporalClient && dataConverter && payloadKeys && database) {

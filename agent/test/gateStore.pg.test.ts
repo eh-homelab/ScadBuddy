@@ -5,10 +5,12 @@ import postgres, { type Sql } from 'postgres'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { durableRequestId } from '../src/gate/ids.js'
 import {
+  decideInput,
   denyInput,
   grantInput,
   INPUT_CHANNEL,
   openInput,
+  readInput,
   resolveInput,
   type OpenInput,
   type Responder,
@@ -465,3 +467,83 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
   },
 )
+
+// R5 (unified runtime plan Step 9.7): a row opened with its `gate` is the request's record, and
+// decideInput decides it there, as the workflow's `respond` handler does an entry it holds.
+describe.skipIf(!TEST_DATABASE_URL)(`a recorded entry${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+  let t: Throwaway
+  let sql: Sql
+  beforeEach(async () => {
+    t = await throwawayDatabase()
+    sql = t.db.sql
+  })
+  afterEach(async () => {
+    await t.drop()
+  })
+
+  const gate = (o: OpenInput) => ({
+    id: o.requestId,
+    kind: o.kind,
+    inputHash: o.inputHash,
+    requestedBy: { kind: ME.kind, id: ME.id },
+    sessionOwner: { kind: ME.kind, id: ME.id },
+    sessionCreator: { kind: ME.kind, id: ME.id },
+    inRun: false,
+    ...(o.kind === 'answer' ? { questions: [{ question: 'Which colour?', multiSelect: false }] } : {}),
+  })
+  const approve = (requestId: string, response: unknown = { kind: 'approval', decision: 'approve' }) =>
+    decideInput(sql, { requestId, response, responder: ME_RESPONDER, role: 'browser' })
+
+  it('decides it in one transaction: the row gone, its resolution written as resolve_input writes one', async () => {
+    const sid = await newSession(sql)
+    const o = open(sid)
+    await openInput(sql, { ...o, gate: gate(o) })
+    expect(await approve(o.requestId)).toEqual({ kind: 'approval', outcome: 'approved' })
+    expect(await count(sql, 'ai_pending_input')).toBe(0)
+    expect(await readInput(sql, { requestId: o.requestId })).toEqual({ outcome: 'approved', response: { decision: 'approve' }, responder: ME, reason: null })
+    expect((await events(sql, sid)).map((e) => e.type)).toEqual(['approval.required', 'input.requested', 'session.status', 'approval.resolved', 'input.resolved', 'session.status'])
+    expect(await statusOf(sql, sid)).toBe('running')
+    // Decided once: the next response finds no row.
+    await expect(approve(o.requestId)).rejects.toMatchObject({ code: 'stale' })
+  })
+
+  it("answers a question with the validator's answers, and keeps the hash of what was sent", async () => {
+    const sid = await newSession(sql)
+    const o = open(sid, 'run-1', 'answer')
+    await openInput(sql, { ...o, gate: gate(o) })
+    const body = { kind: 'answer', answers: { 'Which colour?': 'Blue' } }
+    expect(await approve(o.requestId, body)).toEqual({ kind: 'answer', outcome: 'answered' })
+    const [row] = await sql<{ response: unknown; response_hash: string }[]>`SELECT response, response_hash FROM ai_input_responses WHERE request_id = ${o.requestId}`
+    expect(row).toEqual({ response: { answers: ['Blue'] }, response_hash: responseHash(body) })
+  })
+
+  it('refuses what the validator refuses, and writes nothing', async () => {
+    const sid = await newSession(sql)
+    const o = open(sid)
+    await openInput(sql, { ...o, gate: gate(o) })
+    await expect(approve(o.requestId, { kind: 'answer', text: 'yes' })).rejects.toMatchObject({ code: 'malformed' })
+    await expect(approve(o.requestId, { kind: 'approval', decision: 'approve', input_hash: 'b'.repeat(64) })).rejects.toMatchObject({ code: 'input_mismatch' })
+    await expect(decideInput(sql, { requestId: o.requestId, response: { kind: 'approval', decision: 'approve' }, responder: ME_RESPONDER, role: 'grant' })).rejects.toMatchObject({
+      code: 'self',
+    })
+    expect(await count(sql, 'ai_pending_input')).toBe(1)
+    expect(await count(sql, 'ai_input_responses')).toBe(0)
+  })
+
+  it('refuses a row past its timer as resolving: its workflow is about to end it', async () => {
+    const sid = await newSession(sql)
+    const o = { ...open(sid), expiresAt: new Date(Date.now() - 1_000).toISOString() }
+    await openInput(sql, { ...o, gate: gate(o) })
+    await expect(approve(o.requestId)).rejects.toMatchObject({ code: 'resolving' })
+    expect(await count(sql, 'ai_pending_input')).toBe(1)
+  })
+
+  it('leaves a row with no gate to its workflow, and says so', async () => {
+    const sid = await newSession(sql)
+    const o = open(sid)
+    await openInput(sql, o)
+    expect(await approve(o.requestId)).toBe('workflow')
+    expect(await count(sql, 'ai_pending_input')).toBe(1)
+    expect(await readInput(sql, { requestId: o.requestId })).toBeNull()
+  })
+})
