@@ -89,6 +89,9 @@ describe('the file tools are confined to the session directory', () => {
       ['NotebookEdit', { notebook_path: '/tmp/n.ipynb', new_source: 'x' }],
       ['Glob', { pattern: '/etc/*' }],
       ['Glob', { pattern: '../*' }],
+      ['Glob', { pattern: '{..,x}/*' }],
+      ['Glob', { pattern: 'notes/{x,..}/*' }],
+      ['Glob', { pattern: '{.,..}/**/secret' }],
       ['Glob', { pattern: path.join(root, 'dirlink', '*') }],
       ['Glob', { pattern: '*', path: outside }],
       ['Grep', { pattern: 'kek', path: outside }],
@@ -185,6 +188,20 @@ describe('AccessResolver.native, over stored rows', () => {
   it("switches a built-in off by default on for a package that names it, at the package's tier", async () => {
     expect(await resolver([]).native('Bash', 'off', ['shell'])).toBe('outward')
     expect(await resolver([row('package:shell', 'builtin:Bash', 'write')]).native('Bash', 'off', ['shell'])).toBe('write')
+  })
+
+  it("reads the source's rows once for a turn's built-ins", async () => {
+    let reads = 0
+    const counted = new AccessResolver({
+      rows: (sources) => {
+        reads += 1
+        return Promise.resolve([row(CC, 'Grep', 'off')].filter((r) => sources.includes(r.source)))
+      },
+    })
+    const offered = await nativeBuiltinTools(counted, [])
+    expect(offered.map((t) => t.name)).not.toContain('Grep')
+    expect(offered.map((t) => t.name)).toContain('Read')
+    expect(reads).toBe(1)
   })
 
   it('keeps it off for a package when the source is switched off, or its own row says off', async () => {

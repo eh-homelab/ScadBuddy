@@ -58,6 +58,8 @@ export const TASK_LIST_DIR = '_claude/tasks'
  * the cwd, and the config directory is the pod's own. So that path is made a link to
  * `<session dir>/_claude/tasks`: the files are then workspace files, written back with the
  * directory and refilled at any pod's placement. A list an older image kept there is moved in.
+ * A placement drops dot-files (workspace/directory.ts), Claude Code's `.highwatermark` and
+ * `.lock` here among them, so after a pod move a deleted task's id can be given again.
  */
 export async function linkTaskList(paths: HarnessPaths, sessionDir: string, sessionId: string): Promise<void> {
   if (!isUuid(sessionId)) throw new StateDirError(`not a session id: ${JSON.stringify(sessionId)}`)
