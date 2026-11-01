@@ -275,7 +275,7 @@ export type MigrateOutcome =
   /** Its DurableSession failed or was ended: its conversation is gone. */
   | 'lost'
 
-/** The workflow ids of every open DurableSession, from Temporal's visibility. */
+/** The workflow ids of every open DurableSession, from Temporal's visibility. The query is a constant: never put input in it. */
 export async function* openDurableSessions(client: Client): AsyncGenerator<string> {
   for await (const w of client.workflow.list({ query: `WorkflowType = '${DURABLE_WORKFLOW}' AND ExecutionStatus = 'Running'` })) {
     yield w.workflowId
@@ -415,11 +415,12 @@ export class DurableMigration {
   }
 
   async #migrate(sessionId: string, stopTurn: boolean): Promise<MigrateOutcome> {
-    const [row] = await this.#sql<{ status: string; archived: boolean }[]>`
-      SELECT status, archived_at IS NOT NULL AS archived FROM ai_sessions WHERE id = ${sessionId}`
+    const [row] = await this.#sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${sessionId}`
     if (!row) throw new SessionError('not_found', `no session ${sessionId}`)
     let described = await this.#describe(sessionId)
-    if (!described) return 'none'
+    // Gone (retention removed a closed run): a session whose conversation was written already
+    // goes on at step 4, as one whose DurableSession is still retained does.
+    if (!described) return (await this.#transcribed(sessionId)) ? this.#finish(sessionId, row) : 'none'
     if (described.type !== DURABLE_WORKFLOW) {
       await this.#unified(sessionId)
       return 'agent_session'
@@ -429,15 +430,26 @@ export class DurableMigration {
       described = await this.#describe(sessionId)
     }
     // DurableSession completes only on `end`: then its conversation was written (step 2) before it.
-    if (described?.status !== 'COMPLETED') return 'lost'
+    // One that failed or was terminated before that lost its conversation.
+    if (described?.status !== 'COMPLETED' && !(await this.#transcribed(sessionId))) return 'lost'
+    return this.#finish(sessionId, row)
+  }
+
+  /** Whether the session's conversation is in ai_session_entries (step 2 ran). */
+  async #transcribed(sessionId: string): Promise<boolean> {
+    const [any] = await this.#sql`SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '' LIMIT 1`
+    return Boolean(any)
+  }
+
+  /** Step 4, once the DurableSession is closed or gone. */
+  async #finish(sessionId: string, row: { status: string }): Promise<MigrateOutcome> {
     // A session marked done gets no new workflow; its conversation is kept, as a done classic one's is.
     if (row.status === 'done') {
       await this.#unified(sessionId)
       return 'migrated'
     }
-    // Nor an archived one, until it is sent to again: it stays `durable`, so that send finds its
-    // DurableSession COMPLETED and goes on here, at step 4.
-    if (row.archived) return 'migrated'
+    // An archived one gets its AgentSession now, idle until it is unarchived and sent to: open, so
+    // no retention removes it in the meantime.
     await this.#startAgentSession(sessionId)
     await this.#unified(sessionId)
     return 'migrated'
@@ -462,16 +474,19 @@ export class DurableMigration {
     }
     if (conversation) {
       const entries = resumeTranscript(conversation, sessionId)
-      // Written once: a run that stopped after the append finds the checkpoint's entry there.
+      // Written once: a run that stopped after the append finds its last entry there (the append
+      // is one INSERT, all or nothing; the last is the checkpoint, or a paused call's result).
+      const last = [...entries].reverse().find((e) => typeof e.uuid === 'string')?.uuid ?? conversation.checkpoint
       const [written] = await this.#sql`
-        SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '' AND uuid = ${conversation.checkpoint} LIMIT 1`
+        SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '' AND uuid = ${last} LIMIT 1`
       if (!written) await this.#deps.store.append({ projectKey: '', sessionId }, entries)
     }
     await this.#gate.end(sessionId)
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
     await this.#call(() => handle.result(), this.#settleMs).catch((err: unknown) => {
-      // A failed or terminated run is told apart by the describe after this.
       if (isGrpcDeadlineError(err)) throw err
+      // A failed or terminated run, told apart by the describe after this. Its name only: no payload.
+      console.warn(`migrate durable: session ${sessionId}'s DurableSession did not complete (${err instanceof Error ? err.name : 'error'})`)
     })
     // Its parked calls' rows, which no run will resolve now: the real workflow resolved them at
     // `cancel_input`; any it left go here, with the same reason.

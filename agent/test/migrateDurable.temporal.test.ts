@@ -11,7 +11,7 @@ import { openInput } from '../src/gate/store.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { backfill, DurableMigration, MIGRATED_REASON } from '../src/sessions/migrateDurable.js'
+import { backfill, DurableMigration, MIGRATED_REASON, resumeTranscript } from '../src/sessions/migrateDurable.js'
 import { event } from '../src/sessions/protocol.js'
 import { SESSION_QUEUE, SESSION_WORKFLOW } from '../src/temporal/session/names.js'
 import { type FakeAnthropic, type RecordedRequest, startFakeAnthropic } from './support/fakeAnthropic.js'
@@ -270,7 +270,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(
       expect(await counts()).toEqual(written)
     })
 
-    it('the backfill moves an archived session without starting its AgentSession, which its next send starts', async () => {
+    it('the backfill gives an archived session its AgentSession, which takes its next send once unarchived', async () => {
       const m = await agent()
       const id = await durableSession(m)
       await db.sql`UPDATE ai_sessions SET archived_at = now() WHERE id = ${id}`
@@ -281,13 +281,34 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(
       )
       const report = await backfill(agentSessionsEnv().client, db.sql, migration(m), { only })
       expect(report).toMatchObject({ counts: { migrated: 1 }, failed: 0, open: 0 })
-      expect(await runs(id)).toEqual([{ type: 'DurableSession', status: 'COMPLETED' }])
-      expect((await db.sql<{ runtime: string }[]>`SELECT runtime FROM ai_sessions WHERE id = ${id}`)[0]?.runtime).toBe('durable')
-      // Unarchived and sent to: its AgentSession starts then, on the conversation already written.
+      expect((await agentSessionsEnv().client.workflow.getHandle(sessionWorkflowId(id)).describe()).type).toBe(SESSION_WORKFLOW)
+      expect((await db.sql<{ runtime: string }[]>`SELECT runtime FROM ai_sessions WHERE id = ${id}`)[0]?.runtime).toBe('unified')
       await db.sql`UPDATE ai_sessions SET archived_at = NULL WHERE id = ${id}`
       const turn = await m.send(id, browser, NEXT)
       expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
-      expect((await agentSessionsEnv().client.workflow.getHandle(sessionWorkflowId(id)).describe()).type).toBe(SESSION_WORKFLOW)
+      expect(said(fake.messageCalls().at(-1))).toContain(FIRST_PROMPT)
+    })
+
+    it('goes on from the written conversation when the DurableSession is gone after it (a migration that stopped, then retention)', async () => {
+      const m = await agent()
+      const id = await durableSession(m)
+      // A migration that wrote the conversation and stopped; then the run is removed.
+      const conversation = await migration(m).conversation(id)
+      await m.store.append({ projectKey: '', sessionId: id }, resumeTranscript(conversation!, id))
+      const env = agentSessionsEnv()
+      const { runId } = await env.client.workflow.getHandle(sessionWorkflowId(id)).describe()
+      await env.client.workflow.getHandle(sessionWorkflowId(id)).terminate('the test removes it')
+      await env.client.workflowService.deleteWorkflowExecution({
+        namespace: env.client.options.namespace,
+        workflowExecution: { workflowId: sessionWorkflowId(id), runId },
+      })
+      await eventually(
+        () => env.client.workflow.getHandle(sessionWorkflowId(id)).describe().then(() => false, (err: unknown) => err instanceof WorkflowNotFoundError),
+        (gone) => gone,
+      )
+      const turn = await m.send(id, browser, NEXT)
+      expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+      expect((await env.client.workflow.getHandle(sessionWorkflowId(id)).describe()).type).toBe(SESSION_WORKFLOW)
       expect(said(fake.messageCalls().at(-1))).toContain(FIRST_PROMPT)
     })
 
