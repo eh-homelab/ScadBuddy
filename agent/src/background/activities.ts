@@ -2,6 +2,7 @@ import { Context } from '@temporalio/activity'
 import { createHash } from 'node:crypto'
 import { WORKSPACE_ROOT } from '../builtins/files.js'
 import type { SessionFiles } from '../workspace/store.js'
+import { type SessionDirectory, watchCaps } from '../workspace/directory.js'
 import type { HarnessPaths } from '../harness/options.js'
 import { ensureSessionDir } from '../harness/stateDirs.js'
 import { TASK_QUEUE } from '../temporal/names.js'
@@ -84,6 +85,13 @@ export type BackgroundActivityDeps = {
   now?: () => Date
   /** Where a classic session's directory is, the cwd a monitor's command runs in. */
   paths?: HarnessPaths | undefined
+  /**
+   * The session directories (workspace/directory.ts): a running monitor command holds its
+   * session's, so the directory is neither evicted nor swept under it.
+   */
+  directory?: Pick<SessionDirectory, 'hold' | 'adopt' | 'usage'> | undefined
+  /** Tests only: how often a monitor command's directory is checked against the workspace caps (directory.ts DIR_CHECK_MS). */
+  dirCheckMs?: number | undefined
   /** Resolves a WebSocket monitor's host for its egress check. */
   resolve?: Resolver | undefined
   /** The queue a WebSocket monitor runs on: any agent's (`agent-tools` unless set). */
@@ -238,10 +246,39 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
       const t = await deps.store.get(input.taskId)
       if (!t || t.state !== 'active') return { end: { outcome: 'cancelled' }, events: 0 }
       if (!deps.paths) return { end: { outcome: 'failed', reason: 'this replica runs no monitor commands' }, events: 0 }
-      const cwd = await ensureSessionDir(deps.paths, t.sessionId)
-      return watched(t, deps.store, (signal, onEvent) =>
-        runCommand({ command: String(t.spec.command), cwd, timeoutMs: Number(t.spec.timeoutMs), signal, onEvent }),
-      )
+      const release = deps.directory?.hold(t.sessionId)
+      try {
+        // Placed here first when no turn of the session was (0700, the workspace's files); a
+        // failure leaves the plain directory, whose output is then not written back.
+        await deps.directory?.adopt(t.sessionId).catch((err: unknown) => {
+          console.error(`session ${t.sessionId}: its working directory could not be placed for a monitor: ${err instanceof Error ? err.message : String(err)}`)
+        })
+        const cwd = await ensureSessionDir(deps.paths, t.sessionId)
+        // Checked against the workspace caps as a turn is (directory.ts watchCaps), between turns
+        // too: past one, the command is killed and the monitor ends failed.
+        const capped = new AbortController()
+        let pastCap: string | undefined
+        const stopCaps = deps.directory
+          ? watchCaps(deps.directory, { sessionId: t.sessionId, dir: cwd, base: new Map() }, {
+              ...(deps.dirCheckMs === undefined ? {} : { checkMs: deps.dirCheckMs }),
+              over: (why, message) => {
+                console.warn(`session directory cap: session ${t.sessionId}'s working directory ${why}; monitor ${t.id} is stopped`)
+                pastCap = message
+                capped.abort(new Error(message))
+              },
+            })
+          : undefined
+        try {
+          const result = await watched(t, deps.store, (signal, onEvent) =>
+            runCommand({ command: String(t.spec.command), cwd, timeoutMs: Number(t.spec.timeoutMs), signal: AbortSignal.any([signal, capped.signal]), onEvent }),
+          )
+          return pastCap === undefined ? result : { ...result, end: { outcome: 'failed', reason: pastCap } }
+        } finally {
+          stopCaps?.()
+        }
+      } finally {
+        release?.()
+      }
     },
 
     async [BG_MONITOR_WS](input: { taskId: string }): Promise<MonitorResult> {

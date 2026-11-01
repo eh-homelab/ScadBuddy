@@ -29,7 +29,7 @@ import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
-import { ensureStateDirs, removeLegacyBrowserDir, StateDirError } from './harness/stateDirs.js'
+import { ensureStateDirs, removeLegacyBrowserDir, sessionsRoot, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
@@ -78,6 +78,7 @@ import { startHostWorkers } from './temporal/session/hostWorkers.js'
 import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
 import { sessionTurnActivity } from './temporal/session/turnActivity.js'
 import { TurnHost } from './sessions/turnHost.js'
+import { SessionDirectory } from './workspace/directory.js'
 import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/packageServers.js'
 import { forwardPackageServers, packageHeaderSecrets } from './plugins/packages/mcp.js'
@@ -146,7 +147,7 @@ const role = roleParts(config.agentRole)
 // Before listening: a mounted, empty state volume must get its `claude/` and
 // `work/` back, and an unwritable one should stop the pod here, visibly.
 try {
-  await ensureStateDirs({ stateDir: DEFAULT_STATE_DIR })
+  await ensureStateDirs({ stateDir: DEFAULT_STATE_DIR, sessionsDir: config.sessionDir })
 } catch (err) {
   console.error(err instanceof StateDirError ? err.message : err)
   process.exit(1)
@@ -284,7 +285,8 @@ void tabRelay?.releaseAll()
 const mcpRelay = role.http && database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
 events?.start()
 const resources = new ResourceHub(events)
-const paths = { stateDir: DEFAULT_STATE_DIR }
+// A session's working directory is under SCADBUDDY_SESSION_DIR when it is set (the worker's own emptyDir, plan Step 9.5).
+const paths = { stateDir: DEFAULT_STATE_DIR, sessionsDir: config.sessionDir }
 // The /mcp auth settings (auth/authenticate.ts `mcpAuthSettings`): `oidc` while
 // `ai_settings.mcp_oidc` is enabled (#262), otherwise the `mcp_auth_mode` and
 // `mcp_anonymous_cap` keys. One reader for /mcp, per request, and for Settings
@@ -667,6 +669,28 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
       access: accessResolver,
     }
   : undefined
+// Each session's working directory (workspace/directory.ts, plan Step 9.5): a copy of its workspace
+// under SCADBUDDY_SESSION_DIR (the worker's own capped emptyDir), refilled from the workspace at each
+// placement. The directories of sessions gone since are swept every hour, by every process that runs turns.
+const sessionDirectory =
+  role.sessionHost && workspace
+    ? new SessionDirectory(workspace, sessionsRoot(paths), { sql: database?.sql, ...(sessions ? { warm: (id: string) => sessions.warm.has(id) } : {}) })
+    : undefined
+// A session's copy goes once its warm process here has: this disk holds the warm sessions' copies only.
+if (sessionDirectory && sessions) {
+  sessions.warm.onClosed((id) =>
+    void sessionDirectory.evict(id).catch((err: unknown) => console.error(`session ${id}: its working directory could not be removed:`, (err as Error).message)),
+  )
+}
+if (sessionDirectory && database) {
+  const sweep = () =>
+    void database
+      .ready()
+      .then((ok) => (ok ? sessionDirectory.sweep(database.sql) : []))
+      .catch((err: unknown) => console.error('session directory sweep failed:', (err as Error).message))
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
 // A parked call holds on its entry's row, woken by `scadbuddy_input` on the event bus's connection (§5.4).
 const turnHost =
   role.sessionHost && temporal && sessions
@@ -682,6 +706,8 @@ const turnHost =
           temporalClient ? finishedToolCalls({ sql: temporal.sql, client: temporalClient }, sessionId, turnId) : Promise.resolve([]),
         // A `done` summary, posted as a classic turn's (#5003).
         questions: sessions.questions,
+        // The session's working directory, a copy of its workspace placed for each turn and written back at its end (Step 9.5).
+        ...(sessionDirectory ? { directory: sessionDirectory } : {}),
       })
     : undefined
 // The enabled remote plugins and every usable credential's secret, as a classic turn
@@ -829,6 +855,7 @@ const background =
         send: managerSender(sessions),
         tz: agentTimezone(),
         paths,
+        ...(sessionDirectory ? { directory: sessionDirectory } : {}),
         secrets: toolServices.secrets,
         agents: managerAgents(sessions, { access: accessResolver }),
         workspace,
