@@ -310,8 +310,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session arc
       expect(handed.isError).toBe(true)
       expect(text(handed)).toMatch(/archived/)
       const forked = await call(you, 'sessions_fork', { session_id: id })
-      // No transcript in this scripted session: the fork gets as far as that, past any archive check.
-      expect(text(forked)).not.toMatch(/archived/)
+      // Past any archive check: whether it then forks (a copy-on-write fork needs only a transcript to
+      // read, plan Step 6.5) or finds none in this scripted session, it is never refused as archived.
+      expect(text(forked)).not.toMatch(/is archived/)
     })
   })
 })
