@@ -83,8 +83,21 @@ def test_every_vector_opens_and_seals_again_to_the_same_bytes(
 def test_the_subject_is_a_session_or_flow_uuid() -> None:
     assert subject_of(FLOW) == FLOW
     assert subject_of(SUBJECT) == SUBJECT
-    for other in (None, "print-abc", "flow-not-a-uuid", f"{FLOW}-x", "render-" + FLOW[5:]):
+    # A flow's own child workflow is sealed under the flow's key (agent plan 2026-10-13 Step 9.1).
+    assert subject_of(f"{FLOW}-x") == FLOW
+    for other in (None, "print-abc", "flow-not-a-uuid", f"{FLOW}x", "render-" + FLOW[5:]):
         assert subject_of(other) is None
+
+
+#: agent/test/fixtures/subject-vectors.json
+SUBJECT_VECTORS = FIXTURES / "subject-vectors.json"
+
+
+def test_every_workflow_id_names_the_subject_the_agent_names() -> None:
+    vectors: list[dict[str, Any]] = json.loads(SUBJECT_VECTORS.read_text())
+    assert vectors
+    for v in vectors:
+        assert subject_of(v["workflow_id"]) == v["subject"], v["workflow_id"]
 
 
 class _Keys:
@@ -120,7 +133,7 @@ async def test_a_flows_payloads_are_sealed_and_others_pass_through() -> None:
         assert sealed.metadata["encoding"] == SUBJECT_ENCODING
         assert b"the flow" not in sealed.data
         assert await codec.decode([sealed]) == [PLAIN]
-    for other in ("render-abc", "flow-nope", f"{FLOW}-x"):
+    for other in ("render-abc", "flow-nope", f"{FLOW}x"):
         ctx = WorkflowSerializationContext(namespace="default", workflow_id=other)
         assert await codec.with_context(ctx).encode([PLAIN]) == [PLAIN]
     assert await codec.encode([PLAIN]) == [PLAIN]

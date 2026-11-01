@@ -120,7 +120,7 @@ describe('SubjectPayloadCodec', () => {
       // Decoded without any context: the subject is in the payload.
       expect(view((await codec.decode([sealed!]))[0]!)).toEqual(view(plain))
     }
-    for (const workflowId of ['render-abc', 'session-not-a-uuid', 'AgentOperation-x', `${SUBJECT}-x`]) {
+    for (const workflowId of ['render-abc', 'session-not-a-uuid', 'AgentOperation-x', `${SUBJECT}x`, `${SUBJECT}-`]) {
       expect(await codec.encode([plain], { type: 'workflow', namespace: 'default', workflowId })).toEqual([plain])
     }
     expect(await codec.encode([plain])).toEqual([plain])
@@ -280,6 +280,60 @@ it("seals a session's background tasks under the session's key", () => {
   expect(subjectOf(`bgtask-${id}-ab12cd34`)).toBe(`session-${id}`)
   expect(subjectOf('bgtask-ab12cd34')).toBeUndefined()
   expect(subjectOf(`bgtask-${id}-ab12cd34x`)).toBeUndefined()
+})
+
+// Step 9.1 (#2726): a session's own child workflows (Step 9.2's `ToolCall`,
+// `session-<uuid>-call-<tool_use_id>`) seal under the session's key. Keep this test as
+// written: a narrower pattern would send every tool call's input and result to history
+// unsealed. An Anthropic tool_use_id has capitals and `_` (`toolu_01Ab…`).
+it("seals a session's child workflows under the session's key", async () => {
+  const id = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
+  expect(subjectOf(`session-${id}-call-toolu_01AbC_d`)).toBe(`session-${id}`)
+  expect(subjectOf(`flow-${id}-call-toolu_01AbC_d`)).toBe(`flow-${id}`)
+  expect(subjectOf(`session-${id}x`)).toBeUndefined()
+  expect(subjectOf(`session-${id}-`)).toBeUndefined()
+  expect(subjectOf(`session-${id}-call/x`)).toBeUndefined()
+  expect(subjectOf(`bridge-${id}-call-x`)).toBeUndefined()
+
+  const keys = new FixedKeys(new Map())
+  const codec = new SubjectPayloadCodec(keys)
+  const plain = PLAIN[0]!.payload
+  const [sealed] = await codec.encode([plain], { type: 'workflow', namespace: 'default', workflowId: `session-${id}-call-toolu_01AbC_d` })
+  expect(sealed!.metadata?.['scadbuddy-subject']).toEqual(enc(`session-${id}`))
+  expect(keys.asked).toEqual([[`session-${id}`, true]])
+  expect(await codec.decode([sealed!])).toEqual([plain])
+})
+
+// The workflow id → subject rule all three codecs share (Step 9.1 review): written here, read by
+// agent-durable's tests/test_codec.py and the backend's copy (tests/fixtures/subject-vectors.json,
+// which lint-codec-copies.sh checks). `bridge-<uuid>` is the TypeScript codec's alone (#4780), so
+// it is pinned below, not in the file.
+// Regenerate: UPDATE_SUBJECT_VECTORS=1 pnpm vitest run test/payloadCodec.test.ts
+const SUBJECTS = new URL('./fixtures/subject-vectors.json', import.meta.url)
+it('names the subject of each workflow id as the committed subject vectors say', () => {
+  const s = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
+  const ids = [
+    `session-${s}`,
+    `flow-${s}`,
+    `bgtask-${s}-ab12cd34`,
+    `session-${s}-call-toolu_01AbC_d`,
+    `flow-${s}-call-toolu_01AbC_d`,
+    `session-${s}-a-b_C-9`,
+    `session-${s}x`,
+    `session-${s}-`,
+    `session-${s}-call/x`,
+    `session-${s}-call x`,
+    `session-${s.toUpperCase()}`,
+    `bgtask-${s}-ab12cd34x`,
+    `bgtask-${s}-ab12cd34-call-x`,
+    'bgtask-ab12cd34',
+    'session-not-a-uuid',
+    'render-abc',
+    'print-abc',
+  ]
+  const built = ids.map((workflow_id) => ({ workflow_id, subject: subjectOf(workflow_id) ?? null }))
+  if (process.env.UPDATE_SUBJECT_VECTORS === '1') writeFileSync(SUBJECTS, `${JSON.stringify(built, null, 2)}\n`)
+  expect(JSON.parse(readFileSync(SUBJECTS, 'utf8'))).toEqual(built)
 })
 
 it('seals every browser call between replicas under a key of its own (#4780)', () => {
