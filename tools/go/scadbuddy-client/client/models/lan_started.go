@@ -18,6 +18,8 @@ type LanStarted struct {
 	ended_message LanStarted_LanStarted_ended_messageable
 	// The plate_id property
 	plate_id LanStarted_LanStarted_plate_idable
+	// The run_id property
+	run_id LanStarted_LanStarted_run_idable
 	// The started_at property
 	started_at *i336074805fc853987abe6f7fe3ad97a6a6f3077a16391fec744f671a015fbd7e.Time
 	// The subtask_name property
@@ -284,6 +286,92 @@ func (m *LanStarted_LanStarted_plate_id) SetLanStartedPlateIdMember1(value LanSt
 	m.lanStarted_plate_idMember1 = value
 }
 
+// LanStarted_LanStarted_run_id composed type wrapper for classes LanStarted_run_idMember1able, string
+type LanStarted_LanStarted_run_id struct {
+	// Composed type representation for type LanStarted_run_idMember1able
+	lanStarted_run_idMember1 LanStarted_run_idMember1able
+	// Composed type representation for type string
+	string *string
+}
+
+// NewLanStarted_LanStarted_run_id instantiates a new LanStarted_LanStarted_run_id and sets the default values.
+func NewLanStarted_LanStarted_run_id() *LanStarted_LanStarted_run_id {
+	m := &LanStarted_LanStarted_run_id{}
+	return m
+}
+
+// CreateLanStarted_LanStarted_run_idFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateLanStarted_LanStarted_run_idFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewLanStarted_LanStarted_run_id()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreateLanStarted_run_idMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(LanStarted_run_idMember1able); ok {
+				result.SetLanStartedRunIdMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *LanStarted_LanStarted_run_id) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *LanStarted_LanStarted_run_id) GetIsComposedType() bool {
+	return true
+}
+
+// GetLanStartedRunIdMember1 gets the LanStarted_run_idMember1 property value. Composed type representation for type LanStarted_run_idMember1able
+// returns a LanStarted_run_idMember1able when successful
+func (m *LanStarted_LanStarted_run_id) GetLanStartedRunIdMember1() LanStarted_run_idMember1able {
+	return m.lanStarted_run_idMember1
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *LanStarted_LanStarted_run_id) GetString() *string {
+	return m.string
+}
+
+// Serialize serializes information the current object
+func (m *LanStarted_LanStarted_run_id) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetLanStartedRunIdMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetLanStartedRunIdMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetLanStartedRunIdMember1 sets the LanStarted_run_idMember1 property value. Composed type representation for type LanStarted_run_idMember1able
+func (m *LanStarted_LanStarted_run_id) SetLanStartedRunIdMember1(value LanStarted_run_idMember1able) {
+	m.lanStarted_run_idMember1 = value
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *LanStarted_LanStarted_run_id) SetString(value *string) {
+	m.string = value
+}
+
 type LanStarted_LanStarted_ended_messageable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetLanStartedEndedMessageMember1() LanStarted_ended_messageMember1able
@@ -306,6 +394,14 @@ type LanStarted_LanStarted_plate_idable interface {
 	GetLanStartedPlateIdMember1() LanStarted_plate_idMember1able
 	SetInteger(value *int32)
 	SetLanStartedPlateIdMember1(value LanStarted_plate_idMember1able)
+}
+
+type LanStarted_LanStarted_run_idable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetLanStartedRunIdMember1() LanStarted_run_idMember1able
+	GetString() *string
+	SetLanStartedRunIdMember1(value LanStarted_run_idMember1able)
+	SetString(value *string)
 }
 
 // NewLanStarted instantiates a new LanStarted and sets the default values.
@@ -373,6 +469,16 @@ func (m *LanStarted) GetFieldDeserializers() map[string]func(i878a80d2330e89d268
 		}
 		return nil
 	}
+	res["run_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateLanStarted_LanStarted_run_idFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetRunId(val.(LanStarted_LanStarted_run_idable))
+		}
+		return nil
+	}
 	res["started_at"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetTimeValue()
 		if err != nil {
@@ -418,6 +524,12 @@ func (m *LanStarted) GetPlateId() LanStarted_LanStarted_plate_idable {
 	return m.plate_id
 }
 
+// GetRunId gets the run_id property value. The run_id property
+// returns a LanStarted_LanStarted_run_idable when successful
+func (m *LanStarted) GetRunId() LanStarted_LanStarted_run_idable {
+	return m.run_id
+}
+
 // GetStartedAt gets the started_at property value. The started_at property
 // returns a *Time when successful
 func (m *LanStarted) GetStartedAt() *i336074805fc853987abe6f7fe3ad97a6a6f3077a16391fec744f671a015fbd7e.Time {
@@ -452,6 +564,12 @@ func (m *LanStarted) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c
 	}
 	{
 		err := writer.WriteObjectValue("plate_id", m.GetPlateId())
+		if err != nil {
+			return err
+		}
+	}
+	{
+		err := writer.WriteObjectValue("run_id", m.GetRunId())
 		if err != nil {
 			return err
 		}
@@ -509,6 +627,11 @@ func (m *LanStarted) SetPlateId(value LanStarted_LanStarted_plate_idable) {
 	m.plate_id = value
 }
 
+// SetRunId sets the run_id property value. The run_id property
+func (m *LanStarted) SetRunId(value LanStarted_LanStarted_run_idable) {
+	m.run_id = value
+}
+
 // SetStartedAt sets the started_at property value. The started_at property
 func (m *LanStarted) SetStartedAt(value *i336074805fc853987abe6f7fe3ad97a6a6f3077a16391fec744f671a015fbd7e.Time) {
 	m.started_at = value
@@ -530,12 +653,14 @@ type LanStartedable interface {
 	GetEnded() LanStarted_LanStarted_endedable
 	GetEndedMessage() LanStarted_LanStarted_ended_messageable
 	GetPlateId() LanStarted_LanStarted_plate_idable
+	GetRunId() LanStarted_LanStarted_run_idable
 	GetStartedAt() *i336074805fc853987abe6f7fe3ad97a6a6f3077a16391fec744f671a015fbd7e.Time
 	GetSubtaskName() *string
 	GetWarnings() []FilamentWarningable
 	SetEnded(value LanStarted_LanStarted_endedable)
 	SetEndedMessage(value LanStarted_LanStarted_ended_messageable)
 	SetPlateId(value LanStarted_LanStarted_plate_idable)
+	SetRunId(value LanStarted_LanStarted_run_idable)
 	SetStartedAt(value *i336074805fc853987abe6f7fe3ad97a6a6f3077a16391fec744f671a015fbd7e.Time)
 	SetSubtaskName(value *string)
 	SetWarnings(value []FilamentWarningable)

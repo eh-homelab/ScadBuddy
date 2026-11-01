@@ -35,6 +35,8 @@ type PrintProgress struct {
 	queue_item_id PrintProgress_PrintProgress_queue_item_idable
 	// The route property
 	route PrintProgress_PrintProgress_routeable
+	// The run_id property
+	run_id PrintProgress_PrintProgress_run_idable
 	// The settled property
 	settled *bool
 	// The slice_job_id property
@@ -362,6 +364,92 @@ func (m *PrintProgress_PrintProgress_route) SetString(value *string) {
 	m.string = value
 }
 
+// PrintProgress_PrintProgress_run_id composed type wrapper for classes PrintProgress_run_idMember1able, string
+type PrintProgress_PrintProgress_run_id struct {
+	// Composed type representation for type PrintProgress_run_idMember1able
+	printProgress_run_idMember1 PrintProgress_run_idMember1able
+	// Composed type representation for type string
+	string *string
+}
+
+// NewPrintProgress_PrintProgress_run_id instantiates a new PrintProgress_PrintProgress_run_id and sets the default values.
+func NewPrintProgress_PrintProgress_run_id() *PrintProgress_PrintProgress_run_id {
+	m := &PrintProgress_PrintProgress_run_id{}
+	return m
+}
+
+// CreatePrintProgress_PrintProgress_run_idFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreatePrintProgress_PrintProgress_run_idFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewPrintProgress_PrintProgress_run_id()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreatePrintProgress_run_idMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(PrintProgress_run_idMember1able); ok {
+				result.SetPrintProgressRunIdMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *PrintProgress_PrintProgress_run_id) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *PrintProgress_PrintProgress_run_id) GetIsComposedType() bool {
+	return true
+}
+
+// GetPrintProgressRunIdMember1 gets the PrintProgress_run_idMember1 property value. Composed type representation for type PrintProgress_run_idMember1able
+// returns a PrintProgress_run_idMember1able when successful
+func (m *PrintProgress_PrintProgress_run_id) GetPrintProgressRunIdMember1() PrintProgress_run_idMember1able {
+	return m.printProgress_run_idMember1
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *PrintProgress_PrintProgress_run_id) GetString() *string {
+	return m.string
+}
+
+// Serialize serializes information the current object
+func (m *PrintProgress_PrintProgress_run_id) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetPrintProgressRunIdMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetPrintProgressRunIdMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetPrintProgressRunIdMember1 sets the PrintProgress_run_idMember1 property value. Composed type representation for type PrintProgress_run_idMember1able
+func (m *PrintProgress_PrintProgress_run_id) SetPrintProgressRunIdMember1(value PrintProgress_run_idMember1able) {
+	m.printProgress_run_idMember1 = value
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *PrintProgress_PrintProgress_run_id) SetString(value *string) {
+	m.string = value
+}
+
 // PrintProgress_PrintProgress_slice_job_id composed type wrapper for classes int32, PrintProgress_slice_job_idMember1able
 type PrintProgress_PrintProgress_slice_job_id struct {
 	// Composed type representation for type int32
@@ -475,6 +563,14 @@ type PrintProgress_PrintProgress_queue_item_idable interface {
 type PrintProgress_PrintProgress_routeable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetString() *string
+	SetString(value *string)
+}
+
+type PrintProgress_PrintProgress_run_idable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetPrintProgressRunIdMember1() PrintProgress_run_idMember1able
+	GetString() *string
+	SetPrintProgressRunIdMember1(value PrintProgress_run_idMember1able)
 	SetString(value *string)
 }
 
@@ -697,6 +793,16 @@ func (m *PrintProgress) GetFieldDeserializers() map[string]func(i878a80d2330e89d
 		}
 		return nil
 	}
+	res["run_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreatePrintProgress_PrintProgress_run_idFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetRunId(val.(PrintProgress_PrintProgress_run_idable))
+		}
+		return nil
+	}
 	res["settled"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetBoolValue()
 		if err != nil {
@@ -752,6 +858,12 @@ func (m *PrintProgress) GetQueueItemId() PrintProgress_PrintProgress_queue_item_
 // returns a PrintProgress_PrintProgress_routeable when successful
 func (m *PrintProgress) GetRoute() PrintProgress_PrintProgress_routeable {
 	return m.route
+}
+
+// GetRunId gets the run_id property value. The run_id property
+// returns a PrintProgress_PrintProgress_run_idable when successful
+func (m *PrintProgress) GetRunId() PrintProgress_PrintProgress_run_idable {
+	return m.run_id
 }
 
 // GetSettled gets the settled property value. The settled property
@@ -853,6 +965,12 @@ func (m *PrintProgress) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0
 		}
 	}
 	{
+		err := writer.WriteObjectValue("run_id", m.GetRunId())
+		if err != nil {
+			return err
+		}
+	}
+	{
 		err := writer.WriteBoolValue("settled", m.GetSettled())
 		if err != nil {
 			return err
@@ -945,6 +1063,11 @@ func (m *PrintProgress) SetRoute(value PrintProgress_PrintProgress_routeable) {
 	m.route = value
 }
 
+// SetRunId sets the run_id property value. The run_id property
+func (m *PrintProgress) SetRunId(value PrintProgress_PrintProgress_run_idable) {
+	m.run_id = value
+}
+
 // SetSettled sets the settled property value. The settled property
 func (m *PrintProgress) SetSettled(value *bool) {
 	m.settled = value
@@ -975,6 +1098,7 @@ type PrintProgressable interface {
 	GetLanRun() LanRunControlable
 	GetQueueItemId() PrintProgress_PrintProgress_queue_item_idable
 	GetRoute() PrintProgress_PrintProgress_routeable
+	GetRunId() PrintProgress_PrintProgress_run_idable
 	GetSettled() *bool
 	GetSliceJobId() PrintProgress_PrintProgress_slice_job_idable
 	GetStage() *PrintProgress_stage
@@ -990,6 +1114,7 @@ type PrintProgressable interface {
 	SetLanRun(value LanRunControlable)
 	SetQueueItemId(value PrintProgress_PrintProgress_queue_item_idable)
 	SetRoute(value PrintProgress_PrintProgress_routeable)
+	SetRunId(value PrintProgress_PrintProgress_run_idable)
 	SetSettled(value *bool)
 	SetSliceJobId(value PrintProgress_PrintProgress_slice_job_idable)
 	SetStage(value *PrintProgress_stage)
