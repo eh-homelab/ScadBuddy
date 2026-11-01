@@ -345,8 +345,8 @@ agent's follow a 202.
 | `POST /orders/{id}/items/{item}/fulfilments/{f}/accept` | §6.1: the attempt's quantity counts as made; the item becomes `fulfilled` when its attempts cover its quantity |
 | `POST /orders/{id}/shipments`, `PATCH …/{shipment}` | §6.3 |
 | `GET /orders/{id}/costs` | the quote against the actuals (§6.4) |
-| `GET/PUT /orders/price-book` | §5.1: the currency (with its `minor_exponent`), the policy and the filaments not archived; `PUT` takes the policy whole and the estimate's factor |
-| `POST /orders/price-book/filaments`, `PATCH …/{filament}`, `POST …/{filament}/archive` | §5.1's filament records; a duplicate identity is 409 `filament_exists` naming the record in the book (an archived record frees its identity: there is no unarchive, so the same filament can be added again) |
+| `GET/PUT /orders/price-book` | §5.1: the currency (with its `minor_exponent`), the policy and the filaments not archived (`?include_archived=true` adds the archived ones, #4977); `PUT` takes the policy whole and the estimate's factor |
+| `POST /orders/price-book/filaments`, `PATCH …/{filament}`, `POST …/{filament}/archive`, `POST …/{filament}/unarchive` | §5.1's filament records; a duplicate identity is 409 `filament_exists` naming the record in the book (an archived record frees its identity, so the same filament can be added again; an unarchive, #4977, brings the same record back with its id, and is 409 `filament_exists` when its identity was taken since) |
 | `GET /orders/estimate?output_id=&filament_id=` | §5.3: the rough estimate of every plate of an output, never recorded; 422 `filament_density` for a filament with no density |
 | `GET /orders/{id}/events` | the audit line |
 
@@ -732,7 +732,7 @@ What this relies on, and what the design adds for it:
 (`{unit_price_minor, label?}`, the typed price) or `slice` (`{printer_id?,
 filament_plan, choices, filaments}`), exactly one; `price_book_set` keeps the policy
 (merged over the one in force), the estimate's factor and a filament's record (add,
-edit, archive); `order_estimate` (`read`) is the rough estimate (§5.3). A slice quote
+edit, archive, unarchive); `order_estimate` (`read`) is the rough estimate (§5.3). A slice quote
 runs an operation (§4). The agent's tool follows it as every command
 tool does (`tools/command.ts`: the answer, or `{status: "running", operation_id}` past
 the follow window); in a flow the activity follows it to the answer, as `queue_print`

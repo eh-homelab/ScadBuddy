@@ -616,7 +616,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   Phase 2, pricing (#4250, plan `2026-10-22-orders-phase-2-pricing.md`): the price book is
   `filaments` rows (`pricebook.py` `PriceBookReader`, the store's `*_filament` methods) and
   the stored settings `pricing_*` and `rough_estimate_factor` (`live`), behind `GET`/`PUT
-  /orders/price-book` and `…/price-book/filaments`; `currency.py` is the one table of
+  /orders/price-book` and `…/price-book/filaments` (an archived filament comes back, its id
+  kept, through `…/{id}/unarchive`, 409 `filament_exists` when its identity was taken since,
+  #4977); `currency.py` is the one table of
   minor-unit exponents (ISO 4217), published as `minor_exponent` on every order and on the
   book (the browser's `lib/money.ts` takes it as an argument and never asks `Intl` for the
   digits), and `orders_currency` refuses a code with no minor unit. `pricing.py` is the
@@ -652,8 +654,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `derive` gives its rows; a cancelled one back to the status its cancel's audit row
   recorded, with the items it took) and `reopen_item` (a cancelled item back to what its
   quotes and attempts give it), each taking its quotes' sliced-file holds again (`_hold`);
-  `POST /customers/{id}/unarchive`. Agent `order_reopen` (outward, as a cancel) and
-  `customer_upsert`'s `unarchive`. `Lifecycle.unfulfil_item` (#4952, `POST
+  `POST /customers/{id}/unarchive`. Agent `order_reopen` (outward, as a cancel),
+  `customer_upsert`'s `unarchive` and `price_book_set`'s filament `unarchive`. `Lifecycle.unfulfil_item` (#4952, `POST
   …/items/{item}/unfulfil`, agent `order_item_unfulfil`, outward) clears the latest
   accepted attempt's `accepted_at` (the row stays) and sets the item to what its latest
   attempt gives; refused for an item on a shipment (`order_item_shipped`) and on hold.

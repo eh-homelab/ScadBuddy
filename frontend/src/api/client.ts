@@ -2174,13 +2174,15 @@ export const api = {
     return followRunning<Quote>(op, signal)
   },
   // -- the price book and the rough estimate (#4250, spec 2026-10-18 §5.1, §5.3) -------------
-  priceBook: () => request<PriceBook>('/orders/price-book'),
+  /** `includeArchived` lists the archived filaments too, for the editor that unarchives them (#4977). */
+  priceBook: (includeArchived = false) => request<PriceBook>(`/orders/price-book${includeArchived ? '?include_archived=true' : ''}`),
   setPriceBook: (body: PolicyUpdate) => request<PriceBook>('/orders/price-book', { method: 'PUT', body: JSON.stringify(body) }),
   createFilament: (body: FilamentInput) =>
     request<Filament>('/orders/price-book/filaments', { method: 'POST', body: JSON.stringify(body) }),
   updateFilament: (id: string, body: FilamentPatch) =>
     request<Filament>(`/orders/price-book/filaments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   archiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/archive`, { method: 'POST' }),
+  unarchiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/unarchive`, { method: 'POST' }),
   /** A rough estimate (§5.3), never a quote: nothing is recorded. */
   orderEstimate: (outputId: string, filamentId: string) =>
     request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),
