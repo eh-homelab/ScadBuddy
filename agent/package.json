@@ -53,7 +53,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@opentelemetry/context-async-hooks": "3.0.0",
-    "@temporalio/testing": "1.24.0",
+    "@temporalio/testing": "1.25.0",
     "@types/node": "^24.19.2",
     "@types/turndown": "5.0.6",
     "@types/ws": "^8.18.2",
