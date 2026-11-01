@@ -121,7 +121,8 @@ export type FingerprintParts = {
   /**
    * Whether its ScadBuddy tool calls run as activities (plan 2026-10-13 Step 9.2): the in-process
    * server a process keeps is spawned with it. No longer a setting (Step 9.9): true whenever the
-   * turn had a Temporal starter (`deps.toolCalls`).
+   * turn had a Temporal starter (`deps.toolCalls`) when it was assembled. A turn assembled before
+   * the starter exists (at start) runs its calls in-process, and the next turn recycles its process.
    */
   toolsAsActivities: boolean
   /** http_request's stored access in ai_access (#2171), its tier when one is set; null when none is stored. */
