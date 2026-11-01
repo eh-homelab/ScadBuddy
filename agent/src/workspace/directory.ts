@@ -133,10 +133,11 @@ async function walk(dir: string): Promise<Walked> {
   return out
 }
 
-/** Every byte under `dir`, never following a link (a link counts as itself). */
-async function sizeOf(dir: string): Promise<number> {
+/** Every byte under `dir`, never following a link (a link counts as itself); it stops counting once past `limit`. */
+async function sizeOf(dir: string, limit = Infinity): Promise<number> {
   let total = 0
   const visit = async (abs: string): Promise<void> => {
+    if (total > limit) return
     let entries
     try {
       entries = await readdir(abs, { withFileTypes: true })
@@ -146,6 +147,7 @@ async function sizeOf(dir: string): Promise<number> {
     }
     for (const entry of entries) {
       const at = path.join(abs, entry.name)
+      if (total > limit) return
       if (entry.isDirectory()) await visit(at)
       else total += await lstat(at).then((st) => st.size, () => 0)
     }
@@ -453,10 +455,14 @@ export class SessionDirectory {
     return out
   }
 
-  /** The bytes the directory holds now, every entry counted (a link as itself), and the workspace cap (`workspace_max_bytes`). */
+  /**
+   * The bytes the directory holds now, every entry counted (a link as itself), and the workspace
+   * cap (`workspace_max_bytes`). lstat only, and the count stops once past the cap, so a turn's
+   * check every 15 s stays cheap however large the tree grows.
+   */
   async usage(placement: Placement): Promise<{ bytes: number; cap: number }> {
-    const [{ workspaceMaxBytes }, { bytes }] = await Promise.all([this.#files.limits(), walk(placement.dir)])
-    return { bytes, cap: workspaceMaxBytes }
+    const { workspaceMaxBytes } = await this.#files.limits()
+    return { bytes: await sizeOf(placement.dir, workspaceMaxBytes), cap: workspaceMaxBytes }
   }
 
   /** Removes the session's directory (forgetSubject). */

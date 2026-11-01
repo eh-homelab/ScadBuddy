@@ -124,7 +124,10 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     await writeFile(path.join(turn.dir, 'a-fits.txt'), Buffer.alloc(1000, 'a'))
     await writeFile(path.join(turn.dir, 'b-over-quota.txt'), Buffer.alloc(1000, 'b'))
     await writeFile(path.join(turn.dir, 'c-too-large.txt'), Buffer.alloc(2000, 'c'))
-    expect(await dirs.usage(turn)).toEqual({ bytes: 4000, cap: 1536 })
+    // Counted only until past the cap (4000 bytes are there).
+    const over = await dirs.usage(turn)
+    expect(over.cap).toBe(1536)
+    expect(over.bytes).toBeGreaterThan(1536)
     const back = await dirs.writeBack(turn)
     expect(back.written).toEqual(['a-fits.txt'])
     expect(back.skipped.map((s) => [s.path, s.code])).toEqual([
@@ -354,7 +357,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     expect((await files.read(ws(id), 'out.log'))?.bytes.toString()).toBe('the monitor wrote this')
   })
 
-  it('a turn whose directory grows past the workspace cap is stopped, and its placement still ends', async () => {
+  it('a burst right after a walk far under the cap is caught at the very next check, and the placement still ends', async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), 'sessions-'))
     const scripted = scriptedRunner(() => ({ hang: true }))
     m = manager({ sql: db.sql, paths: { stateDir }, run: scripted.runner, workspace: files })
@@ -365,11 +368,20 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       UPDATE ai_sessions SET status = 'running', mode = 'durable', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
       WHERE id = ${id}`
     const dir = await root()
+    let walks = 0
+    let walksAtStop = 0
+    let firstWalkAt = 0
+    let stoppedAt = 0
     const done: unknown[] = []
     const directory = {
       place: async () => ({ sessionId: id, dir, base: new Map<string, string>() }),
       writeBack: async () => ({ written: [], deleted: [], skipped: [], strays: 0, bytes: 0 }),
-      usage: async () => ({ bytes: 10_000, cap: 1_000 }),
+      // Far under the cap at the first check (a quarter), then a burst past it: no check is skipped.
+      usage: async () => {
+        walks += 1
+        if (walks === 1) firstWalkAt = Date.now()
+        return walks === 1 ? { bytes: 250, cap: 1_000 } : { bytes: 10_000, cap: 1_000 }
+      },
       done: (p: unknown) => {
         done.push(p)
       },
@@ -377,10 +389,15 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     const warned: string[] = []
     const warn = console.warn
     console.warn = (...args: unknown[]) => {
-      warned.push(args.map(String).join(' '))
+      const line = args.map(String).join(' ')
+      if (line.startsWith('session directory cap:') && walksAtStop === 0) {
+        walksAtStop = walks
+        stoppedAt = Date.now()
+      }
+      warned.push(line)
     }
     try {
-      const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: 20 })
+      const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: 200 })
       const result = await host.run(
         { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'fill the disk', images: [], system_append: null } },
         { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
@@ -391,6 +408,10 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       console.warn = warn
     }
     expect(warned.some((w) => w.startsWith('session directory cap:'))).toBe(true)
+    // The next check, one DIR_CHECK_MS on (200 ms here), not after skipped ones: that interval
+    // bounds how far past the cap a burst can write before the turn stops.
+    expect(walksAtStop).toBe(2)
+    expect(stoppedAt - firstWalkAt).toBeLessThan(500)
     expect(done).toHaveLength(1)
   })
 
