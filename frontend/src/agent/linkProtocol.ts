@@ -7,6 +7,8 @@ import { z } from 'zod'
  * against the real service, so the two cannot drift silently.
  *
  * Tab → agent: `hello` (first; the tab id, route and live tools), `state` (either changed),
+ * `image` (the type and size of an image the next `result` holds, its bytes in the binary
+ * frames after it; the agent names it),
  * `result` (the answer to a `call`), and the user's pairing answers `pairing.accept`,
  * `pairing.deny` and `pairing.end`. Agent → tab: `call`, `pairings`, `pairing.result` and
  * `error`. Anything that fails these schemas is dropped.
@@ -46,6 +48,7 @@ export type AgentFrame = z.infer<typeof AgentFrameSchema>
 export type TabFrame = { v: typeof LINK_PROTOCOL_VERSION } & (
   | { type: 'hello'; tabId: string; route: string; live: string[] }
   | { type: 'state'; route: string; live: string[] }
+  | { type: 'image'; id: string; mediaType: string; size: number }
   | { type: 'result'; id: string; outcome: unknown }
   | { type: 'pairing.accept'; id: string; code: string }
   | { type: 'pairing.deny'; id: string }
