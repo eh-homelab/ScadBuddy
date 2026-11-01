@@ -1,5 +1,5 @@
 import type { BackgroundTasks } from '../background/service.js'
-import { CRON_EXPIRY_MS, CronError, describeCron, nextFire, timeOfDay, WAKEUP_MAX_S, WAKEUP_MIN_S } from '../background/schedule.js'
+import { checkCron, CRON_EXPIRY_MS, CronError, describeCron, nextFire, timeOfDay, WAKEUP_MAX_S, WAKEUP_MIN_S } from '../background/schedule.js'
 import { checkSocketUrl, MONITOR_DEFAULT_MS, MONITOR_MAX_MS, shortDuration } from '../background/monitor.js'
 import { type BackgroundTask, MAX_ACTIVE } from '../background/store.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -47,6 +47,7 @@ export async function cronCreate(
   const now = ctx.now()
   let first: Date | undefined
   try {
+    checkCron(input.cron)
     first = nextFire(input.cron, now, ctx.tz)
   } catch (err) {
     if (err instanceof CronError) return error(err.message)
@@ -65,6 +66,8 @@ export async function cronCreate(
   if (!t) return full()
   const when = describeCron(input.cron)
   const zone = `Times are in ${ctx.tz}.`
+  // A recurring job whose first occurrence is past its 7 days (a monthly or yearly one) ends at once.
+  if (t.state !== 'active') return error(`Recurring job ${t.id} (${when}) was not kept: ${t.detail ?? 'it ended'}. ${zone}`)
   return {
     text: recurring
       ? `Scheduled recurring job ${t.id} (${when}). ${KEPT} Auto-expires after 7 days. Use CronDelete to cancel sooner. ${zone}`

@@ -125,6 +125,15 @@ export class BackgroundTaskStore {
     return rows.map(task)
   }
 
+  /** Every session's active recurring cron jobs, for the start-time pass that makes each a Schedule (temporal.ts). */
+  async activeRecurringCrons(): Promise<BackgroundTask[]> {
+    const rows = await this.#sql<Row[]>`
+      SELECT * FROM ai_background_tasks
+       WHERE state = 'active' AND kind = 'cron' AND coalesce(spec->>'recurring', 'true') <> 'false'
+       ORDER BY created_at, id`
+    return rows.map(task)
+  }
+
   /** Records the next fire time of an active task. */
   async scheduled(id: string, nextAt: Date): Promise<void> {
     await this.#sql`UPDATE ai_background_tasks SET next_at = ${nextAt}, updated_at = now() WHERE id = ${id} AND state = 'active'`

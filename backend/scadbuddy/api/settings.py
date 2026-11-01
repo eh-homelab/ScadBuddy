@@ -55,6 +55,7 @@ from scadbuddy.library.settings_store import (
     DisplayUnit,
     ModelPrintChoices,
     ModelProject,
+    PrinterPlate,
     SettingSource,
     SettingsPatch,
     SettingsSnapshot,
@@ -290,6 +291,9 @@ class RememberedChoices(BaseModel):
     model_print_choices: dict[str, ModelPrintChoices] = Field(default_factory=dict)
     #: Stringified Bambuddy printer id -> the plate last printed on it.
     printer_bed_types: dict[str, str] = Field(default_factory=dict)
+    #: Every remembered plate with its registry printer and its Bambuddy one (#4971), a
+    #: LAN-only printer's among them; forgotten by either id.
+    printer_plates: list[PrinterPlate] = Field(default_factory=list)
     #: Stringified Bambuddy printer id -> its rack nozzle algorithm (#836).
     printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
     print_options: PrintOptions = Field(default_factory=PrintOptions)
@@ -524,6 +528,7 @@ def _remembered(
         project_print_targets={str(pid): target for pid, target in project_targets.items()},
         model_print_choices=settings.model_print_choices,
         printer_bed_types=settings.printer_bed_types,
+        printer_plates=settings.printer_plates,
         print_options=settings.print_options,
         printer_print_options=settings.printer_print_options,
         model_print_options=settings.model_print_options,

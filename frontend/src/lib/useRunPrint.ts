@@ -231,10 +231,14 @@ export function useRunPrint({
     if (source) void sourceApi(source).remember(next).catch(() => undefined)
   }
 
-  /** #83 — the plate this printer now has on it, the fallback when it has no archives. */
+  /**
+   * #83 — the plate this printer now has on it, the fallback when it has no archives. A
+   * LAN-only printer has no Bambuddy id, so its registry id names it (#4971).
+   */
   function rememberBedType() {
-    if (printerId === null || bedType === null) return
-    void api.putPrinterBedType(printerId, bedType).catch(() => undefined)
+    const printer = printerId ?? registryPrinter
+    if (printer === null || bedType === null) return
+    void api.putPrinterBedType(printer, bedType).catch(() => undefined)
   }
 
   async function run() {

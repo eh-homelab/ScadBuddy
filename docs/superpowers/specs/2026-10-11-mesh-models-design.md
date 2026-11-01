@@ -36,7 +36,7 @@ today), mesh repair beyond what reading already refuses, sculpting or vertex edi
   returns each object as closed meshes per colour (`ReadObject.parts`, `ColourPart`),
   with Bambu Studio per-part extruders, `basematerials` colours, and Bambu `paint_color`
   painting carried as `ColourPart.paint` (#1965). It refuses sliced files, PrusaSlicer
-  painting and painted-and-mirrored parts, carries a negative part as
+  painting and (until #4015) painted-and-mirrored parts, carries a negative part as
   `ColourPart.negative` (#2337; a mesh model cuts it out of the object's printed parts),
   and bounds work by `ReadBudget`.
 - **File 688 is painted.** `render/paint.py` `MAX_CODE_DIGITS`'s comment: a two-colour
@@ -288,10 +288,16 @@ The step runs in the piece's `render_solids` activity (a `paint` stage, `render/
 3MF (the piece's own, an output's, an arranged one's) is written from the piece's
 `layout.json`, which names each painted part's carried codes (`PartSource.paint`,
 `meshmodel/paint.py`). Its fidelity is measured in §10 (share of painted faces carried
-verbatim on an op-free and on a cut object). A mirrored part keeps the colour of each
-triangle that is one colour (rule 2); only finer painting is lost, and `get_scene` and the
-render's warnings say so. `get_scene`'s mirror note reads the scene's own transform values,
-not the render's parameters: an exposed negative scale could flip it at render.
+verbatim on an op-free and on a cut object). A mirrored part renders wound the other way,
+and a code cannot be turned with its face (#4015), so its codes are carried verbatim as a
+`Paint.reversed` painting, which the 3MF writer stores mirrored back with a mirroring
+component, as Arrange writes one (#4976). A painting has one corner order, so a rendered
+part whose colour is painted on mirrored and unmirrored objects alike becomes two parts
+of one filament, split by its shells (`paint.py` `sides`; the layout names each one's
+faces in its `paint-<plate>-<part>-<n>.json`); only a shell that joins the two ways keeps
+its other way's faces at rule 2, and the render's warnings say so. A file's painted object
+placed mirrored opens with its meshes stored mirrored back, each face in its codes' order,
+and the mirror in its scene objects' transform (`ingest.py`, #4976).
 
 As built, beyond the above:
 
