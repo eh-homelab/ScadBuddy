@@ -19,7 +19,8 @@ from scadbuddy.printers.component import PRINTERS, Printers
 from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.spools.component import SPOOLS, Spools
 from scadbuddy.spools.models import SpoolSnapshot
-from scadbuddy.spools.overlay import printer_overlay, report_status
+from scadbuddy.spools.overlay import printer_overlay
+from scadbuddy.spools.seen import report_status
 from tests.printers.conftest import KEK
 from tests.support.no_bambuddy import forbid_bambuddy
 

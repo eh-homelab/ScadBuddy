@@ -29,7 +29,7 @@ from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.store import printer_uuid
 from scadbuddy.spools.component import SpoolsDep
 from scadbuddy.spools.models import SeenTray, TraySpool
-from scadbuddy.spools.overlay import report_status
+from scadbuddy.spools.seen import report_status
 
 router = APIRouter(prefix="/printers", tags=["printers"])
 
