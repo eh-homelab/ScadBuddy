@@ -150,7 +150,10 @@ export async function sessionPendingInput(
   if (principal.kind !== 'browser' && !grant && !own) return undefined
   // Every session is an AgentSession (plan Step 6.3): its entries are the gate's.
   if (!sessions.durable) throw new DurableUnavailable("sessions need Temporal, and this agent service has none configured")
-  const entries = await sessions.durable.pendingInput(sessionId)
+  const parked = await sessions.durable.pendingInput(sessionId)
+  // The record decides (R5): an entry decided there whose workflow has not read it yet is over.
+  const decided = await sessions.projection.decidedOf(parked.map((e) => e.id))
+  const entries = parked.filter((e) => !decided.has(e.id))
   if (principal.kind === 'browser' || own) return { entries, summaries_truncated: false }
   // A grant holder that does not own the session sees its approvals only, as in the
   // aggregate, and none of a flow run's, which are the person's (#2482).
@@ -328,8 +331,10 @@ export async function respond(
 
 /**
  * `respond` for a durable session's entry: the session must be durable; the route
- * decides the role (gate/role.ts) and the workflow's `respond` Update validates and
- * resolves (spec §6.6). Its refusals keep their status; a workflow that is gone is
+ * decides the role (gate/role.ts). An entry whose row is its record (R5, plan Step 9.7) is
+ * validated and decided in that row's transaction, and its workflow is then woken
+ * (DurableGate.respond); any other entry is validated and resolved by the workflow's
+ * `respond` Update (spec §6.6). Its refusals keep their status; a workflow that is gone is
  * stale, and one whose worker does not answer is a 503 the caller may retry.
  */
 async function respondDurable(

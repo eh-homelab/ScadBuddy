@@ -1,10 +1,12 @@
 import { type Client, WorkflowUpdateFailedError } from '@temporalio/client'
 import { randomUUID } from 'node:crypto'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
+import type { Sql } from 'postgres'
 import type { InputOutcome, Owner } from '../sessions/protocol.js'
 import { responseHash } from './canonical.js'
 import { OWNER_CHANGED_SIGNAL, TAB_RECONNECTED_UPDATE } from '../temporal/session/names.js'
-import { CANCEL_INPUT_UPDATE, END_SIGNAL, GATE_REFUSED, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from './names.js'
+import { CANCEL_INPUT_UPDATE, END_SIGNAL, GATE_REFUSED, INPUT_DECIDED_SIGNAL, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from './names.js'
+import { decideInput } from './store.js'
 import type { PendingInputEntry } from './projection.js'
 import { REFUSALS, RespondRefusal, type RefusalCode, type Role } from './validate.js'
 
@@ -44,6 +46,13 @@ export type DurableGateOptions = {
   timeoutMs?: number
   /** How long `cancel_input` may take before its caller decides without it (spec: 10 s). */
   cancelTimeoutMs?: number
+  /**
+   * The database, where a request whose row is its record is decided (R5, store.ts decideInput)
+   * before its workflow is woken. Without it every response is the `respond` Update.
+   */
+  sql?: Sql
+  /** Wakes the workflow of a decided request (default: the Signal `input_decided`); tests drop it to show the recheck makes it up. */
+  wake?: (sessionId: string, requestId: string) => Promise<void>
 }
 
 /**
@@ -70,11 +79,18 @@ export class DurableGate {
   readonly #client: Client
   readonly #timeoutMs: number
   readonly #cancelTimeoutMs: number
+  readonly #sql: Sql | undefined
+  readonly #wake: (sessionId: string, requestId: string) => Promise<void>
 
   constructor(client: Client, options: DurableGateOptions = {}) {
     this.#client = client
     this.#timeoutMs = options.timeoutMs ?? 5_000
     this.#cancelTimeoutMs = options.cancelTimeoutMs ?? 10_000
+    this.#sql = options.sql
+    this.#wake =
+      options.wake ??
+      ((sessionId, requestId) =>
+        this.#call(this.#timeoutMs, () => this.#client.workflow.getHandle(sessionWorkflowId(sessionId)).signal<[{ request_id: string }]>(INPUT_DECIDED_SIGNAL, { request_id: requestId })))
   }
 
   /** `respond` alone says an Update that failed in its handler is HandlerFailed: worth sending again. */
@@ -90,14 +106,46 @@ export class DurableGate {
     }
   }
 
+  /** Whether the run `runId` of `workflowId` still runs; one that is not found has ended. Unreachable, DurableUnavailable. */
+  async #runs(workflowId: string, runId: string): Promise<boolean> {
+    try {
+      const described = await this.#call(this.#timeoutMs, () => this.#client.workflow.getHandle(workflowId, runId).describe())
+      return described.status.name === 'RUNNING'
+    } catch (err) {
+      if (err instanceof WorkflowNotFoundError) return false
+      throw err
+    }
+  }
+
   /** The session's parked calls, from its workflow (the source of truth). */
   async pendingInput(sessionId: string): Promise<PendingInputEntry[]> {
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
     return this.#call(this.#timeoutMs, () => handle.query<PendingInputEntry[]>(PENDING_INPUT_QUERY))
   }
 
-  /** Answers one entry; the workflow's validator may refuse it (RespondRefusal). */
+  /**
+   * Answers one entry; the validator may refuse it (RespondRefusal). An entry whose row is its
+   * record (R5) is decided there, then its workflow is woken; a wake that does not land is made up
+   * by the workflow's next read of the row, so it never fails the response. Any other entry is
+   * decided by its workflow, through the `respond` Update.
+   */
   async respond(sessionId: string, args: RespondArgs): Promise<RespondOutcome> {
+    if (this.#sql) {
+      const { kind, id, label } = args.responder
+      const decided = await decideInput(this.#sql, {
+        requestId: args.request_id,
+        response: args.response,
+        responder: { kind, id, label },
+        role: args.role,
+        live: (workflowId, runId) => this.#runs(workflowId, runId),
+      })
+      if (decided !== 'workflow') {
+        await this.#wake(sessionId, args.request_id).catch((err: unknown) => {
+          console.warn(`respond: session ${sessionId}'s workflow was not woken for ${args.request_id}; its recheck reads the decision (${(err as Error).message})`)
+        })
+        return decided
+      }
+    }
     const handle = this.#client.workflow.getHandle(sessionWorkflowId(sessionId))
     const send = (updateId: string) =>
       this.#call(this.#timeoutMs, () => handle.executeUpdate<RespondOutcome, [RespondArgs]>(RESPOND_UPDATE, { args: [args], updateId }), { handlerFailed: true })

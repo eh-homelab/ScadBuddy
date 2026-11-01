@@ -193,7 +193,7 @@ describe.skipIf(skip !== '')(`a session turn parks through its workflow${skip}`,
     // The respond route's way to a durable entry: the workflow's `respond` Update (main.ts). Its
     // deadline is wall-clock (`withDeadline(Date.now() + …)`): 30 s, not 5, so a step of this host's
     // clock (about 8 s) or a loaded worker cannot turn a respond the workflow takes into a 503.
-    m.durable = new DurableGate(env.client, { timeoutMs: 30_000 })
+    m.durable = new DurableGate(env.client, { timeoutMs: 30_000, sql: pool.sql })
     // The replica's LISTEN connection, as main.ts's event bus: a held call wakes on `scadbuddy_input`.
     listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
     listener.start()

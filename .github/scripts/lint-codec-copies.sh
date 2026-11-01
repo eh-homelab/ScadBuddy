@@ -18,6 +18,7 @@ same() {
   fi
 }
 same agent/test/fixtures/payload-vectors.json backend/tests/fixtures/payload-vectors.json
+same agent/test/fixtures/subject-vectors.json backend/tests/fixtures/subject-vectors.json
 same agent/src/db/migrations/20261009T0421Z_payload_keys.sql \
   backend/tests/fixtures/agent-migrations/20261009T0421Z_payload_keys.sql
 

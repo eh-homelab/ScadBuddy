@@ -6,6 +6,7 @@ import {
   proxyActivities,
   setHandler,
   defineQuery,
+  defineSignal,
   defineUpdate,
   workflowInfo,
   TemporalFailure,
@@ -15,8 +16,8 @@ import { ASK_USER, buildEntry, DEFAULT_TIMEOUT_S, MalformedAnswerInputError, REC
 import { durableRequestId } from '../../gate/ids.js'
 import { cut } from '../../gate/limits.js'
 import { refusal } from '../../gate/refusal.js'
-import { CANCEL_INPUT_UPDATE, GATE_REFUSED, PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../../gate/names.js'
-import type { DenyInput, GrantInput, OpenInput, ResolveInput, Responder } from '../../gate/store.js'
+import { CANCEL_INPUT_UPDATE, GATE_REFUSED, INPUT_DECIDED_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from '../../gate/names.js'
+import type { DenyInput, GateRecord, GrantInput, InputRecord, OpenInput, ResolveInput, Responder } from '../../gate/store.js'
 import { type GateEntry, type RefusalCode, RespondRefusal, type RespondRequest, type Role, validateRespond } from '../../gate/validate.js'
 import { isUuid } from '../../harness/uuid.js'
 import type { InputEntry, InputOutcome, Owner } from '../../sessions/protocol.js'
@@ -49,6 +50,17 @@ import { FLOW_GRANT_CHECK_ACTIVITY, SESSION_GATE_ACTIVITIES } from './names.js'
 // this is a new workflow type, and no older history takes the paths they guard. Each
 // patch's new side is the one ported (PERSON_KEEPS_TIMEOUT, SETTLE_PARKED,
 // SESSION_FLOW_GRANT, SESSION_FLOW_ESCALATION), so a reader can check each against it.
+//
+// The record (R5, plan Step 9.7, decision Q7). An entry opened with `record` (AgentSession's
+// `patched('gate-record-r5')`) writes the validator's view of itself into its row (`gate`), and
+// the row is then the request's record: the respond route decides it there, in one transaction
+// (gate/store.ts decideInput), and wakes the workflow with the Signal `input_decided`. The
+// workflow keeps the request id and its timers: on the wake, on a recheck timer (every
+// `recheckS`, doubling to RECHECK_MAX_S) and whenever its own resolve_input finds the row gone,
+// it reads the response row (`gate.read_input`) and ends the entry as recorded. So a lost wake
+// is made up by the next read. A decision that commits while the workflow is cancelling the entry
+// stands, and the entry ends as it says (gate/store.ts decideInput). The `respond` Update still decides an entry the workflow holds,
+// one of a run from before the patch, and one an older replica's route sends.
 
 /** An entry's timer at most (ai_pending_input's CHECK). */
 export const ENTRY_MAX_S = 86_400
@@ -58,9 +70,13 @@ const GRANT_CHECK_WAIT = '1m'
 const PROJECTS_QUEUE = 'projects'
 const SHORT = '30s'
 const SYSTEM: Responder = { kind: 'system', id: 'scadbuddy', label: 'ScadBuddy' }
+/** How often a recorded entry's response row is first read again, in case its wake was lost (R5). */
+export const RECHECK_S = 60
+/** The longest wait between two reads: the recheck doubles up to it, so a 24 h wait costs about a hundred reads. */
+export const RECHECK_MAX_S = 900
 
-/** The timers of the session's entries (ai_settings), read when a turn starts. */
-export type GateSettings = { approvalExpiryS: number; questionExpiryS: number; toolTiers?: Record<string, string>; disabledTools?: string[] }
+/** The timers of the session's entries (ai_settings), read when a turn starts; `recheckS` the first recheck of a recorded entry (RECHECK_S). */
+export type GateSettings = { approvalExpiryS: number; questionExpiryS: number; recheckS?: number; toolTiers?: Record<string, string>; disabledTools?: string[] }
 
 /** A call the agent has parked: its tool_use id, the tool and the model's input. */
 export type GateCall = { id: string; name: string; input: unknown }
@@ -103,6 +119,8 @@ export type SessionGateOptions = {
   grantCheckWait?: Duration
   /** Whether a `wait_for_user` call may name `on_timeout` `wait` or `stop` (gate/entry.ts `BuildEntryArgs.onTimeout`); never, when absent. */
   onTimeout?: (onTimeout: string) => boolean
+  /** Whether an entry about to open is recorded in its row (R5): asked once per entry that parks, so a workflow can put it behind `patched()`. Never, when absent. */
+  record?: () => boolean
 }
 
 type Parked = {
@@ -118,6 +136,10 @@ type Parked = {
   /** Whether open_input has written its row: answerable from the moment it is parked, resolved only once its row is there. */
   opened: boolean
   openFailed: boolean
+  /** Whether its row is its record (R5): decided there, and read back here. */
+  record: boolean
+  /** The read of its row in flight (#adopt): a wake that lands meanwhile joins it rather than read again. */
+  reading?: Promise<boolean> | undefined
 }
 
 type Verdict = { verdict: string; grant_id?: string; timeout_s?: number; on_outside?: string; reason?: string; hop_s?: number; parent_hop?: boolean; parent_session?: string; parent_principal?: string }
@@ -129,13 +151,25 @@ type Activities = Record<string, (input?: unknown) => Promise<unknown>>
 const respondUpdate = defineUpdate<{ kind: 'approval' | 'answer'; outcome: InputOutcome }, [RespondArgs]>(RESPOND_UPDATE)
 const cancelInputUpdate = defineUpdate<'cancelled' | 'none', [{ reason?: string }]>(CANCEL_INPUT_UPDATE)
 const pendingInputQuery = defineQuery<(InputEntry & { expiring?: true })[]>(PENDING_INPUT_QUERY)
+const inputDecidedSignal = defineSignal<[{ request_id?: string }]>(INPUT_DECIDED_SIGNAL)
 
 /** A park that ends with its scope (a cancelled turn) is not a failure. */
 function ignoreCancellation(err: unknown): void {
   if (!isCancellation(err)) throw err
 }
 
+/** A read that a cancelled scope or a failed activity ends: the next read (a timer's, a resolve's) makes it up. */
+function ignoreTemporalFailure(err: unknown): void {
+  if (!(err instanceof TemporalFailure)) throw err
+}
+
 const iso = (at: number): string => new Date(at).toISOString()
+
+/** The entry as its row records it (`ai_pending_input.gate`): everything the validator reads but its state. */
+function recordOf(entry: GateEntry): GateRecord {
+  const { state: _state, ...record } = entry
+  return record
+}
 
 export { refusal }
 
@@ -208,6 +242,11 @@ export class SessionGate {
       return (await this.cancelAll(reason, true)) > 0 ? 'cancelled' : 'none'
     })
     setHandler(pendingInputQuery, () => this.pending())
+    // A request decided in its record: read what was decided. An id this run holds no record of is ignored.
+    setHandler(inputDecidedSignal, (args) => {
+      const parked = this.#parked.get(String(args?.request_id ?? ''))
+      if (parked?.record) void this.#adopt(parked).catch(ignoreTemporalFailure)
+    })
   }
 
   /** Parks every call of `calls()` once as it appears, for as long as the scope it runs in lives (`_watch_gate`). */
@@ -370,6 +409,8 @@ export class SessionGate {
       timeout = built.timeoutS || DEFAULT_TIMEOUT_S
     }
     const now = Date.now()
+    // Asked only of an entry that parks (here), so a turn whose calls never park keeps its history.
+    const record = this.#opts.record?.() ?? false
     const parked: Parked = {
       callId: call.id,
       entry: built.entry,
@@ -382,6 +423,7 @@ export class SessionGate {
       attention: built.attention,
       opened: false,
       openFailed: false,
+      record,
     }
     // Parked before its row is opened, so a respond that reads the row as soon as it is
     // written finds the call here; every resolution waits for the open (resolve). From here
@@ -406,6 +448,7 @@ export class SessionGate {
         questions: built.questions,
         attention: built.attention,
         ...hop,
+        ...(record ? { gate: recordOf(built.entry) } : {}),
       } satisfies OpenInput)
     } catch (err) {
       parked.openFailed = true
@@ -514,7 +557,18 @@ export class SessionGate {
 
   async #expire(parked: Parked, timeoutS: number): Promise<void> {
     try {
-      if (await condition(() => parked.entry.state !== 'pending', timeoutS * 1000)) return
+      if (parked.record) {
+        // Read again every recheck until the timer is due, in case the route's wake was lost.
+        let recheckMs = (this.#settings.recheckS ?? RECHECK_S) * 1000
+        for (;;) {
+          const left = parked.expiresAt - Date.now()
+          if (left <= 0) break
+          if (await condition(() => parked.entry.state !== 'pending', Math.min(recheckMs, left))) return
+          if (parked.expiresAt <= Date.now()) break
+          if (await this.#adopt(parked)) return
+          recheckMs = Math.min(recheckMs * 2, RECHECK_MAX_S * 1000)
+        }
+      } else if (await condition(() => parked.entry.state !== 'pending', timeoutS * 1000)) return
       if (parked.entry.state !== 'pending') return
       if (parked.entry.kind === 'approval') await this.#resolve(parked, 'expired', SYSTEM, undefined, undefined, true)
       else if (parked.tool === ASK_USER) await this.#resolve(parked, 'cancelled', SYSTEM, undefined, NOBODY_ANSWERED, true)
@@ -568,8 +622,10 @@ export class SessionGate {
     }
     parked.entry = { ...parked.entry, state: 'resolving' }
     let written: boolean
+    let row: InputRecord | null = null
+    const activities = timer ? this.#onTimer : this.#onRespond
     try {
-      written = (await (timer ? this.#onTimer : this.#onRespond)[SESSION_GATE_ACTIVITIES.resolve]!({
+      written = (await activities[SESSION_GATE_ACTIVITIES.resolve]!({
         requestId: parked.entry.id,
         outcome,
         responder,
@@ -577,10 +633,44 @@ export class SessionGate {
         ...(rawResponse === undefined ? {} : { rawResponse }),
         reason,
       } satisfies ResolveInput)) as boolean
+      // Decided in its record first (the route, R5): it ends as that says.
+      if (!written && parked.record) row = (await activities[SESSION_GATE_ACTIVITIES.read]!({ requestId: parked.entry.id })) as InputRecord | null
     } catch (err) {
       parked.entry = { ...parked.entry, state: 'pending' }
       throw err
     }
+    if (row) {
+      this.#finish(parked, row.outcome, row.responder, row.response, row.reason, true)
+      return false
+    }
+    this.#finish(parked, outcome, responder, response, reason, written)
+    return written
+  }
+
+  /**
+   * Ends a recorded entry as its response row says, once there is one (R5): on the route's wake and
+   * on each recheck. Whether the entry is no longer pending here, by this read or another path.
+   */
+  #adopt(parked: Parked): Promise<boolean> {
+    parked.reading ??= this.#read(parked).finally(() => {
+      parked.reading = undefined
+    })
+    return parked.reading
+  }
+
+  async #read(parked: Parked): Promise<boolean> {
+    if (!(parked.opened || parked.openFailed)) await condition(() => parked.opened || parked.openFailed)
+    if (parked.openFailed || parked.entry.state !== 'pending') return true
+    const row = (await this.#onTimer[SESSION_GATE_ACTIVITIES.read]!({ requestId: parked.entry.id })) as InputRecord | null
+    // A resolution that began while this read ran finds the row gone and reads it itself.
+    if (parked.entry.state !== 'pending') return true
+    if (row === null) return false
+    this.#finish(parked, row.outcome, row.responder, row.response, row.reason, true)
+    return true
+  }
+
+  /** The entry's end, as written (`written`: its resolution is the recorded one): the host told, the waiters woken. */
+  #finish(parked: Parked, outcome: InputOutcome, responder: Responder, response: unknown, reason: string | null | undefined, written: boolean): void {
     parked.entry = { ...parked.entry, state: 'resolved' }
     this.#parked.delete(parked.entry.id)
     // An approval runs only with its approved row; an answer's call reads whatever was
@@ -594,9 +684,8 @@ export class SessionGate {
     this.#resolutions.get(parked.entry.id)?.resolve(
       parked.entry.kind === 'approval'
         ? { kind: 'approval', outcome: outcome as 'approved' | 'denied' | 'expired' | 'cancelled' }
-        : { kind: 'answer', outcome: outcome as 'answered' | 'cancelled' | 'timed_out', ...(response !== undefined ? { response } : {}) },
+        : { kind: 'answer', outcome: outcome as 'answered' | 'cancelled' | 'timed_out', ...(response != null ? { response } : {}) },
     )
-    return written
   }
 
   #request(args: RespondArgs): RespondRequest {

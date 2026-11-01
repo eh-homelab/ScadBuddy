@@ -138,6 +138,17 @@ export class PendingProjection {
     return row !== undefined
   }
 
+  /**
+   * Which of `requestIds` have ended in their record (`ai_input_responses`), in one query: an
+   * entry the route decided (R5) that its workflow has not yet read is listed by it no longer.
+   */
+  async decidedOf(requestIds: readonly string[]): Promise<Set<string>> {
+    if (requestIds.length === 0) return new Set()
+    const rows = await this.#sql<{ request_id: string }[]>`
+      SELECT request_id FROM ai_input_responses WHERE request_id = ANY(${this.#sql.array([...requestIds])})`
+    return new Set(rows.map((r) => r.request_id))
+  }
+
   /** What the gate recorded for a resolved request (`ai_input_responses`), or undefined. */
   async recorded(requestId: string): Promise<RecordedInput | undefined> {
     const [row] = await this.#sql<RecordedInput[]>`
