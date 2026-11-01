@@ -170,6 +170,41 @@ def test_an_output_delete_trashes_its_native_per_print_copies(
     assert portal.call(partial(state.uploads.for_output, saved["id"], native=True)) == []
 
 
+def test_a_model_delete_trashes_its_outputs_native_per_print_copies(
+    native_client: TestClient, widget: str, tmp_path: Path
+) -> None:
+    """#4337 case 2: a deleted model's outputs go, and their upload rows with them, so
+    their native per-print copies and slices go to the trash first (restorable there),
+    as an output delete with ``delete_inbox_copies`` trashes them. A copy a person moved
+    stays, theirs."""
+    saved = _save(native_client, widget, "One").json()
+    native = _native(native_client)
+    state = getattr(native_client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    payload = _three_mf(tmp_path / "copy.3mf").read_bytes()
+    portal = native_client.portal
+    assert portal is not None
+    mine = portal.call(native.create_folder, "Mine", None).id
+    copy = portal.call(native.upload, "copy.3mf", io.BytesIO(payload), None)
+    sliced = portal.call(native.upload, "copy.plate1.gcode.3mf", io.BytesIO(b"g"), None)
+    moved = portal.call(native.upload, "moved.3mf", io.BytesIO(payload), mine)
+    portal.call(
+        state.uploads.record, saved["id"], LibraryCopy(id=copy.id, folder_id=None, target_key="t")
+    )
+    portal.call(state.uploads.record_sliced, saved["id"], copy.id, SlicedCopy(id=sliced.id))
+    # Recorded at the top level, then moved by a person into a folder of theirs.
+    portal.call(
+        state.uploads.record, saved["id"], LibraryCopy(id=moved.id, folder_id=None, target_key="u")
+    )
+
+    deleted = native_client.delete(f"/api/v1/models/{widget}", headers=press())
+
+    assert deleted.status_code == 204, deleted.text
+    live = {f.id for f in native.rows.files(None, every_folder=True)}
+    assert {copy.id, sliced.id} & live == set()
+    assert moved.id in live
+    assert portal.call(partial(state.uploads.for_output, saved["id"], native=True)) == []
+
+
 @pytest.mark.requires_git
 def test_an_output_delete_during_an_open_print_run_is_refused(
     native_client: TestClient, widget: str, tmp_path: Path

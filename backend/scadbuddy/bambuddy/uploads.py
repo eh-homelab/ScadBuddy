@@ -482,6 +482,91 @@ class BambuddyUploadStore:
         """Forget every copy and slice of deleted outputs. Bambuddy is not touched."""
         await asyncio.to_thread(self._delete_outputs, list(output_ids))
 
+    async def touch(self, output_id: str, library_file_id: int) -> None:
+        """A recorded copy was laid out for a run again (#4337): its ``used_at`` is now."""
+        await asyncio.to_thread(self._touch, output_id, library_file_id)
+
+    async def native_unused(self, before: datetime) -> list[tuple[str, LibraryCopy]]:
+        """The native copies (`is_native_id`) last used before ``before`` that are not
+        their subject's newest in their folder (#4337), each with the subject it is
+        recorded under and its slices, oldest first."""
+        return await asyncio.to_thread(self._native_unused, before)
+
+    async def still_unused(self, output_id: str, library_file_id: int, before: datetime) -> bool:
+        """Whether the copy is still recorded, still last used before ``before`` and still
+        not its subject's newest in its folder: :meth:`native_unused` again for one copy,
+        under its copy lock, since a run may have reused it since the list."""
+        return await asyncio.to_thread(self._still_unused, output_id, library_file_id, before)
+
+    async def native_stale_slices(self, before: datetime) -> list[tuple[str, int | None, int]]:
+        """``(subject, copy's folder, sliced id)`` of each slice of a native copy made
+        before ``before`` that is not that copy's newest slice (#4337), oldest first."""
+        return await asyncio.to_thread(self._native_stale_slices, before)
+
+    #: A native copy's rank in its subject's folder, newest use first (#4337).
+    _NATIVE_RANKED = (
+        "SELECT output_id, library_file_id, folder_id, target_key, used_at,"
+        " row_number() OVER (PARTITION BY output_id, folder_id"
+        " ORDER BY used_at DESC, library_file_id DESC) AS rank"
+        " FROM output_bambuddy_uploads WHERE library_file_id >= %(base)s"
+    )
+
+    def _touch(self, output_id: str, library_file_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE output_bambuddy_uploads SET used_at = now()"
+                " WHERE output_id = %s AND library_file_id = %s",
+                (output_id, library_file_id),
+            )
+
+    def _native_unused(self, before: datetime) -> list[tuple[str, LibraryCopy]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT output_id, library_file_id FROM ({self._NATIVE_RANKED}) ranked"
+                " WHERE rank > 1 AND used_at < %(before)s ORDER BY used_at, library_file_id",
+                {"base": NATIVE_ID_BASE, "before": before},
+            ).fetchall()
+        if not rows:
+            return []
+        recorded = self._for_outputs(list(dict.fromkeys(r["output_id"] for r in rows)), True)
+        found: list[tuple[str, LibraryCopy]] = []
+        for row in rows:
+            copy = next(
+                (c for c in recorded[row["output_id"]] if c.id == row["library_file_id"]), None
+            )
+            if copy is not None:
+                found.append((row["output_id"], copy))
+        return found
+
+    def _still_unused(self, output_id: str, library_file_id: int, before: datetime) -> bool:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                f"SELECT 1 FROM ({self._NATIVE_RANKED} AND output_id = %(output)s) ranked"
+                " WHERE library_file_id = %(id)s AND rank > 1 AND used_at < %(before)s",
+                {
+                    "base": NATIVE_ID_BASE,
+                    "output": output_id,
+                    "id": library_file_id,
+                    "before": before,
+                },
+            ).fetchone()
+        return row is not None
+
+    def _native_stale_slices(self, before: datetime) -> list[tuple[str, int | None, int]]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT ranked.output_id, u.folder_id, ranked.sliced_library_file_id FROM ("
+                " SELECT *, row_number() OVER (PARTITION BY output_id, source_library_file_id"
+                " ORDER BY created_at DESC, sliced_library_file_id DESC) AS rank"
+                " FROM output_bambuddy_slices WHERE source_library_file_id >= %(base)s) ranked"
+                " JOIN output_bambuddy_uploads u ON u.output_id = ranked.output_id"
+                " AND u.library_file_id = ranked.source_library_file_id"
+                " WHERE ranked.rank > 1 AND ranked.created_at < %(before)s"
+                " ORDER BY ranked.created_at, ranked.sliced_library_file_id",
+                {"base": NATIVE_ID_BASE, "before": before},
+            ).fetchall()
+        return [(r["output_id"], r["folder_id"], r["sliced_library_file_id"]) for r in rows]
+
     async def project_target(self, project_id: int) -> ProjectTarget | None:
         """What ``project_id`` last printed on, or ``None`` if nothing has been printed
         into it from here (#317). Generate lays the project's file out for it."""
@@ -657,7 +742,7 @@ class BambuddyUploadStore:
                 " VALUES (%s, %s, %s, %s, %s)"
                 " ON CONFLICT (output_id, library_file_id) DO UPDATE"
                 " SET folder_id = EXCLUDED.folder_id, target_key = EXCLUDED.target_key,"
-                " content_key = COALESCE("
+                " used_at = now(), content_key = COALESCE("
                 "EXCLUDED.content_key, output_bambuddy_uploads.content_key)",
                 (output_id, copy.id, copy.folder_id, copy.target_key, copy.content_key),
             )

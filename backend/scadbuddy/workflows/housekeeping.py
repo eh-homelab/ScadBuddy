@@ -155,6 +155,12 @@ QUOTE_HOLDS_PATCH = "housekeeping-reap-quote-holds"
 #: or a payload.
 PRINTER_SYNC_SWEEP = "housekeeping_sync_bambuddy_printers"
 PRINTER_SYNC_PATCH = "housekeeping-sync-bambuddy-printers"
+#: #4337: trash the native library's superseded per-print copies and slices
+#: (`print_library/copies.py` `sweep_per_print_copies`). Last, behind its own patch; on
+#: the sweeps' Schedule only (not in `PRUNE_SWEEPS`): it trashes files people can see,
+#: so it obeys the sweeps' switch, as the other retention sweeps do.
+PER_PRINT_SWEEP = "housekeeping_sweep_print_copies"
+PER_PRINT_PATCH = "housekeeping-sweep-print-copies"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -177,6 +183,7 @@ SWEEPS = (
     PRINTER_WATCHES_SWEEP,
     QUOTE_HOLDS_SWEEP,
     PRINTER_SYNC_SWEEP,
+    PER_PRINT_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -197,7 +204,7 @@ SWEEPS = (
 #: `QUOTE_HOLDS_PATCH`, so a release lost after its commit leaks for one interval. Not the
 #: Bambuddy printer sync (#4439, #4747): it calls Bambuddy, so it obeys the sweeps'
 #: switch, and the import button, a passing connection test and each virtual printer's
-#: write run it besides.
+#: write run it besides. Nor the per-print copies' sweep (#4337), for the same switch.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
@@ -249,6 +256,8 @@ QUOTE_HOLDS_TIMEOUT = timedelta(minutes=2)
 #: Two Bambuddy lists, then per printer with an empty LAN link a read and one probe
 #: (`printers.component.PROBE_TIMEOUT`, 10 s), each in turn.
 PRINTER_SYNC_TIMEOUT = timedelta(minutes=5)
+#: Two reads, then a lock, a read and a trash per superseded copy, and a trash per slice.
+PER_PRINT_TIMEOUT = timedelta(minutes=10)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -281,6 +290,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return QUOTE_HOLDS_TIMEOUT
     if sweep == PRINTER_SYNC_SWEEP:
         return PRINTER_SYNC_TIMEOUT
+    if sweep == PER_PRINT_SWEEP:
+        return PER_PRINT_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -325,6 +336,8 @@ class Housekeeping:
             if sweep == QUOTE_HOLDS_SWEEP and not workflow.patched(QUOTE_HOLDS_PATCH):
                 continue
             if sweep == PRINTER_SYNC_SWEEP and not workflow.patched(PRINTER_SYNC_PATCH):
+                continue
+            if sweep == PER_PRINT_SWEEP and not workflow.patched(PER_PRINT_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import io
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -25,7 +25,12 @@ from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.print_library.copies import ensure_native_copy, trash_copies
+from scadbuddy.print_library.copies import (
+    PER_PRINT_TTL,
+    ensure_native_copy,
+    sweep_per_print_copies,
+    trash_copies,
+)
 from scadbuddy.print_library.ids import NATIVE_ID_BASE, is_native_id
 from scadbuddy.print_library.native import NativeLibrary, blob_key
 from scadbuddy.render.plate import plate_for
@@ -505,3 +510,215 @@ async def test_trash_copies_can_keep_the_slices(
 
     assert trashed == [copy_id]
     assert (await native.library_file(sliced_id)).id == sliced_id
+
+
+# The lifetime of a native run's per-print copies and slices (#4337).
+
+NOW = datetime(2026, 11, 1, 12, 0, tzinfo=UTC)
+PAST = PER_PRINT_TTL.days + 1
+
+
+def _age(pool: Pool, *, days: int, copy: int | None = None, sliced: int | None = None) -> None:
+    """Make ``copy`` last used, or ``sliced`` made, ``days`` before `NOW`."""
+    when = NOW - timedelta(days=days)
+    with pool.connection() as conn:
+        if copy is not None:
+            conn.execute(
+                "UPDATE output_bambuddy_uploads SET used_at = %s WHERE library_file_id = %s",
+                (when, copy),
+            )
+        if sliced is not None:
+            conn.execute(
+                "UPDATE output_bambuddy_slices SET created_at = %s"
+                " WHERE sliced_library_file_id = %s",
+                (when, sliced),
+            )
+
+
+async def _no_runs(subject: str) -> list[object]:
+    return []
+
+
+def _live(native: NativeLibrary) -> set[int]:
+    return {f.id for f in native.rows.files(None, every_folder=True)}
+
+
+async def test_the_sweep_trashes_a_superseded_copy_unused_past_the_ttl(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, pool: Pool
+) -> None:
+    """Case 3: a copy for another target, laid out for no run in `PER_PRINT_TTL`, goes to
+    the trash with its slices; the subject's newest copy in the folder stays."""
+    old, old_slice, _ = await _copy_with_slice(native, uploads, fetches, KEY)
+    newest = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=X1C, folder_id=None
+    )
+    _age(pool, copy=old, days=PAST)
+    _age(pool, copy=newest, days=PAST - 1)
+
+    done = await sweep_per_print_copies(native, uploads, _no_runs, now=NOW)
+
+    assert (done.copies, done.slices) == (1, 1)
+    live = _live(native)
+    assert newest in live and old not in live and old_slice not in live
+    soon = datetime.now(UTC) + timedelta(minutes=1)
+    assert {f.id for f in native.rows.trashed_before(soon)} == {old, old_slice}
+    assert [c.id for c in await uploads.for_output(KEY, native=True)] == [newest]
+
+
+async def test_the_sweep_keeps_a_copy_used_within_the_ttl(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, pool: Pool
+) -> None:
+    old = await ensure_native_copy(native, uploads, fetches.printable(), target=H2D, folder_id=None)
+    newest = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=X1C, folder_id=None
+    )
+    _age(pool, copy=old, days=PAST - 2)
+    _age(pool, copy=newest, days=1)
+
+    done = await sweep_per_print_copies(native, uploads, _no_runs, now=NOW)
+
+    assert done.copies == 0
+    assert {old, newest} <= _live(native)
+
+
+async def test_the_sweep_keeps_the_newest_copy_in_each_folder_however_old(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, pool: Pool
+) -> None:
+    """Each folder keeps the subject's last-used copy there: the record of its latest
+    print there, and what the next print reuses."""
+    folder = (await native.create_folder("Bracket", None)).id
+    top = await ensure_native_copy(native, uploads, fetches.printable(), target=H2D, folder_id=None)
+    filed = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=H2D, folder_id=folder
+    )
+    _age(pool, copy=top, days=400)
+    _age(pool, copy=filed, days=400)
+
+    done = await sweep_per_print_copies(native, uploads, _no_runs, now=NOW)
+
+    assert (done.copies, done.slices) == (0, 0)
+    assert {top, filed} <= _live(native)
+
+
+async def test_a_reused_copy_is_kept(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, pool: Pool
+) -> None:
+    """Laying a recorded copy out for a run again is a use: it restarts its TTL."""
+    old = await ensure_native_copy(native, uploads, fetches.printable(), target=H2D, folder_id=None)
+    newest = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=X1C, folder_id=None
+    )
+    _age(pool, copy=old, days=400)
+    _age(pool, copy=newest, days=400)
+    again = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=H2D, folder_id=None
+    )
+
+    done = await sweep_per_print_copies(native, uploads, _no_runs, now=datetime.now(UTC))
+
+    assert again == old
+    # The reuse made it the newest; the other one, now superseded and old, goes.
+    assert done.copies == 1
+    live = _live(native)
+    assert old in live and newest not in live
+
+
+async def test_the_sweep_leaves_a_moved_copy_and_forgets_it(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, pool: Pool
+) -> None:
+    """Case 4: a copy a person moved is theirs, with its slices; only its record goes."""
+    elsewhere = (await native.create_folder("Mine", None)).id
+    moved, moved_slice, _ = await _copy_with_slice(native, uploads, fetches, KEY)
+    newest = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=X1C, folder_id=None
+    )
+    await native.update_file(moved, folder_id=elsewhere)
+    _age(pool, copy=moved, days=400)
+    _age(pool, copy=newest, days=1)
+
+    done = await sweep_per_print_copies(native, uploads, _no_runs, now=NOW)
+
+    assert done.copies == 0
+    assert {moved, moved_slice} <= _live(native)
+    assert [c.id for c in await uploads.for_output(KEY, native=True)] == [newest]
+
+
+async def test_the_sweep_skips_a_subject_with_an_open_run(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, pool: Pool
+) -> None:
+    """A run still open may read any of its subject's copies and slices."""
+    old, old_slice, _ = await _copy_with_slice(native, uploads, fetches, KEY)
+    newest = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=X1C, folder_id=None
+    )
+    _age(pool, copy=old, days=400)
+    _age(pool, copy=newest, days=1)
+    asked: list[str] = []
+
+    async def running(subject: str) -> list[object]:
+        asked.append(subject)
+        return [object()]
+
+    done = await sweep_per_print_copies(native, uploads, running, now=NOW)
+
+    assert set(asked) == {KEY}
+    assert (done.copies, done.slices) == (0, 0)
+    assert {old, old_slice, newest} <= _live(native)
+
+
+async def test_the_sweep_trims_a_kept_copys_old_slices_all_but_its_newest(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, pool: Pool
+) -> None:
+    """A kept copy's slices (one per preset it was printed with) past the TTL go, all but
+    its newest, which a reprint of its last print reuses."""
+    copy_id, first, _ = await _copy_with_slice(native, uploads, fetches, KEY)
+    second = await native.upload("bracket.plate2.gcode.3mf", io.BytesIO(b"g2"), None)
+    await uploads.record_sliced(KEY, copy_id, SlicedCopy(id=second.id, preset_key="k2"))
+    young = await native.upload("bracket.plate3.gcode.3mf", io.BytesIO(b"g3"), None)
+    await uploads.record_sliced(KEY, copy_id, SlicedCopy(id=young.id, preset_key="k3"))
+    _age(pool, copy=copy_id, days=400)
+    _age(pool, sliced=first, days=60)
+    _age(pool, sliced=second.id, days=50)
+    _age(pool, sliced=young.id, days=2)
+
+    done = await sweep_per_print_copies(native, uploads, _no_runs, now=NOW)
+
+    assert (done.copies, done.slices) == (0, 2)
+    live = _live(native)
+    assert copy_id in live and young.id in live
+    assert first not in live and second.id not in live
+    [copy] = await uploads.for_output(KEY, native=True)
+    assert [s.id for s in copy.sliced] == [young.id]
+
+
+async def test_the_sweep_keeps_a_copys_newest_slice_however_old(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, pool: Pool
+) -> None:
+    copy_id, sliced, _ = await _copy_with_slice(native, uploads, fetches, KEY)
+    _age(pool, copy=copy_id, days=400, sliced=sliced)
+
+    done = await sweep_per_print_copies(native, uploads, _no_runs, now=NOW)
+
+    assert (done.copies, done.slices) == (0, 0)
+    assert {copy_id, sliced} <= _live(native)
+
+
+async def test_the_sweep_never_reads_a_bambuddy_copy(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches, pool: Pool
+) -> None:
+    """Bambuddy's copies (ids under `NATIVE_ID_BASE`) keep their own rules (`send.py`)."""
+    newest = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=X1C, folder_id=None
+    )
+    await uploads.record(KEY, LibraryCopy(id=7, folder_id=None, target_key="t"))
+    await uploads.record_sliced(KEY, 7, SlicedCopy(id=8, preset_key="k"))
+    await uploads.record_sliced(KEY, 7, SlicedCopy(id=9, preset_key="k2"))
+    _age(pool, copy=7, days=400, sliced=8)
+    _age(pool, sliced=9, days=300)
+    _age(pool, copy=newest, days=1)
+
+    done = await sweep_per_print_copies(native, uploads, _no_runs, now=NOW)
+
+    assert (done.copies, done.slices) == (0, 0)
+    [bambuddy] = await uploads.for_output(KEY)
+    assert {s.id for s in bambuddy.sliced} == {8, 9}

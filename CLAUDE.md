@@ -452,7 +452,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
   presets and a process preset's values in Bambuddy's shapes (`local` presets are not
   offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
-  native library (nothing deletes it yet, #4337). The Customize page, the dialog's
+  native library. Its lifetime (#4337, the module docstring) goes only through its
+  `output_bambuddy_uploads`/`_slices` rows, never a file's name or bytes: an output
+  delete with `delete_inbox_copies` and a model delete trash the copies and slices
+  (`trash_copies`), and the `housekeeping_sweep_print_copies` sweep (sweeps' switch only)
+  trashes a subject's copies past its last-used one per folder, and a kept copy's slices
+  past its newest, once unused for `PER_PRINT_TTL` (`used_at`); a moved one is the
+  person's. The Customize page, the dialog's
   first read and its analysis, and the Prints page's queue and history panels ask
   Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
   A run of several plates or copies is its own queue (#4541, `workflows/printing.py`

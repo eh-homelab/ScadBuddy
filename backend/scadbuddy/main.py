@@ -102,6 +102,7 @@ from scadbuddy.operations.store import OperationStore
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.copies import sweep_per_print_copies
 from scadbuddy.print_library.sweep import sweep_library
 from scadbuddy.printers.bambuddy_sync import sync_printers
 from scadbuddy.printers.component import PRINTERS
@@ -164,6 +165,7 @@ from scadbuddy.workflows.housekeeping import (
     LOST_NATIVE_SLICES_SWEEP,
     LOST_SLICES_SWEEP,
     NATIVE_SLICES_SWEEP,
+    PER_PRINT_SWEEP,
     PREVIEWS_SWEEP,
     PRINTER_SYNC_SWEEP,
     PRINTER_WATCHES_SWEEP,
@@ -650,6 +652,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sync_bambuddy_printers() -> None:
         await _heartbeating(_sync_bambuddy_printers_logged(state))
 
+    @activity.defn(name=PER_PRINT_SWEEP)
+    async def sweep_print_copies() -> None:
+        await _heartbeating(_sweep_print_copies_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -671,6 +677,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         ensure_printer_watches,
         reap_quote_holds,
         sync_bambuddy_printers,
+        sweep_print_copies,
     ]
 
 
@@ -774,6 +781,21 @@ async def _sweep_print_library_logged(state: AppState) -> None:
             "swept the print library",
             extra={"purged": done.purged, "orphans": done.orphans},
         )
+
+
+async def _sweep_print_copies_logged(state: AppState) -> None:
+    """#4337: the native library's superseded per-print copies and slices, to its trash
+    (`sweep_per_print_copies` logs what it trashed); nothing on ``bambuddy``."""
+    try:
+        native = await state.components.get(PRINT_LIBRARY).serving_native()
+        if native is None:
+            return
+        await sweep_per_print_copies(
+            native, state.uploads, state.print_runs.store.running_for, now=datetime.now(UTC)
+        )
+    except Exception:
+        logger.exception("could not sweep the native per-print copies")
+        raise
 
 
 async def _sweep_print_attachments_logged(state: AppState) -> None:

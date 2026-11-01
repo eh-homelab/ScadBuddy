@@ -13,9 +13,25 @@ Reuse is by (subject, folder, `Target.key`) only: none of Bambuddy's project rul
 is reused while its row is live and still in the folder: a native id is never handed to
 another file (an identity column, LIB Ruling 1) and a file's bytes are never rewritten
 in place (`NativeLibraryStore` has no update of ``sha256``), so the row is the check
-Bambuddy's ``file_hash`` comparison is there. Nothing here deletes: a superseded copy
-stays until the library's own rules remove it (none yet; the copy's lifetime is a
-follow-up, plan Task 14).
+Bambuddy's ``file_hash`` comparison is there. A run never deletes a superseded copy.
+
+Their lifetime (#4337). The copies and slices name no output, so their upload rows are
+all that leads to them, and every rule below goes through the rows, never by a file's
+name or bytes (a person's own file can share both):
+
+* An output delete with ``delete_inbox_copies`` trashes them (`trash_copies`); without,
+  their rows are forgotten and they stay as the person's files, as Bambuddy's inbox
+  copies do.
+* A model delete trashes every output's (`trash_copies` from `api/models.py`
+  `delete_template`): nothing else would ever reach them once the rows go.
+* While the output lives, `sweep_per_print_copies` (the ``housekeeping_sweep_print_copies``
+  sweep, which obeys the sweeps' switch) keeps each subject's last-used copy per folder,
+  with its newest slice, and trashes the copies and slices unused past `PER_PRINT_TTL`.
+* A copy a person moved is theirs: its rows are forgotten and the file never trashed.
+
+The trash is the library's own (restorable for `sweep.LIBRARY_TRASH_TTL`). Files left
+before these rules by a delete that forgot their rows are not told from a person's, so
+they stay.
 """
 
 from __future__ import annotations
@@ -24,9 +40,11 @@ import asyncio
 import hashlib
 import io
 import logging
-from datetime import UTC, datetime
+from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC, datetime, timedelta
 
 from fastapi import status
+from pydantic import BaseModel
 
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.send import Printable, Target, _copy_lock, _hinted, _laid_out_for
@@ -146,6 +164,8 @@ async def ensure_native_copy(
             if copy.folder_id != folder_id or copy.target_key != target_key:
                 continue
             if await _still_there(native, uploads, printable.key, copy):
+                # A use: the per-print sweep keeps it another `PER_PRINT_TTL` (#4337).
+                await uploads.touch(printable.key, copy.id)
                 return copy.id
         with span("upload.fetch", attributes={"scadbuddy.subject": printable.key}):
             fetched = await printable.fetch()
@@ -233,3 +253,79 @@ async def trash_copies(
         if not keep_slices:
             ids.extend(s.id for s in copy.sliced)
     return [f.id for f in await native.trash(ids)] if ids else []
+
+
+async def _in(native: NativeLibrary, file_id: int, folder_id: int | None) -> bool:
+    """Whether live file ``file_id`` is in ``folder_id``: a slice is uploaded beside its
+    copy, so one elsewhere was moved by a person, and is theirs."""
+    row = await asyncio.to_thread(native.rows.file, file_id)
+    return row is not None and row.folder_id == folder_id
+
+
+#: How long a native per-print copy no run lays out, or a slice, is kept past the
+#: subject's newest in its folder (#4337).
+PER_PRINT_TTL = timedelta(days=30)
+
+
+class PerPrintSweep(BaseModel):
+    copies: int
+    slices: int
+
+
+async def sweep_per_print_copies(
+    native: NativeLibrary,
+    uploads: BambuddyUploadStore,
+    running_for: Callable[[str], Awaitable[Sequence[object]]],
+    *,
+    now: datetime,
+    ttl: timedelta = PER_PRINT_TTL,
+) -> PerPrintSweep:
+    """Trash the native per-print copies superseded while their output lives (#4337 case
+    3): every copy of a subject but its last-used one in each folder, once no run has
+    laid it out for ``ttl``, with its slices; then every slice of a kept copy but its
+    newest, once made ``ttl`` ago. A subject with a print run open (``running_for``, the
+    run store's) is left whole: the run may read any of them. A copy is trashed under
+    its copy lock and only if it is still unused (a run may reuse it meanwhile), and
+    only while it is still in the folder it was recorded in: one a person moved is
+    theirs, and only its record goes (case 4). Bambuddy's copies are never read."""
+    cutoff = now - ttl
+    busy: dict[str, bool] = {}
+
+    async def open_run(subject: str) -> bool:
+        if subject not in busy:
+            busy[subject] = bool(await running_for(subject))
+        return busy[subject]
+
+    copies = slices = 0
+    for subject, copy in await uploads.native_unused(cutoff):
+        if await open_run(subject):
+            continue
+        lock = (f"{NATIVE_LOCK}{subject}", copy.folder_id)
+        async with _copy_lock(lock), uploads.copy_lock(f"{lock[0]}:{copy.folder_id}"):
+            if not await uploads.still_unused(subject, copy.id, cutoff):
+                continue
+            row = await asyncio.to_thread(native.rows.file, copy.id)
+            if row is None:
+                # Trashed or purged by a person: nothing to reuse or trash.
+                await uploads.forget(subject, copy.id)
+                continue
+            if row.folder_id != copy.folder_id:
+                await uploads.forget_files([copy.id])
+                continue
+            sliced = [s.id for s in copy.sliced if await _in(native, s.id, copy.folder_id)]
+            trashed = {f.id for f in await native.trash([copy.id, *sliced])}
+            await uploads.forget(subject, copy.id)
+        copies += copy.id in trashed
+        slices += len(trashed - {copy.id})
+    for subject, folder_id, sliced_id in await uploads.native_stale_slices(cutoff):
+        if await open_run(subject):
+            continue
+        if await _in(native, sliced_id, folder_id):
+            slices += len(await native.trash([sliced_id]))
+        await uploads.forget_slice(subject, sliced_id)
+    if copies or slices:
+        logger.info(
+            "trashed superseded native per-print copies",
+            extra={"copies": copies, "slices": slices},
+        )
+    return PerPrintSweep(copies=copies, slices=slices)

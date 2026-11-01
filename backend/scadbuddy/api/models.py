@@ -133,6 +133,8 @@ from scadbuddy.library.url_import import (
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
 from scadbuddy.operations.store import Operation
+from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.copies import trash_copies
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
@@ -1359,6 +1361,11 @@ async def delete_template(slug: str, force: bool, state: AppState) -> None:
     # cleanup after a delete: the model is gone.
     # Each on its own, so a failed upload cleanup cannot leave links serving archives.
     if output_ids:
+        # ScadBuddy's own library is another matter: its per-print copies and slices name
+        # no output, so the upload rows forgotten below are all that leads to them, and
+        # nobody else cleans them up (#4337). To its trash, as an output delete with
+        # ``delete_inbox_copies`` sends them; a run still open keeps its slices.
+        await _trash_native_copies(state, slug, output_ids)
         try:
             await state.uploads.delete_outputs(output_ids)
         except psycopg.Error:
@@ -1386,6 +1393,23 @@ async def delete_template(slug: str, force: bool, state: AppState) -> None:
     except psycopg.Error:
         logger.exception("could not forget a deleted model's projects", extra={"slug": slug})
     emit(state.events, ModelEvent(kind="model.deleted", slug=slug))
+
+
+async def _trash_native_copies(state: AppState, slug: str, output_ids: list[str]) -> None:
+    """`delete_template`'s trash of its outputs' native per-print copies (#4337). Best
+    effort, each output on its own, like the rest of the cleanup: the model is gone."""
+    native = await state.components.get(PRINT_LIBRARY).serving_native()
+    if native is None:
+        return
+    for output_id in output_ids:
+        try:
+            running = await state.print_runs.store.running_for(output_id)
+            await trash_copies(native, state.uploads, output_id, keep_slices=bool(running))
+        except Exception:
+            logger.exception(
+                "could not trash a deleted model's native per-print copies",
+                extra={"slug": slug, "id": output_id},
+            )
 
 
 def refuse_delete(
