@@ -1056,7 +1056,12 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
     expect((await app.request('/api/v1/ai/pending-input')).status).toBe(403)
     const response = await app.request('/api/v1/ai/pending-input', { headers: UI_READ })
     expect(response.status).toBe(200)
-    const { entries } = (await response.json()) as { entries: Record<string, unknown>[] }
+    const { entries: listed } = (await response.json()) as { entries: Record<string, unknown>[] }
+    // The list is by creation, and the turn opens its first two entries at once (#5051's CI saw
+    // either first): the session's attention request, its approval, then the other session's question.
+    const own = (e: Record<string, unknown>) => e.session_id === session.id
+    const entries = [...listed.filter(own).sort((x, y) => (x.kind === 'answer' ? -1 : 0) - (y.kind === 'answer' ? -1 : 0)), ...listed.filter((e) => !own(e))]
+    expect(listed.at(-1)).toMatchObject({ id: qId })
     expect(entries).toEqual([
       expect.objectContaining({ id: attId, kind: 'answer', session_id: session.id, tool: WAIT_FOR_USER, prompt: 'Load the PETG, please', responders: ['browser'], expires_at: expect.any(String), attention: { reason: 'blocked', on_timeout: 'proceed' } }),
       expect.objectContaining({ id: approvalId, kind: 'approval', session_id: session.id, tool: 'mcp__stub__print', prompt: '', input_hash: expect.stringMatching(/^[0-9a-f]{64}$/), responders: ['browser', 'grant'] }),
