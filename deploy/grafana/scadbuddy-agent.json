@@ -389,7 +389,7 @@
       "id": 20,
       "type": "timeseries",
       "title": "Releases per hour",
-      "description": "agent.turn.release spans per hour: turns that closed their process on a park held past park_hold_seconds (or at a shutdown, while a call was held), to go on as a parked continuation once the calls are decided (spec 2026-10-13 §5.4 \"Release\", agent/src/sessions/turnHost.ts). scadbuddy.parked_calls is how many calls each held. A TraceQL metrics query, as above.",
+      "description": "agent.turn.release spans per hour: turns that held a parked call and closed their process, past park_hold_seconds or at a shutdown (a turn with nothing parked is never counted), to go on as a parked continuation once the calls are decided (spec 2026-10-13 §5.4 \"Release\", agent/src/sessions/turnHost.ts). scadbuddy.parked_calls is how many calls each held. A TraceQL metrics query, as above.",
       "datasource": { "type": "tempo", "uid": "${DS_TEMPO}" },
       "gridPos": { "x": 16, "y": 58, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
