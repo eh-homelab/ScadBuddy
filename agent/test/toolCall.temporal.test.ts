@@ -314,7 +314,10 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
     const [readBack] = toolCallTools
     const ctx = (session_: string | undefined) =>
       ({ ...services(), toolCallResults: (s: string, id: string) => toolCallResult(results, s, id), session: session_ }) as unknown as ToolContext
-    expect(JSON.stringify((await readBack!.execute({ call_id: 'toolu_01Done_a' }, ctx(session.id))).content)).toContain('41')
+    const read = JSON.stringify((await readBack!.execute({ call_id: 'toolu_01Done_a' }, ctx(session.id))).content)
+    expect(read).toContain('41')
+    // Out of the call's own envelope: the registry wraps this tool's result once, as any tool's.
+    expect(read).not.toContain('untrusted_data')
     expect(JSON.stringify((await readBack!.execute({ call_id: 'toolu_01Lost_b' }, ctx(session.id))).content)).toContain('no finished result')
     await expect(readBack!.execute({ call_id: 'toolu_01Done_a' }, ctx(undefined))).rejects.toThrow('in none')
     // Reading it again runs nothing: the call ran once.

@@ -914,15 +914,12 @@ local servers, and that leaves out what the user switched off (`derivedPackage`,
 loaded plugin that still declares an http server (`harness/run.ts`). An allowed
 package's local servers still start as declared.
 
-**Durable sessions (#2320).** A durable turn's Claude Code runs in the `agent-durable`
-container, so the agent copies each loaded package to the payload volume both sidecars
-mount, `<SCADBUDDY_PAYLOAD_DIR>/plugins/<hex>/<name>/`, once per hash, when the turn
-lists its tools (`turn_tools`,
-[`agent/src/temporal/turnPackages.ts`](../../agent/src/temporal/turnPackages.ts)). The
-segment runner hashes that copy again (`agent-durable/.../session/package_hash.py`, the
-same hash as `hash.ts`) and loads only a copy that matches the pin. Without
-`SCADBUDDY_PAYLOAD_DIR` a durable turn loads no package and says so in the session. A
-package's MCP servers run in the agent as turn tools, as a remote plugin's do. They are
+**Turn tools (#2320).** A flow run's `tool('<server>__<tool>', …)`, and a session turn's
+calls with `tools_as_activities` on (unified runtime plan Step 9.3), reach a package's MCP
+servers as turn tools, as a remote plugin's
+([`agent/src/temporal/packageServers.ts`](../../agent/src/temporal/packageServers.ts)). The
+copies durable sessions shared on the payload volume (`<SCADBUDDY_PAYLOAD_DIR>/plugins/`)
+are swept until none is left. They are
 named `plugin_<package>_<server>` and are outward. http ones go through the same
 forwarder (above), and their forwarder URLs and headers are redacted like a plugin's. A
 local one runs only for a package approved with `allow_refused`, started in the
@@ -1080,10 +1077,7 @@ user sets them in Settings → Tools & plugins → Packages
   their own copy. The folder carries the package name because Claude Code 2.1.310 names a
   root skill with no frontmatter `name`, and a plugin with no manifest name, by its folder
   (the same `strings` read, comment at the top of `derived.ts`). A copy already there is
-  kept only while it hashes to the fresh copy. A durable turn shares the same layout on
-  the payload volume (`sharePackage`,
-  [`agent/src/temporal/turnPackages.ts`](../../agent/src/temporal/turnPackages.ts)), and
-  the segment runner hashes it again before it loads it (`session/package_hash.py`).
+  kept only while it hashes to the fresh copy.
 - **Re-pins.** A row is kept while the new pin has its item. A hook keeps its id, and so its
   access, while its event, matcher and handler do not change. A changed or new hook gets a
   new id, so it is back at its default (`on`), and the re-pin's review marks it "New since
@@ -1151,7 +1145,7 @@ user sets them in Settings → Tools & plugins → Packages
   tool set off, a served built-in switched off, or a tool its server no longer lists is
   refused at `turn_tool_tier`, never parked. An allowed package's local (stdio) servers
   take the same switch and stored tool access in both runtimes (`localPackageServers` in
-  `turnPackages.ts`; a classic copy leaves an off one out). Their tools are not listed on
+  `packageServers.ts`; a turn's copy leaves an off one out). Their tools are not listed on
   the page, since that would start the package's process outside a turn; until set, they
   are `outward`. "List tools" lists an http server's tools
   (`POST /api/v1/ai/capabilities/{source}/refresh`).

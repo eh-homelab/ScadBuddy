@@ -1,11 +1,15 @@
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { CallToolRequestSchema, type CallToolResult, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { context as otelContext, trace } from '@opentelemetry/api'
+import type { CallApproval } from '../harness/seamLedger.js'
+import { TOOL_USE_META, toolContextFor } from '../telemetry/trace.js'
 import { type Client, WorkflowFailedError, WorkflowNotFoundError } from '@temporalio/client'
 import { WorkflowExecutionAlreadyStartedError } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import type { SessionBlobs } from '../sessions/blobs.js'
 import { traceparentOf } from '../telemetry/trace.js'
-import { TASK_QUEUE } from '../temporal/names.js'
+import { TASK_QUEUE, TURN_TOOL_PREFIX } from '../temporal/names.js'
 import {
   TOOL_CALL_WORKFLOW,
   type ToolCallArgs,
@@ -33,7 +37,7 @@ import { errorResult } from './registry.js'
 export type ToolCallRequest = {
   sessionId: string
   toolUseId: string
-  /** The registry tool's name. */
+  /** The registry tool's name, or a turn tool's `<server>__<tool>` (Step 9.3). */
   tool: string
   input: Record<string, unknown>
   requestId?: string
@@ -41,6 +45,10 @@ export type ToolCallRequest = {
   signal: AbortSignal
   /** The most the call may run: the turn's own limit (`turn_max_seconds`); the starter's default when absent. */
   timeoutMs?: number
+  /** The activity that runs it: `tool:<name>` by default, a turn tool's `turn:<server>__<tool>`. */
+  activity?: string
+  /** Where that activity runs: agent-tools by default, or the turn's own replica for a pinned server. */
+  activityQueue?: string
 }
 
 export type ToolCallStarter = (request: ToolCallRequest) => Promise<CallToolResult>
@@ -55,6 +63,8 @@ export const GRPC_NOT_FOUND = 5
 export function workflowNotFound(err: unknown): boolean {
   return err instanceof WorkflowNotFoundError || (err as { code?: unknown } | null)?.code === GRPC_NOT_FOUND
 }
+/** How long a pinned call waits for its replica to take it (temporal/session/names.ts' home schedule-to-start is 5 s; a call is not a placement). */
+export const PINNED_START_MS = 30_000
 
 /** The deepest message of a failure chain: what the model reads of a call whose workflow failed. */
 function failureMessage(err: unknown): string {
@@ -94,8 +104,14 @@ export function toolCallStarter(deps: { client: Client; blobs: Pick<SessionBlobs
       ...(request.requestId ? { requestId: request.requestId } : {}),
       ...(traceparent ? { traceparent } : {}),
     }
-    const timeoutMs = request.timeoutMs ?? deps.timeoutMs ?? TOOL_CALL_TIMEOUT_MS
-    const input: ToolCallInput = { activity: toolCallActivity(request.tool), queue, args, timeoutMs }
+    const input: ToolCallInput = {
+      activity: request.activity ?? toolCallActivity(request.tool),
+      queue: request.activityQueue ?? queue,
+      args,
+      timeoutMs: request.timeoutMs ?? deps.timeoutMs ?? TOOL_CALL_TIMEOUT_MS,
+      // A replica's own queue: nobody takes the call once that pod is gone.
+      ...(request.activityQueue ? { startTimeoutMs: PINNED_START_MS } : {}),
+    }
     let handle
     try {
       handle = await deps.client.workflow.start(TOOL_CALL_WORKFLOW, {
@@ -191,8 +207,13 @@ export async function toolCallResult(deps: { client: Client; blobs: Pick<Session
 export async function terminateOpenToolCalls(deps: { sql: Sql; client: Client }, sessionId: string, reason: string): Promise<void> {
   const ids = new Set((await openCalls(deps.sql, sessionId, 0)).map((call) => toolCallWorkflowId(sessionId, call.id)))
   const prefix = toolCallWorkflowId(sessionId, '')
-  for await (const execution of deps.client.workflow.list({ query: `WorkflowId STARTS_WITH "${prefix}" AND ExecutionStatus = "Running"` })) {
-    ids.add(execution.workflowId)
+  try {
+    for await (const execution of deps.client.workflow.list({ query: `WorkflowId STARTS_WITH "${prefix}" AND ExecutionStatus = "Running"` })) {
+      ids.add(execution.workflowId)
+    }
+  } catch (err) {
+    // A backstop: the calls the events name are still ended.
+    console.error(`forget: could not list session ${sessionId}'s running calls: ${err instanceof Error ? err.message : String(err)}`)
   }
   await Promise.all(
     [...ids].map(async (id) => {
@@ -204,4 +225,51 @@ export async function terminateOpenToolCalls(deps: { sql: Sql; client: Client },
       }
     }),
   )
+}
+
+/** One turn tool as its proxy offers it (temporal/turnTools.ts `listTurnTools`). */
+export type ProxiedTool = { name: string; description: string; inputSchema: Record<string, unknown>; queue?: string }
+
+/**
+ * The turn's plugin, package-server and http_request tools as in-process servers (plan 2026-10-13
+ * Step 9.3): one per server, keeping its name, so its tools keep `mcp__<server>__<tool>` and the
+ * seam tiers them as before. Each call is a ToolCall whose activity `turn:<server>__<tool>`
+ * (turnTools.ts `turnToolActivity`) builds the server again on the worker that runs it, on
+ * agent-tools, or on this replica's own queue for a server whose state lives here (`queue`).
+ */
+export function turnToolProxies(
+  byServer: ReadonlyMap<string, readonly ProxiedTool[]>,
+  sessionId: string,
+  start: ToolCallStarter,
+  approvalOf: (toolUseId: string) => CallApproval | undefined,
+): Record<string, McpSdkServerConfigWithInstance> {
+  const out: Record<string, McpSdkServerConfigWithInstance> = {}
+  for (const [server, tools] of byServer) {
+    const instance = new McpServer({ name: server, version: '1' }, { capabilities: { tools: {} } })
+    instance.server.setRequestHandler(ListToolsRequestSchema, () => ({
+      tools: tools.map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema as { type: 'object' } })),
+    }))
+    instance.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      const tool = tools.find((t) => t.name === request.params.name)
+      if (!tool) return errorResult(`No such tool: ${request.params.name}`)
+      const toolUseId = request.params._meta?.[TOOL_USE_META]
+      if (typeof toolUseId !== 'string' || !toolUseId) return errorResult(`${server}: the call carries no tool_use id, so it was not run`)
+      const approval = approvalOf(toolUseId)
+      // In the call's own span (telemetry/turn.ts TurnTrace), as projections.ts runs a ScadBuddy call.
+      return otelContext.with(toolContextFor({ _meta: request.params._meta }), () =>
+        start({
+          sessionId,
+          toolUseId,
+          tool: `${server}__${tool.name}`,
+          input: approval?.input ?? (request.params.arguments ?? {}),
+          ...(approval ? { requestId: approval.requestId } : {}),
+          signal: extra.signal,
+          activity: `${TURN_TOOL_PREFIX}${server}__${tool.name}`,
+          ...(tool.queue ? { activityQueue: tool.queue } : {}),
+        }),
+      )
+    })
+    out[server] = { type: 'sdk', name: server, instance }
+  }
+  return out
 }

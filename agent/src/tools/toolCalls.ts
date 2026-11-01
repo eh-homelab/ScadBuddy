@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { unwrapUntrusted } from '../safety/untrusted.js'
 import { TOOL_CALL_RESULT_TOOL } from '../temporal/toolCall.js'
 import { defineTool, text, ToolError, type Tool } from './registry.js'
 
@@ -21,7 +22,10 @@ export const toolCallTools: Tool[] = [
     handler: async ({ call_id }, ctx) => {
       if (ctx.session === undefined) throw new ToolError(`${TOOL_CALL_RESULT_TOOL} reads a session's calls; this call is in none`)
       if (!ctx.toolCallResults) throw new ToolError('this agent has no workflow service to read a call from')
-      return (await ctx.toolCallResults(ctx.session, call_id)) ?? text(`call ${call_id} of this session has no finished result to read`)
+      const result = await ctx.toolCallResults(ctx.session, call_id)
+      if (!result) return text(`call ${call_id} of this session has no finished result to read`)
+      // Out of the call's own envelope: this tool's result is wrapped once more, as every tool's is (registry.ts).
+      return { ...result, content: result.content.map((block) => (block.type === 'text' ? { ...block, text: unwrapUntrusted(block.text) } : block)) }
     },
   }),
 ]

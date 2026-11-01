@@ -700,7 +700,7 @@ export function toolCallOf(workflowId: string | undefined): { session: string; t
 }
 
 /** A result's blocks as a ToolCall returns them: each image kept in the session's blobs and named, never its bytes. */
-async function callBlocks(content: readonly Block[], keep: { session: string; blobs: ResultBlobs | undefined; toolUseId: string }): Promise<ToolCallBlock[]> {
+export async function callBlocks(content: readonly Block[], keep: { session: string; blobs: ResultBlobs | undefined; toolUseId: string }): Promise<ToolCallBlock[]> {
   const images: SessionImage[] = []
   const blocks: ToolCallBlock[] = content.map((block) => {
     if (block.type === 'text') return { type: 'text', text: block.text ?? '' }
