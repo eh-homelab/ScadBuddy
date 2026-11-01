@@ -75,6 +75,12 @@ export type SessionRuntime = 'durable' | 'unified'
 export const FORK_POINT_QUERY = 'fork_point'
 /** The most characters of entries one `fork_point` page carries: under Temporal's 512 KiB warning. */
 const FORK_PAGE_CHARS = 384 * 1024
+/**
+ * How long each of a send's migration calls may take (Step 7.2). A Query on a DurableSession no
+ * worker holds in its cache replays the whole history first: 13 s for one of 1,982 entries in
+ * production on 2026-11-01, past the 10 s a send gives an Update.
+ */
+const MIGRATE_CALL_MS = 30_000
 /** How long a send waits for a migrated DurableSession to close (Step 7.2); the backfill waits 120 s. */
 const SEND_SETTLE_MS = 20_000
 /** How often reading the parent's pages starts again when a turn commits while they are read. */
@@ -283,7 +289,7 @@ export class DurableTurns {
           events: deps.events,
           audit: deps.audit,
           sessionQueue: this.#sessionQueue,
-          callTimeoutMs: this.#sendTimeoutMs,
+          callTimeoutMs: Math.max(this.#sendTimeoutMs, MIGRATE_CALL_MS),
           // A sender waits at most this long for the DurableSession to close; a close that takes
           // longer answers `unavailable`, and the next send goes on from where it stopped.
           settleTimeoutMs: deps.settleTimeoutMs ?? SEND_SETTLE_MS,
