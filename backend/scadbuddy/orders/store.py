@@ -123,7 +123,7 @@ _QUOTE = (
 _FULFILMENT = (
     "id, order_item_id, attempt, quantity, outcome, failure_reason, started_at, finished_at,"
     " notes, accepted_at, created_by, created_at, print_run_id, sliced_sha256, sliced_blob_key,"
-    " printer, copies"
+    " printer, copies, print_request_id"
 )
 _SHIPMENT = (
     "id, order_id, carrier, service, tracking, shipped_at, address, cost_minor, notes, created_at"
@@ -1130,20 +1130,20 @@ class OrderStore:
         started_at: datetime | None = None,
         finished_at: datetime | None = None,
         notes: str = "",
-        print_run_id: str | None = None,
+        print_request_id: str | None = None,
         copies: int | None = None,
         sliced_sha256: str | None = None,
         sliced_blob_key: str | None = None,
-        printer: str | None = None,
     ) -> Fulfilment:
         """The item's next attempt; numbered under the order's lock, which every writer
-        of an item holds. ``print_run_id`` and the rest are the print path's (#4719)."""
+        of an item holds. ``print_request_id`` and the rest are the print path's claim
+        (#4719), made before its print starts."""
         row = conn.execute(
             "INSERT INTO order_item_fulfilments (order_item_id, attempt, quantity, outcome,"
-            " failure_reason, started_at, finished_at, notes, created_by, print_run_id,"
-            " copies, sliced_sha256, sliced_blob_key, printer)"
+            " failure_reason, started_at, finished_at, notes, created_by, print_request_id,"
+            " copies, sliced_sha256, sliced_blob_key)"
             " VALUES (%s, (SELECT COALESCE(MAX(attempt) + 1, 1) FROM order_item_fulfilments"
-            " WHERE order_item_id = %s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " WHERE order_item_id = %s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             f" RETURNING {_FULFILMENT}",
             (
                 item_id,
@@ -1155,11 +1155,10 @@ class OrderStore:
                 finished_at,
                 notes,
                 Jsonb(created_by.model_dump(mode="json")),
-                print_run_id,
+                print_request_id,
                 copies,
                 sliced_sha256,
                 sliced_blob_key,
-                printer,
             ),
         ).fetchone()
         assert row is not None
@@ -1173,6 +1172,50 @@ class OrderStore:
             " ON CONFLICT (key, holder_kind, holder_id) DO NOTHING",
             (key, holder_kind, attempt_id),
         )
+
+    def print_claim(self, request_id: str, *, conn: Conn | None = None) -> Fulfilment | None:
+        """The attempt an ``order_item_print`` claimed under ``request_id``, if any."""
+        with self._read(conn) as c:
+            row = c.execute(
+                f"SELECT {_FULFILMENT} FROM order_item_fulfilments WHERE print_request_id = %s",
+                (request_id,),
+            ).fetchone()
+        return None if row is None else Fulfilment.model_validate(row)
+
+    def attach_print_run(
+        self, conn: Conn, attempt_id: str, run_id: str, printer: str | None
+    ) -> Fulfilment:
+        """The run a claimed attempt's print started, once it started."""
+        row = conn.execute(
+            "UPDATE order_item_fulfilments SET print_run_id = %s, printer = %s"
+            f" WHERE id = %s RETURNING {_FULFILMENT}",
+            (run_id, printer, attempt_id),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"no fulfilment {attempt_id}")
+        return Fulfilment.model_validate(row)
+
+    def release_print_claim(self, conn: Conn, holder_kind: str, attempt_id: str) -> None:
+        """A claim whose print was refused before it started: its row and its hold go,
+        in the caller's transaction, as if it was never made."""
+        conn.execute(
+            "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (holder_kind, attempt_id),
+        )
+        conn.execute("DELETE FROM order_item_fulfilments WHERE id = %s", (attempt_id,))
+
+    def runs_newest(self, run_id: str) -> bool:
+        """Whether ``run_id`` is its subject's newest succeeded run, the one a print's
+        progress and outcome are read against (``bambuddy/outcomes.py``)."""
+        with self._read(None) as c:
+            row = c.execute(
+                "SELECT n.id FROM print_runs r JOIN LATERAL ("
+                " SELECT id FROM print_runs WHERE output_id = r.output_id"
+                " AND status = 'succeeded' ORDER BY created_at DESC LIMIT 1) n ON true"
+                " WHERE r.id = %s",
+                (run_id,),
+            ).fetchone()
+        return row is not None and row["id"] == run_id
 
     def print_attempt(self, run_id: str, *, conn: Conn | None = None) -> Fulfilment | None:
         """The attempt a print run started (#4719), if any."""

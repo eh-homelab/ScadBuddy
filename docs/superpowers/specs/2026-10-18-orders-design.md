@@ -481,11 +481,16 @@ or a slice quote whose `quote-<sha256>/sliced.3mf` is gone or reads to another d
 The run starts the print as `POST /print/outputs/{id}/run` does (`api/printing.py`
 `accept_run`, `PrintRunWorkflow` on the item's output), with the body's printer, spools and
 choices, every plate, `copies` the quantity still to print and a `request_id` made from the
-operation's key, so a retry or a re-send repeats the run. The attempt
-(`Lifecycle.start_print_attempt`) records `print_run_id`, `copies`, the registry
-`printer`, and the quote's `sliced_sha256` and `sliced_blob_key` held by
-`(order_item_fulfilment, <attempt id>)`; it made nothing yet (`quantity` 0, outcome
-`unknown`), and the item is `queued`. The item follows the run from what the print path
+operation's key, so a retry or a re-send repeats the run. The item is claimed before
+the print starts (`Lifecycle.claim_print`, under the order's lock): the attempt, keyed by
+that `request_id` (`print_request_id`, unique), with `copies`, the quote's `sliced_sha256`
+and `sliced_blob_key` held by `(order_item_fulfilment, <attempt id>)`, nothing made yet
+(`quantity` 0, outcome `unknown`), and the item `queued`. Two prints of one item (two
+tabs, the browser and the agent) claim once, and a hold or cancel after the check refuses
+the claim, so only one print starts. The run is then attached (`attach_print`:
+`print_run_id`, the registry `printer`); a start the print path refuses (a 4xx) releases
+the claim (`release_print`, the item back to `approved` or `failed`), and one that may
+still start (a 5xx) keeps it for the operation's retry, which repeats the same run. The item follows the run from what the print path
 records (`Lifecycle.follow_print`, heard on `print.run`, `print.progress` and
 `print.outcome` and reconciled at start and on `bus.resync`): a failed run fails the
 attempt with its refusal, the first `print.progress` after the run succeeded makes the item

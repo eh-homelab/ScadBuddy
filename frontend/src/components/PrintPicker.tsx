@@ -857,14 +857,15 @@ export function PrintPicker({
   const handing = quoting || itemPrint !== undefined
   const priceBook = useAsync(() => (open && quoting ? api.priceBook() : Promise.resolve(null)), [open, quoting])
   const [priced, setPriced] = useState<Record<string, string>>({})
-  const [quoteBusy, setQuoteBusy] = useState(false)
-  const [quoteError, setQuoteError] = useState<string | null>(null)
+  // The quote and item-print modes (`handing`): the one request the dialog hands the page.
+  const [handingBusy, setHandingBusy] = useState(false)
+  const [handingError, setHandingError] = useState<string | null>(null)
   const quoteSeed = quote ? JSON.stringify(quote.filaments) : ''
   useEffect(() => {
     if (!open || !quoteSeed) return
     const seeded = JSON.parse(quoteSeed) as Record<string, string | null>
     setPriced(Object.fromEntries(Object.entries(seeded).filter((entry): entry is [string, string] => entry[1] !== null)))
-    setQuoteError(null)
+    setHandingError(null)
   }, [open, quoteSeed])
   const unpriced = quoting && (filaments?.slots ?? []).some((slot) => !priced[String(slot.slot_id - 1)])
   // Only for the queue link while a run is unanswered (a result carries its own), so it
@@ -1342,8 +1343,8 @@ export function PrintPicker({
    */
   async function runQuote() {
     if (!quote || !printChoices) return
-    setQuoteBusy(true)
-    setQuoteError(null)
+    setHandingBusy(true)
+    setHandingError(null)
     try {
       await quote.start({
         ...(registryPrinter ? { printer: registryPrinter } : {}),
@@ -1354,17 +1355,17 @@ export function PrintPicker({
       })
       close()
     } catch (cause) {
-      setQuoteError(refusalText(cause))
+      setHandingError(refusalText(cause))
     } finally {
-      setQuoteBusy(false)
+      setHandingBusy(false)
     }
   }
 
   /** #4719 — Print an order item: the dialog's choices, posted as the item's print. */
   async function runItemPrint() {
     if (!itemPrint || !printChoices) return
-    setQuoteBusy(true)
-    setQuoteError(null)
+    setHandingBusy(true)
+    setHandingError(null)
     try {
       await itemPrint.start({
         ...(registryPrinter ? { printer: registryPrinter } : {}),
@@ -1374,9 +1375,9 @@ export function PrintPicker({
       })
       close()
     } catch (cause) {
-      setQuoteError(refusalText(cause))
+      setHandingError(refusalText(cause))
     } finally {
-      setQuoteBusy(false)
+      setHandingBusy(false)
     }
   }
 
@@ -1385,7 +1386,7 @@ export function PrintPicker({
     // reopen with Print enabled and send the print a second time (#539 review).
     // Also ignored mid-create (#710 review): unmounting the picker would drop the
     // creating guard while its request is still in flight.
-    if (running || projectCreating || quoteBusy) return
+    if (running || projectCreating || handingBusy) return
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
@@ -1425,33 +1426,33 @@ export function PrintPicker({
   const split = (choices || source) && !result && unanswered === null
   const footer = quoting ? (
           <>
-            <Button type="button" variant="outline" onClick={close} disabled={quoteBusy}>
+            <Button type="button" variant="outline" onClick={close} disabled={handingBusy}>
               Cancel
             </Button>
             <Button
               type="button"
               onClick={() => void runQuote()}
-              disabled={quoteBusy || loading || !choices || !planReady || !printChoices || unpriced || Boolean(sliced)}
+              disabled={handingBusy || loading || !choices || !planReady || !printChoices || unpriced || Boolean(sliced)}
               data-testid="run-quote"
               {...USER_ONLY}
             >
-              {quoteBusy && <Spinner />}
+              {handingBusy && <Spinner />}
               Quote
             </Button>
           </>
         ) : itemPrint ? (
           <>
-            <Button type="button" variant="outline" onClick={close} disabled={quoteBusy}>
+            <Button type="button" variant="outline" onClick={close} disabled={handingBusy}>
               Cancel
             </Button>
             <Button
               type="button"
               onClick={() => void runItemPrint()}
-              disabled={quoteBusy || loading || !choices || !planReady || !printChoices || Boolean(sliced)}
+              disabled={handingBusy || loading || !choices || !planReady || !printChoices || Boolean(sliced)}
               data-testid="run-item-print"
               {...USER_ONLY}
             >
-              {quoteBusy && <Spinner />}
+              {handingBusy && <Spinner />}
               Print
             </Button>
           </>
@@ -2083,9 +2084,9 @@ export function PrintPicker({
               {runError}
             </p>
           )}
-          {quoteError && (
+          {handingError && (
             <p role="alert" className="mt-3 text-sm text-destructive" data-testid="quote-error">
-              {quoteError}
+              {handingError}
             </p>
           )}
         </>

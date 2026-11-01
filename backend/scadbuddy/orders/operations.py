@@ -41,7 +41,7 @@ from scadbuddy.orders import attachments
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor, Reference
-from scadbuddy.orders.printing import print_check
+from scadbuddy.orders.printing import print_check, print_item
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.quote import (
     MAX_SLICED_BYTES,
@@ -334,57 +334,53 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         return checked
 
     async def item_print_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
-        """The print run started as the print route starts one (``accept_run``), its
-        attempt recorded, then the follow asked once, for a run that ended before the
-        attempt's row existed (its event found nothing to move)."""
+        """The item claimed, then its print started as the print route starts one
+        (``accept_run``), then the run attached (``orders/printing.py`` ``print_item``)."""
         # Here, not at the top: the orders package imports nothing of `api/` as it loads
         # (`orders/__init__.py`); this run is the one place it reaches the print route.
         from scadbuddy.activity.component import ACTIVITY
         from scadbuddy.api.printing import accept_run
         from scadbuddy.workflows.print_models import SourceSpec
 
-        orders = components.get(ORDERS)
-        body = PrintRunRequest.model_validate(
-            {
-                **request["request"],
-                # §5.4: the quantity still to print, of the whole output (a quote is the
-                # whole output's price), keyed by the operation so a retry or a re-send
-                # repeats its run.
-                "copies": checked["copies"],
-                "all_plates": True,
-                "plate_ids": None,
-                "request_id": request["request_id"],
-            }
-        )
         output_id = checked["output_id"]
-        run = await accept_run(
-            core.print_runs,
-            Response(),
-            subject=PrintSubject.output(output_id),
-            slug=checked["slug"],
-            request=body,
-            source=SourceSpec(kind="output", output_id=output_id),
-            activity=components.get(ACTIVITY),
-        )
-        # A follow URL (a `JSONResponse`) answers only a request that asked for one.
-        assert isinstance(run, PrintRun)
-        try:
-            attempt = await to_thread_to_end(
-                lambda: orders.lifecycle.start_print_attempt(
-                    request["order_id"],
-                    request["item_id"],
-                    Actor.model_validate(request["by"]),
-                    print_run_id=run.id,
-                    copies=checked["copies"],
-                    sliced_sha256=checked["sliced_sha256"],
-                    sliced_blob_key=checked["sliced_blob_key"],
-                    printer=run.printer,
-                )
+
+        async def start(copies: int) -> PrintRun:
+            body = PrintRunRequest.model_validate(
+                {
+                    **request["request"],
+                    # §5.4: the quantity still to print, of the whole output (a quote is
+                    # the whole output's price), keyed by the operation so a retry or a
+                    # re-send repeats its run.
+                    "copies": copies,
+                    "all_plates": True,
+                    "plate_ids": None,
+                    "request_id": request["request_id"],
+                }
             )
-        except LifecycleError as error:
-            raise refused(error) from None
-        followed = await asyncio.to_thread(orders.lifecycle.follow_print, run.id)
-        dumped: dict[str, Any] = (followed or attempt).model_dump(mode="json")
+            run = await accept_run(
+                core.print_runs,
+                Response(),
+                subject=PrintSubject.output(output_id),
+                slug=checked["slug"],
+                request=body,
+                source=SourceSpec(kind="output", output_id=output_id),
+                activity=components.get(ACTIVITY),
+            )
+            # A follow URL (a `JSONResponse`) answers only a request that asked for one.
+            assert isinstance(run, PrintRun)
+            return run
+
+        attempt = await print_item(
+            components.get(ORDERS).lifecycle,
+            start,
+            request["order_id"],
+            request["item_id"],
+            Actor.model_validate(request["by"]),
+            request_id=request["request_id"],
+            sliced_sha256=checked["sliced_sha256"],
+            sliced_blob_key=checked["sliced_blob_key"],
+        )
+        dumped: dict[str, Any] = attempt.model_dump(mode="json")
         return dumped
 
     async def attachment_check(request: dict[str, Any]) -> dict[str, Any]:

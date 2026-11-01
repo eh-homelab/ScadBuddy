@@ -669,9 +669,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)
   starts the item's output's print through `api/printing.py` `accept_run`, never a path of
-  its own, its `request_id` from the operation's key; `Lifecycle.start_print_attempt`
-  records the attempt (`print_run_id`, `copies`, the quote's file held by
-  `(order_item_fulfilment, <id>)`) and queues the item, and the item follows the run from
+  its own, its `request_id` from the operation's key. The item is claimed first, under the
+  order's lock (`Lifecycle.claim_print`: the attempt keyed by `print_request_id`, the quote's
+  file held by `(order_item_fulfilment, <id>)`, the item `queued`), so one print starts per
+  item; then the run is attached (`attach_print`) or a refused start releases the claim
+  (`release_print`), and the item follows the run from
   `print_runs` and `print_outcomes` only (`Lifecycle.follow_print`, the component's
   `listen_for_prints`), never by asking a printer or Bambuddy. Agent `order_item_print`
   (outward); frontend `components/orders/PrintItem.tsx` over `PrintPicker`'s `itemPrint`.

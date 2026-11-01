@@ -355,6 +355,9 @@ class Fulfilment(BaseModel):
     printer: str | None = None
     #: How many the run was sent; ``quantity`` is what it made, set when it settles.
     copies: int | None = None
+    #: The print run's ``request_id`` this attempt was claimed under before its print
+    #: started (#4719); a retried operation finds its claim by it.
+    print_request_id: str | None = None
 
 
 class ShipmentItem(BaseModel):

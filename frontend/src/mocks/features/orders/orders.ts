@@ -862,7 +862,7 @@ export const handlers = [
     }),
   ),
   // #4719 — `order_item_print` (`orders/printing.py` `print_check`, then
-  // `Lifecycle.start_print_attempt`): answered at once with the attempt, the item queued.
+  // `Lifecycle.claim_print`, `attach_print`): answered at once with the attempt, the item queued.
   // The mock prints nothing, so the item stays queued until an attempt is edited by hand.
   http.post('/api/v1/orders/:id/items/:item/print', async ({ request, params }) => {
     if (!request.headers.get('Idempotency-Key')) {

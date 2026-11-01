@@ -8,8 +8,14 @@ item's output, with the request's spools and choices), so every path a print tak
 native LAN run among them, prints an item exactly as it prints the output from the
 dialog. ``copies`` is the quantity still to print, every plate is printed (a quote is the
 whole output's price), and ``request_id`` is the operation's own, so a re-sent or retried
-operation repeats its run and never prints twice. The attempt is then recorded through
-the lifecycle (``Lifecycle.start_print_attempt``), which sets the item `queued`.
+operation repeats its run and never prints twice. The item is claimed before the print
+starts (``Lifecycle.claim_print``: the attempt keyed by that ``request_id``, the item
+`queued`, under the order's lock), so of two prints of one item only one starts, and a
+hold or cancel that lands after the check refuses the claim, not a started print. The run
+is then attached to the claim (``attach_print``); a start the print path refuses releases
+it (``release_print``), the item back to `approved` or `failed`. A claim whose start never
+answered (Temporal down past the operation's attempts) stays `queued` with no run, for a
+person to settle by hand.
 
 The item follows its run from what the print path records, never by asking a printer or
 Bambuddy: the run's row (``print_runs``: a run that failed fails the attempt) and the
@@ -41,6 +47,7 @@ from typing import Any
 
 from fastapi import status
 
+from scadbuddy.bambuddy.runs import PrintRun
 from scadbuddy.core.events import (
     BusResync,
     Event,
@@ -50,9 +57,17 @@ from scadbuddy.core.events import (
     PrintRunEvent,
 )
 from scadbuddy.core.problems import ApiError
-from scadbuddy.orders.lifecycle import DERIVED, ENDED, FULFILLABLE, SETTLED, Lifecycle
-from scadbuddy.orders.models import Fulfilment, OrderItem, Quote, Reference
-from scadbuddy.orders.problems import PROBLEMS
+from scadbuddy.operations.kinds import to_thread_to_end
+from scadbuddy.orders.lifecycle import (
+    DERIVED,
+    ENDED,
+    FULFILLABLE,
+    SETTLED,
+    Lifecycle,
+    LifecycleError,
+)
+from scadbuddy.orders.models import Actor, Fulfilment, OrderItem, Quote, Reference
+from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.quote import SLICED_NAME, OutputsRead, output_matches, reference_of
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.render.schema import CustomizerSchema
@@ -252,3 +267,49 @@ def listen_for_prints(
             await asyncio.wait(set(pending))
 
     return remove
+
+
+# -- the run ----------------------------------------------------------------------------------
+
+
+async def print_item(
+    lifecycle: Lifecycle,
+    start: Callable[[int], Awaitable[PrintRun]],
+    order_id: str,
+    item_id: str,
+    by: Actor,
+    *,
+    request_id: str,
+    sliced_sha256: str | None,
+    sliced_blob_key: str | None,
+) -> Fulfilment:
+    """``order_item_print``'s run: the item claimed (``Lifecycle.claim_print``, refused
+    as the check would be when the rows moved since), then its print started with the
+    claim's ``copies`` (``start``, the print route's ``accept_run``), then the run
+    attached and the follow asked once, for a run that ended before it was attached. A
+    start the print path refused (a 4xx: no spool, a printer it cannot serve) releases the
+    claim; one that may still start (a 5xx, Temporal busy or away) keeps it, and the
+    operation's retry finds it and repeats the same run."""
+    try:
+        claim = await to_thread_to_end(
+            lambda: lifecycle.claim_print(
+                order_id,
+                item_id,
+                by,
+                request_id=request_id,
+                sliced_sha256=sliced_sha256,
+                sliced_blob_key=sliced_blob_key,
+            )
+        )
+    except LifecycleError as error:
+        raise refused(error) from None
+    assert claim.copies is not None
+    try:
+        run = await start(claim.copies)
+    except ApiError as error:
+        if error.status < 500:
+            await asyncio.to_thread(lifecycle.release_print, claim, error.detail)
+        raise
+    attempt = await asyncio.to_thread(lifecycle.attach_print, claim, run.id, run.printer)
+    followed = await asyncio.to_thread(lifecycle.follow_print, run.id)
+    return followed or attempt
