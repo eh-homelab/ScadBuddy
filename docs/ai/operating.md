@@ -1027,7 +1027,13 @@ session's Claude Code process offers its own built-ins, each an item of the acce
   cwd. The config directory is the pod's own, so that path is a link to the session
   directory's `_claude/tasks/` (`stateDirs.ts` `linkTaskList`). The task files are then
   workspace files, written back with the directory and refilled at any pod's placement
-  (`test/nativeBuiltins.sdk.test.ts`).
+  (`test/nativeBuiltins.sdk.test.ts`). Two things follow from that:
+  - As workspace files, they show in the panel's Files and count toward the file and byte
+    caps (§13). A write-back refused at a cap (`quota`) leaves out that task file, as it
+    would any new file.
+  - A placement removes every dot-file (`workspace/directory.ts`). That includes Claude
+    Code's `.highwatermark` and `.lock` in the list, so after a move to another pod the id
+    of a task already deleted can be given again. The tasks that remain keep their ids.
 - **Breaking for package authors.** The retired durable turn's `builtin__<Name>` file and
   task tools (`Read`, `Write`, `Edit`, `Glob`, `Grep`, `NotebookEdit`, the `Task*` tools,
   `ReportFindings`, `EnterWorktree`, `ExitWorktree`, `SendMessage`) and their `/workspace`
