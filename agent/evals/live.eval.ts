@@ -1,18 +1,18 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import os from 'node:os'
-import path from 'node:path'
+import { writeFile } from 'node:fs/promises'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { bundledCliPath, sdkDeclaredCliVersion } from '../src/harness/cliVersion.js'
-import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { sdkDeclaredCliVersion } from '../src/harness/cliVersion.js'
 import { scoreCitations } from './citations.js'
 import { resolveEvalCredential } from './credential.js'
 import { EVAL_BACKEND_URL_ENV, RealBackend } from './realBackend.js'
-import { type DurableEvalStack, durableEvalSkip, startDurableStack } from './durable.js'
-import { type CheckResult, type EvalMode, evalModes, formatReport, type Outcome, runScenario, score } from './runner.js'
+import { type EvalStack, evalStackSkip, startEvalStack } from './durable.js'
+import { type CheckResult, formatReport, type Outcome, score } from './runner.js'
 import { SCENARIOS } from './scenarios.js'
 
 // Live evals (issue #259, spec §13 "Live evals"): the scenarios in
-// ./scenarios.ts, answered by a real Claude model through the real harness.
+// ./scenarios.ts, answered by a real Claude model, each in a session on the one
+// runtime: an AgentSession on a stack the run starts itself (evals/durable.ts: a
+// Temporal dev server, an api and a worker agent process, a throwaway Postgres
+// database; plan 2026-10-13 Step 6.6).
 // Never part of `pnpm test` or required CI: run with `pnpm evals` (see
 // docs/ai/evals.md). Without a credential every scenario skips, with the
 // reason in the suite's name and on stderr.
@@ -26,27 +26,15 @@ import { SCENARIOS } from './scenarios.js'
 // #1924, evals/render.ts). Without it those scenarios skip, with the reason in
 // their name: a render checked on the recorded backend is not a real render.
 //
-// SCADBUDDY_EVAL_MODE=classic|durable|both (default both) picks the engine: the
-// classic harness, or a durable session on a stack the run starts itself
-// (evals/durable.ts: a Temporal dev server, agent-durable's worker, the agent's
-// agent-tools worker, a throwaway Postgres database). The durable run skips, saying
-// why, without uv, a Temporal CLI or SCADBUDDY_TEST_DATABASE_URL.
+// Without a Temporal CLI or SCADBUDDY_TEST_DATABASE_URL (the stack's throwaway
+// database) every scenario skips too, saying why.
 
 const found = await resolveEvalCredential()
-let cliMissing: string | undefined
-try {
-  bundledCliPath()
-} catch (err) {
-  cliMissing = (err as Error).message
-}
-const skip = !found.ok ? found.reason : cliMissing
+const skip = !found.ok ? found.reason : evalStackSkip()
 if (skip) console.warn(`[evals] skipped: ${skip}`)
-
-const modes = evalModes(process.env.SCADBUDDY_EVAL_MODE)
 
 type ScenarioReport = {
   id: string
-  mode: EvalMode
   title: string
   pass: boolean
   checks: CheckResult[]
@@ -90,10 +78,9 @@ function citationReport(reply: string): Pick<ScenarioReport, 'citations'> {
   }
 }
 
-function report(mode: EvalMode, scenario: (typeof SCENARIOS)[number], outcome: Outcome, checks: CheckResult[], backend: string): void {
+function report(scenario: (typeof SCENARIOS)[number], outcome: Outcome, checks: CheckResult[], backend: string): void {
   reports.push({
     id: scenario.id,
-    mode,
     title: scenario.title,
     pass: checks.every((c) => c.pass),
     checks,
@@ -115,7 +102,7 @@ function report(mode: EvalMode, scenario: (typeof SCENARIOS)[number], outcome: O
     })),
     ...citationReport(outcome.finalText),
   })
-  console.log(`${formatReport(`${scenario.id} [${mode}]`, checks)}\n  model: ${outcome.model ?? 'unknown'}`)
+  console.log(`${formatReport(scenario.id, checks)}\n  model: ${outcome.model ?? 'unknown'}`)
 }
 
 const backendUrl = process.env[EVAL_BACKEND_URL_ENV]?.trim() || undefined
@@ -126,7 +113,6 @@ describe.skipIf(skip !== undefined)(`live evals${skip ? ` (skipped: ${skip})` : 
     if (!file || !found.ok) return
     const out = {
       credential: found.source,
-      modes,
       sdkClaudeCodeVersion: await sdkDeclaredCliVersion(),
       passed: reports.filter((r) => r.pass).length,
       total: reports.length,
@@ -135,73 +121,39 @@ describe.skipIf(skip !== undefined)(`live evals${skip ? ` (skipped: ${skip})` : 
     await writeFile(file, `${JSON.stringify(out, null, 2)}\n`)
   })
 
-  describe.skipIf(!modes.includes('classic'))('classic', () => {
-    for (const scenario of SCENARIOS) {
-      const noBackend = scenario.realBackend && !backendUrl
-      const title = noBackend ? `${scenario.title} (skipped: ${EVAL_BACKEND_URL_ENV} is not set)` : scenario.title
-      it.skipIf(noBackend)(title, async () => {
-        if (!found.ok) return
-        const real = scenario.realBackend && backendUrl ? backendUrl : undefined
-        const stateDir = await mkdtemp(path.join(os.tmpdir(), `scadbuddy-eval-${scenario.id}-`))
-        let outcome: Awaited<ReturnType<typeof runScenario>>
-        try {
-          await ensureStateDirs({ stateDir })
-          outcome = await runScenario(
-            scenario,
-            {
-              paths: { stateDir },
-              credential: found.credential,
-              ...(found.model ? { model: found.model } : {}),
-              timeoutMs: RUN_TIMEOUT_MS,
-              budgetMs: SCENARIO_BUDGET_MS,
-              // A real render takes seconds, not the recorded backend's none.
-              ...(real ? { renderWaitMs: 120_000, collect: { pollMs: 1000, deadlineMs: SCENARIO_BUDGET_MS - RUN_TIMEOUT_MS } } : {}),
-            },
-            ...(real ? [new RealBackend(real)] : []),
-          )
-        } finally {
-          await rm(stateDir, { recursive: true, force: true })
-        }
-        const checks = score(scenario, outcome)
-        report('classic', scenario, outcome, checks, real ?? 'recorded')
-        expect(checks.filter((c) => !c.pass)).toEqual([])
-      }, TEST_TIMEOUT_MS)
-    }
-  })
+  // One stack for every scenario, each in its own session; the backend URL a
+  // real-backend scenario uses is chosen per run, so render waits are the longer one.
+  let stack: EvalStack | undefined
+  beforeAll(async () => {
+    if (!found.ok) return
+    stack = await startEvalStack({
+      credential: found.credential,
+      ...(found.model ? { model: found.model } : {}),
+      ...(backendUrl ? { renderWaitMs: 120_000 } : {}),
+    })
+  }, 300_000)
+  afterAll(async () => {
+    await stack?.close()
+  }, 60_000)
 
-  const durableSkip = durableEvalSkip()
-  if (modes.includes('durable') && durableSkip) console.warn(`[evals] durable skipped: ${durableSkip}`)
-  describe.skipIf(!modes.includes('durable') || durableSkip !== undefined)(`durable${durableSkip ? ` (skipped: ${durableSkip})` : ''}`, () => {
-    // One stack for every scenario, each in its own durable session; the backend URL
-    // a real-backend scenario uses is chosen per run, so render waits are the longer one.
-    let stack: DurableEvalStack | undefined
-    beforeAll(async () => {
-      if (!found.ok) return
-      stack = await startDurableStack({
-        credential: found.credential,
-        ...(found.model ? { model: found.model } : {}),
-        ...(backendUrl ? { renderWaitMs: 120_000 } : {}),
-      })
-    }, 300_000)
-    afterAll(async () => {
-      await stack?.close()
-    }, 60_000)
-
-    for (const scenario of SCENARIOS) {
-      const noBackend = scenario.realBackend && !backendUrl
-      const title = noBackend ? `${scenario.title} (skipped: ${EVAL_BACKEND_URL_ENV} is not set)` : scenario.title
-      it.skipIf(noBackend)(title, async () => {
-        if (!stack) return
-        const real = scenario.realBackend && backendUrl ? backendUrl : undefined
-        const outcome = await stack.run(
-          scenario,
-          { timeoutMs: RUN_TIMEOUT_MS, ...(real ? { collect: { pollMs: 1000, deadlineMs: SCENARIO_BUDGET_MS - RUN_TIMEOUT_MS } } : {}) },
-          ...(real ? [new RealBackend(real)] : []),
-        )
-        const checks = score(scenario, outcome)
-        report('durable', scenario, outcome, checks, real ?? 'recorded')
-        expect(checks.filter((c) => !c.pass)).toEqual([])
-      }, TEST_TIMEOUT_MS)
-    }
-  })
+  for (const scenario of SCENARIOS) {
+    const noBackend = scenario.realBackend && !backendUrl
+    const title = noBackend ? `${scenario.title} (skipped: ${EVAL_BACKEND_URL_ENV} is not set)` : scenario.title
+    it.skipIf(noBackend)(title, async () => {
+      if (!stack) return
+      const real = scenario.realBackend && backendUrl ? backendUrl : undefined
+      const outcome = await stack.run(
+        scenario,
+        {
+          timeoutMs: RUN_TIMEOUT_MS,
+          budgetMs: SCENARIO_BUDGET_MS,
+          ...(real ? { collect: { pollMs: 1000, deadlineMs: SCENARIO_BUDGET_MS - RUN_TIMEOUT_MS } } : {}),
+        },
+        ...(real ? [new RealBackend(real)] : []),
+      )
+      const checks = score(scenario, outcome)
+      report(scenario, outcome, checks, real ?? 'recorded')
+      expect(checks.filter((c) => !c.pass)).toEqual([])
+    }, TEST_TIMEOUT_MS)
+  }
 })

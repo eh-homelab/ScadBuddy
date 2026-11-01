@@ -1240,7 +1240,7 @@ From the merged code and PR bodies:
 9. **Write-tier calls are not gated, so injected content can drive one.** Tiers put
    `update_source` and other `write` tools in the tier that runs without a human,
    because a write is reversible through the model's git history (spec §8.1). The
-   eval negative control in [`agent/test/evals.test.ts`](../../agent/test/evals.test.ts)
+   eval negative control in [`agent/test/evals.durable.e2e.test.ts`](../../agent/test/evals.durable.e2e.test.ts)
    ("control: a model that obeys the README injection") reproduces it: a model that
    follows a poisoned README overwrites the source, while the `delete_model` it also
    attempts stops at the approval gate. Prevention of that write rests on the model

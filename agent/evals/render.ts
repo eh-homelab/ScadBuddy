@@ -5,7 +5,7 @@ import { type Rendered3mf, readBambu3mf } from './threemf.js'
 // the run used, the way a person would check it: the job settled, the result
 // was saved as an output, and that output's 3MF is what models/<name>/verify.sh
 // checks a render for. Live, with SCADBUDDY_EVAL_BACKEND_URL, that backend is the
-// image, so OpenSCAD really rendered it; in the scripted run (test/evals.test.ts)
+// image, so OpenSCAD really rendered it; in the scripted run (test/evals.durable.e2e.test.ts)
 // it is the recorded backend's 3MF of the same shape (evals/backend.ts).
 //
 // The scorer's own requests go through `peek`, never the logged `fetch`, so a

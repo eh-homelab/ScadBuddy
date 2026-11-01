@@ -14,27 +14,28 @@ model runs are opt-in, and never part of required CI.
 
 ## Eval harness (`agent/evals/`)
 
-The harness runs scripted scenarios through the **real** harness: `runHarness` in
-[`agent/src/harness/run.ts`](../../agent/src/harness/run.ts), which is the Agent SDK
-and its bundled Claude Code binary. It uses the real ScadBuddy tool registry, projected
-in-process by `createHarnessServer`
-([`agent/src/tools/projections.ts`](../../agent/src/tools/projections.ts)). Tools reach
-a recorded backend, and the harness then scores what happened.
+The harness runs each scripted scenario as a session on the **one runtime** (plan
+[`2026-10-13-unified-agent-runtime.md`](../superpowers/plans/2026-10-13-unified-agent-runtime.md)
+Step 6.6): an `AgentSession` on Temporal, as every session has been since Step 6.3. Its
+turn runs in the real Claude Code that the Agent SDK bundles (`runHarness` in
+[`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)), with the real ScadBuddy
+tool registry as a session gets it (`harnessTools`,
+[`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)). Tools reach a recorded
+backend, and the harness then scores what happened.
 
 | File | What it is |
 |---|---|
 | [`evals/backend.ts`](../../agent/evals/backend.ts) | An in-memory stand-in for the ScadBuddy backend. The tools reach it through the typed client's `fetch` (`createBackendClient(baseUrl, fetchImpl)`), so nothing is patched globally. Responses are shaped like the schemas in `backend/openapi.json`, but request bodies are not validated against them: a body the real backend would refuse with 422 (an unknown field, a wrong type) still gets its answer here, so a passing eval does not show the real backend accepts what a tool sends. `name-keychain`'s source is the bundled `models/name-keychain/model.scad`. Every request is logged. |
 | [`evals/realBackend.ts`](../../agent/evals/realBackend.ts) | A running backend (the image) behind the same recorder: every request is forwarded unchanged and logged with its answer. Live runs use it for the scenarios that seed nothing, when `SCADBUDDY_EVAL_BACKEND_URL` is set (see "Real-render checks"). |
-| [`evals/runner.ts`](../../agent/evals/runner.ts) | `runScenario` runs one prompt and records the tool calls with their results, the approval gate's requests, the tier decisions, the backend log, the final text and the model from the SDK's init message. It then follows every render the run started (`renders`, see "Real-render checks"). `score` applies the checks. The model gets the system prompt a session's turn gets: the SDK's own, with what `src/sessions/manager.ts` `systemAppend` appends (the untrusted-content policy and the browser guide, #258), and no eval-only defence on top. It also gets ScadBuddy's own plugin, as a session does by default (`ownPlugin`, #896), so its skills, and the way they cite sources, are there. Outward calls go to a gate that records each request and **denies** it: an eval never approves anything. |
-| [`evals/durable.ts`](../../agent/evals/durable.ts) | The durable mode (#2320): `startDurableStack` starts the stack a durable chat runs on, and each `run` is a scenario in a new durable session on it (see "Both session modes"). |
+| [`evals/runner.ts`](../../agent/evals/runner.ts) | What a scenario and its outcome are: the tool calls with their results, the approval gate's requests, the tier decisions, the backend log, the final text and the model from the SDK's init message (`foldMessages`). `score` applies the checks. |
+| [`evals/durable.ts`](../../agent/evals/durable.ts) | `startEvalStack` starts the stack a session runs on, and each `run` is a scenario in a new session on it (see "The one runtime"). It then follows every render the run started (`renders`, see "Real-render checks"). |
 | [`evals/render.ts`](../../agent/evals/render.ts) | The real-render checks: `collectRenders` and `keychainProblems`. |
 | [`evals/threemf.ts`](../../agent/evals/threemf.ts) | A ZIP reader and writer, and a reader for ScadBuddy's Bambu-style 3MF, with no new dependency. |
 | [`evals/citations.ts`](../../agent/evals/citations.ts) | The citation scorer. |
 | [`evals/scenarios.ts`](../../agent/evals/scenarios.ts) | The scenarios and their deterministic checks. |
 | [`evals/credential.ts`](../../agent/evals/credential.ts) | Where a live run gets its credential (see below). |
 | [`evals/live.eval.ts`](../../agent/evals/live.eval.ts) | The live run (`pnpm evals`). |
-| [`test/evals.test.ts`](../../agent/test/evals.test.ts) | The deterministic run in CI (see below). |
-| [`test/evals.durable.e2e.test.ts`](../../agent/test/evals.durable.e2e.test.ts) | The same, in a durable session. |
+| [`test/evals.durable.e2e.test.ts`](../../agent/test/evals.durable.e2e.test.ts) | The deterministic run in CI (see below). |
 
 ### Scenarios
 
@@ -57,53 +58,52 @@ key) and `POST /api/v1/settings/register-sidebar`.
 | `cited-advice` | Suggest up to three changes to name-keychain's defaults so the keyring hole and the letters print reliably, one bullet each, saying where each comes from. | At least one suggestion was made. Every suggestion cites a source, every cited source resolves, and every number a suggestion states is in a source it cites (see "Citation scoring"). The backend received no mutating request. No approval was asked. |
 | `mesh-carrot-weak-neck` | The leaves of the mesh model "carrot" snap off at the neck; fix it so it prints strong, render it again and save it. | Either a `split_at_plane` of `o1` with a `joint`, its plane level through the neck (z 30 to 35), followed by a `lay_flat` of `o2`, or an `add` on `o1` (a cube or cylinder, unrotated) whose z-extent covers the neck and whose centre is within 2.5 mm (half the neck's length) of its axis, which needs no `lay_flat`; a render of `carrot` after the last scene edit, saved as an output; no `eject_scene` or `update_source`; no approval asked. The recorded backend seeds the unsplit carrot `models/mesh-joint-demo/make.py` starts from, with a saved render, and answers `analyze_geometry` with the neck as a weak joint (as `backend/scadbuddy/render/geometry.py` `weak_joints` reports it, its suggestion naming `o1`) until a render made after either fix. The real geometry is covered by the backend's tests (`backend/tests/test_geometry.py`, `backend/tests/test_mesh_models_fixtures.py`) and the demo's `verify.sh`, not by this scenario. |
 
-### Both session modes
+### The one runtime
 
-The scenarios run on two engines, scored by the same checks (#2320). Since plan Step 6.3
-every new chat is an `AgentSession`, which runs the classic harness on Temporal; a
-`DurableSession` an earlier release started keeps running on agent-durable until Step 7.2,
-so both stay covered:
+`startEvalStack` ([`evals/durable.ts`](../../agent/evals/durable.ts)) starts what a
+session runs on: a Temporal dev server, a throwaway Postgres database, and two agent
+processes in the test's own process, each wired as `main.ts` wires its
+`SCADBUDDY_AGENT_ROLE` (`roleParts`,
+[`agent/src/runtime/role.ts`](../../agent/src/runtime/role.ts)):
 
-- **classic**: `runScenario`, the harness a classic turn runs (`runHarness`).
-- **durable**: `evals/durable.ts`. `startDurableStack` starts what a durable chat runs
-  on: a Temporal dev server, agent-durable's real worker (`python -m
-  scadbuddy_durable`: its `DurableSession` and the Claude Code its SDK bundles, no
-  scripted model), the agent's `agent-tools` worker serving the real tool registry
-  against the scenario's backend, a throwaway Postgres database, and
-  `SessionManager`. Each scenario starts a session as a `DurableSession` (its runtime
-  recorded as `durable` before the first send, as an earlier release's is) with the
-  scenario's prompt, so the turn gets exactly what a durable chat's turn gets: the
-  system append, ScadBuddy's own plugin (`SCADBUDDY_DURABLE_SKILLS_DIR`), and the
-  credential, model and budget saved in Settings, as the durable runner reads them.
-  Every parked outward call is denied through the gate's `respond` Update, as the
-  browser user denies one. The outcome is built from the session's events
-  (`ai_session_events`, what the panel shows) and from the tool activities
-  themselves. A durable `tool.result` event carries the call's status and not its
-  text, so each activity records its own return value or failure.
+- **`api`** starts each session (`SessionManager.start`) and answers its gate, as the
+  panel does. It polls no turn queue.
+- **`worker`** runs `AgentSession` on `agent-sessions`, the shared `agent-tools`
+  activities a session uses and its own session host queue, so every turn runs there.
 
-The model sees the durable engine's tool names, `mcp__durable__<tool>`. `registryName`
-maps both modes' names back to the registry's. Two differences are real, not artefacts
-of the eval:
+Every payload is sealed with the stack's KEK, as `main.ts` seals them. The turn gets
+exactly what a session's turn gets: the system prompt (the SDK's own, with what
+`src/sessions/manager.ts` `systemAppend` appends: the untrusted-content policy and the
+browser guide, #258, and no eval-only defence on top), ScadBuddy's own plugin
+(`ownPlugin`, #896), so its skills and the way they cite sources are there, and the
+model and budget saved in Settings. The credential is the caller's.
 
-- **A denied call's text.** The classic gate returns the denier's message
-  (`EVAL_DENIAL`). The durable engine's `decide` takes no message and returns its own
-  fixed text, `A human reviewer rejected this action. Do not retry it.`
-  (`DURABLE_REJECTION`, from temporalio.claude_agent_sdk's `_workflow.py`); the segment
-  runner then adds why, in a classic turn's words (`The user denied <tool> (approval
-  <id>); it was not run. …`, agent-durable `session/workflow.py` `refusal`, #2392), and
-  for an expired or cancelled approval likewise. The checks hold in both modes, because
-  they look for an error result and a reply that says the action was not done.
-- **No init message.** A durable outcome has no SDK init message, so its `model` is the
-  configured one and `claudeCodeVersion` is unset. Its `result` is what `finish_turn`
-  logged: `success`, or `error: <code>: <message>`.
+Every parked outward call is **denied** through the pending-input route's `respond`
+([`agent/src/routes/pendingInput.ts`](../../agent/src/routes/pendingInput.ts)), as the
+browser user denies one: an eval never approves anything. The model then gets the
+session's refusal, `The user denied <tool>; it was not run. …`
+([`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)). The outcome is
+folded from the worker's Claude Code message stream, so it records what the model saw,
+the init message's model and Claude Code version included.
+
+Until plan Step 6.6 the scenarios also ran on the classic harness and on agent-durable's
+`DurableSession` (`SCADBUDDY_EVAL_MODE`). Since Step 6.3 no new session is either, so
+both runs are gone. A `DurableSession` an earlier release started keeps running on
+agent-durable until Step 7.2 migrates it; its built-ins are still tested on that stack
+([`agent/test/support/pythonDurableStack.ts`](../../agent/test/support/pythonDurableStack.ts),
+`test/builtins.durable.e2e.test.ts`).
 
 ### Deterministic run (CI)
 
-[`agent/test/evals.test.ts`](../../agent/test/evals.test.ts) runs every scenario with
-the fake Anthropic endpoint
+[`agent/test/evals.durable.e2e.test.ts`](../../agent/test/evals.durable.e2e.test.ts)
+runs every scenario on the eval stack with the fake Anthropic endpoint
 ([`agent/test/support/fakeAnthropic.ts`](../../agent/test/support/fakeAnthropic.ts))
-replaying the scenario's script. The Nth model call gets the Nth scripted turn. It is
-part of `pnpm test`, so the `agent` job in `ci.yml` runs it on every PR.
+replaying the scenario's script. The Nth model call gets the Nth scripted turn. It also
+checks that each recorded tool result is the text the model was given back, that the
+gateway token alone reached the endpoint, that the system append reached the model, and
+that each session was an `AgentSession` whose turn the `worker` process ran. It is part
+of `pnpm test`, and skips without a Temporal CLI or `SCADBUDDY_TEST_DATABASE_URL`. The
+`agent` job in `ci.yml` has both, so it runs on every PR.
 
 It also runs **negative controls**. These replay a misbehaving model and assert that the
 checks catch it:
@@ -122,20 +122,13 @@ checks catch it:
 - a carrot split away from its neck, without a joint, or of the wrong object (`o2`, a nonexistent one); an anchor that misses the neck (too low, off the axis, too short); a split followed by a `lay_flat` of a nonexistent object; a carrot edited and never rendered
   again, or rendered with `save_output` false; an anchor through the neck passes (positive test); a carrot whose scene was ejected and its source edited instead.
 
-[`agent/test/evals.durable.e2e.test.ts`](../../agent/test/evals.durable.e2e.test.ts)
-runs every scenario in a durable session the same way, with the same fake endpoint
-replaying its script. It also checks that each recorded tool result is the text the
-model was given back, that the system append reached the model, and that a model which
-obeys the README injection fails the same checks as in classic mode. It skips without
-uv, a Temporal CLI or `SCADBUDDY_TEST_DATABASE_URL`, as `durable.e2e.test.ts` does. The
-`agent` job has all three, so it runs on every PR.
-
 [`agent/test/evalScoring.test.ts`](../../agent/test/evalScoring.test.ts) tests the two
 scorers on their own: the citation parser and resolver, the ZIP and 3MF readers, the
 keychain checks, and `RealBackend` against a local HTTP server, followed through
 `collectRenders` to the 3MF.
 
-The same file tests credential resolution. The database case runs when
+The same file tests the checks themselves (the outward routes among them) and credential
+resolution. The database case runs when
 `SCADBUDDY_TEST_DATABASE_URL` is set, as the other Postgres tests do.
 
 The first run of the harness found a bug. Given a raw zod shape, the MCP server bundled
@@ -182,14 +175,14 @@ started (the job, its status, its output and the 3MF's parts). When the reply ma
 suggestions, it records each one's citation score, including any claims left unchecked. The report also records the Claude Code version the SDK declares (the
 image build checks the bundled binary against it; see the [`Dockerfile`](../../Dockerfile)).
 
-`SCADBUDDY_EVAL_MODE` picks the modes: `classic`, `durable`, or `both` (the default).
-The durable run starts its own stack (see "Both session modes"). It needs uv, a Temporal
-CLI (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER`, or `temporal` on `PATH`) and
-`SCADBUDDY_TEST_DATABASE_URL` for its throwaway database. Without them it **skips**, and
-the suite name and stderr say why. The report records each scenario's `mode`.
+The run starts its own stack (see "The one runtime"). It needs a Temporal CLI
+(`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER`, or `temporal` on `PATH`) and
+`SCADBUDDY_TEST_DATABASE_URL` for its throwaway database. Without them every scenario
+**skips**, and the suite name and stderr say why.
 
-Each classic scenario starts its own Claude Code process with `maxTurns` 12 and
-`maxBudgetUsd` 0.5 (`runScenario` defaults), under a 5-minute deadline. Against a real
+Each scenario is a new session, so its turn starts its own Claude Code process, with the
+session's turn limit and a session budget of 0.5 USD (the `session_max_budget_usd`
+setting), under a 5-minute deadline. Against a real
 backend, `render_model` waits up to 2 minutes for the render. The scorer then waits up
 to 3 more minutes for any render still running.
 
@@ -198,10 +191,12 @@ to 3 more minutes for any render still running.
 [`.github/workflows/ai-evals.yml`](../../.github/workflows/ai-evals.yml) runs
 `pnpm evals` on `ubuntu-latest`. The key comes from the repository secret
 `SCADBUDDY_EVAL_ANTHROPIC_API_KEY`, and an optional `model` input sets
-`SCADBUDDY_EVAL_MODEL`, and a `mode` input (`both` by default) sets `SCADBUDDY_EVAL_MODE`. Unless the mode is `classic`, it installs uv and the pinned Temporal CLI, and points `SCADBUDDY_TEST_DATABASE_URL` at its Postgres service for the durable stack. With the secret set, the job first builds the image's `runtime`
+`SCADBUDDY_EVAL_MODEL`. It takes the pinned Temporal CLI from the test image and points
+`SCADBUDDY_TEST_DATABASE_URL` at its Postgres service for the eval stack. With the
+secret set, the job first builds the image's `runtime`
 target and starts it the way `ci.yml`'s `image` job does: with Postgres, a Temporal dev
 server and the in-process worker. It passes the container's URL as
-`SCADBUDDY_EVAL_BACKEND_URL`. It writes a summary table, with each scenario's mode, and uploads the report as an
+`SCADBUDDY_EVAL_BACKEND_URL`. It writes a summary table and uploads the report as an
 artifact.
 
 - **Manual only.** The workflow has only a `workflow_dispatch` trigger, with no
