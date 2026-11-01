@@ -162,7 +162,8 @@ def test_the_component_reads_the_printer_registry() -> None:
     """`SPOOLS` is built with a tray source over `PRINTERS`, and reads nothing yet."""
     printers = object()
     core = SimpleNamespace(
-        projection=SimpleNamespace(pool=object()), settings_store=SimpleNamespace(load=None)
+        projection=SimpleNamespace(pool=object()),
+        settings_store=SimpleNamespace(load=None, pool=None),
     )
     components = SimpleNamespace(get=lambda key: printers if key is PRINTERS else None)
     built = spools_component._build(cast(Core, core), cast(Components, components))
