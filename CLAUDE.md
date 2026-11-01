@@ -673,7 +673,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   order's lock (`Lifecycle.claim_print`: the attempt keyed by `print_request_id`, the quote's
   file held by `(order_item_fulfilment, <id>)`, the item `queued`), so one print starts per
   item; then the run is attached (`attach_print`) or a refused start releases the claim
-  (`release_print`), and the item follows the run from
+  (`release_print`); a retry re-checks a run-less claim before it starts, a key's claim on
+  another item is `print_request_conflict`, and a run-less claim's `PATCH` waits for its
+  operation (`print_starting`). The item follows the run from
   `print_runs` and `print_outcomes` only (`Lifecycle.follow_print`, the component's
   `listen_for_prints`), never by asking a printer or Bambuddy. Agent `order_item_print`
   (outward); frontend `components/orders/PrintItem.tsx` over `PrintPicker`'s `itemPrint`.

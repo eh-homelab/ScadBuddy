@@ -490,7 +490,14 @@ tabs, the browser and the agent) claim once, and a hold or cancel after the chec
 the claim, so only one print starts. The run is then attached (`attach_print`:
 `print_run_id`, the registry `printer`); a start the print path refuses (a 4xx) releases
 the claim (`release_print`, the item back to `approved` or `failed`), and one that may
-still start (a 5xx) keeps it for the operation's retry, which repeats the same run. The item follows the run from what the print path
+still start (a 5xx) keeps it for the operation's retry, which repeats the same run. The
+`request_id` is made from the item and the key, and a claim found under it on another item
+is `print_request_conflict`; a claim's run, once attached, is never replaced. A retry whose
+claim has no run yet starts only while the claim still may print (the order not ended or on
+hold, the item still `queued`, the attempt still open); otherwise the open claim is
+released and the retry refused. A claim with no run keeps the item `queued` (it is a
+print's attempt, not one by hand), and its `PATCH` is refused (`print_starting`) while its
+`order_item_print` operation still runs. The item follows the run from what the print path
 records (`Lifecycle.follow_print`, heard on `print.run`, `print.progress` and
 `print.outcome` and reconciled at start and on `bus.resync`): a failed run fails the
 attempt with its refusal, the first `print.progress` after the run succeeded makes the item

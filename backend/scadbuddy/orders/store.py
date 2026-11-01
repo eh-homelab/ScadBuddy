@@ -1184,16 +1184,27 @@ class OrderStore:
 
     def attach_print_run(
         self, conn: Conn, attempt_id: str, run_id: str, printer: str | None
-    ) -> Fulfilment:
-        """The run a claimed attempt's print started, once it started."""
+    ) -> Fulfilment | None:
+        """The run a claimed attempt's print started, once it started; None when the
+        attempt is gone or names another run already (one claim, one run)."""
         row = conn.execute(
             "UPDATE order_item_fulfilments SET print_run_id = %s, printer = %s"
-            f" WHERE id = %s RETURNING {_FULFILMENT}",
-            (run_id, printer, attempt_id),
+            " WHERE id = %s AND (print_run_id IS NULL OR print_run_id = %s)"
+            f" RETURNING {_FULFILMENT}",
+            (run_id, printer, attempt_id, run_id),
         ).fetchone()
-        if row is None:
-            raise LookupError(f"no fulfilment {attempt_id}")
-        return Fulfilment.model_validate(row)
+        return None if row is None else Fulfilment.model_validate(row)
+
+    def print_starting(self, item_id: str, *, conn: Conn | None = None) -> bool:
+        """Whether an ``order_item_print`` operation of the item is still running: its
+        claim's print may yet start."""
+        with self._read(conn) as c:
+            row = c.execute(
+                "SELECT 1 FROM operations WHERE kind = 'order_item_print' AND subject = %s"
+                " AND status = 'running' LIMIT 1",
+                (f"order_item:{item_id}",),
+            ).fetchone()
+        return row is not None
 
     def release_print_claim(self, conn: Conn, holder_kind: str, attempt_id: str) -> None:
         """A claim whose print was refused before it started: its row and its hold go,

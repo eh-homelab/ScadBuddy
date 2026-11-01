@@ -1040,7 +1040,8 @@ async def print_item(
     for an unknown order or item; 409 ``order_not_accepted``, ``order_on_hold``,
     ``order_closed``/``order_cancelled``, ``item_custom``, ``item_not_open``,
     ``item_not_approved`` (one printing already), ``item_made`` (its attempts made its
-    quantity: accept them), and ``requote_needed`` (no accepted quote, its output gone,
+    quantity: accept them), ``print_request_conflict`` (the key's print is another
+    item's), and ``requote_needed`` (no accepted quote, its output gone,
     or a slice quote whose sliced file is gone or no longer the file it priced); and the
     print run's own refusals, as the print route answers them."""
     _path(order_id, item_id)
@@ -1055,7 +1056,7 @@ async def print_item(
             "request": body.model_dump(mode="json", exclude_unset=True),
             # The print run's key: a re-send (the same Idempotency-Key) repeats its run.
             # Without a key `run_operation` answers 428 before this is read.
-            "request_id": print_request_id(idempotency_key or ""),
+            "request_id": print_request_id(item_id, idempotency_key or ""),
             # Ruling 12: who it is for comes from the author header, never the body.
             "by": current_actor().model_dump(mode="json"),
         },

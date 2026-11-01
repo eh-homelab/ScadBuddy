@@ -79,10 +79,12 @@ logger = logging.getLogger(__name__)
 REQUEST_ID_PREFIX = "order-item-print-"
 
 
-def print_request_id(idempotency_key: str) -> str:
-    """The print run's ``request_id`` for one ``order_item_print`` (the operation's
-    Idempotency-Key): a retried or re-sent operation repeats its run."""
-    return REQUEST_ID_PREFIX + hashlib.sha256(idempotency_key.encode()).hexdigest()[:40]
+def print_request_id(item_id: str, idempotency_key: str) -> str:
+    """The print run's ``request_id`` for one ``order_item_print`` of the item (the
+    operation's Idempotency-Key): a retried or re-sent operation repeats its run, and one
+    key on two items is two requests."""
+    digest = hashlib.sha256(f"{item_id}\0{idempotency_key}".encode()).hexdigest()[:40]
+    return REQUEST_ID_PREFIX + digest
 
 
 def _refused(slug: str, message: str, *, items: list[str] | None = None) -> ApiError:
@@ -289,7 +291,8 @@ async def print_item(
     attached and the follow asked once, for a run that ended before it was attached. A
     start the print path refused (a 4xx: no spool, a printer it cannot serve) releases the
     claim; one that may still start (a 5xx, Temporal busy or away) keeps it, and the
-    operation's retry finds it and repeats the same run."""
+    operation's retry finds it and repeats the same run. A claim whose run is attached
+    already starts nothing."""
     try:
         claim = await to_thread_to_end(
             lambda: lifecycle.claim_print(
@@ -304,6 +307,10 @@ async def print_item(
     except LifecycleError as error:
         raise refused(error) from None
     assert claim.copies is not None
+    if claim.print_run_id is not None:
+        # A re-send after its print started: that print, never another.
+        followed = await asyncio.to_thread(lifecycle.follow_print, claim.print_run_id)
+        return followed or claim
     try:
         run = await start(claim.copies)
     except ApiError as error:

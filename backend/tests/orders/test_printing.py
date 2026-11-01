@@ -372,8 +372,10 @@ def test_the_check_prints_what_is_left(shop: Shop, pool: PgPool, tmp_path: Path)
 
 
 def test_a_print_request_id_is_the_operations() -> None:
-    assert print_request_id("k") == print_request_id("k") != print_request_id("j")
-    assert len(print_request_id("k" * 500)) <= 128
+    assert print_request_id("i", "k") == print_request_id("i", "k") != print_request_id("i", "j")
+    # One key on two items is two runs.
+    assert print_request_id("i", "k") != print_request_id("h", "k")
+    assert len(print_request_id("i" * 64, "k" * 500)) <= 128
 
 
 # -- the run: claimed before it prints (#5149 review) -----------------------------------------
@@ -445,7 +447,8 @@ def test_two_prints_of_one_item_start_one_print(shop: Shop, pool: PgPool) -> Non
     # The winning key again repeats its claim and its run.
     assert attempt.print_request_id is not None
     again = _print(shop, order, item, start, attempt.print_request_id)
-    assert again.id == attempt.id
+    assert again.id == attempt.id and again.print_run_id == attempt.print_run_id
+    assert start.calls == [2]
 
 
 def test_a_hold_between_the_check_and_the_run_prints_nothing(
@@ -507,3 +510,88 @@ def test_progress_of_a_newer_print_of_the_output_is_not_the_items(shop: Shop, po
     run_row(pool, status="succeeded")
     assert shop.lifecycle.follow_print(run_id, progressed=True) is None
     assert shop.get_item(item).status == "queued"
+
+
+def test_a_claims_key_on_another_item_is_refused(shop: Shop, pool: PgPool) -> None:
+    order = shop.order()
+    item, other = shop.item(order), shop.item(order)
+    shop.quoted(order, item)
+    shop.quoted(order, other)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    claim = claimed(shop, order, item, "k")
+    with pytest.raises(LifecycleError) as refused:
+        claimed(shop, order, other, "k")
+    assert refused.value.slug == "print_request_conflict"
+    assert shop.rows.fulfilments(other.id) == []
+    # Nor does another run take a claim's run over.
+    run_id = run_row(pool)
+    shop.lifecycle.attach_print(claim, run_id, None)
+    with pytest.raises(LifecycleError) as taken:
+        shop.lifecycle.attach_print(claim, run_row(pool), None)
+    assert taken.value.slug == "print_request_conflict"
+    assert shop.rows.fulfilments(item.id)[0].print_run_id == run_id
+
+
+def test_a_hold_between_the_claim_and_its_retry_prints_nothing(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted()
+    with pytest.raises(ApiError):
+        _print(shop, order, item, Starts(pool, refuse=ApiError(503, "Temporal is busy")), "k")
+    shop.lifecycle.hold(order.id, BY)
+    start = Starts(pool)
+    assert _refusal(lambda: _print(shop, order, item, start, "k")) == "order_on_hold"
+    assert start.calls == []
+    assert shop.rows.fulfilments(item.id) == []
+    assert held(pool, FULFILMENT_HOLDER) == {}
+    assert shop.get_item(item).status == "approved"
+
+
+def test_a_cancel_between_the_claim_and_its_retry_prints_nothing(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted(quantity=2)
+    with pytest.raises(ApiError):
+        _print(shop, order, item, Starts(pool, refuse=ApiError(503, "Temporal is busy")), "k")
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    start = Starts(pool)
+    assert _refusal(lambda: _print(shop, order, item, start, "k")) == "item_not_open"
+    assert start.calls == []
+    assert shop.rows.fulfilments(item.id) == []
+    assert shop.get_item(item).status == "cancelled"
+
+
+def running_print(pool: PgPool, item: OrderItem) -> None:
+    """``order_item_print``'s operation, still running for the item."""
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO operations (id, kind, subject, operation_key, status, request,"
+            " workflow_id, workflow_run_id)"
+            " VALUES (%s, 'order_item_print', %s, %s, 'running', '{}'::jsonb, %s, 'r')",
+            (uuid.uuid4().hex, f"order_item:{item.id}", uuid.uuid4().hex, uuid.uuid4().hex),
+        )
+
+
+def test_a_pending_claim_keeps_the_item_queued(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted(quantity=2)
+    claim = claimed(shop, order, item, "k")
+    running_print(pool, item)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.update_fulfilment(
+            order.id, item.id, claim.id, FulfilmentInput(quantity=0, outcome="unknown"), BY
+        )
+    assert refused.value.slug == "print_starting"
+    assert shop.get_item(item).status == "queued"
+    with pytest.raises(LifecycleError) as again:
+        claimed(shop, order, item, "k2")
+    assert again.value.slug == "item_not_approved"
+
+
+def test_a_claim_whose_start_ended_is_settled_by_hand(shop: Shop, pool: PgPool) -> None:
+    """The start never answered and its operation gave up: a person settles it."""
+    order, item = shop.accepted()
+    claim = claimed(shop, order, item, "k")
+    shop.lifecycle.update_fulfilment(
+        order.id, item.id, claim.id, FulfilmentInput(quantity=0, outcome="unknown"), BY
+    )
+    assert shop.get_item(item).status == "queued"
+    shop.lifecycle.update_fulfilment(
+        order.id, item.id, claim.id, FulfilmentInput(quantity=0, outcome="failed"), BY
+    )
+    assert shop.get_item(item).status == "failed"
