@@ -13,6 +13,7 @@ import type { FlowRuns } from '../src/temporal/flowRuns.js'
 import { BACKEND_UNAVAILABLE, decidedCalls, DESCRIBE_CALL_ACTIVITY, FLOW_IMAGES_FULL, gateActivities, TOOL_IMAGES_TOOL, toolActivities, type ToolActivityDeps } from '../src/temporal/toolActivities.js'
 import { AUTHOR_SESSION_HEADER } from '../src/tools/authorship.js'
 import { browserTools } from '../src/tools/browser.js'
+import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
 import { printTools } from '../src/tools/print.js'
 import { defineTool, json, runToolWithOutcome, ToolError, type Tool, type ToolContext } from '../src/tools/registry.js'
@@ -456,6 +457,12 @@ describe('flow runs in tool activities', () => {
     expect([missing.type, missing.nonRetryable]).toEqual(['UnknownFlow', true])
     expect(missing.message).toMatch(/carries no workflow execution run id/)
     expect(h.audits).toEqual([])
+  })
+
+  // Plan Step 8.2: a flow refuses the gate's answer kinds by their absence from the registry.
+  it('registers no tool under the gate\'s answer names, so a flow cannot call one', () => {
+    expect(ALL_TOOLS.map((t) => t.name)).not.toEqual(expect.arrayContaining(['ask_user']))
+    expect(ALL_TOOLS.map((t) => t.name)).not.toEqual(expect.arrayContaining(['wait_for_user']))
   })
 
   it('refuses the browser tools: a flow has no tab', async () => {
