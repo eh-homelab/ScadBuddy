@@ -218,7 +218,8 @@ export const handlers = [
 
   /**
    * Ignore or suppress at a scope (`post_decision`): a suppression without a reason is
-   * refused as the backend's validator refuses it, and a decision about the same rule
+   * refused as the backend's validator refuses it, an enforced suppression of an `error`
+   * rule without `confirm` is 428, and a decision about the same rule
    * and instance at the same scope is replaced, each announced on `analyzers`.
    */
   http.post(`${base}/decisions`, async ({ request }) => {
@@ -228,6 +229,15 @@ export const handlers = [
       return shapeRefusal('Value error, a suppression needs a reason, as #pragma warning disable does', [
         'body',
       ])
+    }
+    const rule = state.diagnostics.find((row) => row.id === body.diagnostic_id)
+    if (body.kind === 'suppress' && body.enforced && rule?.severity === 'error' && body.confirm !== true) {
+      return problem(
+        428,
+        'Precondition Required',
+        `enforcing a suppression of ${rule.id} (${rule.title}, an error) hides it from every print in the scope; confirm it`,
+        { type: 'https://scadbuddy.dev/problems/confirmation-required' },
+      )
     }
     const instance = body.instance ?? null
     const decision: AnalyzerDecision = {
