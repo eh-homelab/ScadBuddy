@@ -5,6 +5,7 @@ import type { ApprovalRecord, GateTrace, ParkTrace } from '../approvals/service.
 import type { RiskTier } from '../harness/permissions.js'
 import type { TurnOutcome } from '../sessions/manager.js'
 import type { ServerEvent } from '../sessions/protocol.js'
+import type { Continuation } from '../temporal/session/models.js'
 import { bindToolContext, recordFailure, spanContextFrom, tracer, traceparentOf, unbindToolContext } from './trace.js'
 
 // One chat turn's trace (spec 2026-10-01 §5.4). The turn is a sequence of
@@ -72,7 +73,7 @@ export type TurnTraceOptions = {
    */
   before: { costUsd: number; turns: number }
   /** An AgentSession placement that continues its turn (spec 2026-10-13 §5.4, §5.5): `parked` or `restarted`, on the first segment. */
-  continuation?: string
+  continuation?: Continuation['kind']
 }
 
 type Segment = {

@@ -130,9 +130,6 @@ describe.skipIf(cliMissing !== undefined)("Claude Code's own built-ins in a sess
     expect(JSON.stringify(toolResults())).not.toContain('the key')
   }, 60_000)
 
-  // Measured on 2.1.310: Read and Write expand `~` before the seam, but Glob's and Grep's
-  // `path` reach it as `~` and the tool then searches HOME (the state dir); `$HOME`,
-  // `${HOME}`, `~user` and a `~` in a pattern are taken as names in the directory.
   it('refuses a Glob pattern that climbs out through a brace alternative', async () => {
     const parent = await mkdtemp(path.join(os.tmpdir(), 'native-brace-'))
     const { paths } = await session()
@@ -145,6 +142,9 @@ describe.skipIf(cliMissing !== undefined)("Claude Code's own built-ins in a sess
     expect(JSON.stringify(toolResults())).not.toContain('sibling-secret')
   }, 60_000)
 
+  // Measured on 2.1.310: Read and Write expand `~` before the seam, but Glob's and Grep's
+  // `path` reach it as `~` and the tool then searches HOME (the state dir); `$HOME`,
+  // `${HOME}`, `~user` and a `~` in a pattern are taken as names in the directory.
   it('refuses a path that starts at a home directory', async () => {
     const { paths, cwd } = await session()
     await writeFile(path.join(paths.stateDir, 'marker'), 'HOME-MARKER')
