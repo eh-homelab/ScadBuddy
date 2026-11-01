@@ -1361,9 +1361,12 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   `migration:2171`). `20261030T1020Z_access_drop_mirrors.sql` (#4828) dropped the two mirror
   triggers and deleted the four `ai_settings` keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only.
   `20261101T1527Z_access_drop_columns.sql` (#5014) dropped the three `ai_plugins` columns and
-  deleted the four keys again, for those that older replicas wrote after the first delete. Rolling the agent back past #4838 is not supported: that build
-  reads the deleted keys as absent, which means on. The copied `migration:2171` rows stay.
-  See [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql)
+  deleted the four keys again, for those that older replicas wrote after the first delete.
+  Rolling the agent back past #4838 is not supported: that build
+  reads the deleted keys as absent, which means on. Rolling back to a build that names the
+  dropped columns (any build before #4828) is not supported either: its plugin reads and writes
+  fail. Build `sha-7626da9` and later are safe. The copied `migration:2171` rows stay.
+  See [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql),
   [`20261030T1020Z_access_drop_mirrors.sql`](../../agent/src/db/migrations/20261030T1020Z_access_drop_mirrors.sql)
   and [`20261101T1527Z_access_drop_columns.sql`](../../agent/src/db/migrations/20261101T1527Z_access_drop_columns.sql).
 - The printer camera is the access of `get_printer_camera` (`builtin:scadbuddy`): `off`

@@ -766,8 +766,10 @@ design is [spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-de
   [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql)
   carried their values into `ai_access`. `20261030T1020Z_access_drop_mirrors.sql` (#4828) dropped the
   mirror triggers and deleted the four keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only.
-  `20261101T1527Z_access_drop_columns.sql` (#5014) dropped the `ai_plugins` columns and deleted the four keys again. Rolling back
-  the agent past #4838 is not supported. `20261026T2200Z_access.sql` made the table.
+  `20261101T1527Z_access_drop_columns.sql` (#5014) dropped the `ai_plugins` columns and deleted the four keys again.
+  Rolling back the agent past #4838 is not supported. Rolling back to a build before #4828 is
+  not supported either: it names the dropped columns, and its plugin reads and writes fail.
+  Build `sha-7626da9` and later are safe. `20261026T2200Z_access.sql` made the table.
 
 ## A browser plugin (Playwright MCP)
 
