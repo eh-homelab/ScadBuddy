@@ -14,6 +14,7 @@ import time
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
@@ -279,13 +280,41 @@ def printer_ids(store: PrinterStore, printer_id: str) -> tuple[int | None, str |
     return row.bambuddy_printer_id, row.id
 
 
-def printer_key(bambuddy_id: int | None, printer: str | None) -> str:
-    """A per-printer settings map's key (#4971): the Bambuddy id, which the previous
-    build reads, else the registry id of a printer with none."""
-    if bambuddy_id is not None:
-        return str(bambuddy_id)
-    assert printer is not None, "a printer has one id or the other"
-    return printer
+@dataclass(frozen=True)
+class PrinterKeys:
+    """Where a per-printer settings map write lands (#4971): ``key``, and the ``stale``
+    keys it removes, ``bambuddy_id`` and ``printer`` the printer's two ids."""
+
+    key: str
+    stale: tuple[str, ...]
+    bambuddy_id: int | None
+    printer: str | None
+
+
+def printer_keys(store: PrinterStore, printer_id: str, *, forget: bool) -> PrinterKeys:
+    """A per-printer map's key for a route's path (#4971): the Bambuddy id, which the
+    previous build reads, else the registry id of a printer with none. A printer with
+    both ids also drops the entry its registry id kept from before it was linked, which
+    the previous build never reads, so it cannot outlive a change or a forget. A forget
+    naming a registry id the registry no longer holds removes that key as given, so a
+    deleted printer's entry can still go; any other unknown id is 404."""
+    if printer_id.isascii() and printer_id.isdecimal():
+        bambuddy_id = int(printer_id)
+        if bambuddy_id > _BAMBUDDY_ID_MAX:
+            if forget:
+                return PrinterKeys(printer_id, (), None, None)
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+        linked = store.by_bambuddy_id(bambuddy_id)
+        stale = (linked.id,) if linked is not None else ()
+        return PrinterKeys(printer_id, stale, bambuddy_id, linked.id if linked else None)
+    row = store.get(printer_id)
+    if row is None:
+        if forget:
+            return PrinterKeys(printer_id, (), None, None)
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+    if row.bambuddy_printer_id is None:
+        return PrinterKeys(row.id, (), None, row.id)
+    return PrinterKeys(str(row.bambuddy_printer_id), (row.id,), row.bambuddy_printer_id, row.id)
 
 
 class PrinterRackAlgorithmPut(BaseModel):
@@ -513,10 +542,13 @@ def put_printer_rack_algorithm(
     Bambuddy, like the printer's remembered plate. The path is a Bambuddy printer's id or
     a registry printer's (#4971): one with a Bambuddy id is kept under it, as the
     previous build reads it, one with none (LAN-only) under its registry id."""
-    bambuddy_id, printer = printer_ids(registry.store, printer_id)
-    key = printer_key(bambuddy_id, printer)
+    keys = printer_keys(registry.store, printer_id, forget=body.algorithm is None)
+    bambuddy_id = keys.bambuddy_id
+    printer = None if bambuddy_id is not None else keys.printer
     try:
-        algorithm = store.set_printer_rack_algorithm(key, body.algorithm, body.version)
+        algorithm = store.set_printer_rack_algorithm(
+            keys.key, body.algorithm, body.version, stale=keys.stale
+        )
     except RackAlgorithmSupersededError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
@@ -1563,8 +1595,10 @@ async def get_choices(
     meta = require_output(outputs, output_id)
     settings = store.load()
     remembered = settings.model_print_choices.get(meta.slug)
-    printer, printer_id = remembered_printer(printer, printer_id, remembered)
-    route = await opening_route(settings, printers, printer=printer, printer_id=printer_id)
+    # The remembered printer opens a native route only: Bambuddy's choices fall back
+    # from a remembered printer that is gone themselves (`choices_for`).
+    opening, opening_id = remembered_printer(printer, printer_id, remembered)
+    route = await opening_route(settings, printers, printer=opening, printer_id=opening_id)
     if route is not None:
         native_view = await native_choices(
             OutputSource(store=outputs, meta=meta, uploads=uploads, settings=settings),

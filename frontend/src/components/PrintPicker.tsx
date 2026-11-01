@@ -1017,10 +1017,12 @@ export function PrintPicker({
     }
   }, [open, scopeKey])
 
+  // #4971 — a LAN-only printer's options are kept under its registry id.
+  const printerKey = printerId === null ? registryPrinter : String(printerId)
   const rememberedCopies =
     resolveOptions(
       remembered?.global_options,
-      remembered?.printers?.[printerId === null ? (registryPrinter ?? '') : String(printerId)],
+      printerKey === null ? undefined : remembered?.printers?.[printerKey],
       scopeKey === undefined ? undefined : remembered?.models?.[scopeKey],
     ).quantity ?? null
   const effectiveCopies = copies ?? rememberedCopies ?? 1

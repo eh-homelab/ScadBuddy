@@ -102,7 +102,7 @@ def test_a_rack_algorithm_save_that_failed_is_a_503_problem_naming_its_cause(
     """#1129 review: the bounded save's failures are expected, not a crash, and the 503
     says which one happened (#1283) rather than calling every one a timeout."""
 
-    def failed(*_: object) -> None:
+    def failed(*_: object, **__: object) -> None:
         raise error
 
     monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", failed)
@@ -118,7 +118,7 @@ def test_a_dropped_connection_does_not_claim_nothing_was_saved(
     """#1189 review: a connection lost mid-save may have committed, so the 503 must not
     say nothing was saved; a timeout that rolled back can."""
 
-    def dropped(*_: object) -> None:
+    def dropped(*_: object, **__: object) -> None:
         raise psycopg.OperationalError("server closed the connection unexpectedly")
 
     monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", dropped)

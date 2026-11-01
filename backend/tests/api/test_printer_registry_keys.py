@@ -96,3 +96,40 @@ def test_a_subjects_remembered_printer_keeps_a_registry_id_only_without_a_bambud
     assert kept.json()["printer"] == lan
     both = client.put("/api/v1/print/models/gear/choices", json={"printer_id": 4, "printer": lan})
     assert (both.json()["printer_id"], both.json()["printer"]) == (4, None)
+
+
+def test_a_lan_only_entry_is_dropped_once_its_printer_is_linked(client: TestClient) -> None:
+    """#5170 review: a printer saved under its registry id and later linked to Bambuddy
+    keeps no registry-id entry past its next write or forget, and an entry of a printer
+    the registry no longer holds can still be forgotten by its key."""
+    lan, _ = _rows(client)
+    _algorithm(client, lan, "newest_first")
+    saved = client.put(
+        "/api/v1/settings/print-options",
+        json={"scope": "printer", "key": lan, "options": {"timelapse": True}},
+    )
+    assert saved.status_code == 200, saved.text
+    registry: Printers = getattr(client.app.state, STATE_ATTR).components.get(PRINTERS)  # type: ignore[attr-defined]
+    registry.store.link_bambuddy(lan, 5)
+
+    _algorithm(client, lan, None)
+    forgot = client.put(
+        "/api/v1/settings/print-options", json={"scope": "printer", "key": lan, "options": {}}
+    )
+    assert forgot.status_code == 200, forgot.text
+    assert client.get("/api/v1/settings/remembered").json()["printer_rack_algorithms"] == {}
+    assert client.get("/api/v1/settings/print-options").json()["printers"] == {}
+
+    # A deleted printer's entry: no registry row, and the forget still removes it.
+    gone = client.post("/api/v1/printers", json={"serial": "0938AB000000033", "name": "Gone"})
+    gone_id = gone.json()["id"]
+    _algorithm(client, gone_id, "oldest_first")
+    assert client.delete(f"/api/v1/printers/{gone_id}").status_code == 204
+    _algorithm(client, gone_id, None)
+    assert client.get("/api/v1/settings/remembered").json()["printer_rack_algorithms"] == {}
+    # A save naming it is refused, as the rack algorithm's is.
+    refused = client.put(
+        "/api/v1/settings/print-options",
+        json={"scope": "printer", "key": gone_id, "options": {"timelapse": True}},
+    )
+    assert refused.status_code == 404, refused.text

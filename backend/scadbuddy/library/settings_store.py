@@ -35,7 +35,7 @@ import json
 import logging
 import time
 import types
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any, Literal, LiteralString, Self, Union, get_args, get_origin
@@ -1055,7 +1055,12 @@ class SettingsStore:
         return self._written("printer_bed_type")
 
     def set_printer_rack_algorithm(
-        self, printer_id: int | str, algorithm: RackAlgorithm | None, version: int | None = None
+        self,
+        printer_id: int | str,
+        algorithm: RackAlgorithm | None,
+        version: int | None = None,
+        *,
+        stale: Sequence[str] = (),
     ) -> RackAlgorithm:
         """Remember how one printer's rack nozzle is picked (#836); ``None`` forgets it.
         Returns the printer's algorithm now.
@@ -1072,7 +1077,8 @@ class SettingsStore:
         could outlast the give-up on a save that has already landed.
 
         ``printer_id`` is the map's key: a Bambuddy id, or the registry id of a printer
-        with none (#4971)."""
+        with none (#4971). ``stale`` keys are removed in the same write: a linked
+        printer's registry-id entry from before it was linked."""
         bound_ms = int(RACK_ALGORITHM_WRITE_TIMEOUT * 1000)
         key = str(printer_id)
         with (
@@ -1097,6 +1103,8 @@ class SettingsStore:
                         f"a newer rack-algorithm save is stored for printer {printer_id}"
                     )
             _put_entry(conn, "printer_rack_algorithms", key, algorithm)
+            for gone in stale:
+                _put_entry(conn, "printer_rack_algorithms", gone, None)
         emit(self.events, SettingsChanged(section="printer_rack_algorithm"))
         return algorithm or DEFAULT_ALGORITHM
 
@@ -1159,7 +1167,12 @@ class SettingsStore:
         emit(self.events, SettingsChanged(section="model_project"))
 
     def save_print_options(
-        self, scope: OptionScope, key: str | None, options: PrintOptions
+        self,
+        scope: OptionScope,
+        key: str | None,
+        options: PrintOptions,
+        *,
+        stale: Sequence[str] = (),
     ) -> StoredSettings:
         """Replace one scope's print-option overrides.
 
@@ -1182,6 +1195,9 @@ class SettingsStore:
                     raise ValueError(f"the {scope!r} scope needs a key")
                 field = "printer_print_options" if scope == "printer" else "model_print_options"
                 _put_entry(conn, field, key, value)
+                # A linked printer's registry-id entry from before it was linked (#4971).
+                for gone in stale:
+                    _put_entry(conn, field, gone, None)
         return self._written("print_options")
 
     def forget_remembered(self) -> StoredSettings:

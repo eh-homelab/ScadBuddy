@@ -27,6 +27,7 @@ from scadbuddy.api.operations import (
     temporal_refused,
     temporal_unavailable,
 )
+from scadbuddy.api.printing import printer_keys
 from scadbuddy.api.runtime import apply_runtime, restart_required
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.errors import SCOPE_PROBLEM, Scope, UpstreamAnswer
@@ -668,11 +669,11 @@ def put_print_options(
     build reads it."""
     scope: OptionScope = body.scope
     key = body.key
-    if scope == "printer" and key is not None and not (key.isascii() and key.isdecimal()):
-        row = registry.store.get(key)
-        if row is not None and row.bambuddy_printer_id is not None:
-            key = str(row.bambuddy_printer_id)
-    return _options_view(store.save_print_options(scope, key, body.options))
+    stale: tuple[str, ...] = ()
+    if scope == "printer" and key is not None:
+        keys = printer_keys(registry.store, key, forget=body.options.is_empty())
+        key, stale = keys.key, keys.stale
+    return _options_view(store.save_print_options(scope, key, body.options, stale=stale))
 
 
 @router.post("/settings/test", response_model=ConnectionTest, summary="Verify the API key")

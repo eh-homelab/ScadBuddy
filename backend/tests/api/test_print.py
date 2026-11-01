@@ -43,6 +43,8 @@ def presets_routes() -> None:
 #: The spool-first dialog's own remembered choices (spec 2026-09-27 §7), unset: what a
 #: PUT that names only the printer and spools reads back with.
 NO_DIALOG_CHOICES: dict[str, object] = {
+    # #4971: the registry printer, only for a printer with no Bambuddy id.
+    "printer": None,
     "nozzles": [],
     "tier": None,
     "process_name": None,

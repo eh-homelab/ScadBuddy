@@ -9,6 +9,7 @@ from __future__ import annotations
 import psycopg
 import pytest
 
+from scadbuddy.api.printing import names_no_printer
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import _named_printer
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, ProjectTarget
@@ -63,6 +64,8 @@ async def test_the_default_printer_with_no_bambuddy_id_is_named_by_its_registry_
         None, None, settings.model_copy(update={"printer_id": 4}), printers
     )
     assert configured == 4
+    # The dialog's reads name it too, rather than opening on the first native row.
+    assert not names_no_printer(settings, None, None)
 
 
 async def test_a_projects_lan_only_printer_is_kept_beside_a_zero(
