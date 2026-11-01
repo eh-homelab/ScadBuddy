@@ -16,13 +16,14 @@ import { type AccessRow, BUILTIN_SOURCES, packageServerSource, packageSource, ty
 import { type CallPlugin, offCallItem, subagentItem } from '../access/items.js'
 import type { PackageAccess } from '../access/resolver.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
+import { NATIVE_NAMES, TASK_TOOLS, nativeBuiltinTools } from '../access/nativeBuiltins.js'
 import { liveAccess } from '../access/live.js'
 import { SeamLedger } from '../harness/seamLedger.js'
 import { HTTP_SERVER, HTTP_TOOL, httpAccessTierOf, httpRequestServer, httpTierOf } from '../harness/httpRequest.js'
 import type { RiskTier, TierResolver } from '../harness/permissions.js'
 import { isQuestionTool } from '../harness/questions.js'
 import { harnessTierOf, type HarnessRun } from '../harness/run.js'
-import { ensureSessionDir } from '../harness/stateDirs.js'
+import { ensureSessionDir, linkTaskList } from '../harness/stateDirs.js'
 import { createMemoryHooks, HindsightClient, hindsightTarget, type MemoryHooks, turnRecallMaxQueryChars } from '../memory/hindsight.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { PluginEndpoint, PluginsForRun } from '../plugins/forwarder.js'
@@ -122,6 +123,8 @@ export type FingerprintParts = {
   /** http_request's stored access in ai_access (#2171), its tier when one is set; null when none is stored. */
   httpTier: ToolAccess | null
   builtinTools: string[]
+  /** Claude Code's own built-ins the turn offers and their tiers (Step 9.6, `<name>=<tier>`): Settings → Tools & plugins' `builtin:claude-code`. */
+  nativeTools: string[]
   /** The package built-ins the session serves in place of Claude Code's (#2684): background ones and WebFetch. */
   servedBuiltins: string[]
   /** Whether the session keeps background tasks (src/background/), which decides which built-ins it serves. */
@@ -211,6 +214,7 @@ export class TurnRunner {
     'pluginPaths',
     'allowedPluginPaths',
     'builtinTools',
+    'nativeTools',
     'ownPlugin',
     'remotePlugins',
     'disallowedTools',
@@ -251,6 +255,7 @@ export class TurnRunner {
     pluginPaths: 'packageHashes',
     allowedPluginPaths: 'allowedPackageHashes',
     builtinTools: 'builtinTools',
+    nativeTools: 'nativeTools',
     ownPlugin: 'ownPlugin',
     remotePlugins: 'plugins',
     disallowedTools: 'disabledTools', // a local package server's tools set off (#4757)
@@ -422,6 +427,9 @@ export class TurnRunner {
         name,
         packages: allowedLoaded.filter((p) => p.builtinTools.includes(name)).map((p) => p.name),
       }))
+      // Claude Code's own built-ins (plan 2026-10-13 Step 9.6): every one not off under
+      // `builtin:claude-code`, which a package that names one can only switch on.
+      const nativeTools = await nativeBuiltinTools(access, callBuiltins)
       // Every package's http MCP servers, through the forwarder like a remote
       // plugin's (#2320); Claude Code loads the packages without them (above).
       packageServers =
@@ -441,6 +449,7 @@ export class TurnRunner {
               packageServers: [...(packageServers?.servers ?? []), ...local],
               plugins: callPlugins,
               builtins: callBuiltins,
+              native: true,
             }),
             ledger,
           }
@@ -451,6 +460,7 @@ export class TurnRunner {
         ...(ownPlugin !== undefined ? { ownPlugin } : {}),
         pluginPaths: [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])],
         allowedPluginPaths: packages?.allowedPaths ?? [],
+        nativeTools,
       })
       eventTierOf = (name, input) => raised(name, pluginTiers(name, input))
       // A plugin left out of this turn is said so in the session, not only in the log.
@@ -522,6 +532,8 @@ export class TurnRunner {
           this.deps.settings ? readRuntimeSettings(this.deps.settings) : undefined,
         ]),
       )
+      // Claude Code's task list in the session directory, so it moves with it (Step 9.6, stateDirs.ts).
+      if (nativeTools.some((t) => TASK_TOOLS.has(t.name))) await linkTaskList(this.deps.paths, cwd, id)
       // The turn's ScadBuddy calls as activities (plan 2026-10-13 Step 9.2), each given the gate
       // entry the seam approved it on, and bounded by the turn's own limit. Without a starter (no
       // Temporal), they run here.
@@ -735,8 +747,9 @@ export class TurnRunner {
           : {}),
         ...(pluginPaths.length ? { pluginPaths } : {}),
         ...(allowedPluginPaths.length
-          ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !served.includes(n)) }
+          ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !served.includes(n) && !NATIVE_NAMES.has(n)) }
           : {}),
+        ...(nativeTools.length ? { nativeTools } : {}),
         ...(ownPlugin !== undefined ? { ownPlugin } : {}),
         ...(remotePlugins.length && !proxies ? { remotePlugins } : {}),
         disallowedTools: localOff,
@@ -776,6 +789,7 @@ export class TurnRunner {
         toolsAsActivities: activities !== undefined,
         httpTier: httpAccess?.access ?? null,
         builtinTools: run.builtinTools ?? [],
+        nativeTools: nativeTools.map((t) => `${t.name}=${t.tier}`),
         servedBuiltins: served,
         backgroundTasks: this.deps.background !== undefined,
         recallMaxQueryChars: memory?.recallMaxQueryChars ?? null,

@@ -392,7 +392,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     await classic.send(session.id, browser, 'loop it')
     await expect.poll(() => scripted.runs.length).toBe(1)
     const run = scripted.runs[0]!
-    expect(run.builtinTools).toEqual(['Read'])
+    // Read is Claude Code's own in every session since Step 9.6, not the package's.
+    expect(run.builtinTools).toEqual([])
+    expect(run.nativeTools?.map((t) => t.name)).toContain('Read')
     expect(Object.keys(run.mcpServers ?? {})).toContain('builtin')
     expect(run.systemPromptAppend).toContain('CronCreate (mcp__builtin__CronCreate)')
     // The turn's Monitor runs its command on this replica's own queue, where the turn's Bash runs.

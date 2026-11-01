@@ -152,6 +152,7 @@ describe('/api/v1/ai/capabilities', () => {
       BUILTIN_SOURCES.browser,
       BUILTIN_SOURCES.http,
       BUILTIN_SOURCES.ownPlugin,
+      BUILTIN_SOURCES.claudeCode,
       'remote:hs',
       'remote:other',
     ])
@@ -190,7 +191,13 @@ describe('/api/v1/ai/capabilities', () => {
     const res = await get(app)
     expect(res.status).toBe(200)
     const { sources } = (await res.json()) as { sources: SourceView[] }
-    expect(sources.map((s) => s.id)).toEqual([BUILTIN_SOURCES.scadbuddy, BUILTIN_SOURCES.browser, BUILTIN_SOURCES.http, BUILTIN_SOURCES.ownPlugin])
+    expect(sources.map((s) => s.id)).toEqual([
+      BUILTIN_SOURCES.scadbuddy,
+      BUILTIN_SOURCES.browser,
+      BUILTIN_SOURCES.http,
+      BUILTIN_SOURCES.ownPlugin,
+      BUILTIN_SOURCES.claudeCode,
+    ])
     const remote = await get(app, `/${enc('remote:hs')}`)
     expect(remote.status).toBe(404)
     expect(remote.headers.get('content-type')).toContain('application/json')

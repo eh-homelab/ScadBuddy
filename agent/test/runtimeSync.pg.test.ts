@@ -100,6 +100,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm ca
         toolsAsActivities: false,
         httpTier: null,
         builtinTools: [],
+        nativeTools: [],
         recallMaxQueryChars: null,
         transientRetries: null,
         servedBuiltins: [],
