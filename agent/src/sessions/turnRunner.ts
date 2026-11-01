@@ -575,7 +575,9 @@ export class TurnRunner {
       // With the turn's calls as activities (plan 2026-10-13 Step 9.3), its remote plugins, package
       // http servers and http_request are in-process proxies of the same names, each call a ToolCall
       // whose activity builds the server again where it runs: none is handed to Claude Code. Listed
-      // here, as the activity lists them; a listing that fails leaves the turn as it was.
+      // here, as the activity lists them; a listing that fails leaves the turn as it was. Their
+      // forwarder routes above are kept on purpose: the listing names its servers from them, and
+      // a listing that fails falls back to them.
       let proxies: Record<string, McpSdkServerConfigWithInstance> | undefined
       if (activities && this.deps.turnTools) {
         try {
@@ -583,6 +585,11 @@ export class TurnRunner {
           const listed = await phase('turn tools', () =>
             this.deps.turnTools!({ session: id, owner: session.owner, signal: AbortSignal.timeout(TURN_TOOLS_LIST_MS) }, wanted),
           )
+          // A server that listed nothing is said so, as one the assembly left out is (its own problems are said above).
+          for (const problem of listed.unlisted ?? []) {
+            this.deps.stderr?.(`${problem}\n`)
+            await unavailable(problem)
+          }
           const byServer = new Map<string, ProxiedTool[]>()
           for (const entry of listed.tools) {
             const at = entry.name.indexOf('__')

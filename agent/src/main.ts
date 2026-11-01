@@ -703,7 +703,7 @@ const turnClients = new SessionClients<ListedTools>()
  * read from their stores alone: no address check, no forwarder route, no plugin contacted. The
  * turn's own forwarder URLs never reach Claude Code with the turn's tools proxied (Step 9.3).
  */
-const turnHeaderSecrets = async (): Promise<string[]> => {
+const readHeaderSecrets = async (): Promise<string[]> => {
   const out: string[] = []
   if (plugins) {
     const { plugins: enabled } = await plugins.enabled(kek.ok ? kek.kek : undefined)
@@ -718,6 +718,20 @@ const turnHeaderSecrets = async (): Promise<string[]> => {
     }
   }
   return out
+}
+/** How long one read of them serves every ToolCall's tool: a header changed since is redacted once it lapses. */
+const HEADER_SECRETS_MS = 30_000
+let headerSecrets: { at: number; read: Promise<string[]> } | undefined
+const turnHeaderSecrets = (): Promise<string[]> => {
+  if (!headerSecrets || Date.now() - headerSecrets.at > HEADER_SECRETS_MS) {
+    const read = readHeaderSecrets()
+    headerSecrets = { at: Date.now(), read }
+    // A read that failed is not kept: the next call reads again.
+    read.catch(() => {
+      if (headerSecrets?.read === read) headerSecrets = undefined
+    })
+  }
+  return headerSecrets.read
 }
 const turnToolDeps = temporal
   ? {
@@ -763,6 +777,7 @@ const turnToolDeps = temporal
   : undefined
 if (turnToolDeps) {
   const deps = turnToolDeps
+  // The turn says what its listing left out itself (`unlisted`), beside its own assembly's problems.
   turnToolList = (context, only) => listTurnTools({ ...deps, report: undefined }, context, only)
 }
 // AgentSession's turns are hosted here only with both halves (§5.2): acquire_worker on agent-tools
