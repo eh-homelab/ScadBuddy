@@ -42,6 +42,21 @@ Measured 2026-10-18 with the worker's argv in the slicer image: MakerWorld's
 PEI Plate``), sliced with this module's files for an A1, heats the bed to 35 °C with
 ``Cool Plate`` and to 65 °C with ``Textured PEI Plate``.
 The filament colours are not written: the laid-out 3MF carries them.
+
+A slot's filament settings (:attr:`SlicePlan.filament_overrides`, a filament profile's
+nozzle temperature, #2799) are written into that slot's filament file, never the
+process file: the CLI takes a filament option from the filament files it loads and
+ignores the same key in a process file. Measured 2026-11-01 with the slicer image
+``ghcr.io/eh-homelab/scadbuddy-slicer:main@sha256:098ac9e6…`` (Bambu Studio
+02.08.02.61), the worker's argv, and this module's files for an A1 (``0.20mm Standard
+@BBL A1``, ``Bambu PLA Basic @BBL A1`` in both slots), slicing MakerWorld's
+``448-articulated-pumpkin.3mf`` (two filaments, one plate): plain, every print
+temperature set under either tool is 220 °C (beside the flush's 240 °C).
+``nozzle_temperature`` and ``nozzle_temperature_initial_layer`` at 235 in the process
+file change nothing: the sliced ``project_settings.config`` still says
+``["220", "220"]``, and the ``M104``/``M109`` lines are the plain slice's. The same two
+in slot 2's filament file give ``["220", "235"]``, and every print temperature set
+under ``T1`` is 235 °C while ``T0``'s stay 220 °C (spec 2026-10-13 §5, #2799).
 """
 
 from __future__ import annotations
@@ -274,6 +289,12 @@ async def build_presets(
     filaments = [
         await _resolve("filament", ref, profiles, client, names) for ref in plan.filament_presets
     ]
+    # #2799: a slot's filament settings go into its own file, which the CLI honours; the
+    # same keys in the process file are ignored (the module's docstring).
+    filaments = [
+        (apply_overrides(filament, plan.filament_overrides.get(slot, {})), held)
+        for slot, (filament, held) in enumerate(filaments, start=1)
+    ]
     process = apply_overrides(process, plan.process_overrides)
     if plan.bed_type:
         process["curr_bed_type"] = plan.bed_type
@@ -323,6 +344,9 @@ def native_preset_key(
     that names the old colours. Keys of slices from before then never match, and those
     slices, without the tower, are not reused.
 
+    A slot's filament overrides (#2799) follow, when it has any: they change that slot's
+    file, and a plan without them keys as it did before.
+
     :data:`FLATTEN_REVISION` ends it (#4714): the image's version does not change when
     :func:`~scadbuddy.slicing.profiles.flatten` does, and a slice flattened before
     ``include`` was applied carries another machine's G-code, so it is never reused."""
@@ -338,4 +362,10 @@ def native_preset_key(
             key += f"/bambuddy-{slot}={held[slot]}"
     if plan.filament_colours:
         key += "/colours=" + ",".join(colour.upper() for colour in plan.filament_colours)
+    for number, values in sorted(plan.filament_overrides.items()):
+        if values:
+            # Each value as JSON, as the process overrides are (#2804).
+            key += f"/filament_{number}=" + ",".join(
+                f"{k}={json.dumps(v)}" for k, v in sorted(values.items())
+            )
     return key + f"/flatten={FLATTEN_REVISION}"

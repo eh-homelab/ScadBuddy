@@ -42,7 +42,12 @@ def presets_routes() -> None:
 
 #: The spool-first dialog's own remembered choices (spec 2026-09-27 §7), unset: what a
 #: PUT that names only the printer and spools reads back with.
-NO_DIALOG_CHOICES: dict[str, object] = {"nozzles": [], "tier": None, "process_name": None}
+NO_DIALOG_CHOICES: dict[str, object] = {
+    "nozzles": [],
+    "tier": None,
+    "process_name": None,
+    "print_sequence": None,
+}
 
 
 def test_the_models_printer_and_spools_are_remembered(

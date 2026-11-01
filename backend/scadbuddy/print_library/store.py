@@ -55,6 +55,9 @@ class NativeFile(BaseModel):
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None
+    #: The print subject whose run put it here, as its per-print copy or a slice (#4337);
+    #: ``None`` for every other file, and once a person moved or restored it.
+    print_subject: str | None = None
 
     @property
     def file_type(self) -> str:
@@ -71,7 +74,7 @@ def file_type_of(name: str) -> str:
 
 _FILE_COLUMNS = (
     "id, folder_id, name, size, sha256, blob_key, media_type, plates, has_thumbnail,"
-    " output_id, filed, created_at, updated_at, deleted_at"
+    " output_id, filed, created_at, updated_at, deleted_at, print_subject"
 )
 _FOLDER_COLUMNS = "id, name, parent_id, created_at"
 _FOLDER_TREE_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:library:tree', 0))"
@@ -80,8 +83,9 @@ _FOLDER_TREE_LOCK = "SELECT pg_advisory_xact_lock(hashtextextended('scadbuddy:li
 def _insert_file(conn: Connection[DictRow], row: NativeFile) -> NativeFile:
     out = conn.execute(
         f"INSERT INTO library_files (id, folder_id, name, size, sha256, blob_key, media_type,"
-        f" plates, has_thumbnail, output_id, filed, created_at, updated_at, deleted_at)"
-        f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+        f" plates, has_thumbnail, output_id, filed, created_at, updated_at, deleted_at,"
+        f" print_subject)"
+        f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
         f" RETURNING {_FILE_COLUMNS}".encode(),
         (
             row.id,
@@ -98,6 +102,7 @@ def _insert_file(conn: Connection[DictRow], row: NativeFile) -> NativeFile:
             row.created_at,
             row.updated_at,
             row.deleted_at,
+            row.print_subject,
         ),
     ).fetchone()
     assert out is not None
@@ -282,13 +287,20 @@ class NativeLibraryStore:
     ) -> NativeFile | None:
         """A rename, a move or both, under the names lock of the folder the file ends up
         in (`_lock_folder_names`); the row is locked first, as `trash` and
-        `delete_folder_tree` take it. Like an upload, it keeps the name it is given."""
+        `delete_folder_tree` take it. Like an upload, it keeps the name it is given. A
+        per-print file a person moves to another folder is theirs (#4337, case 4), as
+        Bambuddy's inbox copy once moved is: its ``print_subject`` is cleared."""
         sets = ["updated_at = now()"]
         params: list[Any] = []
         if name is not None:
             sets.append("name = %s")
             params.append(name)
         if not isinstance(folder_id, UnsetType):
+            # Every SET reads the row as it was: this compares the folder it leaves.
+            sets.append(
+                "print_subject = CASE WHEN folder_id IS NOT DISTINCT FROM %s THEN print_subject END"
+            )
+            params.append(folder_id)
             sets.append("folder_id = %s")
             params.append(folder_id)
         if filed is not None:
@@ -307,9 +319,12 @@ class NativeLibraryStore:
                 _lock_folder_names(conn, target)
             return _update_file(conn, id, sets, params)
 
-    def trash(self, ids: list[int]) -> list[NativeFile]:
+    def trash(self, ids: list[int], *, per_print: bool = False) -> list[NativeFile]:
         """The rows are locked by id first, as `delete_folder_tree` locks them: an UPDATE
-        alone locks them in the order its scan meets them, and would deadlock with it."""
+        alone locks them in the order its scan meets them, and would deadlock with it.
+        ``per_print`` trashes only those still marked (#4337): a file a person made theirs
+        since the caller read it (a move, a restore) stays."""
+        only = " AND print_subject IS NOT NULL" if per_print else ""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(
                 "SELECT id FROM library_files WHERE id = ANY(%s) AND deleted_at IS NULL"
@@ -318,20 +333,51 @@ class NativeLibraryStore:
             )
             rows = conn.execute(
                 f"UPDATE library_files SET deleted_at = now(), updated_at = now()"
-                f" WHERE id = ANY(%s) AND deleted_at IS NULL RETURNING {_FILE_COLUMNS}".encode(),
+                f" WHERE id = ANY(%s) AND deleted_at IS NULL{only}"
+                f" RETURNING {_FILE_COLUMNS}".encode(),
                 (list(ids),),
             ).fetchall()
         return [NativeFile.model_validate(r) for r in rows]
 
     def restore(self, ids: list[int]) -> list[int]:
-        """A file whose folder is gone comes back with `folder_id` NULL, by the FK."""
+        """A file whose folder is gone comes back with `folder_id` NULL, by the FK. A
+        per-print file a person restores is theirs (#4337): its ``print_subject`` is
+        cleared, or the sweep that trashed it would trash it again."""
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "UPDATE library_files SET deleted_at = NULL, updated_at = now()"
+                "UPDATE library_files SET deleted_at = NULL, updated_at = now(),"
+                " print_subject = NULL"
                 " WHERE id = ANY(%s) AND deleted_at IS NOT NULL RETURNING id",
                 (list(ids),),
             ).fetchall()
         return sorted(int(r["id"]) for r in rows)
+
+    def per_print(self) -> list[NativeFile]:
+        """Every live file a run put here and nobody has made theirs (#4337): what
+        `sweep.sweep_print_copies` judges."""
+        return self._files(
+            f"SELECT {_FILE_COLUMNS} FROM library_files"
+            f" WHERE print_subject IS NOT NULL AND deleted_at IS NULL ORDER BY id"
+        )
+
+    def existing(self, ids: list[int]) -> set[int]:
+        """Those of ``ids`` whose row is still there, live or trashed."""
+        if not ids:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id FROM library_files WHERE id = ANY(%s)", (list(ids),)
+            ).fetchall()
+        return {int(r["id"]) for r in rows}
+
+    def release(self, ids: list[int]) -> None:
+        """These files are a person's now (#4337): no sweep trashes them."""
+        if not ids:
+            return
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE library_files SET print_subject = NULL WHERE id = ANY(%s)", (list(ids),)
+            )
 
     def trashed_before(self, cutoff: datetime) -> list[NativeFile]:
         return self._files(

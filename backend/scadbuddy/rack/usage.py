@@ -22,9 +22,10 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import SpoolOption, normalise_colour, spool_label
-from scadbuddy.bambuddy.follow import SettledHook
+from scadbuddy.bambuddy.follow import ReadHook, SettledHook
 from scadbuddy.bambuddy.models import ArchiveDetail, FilamentRequirement, PrinterStatus
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
+from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.library.settings_store import StoredSettings
@@ -143,6 +144,26 @@ class RackUsage(Protocol):
     ) -> int: ...
 
 
+class LanUsage(Protocol):
+    """A LAN start's picks (#4543), keyed by its run and ``subtask_name``."""
+
+    async def record_lan_picks(
+        self,
+        run_id: str,
+        subtask_name: str,
+        printer_id: int | None,
+        picks: Sequence[PickedHotend],
+    ) -> int: ...
+
+    async def settle_lan(
+        self, run_id: str, subtask_name: str | None = None, *, timed: bool = True
+    ) -> int: ...
+
+
+class LanRackUsage(RackUsage, LanUsage, Protocol):
+    """What a LAN start ranks its pick with and saves it to (`printers.print_activities`)."""
+
+
 def _bound_statements(conn: Connection[DictRow]) -> None:
     """Lower the connection's statement timeout to ``STATEMENT_TIMEOUT_MS``; one the
     conninfo already sets lower is kept (#1086 review)."""
@@ -243,15 +264,20 @@ class RackUsageStore:
     def _usage(self, unique: list[str]) -> dict[str, Usage]:
         with self._ready().connection() as conn:
             rows = conn.execute(
-                "SELECT s.serial, seen.first_seen_at, count(p.archive_id) AS prints,"
+                # A LAN print's row has no archive (#4543): every row is one print.
+                "SELECT s.serial, seen.first_seen_at, count(p.serial) AS prints,"
                 " coalesce(sum(p.print_seconds), 0) AS print_seconds,"
                 " coalesce(sum(p.grams), 0) AS grams,"
                 " max(p.settled_at) AS last_used_at,"
                 # Open picks (#1079): each of a pick's copies with no print row for its
-                # item and group yet, as every copy settles its own (#2134).
+                # item (or its LAN start, #4543) and group yet, as every copy settles its
+                # own (#2134).
+                # One count per key shape, each on its own index (not one OR).
                 " (SELECT coalesce(sum(greatest(k.copies - (SELECT count(*)"
                 "   FROM rack_nozzle_prints AS done"
-                "   WHERE done.queue_item_id = k.queue_item_id"
+                "   WHERE done.queue_item_id = k.queue_item_id AND done.group_id = k.group_id)"
+                "  - (SELECT count(*) FROM rack_nozzle_prints AS done"
+                "   WHERE done.lan_run_id = k.lan_run_id AND done.lan_subtask = k.lan_subtask"
                 "   AND done.group_id = k.group_id), 0)), 0)"
                 "  FROM rack_nozzle_picks AS k"
                 "  WHERE k.serial = s.serial AND k.picked_at > now() - %s) AS pending"
@@ -284,23 +310,33 @@ class RackUsageStore:
     def _spool_history(self, unique: list[str]) -> dict[str, list[SpoolUse]]:
         with self._ready().connection() as conn:
             rows = conn.execute(
-                "SELECT p.serial, s.spool_id,"
+                "SELECT u.serial, u.spool_id,"
                 # A spool's newest label, colour and material: it may have been renamed.
-                " (array_agg(s.label ORDER BY p.settled_at DESC))[1] AS label,"
-                " (array_agg(s.material ORDER BY p.settled_at DESC))[1] AS material,"
-                " (array_agg(s.colour ORDER BY p.settled_at DESC))[1] AS colour,"
-                " count(DISTINCT p.archive_id) AS prints,"
-                " coalesce(sum(s.grams), 0) AS grams,"
-                " max(p.settled_at) AS last_used_at"
-                " FROM rack_nozzle_prints AS p"
-                " JOIN rack_nozzle_pick_spools AS s"
+                " (array_agg(u.label ORDER BY u.settled_at DESC))[1] AS label,"
+                " (array_agg(u.material ORDER BY u.settled_at DESC))[1] AS material,"
+                " (array_agg(u.colour ORDER BY u.settled_at DESC))[1] AS colour,"
+                " count(DISTINCT u.print_key) AS prints,"
+                " coalesce(sum(u.grams), 0) AS grams,"
+                " max(u.settled_at) AS last_used_at"
+                # A print is its archive, or its LAN start (#4543): one join per key
+                # shape, each on its own index.
+                " FROM (SELECT p.serial, p.settled_at, p.archive_id::text AS print_key,"
+                "  s.spool_id, s.label, s.material, s.colour, s.grams"
+                "  FROM rack_nozzle_prints AS p JOIN rack_nozzle_pick_spools AS s"
                 "  ON s.queue_item_id = p.queue_item_id AND s.group_id = p.group_id"
-                " WHERE p.serial = ANY(%s)"
+                "  WHERE p.serial = ANY(%s)"
+                " UNION ALL"
+                " SELECT p.serial, p.settled_at, p.lan_run_id || '/' || p.lan_subtask,"
+                "  s.spool_id, s.label, s.material, s.colour, s.grams"
+                "  FROM rack_nozzle_prints AS p JOIN rack_nozzle_pick_spools AS s"
+                "  ON s.lan_run_id = p.lan_run_id AND s.lan_subtask = p.lan_subtask"
+                "  AND s.group_id = p.group_id"
+                "  WHERE p.serial = ANY(%s)) AS u"
                 # No inventory spool: one row per label instead.
-                " GROUP BY p.serial, s.spool_id,"
-                "  CASE WHEN s.spool_id IS NULL THEN s.label END"
-                " ORDER BY p.serial, prints DESC, last_used_at DESC",
-                (unique,),
+                " GROUP BY u.serial, u.spool_id,"
+                "  CASE WHEN u.spool_id IS NULL THEN u.label END"
+                " ORDER BY u.serial, prints DESC, last_used_at DESC",
+                (unique, unique),
             ).fetchall()
         history: dict[str, list[SpoolUse]] = {}
         for row in rows:
@@ -432,6 +468,99 @@ class RackUsageStore:
             )
         return cursor.rowcount
 
+    async def record_lan_picks(
+        self,
+        run_id: str,
+        subtask_name: str,
+        printer_id: int | None,
+        picks: Sequence[PickedHotend],
+    ) -> int:
+        """The picks sent with one LAN start (#4543), keyed by its run and its
+        ``subtask_name``, with their spools; the pick rows written. A start picked again
+        (its start may not have been taken, so it was sent again) keeps the newer pick:
+        that one prints. ``printer_id`` is the Bambuddy printer the rack tables key on,
+        ``None`` for a LAN-only printer."""
+        if not picks:
+            return 0
+        return await asyncio.to_thread(
+            self._record_lan_picks, run_id, subtask_name, printer_id, list(picks)
+        )
+
+    def _record_lan_picks(
+        self, run_id: str, subtask: str, printer_id: int | None, picks: list[PickedHotend]
+    ) -> int:
+        written = 0
+        with self._ready().connection() as conn, conn.transaction():
+            # The earlier pick's spools go with it: the newer pick may print others.
+            conn.execute(
+                "DELETE FROM rack_nozzle_pick_spools WHERE lan_run_id = %s AND lan_subtask = %s",
+                (run_id, subtask),
+            )
+            conn.execute(
+                "DELETE FROM rack_nozzle_picks WHERE lan_run_id = %s AND lan_subtask = %s"
+                " AND group_id <> ALL(%s)",
+                (run_id, subtask, [pick.group_id for pick in picks]),
+            )
+            for pick in picks:
+                cursor = conn.execute(
+                    "INSERT INTO rack_nozzle_picks"
+                    " (lan_run_id, lan_subtask, group_id, printer_id, serial)"
+                    " VALUES (%s, %s, %s, %s, %s)"
+                    " ON CONFLICT (lan_run_id, lan_subtask, group_id) DO UPDATE SET"
+                    " printer_id = EXCLUDED.printer_id, serial = EXCLUDED.serial,"
+                    " picked_at = now()",
+                    (run_id, subtask, pick.group_id, printer_id, pick.serial),
+                )
+                written += cursor.rowcount
+                for spool in pick.spools:
+                    conn.execute(
+                        "INSERT INTO rack_nozzle_pick_spools"
+                        " (lan_run_id, lan_subtask, group_id, slot_id, spool_id, label,"
+                        " material, colour, grams) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                        " ON CONFLICT (lan_run_id, lan_subtask, group_id, slot_id) DO NOTHING",
+                        (
+                            run_id,
+                            subtask,
+                            pick.group_id,
+                            spool.slot_id,
+                            spool.spool_id,
+                            spool.label,
+                            spool.material,
+                            spool.colour,
+                            spool.grams,
+                        ),
+                    )
+        return written
+
+    async def settle_lan(
+        self, run_id: str, subtask_name: str | None = None, *, timed: bool = True
+    ) -> int:
+        """One ``rack_nozzle_prints`` row per open pick of a LAN run (#4543): of one start,
+        or with ``subtask_name`` ``None`` of every start of the run; the rows written. Its
+        time is from the pick (made as the printer took the start) to now, on the
+        database's clock, or none when not ``timed`` (the report never said it ended);
+        its grams the group's sliced grams. A start settled already writes nothing, so
+        each copy's own settle and the run's last one never count it twice."""
+        return await asyncio.to_thread(self._settle_lan, run_id, subtask_name, timed)
+
+    def _settle_lan(self, run_id: str, subtask: str | None, timed: bool) -> int:
+        with self._ready().connection() as conn:
+            cursor = conn.execute(
+                "INSERT INTO rack_nozzle_prints"
+                " (lan_run_id, lan_subtask, group_id, serial, settled_at, print_seconds, grams)"
+                " SELECT k.lan_run_id, k.lan_subtask, k.group_id, k.serial, now(),"
+                "  CASE WHEN %s THEN greatest(0, extract(epoch FROM now() - k.picked_at))::bigint"
+                "  END,"
+                "  (SELECT sum(s.grams) FROM rack_nozzle_pick_spools AS s"
+                "   WHERE s.lan_run_id = k.lan_run_id AND s.lan_subtask = k.lan_subtask"
+                "   AND s.group_id = k.group_id)"
+                " FROM rack_nozzle_picks AS k"
+                " WHERE k.lan_run_id = %s AND (%s::text IS NULL OR k.lan_subtask = %s)"
+                " ON CONFLICT (lan_run_id, lan_subtask, group_id) DO NOTHING",
+                (timed, run_id, subtask, subtask),
+            )
+        return cursor.rowcount
+
 
 def group_spools(
     filaments: Sequence[FilamentRequirement],
@@ -508,6 +637,60 @@ async def save_picks(
             RACK_PICKS_FALLBACK,
             extra={"printer_id": printer_id, "error": type(exc).__name__},
         )
+
+
+async def save_lan_picks(
+    store: LanUsage | None,
+    run_id: str,
+    subtask_name: str,
+    printer_id: int | None,
+    picks: Sequence[PickedHotend],
+) -> None:
+    """Write the picks sent with a LAN start (#4543), keyed by its run and its
+    ``subtask_name``. Advisory, as `save_picks`: the start is sent, so a failure is
+    logged by type and dropped. A pick of a hotend with no serial is skipped."""
+    attributable = [pick for pick in picks if pick.serial]
+    if store is None or not attributable:
+        return
+    try:
+        await store.record_lan_picks(run_id, subtask_name, printer_id, attributable)
+    except Exception as exc:
+        logger.warning(
+            RACK_PICKS_FALLBACK,
+            extra={"run_id": run_id, "error": type(exc).__name__},
+        )
+
+
+async def settle_lan_print(
+    store: LanUsage | None, run_id: str, subtask_name: str | None = None, *, timed: bool = True
+) -> None:
+    """Settle a LAN run's open picks (#4543): one start's, or every start's with
+    ``subtask_name`` ``None``. Advisory: a failure is logged by type, and the run's last
+    settle (the follow's) or the pick's age (`PENDING_PICK_MAX_AGE`) closes it."""
+    if store is None:
+        return
+    try:
+        await store.settle_lan(run_id, subtask_name, timed=timed)
+    except Exception as exc:
+        logger.warning(
+            RACK_SETTLE_FALLBACK,
+            extra={"run_id": run_id, "error": type(exc).__name__},
+        )
+
+
+def lan_settle_hook(store: LanUsage) -> ReadHook:
+    """The print follow's read hook for a LAN rack print (#4543): once the run's print
+    has settled (its last start ended, or the run stopped the rest), every pick of the
+    run not settled yet is. ``lan_wait`` settles each earlier copy as the printer ends
+    it; this settles the last, and any it missed. Timed unless the report never said how
+    the print ended (``unknown``)."""
+
+    async def hook(run_subject: str, progress: PrintProgress) -> None:
+        if progress.route != "lan" or not progress.settled or progress.run_id is None:
+            return
+        await settle_lan_print(store, progress.run_id, timed=progress.stage != "unknown")
+
+    return hook
 
 
 class ArchiveReader(Protocol):

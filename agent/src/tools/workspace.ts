@@ -321,7 +321,8 @@ export const workspaceTools: Tool[] = [
       'Create or replace a workspace text file with `content`. Give `expected_sha256` (from workspace_read or ' +
       'workspace_list) to replace only the file you read, or `null` to create a new file only. Prefer workspace_edit ' +
       "to change part of a text file. Text only: a binary file reaches the workspace by the user's upload in the " +
-      'assistant panel, http_request `save_to_workspace`, or workspace_save, never as an argument. Answers the stored ' +
+      'assistant panel, http_request `save_to_workspace`, or workspace_save, never as an argument. A workspace holds at ' +
+      'most 5,000 files besides its byte cap; `quota` names which one a write is past. Answers the stored ' +
       "file's size and sha256.",
     input: z
       .object({

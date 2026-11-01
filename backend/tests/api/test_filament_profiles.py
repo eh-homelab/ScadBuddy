@@ -48,8 +48,67 @@ def test_the_profiles_are_listed_with_their_sources(client: TestClient) -> None:
     source = silk["settings"][0]["sources"][0]
     assert source["url"].startswith("https://wiki.bambulab.com/")
     assert "Try 50 mm/s first." in source["quote"]
-    # The temperature is advice, never sent: no filament channel is verified.
-    assert "235" in silk["notes"][0]["text"]
+    # #2799: the temperature is a filament setting, which the native slicer applies.
+    assert [(s["key"], s["value"], s["unit"]) for s in silk["filament_settings"]] == [
+        ("nozzle_temperature", "235", "°C"),
+        ("nozzle_temperature_initial_layer", "235", "°C"),
+    ]
+    assert "235" in silk["filament_settings"][0]["sources"][0]["quote"]
+    assert silk["notes"] == []
+
+
+@respx.mock
+def test_on_bambuddys_slicer_the_temperature_is_previewed_as_not_applied(
+    client: TestClient,
+) -> None:
+    """#2799: Bambuddy's slice request has no filament field, so the dialog says the
+    temperature is not applied there, while the wall speed still is."""
+    configure(client)
+    h2c_presets()
+    preset_values()
+
+    (silk,) = client.post(
+        "/api/v1/print/filament-profiles/preview",
+        json={"choices": {"nozzles": [{"size": "0.2"}], "tier": "fine"}, "profiles": ["silk-pla"]},
+    ).json()
+
+    assert silk["applicable"] is True
+    assert silk["filament_applied"] is False
+    assert silk["filament_reason"].startswith("Bambuddy's slicer has no filament setting override")
+
+
+@respx.mock
+def test_on_bambuddys_slicer_a_run_says_the_temperature_was_not_applied(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    preset_values()
+    sliced = slice_routes()
+    queue_route()
+    request = {**body(), "filament_profiles": ["silk-pla"]}
+    expected = {
+        "kind": "profile-not-applied",
+        "slot_id": None,
+        "message": (
+            "Silk PLA profile's nozzle temperature and nozzle temperature (first layer) not "
+            "applied: Bambuddy's slicer has no filament setting override, so set them in "
+            "the spool's filament preset. The native slicer applies them."
+        ),
+    }
+
+    check = client.post(f"/api/v1/print/outputs/{output_id}/check", json=request)
+    response = run_print(client, output_id, json=request)
+
+    assert check.status_code == 200, check.text
+    assert expected in check.json()["warnings"]
+    assert response.status_code == 200, response.text
+    assert expected in response.json()["warnings"]
+    sent = json.loads(sliced.calls.last.request.content)
+    # The wall speed still goes out; nothing about the temperature does.
+    assert sent["process_overrides"] == {"outer_wall_speed": ["50"] * 5}
+    assert "nozzle_temperature" not in sliced.calls.last.request.content.decode()
 
 
 @respx.mock

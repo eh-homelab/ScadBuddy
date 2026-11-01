@@ -69,7 +69,7 @@ def snapshot(spool: Spool, where: SpoolLocation | None = None) -> SpoolSnapshot:
 class BambuddyProvider:
     name = "bambuddy"
     label = "Bambuddy"
-    #: Behind ScadBuddy's own inventory (tier B) when it comes, ahead of others.
+    #: Behind ScadBuddy's own inventory (`spools/spool_providers.py`, 10), ahead of others.
     priority = 100
 
     def __init__(self, load: Callable[[], StoredSettings]) -> None:

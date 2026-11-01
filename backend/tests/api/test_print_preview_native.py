@@ -42,7 +42,7 @@ from scadbuddy.store.content import ContentStore, sweep_content
 from tests.api.conftest import follow_operation
 from tests.api.test_print_filaments import prepared
 from tests.api.test_print_library import flow_copy_routes, library_file, one_color
-from tests.api.test_print_run_choices import body, run_routes
+from tests.api.test_print_run_choices import body, on_spool, run_routes
 from tests.api.test_send import API, configure, upload_route
 from tests.slicing.conftest import PROFILES
 from tests.support.fake_slicer import INTERNAL, FakeSlicer, fake_slicer_worker
@@ -269,6 +269,39 @@ def test_a_native_preview_names_each_slots_side(
 
     assert answer["status"] == "completed", answer
     assert [(slot["slot_id"], slot["side"]) for slot in answer["slots"]] == [(1, "R"), (2, "L")]
+
+
+def test_a_silk_profile_sets_the_silk_slots_nozzle_temperature_in_its_filament_file(
+    native_client: TestClient, model: str, slicer: FakeSlicer, dialog: respx.MockRouter
+) -> None:
+    """#2799: on the native slicer a profile's filament settings go into the filament
+    file of the slot whose spool it matches (spool 5 is Bambu's tri-colour silk), the
+    channel measured to change the G-code (``slicing/presets.py``)."""
+    dialog.get(f"{API}/slicer/preset-values").mock(
+        return_value=httpx.Response(
+            200, json={"resolved": True, "values": {"outer_wall_speed": ["200", "200"]}}
+        )
+    )
+    output_id = prepared(native_client, model)
+    started = native_client.post(
+        f"/api/v1/print/outputs/{output_id}/preview-slice",
+        json={**on_spool(5), "filament_profiles": ["silk-pla"]},
+        headers=press(),
+    )
+    assert started.status_code == 202, started.text
+    op = follow_operation(native_client, started.json(), timeout=60, poll=0.1)
+    assert op["status"] == "succeeded", op
+
+    answer = settled(native_client, output_id, op["result"]["job_id"])
+
+    assert answer["status"] == "completed", answer
+    _input, _machine, process, silk, *_ = slicer.downloads[0]
+    # In the preset's shape: one entry per extruder variant, every one set alike.
+    assert json.loads(silk)["nozzle_temperature"] == ["235"]
+    # The test tree's preset leaves this one out, so it is written as given.
+    assert json.loads(silk)["nozzle_temperature_initial_layer"] == "235"
+    assert "nozzle_temperature" not in json.loads(process)
+    assert json.loads(process)["outer_wall_speed"] == ["50", "50"]
 
 
 def test_the_same_choices_answer_the_same_job(

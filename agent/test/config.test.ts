@@ -33,6 +33,7 @@ describe('loadConfig', () => {
         SCADBUDDY_TEMPORAL_NAMESPACE: 'scadbuddy-dev',
         SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES: 'true',
         SCADBUDDY_PAYLOAD_DIR: '/data/payloads',
+        SCADBUDDY_SESSION_DIR: '/var/lib/scadbuddy-sessions/',
         SCADBUDDY_AGENT_ROLE: 'worker',
       }),
     ).toEqual({
@@ -47,6 +48,7 @@ describe('loadConfig', () => {
       temporalNamespace: 'scadbuddy-dev',
       temporalSearchAttributes: true,
       payloadDir: '/data/payloads',
+      sessionDir: '/var/lib/scadbuddy-sessions',
       agentRole: 'worker',
     })
   })
@@ -71,6 +73,7 @@ describe('loadConfig', () => {
     [{ SCADBUDDY_AGENT_TRUSTED_PROXIES: '10.0.0.0/33' }, /"10\.0\.0\.0\/33" is not an IP address or CIDR range/],
     [{ SCADBUDDY_AGENT_TRUSTED_PROXIES: 'ingress-nginx' }, /SCADBUDDY_AGENT_TRUSTED_PROXIES/],
     [{ SCADBUDDY_AGENT_TRUSTED_PROXIES: '10.0.0.0/8/1' }, /SCADBUDDY_AGENT_TRUSTED_PROXIES/],
+    [{ SCADBUDDY_SESSION_DIR: 'sessions' }, /SCADBUDDY_SESSION_DIR must be an absolute path, not "sessions"/],
   ])('refuses a malformed %j', (env, message) => {
     expect(() => loadConfig(env)).toThrow(ConfigError)
     expect(() => loadConfig(env)).toThrow(message)

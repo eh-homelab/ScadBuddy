@@ -61,8 +61,16 @@ async def preview_profiles(
     """Each profile's changes against the process preset these choices resolve to: the
     preset's value (a list for a per-extruder-variant option) and the profile's. A
     profile that cannot be applied says why (``applicable: false``, ``reason``), and a
-    print with it on goes ahead without it, saying so in its warnings."""
-    async with client_for(store.load()) as client:
+    print with it on goes ahead without it, saying so in its warnings. Its filament
+    settings (a nozzle temperature) apply only on the native slicer (``filament_applied``,
+    ``filament_reason``, #2799)."""
+    settings = store.load()
+    async with client_for(settings) as client:
         process = process_preset_for(body.choices, await catalogue_for(client, native=None))
         ids = body.profiles if body.profiles is not None else list(BUILTIN)
-        return await previews(client, process, [BUILTIN[i] for i in ids])
+        return await previews(
+            client,
+            process,
+            [BUILTIN[i] for i in ids],
+            native_slicer=settings.slicer_backend == "native",
+        )

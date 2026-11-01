@@ -93,6 +93,7 @@ export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   nozzles: [],
   tier: null,
   process_name: null,
+  print_sequence: null,
 }
 
 /** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
@@ -102,7 +103,8 @@ export function isNoModelChoices(choices: ModelPrintChoices): boolean {
     !choices.filament_plan?.length &&
     !choices.nozzles?.length &&
     choices.tier == null &&
-    choices.process_name == null
+    choices.process_name == null &&
+    choices.print_sequence == null
   )
 }
 
@@ -820,7 +822,14 @@ export function mockRemembered() {
     Object.fromEntries(Object.entries(options ?? {}).filter(([, value]) => value !== null && value !== undefined))
   return {
     model_print_choices: structuredClone(state.modelChoices),
-    printer_bed_types: { ...state.printerBedTypes },
+    printer_bed_types: Object.fromEntries(Object.entries(state.printerBedTypes).filter(([id]) => /^\d+$/.test(id))),
+    // #4971: every plate, a registry printer's (a non-numeric key) among them.
+    printer_plates: Object.entries(state.printerBedTypes).map(([id, bed]) => ({
+      printer: /^\d+$/.test(id) ? null : id,
+      bambuddy_printer_id: /^\d+$/.test(id) ? Number(id) : null,
+      name: null,
+      bed_type: bed,
+    })),
     print_options: dropEmpty(state.printOptions.global_options),
     printer_print_options: structuredClone(state.printOptions.printers ?? {}),
     model_print_options: structuredClone(state.printOptions.models ?? {}),
@@ -2855,6 +2864,19 @@ export const handlers = [
     return HttpResponse.json(job)
   }),
 
+  // #4968 — the page's one claim withdrawn: an unsettled job is cancelled.
+  http.post(`${base}/jobs/:id/withdraw`, ({ params }) => {
+    const id = String(params['id'])
+    const job = state.jobs.get(id)
+    if (!job) return problem(404, 'Job not found')
+    if (job.status === 'pending' || job.status === 'running') {
+      job.status = 'cancelled'
+      job.error = fixtures.CANCELLED_ERROR
+      emitRealtime('job.cancelled', [`job:${id}`], { job_id: id, slug: job.slug })
+    }
+    return HttpResponse.json(job)
+  }),
+
   http.get(`${base}/jobs/:id/preview.glb`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')
@@ -3265,8 +3287,10 @@ export const handlers = [
     const body = (await request.json()) as { bed_type: string | null }
     if (body.bed_type === null) delete state.printerBedTypes[printerId]
     else state.printerBedTypes[printerId] = body.bed_type
+    const bambuddy = /^\d+$/.test(printerId)
     return HttpResponse.json({
-      printer_id: Number(printerId),
+      printer_id: bambuddy ? Number(printerId) : null,
+      printer: bambuddy ? null : printerId,
       bed_type: state.printerBedTypes[printerId] ?? null,
     })
   }),

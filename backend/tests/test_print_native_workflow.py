@@ -38,6 +38,7 @@ from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.store import PrinterStore
+from scadbuddy.rack.usage import PickedHotend
 from scadbuddy.workflows.follow import FollowPrint, follow_queue
 from scadbuddy.workflows.print_models import (
     LAN_PRINT_ACTIVITY,
@@ -169,10 +170,18 @@ class Usage:
         self.asked: list[list[str]] = []
         self.linked = linked
         self.seen_by: list[int] = []
+        #: Each `record_lan_picks` (#4543): the run, the start, the Bambuddy id, the picks.
+        self.picks: list[tuple[str, str, int | None, list[PickedHotend]]] = []
 
     async def usage(self, serials: Iterable[str]) -> dict[str, object]:
         self.asked.append(list(serials))
         return {}
+
+    async def record_lan_picks(
+        self, run_id: str, subtask_name: str, printer_id: int | None, picks: list[PickedHotend]
+    ) -> int:
+        self.picks.append((run_id, subtask_name, printer_id, list(picks)))
+        return len(picks)
 
     async def seen(self, printer_id: int, serials: Iterable[str]) -> None:
         if not self.linked:
@@ -539,7 +548,7 @@ async def test_a_rack_print_sends_its_nozzle_mapping(
     Bambuddy's own: ``[21, 18, 20, 17, 1, 17, -1 x26]``."""
     as_the_h2c(fake_lan)
     usage = Usage()
-    _, run = await _run(
+    fake, run = await _run(
         client, pg_pool, registry_native, blobs=Blobs(rack_3mf()), plan=RACK_TRAYS, rack=usage
     )
     assert run.status == "succeeded"
@@ -548,6 +557,16 @@ async def test_a_rack_print_sends_its_nozzle_mapping(
     assert sent["nozzle_mapping"] == MEASURED["plate"]["nozzle_mapping"]
     # Ranked over the hotends the report lists (the carriage's fills position 4).
     assert [len(serials) for serials in usage.asked] == [6]
+    # #4543: the picks are saved under the run and the start, with the spools each
+    # group printed from, so Least used sees the open pick and the follow settles it.
+    stem = "scadbuddy-run-1-p1"
+    [(run_id, subtask, printer_id, picks)] = usage.picks
+    assert (run_id, subtask, printer_id) == ("run-1", stem, None)
+    assert sorted(pick.position for pick in picks) == [2, 3, 5, 6]
+    assert all(pick.serial and pick.spools for pick in picks)
+    [outcome] = fake.outcomes
+    assert outcome.lan is not None
+    assert (outcome.lan.run_id, outcome.lan.plate_id) == ("run-1", 1)
 
 
 async def test_the_rack_pick_reads_the_printers_report(

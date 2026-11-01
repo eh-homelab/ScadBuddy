@@ -36,6 +36,13 @@ export const WORKSPACE_FILE_MAX_SETTING = 'workspace_file_max_bytes'
 export const WORKSPACE_MAX_SETTING = 'workspace_max_bytes'
 export const DEFAULT_FILE_MAX_BYTES = 25 * 1024 * 1024
 export const DEFAULT_WORKSPACE_MAX_BYTES = 200 * 1024 * 1024
+/**
+ * The most files one workspace holds. Each file brings at most three parent directories with it
+ * (WORKSPACE_PATH: four segments), so a placement of a full workspace (workspace/directory.ts)
+ * makes at most 4 × 5,000 = 20,000 entries, its MAX_ENTRIES: no placement can make a directory
+ * the turn's entry check would stop.
+ */
+export const WORKSPACE_MAX_FILES = 5_000
 /** How long a principal's workspace file lives after its last write. */
 export const WORKSPACE_TTL_MS = 24 * 60 * 60 * 1000
 /** How often principals' expired files are swept. */
@@ -342,15 +349,30 @@ export class SessionFiles {
   private readonly settings: SettingsReader | undefined
   private readonly fixed: Partial<WorkspaceLimits>
   private readonly blobs: WorkspaceBlobs | undefined
+  /** The most files one workspace holds (WORKSPACE_MAX_FILES; tests set fewer). */
+  readonly maxFiles: number
 
   constructor(
     sql: Sql,
-    options: { settings?: SettingsReader | undefined; limits?: Partial<WorkspaceLimits>; blobs?: WorkspaceBlobs | undefined } = {},
+    options: {
+      settings?: SettingsReader | undefined
+      limits?: Partial<WorkspaceLimits>
+      blobs?: WorkspaceBlobs | undefined
+      maxFiles?: number | undefined
+    } = {},
   ) {
     this.sql = sql
     this.settings = options.settings
     this.fixed = options.limits ?? {}
     this.blobs = options.blobs
+    this.maxFiles = options.maxFiles ?? WORKSPACE_MAX_FILES
+  }
+
+  /** How many files the workspace holds now. */
+  async fileCount(ws: WorkspaceRef): Promise<number> {
+    const { key } = keyOf(ws)
+    const [row] = await this.sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_session_files WHERE workspace = ${key}`
+    return row?.n ?? 0
   }
 
   #sealing(): { store: WorkspaceBlobStore; sealing: WorkspaceSealing } {
@@ -547,7 +569,7 @@ export class SessionFiles {
 
   /**
    * Creates or replaces a file. Refused `too_large` past the per-file cap,
-   * `quota` past the workspace's, `conflict` when `expectedSha256` does not
+   * `quota` past the workspace's bytes or WORKSPACE_MAX_FILES files, `conflict` when `expectedSha256` does not
    * hold. Answers the file as stored.
    */
   async write(ws: WorkspaceRef, path: string, bytes: Uint8Array, options: WriteOptions = {}): Promise<WorkspaceFileInfo> {
@@ -582,13 +604,29 @@ export class SessionFiles {
           )
         }
       }
-      const [held] = await tx<{ bytes: string }[]>`
-        SELECT coalesce(sum(size), 0)::bigint AS bytes FROM ai_session_files WHERE workspace = ${key} AND path <> ${name}`
+      const [held] = await tx<{ bytes: string; files: number }[]>`
+        SELECT coalesce(sum(size), 0)::bigint AS bytes, count(*)::int AS files FROM ai_session_files WHERE workspace = ${key} AND path <> ${name}`
       const total = Number(held?.bytes ?? 0) + data.byteLength
       if (total > workspaceMaxBytes) {
         throw new WorkspaceError(
           'quota',
           `the workspace would hold ${total} bytes; it holds at most ${workspaceMaxBytes}. Delete files with workspace_delete first`,
+        )
+      }
+      this.#checkFiles(held?.files ?? 0)
+      // A file and a directory never share a name: a working directory (workspace/directory.ts)
+      // cannot hold both, and the one it dropped would read as deleted at its write-back.
+      const parents = name.split('/').slice(0, -1).map((_, i, segments) => segments.slice(0, i + 1).join('/'))
+      const [clash] = await tx<{ path: string }[]>`
+        SELECT path FROM ai_session_files
+        WHERE workspace = ${key} AND (path = ANY(${parents}::text[]) OR starts_with(path, ${`${name}/`}))
+        LIMIT 1`
+      if (clash) {
+        throw new WorkspaceError(
+          'conflict',
+          clash.path.length < name.length
+            ? `${clash.path} is a file, so ${name} cannot be under it; nothing was written`
+            : `${name} is a directory (it holds ${clash.path}), so it cannot be a file too; nothing was written`,
         )
       }
       const [row] = await tx<Row[]>`
@@ -639,9 +677,10 @@ export class SessionFiles {
 
   /** The write's conflict and quota checks, without the lock, before its upload. */
   async #precheck(key: string, name: string, size: number, workspaceMaxBytes: number, expected: string | null | undefined): Promise<void> {
-    const [row] = await this.sql<{ current: string | null; held: string }[]>`
+    const [row] = await this.sql<{ current: string | null; held: string; files: number }[]>`
       SELECT (SELECT sha256 FROM ai_session_files WHERE workspace = ${key} AND path = ${name}) AS current,
-             (SELECT coalesce(sum(size), 0)::bigint FROM ai_session_files WHERE workspace = ${key} AND path <> ${name}) AS held`
+             (SELECT coalesce(sum(size), 0)::bigint FROM ai_session_files WHERE workspace = ${key} AND path <> ${name}) AS held,
+             (SELECT count(*)::int FROM ai_session_files WHERE workspace = ${key} AND path <> ${name}) AS files`
     const current = row?.current ?? null
     if (expected === null && current !== null) {
       throw new WorkspaceError('conflict', `${name} already exists (sha256 ${current}); nothing was written`)
@@ -660,6 +699,14 @@ export class SessionFiles {
         'quota',
         `the workspace would hold ${total} bytes; it holds at most ${workspaceMaxBytes}. Delete files with workspace_delete first`,
       )
+    }
+    this.#checkFiles(row?.files ?? 0)
+  }
+
+  /** `others`: the files the workspace holds besides the one written. */
+  #checkFiles(others: number): void {
+    if (others + 1 > this.maxFiles) {
+      throw new WorkspaceError('quota', `the workspace holds ${others} files; it holds at most ${this.maxFiles}. Delete files with workspace_delete first`)
     }
   }
 

@@ -43,6 +43,7 @@ function describeChoices(choices: ModelPrintChoices, printerName: (id: number) =
   if (choices.printer_id !== null && choices.printer_id !== undefined) parts.push(printerName(choices.printer_id))
   if (choices.tier) parts.push(`${choices.tier} quality`)
   if (choices.process_name) parts.push(choices.process_name)
+  if (choices.print_sequence) parts.push(choices.print_sequence)
   const spools = choices.filament_plan?.length ?? 0
   if (spools) parts.push(`${spools} ${spools === 1 ? 'spool' : 'spools'}`)
   if (choices.nozzles?.length) parts.push(`nozzles ${choices.nozzles.map((n) => n.size).join(' / ')} mm`)
@@ -149,13 +150,25 @@ export function RememberedChoicesPanel({
         forget: () => (fileId === null ? api.putModelChoices(scope, {}) : api.putLibraryChoices(fileId, {})),
       })
     }
-    for (const [printerId, bed] of Object.entries(remembered.printer_bed_types ?? {})) {
+    // #4971: each plate with its registry printer, a LAN-only one's among them; an older
+    // server lists only the Bambuddy-keyed map.
+    const plates =
+      remembered.printer_plates ??
+      Object.entries(remembered.printer_bed_types ?? {}).map(([printerId, bed]) => ({
+        printer: null,
+        bambuddy_printer_id: Number(printerId),
+        name: null,
+        bed_type: bed,
+      }))
+    for (const plate of plates) {
+      const id = plate.bambuddy_printer_id ?? plate.printer
+      if (id === null || id === undefined) continue
       rows.push({
-        key: `bed:${printerId}`,
+        key: `bed:${id}`,
         kind: 'Plate',
-        subject: printerName(printerId),
-        value: bed,
-        forget: () => api.putPrinterBedType(Number(printerId), null),
+        subject: plate.name ?? printerName(id),
+        value: plate.bed_type,
+        forget: () => api.putPrinterBedType(id, null),
       })
     }
     for (const [printerId, algorithm] of Object.entries(remembered.printer_rack_algorithms ?? {})) {

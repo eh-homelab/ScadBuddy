@@ -1021,6 +1021,9 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   library_backend: 'restart',
 }
 
+/** `asset_fetch.py` `DEFAULT_ASSET_FETCH_DOMAINS`: what a stored `null` resolves to. */
+export const DEFAULT_ASSET_FETCH_DOMAINS = ['game-icons.net', 'github.com', 'raw.githubusercontent.com', 'openmoji.org']
+
 export const settings: Settings = {
   ...settingsDefaults,
   bambuddy_url: 'https://bambuddy.internal.nullreference.io',
@@ -1040,6 +1043,7 @@ export const settings: Settings = {
   render_timeout: 300,
   job_ttl: 3600,
   activity_follow: null,
+  asset_fetch_domains: [...DEFAULT_ASSET_FETCH_DOMAINS],
   activity_ttl_seconds: null,
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,

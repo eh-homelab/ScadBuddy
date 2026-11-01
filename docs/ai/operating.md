@@ -240,6 +240,7 @@ as unset (`present()`).
 | `SCADBUDDY_PUBLIC_URL` | unset → loopback only | `originPolicy()` in [`agent/src/http/origins.ts`](../../agent/src/http/origins.ts) | The UI's public URL. This is the same variable the backend reads (`public_url` in `backend/scadbuddy/core/settings.py`). Its origin is the only non-loopback origin allowed to write. Must be `http(s)`. See §6. |
 | `SCADBUDDY_AGENT_TRUSTED_PROXIES` | unset → no proxy trusted | `parseCidrList()` in `origins.ts` | A comma-separated list of CIDRs or bare addresses whose `X-Forwarded-Proto`/`X-Forwarded-Host` are believed. A malformed entry is a `ConfigError` at start. See §6. |
 | `SCADBUDDY_AGENT_ROLE` | `all` | `loadConfig()` | `all`, `api` or `worker` (§1, "Roles"). Any other value stops the process with exit code 1, naming the value. |
+| `SCADBUDDY_SESSION_DIR` | unset → `work/sessions` under the state directory | `loadConfig()`, `sessionsRoot()` in [`agent/src/harness/stateDirs.ts`](../../agent/src/harness/stateDirs.ts) | Where each session's working directory, `<dir>/<session id>/`, is: the `cwd` of its Claude Code process, a working copy of its workspace (§13). Set it on the workers to a capped emptyDir of the pod's own, never the NAS share (the copies are plaintext, and the share's backup cannot leave a subPath out); every placement refills it from the workspace, so a turn placed on another pod still finds the files the last one wrote back. Must be an absolute path. The process checks at start that it can write there. |
 
 `main.ts` logs one line at start naming the backend URL, whether a database is
 configured, and where credential writes are accepted from.
@@ -966,8 +967,19 @@ session, in both modes (`agent/src/background/`). Claude Code keeps its own jobs
 process ("Session-only (not written to disk, dies when Claude exits)"), which a turn
 ends, so a classic turn gets these in place of its own too (`mcp__builtin__<Name>`, the
 `builtin` in-process server, `sessions/manager.ts`). Each task is a row of
-`ai_background_tasks` and a `BackgroundTask` workflow `bgtask-<id>` on `agent-tools`
-(`temporal/backgroundTask.ts`), which carries only the id: when the task is due it sends
+`ai_background_tasks` and what fires it on `agent-tools`, which carries only the id: a
+recurring cron job is a Temporal Schedule `bgtask-<session>-<id>` (its cron in the task's
+timezone, ending at its expiry) whose every fire is a short `BackgroundFire` workflow
+(`background/temporal.ts`, unified runtime plan Step 9.8; jobs made before it are converted
+at start, and an hourly pass ends any job whose last occurrence before its expiry was
+missed). A job with no occurrence before its expiry (a monthly one, say) is not kept.
+A cron takes numbers, `*`, ranges, steps, lists and month or day names. `L`, `W`, `#` and
+`?` are refused, because Temporal refuses them or reads them differently. A job stored with
+them before keeps its timer workflow until it expires. A job whose day
+fields are both restricted is two Schedule expressions, so it fires when either day field
+matches, as standard cron does (`background/schedule.ts` `scheduleCrons`). A fire's
+payloads are its task id and outcome only, so they are not sealed. Any other task is a `BackgroundTask` workflow `bgtask-<session>-<id>`
+(`temporal/backgroundTask.ts`). When the task is due it sends
 the prompt as the session's next message, as the one who made it and only while they
 still own the session, once the session is idle (asked again every 30 s; a cron
 occurrence is given up after an hour busy). Bounds: 10 active tasks per session;
@@ -1503,17 +1515,81 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   table: it migrates both services into one database, runs the real API on moto's S3
   (`backend/tests/support/workspace_backend.py`), and checks the `blob_refs` row; a
   change to that table the trigger does not follow fails it.
+- The working directory (plan 2026-10-13 Step 9.5, decision Q5,
+  [`agent/src/workspace/directory.ts`](../../agent/src/workspace/directory.ts)): a
+  session's Claude Code runs in `<SCADBUDDY_SESSION_DIR>/<session id>/` (§2), a working copy
+  of its workspace; `ai_session_files` stays the record. Before each turn the worker makes
+  the directory what the workspace holds: it writes each file whose bytes differ and removes
+  everything else (a file the workspace no longer holds, what a turn that died never wrote
+  back, and every entry that is not a regular file at a workspace path, such as a symlink or a
+  dot-file). At each park, every minute of a running turn, and at the turn's end (a released
+  or shut-down turn's too), it writes each changed file back and deletes each removed one, by
+  sha256 against what it last synced, with the source `{kind: "session_dir"}`. A placement on
+  the worker that synced last writes back first what changed since, such as a Monitor
+  command's output between turns or a file whose write-back failed, before it removes
+  anything. A file the record cannot take now (`unavailable`) is never removed or
+  overwritten: placements, the eviction and the sweep keep it until a write-back succeeds.
+  While a Monitor command runs, nothing in the directory is removed. A panel upload or a `workspace_*` write during the turn wins over the
+  directory's change to the same file, and reaches the directory at the next turn. A turn
+  cut off because another placement took it writes nothing back. A worker that dies
+  mid-turn loses only that turn's changes since its last sync.
+  - As built, against Q5: Q5 put the directory on the NAS share. It is a capped emptyDir of
+    each worker instead, refilled at every placement, because the copies are plaintext and the
+    share's one backup (`nas-share-backup.yaml`, Velero 1.18's kopia fs-backup) carries the
+    whole share and cannot leave a subPath out. A separate NAS share outside that backup stays
+    possible if the refill costs too much.
+  - Caps: the workspace's. A file past `workspace_file_max_bytes`, or one the
+    `workspace_max_bytes` or 5,000-file quota refuses, is removed from the directory at the
+    write-back, as is every entry that cannot be synced. Once the workspace holds 5,000 files, a
+    write-back offers no new file at all. Each file brings at most three parent directories, so a
+    placement makes at most 20,000 entries and never makes a directory the entry check stops. A turn whose directory grows past `workspace_max_bytes`
+    is stopped, as is one that holds more than 20,000 entries (`MAX_ENTRIES`; empty files and
+    directories cost inodes and walk time but no bytes). The check runs every 15 s
+    (`DIR_CHECK_MS`) and is never skipped. A tick is skipped only while the previous walk still
+    runs. A walk that takes longer than 10 s (`DIR_WALK_TIMEOUT_MS`) counts as past the cap and
+    stops the turn (fail closed), as does a walk that fails. A Monitor command's directory is
+    checked the same way (`watchCaps`), between turns too: past a cap, the command is killed and
+    the monitor ends failed. A directory or file that a process made unreadable to its owner
+    (`chmod 000`) gets its owner's permissions back before it is walked, read or removed. The
+    minute's write-back runs beside the walks and never holds
+    them up. A walk uses lstat only, and it stops counting once past either cap. So a turn can overrun its cap by at most its
+    write rate times 15 s, and the emptyDir's `sizeLimit` must leave room for that. Each refusal logs a line starting
+    `session directory cap:`. A session's directory is removed once its warm process on that
+    worker closes, unless a Monitor command still runs in it, and only after what changed since
+    the last sync is written back. So a worker's disk holds at most `warm_max_per_replica`
+    directories, plus those of running monitors. The
+    worker's emptyDir `sizeLimit` must be at least `workspace_max_bytes` times
+    `warm_max_per_replica`.
+  - Isolation: each directory is 0700 and its files 0600. Nothing is read or written through a
+    symlink, and no path leaves the directory. All sessions on a worker share one uid, so
+    that uid is not a boundary between them: the boundary is these checks, and the
+    file-tool seam that Step 9.6 adds.
+  - The directory holds the files in plaintext (the record's bytes are sealed):
+    `forgetSubject` removes the copy on its own pod, and each worker removes, every hour, the
+    directories of sessions whose row is gone. That sweep is what finally removes a copy: the
+    `forget-subject` CLI runs outside the worker's own serialisation, so a turn placed there at
+    that moment can write the directory again.
+  - A write-back at a park or on the minute's timer only offers files. Pruning (strays, capped
+    files) happens at the turn's end, at an eviction and at a placement, so a turn keeps its
+    `.git` or a large intermediate file while it runs. Until Step 9.6 gives
+  sessions Claude Code's own file tools, only an `allow_refused` package's built-ins (§9)
+  and a Monitor's command use the directory.
 - A session's files go with the session (deleting it, or `forgetSubject`, deletes them,
   and forgetting deletes the key that opens its blobs); a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
   principal's own workspace, whose files are swept 24 h after their last write (every
   10 minutes, `WORKSPACE_SWEEP_MS`).
-- Caps: 25 MiB a file and 200 MiB a workspace by default, the `ai_settings` keys
+- Caps: 25 MiB a file, 200 MiB and 5,000 files a workspace by default (the file count is
+  fixed, `WORKSPACE_MAX_FILES`), the byte caps the `ai_settings` keys
   `workspace_file_max_bytes` and `workspace_max_bytes` (bytes), which Settings →
   Assistant workspace writes through `PUT /api/v1/ai/settings/workspace`
   `{file_max_bytes, workspace_max_bytes}` (1 MiB to 100 MiB a file, 1 MiB to 2 GiB a
   workspace, the file cap no larger; both in one transaction, each a `settings` audit row;
   [`agent/src/routes/workspaceSettings.ts`](../../agent/src/routes/workspaceSettings.ts)).
   Each is read at every write. Size the database for them.
+- A file and a directory never share a name. A write of `notes` while `notes/a.txt` exists, or
+  of `notes/a.txt` while the file `notes` exists, is refused `conflict`, because a session's
+  working directory cannot hold both. In an older workspace that holds both, a placement leaves
+  the file `notes` out of the directory and out of its write-back, so it is never read as deleted.
 - Tools, with their tiers: `workspace_list` and `workspace_read` (read),
   `workspace_write`, `workspace_edit` and `workspace_delete` (write), and
   `workspace_save` (read: it saves an output's 3MF, a model's file, thumbnail or media,

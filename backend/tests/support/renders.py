@@ -63,13 +63,12 @@ def legacy_row(store: JobProjection, job: Job) -> Job:
     its workflow `render-<id>`, no execution's run id, announced as `job.pending`."""
     with store.pool.connection() as conn, conn.transaction():
         conn.execute(
-            "INSERT INTO render_jobs (id, slug, params, inputs, model_version, state,"
+            "INSERT INTO render_jobs (id, slug, inputs, model_version, state,"
             " created_at, render_key, workflow_id, kind)"
-            " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s)",
+            " VALUES (%s, %s, %s, %s, 'pending', %s, %s, %s, %s)",
             (
                 job.id,
                 job.slug,
-                Jsonb(job.params),
                 Jsonb(job.inputs or legacy_inputs(job.params)),
                 job.model_version,
                 job.created_at,

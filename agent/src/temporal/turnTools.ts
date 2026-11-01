@@ -217,6 +217,8 @@ export type TurnToolEntry = {
 
 export type TurnToolsResult = {
   tools: TurnToolEntry[]
+  /** Why a server listed nothing (it stalled, failed, or is gone), scrubbed of the turn's secrets: a turn listing in its own process says these itself. */
+  unlisted?: string[]
 }
 
 /** A client on an in-process MCP server (an SDK server's `instance`), made fresh for each use. */
@@ -548,9 +550,10 @@ export async function listTurnTools(deps: TurnToolsDeps, context: TurnContext, o
     // A plugin gone since, or configured differently now, takes its session with it.
     await deps.clients?.retain(session, new Map(set.servers.flatMap((s) => (s.keep ? [[s.name, s.keep.fingerprint] as const] : []))))
     // Said once, after the listing, so a retried attempt does not say it again.
-    const problems = [...set.problems, ...listings.flatMap((l) => (l.problem ? [l.problem] : []))]
-    if (problems.length) await deps.report?.(session, problems.map(scrub))
-    return { tools }
+    const unlisted = listings.flatMap((l) => (l.problem ? [scrub(l.problem)] : []))
+    const problems = [...set.problems.map(scrub), ...unlisted]
+    if (problems.length) await deps.report?.(session, problems)
+    return { tools, ...(unlisted.length ? { unlisted } : {}) }
   })
 }
 

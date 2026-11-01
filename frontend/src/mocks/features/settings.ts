@@ -114,7 +114,12 @@ function putSettings(body: Record<string, unknown>) {
   for (const [name, value] of Object.entries(body)) {
     if (name === 'reset') continue
     if (!envSeeded.has(name)) {
-      next[name] = name === 'display_unit' ? (value ?? 'mm') : value
+      next[name] =
+        name === 'display_unit'
+          ? (value ?? 'mm')
+          : name === 'asset_fetch_domains'
+            ? (value ?? [...fixtures.DEFAULT_ASSET_FETCH_DOMAINS])
+            : value
       continue
     }
     if (value === null && !NULLABLE.has(name)) {

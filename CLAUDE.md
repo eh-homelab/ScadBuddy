@@ -268,7 +268,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `QueueFullError`), `submit.py` (`RenderService`, what the routes type against as
   `RenderDep`: submit starts `render-<render_key>` with update-with-start; the
   workflow's first (local) activity inserts the row, identical requests join it as
-  claims, and a supersede sends the old execution `release`, #1053; with `reuse_finished`
+  claims, and a supersede sends the old execution `release`, #1053; a withdrawal
+  (`withdraw`, `POST /jobs/{id}/withdraw` with an `Idempotency-Key`, the agent's
+  `withdraw_render`, the Customize page's Cancel) sends it `release` with `cancelled`,
+  and the last claim withdrawn cancels the job, #4968; with `reuse_finished`
   (the render route, an order's quote) a `done` job of the key whose refs still hold its
   result answers at once, its `reused_at` keeping it from the prune,
   `JobProjection.reuse_done`, #4870; a caller whose work follows the run, as the output
@@ -446,15 +449,29 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   native run passes `client=None` (`bambuddy/client.py` `maybe_client`), reads printer
   state from the LAN report (`printers/reports.py`), and its filaments are the loaded
   trays plus the physical-spool overlay of cached provider records (`spools/`, refreshed
-  off the path). `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
+  off the path): Bambuddy's inventory and ScadBuddy's own (`native_spools`,
+  `spools/native.py`, provider `native` in `spools/spool_providers.py`, routes
+  `api/native_spools.py`, #4643; each write re-caches it at once; a LAN start saves its
+  slots' grams in `native_spool_uses`, taken off once the run settles with that start
+  `done`, `native_use_hook`; the editor is Settings' `components/settings/NativeSpools.tsx`).
+  `printers/ams_mapping.py` computes `ams_mapping`/`ams_mapping2` from the
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
   command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
   presets and a process preset's values in Bambuddy's shapes (`local` presets are not
   offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
-  native library (nothing deletes it yet, #4337). The Customize page, the dialog's
+  native library, marked with its run's subject (`library_files.print_subject`, as is
+  its slice); `print_library/sweep.py` `sweep_print_copies` (housekeeping
+  `NATIVE_COPIES_SWEEP`, #4337) trashes a folder's superseded copies and what nothing
+  records, as Bambuddy's inbox keeps its copies; a moved, restored or copied one is the
+  person's (no subject). The Customize page, the dialog's
   first read and its analysis, and the Prints page's queue and history panels ask
   Bambuddy nothing on these backends (#4601, #4629; the panels read it only when opened).
+  A LAN print's records (#4644, #4543): `print_succeed` writes its `output_last_prints`
+  row (`print_route` `lan`), and `lan_print` saves its rack picks keyed by run and
+  `subtask_name` (`rack_nozzle_*`'s `lan_run_id`, `lan_subtask`); the follow's read hooks
+  (`Follower.on_read`: `printers/progress.py` `lan_last_print`, `rack/usage.py`
+  `lan_settle_hook`) move the row and settle the picks, `lan_wait` each earlier copy's.
   A run of several plates or copies is its own queue (#4541, `workflows/printing.py`
   `_print_lan`): it succeeds at its first start, then `lan_wait` (`printers/print_activities.py`,
   over the watch's `printer_reports`) waits out each print before the next starts, and
@@ -665,6 +682,21 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
   times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
+  Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
+  (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
+  `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)
+  starts the item's output's print through `api/printing.py` `accept_run`, never a path of
+  its own, its `request_id` from the operation's key. The item is claimed first, under the
+  order's lock (`Lifecycle.claim_print`: the attempt keyed by `print_request_id`, the quote's
+  file held by `(order_item_fulfilment, <id>)`, the item `queued`), so one print starts per
+  item; then the run is attached (`attach_print`) or a refused start releases the claim
+  (`release_print`); a retry re-checks a run-less claim before it starts (refused, it
+  attaches the run its request made if one exists, else releases), a key's claim on
+  another item is `print_request_conflict`, and a run-less claim's `PATCH` waits for its
+  operation (`print_starting`). The item follows the run from
+  `print_runs` and `print_outcomes` only (`Lifecycle.follow_print`, the component's
+  `listen_for_prints`), never by asking a printer or Bambuddy. Agent `order_item_print`
+  (outward); frontend `components/orders/PrintItem.tsx` over `PrintPicker`'s `itemPrint`.
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
@@ -823,11 +855,14 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `SessionFiles` over `ai_session_files`, keyed by `workspace` (`session:<id>`, gone
     with its session, copied by a fork; or `principal:<kind>:<id>` outside a session,
     swept 24 h after its last write) and a checked `path`; caps
-    `workspace_file_max_bytes`/`workspace_max_bytes`. Reached as
+    `workspace_file_max_bytes`/`workspace_max_bytes` and `WORKSPACE_MAX_FILES` (5,000). Reached as
     `ToolServices.workspace` (so in-process, `/mcp` and the durable activities alike),
     with `workspaceOf(ctx)`; the `workspace_*` tools are `src/tools/workspace.ts`, and
     `http_request`'s `save_to_workspace` gets the session's from `sessions/manager.ts`.
-    Never a file on the pod. The bytes (#4789) are a blob of the backend's content store,
+    Never a file on the pod; a session's working directory, `<SCADBUDDY_SESSION_DIR>/<id>/`
+    (each worker's own capped emptyDir, Step 9.5; not the NAS share, whose backup cannot leave
+    the plaintext copies out), is a copy of it that each turn's placement fills and each park
+    and its end write back by sha256 (`src/workspace/directory.ts`). The bytes (#4789) are a blob of the backend's content store,
     sealed under a per-file key wrapped under the session's data key (`src/workspace/sealing.ts`,
     `blobs.ts`; backend `api/internal_workspace.py` mints the URLs; a trigger keeps the
     `blob_refs` holder with the row, which assumes one database and role for both services;

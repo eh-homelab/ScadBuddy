@@ -103,11 +103,14 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's plug
     await rm(dir, { recursive: true, force: true })
   })
 
-  async function agent(): Promise<SessionManager> {
+  async function agent(options: { broken?: boolean } = {}): Promise<SessionManager> {
     const paths = await tempPaths()
     await ensureStateDirs(paths)
     const memory: CheckedPlugin = { plugin: { name: 'my-memory', url: mcp.url, toolTiers: { recall: 'read' }, disabledTools: [] }, address: '127.0.0.1' }
-    const remotePlugins = (): Promise<PluginsForRun> => Promise.resolve(forwardForRun({ plugins: [memory], problems: [] }, forwarder))
+    // A plugin whose server is not there: its listing fails, and the turn says why.
+    const broken: CheckedPlugin = { plugin: { name: 'gone-plugin', url: 'http://127.0.0.1:9/mcp', toolTiers: {}, disabledTools: [] }, address: '127.0.0.1' }
+    const remotePlugins = (): Promise<PluginsForRun> =>
+      Promise.resolve(forwardForRun({ plugins: options.broken ? [memory, broken] : [memory], problems: [] }, forwarder))
     // A package whose subagent the turn starts.
     const root = path.join(dir, 'greeter')
     for (const [rel, content] of Object.entries({
@@ -204,5 +207,16 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's plug
     expect(mcp.calls).toEqual(['retain:a greeting'])
     const retain = fake.messageCalls().filter(isSubagent).flatMap(toolUses).find((t) => t.name === 'mcp__my-memory__retain')
     expect(await activitiesOf(session.id, retain!.id)).toEqual([{ type: 'turn:my-memory__retain', queue: host }])
+  }, 120_000)
+
+  it('says in the session why a plugin listed nothing, and still runs the others', async () => {
+    script = (r) => (lastContent(r).includes('tool_result') ? { text: 'Recalled.' } : { toolUse: { name: 'mcp__my-memory__recall', input: { query: 'q' } } })
+    const m = await agent({ broken: true })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'recall' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    expect(mcp.calls).toEqual(['recall:q'])
+    const said = await db.sql<{ event: string }[]>`SELECT event FROM ai_session_events WHERE session_id = ${session.id} ORDER BY seq`
+    const unavailable = said.map((r) => JSON.parse(r.event) as { type: string; code?: string; message?: string }).filter((e) => e.code === 'plugin_unavailable')
+    expect(unavailable.some((e) => e.message?.includes('gone-plugin'))).toBe(true)
   }, 120_000)
 })

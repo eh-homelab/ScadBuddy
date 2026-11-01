@@ -766,18 +766,18 @@ def stopped(stop: threading.Event | None) -> bool:
 
 def referenced_asset_ids(
     paths: DataPaths,
-    params: Iterable[Mapping[str, ParamValue]] = (),
-    extra: Iterable[Mapping[str, Any]] = (),
+    records: Iterable[Mapping[str, Any]] = (),
 ) -> set[str]:
     """Every asset id something keeps (#296): the sweep removes nothing in here.
 
     - every output's records (``params.json`` and the rest of its JSON), and for an
       output whose ``params.json`` is gone, the root model of its 3MF, where the
       provenance "Edit in ScadBuddy" falls back to is stamped;
-    - ``params``: every saved preset's values (they are in Postgres) and every job's
-      in the ``render_jobs`` projection, finished or not;
-    - ``extra``: other JSON records to scan whole, as ``params`` are: every order
-      item's ``inputs`` (#4249, orders spec §3.3), so an ordered upload stays;
+    - ``records``: JSON records from Postgres, each scanned whole: every saved
+      preset's and every job's inputs (the ``render_jobs`` projection, finished or
+      not), and every order item's (#4249, orders spec §3.3) -- their ``params`` and
+      the template UI's own state beside them alike (#725), which names an upload by
+      the same id a ``file`` parameter holds;
     - every template's shipped ``presets.json`` and ``model.json``, mine and built-in;
 
     A source that exists but cannot be read raises OSError: a sweep that cannot see
@@ -800,10 +800,8 @@ def referenced_asset_ids(
     for pattern in (f"*/{LEGACY_PRESETS_NAME}", "*/model.json"):
         for template_file in (*paths.models.glob(pattern), *paths.builtins.glob(pattern)):
             scan(template_file)
-    for values in params:
-        found.update(_ids_in(json.dumps(values).encode()))
-    for inputs in extra:
-        found.update(_ids_in(json.dumps(inputs).encode()))
+    for document in records:
+        found.update(_ids_in(json.dumps(document).encode()))
     return found
 
 

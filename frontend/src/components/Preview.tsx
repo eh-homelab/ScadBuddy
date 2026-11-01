@@ -164,6 +164,14 @@ interface Props {
   blocked?: string
   /** #937 — where OpenSCAD's warnings point the reader to fix them: the source editor. */
   sourceLink?: ReactNode
+  /** #4968 — withdraws the render in flight; offered as "Cancel" while it is pending or running. */
+  onCancel?: () => void
+  /** The withdrawal has been sent and not yet answered. */
+  cancelling?: boolean
+  /** Why the last withdrawal was refused. */
+  cancelError?: string | undefined
+  /** The job this page withdrew: cancelled, it is said to be the reader's own doing. */
+  withdrawn?: string | undefined
 }
 
 export function Preview({
@@ -178,6 +186,10 @@ export function Preview({
   rejected = false,
   blocked,
   sourceLink,
+  onCancel,
+  cancelling = false,
+  cancelError,
+  withdrawn,
 }: Props) {
   // #1638 — the job this render waits on, once read: whether a worker has it yet,
   // where it waits, and how long since it was submitted.
@@ -434,6 +446,24 @@ export function Preview({
                 {live && <RenderElapsed since={live.created_at} />}
               </Badge>
             )}
+            {live && onCancel && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                data-overlay="chip"
+                className={`${CHIP} h-auto ${compact ? 'px-2 py-0.5 text-[11px]' : 'px-2.5 py-1 text-xs'}`}
+                onClick={onCancel}
+                disabled={cancelling}
+              >
+                {cancelling ? 'Cancelling…' : 'Cancel'}
+              </Button>
+            )}
+            {live && cancelError && (
+              <span role="alert" className={`${CHIP} px-2 py-0.5 text-xs text-destructive`}>
+                Could not cancel: {cancelError}
+              </span>
+            )}
             {controls}
           </div>
         </div>
@@ -480,6 +510,7 @@ export function Preview({
       {failed && (
         <RenderError
           cancelled={cancelled}
+          withdrawn={cancelled && withdrawn === job.id}
           log={(job.log_tail ?? []).join('\n')}
           error={job.error ?? undefined}
           warnings={job.warnings ?? []}
@@ -824,12 +855,14 @@ function RenderWarnings({
 
 function RenderError({
   cancelled = false,
+  withdrawn = false,
   log,
   error,
   warnings,
   covered,
 }: {
   cancelled?: boolean
+  withdrawn?: boolean
   log?: string
   error?: string
   warnings: string[]
@@ -845,19 +878,23 @@ function RenderError({
       style={covered ? { left: `calc(${covered} + 0.75rem)` } : undefined}
     >
       <p className="border-b border-destructive/25 px-3 py-2 text-sm font-medium text-destructive">
-        {cancelled
+        {withdrawn
+          ? 'You cancelled this render. Change a parameter to render again.'
+          : cancelled
           ? 'This render was cancelled. A newer request replaced it before it finished — your parameters were not the problem.'
           : ownFailure
             ? 'ScadBuddy could not finish this render.'
             : 'OpenSCAD could not render these parameters.'}
       </p>
       {warnings.length > 0 && <RenderWarnings warnings={warnings} inline />}
-      <pre
-        data-testid="render-log"
-        className="sb-num max-h-40 overflow-auto px-3 py-2 text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted-foreground"
-      >
-        {(ownFailure ? error : log) || 'No log output was captured.'}
-      </pre>
+      {!withdrawn && (
+        <pre
+          data-testid="render-log"
+          className="sb-num max-h-40 overflow-auto px-3 py-2 text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted-foreground"
+        >
+          {(ownFailure ? error : log) || 'No log output was captured.'}
+        </pre>
+      )}
     </div>
   )
 }

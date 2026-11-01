@@ -19,8 +19,10 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.printers.component import PRINTERS, Printers
 from tests.api.conftest import read_stored, set_plate_image, wait_for_job
 from tests.api.test_print import API
 from tests.api.test_print_filaments import queue_route as filament_queue_route
@@ -52,18 +54,70 @@ def test_the_plate_type_is_remembered_per_printer(client: TestClient, settings: 
     printers, and only a real readback of both keys together catches that.
     """
     answer = client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Supertack Plate"})
-    assert answer.json() == {"printer_id": 1, "bed_type": "Supertack Plate"}
+    assert answer.json() == {"printer_id": 1, "printer": None, "bed_type": "Supertack Plate"}
     other = client.put("/api/v1/print/printers/2/bed-type", json={"bed_type": "Cool Plate"})
-    assert other.json() == {"printer_id": 2, "bed_type": "Cool Plate"}
+    assert other.json() == {"printer_id": 2, "printer": None, "bed_type": "Cool Plate"}
 
     stored = read_stored(settings.database_url)
     assert stored["printer_bed_types"] == {"1": "Supertack Plate", "2": "Cool Plate"}
 
     cleared = client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": None})
-    assert cleared.json() == {"printer_id": 1, "bed_type": None}
+    assert cleared.json() == {"printer_id": 1, "printer": None, "bed_type": None}
 
     stored = read_stored(settings.database_url)
     assert stored["printer_bed_types"] == {"2": "Cool Plate"}
+
+
+def test_the_plate_is_remembered_by_the_registry_printer(client: TestClient) -> None:
+    """#4971: a registry id names the printer too, so a LAN-only one (no Bambuddy id)
+    remembers its plate; a Bambuddy id the registry links lands on that printer's row,
+    and Settings lists both with their names, to forget by either id."""
+    lan = client.post("/api/v1/printers", json={"serial": "0938AB000000011", "name": "LAN"})
+    assert lan.status_code == 201, lan.text
+    lan_id = lan.json()["id"]
+    linked = client.post("/api/v1/printers", json={"serial": "0938AB000000012", "name": "Both"})
+    linked_id = linked.json()["id"]
+    registry: Printers = getattr(client.app.state, STATE_ATTR).components.get(PRINTERS)  # type: ignore[attr-defined]
+    registry.store.link_bambuddy(linked_id, 4)
+
+    answer = client.put(
+        f"/api/v1/print/printers/{lan_id}/bed-type", json={"bed_type": "Cool Plate"}
+    )
+    assert answer.json() == {"printer_id": None, "printer": lan_id, "bed_type": "Cool Plate"}
+    by_bambuddy = client.put(
+        "/api/v1/print/printers/4/bed-type", json={"bed_type": "Supertack Plate"}
+    )
+    assert by_bambuddy.json() == {
+        "printer_id": 4,
+        "printer": linked_id,
+        "bed_type": "Supertack Plate",
+    }
+
+    remembered = client.get("/api/v1/settings/remembered").json()
+    assert remembered["printer_bed_types"] == {"4": "Supertack Plate"}
+    assert sorted(remembered["printer_plates"], key=lambda plate: plate["name"]) == [
+        {
+            "printer": linked_id,
+            "bambuddy_printer_id": 4,
+            "name": "Both",
+            "bed_type": "Supertack Plate",
+        },
+        {"printer": lan_id, "name": "LAN", "bed_type": "Cool Plate"},
+    ]
+
+    client.put(f"/api/v1/print/printers/{linked_id}/bed-type", json={"bed_type": None})
+    client.put(f"/api/v1/print/printers/{lan_id}/bed-type", json={"bed_type": None})
+    assert client.get("/api/v1/settings/remembered").json()["printer_plates"] == []
+
+
+@pytest.mark.parametrize("printer_id", ["00000000-0000-4000-8000-000000000000", "nope", str(2**31)])
+def test_a_printer_the_registry_does_not_hold_is_not_found(
+    client: TestClient, printer_id: str
+) -> None:
+    answer = client.put(
+        f"/api/v1/print/printers/{printer_id}/bed-type", json={"bed_type": "Cool Plate"}
+    )
+    assert answer.status_code == 404, answer.text
 
 
 @pytest.mark.requires_postgres

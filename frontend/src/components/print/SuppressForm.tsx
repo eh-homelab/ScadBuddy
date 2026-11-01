@@ -17,6 +17,16 @@ function scopeValue(scope: ScopeRef): string {
   return `${scope.kind}\u0000${scope.key}`
 }
 
+type Kind = 'suppress' | 'ignore'
+
+/** What each decision kind does, shown under the choice (`runner.apply_decisions`). */
+const KIND_HELP: Record<Kind, string> = {
+  suppress: 'Sets the finding aside with a reason, as #pragma warning disable does.',
+  ignore: 'No reason needed; one is kept if given.',
+}
+
+const KIND_VERB: Record<Kind, string> = { suppress: 'Suppress', ignore: 'Ignore' }
+
 interface Props {
   diagnostic: AnalyzerDiagnostic
   /** Where a decision about this print can be stored, broadest first (the report's). */
@@ -35,8 +45,10 @@ interface Props {
  * The chosen scope is checked against `scopes` on every render: the report is read
  * again while the form is open (another printer, other filaments), and a scope it no
  * longer lists falls back to this print rather than being posted stale. An `error`
- * finding suppressed wider than the template needs a confirmation, since the backend
- * asks for one only when the decision is enforced.
+ * finding set aside wider than the template needs a confirmation here, and so does one
+ * enforced at any scope: the backend asks (`confirm`, 428) only for an enforced
+ * suppression of an `error` rule, and the form asks for both kinds alike, since an
+ * ignore hides it as surely.
  *
  * A finding with an accepted fix is still listed, and the backend takes the narrowest
  * decision (`decisions.resolve`): a suppression wider than the acceptance would be
@@ -45,8 +57,12 @@ interface Props {
  * acceptance is (`post_apply` stores `instance=diagnostic.key`), so it replaces it
  * rather than losing to it.
  *
- * Not offered: `enforced` (a broad decision overriding narrower ones, which for an
- * `error` rule also needs a confirmation) and `ignore`, which records no reason.
+ * Both kinds `DecisionCreate` takes are offered (#4967): `suppress`, which needs a
+ * reason, and `ignore`, which does not (`_well_formed`). `enforced` makes the decision
+ * win over any narrower one (`decisions.resolve`), so it is offered only above this
+ * print, the narrowest scope, where nothing is narrower; the panel removes an enforced
+ * decision only after a confirmation (`RemoveButton`). A reason typed under one kind
+ * is kept when the kind changes.
  */
 export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: Props) {
   const id = useId()
@@ -55,8 +71,13 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
   const scopes = accepted ? atOrNarrower(offered, accepted.scope) : offered
   const [choice, setChoice] = useState<string | undefined>(undefined)
   const scope = scopes.find((row) => scopeValue(row) === choice) ?? scopes.at(-1)
+  const [kind, setKind] = useState<Kind>('suppress')
+  const [enforcedChosen, setEnforced] = useState(false)
+  const canEnforce = scope !== undefined && scope.kind !== 'print'
+  const enforced = enforcedChosen && canEnforce
   const [confirmed, setConfirmed] = useState(false)
-  const needsConfirm = diagnostic.severity === 'error' && scope !== undefined && widerThanTemplate(scope)
+  const needsConfirm =
+    diagnostic.severity === 'error' && scope !== undefined && (enforced || widerThanTemplate(scope))
   const [everyInstanceChosen, setEveryInstance] = useState(false)
   const replacesAccepted = accepted !== undefined && scope !== undefined && sameScope(scope, accepted.scope)
   const everyInstance = everyInstanceChosen && !replacesAccepted
@@ -65,7 +86,10 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
   const [refusal, setRefusal] = useState<string | null>(null)
 
   const ready =
-    scope !== undefined && reason.trim() !== '' && !saving && (!needsConfirm || confirmed)
+    scope !== undefined &&
+    (kind === 'ignore' || reason.trim() !== '') &&
+    !saving &&
+    (!needsConfirm || confirmed)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -76,15 +100,15 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
       await api.createDecision({
         diagnostic_id: diagnostic.id,
         instance: everyInstance ? null : diagnostic.key,
-        kind: 'suppress',
+        kind,
         scope,
-        reason: reason.trim(),
-        enforced: false,
-        confirm: false,
+        reason: reason.trim() || null,
+        enforced,
+        confirm: needsConfirm && confirmed,
       })
       onDone()
     } catch (cause) {
-      setRefusal(cause instanceof ApiError ? cause.detail : 'The suppression was not saved.')
+      setRefusal(cause instanceof ApiError ? cause.detail : 'The decision was not saved.')
       setSaving(false)
     }
   }
@@ -97,6 +121,27 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
       onSubmit={(event) => void submit(event)}
       className="space-y-2"
     >
+      <div className="flex flex-col gap-1">
+        <Label htmlFor={`${id}-kind`} className="text-[12px] font-normal text-muted-foreground">
+          Decision
+        </Label>
+        <Select
+          value={kind}
+          onValueChange={(next) => {
+            setKind(next as Kind)
+            setConfirmed(false)
+          }}
+        >
+          <SelectTrigger id={`${id}-kind`} size="sm" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="suppress">Suppress</SelectItem>
+            <SelectItem value="ignore">Ignore</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-[12px] text-muted-foreground">{KIND_HELP[kind]}</p>
+      </div>
       <div className="flex flex-col gap-1">
         <Label htmlFor={`${id}-scope`} className="text-[12px] font-normal text-muted-foreground">
           Scope
@@ -124,7 +169,7 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
         <p className="text-[12px] text-muted-foreground">
           {replacesAccepted
             ? `This replaces the fix accepted for ${scopeLabel(accepted.scope).toLowerCase()}, so it is about this finding only.`
-            : `A fix is accepted for ${scopeLabel(accepted.scope).toLowerCase()}; a wider suppression would not apply, so only that scope and narrower ones are offered.`}
+            : `A fix is accepted for ${scopeLabel(accepted.scope).toLowerCase()}; a wider decision would not apply, so only that scope and narrower ones are offered.`}
         </p>
       )}
       <div className="flex items-center gap-2">
@@ -138,13 +183,36 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
           Every {diagnostic.id} finding
         </Label>
       </div>
+      {canEnforce && (
+        <div className="flex items-start gap-2">
+          <Checkbox
+            id={`${id}-enforce`}
+            checked={enforced}
+            onCheckedChange={(next) => {
+              setEnforced(next === true)
+              setConfirmed(false)
+            }}
+            className="mt-0.5"
+          />
+          <div className="flex flex-col gap-0.5">
+            <Label htmlFor={`${id}-enforce`} className="text-[12px] font-normal text-muted-foreground">
+              Enforce over narrower scopes
+            </Label>
+            {enforced && (
+              <p className="text-[12px] text-muted-foreground">
+                It wins over any decision made for a narrower scope; removing it asks first.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
       <div className="flex flex-col gap-1">
         <Label htmlFor={`${id}-reason`} className="text-[12px] font-normal text-muted-foreground">
-          Reason
+          {kind === 'ignore' ? 'Reason (optional)' : 'Reason'}
         </Label>
         <Textarea
           id={`${id}-reason`}
-          required
+          required={kind === 'suppress'}
           maxLength={MAX_REASON}
           rows={2}
           value={reason}
@@ -161,7 +229,9 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
             className="mt-0.5"
           />
           <Label htmlFor={`${id}-confirm`} className="text-[12px] leading-snug font-normal text-destructive">
-            {`${diagnostic.id} is a problem. Suppress it for ${scopeLabel(scope).toLowerCase()}, not only this template?`}
+            {enforced
+              ? `${diagnostic.id} is a problem. ${KIND_VERB[kind]} it for ${scopeLabel(scope).toLowerCase()} over every narrower decision?`
+              : `${diagnostic.id} is a problem. ${KIND_VERB[kind]} it for ${scopeLabel(scope).toLowerCase()}, not only this template?`}
           </Label>
         </div>
       )}
@@ -176,7 +246,7 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
         </Button>
         <Button size="sm" type="submit" disabled={!ready}>
           {saving && <Spinner />}
-          Suppress
+          {KIND_VERB[kind]}
         </Button>
       </div>
     </form>

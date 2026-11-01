@@ -152,6 +152,35 @@ describe('Preview', () => {
     expect(screen.queryByText(/OpenSCAD could not render these parameters/i)).not.toBeInTheDocument()
   })
 
+  it('offers Cancel on a render in flight, and only then (#4968)', () => {
+    const onCancel = vi.fn()
+    const { rerender } = render(
+      <Preview job={job({ status: 'running', created_at: new Date().toISOString() })} rendering onCancel={onCancel} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onCancel).toHaveBeenCalledTimes(1)
+    rerender(
+      <Preview job={job({ status: 'running', created_at: new Date().toISOString() })} rendering onCancel={onCancel} cancelling />,
+    )
+    expect(screen.getByRole('button', { name: 'Cancelling…' })).toBeDisabled()
+    rerender(<Preview job={job({ status: 'done' })} rendering={false} onCancel={onCancel} />)
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+  })
+
+  it('says a render this page withdrew was the reader’s own cancel, with no log', () => {
+    const id = 'c'.repeat(32)
+    render(
+      <Preview
+        job={job({ id, status: 'cancelled', error: CANCELLED_ERROR, log_tail: [CANCELLED_ERROR] })}
+        rendering={false}
+        withdrawn={id}
+      />,
+    )
+    expect(screen.getByText(/you cancelled this render/i)).toBeInTheDocument()
+    expect(screen.queryByText(/were not the problem/i)).not.toBeInTheDocument()
+    expect(screen.queryByTestId('render-log')).not.toBeInTheDocument()
+  })
+
   it('invites a parameter change before the first render', () => {
     render(<Preview job={undefined} rendering={false} />)
     expect(screen.getByText('Change a parameter to render.')).toBeInTheDocument()

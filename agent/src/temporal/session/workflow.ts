@@ -138,6 +138,12 @@ const ATTENTION_TIMEOUTS_PATCH = 'agent-session-attention-timeouts'
  * an older history is held by the workflow, as it was.
  */
 const GATE_RECORD_PATCH = 'gate-record-r5'
+/**
+ * A wake that joined a read in flight, which read the row before the decision committed, reads
+ * it again (#5118). Asked only when that read found nothing: an older history's wake waited for
+ * the entry's next recheck there.
+ */
+const WAKE_REREAD_PATCH = 'gate-record-wake-reread'
 const THE_TURN_ENDED = 'the turn ended'
 
 type Activities = Record<string, (input?: unknown) => Promise<unknown>>
@@ -234,6 +240,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     taskQueue: TASK_QUEUE,
     onTimeout: () => patched(ATTENTION_TIMEOUTS_PATCH),
     record: () => patched(GATE_RECORD_PATCH),
+    rereadOnWake: () => patched(WAKE_REREAD_PATCH),
   })
   gate.install()
 

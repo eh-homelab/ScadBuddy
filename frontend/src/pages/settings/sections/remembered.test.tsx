@@ -27,6 +27,26 @@ describe('Remembered choices (#322)', () => {
     expect((await api.getRemembered()).printer_bed_types).toEqual({ '1': 'Textured PEI Plate' })
   })
 
+  it("lists and forgets a LAN-only printer's plate by its registry id (#4971)", async () => {
+    setMockRemembered({ printerBedTypes: { 'lan-row': 'Cool Plate', '1': 'Textured PEI Plate' } })
+    const { user } = renderSettingsSection(<Remembered />, { route: '/settings/printing' })
+    const table = await screen.findByRole('table', { name: 'Remembered choices' })
+    expect(within(table).getByText('Cool Plate')).toBeInTheDocument()
+
+    await user.click(within(table).getByRole('button', { name: 'Forget plate for Printer lan-row' }))
+    await waitFor(() => expect(within(table).queryByText('Cool Plate')).toBeNull())
+    expect((await api.getRemembered()).printer_plates).toEqual([
+      { printer: null, bambuddy_printer_id: 1, name: null, bed_type: 'Textured PEI Plate' },
+    ])
+  })
+
+  it('shows a remembered print sequence (#4970)', async () => {
+    setMockRemembered({ modelChoices: { gear: { tier: 'draft', print_sequence: 'by object' } } })
+    renderSettingsSection(<Remembered />, { route: '/settings/printing' })
+    const table = await screen.findByRole('table', { name: 'Remembered choices' })
+    expect(within(table).getByText('draft quality · by object')).toBeInTheDocument()
+  })
+
   it("shows each project's printer and nozzle and forgets one (#599)", async () => {
     setMockRemembered({
       projectTargets: { '1': { printer_id: 1, nozzle_diameter: '0.4' }, '99': { printer_id: 42 } },

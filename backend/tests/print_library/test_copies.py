@@ -103,7 +103,7 @@ async def test_another_target_uploads_another_copy(
 
     assert h2d != x1c
     assert {c.id for c in await uploads.for_output(KEY, native=True)} == {h2d, x1c}
-    # Never a delete: the superseded target's copy stays in the library.
+    # Never a delete here: the superseded target's copy is the sweep's (#4337).
     assert {f.id for f in await native.library_listing(folder_id=None)} == {h2d, x1c}
 
 
@@ -149,9 +149,9 @@ async def test_an_earlier_attempts_unrecorded_copy_is_taken(
     takes that file rather than upload a second."""
     laid_out = _laid_out_for(fetches.payload, H2D)
     since = datetime.now(UTC)
-    left = await native.upload("bracket.3mf", io.BytesIO(laid_out), None)
+    left = await native.upload("bracket.3mf", io.BytesIO(laid_out), None, print_subject=KEY)
     # Same name, other bytes: never taken.
-    await native.upload("bracket.3mf", io.BytesIO(fetches.payload), None)
+    await native.upload("bracket.3mf", io.BytesIO(fetches.payload), None, print_subject=KEY)
 
     taken = await ensure_native_copy(
         native, uploads, fetches.printable(), target=H2D, folder_id=None, attempt_since=since
@@ -182,12 +182,30 @@ async def test_a_file_older_than_the_attempt_is_never_taken(
     assert made != theirs.id
 
 
+async def test_a_persons_file_made_during_the_attempt_is_never_taken(
+    native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches
+) -> None:
+    """#4337, case 5: a person's own upload of the same name and bytes, even one made
+    while the run's attempts went on, carries no run's subject, and is theirs."""
+    laid_out = _laid_out_for(fetches.payload, H2D)
+    since = datetime.now(UTC)
+    theirs = await native.upload("bracket.3mf", io.BytesIO(laid_out), None)
+
+    made = await ensure_native_copy(
+        native, uploads, fetches.printable(), target=H2D, folder_id=None, attempt_since=since
+    )
+
+    assert made != theirs.id
+
+
 async def test_a_recorded_file_is_never_taken_as_an_earlier_attempts(
     native: NativeLibrary, uploads: BambuddyUploadStore, fetches: _Fetches
 ) -> None:
     laid_out = _laid_out_for(fetches.payload, H2D)
     since = datetime.now(UTC)
-    other = await native.upload("bracket.3mf", io.BytesIO(laid_out), None)
+    other = await native.upload(
+        "bracket.3mf", io.BytesIO(laid_out), None, print_subject="another-output"
+    )
     await uploads.record("another-output", LibraryCopy(id=other.id, folder_id=None, target_key="x"))
 
     made = await ensure_native_copy(
@@ -365,7 +383,9 @@ async def _copy_with_slice(
     copy_id = await ensure_native_copy(
         native, uploads, fetches.printable(key), target=H2D, folder_id=None
     )
-    sliced = await native.upload("bracket.plate1.gcode.3mf", io.BytesIO(b"gcode"), None)
+    sliced = await native.upload(
+        "bracket.plate1.gcode.3mf", io.BytesIO(b"gcode"), None, print_subject=key
+    )
     await uploads.record_sliced(key, copy_id, SlicedCopy(id=sliced.id, preset_key="k"))
     return copy_id, sliced.id, sliced.sha256
 

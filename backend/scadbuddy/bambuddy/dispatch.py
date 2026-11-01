@@ -79,6 +79,12 @@ class SlicePlan(BaseModel):
     #: Accepted analyzer fixes are not consumed by a print yet (``api/analyzers.py``);
     #: when they are, an explicit fix goes over these.
     process_overrides: dict[str, ProcessValue] = Field(default_factory=dict)
+    #: Filament settings by slot (from 1), written into that slot's filament file: a
+    #: filament profile's nozzle temperature (#2799). Only the native slicer has the
+    #: channel (``slicing/presets.py``); Bambuddy's ``SliceRequest`` has no filament
+    #: field, so :func:`slice_request` never sends them, and a plan for Bambuddy's slicer
+    #: carries none. Defaults empty, so a plan in a workflow's history reads as before.
+    filament_overrides: dict[int, dict[str, str]] = Field(default_factory=dict)
     #: Slice the file as a whole (``plate: 0``) rather than by its plate number: set
     #: for a library file of one plate (#2180). Naming a plate makes Bambuddy repaint
     #: any slot it thinks that plate leaves unused, and it cannot see colour painted

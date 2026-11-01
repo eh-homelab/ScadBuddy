@@ -441,6 +441,48 @@ def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
     assert "scadbuddy_assets_swept_total 1.0" in client.get("/metrics").text
 
 
+def test_the_sweep_keeps_what_inputs_ui_state_names(
+    app: FastAPI, client: TestClient, pg_conninfo: str
+) -> None:
+    """#725: an upload named only by a template UI's own state (a key of the inputs
+    beside `params`, at any depth) is a reference, in a saved preset, a job and an
+    output alike, and one nothing names still goes."""
+    in_output, in_preset, in_job, unused = (str(_upload(client, _svg(n))["id"]) for n in range(4))
+
+    def ui(asset_id: str) -> dict[str, object]:
+        return {"params": {}, "v": 0, "layers": [{"image": asset_id, "x": 1}]}
+
+    render = f"/api/v1/models/{MODEL_SLUG}/render"
+    accepted = client.post(render, json={"inputs": ui(in_output)})
+    assert accepted.status_code == 202, accepted.text
+    job = wait_for_job(client, accepted.json()["job_id"])
+    saved = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/outputs",
+        json={"job_id": job["id"], "inputs": ui(in_output)},
+        headers=press(),
+    )
+    assert saved.status_code == 201, saved.text
+    preset = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/presets",
+        json={"name": "Layers", "inputs": ui(in_preset)},
+        headers=press(),
+    )
+    assert preset.status_code == 201, preset.text
+    state: AppState = getattr(app.state, STATE_ATTR)
+    with state.projection.pool.connection() as conn:
+        conn.execute("DELETE FROM render_jobs WHERE id = %s", (job["id"],))
+    other = client.post(render, json={"inputs": ui(in_job)})
+    assert other.status_code == 202, other.text
+    wait_for_job(client, other.json()["job_id"])
+    for asset_id in (in_output, in_preset, in_job, unused):
+        _age(pg_conninfo, asset_id, 30 * 86400)
+
+    assert sweep_assets(state) == [unused]
+
+    for asset_id in (in_output, in_preset, in_job):
+        assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code == 200
+
+
 def _until(done: Callable[[], bool], timeout: float = 30) -> None:
     """The boot's sweep is the housekeeping Schedule's run (review #1095 1), which
     starts once the app's library worker has set the Schedule up."""
@@ -640,14 +682,14 @@ def test_a_sweep_stopped_while_it_read_its_references_removes_nothing(
     """#2554: stopped during the reference reads, it returns before the per-asset pass."""
     stop = threading.Event()
 
-    def referenced(paths: object, params: object, extra: object = ()) -> set[str]:
+    def referenced(paths: object, records: object = ()) -> set[str]:
         stop.set()  # the shutdown arrives while the templates are read
         return set()
 
     monkeypatch.setattr(main_module, "referenced_asset_ids", referenced)
     state = SimpleNamespace(
         render=SimpleNamespace(store=SimpleNamespace(list_jobs=list)),
-        presets=SimpleNamespace(saved_params=list),
+        presets=SimpleNamespace(saved_inputs=list),
         components=SimpleNamespace(
             get=lambda key: SimpleNamespace(store=SimpleNamespace(item_inputs=list))
         ),

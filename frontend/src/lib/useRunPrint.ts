@@ -205,8 +205,9 @@ export function useRunPrint({
 
   /**
    * #78 / spec §7 — what this model reopens on next time: the printer, the nozzles,
-   * tier and process, and the spools where they differ from the suggestion (re-sending
-   * the suggestion is not a choice). Best effort, and only once the print has started.
+   * tier and process, the print sequence (#4970), and the spools where they differ from
+   * the suggestion (re-sending the suggestion is not a choice). Best effort, and only once
+   * the print has started.
    */
   function rememberChoices() {
     const last = choices?.model_choices
@@ -216,6 +217,7 @@ export function useRunPrint({
       nozzles,
       tier,
       process_name: processName,
+      print_sequence: printSequence,
     }
     const before = {
       printer_id: last?.printer_id ?? null,
@@ -223,15 +225,20 @@ export function useRunPrint({
       nozzles: last?.nozzles ?? [],
       tier: last?.tier ?? null,
       process_name: last?.process_name ?? null,
+      print_sequence: last?.print_sequence ?? null,
     }
     if (JSON.stringify(next) === JSON.stringify(before)) return
     if (source) void sourceApi(source).remember(next).catch(() => undefined)
   }
 
-  /** #83 — the plate this printer now has on it, the fallback when it has no archives. */
+  /**
+   * #83 — the plate this printer now has on it, the fallback when it has no archives. A
+   * LAN-only printer has no Bambuddy id, so its registry id names it (#4971).
+   */
   function rememberBedType() {
-    if (printerId === null || bedType === null) return
-    void api.putPrinterBedType(printerId, bedType).catch(() => undefined)
+    const printer = printerId ?? registryPrinter
+    if (printer === null || bedType === null) return
+    void api.putPrinterBedType(printer, bedType).catch(() => undefined)
   }
 
   async function run() {

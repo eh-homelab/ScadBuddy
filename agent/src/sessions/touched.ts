@@ -306,6 +306,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_item_quote: () => [],
   order_item_accept_quote: () => [],
   order_accept: () => [],
+  order_item_print: () => [],
   order_item_fulfil: () => [],
   order_item_unfulfil: () => [],
   order_ship: () => [],
@@ -395,6 +396,11 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
       ...(job ? [{ type: 'render_job' as const, id: job, action: 'created' as const, model: slug, after: str(field(result, 'model_version')) }] : []),
       ...output(field(result, 'output'), slug),
     ]
+  },
+  // #4968: the caller's claim is gone whether or not the job was cancelled by it.
+  withdraw_render: (input) => {
+    const job = str(input.job_id)
+    return job ? [{ type: 'render_job', id: job, action: 'modified', model: null }] : []
   },
   save_output: (input, result) => output(result, str(input.slug)),
   // #1864: nothing is recorded until the arrange is saved; a still-running one is not.
@@ -609,6 +615,10 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // tray_spool_links; the spool and its providers' records are unchanged).
   'link_tray_spool',
   'unlink_tray_spool',
+  // ScadBuddy's own spools (#4643, native_spools) are no recorded resource kind: the
+  // shelf lists them, and the overlay's cached copy follows each write.
+  'native_spool_upsert',
+  'native_spool_delete',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',

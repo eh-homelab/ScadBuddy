@@ -23,13 +23,13 @@ import { backgroundActivities, managerSender } from './background/activities.js'
 import { agentTimezone } from './background/schedule.js'
 import { BackgroundTasks } from './background/service.js'
 import { BackgroundTaskStore } from './background/store.js'
-import { temporalTaskRunner } from './background/temporal.js'
+import { runCronPasses, temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { OWN_PLUGIN_DIR } from './harness/ownPlugin.js'
-import { ensureStateDirs, removeLegacyBrowserDir, StateDirError } from './harness/stateDirs.js'
+import { ensureStateDirs, removeLegacyBrowserDir, sessionsRoot, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
@@ -78,6 +78,7 @@ import { startHostWorkers } from './temporal/session/hostWorkers.js'
 import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
 import { sessionTurnActivity } from './temporal/session/turnActivity.js'
 import { TurnHost } from './sessions/turnHost.js'
+import { SessionDirectory } from './workspace/directory.js'
 import { readRuntimeSettings, RUNTIME_BOUNDS } from './sessions/runtimeSettings.js'
 import { SHARED_PACKAGES, sweepPackageCopies } from './temporal/packageServers.js'
 import { forwardPackageServers, packageHeaderSecrets } from './plugins/packages/mcp.js'
@@ -146,7 +147,7 @@ const role = roleParts(config.agentRole)
 // Before listening: a mounted, empty state volume must get its `claude/` and
 // `work/` back, and an unwritable one should stop the pod here, visibly.
 try {
-  await ensureStateDirs({ stateDir: DEFAULT_STATE_DIR })
+  await ensureStateDirs({ stateDir: DEFAULT_STATE_DIR, sessionsDir: config.sessionDir })
 } catch (err) {
   console.error(err instanceof StateDirError ? err.message : err)
   process.exit(1)
@@ -284,7 +285,8 @@ void tabRelay?.releaseAll()
 const mcpRelay = role.http && database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
 events?.start()
 const resources = new ResourceHub(events)
-const paths = { stateDir: DEFAULT_STATE_DIR }
+// A session's working directory is under SCADBUDDY_SESSION_DIR when it is set (the worker's own emptyDir, plan Step 9.5).
+const paths = { stateDir: DEFAULT_STATE_DIR, sessionsDir: config.sessionDir }
 // The /mcp auth settings (auth/authenticate.ts `mcpAuthSettings`): `oidc` while
 // `ai_settings.mcp_oidc` is enabled (#262), otherwise the `mcp_auth_mode` and
 // `mcp_anonymous_cap` keys. One reader for /mcp, per request, and for Settings
@@ -434,18 +436,22 @@ const tokens =
 const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
 
 // A session's background tasks (CronCreate, ScheduleWakeup, Monitor, TaskStop), in either mode:
-// each a `BackgroundTask` workflow on agent-tools that sends its prompt when due. Its
-// payloads are task ids only, so its client has no codec.
-const backgroundTasks =
+// a recurring cron job a Schedule, any other a `BackgroundTask` workflow, on agent-tools, that
+// sends its prompt when due. Their payloads are task ids only, so their client has no codec.
+const backgroundClient =
   config.temporalAddress && database
-    ? new BackgroundTasks({
-        store: new BackgroundTaskStore(database.sql),
-        runner: temporalTaskRunner(
-          new Client({ connection: Connection.lazy({ address: config.temporalAddress }), namespace: config.temporalNamespace }),
-          TASK_QUEUE,
-        ),
-      })
+    ? new Client({ connection: Connection.lazy({ address: config.temporalAddress }), namespace: config.temporalNamespace })
     : undefined
+const backgroundTasks =
+  backgroundClient && database
+    ? new BackgroundTasks({ store: new BackgroundTaskStore(database.sql), runner: temporalTaskRunner(backgroundClient, TASK_QUEUE) })
+    : undefined
+// Decision Q11 (plan 2026-10-13 Step 9.8): the recurring cron jobs made before Schedules become
+// Schedules now, not at their next occurrence; then, hourly, the jobs whose last occurrence was
+// missed are ended. Idempotent, so every replica may run it.
+if (backgroundClient && backgroundTasks) {
+  runCronPasses({ client: backgroundClient, store: backgroundTasks.store, taskQueue: TASK_QUEUE }, { info: console.log, error: console.error })
+}
 // Sessions (#300) and their approvals (#258): started from the assistant
 // panel's socket (routes/chat.ts), the session routes (routes/sessions.ts)
 // and the `sessions_*` tools (tools/sessions.ts).
@@ -667,6 +673,28 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
       access: accessResolver,
     }
   : undefined
+// Each session's working directory (workspace/directory.ts, plan Step 9.5): a copy of its workspace
+// under SCADBUDDY_SESSION_DIR (the worker's own capped emptyDir), refilled from the workspace at each
+// placement. The directories of sessions gone since are swept every hour, by every process that runs turns.
+const sessionDirectory =
+  role.sessionHost && workspace
+    ? new SessionDirectory(workspace, sessionsRoot(paths), { sql: database?.sql, ...(sessions ? { warm: (id: string) => sessions.warm.has(id) } : {}) })
+    : undefined
+// A session's copy goes once its warm process here has: this disk holds the warm sessions' copies only.
+if (sessionDirectory && sessions) {
+  sessions.warm.onClosed((id) =>
+    void sessionDirectory.evict(id).catch((err: unknown) => console.error(`session ${id}: its working directory could not be removed:`, (err as Error).message)),
+  )
+}
+if (sessionDirectory && database) {
+  const sweep = () =>
+    void database
+      .ready()
+      .then((ok) => (ok ? sessionDirectory.sweep(database.sql) : []))
+      .catch((err: unknown) => console.error('session directory sweep failed:', (err as Error).message))
+  sweep()
+  setInterval(sweep, 3600_000).unref()
+}
 // A parked call holds on its entry's row, woken by `scadbuddy_input` on the event bus's connection (§5.4).
 const turnHost =
   role.sessionHost && temporal && sessions
@@ -682,6 +710,8 @@ const turnHost =
           temporalClient ? finishedToolCalls({ sql: temporal.sql, client: temporalClient }, sessionId, turnId) : Promise.resolve([]),
         // A `done` summary, posted as a classic turn's (#5003).
         questions: sessions.questions,
+        // The session's working directory, a copy of its workspace placed for each turn and written back at its end (Step 9.5).
+        ...(sessionDirectory ? { directory: sessionDirectory } : {}),
       })
     : undefined
 // The enabled remote plugins and every usable credential's secret, as a classic turn
@@ -703,7 +733,7 @@ const turnClients = new SessionClients<ListedTools>()
  * read from their stores alone: no address check, no forwarder route, no plugin contacted. The
  * turn's own forwarder URLs never reach Claude Code with the turn's tools proxied (Step 9.3).
  */
-const turnHeaderSecrets = async (): Promise<string[]> => {
+const readHeaderSecrets = async (): Promise<string[]> => {
   const out: string[] = []
   if (plugins) {
     const { plugins: enabled } = await plugins.enabled(kek.ok ? kek.kek : undefined)
@@ -718,6 +748,20 @@ const turnHeaderSecrets = async (): Promise<string[]> => {
     }
   }
   return out
+}
+/** How long one read of them serves every ToolCall's tool: a header changed since is redacted once it lapses. */
+const HEADER_SECRETS_MS = 30_000
+let headerSecrets: { at: number; read: Promise<string[]> } | undefined
+const turnHeaderSecrets = (): Promise<string[]> => {
+  if (!headerSecrets || Date.now() - headerSecrets.at > HEADER_SECRETS_MS) {
+    const read = readHeaderSecrets()
+    headerSecrets = { at: Date.now(), read }
+    // A read that failed is not kept: the next call reads again.
+    read.catch(() => {
+      if (headerSecrets?.read === read) headerSecrets = undefined
+    })
+  }
+  return headerSecrets.read
 }
 const turnToolDeps = temporal
   ? {
@@ -763,6 +807,7 @@ const turnToolDeps = temporal
   : undefined
 if (turnToolDeps) {
   const deps = turnToolDeps
+  // The turn says what its listing left out itself (`unlisted`), beside its own assembly's problems.
   turnToolList = (context, only) => listTurnTools({ ...deps, report: undefined }, context, only)
 }
 // AgentSession's turns are hosted here only with both halves (§5.2): acquire_worker on agent-tools
@@ -814,6 +859,7 @@ const background =
         send: managerSender(sessions),
         tz: agentTimezone(),
         paths,
+        ...(sessionDirectory ? { directory: sessionDirectory } : {}),
         secrets: toolServices.secrets,
         agents: managerAgents(sessions, { access: accessResolver }),
         workspace,

@@ -30,7 +30,8 @@ describe('fetchPendingInput', () => {
     const unattached = [expect.objectContaining({ tool: 'send_to_bambuddy' }), expect.objectContaining({ tool: 'send_to_bambuddy' })]
     expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0, summariesTruncated: false, unattached })
     setPendingAnswers(1, 3)
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0, summariesTruncated: false, unattached })
+    const notices = Array.from({ length: 3 }, () => expect.objectContaining({ reason: 'tab_disconnected' }))
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0, summariesTruncated: false, unattached, notices })
   })
 
   it('lists the approvals in no session and no flow run, which no feed shows, with what their card says (#4813)', async () => {
@@ -80,7 +81,7 @@ describe('fetchPendingInput', () => {
   it('counts a done summary apart: it waits for nothing, so it is not in the waiting total', async () => {
     setPendingAnswers(1, 1, 2)
     const counts = await fetchPendingInput()
-    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2, summariesTruncated: false })
+    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2, summariesTruncated: false, notices: [expect.objectContaining({ reason: 'tab_disconnected' })] })
     expect(totalOf(counts!)).toBe(2)
     expect(attentionLabel(totalOf(counts!))).toBe('2 waiting for you')
     expect(attentionDetail(counts)).toBe('1 question, 1 attention request')
@@ -90,6 +91,30 @@ describe('fetchPendingInput', () => {
     expect(totalOf(only!)).toBe(0)
     expect(attentionLabel(totalOf(only!))).toBe('')
     expect(summaryLabel(only)).toBe('1 summary')
+  })
+
+  it('lists the attention requests waiting on the user, for their OS notification (#815)', async () => {
+    const attention = { kind: 'answer', id: 'question:q1', session_id: 'sess-1', prompt: 'Reopen the tab?', attention: { reason: 'tab_disconnected', on_timeout: 'proceed' } }
+    server.use(
+      http.get('/api/v1/ai/pending-input', () =>
+        HttpResponse.json({
+          entries: [
+            attention,
+            { ...attention, id: 'question:q2', session_id: null, prompt: undefined, attention: { reason: 'blocked', on_timeout: 'wait' } },
+            // A summary waits for nothing; a question, an approval, one past its timer and one with no id are not attention requests to announce.
+            { ...attention, id: 'question:q3', attention: { reason: 'done', on_timeout: null } },
+            { kind: 'answer', id: 'question:q4', session_id: 'sess-1', prompt: 'Which colour?' },
+            { kind: 'approval', id: 'approval:a1', session_id: 'sess-1' },
+            { ...attention, id: 'question:q5', expiring: true },
+            { ...attention, id: undefined },
+          ],
+        }),
+      ),
+    )
+    expect((await fetchPendingInput())?.notices).toEqual([
+      { id: 'question:q1', sessionId: 'sess-1', reason: 'tab_disconnected', message: 'Reopen the tab?' },
+      { id: 'question:q2', sessionId: null, reason: 'blocked', message: '' },
+    ])
   })
 
   it('says when the agent listed only some of the done summaries, and not otherwise', async () => {
