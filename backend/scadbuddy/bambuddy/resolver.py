@@ -38,6 +38,7 @@ from scadbuddy.bambuddy.models import (
     NozzleChoice,
     NozzleSize,
     PresetRef,
+    PresetSource,
     SpoolFilamentPreset,
     Tier,
 )
@@ -185,19 +186,22 @@ def _record_preset(catalogue: Catalogue, option: SpoolOption, printer: str) -> P
     """An untagged tray's preset from the spool providers' records of its spool (#3818
     D1), in their priority order: Bambuddy's ``slicer_filament`` is a ``filament_id``
     (``GFA00``) or a cloud ``setting_id`` (``GFSL99_20``), as
-    ``tests/bambuddy/recordings/inventory-spools.json`` shows; anything else (a local
-    preset's id) is no native preset, and the slot falls back as any tray does."""
+    ``tests/bambuddy/recordings/inventory-spools.json`` shows, or a Bambuddy local
+    preset's id (all digits), which is the kept copy's preset when the catalogue offers it
+    (#4645); anything else is no native preset, and the slot falls back as any tray
+    does."""
     for record in option.records.values():
         if not record.preset:
             continue
         ref = _by_filament_id(catalogue.filament, record.preset, printer)
         if ref is None:
-            cloud = catalogue.native_ref(PresetRef(source="cloud", id=record.preset), "filament")
-            fits = cloud is not None and any(
-                row.name == cloud.id and printer in row.compatible_printers
+            source: PresetSource = "local" if _is_local_id(record.preset) else "cloud"
+            native = catalogue.native_ref(PresetRef(source=source, id=record.preset), "filament")
+            fits = native is not None and any(
+                row.ref == native and printer in row.compatible_printers
                 for row in catalogue.filament
             )
-            ref = cloud if fits else None
+            ref = native if fits else None
         if ref is not None:
             return ref
     return None
@@ -208,7 +212,7 @@ def _record_preset(catalogue: Catalogue, option: SpoolOption, printer: str) -> P
 _NOT_NATIVE: dict[str, str] = {
     "standard": "not one of Bambu Studio's own presets in this version",
     "cloud": "a Bambu Cloud user preset",
-    "local": "a Bambuddy local preset",
+    "local": "a Bambuddy local preset ScadBuddy has no copy of (they are kept with the spools)",
     "orca_cloud": "an OrcaSlicer cloud preset",
 }
 
@@ -388,13 +392,18 @@ def resolve(
             if catalogue.is_native:
                 # A spool's preset is a preset name, a Bambu Cloud setting_id, a BBL
                 # filament_id (as a tray's tray_info_idx is) or a Bambuddy local id,
-                # which the image lacks; native refs are preset names (#4349).
+                # which the image lacks; native refs are preset names (#4349), or a kept
+                # local preset's own ref (#4645).
                 mapped = {
-                    preset_id: catalogue.native_ref(
-                        PresetRef(source="standard", id=preset_id), "filament"
+                    preset_id: (
+                        catalogue.native_ref(PresetRef(source="local", id=preset_id), "filament")
+                        if _is_local_id(preset_id)
+                        else catalogue.native_ref(
+                            PresetRef(source="standard", id=preset_id), "filament"
+                        )
+                        or catalogue.native_ref(PresetRef(source="cloud", id=preset_id), "filament")
+                        or _by_filament_id(catalogue.filament, preset_id, printer)
                     )
-                    or catalogue.native_ref(PresetRef(source="cloud", id=preset_id), "filament")
-                    or _by_filament_id(catalogue.filament, preset_id, printer)
                     for preset_id in own
                 }
                 if any(
@@ -402,21 +411,24 @@ def resolve(
                     for preset_id, native in mapped.items()
                 ):
                     # Said, so a slot that falls back to a name is not a mystery; a
-                    # Bambuddy local id (all digits) is never in the image, so not said.
+                    # Bambuddy local id (all digits) is the kept copy's when it is offered
+                    # (#4645), and otherwise not said.
                     logger.debug(
                         "a spool's own preset is not in the native catalogue",
                         extra={"spool_id": option.spool_id},
                     )
-                own = [native.id for native in mapped.values() if native is not None]
-            ref = next(
-                (
-                    choice.ref
-                    for preset_id in own
-                    for choice in catalogue.filament
-                    if choice.ref.id == preset_id
-                ),
-                None,
-            )
+                # Each is a ref the catalogue offers: a kept local one is not a name.
+                ref = next((native for native in mapped.values() if native is not None), None)
+            else:
+                ref = next(
+                    (
+                        choice.ref
+                        for preset_id in own
+                        for choice in catalogue.filament
+                        if choice.ref.id == preset_id
+                    ),
+                    None,
+                )
             if ref is None and option.slicer_filament_name:
                 ref = _fits(catalogue.filament, f"{option.slicer_filament_name} @BBL H2C", printer)
             if ref is None:

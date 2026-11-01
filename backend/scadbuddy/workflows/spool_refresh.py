@@ -6,7 +6,10 @@ D1, Task 6b).
 overlap SKIP, and once at each boot; 0 deletes it). A run lists the providers
 (``spool_providers_list``), refreshes each in an activity of its own
 (``spool_provider_refresh``: its records into Postgres, a failure recorded as its own),
-then records the printers' trays (``spool_trays_seen``); `spools/activities.py`. It is
+then records the printers' trays (``spool_trays_seen``); `spools/activities.py`. Last
+it keeps Bambuddy's local presets (``held_presets_refresh``, #4645,
+`slicing/held_presets.py`), behind `HELD_PATCH`, which a native run offers and slices
+from with no Bambuddy call (hot-path plan D5). It is
 never started, signalled or awaited by the print dialog, which reads only what it
 wrote: the hot path never waits on Bambuddy. A step that fails is not retried within
 its run; the next tick is the retry, as it is for the sweeps.
@@ -33,6 +36,9 @@ SPOOL_SCHEDULE = "scadbuddy-spool-providers"
 LIST_ACTIVITY = "spool_providers_list"
 PROVIDER_ACTIVITY = "spool_provider_refresh"
 SEEN_ACTIVITY = "spool_trays_seen"
+HELD_ACTIVITY = "held_presets_refresh"
+#: The `workflow.patched` id that adds `HELD_ACTIVITY` to a run.
+HELD_PATCH = "spool-refresh-held-presets"
 #: Listing the providers reads nothing.
 LIST_TIMEOUT = timedelta(seconds=30)
 #: One provider's refresh is bounded at a minute (`activities.PROVIDER_TIMEOUT`), then
@@ -40,6 +46,8 @@ LIST_TIMEOUT = timedelta(seconds=30)
 PROVIDER_TIMEOUT = timedelta(seconds=90)
 #: Every printer's latest report, then a write per tagged tray.
 SEEN_TIMEOUT = timedelta(minutes=2)
+#: One list of Bambuddy's local presets, then a read of each one edited since.
+HELD_TIMEOUT = timedelta(minutes=2)
 #: Each provider is its own activity, so the run grows with them; a run that can never
 #: finish still ends, and the Schedule's overlap SKIP stops holding later ticks back.
 RUN_TIMEOUT = timedelta(minutes=15)
@@ -82,6 +90,16 @@ class SpoolRefresh:
             )
         except ActivityError:
             workflow.logger.warning("could not record what the printers' trays show")
+        if workflow.patched(HELD_PATCH):
+            try:
+                await workflow.execute_activity(
+                    HELD_ACTIVITY,
+                    result_type=str,
+                    start_to_close_timeout=HELD_TIMEOUT,
+                    retry_policy=_ONCE,
+                )
+            except ActivityError:
+                workflow.logger.warning("could not keep Bambuddy's local presets")
         return outcome
 
 

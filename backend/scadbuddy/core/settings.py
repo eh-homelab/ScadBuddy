@@ -451,8 +451,9 @@ class Settings(BaseSettings):
     # may set its own, and a run may override both.
     flow_approval_timeout_seconds: int = 0
     # SCADBUDDY_SPOOL_OVERLAY_REFRESH_SECONDS (#3818 tier A, plan 2026-10-18 Task 6b): how
-    # often the spool providers' records are refreshed into Postgres, on their own
-    # Schedule (`workflows/spool_refresh.py`); 0 turns the refresh off.
+    # often the spool providers' records, and the kept copy of Bambuddy's local presets
+    # (#4645), are refreshed into Postgres, on their own Schedule
+    # (`workflows/spool_refresh.py`); 0 turns the refresh off.
     spool_overlay_refresh_seconds: int = Field(default=300, ge=0)
 
     @field_validator("flow_approval_timeout_seconds")

@@ -30,7 +30,7 @@ from temporalio.exceptions import CancelledError
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.dispatch import SlicePlan
-from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.bambuddy.models import LocalPresetDetail, PresetRef
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
@@ -38,6 +38,7 @@ from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.ids import NATIVE_ID_BASE
 from scadbuddy.print_library.native import NativeLibrary, blob_key
 from scadbuddy.slicing.component import SLICING, Slicing
+from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.models import SliceProgress
 from scadbuddy.slicing.presets import native_preset_key
 from scadbuddy.slicing.profiles import ProfileError
@@ -800,6 +801,22 @@ def test_standard_presets_slice_with_no_bambuddy(
         row = _slice(client, file_id)
     assert row.status == "completed", row.failure
     assert slicer.calls == 1
+
+
+def test_a_kept_local_preset_slices_with_no_bambuddy(
+    native_alone_client: TestClient, settings: Settings, tmp_path: Path
+) -> None:
+    """#4645: a ``local`` filament preset the kept copy holds slices a native file with
+    no Bambuddy at all, at the start and in ``slice_prepare`` alike, keyed by what the
+    copy held."""
+    client = native_alone_client
+    held = HeldPresetStore(_state(client).projection.pool)
+    _call(client, partial(held.replace, [7], [LocalPresetDetail.model_validate(_local_pla("215"))]))
+    file_id = _native_upload(client, tmp_path)
+    with fake_slicer_worker(client, settings.temporal_task_queue_slicer) as slicer:
+        row = _slice(client, file_id, plan=LOCAL_FILAMENT_PLAN)
+    assert row.status == "completed", row.failure
+    assert slicer.calls == 1 and "/bambuddy-filament_1=" in row.preset_key
 
 
 def test_a_preset_that_needs_bambuddy_says_none_is_configured(

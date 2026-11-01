@@ -113,6 +113,7 @@ from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.slicing.component import SLICING
+from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activity
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
 from scadbuddy.spools.activities import spool_activities
 from scadbuddy.spools.component import SPOOLS
@@ -1397,6 +1398,10 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *_housekeeping_activities(state),
         *_preview_activities(state),
         *spool_activities(state.components.get(SPOOLS)),
+        # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
+        held_presets_activity(
+            lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
+        ),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
         migrate_activity(lambda: state.settings_store.pool, state.settings),

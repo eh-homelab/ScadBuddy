@@ -30,6 +30,14 @@ Where a preset comes from:
   supported"`` (measured 2026-09-27, and again 2026-10-18 against the live
   ``ghcr.io/maziggy/bambuddy:daily@sha256:99684c2f…`` with ``source=cloud&id=GFSB00_22``),
   so a cloud user preset in the printer or filament slot is still refused.
+- A ``local`` preset of any slot that the kept copy of Bambuddy's local presets holds
+  (:attr:`Profiles.held`, `slicing/held_presets.py`, #4645) is built from that copy's
+  document, flattened over the tree as above, and never read from Bambuddy, with a
+  client or without: so a native run, which has none, slices it, and a slice's start and
+  its prepare build it alike. A process preset is then the tree's flattening of the
+  user's document, not Bambuddy's values. Its key carries the built file's digest as a
+  read from Bambuddy does (the same ``from_bambuddy`` slot), so an edit, once kept,
+  slices again. A ``local`` ref the copy lacks is read from Bambuddy as above.
 - ``orca_cloud`` presets are OrcaSlicer's, not Bambu Studio's, and are refused.
 
 The plate type goes in the process file's ``curr_bed_type``: the v02.08.02.61 CLI has
@@ -58,7 +66,7 @@ from pydantic import BaseModel, Field
 from scadbuddy.bambuddy.catalogue import read_preset_names
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.dispatch import SlicePlan, slice_request
-from scadbuddy.bambuddy.models import PresetRef, ProcessValue
+from scadbuddy.bambuddy.models import LocalPresetDetail, PresetRef, ProcessValue
 from scadbuddy.core.problems import ApiError
 from scadbuddy.slicing.profiles import (
     Flat,
@@ -158,8 +166,10 @@ async def _resolve(
                 found = await asyncio.to_thread(profiles.find, kind, name)
         if found is not None:
             return await asyncio.to_thread(getattr(profiles, kind), found), False
-    if ref.source == "local" and slot != "process":
-        return await _local(slot, ref, profiles, client), True
+    if ref.source == "local":
+        held = await _held(profiles, ref)
+        if held is not None or slot != "process":
+            return await _local(slot, ref, profiles, client, held), True
     name = await names.of(ref) or ref.id
     if slot != "process":
         version = await asyncio.to_thread(lambda: profiles.version)
@@ -190,31 +200,60 @@ async def _resolve(
     return flatten(name, {name: own}.get), True
 
 
+def _local_id(ref: PresetRef) -> int | None:
+    """A Bambuddy local preset's id: a number (ASCII digits only)."""
+    return int(ref.id) if ref.id.isascii() and ref.id.isdigit() else None
+
+
+async def _held(profiles: Profiles, ref: PresetRef) -> LocalPresetDetail | None:
+    """``local`` ``ref`` from the kept copy of Bambuddy's local presets (#4645), or
+    ``None`` when it holds none (or there is no copy)."""
+    preset_id = _local_id(ref)
+    if profiles.held is None or ref.source != "local" or preset_id is None:
+        return None
+    return (await profiles.held.documents([preset_id])).get(preset_id)
+
+
+async def held_flat(profiles: Profiles, slot: Slot, ref: PresetRef) -> Flat | None:
+    """``local`` ``ref``'s ``slot`` preset flattened from the kept copy, as a slice builds
+    it; ``None`` when the copy holds none. A :class:`ProfileError` when it cannot be read."""
+    held = await _held(profiles, ref)
+    return None if held is None else await _local(slot, ref, profiles, None, held)
+
+
 async def _local(
-    slot: Slot, ref: PresetRef, profiles: Profiles, client: BambuddyClient | None
+    slot: Slot,
+    ref: PresetRef,
+    profiles: Profiles,
+    client: BambuddyClient | None,
+    held: LocalPresetDetail | None = None,
 ) -> Flat:
-    """A ``local`` printer or filament preset's file (#4233): Bambuddy's document for it
-    (``GET /local-presets/{id}``), flattened over the image's tree by its ``inherits``
-    (the module's docstring). The row names the preset, so the catalogue is not read."""
+    """A ``local`` preset's file (#4233): Bambuddy's document for it, flattened over the
+    image's tree by its ``inherits`` (the module's docstring). The document is the kept
+    copy's (``held``, #4645) when it has one, else read from Bambuddy (``GET
+    /local-presets/{id}``). The row names the preset, so the catalogue is not read."""
     what = f"the native slicer cannot read local {slot} preset"
-    if client is None:
-        version = await asyncio.to_thread(lambda: profiles.version)
-        raise ProfileError(
-            f"{what} {ref.id}: it is not one of Bambu Studio {version}'s, and reading it"
-            " from Bambuddy's local presets needs Bambuddy, and none is configured"
-        )
-    try:
-        preset_id = int(ref.id)
-    except ValueError:
-        raise ProfileError(f"{what} {ref.id}: a Bambuddy local preset's id is a number") from None
-    try:
-        row = await client.local_preset(preset_id)
-    except ApiError as error:
-        if error.status != status.HTTP_404_NOT_FOUND:
-            raise
-        raise ProfileError(
-            f"{what} {ref.id}: Bambuddy has no local preset {preset_id} any more"
-        ) from None
+    row = held
+    if row is None:
+        if client is None:
+            version = await asyncio.to_thread(lambda: profiles.version)
+            raise ProfileError(
+                f"{what} {ref.id}: it is not one of Bambu Studio {version}'s, nor in"
+                " ScadBuddy's copy of Bambuddy's local presets (kept with the spools), and"
+                " reading it from Bambuddy needs Bambuddy, and none is configured"
+            )
+        preset_id = _local_id(ref)
+        if preset_id is None:
+            raise ProfileError(f"{what} {ref.id}: a Bambuddy local preset's id is a number")
+        try:
+            row = await client.local_preset(preset_id)
+        except ApiError as error:
+            if error.status != status.HTTP_404_NOT_FOUND:
+                raise
+            raise ProfileError(
+                f"{what} {ref.id}: Bambuddy has no local preset {preset_id} any more"
+            ) from None
+    preset_id = row.id
     if row.preset_type != slot:
         raise ProfileError(
             f"{what} {row.name}: Bambuddy's local preset {preset_id} is a {row.preset_type} preset"
@@ -243,8 +282,8 @@ def _digest(document: bytes) -> str:
 async def needs_bambuddy(plan: SlicePlan, profiles: Profiles) -> bool:
     """Whether building ``plan``'s presets reads Bambuddy: a ref the image's tree does
     not hold by its id that Bambuddy could resolve (by name, a process preset's values,
-    or a local preset's document). A ref refused either way (``orca_cloud``) does not
-    count."""
+    or a local preset's document the kept copy lacks, #4645). A ref refused either way
+    (``orca_cloud``) does not count."""
     refs: list[tuple[Slot, PresetRef]] = [
         ("printer", plan.printer_preset),
         ("process", plan.process_preset),
@@ -256,7 +295,7 @@ async def needs_bambuddy(plan: SlicePlan, profiles: Profiles) -> bool:
         if ref.source in ("standard", "cloud"):
             if await asyncio.to_thread(profiles.find, _KINDS[slot], ref.id) is None:
                 return True
-        else:
+        elif await _held(profiles, ref) is None:
             return True
     return False
 

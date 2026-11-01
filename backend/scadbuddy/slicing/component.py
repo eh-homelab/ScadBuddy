@@ -17,6 +17,7 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.library.settings_store import settings_kek
 from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
+from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.start import NativeSliceStarter, native_slice_starter
 from scadbuddy.slicing.store import NativeSliceStore
@@ -41,7 +42,11 @@ class Slicing:
 
     @cached_property
     def profiles(self) -> Profiles | None:
-        return Profiles.installed(self.core.settings.slicer_profiles_dir)
+        """The image's tree, with the kept copy of Bambuddy's local presets (#4645)."""
+        return Profiles.installed(
+            self.core.settings.slicer_profiles_dir,
+            held=HeldPresetStore(self.core.projection.pool),
+        )
 
     @cached_property
     def starter(self) -> NativeSliceStarter | None:
