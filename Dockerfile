@@ -287,16 +287,16 @@ CMD ["node", "--import", "./dist/telemetry.js", "dist/main.js"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 
-# ── agent-durable: durable agent sessions on Temporal (spec 2026-10-01 §6.3a) ──
-# A sidecar in the ScadBuddy pod beside `agent`, trusted like it (#1030). Python
-# because the Claude Agent SDK's Temporal plugin is Python (ai-integrations#33,
-# git-pinned in agent-durable/uv.lock). Plain psycopg against apt's libpq5, as
-# the backend image does, so libpq fixes arrive with the OS.
+# ── agent-durable: ScadBuddy's Python agent parts (spec 2026-10-13 §14.4) ─────
+# Its Deployment of its own, trusted like `agent` (#1030). The Python turn is retired
+# (plan 2026-10-13 Step 8.1): the process serves /healthz and runs no worker until a
+# Python workload exists; the codec, secrets and gate ports stay tested. Plain psycopg
+# against apt's libpq5, as the backend image does, so libpq fixes arrive with the OS.
 FROM python:3.14-slim-bookworm AS agent-durable
 
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini libpq5 git ca-certificates \
+    && apt-get install -y --no-install-recommends tini libpq5 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=uv /uv /usr/local/bin/
 # The stdlib's bytecode (#4161). The python image ships none, and the worker (user
@@ -327,36 +327,6 @@ RUN uv sync --frozen --no-dev \
     && .venv/bin/python -m compileall -q -j 0 --invalidation-mode checked-hash src \
     && find src \( -type d -o -name '*.pyc' \) -exec touch -h -d @0 {} +
 
-# ScadBuddy's own skills only, as the agent-build stage copies them (spec §6.3b).
-# A directory with no .claude-plugin/plugin.json: the bundled Claude Code takes a
-# --plugin-dir with `skills/` at its top as one plugin named after the directory
-# (checked 2026-10-10 on 2.1.292 with --debug-to-stderr: "Loaded 3 skills from
-# plugin scadbuddy"). SCADBUDDY_DURABLE_SKILLS_DIR below points at it.
-#
-# These three copies are `--link` (#4140): a plain COPY re-ran whenever src/ changed
-# above it and recorded that moment as its parent directories' mtimes, a new layer
-# with the same files in it; a linked copy is reused whatever changed above it
-# (https://docs.docker.com/reference/dockerfile/#copy---link). The directories it
-# creates are root's, 0755, as WORKDIR made /app and /app/agent-durable.
-COPY --link plugins/scadbuddy/skills /app/plugins/scadbuddy/skills
-# Its subagents (#2320, #2562), outside the plugin directory: the runner gives each the
-# agent's loopback MCP server inline, which a plugin's own subagents cannot carry
-# (https://code.claude.com/docs/en/sub-agents). SCADBUDDY_DURABLE_AGENTS_DIR below.
-COPY --link plugins/scadbuddy/agents /app/subagents
-# The agent's tool manifest (agent `pnpm build` writes dist/tools.json): each entry
-# becomes an `activity_as_tool` on `agent-tools`, which the agent container of the
-# same build serves, so the two never disagree on a tool's name or schema (#1056, 5e).
-COPY --link --from=agent-build /src/agent/dist/tools.json /app/agent-durable/tools.json
-
-# Fails the build when the bundled Claude Code is missing for this platform or
-# is not the version claude-agent-sdk declares (agent/src/check-cli-version.ts's twin),
-# or when the tool manifest does not parse or is empty (rather than at the worker's start).
-# `-B` (#4140): without it these imports wrote ~1 MB of .pyc (the stdlib's, which the
-# python image ships none of, and src/'s) stamped with the build's time, a new layer
-# whenever this RUN re-ran. It applies to these two commands only, not the runtime.
-RUN .venv/bin/python -B -m scadbuddy_durable.check_cli_version \
-    && .venv/bin/python -B -m scadbuddy_durable.check_manifest /app/agent-durable/tools.json
-
 # Fails the build when a module the worker imports at start has no .pyc beside it
 # (#4316 review): a move of the stdlib, of src/, or of the compile steps above would
 # otherwise bring the per-start compile back unnoticed. `-B`, so it writes none itself.
@@ -378,11 +348,6 @@ ARG SCADBUDDY_REVISION=unknown
 ARG SCADBUDDY_VERSION=dev
 ENV PATH=/app/agent-durable/.venv/bin:$PATH \
     HOME=/srv/agent \
-    CLAUDE_CONFIG_DIR=/srv/agent/claude \
-    SCADBUDDY_DURABLE_TOOLS_JSON=/app/agent-durable/tools.json \
-    SCADBUDDY_DURABLE_SKILLS_DIR=/app/plugins/scadbuddy \
-    SCADBUDDY_DURABLE_AGENTS_DIR=/app/subagents \
-    SCADBUDDY_DURABLE_CWD=/srv/agent \
     SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
     SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
 

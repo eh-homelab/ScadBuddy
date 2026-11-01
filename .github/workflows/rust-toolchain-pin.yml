@@ -1,7 +1,7 @@
 # dtolnay/rust-toolchain has no release tags, so ci.yml pins it by commit and
 # Dependabot never moves that pin (#4099). This compares it with the action's
 # master weekly; a failure is the reminder to move it in a reviewed PR, as
-# agent-durable-pin.yml is for its pin.
+# harness-pin.yml is for its pin.
 name: rust-toolchain pin
 
 on:

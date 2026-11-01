@@ -52,13 +52,13 @@ import { SessionBlobs, type StoredBlob } from './blobs.js'
 import { PgHttpBodies } from './httpBodies.js'
 import { SessionFiles } from '../workspace/store.js'
 import { SessionEdits } from './edits.js'
-import { blobNames, durableReplies, entriesThrough, forkHistory, historyThroughCalls, transcriptCut, unansweredCalls } from './forkPoint.js'
+import { blobNames, forkHistory, transcriptCut } from './forkPoint.js'
 import type { TitleResolver } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 import type { UserImage } from './images.js'
 import { type ResourceRef, SessionResources, type TouchedRecord } from './touched.js'
 import { type DurableGate, DurableUnavailable } from '../gate/durable.js'
-import type { DurableTurns, ForkedAgent, SessionRuntime } from './durable.js'
+import type { DurableTurns, SessionRuntime } from './durable.js'
 import { PendingProjection } from '../gate/projection.js'
 import { Escalations } from '../flows/escalations.js'
 import { TurnRunner } from './turnRunner.js'
@@ -1320,7 +1320,7 @@ export class SessionManager {
    * no Temporal or key, or no worker an AgentSession needs polls (DurableTurns.unready).
    */
   private async refuseUnready(): Promise<void> {
-    const why = await this.durableOrRefuse().unready('unified')
+    const why = await this.durableOrRefuse().unready()
     if (why) throw new SessionError('unavailable', `sessions cannot run now: ${why}; try again once it does`)
   }
 
@@ -1593,30 +1593,28 @@ export class SessionManager {
     const startedAt = new Date()
     const fresh = options.freshBudget === true && principal.kind === 'browser'
     const parent = await this.get(id, principal)
-    // A DurableSession parent's conversation is its workflow's (#2688), read before anything is
-    // written. Any other's is its transcript in ai_session_entries: a classic session's, and an
-    // AgentSession's, whose turns write it as a classic turn does (turnHost.ts). A durable session
-    // whose first send has not run has no workflow (`runtime` is set by that send), so no
-    // conversation either: the transcript's check says so.
-    const durable = parent.runtime === 'durable' ? await this.durableForkPoint(parent, options.upTo) : undefined
-    // Where the child's transcript is cut: how many of the parent's entries, as the parent loads them, it reads.
-    let cut: number | undefined
-    let history: ServerEvent[] | undefined
-    if (durable) {
-      history = durable.history
-    } else {
-      const transcript = await this.store.load({ projectKey: '', sessionId: id })
-      if (!transcript) {
-        throw new SessionError('no_transcript', `session ${id} has no transcript to fork yet; send it a turn first`)
-      }
-      // Through the entry the SDK's forkSession({upToMessageId}) sliced at (forkPoint.ts), inclusive.
-      const upToMessageId = options.upTo === undefined ? undefined : transcriptCut(transcript, options.upTo)
-      history = await forkHistory(this.events, id, options.upTo)
-      if (!history || (options.upTo !== undefined && upToMessageId === undefined)) {
-        throw new SessionError('invalid', `session ${id} has no finished reply ${options.upTo} to fork from`)
-      }
-      cut = upToMessageId === undefined ? transcript.length : transcript.findIndex((e) => e.uuid === upToMessageId) + 1
+    // The parent's conversation is its transcript in ai_session_entries: a classic session's, and
+    // an AgentSession's, whose turns write it as a classic turn does (turnHost.ts), a migrated
+    // DurableSession's among them (plan Step 7.2). A DurableSession that closed before that
+    // migration (`runtime` still `durable`, durable.ts) has none, and no worker can read its
+    // workflow now (plan Step 8.1): its child keeps the panel's history and starts with no model
+    // context.
+    const transcript = await this.store.load({ projectKey: '', sessionId: id })
+    const closedDurable = !transcript && parent.runtime === 'durable'
+    if (!transcript && !closedDurable) {
+      throw new SessionError('no_transcript', `session ${id} has no transcript to fork yet; send it a turn first`)
     }
+    // Through the entry the SDK's forkSession({upToMessageId}) sliced at (forkPoint.ts), inclusive.
+    const upToMessageId = options.upTo === undefined || !transcript ? undefined : transcriptCut(transcript, options.upTo)
+    const history = await forkHistory(this.events, id, options.upTo)
+    if (!history || (options.upTo !== undefined && transcript && upToMessageId === undefined)) {
+      throw new SessionError('invalid', `session ${id} has no finished reply ${options.upTo} to fork from`)
+    }
+    // Where the child's transcript is cut: how many of the parent's entries, as the parent loads them, it
+    // reads. None for a parent with no transcript, whose child reads nothing of it.
+    const forkOf = transcript
+      ? { parentId: id, cut: upToMessageId === undefined ? transcript.length : transcript.findIndex((e) => e.uuid === upToMessageId) + 1 }
+      : undefined
     // A fork of a spent lineage could not run a turn; say why now rather than at its first send.
     if (!fresh && parent.costUsd >= parent.budgetUsd) {
       throw new SessionError(
@@ -1633,39 +1631,21 @@ export class SessionManager {
     await this.withinNewSessionLimit(principal, this.deps.sql)
     const fields = { origin: options.origin ?? parent.origin, title, tags: parent.tags, scope: parent.scope, parentId: parent.id }
     const insertOptions = { rateLimited: options.rateLimited ?? true, ...(fresh ? {} : { budgetOf: parent }) }
-    let child: SessionRecord
-    if (durable) {
-      // A new durable session whose workflow starts with a copy of the parent's
-      // conversation as it stood at the fork point, under the parent's Claude session
-      // (only ever resumed inside each workflow's own segments, never shared).
-      child = await this.insert(randomUUID(), principal, { ...fields, mode: 'durable' }, insertOptions)
-      try {
-        // Its workspace files (#2329) before its workflow starts, so a copy that fails
-        // (copy() is all or nothing) leaves nothing of the child either.
-        await this.files.copy(id, child.id)
-        await durable.turns.startFork(child, durable.agent)
-      } catch (err) {
-        // Nothing else of the child is written yet: it goes, rather than run empty.
-        await this.dropFailedFork(child.id)
-        throw err
-      }
-    } else {
-      // A classic parent's transcript or an AgentSession's, read through the cut: the child is an
-      // AgentSession, as every new session is (plan Step 6.3). Forks made before Step 6.5 hold a copy.
-      child = await this.insert(
-        randomUUID(),
-        principal,
-        { ...fields, mode: 'durable', runtime: 'unified', forkOf: { parentId: id, cut: cut ?? 0 } },
-        insertOptions,
-      )
-      try {
-        // Its workspace files (#2329), so the fork carries on with what the parent had.
-        await this.files.copy(id, child.id)
-      } catch (err) {
-        // A fork whose files could not be copied goes whole (copy() wrote none).
-        await this.dropFailedFork(child.id)
-        throw err
-      }
+    // The parent's transcript, read through the cut: the child is an AgentSession, as every new
+    // session is (plan Step 6.3). Forks made before Step 6.5 hold a copy.
+    const child = await this.insert(
+      randomUUID(),
+      principal,
+      { ...fields, mode: 'durable', runtime: 'unified', ...(forkOf ? { forkOf } : {}) },
+      insertOptions,
+    )
+    try {
+      // Its workspace files (#2329), so the fork carries on with what the parent had.
+      await this.files.copy(id, child.id)
+    } catch (err) {
+      // A fork whose files could not be copied goes whole (copy() wrote none).
+      await this.dropFailedFork(child.id)
+      throw err
     }
     const childId = child.id
     // The images the copied events name (#782, #2150), before the events that name them: the
@@ -1703,76 +1683,6 @@ export class SessionManager {
       })
     }
     return child
-  }
-
-  /**
-   * Where a durable session forks (#2688): its workflow's committed conversation through
-   * `upTo`'s reply, or all of it. A parent whose turn is running forks at its last
-   * finished reply, as the conversation past it is not committed yet. One whose committed
-   * state ends at a paused call (#4173: a stopped turn's last segment never committed)
-   * forks there when its workflow holds the call's result: the child takes it with the
-   * checkpoint and delivers it first, and its history runs through the call. Without the
-   * result (a worker from before it was sent) it forks at its last finished reply before
-   * the call, with its history through that reply. A cut never leaves a call unanswered.
-   */
-  private async durableForkPoint(
-    parent: SessionRecord,
-    upTo: string | undefined,
-  ): Promise<{ turns: DurableTurns; agent: ForkedAgent; history: ServerEvent[] }> {
-    const id = parent.id
-    const turns = this.durableOrRefuse()
-    const source = await turns.forkSource(id)
-    const all = source ? await forkHistory(this.events, id) : undefined
-    if (!source || !all) {
-      throw new SessionError('no_transcript', `session ${id} has no conversation to fork yet; send it a turn first`)
-    }
-    const replies = durableReplies(source.entries, all)
-    const through = (uuid: string | undefined) => (uuid === undefined ? undefined : entriesThrough(source.entries, uuid))
-    // At the checkpoint, a call whose result the workflow holds is answered: the child delivers it.
-    const answered = (uuid: string | undefined, owed: Record<string, unknown> = {}) => {
-      const prefix = through(uuid)
-      return prefix && unansweredCalls(prefix).every((call) => call in owed) ? prefix : undefined
-    }
-    const paused = unansweredCalls(through(source.checkpoint) ?? [])
-    // The child's history through the paused calls; undefined when the log lacks one of them,
-    // and then the parent forks before them, as without their results.
-    const pausedHistory = historyThroughCalls(all, paused)
-    // The conversation through the checkpoint, when the workflow holds every result it lacks.
-    const atCheckpoint = answered(source.checkpoint, source.owed.pending)
-    let at = upTo
-    if (at === undefined && (source.busy || !pausedHistory || !atCheckpoint)) {
-      at = [...replies.keys()].reverse().find((reply) => answered(replies.get(reply)))
-      if (at === undefined) {
-        let reason = `session ${id} has no finished reply before the call it is waiting on; fork it once that call is answered`
-        if (source.busy) reason = `session ${id} has no finished reply to fork yet; wait for its turn to answer`
-        else if (!pausedHistory && atCheckpoint) {
-          // The result is held, but the log has no record of the call to end the child's history at.
-          reason = `session ${id} has no finished reply before the call it is waiting on, and its log has no record of that call to fork at; fork it once the session has resumed past that call`
-        }
-        throw new SessionError('no_transcript', reason)
-      }
-    }
-    const entries = at === undefined ? atCheckpoint : answered(replies.get(at))
-    if (!entries && through(at === undefined ? source.checkpoint : replies.get(at))) {
-      throw new SessionError('invalid', `session ${id}'s conversation through reply ${at} leaves a call unanswered; fork from an earlier reply`)
-    }
-    const history = at === undefined ? pausedHistory : await forkHistory(this.events, id, at)
-    if (!entries || !history) {
-      throw new SessionError('invalid', `session ${id} has no finished reply ${upTo} to fork from`)
-    }
-    const checkpoint = entries.at(-1)!.uuid!
-    // At the parent's checkpoint the child takes what the parent still owes there (#4173):
-    // a turn stopped at a paused call left its result for the next segment, which the
-    // child's first segment must deliver. A reply before it owes nothing; the calls that
-    // already ran never run again either way. An `upTo` whose reply is the checkpoint
-    // takes it too: it is the same state, and a prefix with no unanswered call owes no
-    // result, only `fork_next` (a stopped turn's: the next segment runs in a copy).
-    const owed = checkpoint === source.checkpoint ? source.owed : { pending: {}, fork_next: false, recent_call_ids: source.owed.recent_call_ids }
-    return {
-      turns,
-      agent: { session_id: source.claudeSessionId, checkpoint, conversation: entries.map((e) => JSON.stringify(e)), ...owed },
-      history,
-    }
   }
 
   /**

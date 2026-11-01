@@ -1397,69 +1397,25 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   GHCR package needs the same one-time **public** visibility step as
   `scadbuddy` (see the header of `build-image.yml`).
 
-### The agent-durable worker (durable sessions, #1056)
+### The agent-durable image (#1056, retired turn)
 
-Durable chat sessions (spec 2026-10-01 §6) run on
 `ghcr.io/eh-homelab/scadbuddy-agent-durable` (the Dockerfile's
 `--target agent-durable`, published by the `agent-durable` job in
-`build-image.yml` with the same tags). It runs the `agent` task queue's worker:
-`DurableSession` and the Claude Code segments. Each tool call is an activity on
-`agent-tools`, which the `agent` container serves. The plan with its rulings is
-`docs/superpowers/plans/2026-10-10-durable-phase-5e-deploy.md`. It can run as a
-third container in the ScadBuddy pod, or as a Deployment of its own so it scales
-apart from the API (clusters runs it that way, `scadbuddy-agent-durable.yaml`);
-see the subagents bullet for what the second needs.
+`build-image.yml` with the same tags) ran the Python turn: the `agent` task
+queue's `DurableSession` workflow. Every session is an AgentSession on the agent
+worker since plan 2026-10-13 Step 6.3, Step 7.2 moved the open DurableSessions
+to it, and Step 8.1 retired the Python turn (spec 2026-10-13 §14.4). The image
+keeps the Python ports of the payload codec, the secrets and the gate, tested in
+CI against the agent's vector files, until a Python workload exists (decision Q9
+of `docs/superpowers/plans/2026-10-13-unified-agent-runtime.md`).
 
-- It answers `GET /healthz` on `8082` and opens no other port. The body's
-  `worker` says `running`, `not configured` (a variable is missing), or
-  `failed to start`. It is always 200 while the process serves, so liveness is
-  the only probe it needs.
-- Set the same variables the agent has: `SCADBUDDY_DATABASE_URL`,
-  `SCADBUDDY_SECRET_KEY_FILE` (the agent's KEK mount; add
-  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE` during a rotation),
-  `SCADBUDDY_TEMPORAL_ADDRESS` and `SCADBUDDY_TEMPORAL_NAMESPACE`. The image
-  sets its own paths: `SCADBUDDY_DURABLE_TOOLS_JSON` (the agent's tool manifest
-  from the same build), `SCADBUDDY_DURABLE_SKILLS_DIR`,
-  `SCADBUDDY_DURABLE_AGENTS_DIR` (ScadBuddy's subagents) and
-  `SCADBUDDY_DURABLE_CWD=/srv/agent`.
-- A segment's subagents call ScadBuddy's tools on the agent container's MCP
-  server, `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL`, by default
-  `http://127.0.0.1:8081/internal/durable/subagent-mcp`: the `agent` container in
-  the same pod. Set it if the agent listens elsewhere, or to `off` to give the
-  subagents no ScadBuddy tools. The path is not under `/api/v1/ai/`, so the
-  ingress never routes to it. The agent answers it on loopback only, unless
-  Settings → Durable subagents (`/api/v1/ai/settings/durable-subagents`) lists
-  more addresses or CIDR ranges (none broader than a /8, or an IPv6 /32): a
-  worker in its own pods needs its pod range there. A NetworkPolicy that admits
-  only those pods to the agent's port is then **required**, not optional: a pod
-  range also holds the ingress's pods, and without the policy the guard is only
-  the token and the ingress's `X-Forwarded-For`.
-  Each call still needs a token minted under the KEK for one session, turn and
-  owner, and is a request with no `X-Forwarded-For`. The same setting's URL,
-  when set, replaces `SCADBUDDY_DURABLE_SUBAGENT_MCP_URL` (not `off`) from the
-  next segment.
-- It runs as uid 10001 and writes only under `/srv/agent` (`HOME`, Claude
-  Code's config and its working directory) and `/tmp`, so mount an `emptyDir`
-  at each and keep the root filesystem read-only.
-- Set `SCADBUDDY_PAYLOAD_DIR` on it **and** on the `agent` container to one
-  directory on the data share, mounted at the same path in both (e.g. the
-  backend's NAS volume, `/data/payloads`). A session's Temporal payloads of
-  128 KiB or more (the conversation, the tool manifest, a large tool result)
-  are kept there as files, `<subject>/<sha256>`, ciphertext under the
-  session's own key, and history holds only a reference (#2243). Set it on
-  both or on neither: a reference one container writes, the other must read.
-  forgetSubject removes a session's directory after deleting its key. Unset,
-  payloads stay in history, and a turn whose conversation outgrows 2 MB fails.
-- Several replicas are safe: a session is one workflow, and any worker
-  continues it, because the conversation lives in the workflow (5c Ruling 1).
-- `deploy.reusable.yml` pins its line to the build's digest: in
-  `applications/scadbuddy/scadbuddy-agent-durable.yaml` when that file exists,
-  otherwise in `applications/scadbuddy/scadbuddy.yaml` (the sidecar). A layout
-  without the line deploys without it; one with it in both files fails.
-- Until a worker polls `agent`, new chats fall back to classic and say why
-  (5d Ruling 2b).
-- The new GHCR package needs the one-time **public** visibility step
-  described above.
+- It runs no worker and needs no variables. It answers `GET /healthz` on `8082`
+  with `{"status": "ok", "worker": "none"}` and logs why, and opens no other port.
+- It runs as uid 10001; keep the root filesystem read-only, with an `emptyDir`
+  at `/tmp`.
+- clusters runs it as `scadbuddy-agent-durable.yaml`, at zero replicas since
+  Step 8.3. `deploy.reusable.yml` still pins that file's image line to the
+  build's digest, so scaling it up again runs the same build.
 
 ### Slicer worker (#3821)
 

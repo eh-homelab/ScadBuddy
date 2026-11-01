@@ -22,9 +22,9 @@ fi
 
 wiring='Dockerfile$|\.dockerignore$|\.github/workflows/ci\.yml$|\.github/scripts/(select-lanes|changed-paths)(\.test)?\.sh$'
 backend="^(backend/|models/|test-fixtures/|e2e-stack/|workers/rust/vectors/|frontend/page-csp\.txt$|THIRD_PARTY_NOTICES\.md$|\.gitattributes$|\.github/scripts/merge-test-durations\.sh$|$wiring)"
-# agent-durable's tests read agent/ (migrations, fixtures, vectors); its image takes
-# the plugin's skills and agents. The job also checks the backend's harness pin.
-agent_durable="^(agent-durable/|agent/|plugins/scadbuddy/|backend/(pyproject\.toml|uv\.lock)$|\.github/scripts/(agent-durable-pin|harness-pin)(\.test)?\.sh$|$wiring)"
+# agent-durable's tests read agent/ (migrations, fixtures, vectors). The job also checks
+# the backend's harness pin.
+agent_durable="^(agent-durable/|agent/|backend/(pyproject\.toml|uv\.lock)$|\.github/scripts/(uv-git-pin|harness-pin)(\.test)?\.sh$|$wiring)"
 rust="^(workers/rust/|$wiring)"
 image_extra='^(frontend/|tools/go/|go\.work(\.sum)?$|vendor/|\.github/scripts/(bambuddy-fs-live|fonts-probe)\.sh$)'
 

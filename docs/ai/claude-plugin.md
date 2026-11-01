@@ -97,31 +97,14 @@ tier, and no other built-in ([`agent/src/harness/ownPlugin.ts`](../../agent/src/
 A subagent's calls go through the same permission checks as the session's own. One asked
 to run in the background runs inside the turn instead (#946).
 
-In a durable session (#2320) the subagents run in the segment's Claude Code, in the
-`agent-durable` container. The Temporal plugin refuses them every durable tool, because
-a subagent cannot pause the segment. So each segment gives the subagents the agent's
-loopback MCP server under the name `scadbuddy`, and their tool names stay
-`mcp__scadbuddy__<tool>`
-([`agent/src/routes/subagentMcp.ts`](../../agent/src/routes/subagentMcp.ts),
-[`agent-durable/.../session/subagents.py`](../../agent-durable/src/scadbuddy_durable/session/subagents.py)).
-The server answers only a loopback peer, with a token the segment runner mints from the
-KEK for the session's running turn and owner. Every call is decided from the session as
-it is when the call runs: the turn still running, the owner unchanged, the turn sender's
-tiers cut to what its credential holds now, and Settings → Tools & plugins applied. An outward
-call is refused with a note telling the subagent to leave it to the main agent, where it
-parks for approval. The server is the subagents' own (#2562): the runner passes each
-definition in `agents/` to Claude Code with the server inline
-(`AgentDefinition.mcpServers`), which Claude Code connects for that subagent only, so the
-main agent is never offered a second copy of every tool. A plugin's own subagents cannot
-carry an MCP server ([Subagents](https://code.claude.com/docs/en/sub-agents)), so the
-image copies `agents/` to `/app/subagents` (`SCADBUDDY_DURABLE_AGENTS_DIR`), outside the
-plugin directory. The session's other tools (remote plugins, `http_request`, the headless
-browser) are durable turn tools there, which the Temporal plugin refuses a subagent, so a
-durable subagent has ScadBuddy's own tools only. The server's path,
-`/internal/durable/subagent-mcp`, is outside `/api/v1/ai/`, which the ingress routes to
-the agent. `agent-durable/tests/test_subagents.py` runs the bundled Claude Code against
-a fake endpoint and checks both: the main agent's request lists no `mcp__scadbuddy__`
-tool, and a subagent's lists the server's.
+Every session is an AgentSession since plan 2026-10-13 Step 6.3, so a subagent runs in
+the turn's own Claude Code and gets the turn's plugin, `http_request` and browser tools,
+and its outward call parks for the person as the main agent's does (#2660;
+[`agent/test/parity.temporal.test.ts`](../../agent/test/parity.temporal.test.ts)). The
+retired Python turn (Step 8.1) gave its subagents ScadBuddy's own tools only, through the
+agent's loopback `/internal/durable/subagent-mcp`
+([`agent/src/routes/subagentMcp.ts`](../../agent/src/routes/subagentMcp.ts)), which
+Step 8.2 removes.
 Claude Code refuses `AskUserQuestion` inside a subagent, so in a session the user is in
 the harness also serves `mcp__scadbuddy_questions__ask_user`, which asks the user through
 the same panel card (#940), which the subagents inherit.

@@ -48,8 +48,8 @@ running Temporal (e.g. `temporal server start-dev`) or a `temporal` CLI is on `P
 (`SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` can point at one; the test image ships
 `/usr/local/bin/temporal`), from which the tests start their own dev server.
 That CLI is pinned by version and amd64 sha256 in the Dockerfile's `test` stage
-(`TEMPORAL_CLI_VERSION`, `TEMPORAL_CLI_SHA256_AMD64`), in `ci.yml`'s three "Install the
-Temporal CLI" steps; move all four together.
+(`TEMPORAL_CLI_VERSION`, `TEMPORAL_CLI_SHA256_AMD64`), in `ci.yml`'s two "Install the
+Temporal CLI" steps; move all three together.
 Under pytest-xdist each worker makes its schemas in a database of its own
 (`<test db>_gw<N>`, created and dropped by `tests/conftest.py::_pg_database_url`),
 because advisory locks and NOTIFY channels are per database: workers sharing one would
@@ -149,21 +149,23 @@ skips without one), and its render is checked `verify.sh`-style on the saved out
 3MF; replies with suggestions are scored on their citations (`evals/citations.ts`,
 #1924).
 `.github/scripts/lint-one-runtime.sh` (the `lint` job) fails on a second turn path: a session
-mode branch in `agent/src`, or the SDK's `query` imported outside `harness/run.ts` and
-`harness/testConnection.ts`.
+mode branch in `agent/src`, the SDK's `query` imported outside `harness/run.ts` and
+`harness/testConnection.ts`, or `agent-durable/` importing or depending on the Claude Agent
+SDK or naming `DurableSession` (plan Step 8.1).
 
-Durable sessions (`agent-durable/`, Python 3.14; the `agent-durable` CI job, #1056):
+The Python agent parts (`agent-durable/`, Python 3.14; the `agent-durable` CI job, #1056):
 
 ```bash
 cd agent-durable
-../.github/scripts/agent-durable-pin.sh .   # the ai-integrations#33 pin still resolves (uv lock --check alone cannot tell)
 uv run --frozen ruff check . && uv run --frozen ruff format --check .
 uv run --frozen mypy
 uv run --frozen pytest            # requires_postgres tests need SCADBUDDY_TEST_DATABASE_URL
-docker build --target agent-durable -t scadbuddy-agent-durable:dev .   # checks the bundled Claude Code
+docker build --target agent-durable -t scadbuddy-agent-durable:dev .
 ```
 
-It needs uv 0.9.0 or later, which `[tool.uv] required-version` enforces.
+It needs uv 0.9.0 or later, which `[tool.uv] required-version` enforces. The job also runs
+`.github/scripts/harness-pin.test.sh`: `uv-git-pin.sh` on the backend's temporal-agent-harness
+pin, which must fail on a vanished commit (`uv lock --check` alone cannot tell).
 
 `agent/test/fixtures/secret-vectors.json` is written by `agent/test/secretVectors.test.ts`
 (`UPDATE_SECRET_VECTORS=1`) and opened by `agent-durable/tests`: a change to
@@ -171,8 +173,6 @@ It needs uv 0.9.0 or later, which `[tool.uv] required-version` enforces.
 `agent/test/fixtures/payload-vectors.json` does the same for the payload codec
 (`agent/test/payloadCodec.test.ts`, `UPDATE_PAYLOAD_VECTORS=1`; `agent-durable/tests/test_codec.py`
 opens every one and seals it again byte for byte).
-The plugin pin moves only in its own PR, which carries the diff of `python/claude_agent_sdk`
-between the two SHAs; `agent-durable-pin.yml` checks weekly that it still resolves (`.github/scripts/agent-durable-pin.sh`).
 
 Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.ts` and
 `agent/src/api/schema.d.ts` are gitignored and never committed. In frontend and agent,
@@ -816,15 +816,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     plan Step 6.5), so forgetting a parent first copies each fork's range into it under
     the fork's key (`copyForkRanges`, `inherited` rows), and refuses without the KEK. A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
-  - DurableSession to AgentSession (plan 2026-10-13 Step 7.2, #4772):
-    `src/sessions/migrateDurable.ts` moves a session whose `runtime` is `durable` at its
-    next send (`cancel_input(migrated)`, the conversation paged through `fork_point`, cut as
-    the plugin's next segment would seed it and appended to `ai_session_entries` under the
-    session's own id with its `mcp__durable__` tool names renamed, `end`, then AgentSession
-    under the same workflow id). Operators run `node dist/migrate-durable-sessions.js
-    --dry-run` (Queries only) and then with `--stop-on-failure`, from a pod with the KEK; Phase 8
-    waits for its `open_durable_sessions: 0`. Only `test/support/durableSessionTurns.ts`
-    (`durableSends`) still sends a turn to a DurableSession, for the Python turn's tests.
+  - DurableSession, the retired Python turn (plan 2026-10-13 Steps 7.2 and 8.1, #4772): its
+    open sessions were moved to AgentSession on 2026-11-01 (their conversations in
+    `ai_session_entries`). A row still `runtime = durable` closed before that and has no
+    transcript: a send to it is refused `closed` (`sessions/durable.ts`), and a fork of it is
+    an AgentSession with the panel's history and no model context (`manager.ts` `fork`).
   - The workspace (#2329, `docs/ai/operating.md` §13): `src/workspace/store.ts`
     `SessionFiles` over `ai_session_files`, keyed by `workspace` (`session:<id>`, gone
     with its session, copied by a fork; or `principal:<kind>:<id>` outside a session,
@@ -876,11 +872,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `<state dir>/plugins/` is only a cache, re-hashed before every load and
     re-fetched from the pin. Install stores the pin unapproved; approving needs the
     exact commit and hash. `vet.ts` adds rules on top of `harness/plugins.ts`. Tests
-    use local git repos (`test/support/gitRepo.ts`). A durable turn (#2320) gets them
-    from `<payload dir>/plugins/<content hash>/` (`temporal/turnPackages.ts`), which the
-    segment runner re-hashes (`agent-durable/.../session/package_hash.py`, the same hash
-    as `hash.ts`); their MCP servers are turn tools (http ones, in both modes, through the
-    forwarder: `plugins/packages/mcp.ts`). Of an allowed package's built-ins the engine
+    use local git repos (`test/support/gitRepo.ts`). Their MCP servers' http ones go
+    through the forwarder (`plugins/packages/mcp.ts`); `temporal/turnPackages.ts` shares a
+    package under `<payload dir>/plugins/<content hash>/` for the retired Python turn
+    (Step 8.2 removes it). Of an allowed package's built-ins the engine
     runs `Bash`/`PowerShell` (each parked for approval); the agent provides the rest as
     the `builtin` turn tools (`src/builtins/`, #2393: the file tools on the session
     workspace under `/workspace`, WebFetch through the egress check, WebSearch and
@@ -891,8 +886,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own in both modes
     (`src/background/`: `ai_background_tasks`, one `BackgroundTask` workflow per task on
     `agent-tools` that sends the prompt when due and the session is idle; a Monitor's source
-    runs where the session's Bash runs, the replica's own queue or agent-durable's
-    `scadbuddy_durable/background.py`, its events in `ai_background_events`; a Workflow's
+    runs where the session's Bash runs, the replica's own queue, its events in
+    `ai_background_events`; a Workflow's
     script runs in QuickJS (`workflowRunner.ts`, never Node's `vm`), each `agent()` a child chat
     (`workflowAgents.ts`), its results journalled in `ai_workflow_calls`; a classic turn
     gets them as the in-process `builtin` server in place of Claude Code's, which end
@@ -906,38 +901,18 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   §4, "Architecture") describes the backend container; the
   AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole, and the
   09-27 template-pipelines spec makes Postgres and Temporal required.
-- `agent-durable/` — durable agent sessions (#1056, spec 2026-10-01 §6), Python on
-  `temporalio-claude-agent-sdk` (ai-integrations#33, git-pinned by SHA in `uv.lock`, never
-  vendored), shipped as the Dockerfile's `agent-durable` target, trusted like `agent`
-  (clusters runs it as a Deployment of its own; its subagents reach the agent's
-  `/internal/durable/subagent-mcp` from the peers `routes/durableSubagents.ts` stores). `secrets.py`/`credentials.py` open `ai_credentials` as the agent does (only
-  the agent writes a secret; a segment records its key's health, `record_health`,
-  #2320: used, a 60 s cooldown on a 429, or `last_error`, never a disable, which waits
-  on the agent's probe); `check_cli_version.py` is the build's bundled-CLI
-  check (Python `claude-agent-sdk` pinned exactly; it bundles a Claude Code of its own,
-  not the TypeScript SDK's). `python -m scadbuddy_durable` serves `/healthz` on 8082
-  and runs the `agent` queue's worker (`worker.py`; without its variables, health only,
-  saying why). `scadbuddy_durable/session/` is `DurableSession` (5c): `workflow.py`
-  (turns, the gate wiring), `tools.py` (the manifest from `SCADBUDDY_DURABLE_TOOLS_JSON`
-  as `activity_as_tool` stubs on `agent-tools`; the sandbox passes the module through,
-  or a workflow sees an empty manifest), `runner.py` (`ScadBuddyRunner`: credential,
-  budget and cost per segment, `view_user_images`), `events.py` (`follow_session`,
-  the live output into `ai_session_events` from `ai_sessions.durable_offset`),
-  `activities.py` (`gate_settings`, `finish_turn`). Its tests start a dev server from
-  `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` and skip without one; `tests/fake_anthropic.py`
-  is the Python fake endpoint the bundled Claude Code is pointed at.
-  A segment's subagents (#2320) get ScadBuddy's tools from the agent's loopback
-  `routes/subagentMcp.ts` (`/internal/durable/subagent-mcp`) as `mcp__scadbuddy__*`
-  (`session/subagents.py` mints the per-turn token from the KEK,
-  `temporal/subagentToken.ts` the same format); every call is resolved from the session
-  as it is then, and an outward one is refused to the main agent. The server is inline in
-  each subagent's definition (`load_agents`, `with_server`, from
-  `SCADBUDDY_DURABLE_AGENTS_DIR`, outside the plugin dir), so the main agent never has it.
-  `scadbuddy_durable/gate/` is the gate's Python half (5b): ids, the `respond`
-  validator (the same vectors), `build_entry`, and the `open_input` / `resolve_input`
-  activities that write `ai_pending_input`, `ai_input_responses`, the session's events
-  and the approval audit row (`store.py`, mirroring `eventLog.ts`). `codec.py` is the
-  payload codec's Python half (`data_converter`, the same vectors).
+- `agent-durable/` — ScadBuddy's Python agent parts (#1056; spec 2026-10-13 §14.4), shipped
+  as the Dockerfile's `agent-durable` target, trusted like `agent`. It ran the Python turn
+  (DurableSession on the `agent` queue) until plan Step 8.1 retired it: it now depends on no
+  Claude Agent SDK, and `python -m scadbuddy_durable` serves `/healthz` on 8082 and runs no
+  worker (`worker.py` `NO_WORKER`), until a Python workload exists (decision Q9; clusters
+  keeps its Deployment at zero). What stays, tested against the agent's vector files:
+  `secrets.py`/`credentials.py` (open `ai_credentials` as the agent does; only the agent
+  writes a secret), `codec.py` and `payload_store.py` (the payload codec's Python half),
+  and `gate/` (the gate's Python half: ids, the `respond` validator, `build_entry`, and the
+  `open_input` / `resolve_input` writers of `ai_pending_input`, `ai_input_responses`, the
+  session's events and the approval audit row, which `agent/test/gateStore.pg.test.ts`
+  runs against the TypeScript store).
 - `models/` — bundled example models (`models/<name>/verify.sh`).
 - `deploy/grafana/` — the ScadBuddy Grafana dashboards (#988, tracing spec §7): the
   overview `scadbuddy.json` (uid `scadbuddy`; never change it) and one `<name>.json` per

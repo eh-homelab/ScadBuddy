@@ -383,15 +383,9 @@ jobs:
           fi
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
 
-      # The build runs the stage's bundled Claude Code check
-      # (scadbuddy_durable.check_cli_version) and parses the agent's tool
-      # manifest.
-      #
       # `type=gha` on a hosted runner only, as above. Its own scope, which
       # ci.yml's `agent-durable` job reads and writes too, at mode=min (the
-      # repo's Actions cache is at its ceiling, #743). It also reads
-      # `scope=agent`, whose mode=max index holds the `agent-build` stage the
-      # tool manifest comes from, so that chain is not rebuilt from nothing.
+      # repo's Actions cache is at its ceiling, #743).
       - name: Build and push
         id: build
         uses: docker/build-push-action@v7
@@ -406,9 +400,7 @@ jobs:
             SCADBUDDY_REVISION=${{ github.sha }}
             SCADBUDDY_VERSION=${{ steps.label.outputs.version }}
           provenance: false
-          cache-from: |
-            type=gha,scope=agent-durable
-            type=gha,scope=agent
+          cache-from: type=gha,scope=agent-durable
           cache-to: type=gha,scope=agent-durable,mode=min
 
       - name: Report the published digest

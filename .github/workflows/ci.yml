@@ -687,9 +687,8 @@ jobs:
 
       # `pnpm gen:api`, which typecheck, test and build run first, exports the
       # backend's spec with uv: the spec and the generated clients are not
-      # committed (#492). Same pinned action as the `freshness` job. The durable
-      # session's end-to-end test (test/durable.e2e.test.ts) runs agent-durable's
-      # worker with uv too.
+      # committed (#492). Same pinned action as the `freshness` job. The gate store's
+      # parity test (test/gateStore.pg.test.ts) runs agent-durable's port with uv too.
       - name: Set up uv
         uses: astral-sh/setup-uv@v10.3.2
         with:
@@ -830,18 +829,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: agent-durable/uv.lock
 
-      # The pin still resolves from temporalio/ai-integrations (spec §6.2): a
-      # commit only a draft PR references can vanish. Runs on every PR, so a
-      # change to uv.lock is checked where it is made. The test also proves the
-      # check fails on a vanished commit, which `uv lock --check` alone never sees.
-      - name: Check the pin still resolves
-        working-directory: .
-        run: .github/scripts/agent-durable-pin.test.sh
-
-      # The same check on the backend's temporal-agent-harness pin (plan
-      # 2026-10-09-durable-phase-6-flows.md Ruling 1). It runs here only because
-      # this job already sets up uv on the runner; the backend's own jobs run in
-      # the image.
+      # The backend's temporal-agent-harness pin still resolves (plan
+      # 2026-10-09-durable-phase-6-flows.md Ruling 1): a commit can vanish, which
+      # `uv lock --check` alone never sees. It runs here only because this job
+      # already sets up uv on the runner; the backend's own jobs run in the image.
       - name: Check the harness pin still resolves
         working-directory: .
         run: .github/scripts/harness-pin.test.sh
@@ -864,26 +855,9 @@ jobs:
       # validator port, as the agent job runs them against agent/src/gate/validate.ts.
       # Opens and re-seals agent/test/fixtures/payload-vectors.json, which the agent
       # job regenerates from agent/src/temporal/payloadCodec.ts.
-      # DurableSession's tests (tests/test_session_*.py, #1056 phase 5c) start their own
-      # dev server from this CLI and skip without one. Same version and digest as the
-      # agent job's step and the Dockerfile's `test` stage; bump together.
-      - name: Install the Temporal CLI
-        working-directory: .
-        env:
-          TEMPORAL_CLI_VERSION: 1.9.1
-          TEMPORAL_CLI_SHA256: 09a0326a51db84d02735e53542b9ebd8c4758daf47482a9ab0abce15844e60d5
-        run: |
-          set -euo pipefail
-          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/temporal-cli.tar.gz" \
-            "https://github.com/temporalio/cli/releases/download/v${TEMPORAL_CLI_VERSION}/temporal_cli_${TEMPORAL_CLI_VERSION}_linux_amd64.tar.gz"
-          echo "${TEMPORAL_CLI_SHA256}  $RUNNER_TEMP/temporal-cli.tar.gz" | sha256sum --check --strict
-          tar -xzf "$RUNNER_TEMP/temporal-cli.tar.gz" -C "$RUNNER_TEMP" temporal
-          "$RUNNER_TEMP/temporal" --version
-
       - name: Tests
         env:
           SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
-          SCADBUDDY_TEST_TEMPORAL_DEV_SERVER: ${{ runner.temp }}/temporal
         run: uv run --frozen pytest -v
 
       - uses: docker/setup-buildx-action@v4
@@ -894,8 +868,6 @@ jobs:
             [registry."docker.io"]
               mirrors = ["mirror.gcr.io"]
 
-      # The stage copies the agent's tool manifest from `agent-build` (5e), so
-      # it also reads `scope=agent`, whose mode=max index holds that chain.
       - name: Build the agent-durable image
         uses: docker/build-push-action@v7
         with:
@@ -903,9 +875,7 @@ jobs:
           target: agent-durable
           load: true
           tags: scadbuddy-agent-durable:ci
-          cache-from: |
-            type=gha,scope=agent-durable
-            type=gha,scope=agent
+          cache-from: type=gha,scope=agent-durable
           cache-to: type=gha,scope=agent-durable,mode=min
 
       - name: Start it and check /healthz
@@ -921,7 +891,7 @@ jobs:
           done
           body="$(curl --fail --silent --show-error http://127.0.0.1:18082/healthz)"
           echo "$body"
-          jq -e '.status == "ok"' <<<"$body" >/dev/null
+          jq -e '.status == "ok" and .worker == "none"' <<<"$body" >/dev/null
 
       - name: Tear down
         if: always()

@@ -1,6 +1,6 @@
 """``open_input`` and ``resolve_input`` as activities on the ``agent`` queue (spec §6.6).
 
-DurableSession (phase 5c) runs them: ``open_input`` once the plugin's
+The retired Python turn (phase 5c) ran them: ``open_input`` once the plugin's
 ``pending_approvals()`` gains a call, ``resolve_input`` before every ``agent.decide``.
 How it retries ``resolve_input`` depends on who waits: on the ``respond`` path a
 person waits on the Update's answer, so the activity is bounded at 30 s; on the timer

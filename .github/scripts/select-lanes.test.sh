@@ -23,7 +23,8 @@ expect "true false false true"  .github/scripts/merge-test-durations.sh
 expect "true true false true"   backend/uv.lock
 expect "false true false false" agent-durable/scadbuddy_durable/worker.py
 expect "false true false false" agent/src/secrets.ts
-expect "false true false false" plugins/scadbuddy/skills/print/SKILL.md
+expect "false false false false" plugins/scadbuddy/skills/print/SKILL.md
+expect "false true false false" .github/scripts/uv-git-pin.sh
 expect "false true false false" .github/scripts/harness-pin.test.sh
 expect "false false true false" workers/rust/crates/sb-slicer/src/lib.rs
 expect "false false false true" frontend/src/main.tsx

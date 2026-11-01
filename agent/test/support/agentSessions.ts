@@ -244,7 +244,7 @@ export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, '
   stack.served.push(served)
   m.durable = new DurableGate(stack.env.client)
   m.durableTurns = new ServedTurns(
-    { client: stack.env.client, sql: deps.sql, events: m.events, store: m.store, liveHosts: polledHosts(stack.env.client, stack.hostQueue) },
+    { client: stack.env.client, sql: deps.sql, events: m.events, liveHosts: polledHosts(stack.env.client, stack.hostQueue) },
     (id) => stack.bySession.set(id, served),
   )
   const stopTurns = m.stopTurns.bind(m)

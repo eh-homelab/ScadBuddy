@@ -17,6 +17,20 @@ if grep -rnE "mode ?[!=]==? ?$q(durable|classic)$q|case $q(durable|classic)$q|se
   echo "a session mode branch is back: every session is an AgentSession" >&2
   fail=1
 fi
+# The Python turn is retired (plan Step 8.1, spec §14.4): agent-durable/ neither imports the
+# Claude Agent SDK (`claude_agent_sdk`, or the Temporal plugin's `temporalio.claude_agent_sdk`)
+# nor depends on it, and no file of it names DurableSession, the workflow that turn ran in.
+if [ -d "$root/agent-durable" ]; then
+  if grep -rnE "^[[:space:]]*(from|import)[[:space:]][^#]*\bclaude_agent_sdk\b|\bDurableSession\b" "$root/agent-durable" \
+      --include='*.py' --exclude-dir=.venv --exclude-dir=__pycache__; then
+    echo "agent-durable/ runs a turn again: the Python turn is retired" >&2
+    fail=1
+  fi
+  if grep -nE "claude-agent-sdk" "$root/agent-durable/pyproject.toml" 2>/dev/null; then
+    echo "agent-durable/ depends on the Claude Agent SDK again: the Python turn is retired" >&2
+    fail=1
+  fi
+fi
 # Every import of the SDK's `query` (named, renamed, across lines, a namespace import, a
 # dynamic import), wherever it is called, outside the harness's two call sites.
 python3 - "$root/agent/src" <<'PY' || fail=1

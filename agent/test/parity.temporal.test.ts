@@ -171,6 +171,39 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`an AgentSessi
     await expect.poll(() => hindsight.retains().length).toBeGreaterThan(0)
   }, 120_000)
 
+  // What test/builtins.durable.e2e.test.ts pinned for the retired Python turn (#2393, plan Step 8.1):
+  // an allowed package's named built-in is offered, its call parks for the person, and once
+  // approved it runs and the model gets its result.
+  it("parks an allowed package's built-in call for the person, then runs it once approved", async () => {
+    const file = path.join(dir, 'notes', 'a.txt')
+    let write: string | undefined
+    script = (r) => {
+      write ??= ['Write', 'mcp__builtin__Write'].find((n) => tools(r).includes(n))
+      if (lastContent(r).includes('tool_result')) return { text: 'Jotted.' }
+      return { toolUse: { name: write!, input: { file_path: file, content: 'jotted\n' } } }
+    }
+    const m = await agent()
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'jot it down' })
+    let entry: { request_id: string; tool: string } | undefined
+    await expect
+      .poll(
+        async () => {
+          ;[entry] = await db.sql<{ request_id: string; tool: string }[]>`
+            SELECT request_id, tool FROM ai_pending_input WHERE session_id = ${session.id} AND kind = 'approval'`
+          return entry?.tool
+        },
+        { timeout: 60_000 },
+      )
+      .toEqual(expect.any(String))
+    expect(write).toBeDefined()
+    expect(entry!.tool).toBe(write)
+    expect(await respond(m, browser, entry!.request_id, { kind: 'approval', decision: 'approve' })).toMatchObject({ outcome: 'approved' })
+    expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    const told = turnCalls().map(lastContent).find((c) => c.includes('tool_result'))
+    expect(told).toContain('File created successfully')
+    expect(told).not.toContain('denied')
+  }, 120_000)
+
   it("gives a subagent the turn's plugin, http_request and browser tools, and its outward call parks", async () => {
     script = (r) => {
       const last = lastContent(r)

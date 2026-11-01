@@ -227,8 +227,7 @@ jobs:
       # The durable sessions worker (#1056), resolved like the agent, but only
       # when a manifest runs it: one without its line needs no image,
       # so a build from before 5e, or a still-private package, costs no wait.
-      # Its job builds the agent-build chain plus the stage and can finish well
-      # after the API's, so it waits up to 20 minutes. The pin step fails when
+      # Its job can finish after the API's, so it waits up to 20 minutes. The pin step fails when
       # the manifest names the image and this found nothing.
       - name: Resolve the agent-durable image
         id: agent-durable
@@ -410,7 +409,7 @@ jobs:
           # The durable sessions worker's line (#1056). Optional until clusters
           # runs it: a manifest with no line deploys without it. A manifest that
           # names it gets this build's image or fails, never a stale pin beside
-          # a new agent (the two share the tool manifest). Sets $durable to
+          # a new agent. Sets $durable to
           # `pinned` when it rewrote the line.
           durable=none
           pin_agent_durable() { # manifest

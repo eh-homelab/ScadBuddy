@@ -2,7 +2,7 @@
 
 A port of agent/src/gate/validate.ts, check for check and in the same order; the
 shared vectors run against both. It reads nothing but its arguments (no I/O, no
-clock), so DurableSession's ``respond`` Update can run it as its validator, beside
+clock), so a session workflow's ``respond`` Update can run it as its validator, beside
 the plugin's ``validate_decision``. Who the caller is (``role``) is the route's to
 decide; this checks only whether the kind accepts that role.
 """

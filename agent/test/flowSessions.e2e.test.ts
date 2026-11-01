@@ -1,17 +1,15 @@
-import { Client } from '@temporalio/client'
-import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createBackendClient } from '../src/api/backend.js'
-import { CredentialStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
-import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
+import { bundledCliPath } from '../src/harness/cliVersion.js'
+import { respond } from '../src/routes/pendingInput.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { type SessionManager } from '../src/sessions/manager.js'
 import { PgFlowRuns } from '../src/temporal/flowRuns.js'
@@ -21,14 +19,16 @@ import { gateActivities, PgApprovalRecords, PgSessionOwners, toolActivities } fr
 import { turnServers } from '../src/temporal/turnServers.js'
 import { turnToolActivities } from '../src/temporal/turnTools.js'
 import { AgentWorker } from '../src/temporal/worker.js'
-import { DURABLE_TOOLS, writeManifest } from '../src/tools/manifest.js'
+import { harnessTools } from '../src/tools/harness.js'
+import { ALL_TOOLS } from '../src/tools/index.js'
+import { DURABLE_TOOLS } from '../src/tools/manifest.js'
 import { PendingActionStore } from '../src/tools/pending.js'
-import { DurableSessionTurns } from './support/durableSessionTurns.js'
-import { durableHealthPort, notStarted } from './support/durableHealth.js'
+import type { ToolServices } from '../src/tools/registry.js'
+import { AGENT_SESSIONS_SKIP, agentSessions, agentSessionsEnv } from './support/agentSessions.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import { fixedCredentials } from './support/fixedCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
-import { browser, manager, tempPaths } from './support/sessions.js'
-import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.js'
+import { browser, manager, stopManagers, tempPaths } from './support/sessions.js'
 
 // A flow's `agent(...)` and `ask_session(...)` end to end (#1057, plan
 // 2026-10-09-durable-phase-6-flows.md §8: "agent(...) and ask_session against the fake
@@ -36,25 +36,28 @@ import { localTemporal, TEMPORAL_CLI, TEMPORAL_SKIP } from './support/temporal.j
 //
 // - the backend's `projects` worker runs the script in ProjectWorkflow
 //   (backend/tests/flows/agent_e2e_driver.py, a process);
-// - this process's agent-tools worker serves `sessions_start`/`sessions_send` (the
-//   SessionManager, durable, over DurableTurns), `flow_session_check`/`flow_session_turn`
-//   and the session's own tool calls, as main.ts wires it;
-// - agent-durable's worker (`python -m scadbuddy_durable`, a process) runs the
-//   DurableSession turn with the bundled Claude Code, pointed as a gateway at this
-//   process's fake Anthropic endpoint (support/fakeAnthropic.ts), which scripts the turn.
+// - this process's flow tools worker serves `sessions_start`/`sessions_send` (the
+//   SessionManager over DurableTurns) and `flow_session_check`/`flow_session_turn`, as
+//   main.ts wires the agent-tools worker, on a queue of its own (the session stack's
+//   agent-tools worker is support/agentSessions.ts's);
+// - the session runs as an AgentSession (support/agentSessions.ts, as a worker replica runs
+//   it), its turn on the real SDK and its bundled Claude Code, pointed as a gateway at this
+//   process's fake Anthropic endpoint (support/fakeAnthropic.ts), which scripts the turn. Its
+//   ScadBuddy tools are the turn's own, in-process, and its outward call parks in the turn's
+//   gate (ai_pending_input).
 //
 // backend/tests/flows/test_agent_host_functions.py covers the host functions against
 // stand-in activities, and flowSessions.pg.test.ts the two activities against a
-// hand-written event log; this is the path between them. Skips without uv, Temporal or
-// Postgres.
+// hand-written event log; this is the path between them. Skips without uv, Temporal,
+// Postgres or the bundled Claude Code.
 
 const BACKEND_DIR = fileURLToPath(new URL('../../backend/', import.meta.url))
-const DURABLE_DIR = fileURLToPath(new URL('../../agent-durable/', import.meta.url))
 const FAILURE_CONVERTER = fileURLToPath(new URL('../src/temporal/failureConverter.ts', import.meta.url))
-const TOOLS_QUEUE = 'agent-tools'
+const TOOLS_QUEUE = 'flow-tools-e2e'
 const TOKEN = 'gateway-token-1057'
-// The durable plugin offers each tool to Claude Code as `mcp__durable__<name>`.
-const DURABLE = 'mcp__durable__'
+// A turn offers each ScadBuddy tool to Claude Code as `mcp__scadbuddy__<name>`.
+const SCADBUDDY = 'mcp__scadbuddy__'
+const TURN_TOOLS = ALL_TOOLS.filter((t) => t.name === 'sessions_list' || t.name === 'delete_output')
 const SIZE_PROMPT = 'Size the door'
 const WINDOW_PROMPT = 'And the window?'
 const SCHEMA = { type: 'object', properties: { width: { type: 'number' } }, required: ['width'] }
@@ -68,13 +71,20 @@ function hasUv(): boolean {
   }
 }
 
+let cliMissing: string | undefined
+try {
+  bundledCliPath()
+} catch (err) {
+  cliMissing = (err as Error).message
+}
+
 const skip = !hasUv()
   ? 'uv is not on PATH'
-  : !TEMPORAL_CLI
-    ? TEMPORAL_SKIP.trim()
+  : AGENT_SESSIONS_SKIP
+    ? AGENT_SESSIONS_SKIP.trim()
     : !TEST_DATABASE_URL
       ? `${TEST_DATABASE_URL_ENV} is not set`
-      : undefined
+      : cliMissing
 
 function withSearchPath(url: string, schema: string): string {
   const u = new URL(url)
@@ -97,13 +107,13 @@ function toolResults(request: RecordedRequest): number {
  */
 function reply(request: RecordedRequest): Reply {
   const tools = (request.body?.tools ?? []).map((t) => t.name)
-  if (!tools.includes(`${DURABLE}delete_output`)) return { text: 'ok' }
+  if (!tools.includes(`${SCADBUDDY}delete_output`)) return { text: 'ok' }
   const conversation = JSON.stringify(request.body?.messages ?? [])
   if (conversation.includes(WINDOW_PROMPT)) return { text: 'The window is 60 wide.' }
   if (!conversation.includes(SIZE_PROMPT)) return { text: 'ok' }
   const results = toolResults(request)
-  if (results === 0) return { toolUse: { name: `${DURABLE}sessions_list`, input: {} } }
-  if (results === 1) return { toolUse: { name: `${DURABLE}delete_output`, input: { output_id: 'out-1' } } }
+  if (results === 0) return { toolUse: { name: `${SCADBUDDY}sessions_list`, input: {} } }
+  if (results === 1) return { toolUse: { name: `${SCADBUDDY}delete_output`, input: { output_id: 'out-1' } } }
   return { text: '```json\n{"width": 40}\n```' }
 }
 
@@ -131,16 +141,14 @@ async function stop(proc: Proc | undefined): Promise<void> {
 }
 
 describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to end${skip ? ` (skipped: ${skip})` : ''}`, () => {
-  let env: TestWorkflowEnvironment
+  agentSessions()
   let db: Database
   let drop: () => Promise<void>
   let fake: FakeAnthropic
-  let durable: Proc | undefined
   let projects: Proc | undefined
   let worker: AgentWorker | undefined
-  let client: Client
+  let services: ToolServices
   let sessions: SessionManager
-  let gate: DurableGate
   const lines: string[] = []
   const waiting: ((line: string) => void)[] = []
 
@@ -162,7 +170,7 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
   }
 
   beforeAll(async () => {
-    env = await localTemporal()
+    const env = agentSessionsEnv()
     let schema: string
     let url: string
     ;({ db, url, schema, drop } = await throwawayDatabase())
@@ -171,32 +179,10 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
     const kekB64 = randomBytes(32).toString('base64')
     const kekFile = path.join(dir, 'kek')
     await writeFile(kekFile, kekB64, { mode: 0o600 })
-    await writeManifest(path.join(dir, 'tools.json'))
-    for (const sub of ['home', 'cwd']) await mkdir(path.join(dir, sub))
     const kek = kekFromBase64(kekB64)
     fake = await startFakeAnthropic(reply)
-    await new CredentialStore(db.sql).create({ kind: 'gateway', base_url: fake.url, secret: TOKEN }, kek)
     const databaseUrl = withSearchPath(url, schema)
 
-    // agent-durable, with the real segment runner (no SCADBUDDY_DURABLE_SCRIPTED).
-    durable = start(
-      'uv',
-      ['run', '--frozen', 'python', '-m', 'scadbuddy_durable'],
-      DURABLE_DIR,
-      {
-        SCADBUDDY_DATABASE_URL: databaseUrl,
-        SCADBUDDY_TEMPORAL_ADDRESS: env.address,
-        SCADBUDDY_TEMPORAL_NAMESPACE: 'default',
-        SCADBUDDY_SECRET_KEY_FILE: kekFile,
-        SCADBUDDY_DURABLE_TOOLS_JSON: path.join(dir, 'tools.json'),
-        SCADBUDDY_DURABLE_CWD: path.join(dir, 'cwd'),
-        SCADBUDDY_DURABLE_HEALTH_PORT: '0',
-        // Claude Code's own state, never the developer's.
-        HOME: path.join(dir, 'home'),
-        CLAUDE_CONFIG_DIR: path.join(dir, 'home'),
-      },
-      'ignore',
-    )
     // The backend's `projects` worker; it migrates the backend's tables into the schema.
     projects = start(
       'uv',
@@ -216,23 +202,14 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
       else lines.push(line)
     })
 
-    // This process: the sessions, and the agent-tools worker as main.ts wires it.
+    // This process: the sessions (AgentSessions on the stack's workers), and the flow tools
+    // worker as main.ts wires the agent-tools worker.
     const codec = { payloadCodecs: [new SubjectPayloadCodec(new PgPayloadKeys(db.sql, kek))] }
-    client = new Client({ connection: env.connection, namespace: 'default', dataConverter: codec })
-    sessions = manager({
-      sql: db.sql,
-      paths: await tempPaths(),
-      settings: { get: <T>() => Promise.resolve(undefined as T) },
-    })
-    gate = new DurableGate(client)
-    sessions.durable = gate
-    sessions.durableTurns = new DurableSessionTurns({ client, sql: db.sql, events: sessions.events, sendTimeoutMs: 60_000 })
-    const services = {
+    services = {
       backend: createBackendClient('http://backend.invalid', async () => new Response(null, { status: 503 })),
       pending: new PendingActionStore(),
       pollIntervalMs: 5,
       renderWaitMs: 5_000,
-      sessions,
     }
     const audit = {
       record: async () => {},
@@ -261,39 +238,37 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
     })
     await worker.running()
 
-    // Both workers up (uv may sync their environments first).
+    // The projects worker up (uv may sync its environment first).
     const deadline = Date.now() + 240_000
-    let port: number | undefined
     for (;;) {
-      if (durable.child.exitCode !== null) throw new Error(`the durable worker exited: ${durable.log()}`)
       if (projects.child.exitCode !== null) throw new Error(`the projects worker exited: ${projects.log()}`)
-      port ??= durableHealthPort(durable.log())
-      const status = port === undefined
-        ? undefined
-        : await fetch(`http://127.0.0.1:${port}/healthz`)
-            .then((r) => r.json() as Promise<{ worker?: string }>)
-            .catch(() => undefined)
-      if (status?.worker === 'running' && lines.includes('{"ready": true}')) break
-      if (Date.now() > deadline) throw notStarted('the workers', port, `${durable.log()}\n${projects.log()}`)
+      if (lines.includes('{"ready": true}')) break
+      if (Date.now() > deadline) throw new Error(`the projects worker never got ready: ${projects.log()}`)
       await new Promise((r) => setTimeout(r, 500))
     }
   }, 300_000)
 
+  // A manager per test: the session stack serves the managers of the running test only.
+  beforeEach(async () => {
+    sessions = manager({
+      sql: db.sql,
+      paths: await tempPaths(),
+      settings: { get: <T>() => Promise.resolve(undefined as T) },
+      credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
+      ...harnessTools(services, TURN_TOOLS),
+      approvalPollMs: 50,
+      approvalHashKey: Buffer.alloc(32, 7),
+    })
+    services.sessions = sessions
+  })
+
   afterAll(async () => {
     projects?.child.stdin?.end()
     await stop(projects)
-    const ids = db ? await db.sql<{ id: string }[]>`SELECT id::text FROM ai_sessions WHERE mode = 'durable'`.catch(() => []) : []
-    for (const { id } of ids) {
-      await client?.workflow
-        .getHandle(sessionWorkflowId(id))
-        .terminate('test over')
-        .catch(() => {})
-    }
     await worker?.stop()
-    await stop(durable)
+    await stopManagers()
     await fake?.close()
     await drop?.()
-    await env?.teardown()
   }, 60_000)
 
   /** Denies the first outward call that parks at a gate, unless `done` settles first. */
@@ -307,25 +282,19 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
         SELECT p.request_id, p.session_id::text, p.tool FROM ai_pending_input p
          WHERE p.kind = 'approval' AND NOT EXISTS (SELECT 1 FROM ai_input_responses r WHERE r.request_id = p.request_id)`
       if (parked) {
-        const answer = await gate.respond(parked.session_id, {
-          request_id: parked.request_id,
-          response: { kind: 'approval', decision: 'deny' },
-          responder: browser,
-          role: 'browser',
-        })
-        expect(answer).toEqual({ kind: 'approval', outcome: 'denied' })
+        expect(await respond(sessions, browser, parked.request_id, { kind: 'approval', decision: 'deny' })).toMatchObject({ outcome: 'denied' })
         return parked.tool
       }
-      if (Date.now() > deadline) throw new Error(`no outward call parked: ${durable!.log()}`)
+      if (Date.now() > deadline) throw new Error('no outward call parked')
       await new Promise((r) => setTimeout(r, 200))
     }
   }
 
-  it("agent() starts a durable session, waits for its turn and parses the answer its result_schema asks for", async () => {
+  it("agent() starts a session, waits for its turn and parses the answer its result_schema asks for", async () => {
     const running = flow(`answer = await agent(${JSON.stringify(SIZE_PROMPT)}, [], ${JSON.stringify(SCHEMA)})`, "return answer['width'] + 2")
     // A run that ends without parking a call fails below with its own result.
     const [run, denied] = await Promise.all([running, denyTheOutwardCall(running)])
-    expect(denied).toBe('delete_output')
+    expect(denied).toBe(`${SCADBUDDY}delete_output`)
     // The fenced JSON was parsed and checked against the schema: the script did arithmetic on it.
     expect([run.status, run.result]).toEqual(['succeeded', 'result: 42'])
     const [step] = run.steps
@@ -345,13 +314,13 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
       SELECT event::jsonb AS event FROM ai_session_events
        WHERE session_id = ${sessionId} AND event::jsonb->>'type' = 'tool.call' ORDER BY seq`
     expect(calls.map((c) => [c.event.name, c.event.risk])).toEqual([
-      ['sessions_list', 'read'],
-      ['delete_output', 'outward'],
+      [`${SCADBUDDY}sessions_list`, 'read'],
+      [`${SCADBUDDY}delete_output`, 'outward'],
     ])
     expect(run.preview).toEqual([['agent', step!.call_id]])
   }, 300_000)
 
-  it('ask_session() sends to a durable session the starter owns and answers with its turn', async () => {
+  it('ask_session() sends to a session the starter owns and answers with its turn', async () => {
     const { session } = await sessions.start(browser, { origin: 'chat', title: 'window', mode: 'durable' })
     expect(session.mode).toBe('durable')
     const run = await flow(`return await ask_session(${JSON.stringify(session.id)}, ${JSON.stringify(WINDOW_PROMPT)})`)

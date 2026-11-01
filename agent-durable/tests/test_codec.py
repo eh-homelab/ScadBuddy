@@ -91,7 +91,7 @@ async def test_a_sessions_payloads_are_sealed_and_others_pass_through() -> None:
             activity_type=None,
             activity_task_queue=None,
             workflow_id=SUBJECT,
-            workflow_type="DurableSession",
+            workflow_type="AgentSession",
             is_local=False,
         ),
     ):
