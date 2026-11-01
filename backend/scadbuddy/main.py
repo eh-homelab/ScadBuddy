@@ -84,6 +84,8 @@ from scadbuddy.flow_triggers.events import listen_for_triggers
 from scadbuddy.flow_triggers.fire import TriggerFires, reconcile_trigger_schedules
 from scadbuddy.flows.component import FLOWS
 from scadbuddy.flows.sweep import sweep_flow_runs, sweep_orphan_grants
+from scadbuddy.git_remote.component import GIT_REMOTE
+from scadbuddy.git_remote.push import PushError
 from scadbuddy.library.assets import referenced_asset_ids, stopped
 from scadbuddy.library.backfill import attach_backfills, attach_job_backfills, follow_backfills
 from scadbuddy.library.history import GitError
@@ -158,6 +160,7 @@ from scadbuddy.workflows.housekeeping import (
     ATTACHMENTS_SWEEP,
     BACKFILL_SWEEP,
     FLOWS_SWEEP,
+    GIT_REMOTE_SWEEP,
     GIT_SWEEP,
     HEARTBEAT_TIMEOUT,
     LIBRARY_SWEEP,
@@ -659,6 +662,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_native_copies() -> None:
         await _heartbeating(_sweep_native_copies_logged(state))
 
+    @activity.defn(name=GIT_REMOTE_SWEEP)
+    async def push_git_remote() -> None:
+        await _heartbeating(_push_git_remote_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -681,6 +688,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         reap_quote_holds,
         sync_bambuddy_printers,
         sweep_native_copies,
+        push_git_remote,
     ]
 
 
@@ -989,6 +997,21 @@ async def _maintain_models_git_logged(state: AppState) -> None:
         raise
     if packed:
         logger.info("packed the models repository")
+
+
+async def _push_git_remote_logged(state: AppState) -> None:
+    """#4974: what a push after a commit left behind, when a git remote is set."""
+    try:
+        pushed = await asyncio.to_thread(state.components.get(GIT_REMOTE).push_all)
+    except PushError:
+        # Each failure is recorded for Settings, scrubbed of the credential.
+        logger.warning("could not push to the git remote")
+        raise
+    except Exception:
+        logger.exception("could not push to the git remote")
+        raise
+    if pushed:
+        logger.info("pushed to the git remote", extra={"repositories": pushed})
 
 
 async def _reap_quote_holds_logged(state: AppState) -> None:

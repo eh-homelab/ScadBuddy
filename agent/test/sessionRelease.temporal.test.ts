@@ -183,7 +183,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
         }),
     })
     m.durableTurns = new DurableTurns({ client: env.client, sql: pool.sql, events: m.events, liveHosts: polledHosts(env.client, hostQueue) })
-    m.durable = new DurableGate(env.client, { timeoutMs: 30_000, sql: pool.sql })
+    m.durable = new DurableGate(env.client, { timeoutMs: 30_000, db: { sql: pool.sql, events: m.events } })
     const listener = new PgEventListener(url, { searchPath: schema, retryMinMs: 20, log: () => {} })
     listener.start()
     const runCall = decidedCalls([ship], {
@@ -217,7 +217,7 @@ describe.skipIf(skip !== '')(`a long park releases the process${skip}`, { timeou
       activities: {
         ...acquire,
         ...sessionFinishActivities(pool.sql, m.events),
-        ...sessionGateActivities(pool.sql),
+        ...sessionGateActivities({ sql: pool.sql, events: m.events }),
         ...gateActivities({ audit, sessions: new PgSessionOwners(pool.sql) }),
       },
       shutdownGraceMs: 1_000,

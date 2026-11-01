@@ -110,7 +110,7 @@ describe('registry', () => {
     expect(AREAS.map((a) => [a.id, SECTION_REGISTRY.filter((s) => s.area === a.id).map((s) => s.id)])).toEqual([
       ['general', ['connection']],
       ['printing', ['printing', 'printers', 'inventory', 'native-spools', 'orders', 'remembered', 'hotend-usage']],
-      ['library', ['projects', 'uploads', 'fonts', 'libraries', 'rendering', 'preview']],
+      ['library', ['projects', 'uploads', 'fonts', 'libraries', 'git-remote', 'rendering', 'preview']],
       [
         'assistant',
         [

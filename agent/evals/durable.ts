@@ -283,7 +283,7 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
             taskQueue: TASK_QUEUE,
             activities: {
               ...gateActivities({ audit, sessions: new PgSessionOwners(pool.sql), tools: ALL_TOOLS, services }),
-              ...sessionGateActivities(pool.sql),
+              ...sessionGateActivities({ sql: pool.sql, events: p.m.events }),
               ...sessionFinishActivities(pool.sql, p.m.events),
               ...acquire,
             },

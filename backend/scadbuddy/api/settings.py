@@ -187,6 +187,12 @@ class SettingsView(BaseModel):
     worker_cache_max_bytes: int
     has_google_fonts_api_key: bool = False
     fonts_catalogue_ttl: float
+    #: The off-box copy of the history (#4974): where each commit is pushed, and as whom.
+    #: The token is reported only as ``has_git_remote_token``; how far behind the remote
+    #: is, is ``GET /settings/git-remote``.
+    git_remote_url: str | None = None
+    git_remote_username: str | None = None
+    has_git_remote_token: bool = False
     event_log_retention_seconds: float
     event_log_retention_rows: int
     flow_approval_timeout_seconds: int
@@ -397,6 +403,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         destination_sort=stored.destination_sort,
         asset_fetch_domains=list(stored.allowed_asset_domains()),
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),
+        has_git_remote_token=bool(runtime.git_remote_token),
         sources=snapshot.sources,
         applies=dict(APPLIES),
         restart_required=restart_required(state, runtime),
@@ -467,6 +474,14 @@ async def put_settings(
     ``settings.changed``) on every other replica."""
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
+    if patch.git_remote_token and store.kek is None:
+        # #4974: the remote's credential is only ever stored sealed under the KEK.
+        msg = "A git remote's token is stored sealed: set SCADBUDDY_SECRET_KEY_FILE first."
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            msg,
+            errors=[{"loc": ["body", "git_remote_token"], "msg": msg}],
+        )
     try:
         await asyncio.to_thread(store.save, patch)
     except StoreNotReadyError as error:

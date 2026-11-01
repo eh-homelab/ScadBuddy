@@ -85,6 +85,9 @@ export function connectWebMcp(bridge: AgentBridge, preference: WebMcpPreference 
     // listTools() succeeded, not that any tool was registered (the list may be empty).
     warned.clear()
     for (const tool of listed.tools) {
+      // Its answer is an image, which WebMCP's content would carry as base64; the bridge
+      // sends it as bytes instead (link.ts, #2479), so only the bridge offers it.
+      if (tool.name === 'screenshot') continue
       await context!
         .registerTool(
           {

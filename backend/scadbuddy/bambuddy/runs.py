@@ -185,6 +185,9 @@ def run_key(output_id: str, request: PrintRunRequest) -> str:
     # #717: no profiles is the key from before the field existed.
     if not request.filament_profiles:
         exclude.add("filament_profiles")
+    # #284: no accepted fixes is the key from before the field existed.
+    if not request.accepted_fixes:
+        exclude.add("accepted_fixes")
     body = request.model_dump(mode="json", exclude=exclude or None)
     canonical = json.dumps(body, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(f"{output_id}\n{canonical}".encode()).hexdigest()

@@ -928,39 +928,66 @@ are swept until none is left. They are
 named `plugin_<package>_<server>` and are outward. http ones go through the same
 forwarder (above), and their forwarder URLs and headers are redacted like a plugin's. A
 local one runs only for a package approved with `allow_refused`, started in the
-package's folder with `PATH`, `HOME` and its declared `env`. Of the built-ins an allowed
-package names, only `Bash` and `PowerShell` can run as the engine's own activities, and so
-wait for a human: the Temporal plugin refuses any other in `tool_activities`
-([`_check_tool_activities`](https://github.com/temporalio/ai-integrations/blob/b1cf3848b15ad5cd1f009bd19524e3f751140439/python/claude_agent_sdk/src/temporalio/claude_agent_sdk/_workflow.py#L73-L97)).
-A durable turn offers those two and decides each call by its access as it is then: `off`
-refuses it, `read` or `write` runs it, `outward` parks it for approval (#4757, "Items and
-switches" below). Skill, Agent and Task run inside the segment (see "Items and
-switches"). The agent provides the
-others as the `builtin` turn tools (`agent/src/builtins/`, #2393), named
-`builtin__<Name>`, each at its access (unset is outward) and parked like any outward turn tool, and the turn's system
-prompt names them (`turnServers.ts` `builtinNote`, carried as the listing's `system_note`):
+package's folder with `PATH`, `HOME` and its declared `env`.
 
-- `Read`, `Write`, `Edit`, `Glob`, `Grep` and `NotebookEdit` act on the session's
-  workspace (`ai_session_files`), shown under `/workspace`, which the `workspace_*` tools
-  and the panel's Files see too;
+**Claude Code's own built-ins** (plan 2026-10-13 Step 9.6, decisions Q2 to Q4). Every
+session's Claude Code process offers its own built-ins, each an item of the access source
+`builtin:claude-code` in Settings → Tools & plugins
+([`agent/src/access/nativeBuiltins.ts`](../../agent/src/access/nativeBuiltins.ts)):
+
+| Tool | Default access |
+|---|---|
+| `Read`, `Glob`, `Grep`, `TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate` | `read` |
+| `Write`, `Edit`, `NotebookEdit` | `write` |
+| `Bash`, `PowerShell` | `off` |
+
+- They run in the session's working directory (§13), the process's cwd. The permission
+  seam refuses a file tool's path outside it: an absolute path elsewhere, `..`, a link
+  whose target is outside, or a path, Glob pattern or Grep glob that starts with `~`
+  ([`agent/src/harness/confine.ts`](../../agent/src/harness/confine.ts), an input guard in
+  both canUseTool and the PreToolUse hook). Claude Code expands a leading `~` to HOME, the
+  state directory with its config and transcripts; Glob's and Grep's `path` reach the seam
+  unexpanded and the tool expands them after (measured on Claude Code 2.1.310,
+  `agent/test/nativeBuiltins.sdk.test.ts`; `$HOME` and `~user` were not expanded). A turn
+  with no working directory is offered none of the file tools, and the seam refuses them.
+  A link swapped in between the check and the
+  tool's own open is still followed; only a process the session runs (a Monitor command, an
+  allowed package's `Bash`) can make one.
+- `Bash` and `PowerShell` are `off` because Claude Code's sandbox cannot run in the worker
+  pod. Measured on 2026-11-01 in `scadbuddy-agent-worker` (read-only): `unshare --user
+  --map-root-user --pid --fork id` works, but with `--mount` it fails with "cannot change
+  root filesystem propagation: Permission denied" (AppArmor `cri-containerd.apparmor.d`,
+  enforce), and the image has no `bwrap`. Unsandboxed, `Bash` could read the KEK mount and
+  every session's directory. A sandbox pod (#779) comes first.
+- An `allow_refused` package's `builtinTools` only switch on a built-in that is `off` by
+  default, at the package's own tier for it (`outward` by default, so each call parks).
+  The source switched off, or the item's own row set to `off`, keeps it off whatever a
+  package names. They no longer decide which built-ins exist.
+- The task list. Measured on the bundled Claude Code (SDK 0.3.310): `TaskCreate` keeps it
+  in `$CLAUDE_CONFIG_DIR/tasks/<session id>/<n>.json`, in neither the transcript nor the
+  cwd. The config directory is the pod's own, so that path is a link to the session
+  directory's `_claude/tasks/` (`stateDirs.ts` `linkTaskList`). The task files are then
+  workspace files, written back with the directory and refilled at any pod's placement
+  (`test/nativeBuiltins.sdk.test.ts`).
+- **Breaking for package authors.** The retired durable turn's `builtin__<Name>` file and
+  task tools (`Read`, `Write`, `Edit`, `Glob`, `Grep`, `NotebookEdit`, the `Task*` tools,
+  `ReportFindings`, `EnterWorktree`, `ExitWorktree`, `SendMessage`) and their `/workspace`
+  paths are gone, and so is the old task list file `_claude/tasks.json`. A skill names
+  Claude Code's own tools, with paths in the session directory.
+
+The agent still provides these in place of Claude Code's, from the in-process `builtin`
+server (`agent/src/builtins/server.ts`, `mcp__builtin__<Name>`), each outward:
+
 - `WebFetch` fetches through `http_request`'s exchange (every hop egress-checked and
   pinned; a cross-host redirect is returned, as Claude Code returns it; http is not
   upgraded), converts the page with turndown and asks a small model (`haiku`) about it in
-  a one-shot Claude Code query with no tools, on the session's credential. A classic
-  turn gets this `WebFetch` too, as `mcp__builtin__WebFetch` in place of Claude Code's
-  (#2684), its model call counted in the turn's cost;
+  a one-shot Claude Code query with no tools, on the session's credential (#2684). Claude
+  Code's own WebFetch skips the egress check (decision Q2);
 - `WebSearch` runs Claude Code's own WebSearch in a one-shot query that may make only the
-  search asked for, and returns its result as it is;
-- `TaskCreate`, `TaskGet`, `TaskList` and `TaskUpdate` keep the task list in the
-  workspace file `_claude/tasks.json`, so it lasts the session, not one process;
-- `ReportFindings`, `EnterWorktree`, `ExitWorktree` and `SendMessage` answer as a
-  classic turn's do (there is no git repository and no agent team in either mode).
+  search asked for, and returns its result as it is.
 
 The one-shot queries' cost is added to the session's `cost_usd`, which its budget reads,
-as a classic turn counts Claude Code's own calls. The inputs are Claude Code's own
-(`src/builtins/schemas.json`, checked against the bundled binary by
-`test/builtins.sdk.test.ts`; `UPDATE_BUILTIN_SCHEMAS=1` rewrites it after a bump) and the
-answers its wording, measured in a classic turn on Claude Code 2.1.296.
+as a turn counts Claude Code's own calls.
 
 `CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are kept by the
 session, in both modes (`agent/src/background/`). Claude Code keeps its own jobs in its
@@ -1120,8 +1147,10 @@ user sets them in Settings → Tools & plugins → Packages
     any match it reaches is off.
 - **Hooks change per turn, in both runtimes.** No SDK option drops one plugin hook from a
   running query (spec §2), so a hook switched off is left out of the next turn's copy.
-- **Built-ins.** For a pin approved with `allow_refused`, each Claude Code built-in it
-  names is an item `builtin:<Tool>`, with a tool's access. Where several packages of the
+- **Built-ins.** Claude Code's own built-ins are items of `builtin:claude-code` (§9). For a
+  pin approved with `allow_refused`, each Claude Code built-in it names is also an item
+  `builtin:<Tool>`, with a tool's access; for one of `builtin:claude-code`'s it counts only
+  while that item is `off`, as the switch that turns it on. Where several packages of the
   turn name one built-in, the strictest wins (`off` > `outward` > `write` > `read`), and a
   package that names it with no row counts as `outward` (`strictest` in `items.ts`). Each
   call takes its access as it is then:
@@ -1392,7 +1421,7 @@ Settings → Tools & plugins reads and writes `ai_access` through seven agent ro
 
 | Route | |
 |---|---|
-| `GET /api/v1/ai/capabilities` | `{ sources }`: every source with its items (`id`, `kind`, `name`, `harness_name`, `label`, `description`, `default`, `access`, `own_access`, `overridden`, `allowed`, `fixed`, `reason`, …), its `enabled` and `switchable`, its `problem` and `checking` (a package's load check), its `children` (a package's servers), its `options_route` and, for a remote plugin or a package server, `listed_at`. The sources are the four built-ins, each remote plugin, and each installed package `package:<name>` with a child `package:<name>/mcp:<server>` per server; a package is `switchable` only once its pin is approved |
+| `GET /api/v1/ai/capabilities` | `{ sources }`: every source with its items (`id`, `kind`, `name`, `harness_name`, `label`, `description`, `default`, `access`, `own_access`, `overridden`, `allowed`, `fixed`, `reason`, …), its `enabled` and `switchable`, its `problem` and `checking` (a package's load check), its `children` (a package's servers), its `options_route` and, for a remote plugin or a package server, `listed_at`. The sources are the five built-ins (`builtin:claude-code` among them, Step 9.6), each remote plugin, and each installed package `package:<name>` with a child `package:<name>/mcp:<server>` per server; a package is `switchable` only once its pin is approved |
 | `GET /api/v1/ai/capabilities/{source}` | one source |
 | `PUT /api/v1/ai/capabilities/{source}` | `{ "enabled": true\|false }`: the source switch (item `*`); 409 on a source that is not `switchable` |
 | `GET /api/v1/ai/capabilities/{source}/items/{item}` | the item with its input and output schemas, annotations, the raw listed entry and what the caps `omitted` |
@@ -1571,9 +1600,8 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     that moment can write the directory again.
   - A write-back at a park or on the minute's timer only offers files. Pruning (strays, capped
     files) happens at the turn's end, at an eviction and at a placement, so a turn keeps its
-    `.git` or a large intermediate file while it runs. Until Step 9.6 gives
-  sessions Claude Code's own file tools, only an `allow_refused` package's built-ins (§9)
-  and a Monitor's command use the directory.
+    `.git` or a large intermediate file while it runs. Claude Code's own file tools (§9) and
+    a Monitor's command use the directory.
 - A session's files go with the session (deleting it, or `forgetSubject`, deletes them,
   and forgetting deletes the key that opens its blobs); a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
   principal's own workspace, whose files are swept 24 h after their last write (every
@@ -1682,3 +1710,60 @@ writes the print options (`PUT /api/v1/settings/print-options`,
 and each call approved, can reach any LAN URL, ScadBuddy's own `PUT /api/v1/settings`
 included, so approving such a call is approving a settings write. A print an agent starts slices
 on whichever slicer is set when its run is planned.
+
+## 15. Signing a remote plugin in with OAuth (#780)
+
+A remote MCP plugin can use a short-lived OAuth token in place of a static header, as
+the [MCP authorization spec, revision 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/index.md)
+describes. In Settings → Tools & plugins → Plugins, a plugin with no header shows
+**Sign in**. It opens a new window, where you sign in at the plugin's authorization
+server. When you come back, the card reads "Signed in with …".
+
+How the agent does it
+([`agent/src/plugins/oauth.ts`](../../agent/src/plugins/oauth.ts),
+[`oauthStore.ts`](../../agent/src/plugins/oauthStore.ts)):
+
+1. **Discovery.** The agent sends an unauthenticated MCP request. It follows the 401's
+   `resource_metadata` ([RFC 9728](https://www.rfc-editor.org/rfc/rfc9728)), or the
+   well-known URLs when the 401 has none. The metadata's `resource` must name the
+   plugin's URL. Then it reads the first authorization server's
+   [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) or OIDC metadata. That metadata
+   must give the same `issuer` and offer PKCE with `S256`.
+2. **Client.** If you give a client id (and secret) under **Use my own OAuth app**,
+   the agent uses that app. Otherwise it registers one with
+   [RFC 7591](https://www.rfc-editor.org/rfc/rfc7591), if the server offers
+   registration. If the server offers neither, the start says so.
+3. **Sign-in.** The start returns a one-use link on ScadBuddy's own origin
+   (`/api/v1/ai/plugin-oauth/authorize?ticket=…`, valid 10 minutes). The link sets a
+   cookie in your browser and redirects to the authorization server. The request
+   carries `state`, the PKCE challenge and `resource`
+   ([RFC 8707](https://www.rfc-editor.org/rfc/rfc8707)).
+4. **Callback.** The server redirects back to
+   `<origin>/api/v1/ai/plugin-oauth/callback`. That is the origin the start came
+   through, so it must be on the allowlist (§6). The callback is accepted only once,
+   only before its flow expires, and only in the browser that opened the link (the
+   cookie). The agent checks `iss`
+   ([RFC 9207](https://www.rfc-editor.org/rfc/rfc9207)) before it sends the code to
+   the token endpoint.
+5. **Tokens.** The access token, the refresh token and any client secret are sealed
+   under the KEK (§3) in `ai_plugin_oauth`. The AAD binds them to the plugin, its URL,
+   the resource, the issuer, the token endpoint and the client id. The forwarder asks
+   for a token on every request and refreshes it shortly before it expires. The
+   refresh runs under the row's lock, so replicas never spend one refresh token twice.
+   Claude Code, the browser and every route see only the sign-in's state.
+6. **Failure.** A refused refresh, or a server that refuses a renewed token, marks the
+   sign-in `error` and the card shows **Sign in again**. Until then, turns run without
+   the plugin, and the reason is listed among the turn's plugin problems.
+
+A plugin uses either a header or a sign-in, never both. Saving a header signs the
+plugin out, a URL change drops its sign-in, and **Sign out** forgets it.
+
+**GitHub** (`https://api.githubcopilot.com/mcp/`). Its authorization server
+(`https://github.com/login/oauth`, metadata at
+`https://github.com/.well-known/oauth-authorization-server/login/oauth`, read on
+2026-11-01) offers no dynamic registration, so register an app yourself. Prefer a
+**GitHub App** to an OAuth App: its user tokens expire after 8 hours, they come with a
+refresh token, and they can act only on the repositories the App is installed on
+([GitHub docs](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)).
+Set the App's callback URL to the one the card shows, then give its client id and a
+client secret under **Use my own OAuth app**.

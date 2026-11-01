@@ -1,12 +1,11 @@
 import { type Client, WorkflowUpdateFailedError } from '@temporalio/client'
 import { randomUUID } from 'node:crypto'
 import { ApplicationFailure, WorkflowNotFoundError } from '@temporalio/common'
-import type { Sql } from 'postgres'
 import type { InputOutcome, Owner } from '../sessions/protocol.js'
 import { responseHash } from './canonical.js'
 import { OWNER_CHANGED_SIGNAL, TAB_RECONNECTED_UPDATE } from '../temporal/session/names.js'
 import { CANCEL_INPUT_UPDATE, END_SIGNAL, GATE_REFUSED, INPUT_DECIDED_SIGNAL, INTERRUPT_SIGNAL, PENDING_INPUT_QUERY, RESPOND_UPDATE } from './names.js'
-import { decideInput } from './store.js'
+import { decideInput, type GateDb } from './store.js'
 import type { PendingInputEntry } from './projection.js'
 import { REFUSALS, RespondRefusal, type RefusalCode, type Role } from './validate.js'
 
@@ -48,9 +47,10 @@ export type DurableGateOptions = {
   cancelTimeoutMs?: number
   /**
    * The database, where a request whose row is its record is decided (R5, store.ts decideInput)
-   * before its workflow is woken. Without it every response is the `respond` Update.
+   * before its workflow is woken, with the session event log its events go through. Without it
+   * every response is the `respond` Update.
    */
-  sql?: Sql
+  db?: GateDb
   /** Wakes the workflow of a decided request (default: the Signal `input_decided`); tests drop it to show the recheck makes it up. */
   wake?: (sessionId: string, requestId: string) => Promise<void>
 }
@@ -79,14 +79,14 @@ export class DurableGate {
   readonly #client: Client
   readonly #timeoutMs: number
   readonly #cancelTimeoutMs: number
-  readonly #sql: Sql | undefined
+  readonly #db: GateDb | undefined
   readonly #wake: (sessionId: string, requestId: string) => Promise<void>
 
   constructor(client: Client, options: DurableGateOptions = {}) {
     this.#client = client
     this.#timeoutMs = options.timeoutMs ?? 5_000
     this.#cancelTimeoutMs = options.cancelTimeoutMs ?? 10_000
-    this.#sql = options.sql
+    this.#db = options.db
     this.#wake =
       options.wake ??
       ((sessionId, requestId) =>
@@ -130,9 +130,9 @@ export class DurableGate {
    * decided by its workflow, through the `respond` Update.
    */
   async respond(sessionId: string, args: RespondArgs): Promise<RespondOutcome> {
-    if (this.#sql) {
+    if (this.#db) {
       const { kind, id, label } = args.responder
-      const decided = await decideInput(this.#sql, {
+      const decided = await decideInput(this.#db, {
         requestId: args.request_id,
         response: args.response,
         responder: { kind, id, label },

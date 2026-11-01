@@ -40,6 +40,7 @@ import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview,
 import { reviewsByHash } from './access/packageProvider.js'
 import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
+import { PluginOAuth } from './plugins/oauthStore.js'
 import { headerSecretVariants, loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
@@ -52,6 +53,7 @@ import { TabHub } from './bridge/hub.js'
 import { TemporalTabRelay } from './bridge/relay.js'
 import { PostgresTabOwnerStore } from './bridge/tabOwners.js'
 import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
+import { PostgresTabImageStore } from './bridge/tabImages.js'
 import { PgMcpSessionRelay } from './mcp/sessionRelay.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
@@ -72,7 +74,7 @@ import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type 
 import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
-import { sessionGateActivities } from './temporal/session/gateActivities.js'
+import { gateDb, sessionGateActivities } from './temporal/session/gateActivities.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from './temporal/session/affinity.js'
 import { startHostWorkers } from './temporal/session/hostWorkers.js'
 import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
@@ -211,6 +213,13 @@ const database = config.databaseUrl
               (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
           )
         }
+        const grants = await new PluginOAuth(sql).rewrapFrom(previousKek.kek, kek.kek)
+        if (grants.rewrapped || grants.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${grants.rewrapped} plugin sign-in(s)` +
+              (grants.failed ? `; ${grants.failed} could not be opened with the previous key` : ''),
+          )
+        }
       },
     })
   : undefined
@@ -244,7 +253,9 @@ const access = database ? new AccessStore(database.sql, audit) : undefined
 const listings = database ? new ToolListings(database.sql, database.locks) : undefined
 // Each item's effective access, read at each call (#2171): the turns' http_request and own-plugin switches.
 const accessResolver = new AccessResolver(access)
-const plugins = database ? new PluginStore(database.sql) : undefined
+// OAuth sign-in for remote plugins (#780): the forwarder asks it for each request's token.
+const pluginOAuth = database ? new PluginOAuth(database.sql) : undefined
+const plugins = database ? new PluginStore(database.sql, pluginOAuth ? { oauth: pluginOAuth } : {}) : undefined
 // ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_access (#2171).
 const builtInTools = new BuiltInTools(access)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
@@ -316,6 +327,9 @@ const tabs = new TabHub({
   // A durable session's browser_* calls run on whichever replica took the
   // activity, so the tab its chat socket paired is read from Postgres (#2086).
   sessionTabs: database ? new PostgresSessionTabStore(database.sql) : undefined,
+  // A browser_screenshot's image, stored by the replica holding the tab for the one
+  // whose call asked (#254, bridge/tabImages.ts).
+  images: database ? new PostgresTabImageStore(database.sql) : undefined,
 })
 toolServices.browser = tabs
 // What each session touched (#931, sessions/touched.ts), from its tool calls.
@@ -891,7 +905,9 @@ const temporalWorker =
             currentTiers: durableToolDeps.currentTiers,
           }),
           // AgentSession's gate (its writers and timers) and its turn end (unified runtime §5.1, flagged off until phase 6).
-          ...sessionGateActivities(temporal.sql),
+          // Its events through this replica's event log, so they wake its followers at once and
+          // go on the bus under its id (#3365); with no session manager, a log that only publishes.
+          ...sessionGateActivities(gateDb(temporal.sql, sessions?.events, sessionEvents?.onAppend)),
           ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),
           ...(sessionAcquire ?? {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
@@ -980,7 +996,7 @@ if (tabRelay && hostWorkers) {
 }
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6), and
 // a recorded entry's decision in its row (R5, plan Step 9.7).
-if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { sql: database.sql } : {})
+if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { db: { sql: database.sql, events: sessions.events } } : {})
 // The browser relay's calls go through Temporal only sealed, each under a key of its own
 // that is deleted once the caller has the answer (#4780): so only with the codec.
 if (tabRelay && temporalClient && dataConverter && payloadKeys && database) {
@@ -1069,6 +1085,7 @@ const app = !role.http
   credentials,
   access,
   plugins,
+  pluginOAuth,
   pluginForwarder,
   listings,
   pluginPackages,

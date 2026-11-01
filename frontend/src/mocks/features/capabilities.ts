@@ -65,9 +65,14 @@ const SPECS: readonly Spec[] = [
   { id: 'builtin:browser', title: 'Your browser tab', switchable: true, options_route: '/api/v1/ai/settings/browser-origins' },
   { id: 'builtin:http', title: 'HTTP requests', switchable: true, options_route: null },
   { id: 'builtin:own-plugin', title: 'ScadBuddy skills and subagents', switchable: true, options_route: null },
+  { id: 'builtin:claude-code', title: "Claude Code's built-in tools", switchable: true, options_route: null },
 ]
 
-type BuiltInTool = { name: string; label: string; description: string; risk: RiskTier }
+/** `risk` is the default: Claude Code's Bash and PowerShell are `off` by default (the agent's nativeBuiltins.ts). */
+type BuiltInTool = { name: string; label: string; description: string; risk: RiskTier | 'off'; note?: string }
+
+const CLAUDE_CODE = 'builtin:claude-code'
+const NATIVE_OFF_NOTE = 'off: it would run unsandboxed in the worker pod (#779); a plugin package that names it switches it on, asking first'
 
 const TOOLS: Record<string, readonly BuiltInTool[]> = {
   'builtin:scadbuddy': [
@@ -84,6 +89,15 @@ const TOOLS: Record<string, readonly BuiltInTool[]> = {
   ],
   'builtin:browser': [
     { name: 'browser_click', label: 'Click in your tab', description: 'Clicks an element on the page you have open.', risk: 'write' },
+  ],
+  [CLAUDE_CODE]: [
+    { name: 'Read', label: 'Read a file', description: "Reads a file of the session's working directory.", risk: 'read' },
+    { name: 'Glob', label: 'Find files', description: "Lists the session directory's files that match a glob pattern.", risk: 'read' },
+    { name: 'Grep', label: 'Search files', description: "Searches the session directory's files with a regular expression.", risk: 'read' },
+    { name: 'TaskList', label: 'List the tasks', description: "Lists the session's task list.", risk: 'read' },
+    { name: 'Write', label: 'Write a file', description: "Writes a file in the session's working directory.", risk: 'write' },
+    { name: 'Edit', label: 'Edit a file', description: "Replaces exact text in a file of the session's working directory.", risk: 'write' },
+    { name: 'Bash', label: 'Run a shell command', description: 'Runs a shell command in the worker pod.', risk: 'off', note: NATIVE_OFF_NOTE },
   ],
 }
 
@@ -254,11 +268,11 @@ function builtInItem(source: string, tool: BuiltInTool): ItemView {
     id: tool.name,
     kind: 'tool',
     name: tool.name,
-    harness_name: `mcp__scadbuddy__${tool.name}`,
+    harness_name: source === CLAUDE_CODE ? tool.name : `mcp__scadbuddy__${tool.name}`,
     label: tool.label,
     description: tool.description,
     default: tool.risk,
-    default_note: null,
+    default_note: tool.note ?? null,
     suggested: null,
     access: row ?? tool.risk,
     own_access: row ?? tool.risk,

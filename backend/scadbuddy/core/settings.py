@@ -130,6 +130,17 @@ class Settings(BaseSettings):
     google_fonts_api_key: str | None = Field(default=None, repr=False)
     fonts_catalogue_ttl: float = DEFAULT_FONTS_CATALOGUE_TTL
 
+    # SCADBUDDY_GIT_REMOTE_URL / _USERNAME / _TOKEN (#4974): the off-box copy of the model
+    # and flow history (#90). Each commit of `data/models` is pushed to the remote's
+    # `models` branch and each of `data/flows` to its `flows` branch once it lands, and a
+    # housekeeping sweep pushes what is still behind (`git_remote/push.py`). An http(s)
+    # URL with no credentials in it; the token (a personal access token, or a password)
+    # is sealed at rest like the other secrets, and saving one needs
+    # SCADBUDDY_SECRET_KEY_FILE. Unset: nothing is pushed.
+    git_remote_url: str | None = None
+    git_remote_username: str | None = None
+    git_remote_token: str | None = Field(default=None, repr=False)
+
     seed_models_dir: Path | None = None
     seed_libraries_dir: Path | None = None
     frontend_dir: Path | None = None
@@ -272,6 +283,27 @@ class Settings(BaseSettings):
             if parts.scheme not in ("http", "https") or not parts.hostname:
                 raise ValueError(f"SCADBUDDY_BAMBUDDY_WEB_URLS: {url!r} is not an http(s) URL")
         return value
+
+    @field_validator("git_remote_url")
+    @classmethod
+    def _git_remote_is_http(cls, value: str | None) -> str | None:
+        """An http(s) URL with a host and no credentials: the token goes in its own
+        field, sealed, and a URL is logged and shown."""
+        if value is None or not value.strip():
+            return None
+        url = value.strip()
+        try:
+            parts = urlsplit(url)
+            host = parts.hostname
+        except ValueError:
+            raise ValueError("SCADBUDDY_GIT_REMOTE_URL: not an http(s) URL") from None
+        if parts.scheme not in ("http", "https") or not host:
+            raise ValueError("SCADBUDDY_GIT_REMOTE_URL: not an http(s) URL")
+        if parts.username is not None or parts.password is not None:
+            raise ValueError(
+                "SCADBUDDY_GIT_REMOTE_URL: put the credential in the token, not in the URL"
+            )
+        return url
 
     # SCADBUDDY_DEFAULT_PLATE: the printer model ("H2C", "A1 mini") whose plate the
     # preview draws while no printer has been chosen (#81).
@@ -688,6 +720,7 @@ SECRET_FIELDS: Final = frozenset(
         "bambuddy_render_api_key",
         "google_fonts_api_key",
         "store_s3_secret_access_key",
+        "git_remote_token",
     }
 )
 
@@ -749,6 +782,10 @@ APPLIES: Final[Mapping[str, Applies]] = MappingProxyType(
         # A key change swaps the client and refetches the catalogue.
         "google_fonts_api_key": "live",
         "fonts_catalogue_ttl": "live",
+        # Read from the running settings by every push (#4974).
+        "git_remote_url": "live",
+        "git_remote_username": "live",
+        "git_remote_token": "live",
         "log_level": "live",
         # Read at start, by the API and by every render worker (spec 2026-09-27 §6.2, §9):
         # the store each process opens, its caps, and the key workers fetch with.

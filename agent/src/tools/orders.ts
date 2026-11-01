@@ -955,6 +955,22 @@ export const orderTools: Tool[] = [
     },
   }),
   defineTool({
+    name: 'price_book_import_spools',
+    label: "Import filaments from Bambuddy's spools",
+    description:
+      "Make or update the price book's filament records from Bambuddy's spool inventory: one record per filament " +
+      '(material, subtype, brand and colour), made when the book has none, else given the most recent priced ' +
+      "spool's cost per kilogram; `min_cost_per_kg`/`max_cost_per_kg` show the spread when the spools' prices " +
+      'differ. A filament known only by its colour name, or with no priced spool, is `skipped` with its `reason`. ' +
+      "Only when Bambuddy is linked (price_book_get's `spool_import`); else `not_linked`. Quotes never read spools.",
+    input: z.object({}),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/price-book/import-spools'],
+    title: () => 'Import filaments from spools',
+    handler: async (_input, { backend }) =>
+      json(await ok(backend.POST('/api/v1/orders/price-book/import-spools'), 'import filaments from spools')),
+  }),
+  defineTool({
     name: 'order_estimate',
     label: "Estimate an output's filament cost",
     description:

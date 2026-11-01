@@ -142,11 +142,15 @@ describe("a classic turn's packages and own plugin (#4757)", () => {
     const a = await pkg({ name: 'a', allowed: true, builtins: ['Bash'] })
     const b = await pkg({ name: 'b', allowed: true, builtins: ['Bash', 'Grep'] })
     const { turn } = await assemble([a, b], [row(packageSource('a'), 'builtin:Bash', 'write'), row(packageSource('b'), 'builtin:Bash', 'off')])
-    expect(turn.run.builtinTools).toEqual(['Grep'])
+    // Claude Code's own built-ins come from `builtin:claude-code` (Step 9.6): Grep is there at
+    // read whatever a package says, and Bash, off there, only a package can switch on.
+    expect(turn.run.builtinTools).toEqual([])
+    expect(turn.run.nativeTools?.map((t) => t.name)).toContain('Grep')
+    expect(turn.run.nativeTools?.map((t) => t.name)).not.toContain('Bash')
     expect(await turn.run.live!.access('Bash', { command: 'ls' })).toBe('off')
     // Unset in both: offered, each call outward; write in both: write.
     const unset = await assemble([a, b])
-    expect(unset.turn.run.builtinTools).toEqual(['Bash', 'Grep'])
+    expect(unset.turn.run.nativeTools?.find((t) => t.name === 'Bash')).toEqual({ name: 'Bash', tier: 'outward' })
     expect(await unset.turn.run.live!.access('Bash', { command: 'ls' })).toBe('outward')
     const write = await assemble([a, b], [row(packageSource('a'), 'builtin:Bash', 'write'), row(packageSource('b'), 'builtin:Bash', 'write')])
     expect(await write.turn.run.live!.access('Bash', { command: 'ls' })).toBe('write')

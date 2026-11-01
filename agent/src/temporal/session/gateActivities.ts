@@ -1,11 +1,13 @@
 import type { Sql } from 'postgres'
+import type { AppendHook } from '../../sessions/busEvents.js'
+import { EventLog } from '../../sessions/eventLog.js'
 import {
   DEFAULT_APPROVAL_EXPIRY_SECONDS,
   MAX_APPROVAL_EXPIRY_SECONDS,
   MIN_APPROVAL_EXPIRY_SECONDS,
   SETTING_APPROVAL_EXPIRY_SECONDS,
 } from '../../approvals/service.js'
-import { denyInput, grantInput, openInput, readInput, resolveInput } from '../../gate/store.js'
+import { denyInput, type GateDb, grantInput, openInput, readInput, resolveInput } from '../../gate/store.js'
 import {
   DEFAULT_QUESTION_EXPIRY_SECONDS,
   MAX_QUESTION_EXPIRY_SECONDS,
@@ -41,13 +43,22 @@ export async function gateSettings(sql: Sql): Promise<GateSettings> {
   }
 }
 
-export function sessionGateActivities(sql: Sql) {
+/**
+ * The gate's GateDb as main.ts builds it: the session manager's event log, or with none (no
+ * credentials) a log of its own that only publishes, so a write still reaches the bus (#3365).
+ */
+export function gateDb(sql: Sql, events: EventLog | undefined, onAppend: AppendHook | undefined): GateDb {
+  return { sql, events: events ?? new EventLog(sql, onAppend ? { onAppend } : {}) }
+}
+
+/** `db.events` is this replica's session event log, so a write wakes its followers at once (#3365). */
+export function sessionGateActivities(db: GateDb) {
   return {
-    [SESSION_GATE_ACTIVITIES.settings]: () => gateSettings(sql),
-    [SESSION_GATE_ACTIVITIES.open]: (args: Parameters<typeof openInput>[1]) => openInput(sql, args),
-    [SESSION_GATE_ACTIVITIES.grant]: (args: Parameters<typeof grantInput>[1]) => grantInput(sql, args),
-    [SESSION_GATE_ACTIVITIES.deny]: (args: Parameters<typeof denyInput>[1]) => denyInput(sql, args),
-    [SESSION_GATE_ACTIVITIES.resolve]: (args: Parameters<typeof resolveInput>[1]) => resolveInput(sql, args),
-    [SESSION_GATE_ACTIVITIES.read]: (args: Parameters<typeof readInput>[1]) => readInput(sql, args),
+    [SESSION_GATE_ACTIVITIES.settings]: () => gateSettings(db.sql),
+    [SESSION_GATE_ACTIVITIES.open]: (args: Parameters<typeof openInput>[1]) => openInput(db, args),
+    [SESSION_GATE_ACTIVITIES.grant]: (args: Parameters<typeof grantInput>[1]) => grantInput(db, args),
+    [SESSION_GATE_ACTIVITIES.deny]: (args: Parameters<typeof denyInput>[1]) => denyInput(db, args),
+    [SESSION_GATE_ACTIVITIES.resolve]: (args: Parameters<typeof resolveInput>[1]) => resolveInput(db, args),
+    [SESSION_GATE_ACTIVITIES.read]: (args: Parameters<typeof readInput>[1]) => readInput(db.sql, args),
   }
 }

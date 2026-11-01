@@ -9,6 +9,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import type { Database } from '../src/db.js'
 import { DurableGate, sessionWorkflowId } from '../src/gate/durable.js'
 import { INPUT_DECIDED_SIGNAL } from '../src/gate/names.js'
+import { EventLog } from '../src/sessions/eventLog.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
 import { sessionGateActivities } from '../src/temporal/session/gateActivities.js'
@@ -103,7 +104,7 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
 
   /** The workers main.ts runs for a session, the gate's activities real and their first recheck at `recheckS`. */
   async function startWorkers(): Promise<void> {
-    const gate = sessionGateActivities(db.sql)
+    const gate = sessionGateActivities({ sql: db.sql, events: new EventLog(db.sql) })
     const make = (taskQueue: string, activities: Record<string, (...args: never[]) => unknown>, workflowBundle?: WorkflowBundle) =>
       Worker.create({
         connection: env.nativeConnection,
@@ -199,7 +200,7 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     const run = await parkedRun(id)
     // Recorded with what the validator reads: the respond is decided in the row.
     expect(entry.gate).toEqual(expect.objectContaining({ id: entry.request_id, kind: 'approval', inputHash: 'a'.repeat(64), inRun: false }))
-    const lost = new DurableGate(env.client, { sql: db.sql, wake: async () => {} })
+    const lost = new DurableGate(env.client, { db: { sql: db.sql, events: new EventLog(db.sql) }, wake: async () => {} })
     expect(await approve(lost, id, entry.request_id)).toEqual({ kind: 'approval', outcome: 'approved' })
     // Nothing was sent to the workflow; its recheck read the row, and the turn went on with the decision.
     await expect.poll(resolutions, { timeout: 20_000 }).toEqual([{ kind: 'approval', outcome: 'approved' }])
@@ -218,7 +219,7 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     const entry = await parked(id)
     const run = await parkedRun(id)
     const before = reads
-    expect(await approve(new DurableGate(env.client, { sql: db.sql }), id, entry.request_id)).toEqual({ kind: 'approval', outcome: 'approved' })
+    expect(await approve(new DurableGate(env.client, { db: { sql: db.sql, events: new EventLog(db.sql) } }), id, entry.request_id)).toEqual({ kind: 'approval', outcome: 'approved' })
     await expect.poll(resolutions, { timeout: 20_000 }).toEqual([{ kind: 'approval', outcome: 'approved' }])
     // The parked run's history: the turn's end may have continued the session as new by now.
     const history = await run.fetchHistory()
@@ -239,7 +240,7 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     await run.signal(INPUT_DECIDED_SIGNAL, { request_id: entry.request_id })
     await expect.poll(() => held.held, { timeout: 20_000 }).toBe(true)
     hold = undefined
-    expect(await approve(new DurableGate(env.client, { sql: db.sql }), id, entry.request_id)).toEqual({ kind: 'approval', outcome: 'approved' })
+    expect(await approve(new DurableGate(env.client, { db: { sql: db.sql, events: new EventLog(db.sql) } }), id, entry.request_id)).toEqual({ kind: 'approval', outcome: 'approved' })
     // The decision's wake reaches the workflow while that read still waits, so it joins it.
     const wakeTaken = async () => {
       const events = (await run.fetchHistory()).events ?? []
@@ -257,7 +258,7 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     await send(env.client, id)
     const entry = await parked(id)
     await env.client.workflow.getHandle(sessionWorkflowId(id)).terminate('the test ended the run')
-    await expect(approve(new DurableGate(env.client, { sql: db.sql }), id, entry.request_id)).rejects.toMatchObject({ code: 'stale' })
+    await expect(approve(new DurableGate(env.client, { db: { sql: db.sql, events: new EventLog(db.sql) } }), id, entry.request_id)).rejects.toMatchObject({ code: 'stale' })
     expect((await db.sql`SELECT 1 FROM ai_pending_input WHERE request_id = ${entry.request_id}`).length).toBe(1)
     expect((await db.sql`SELECT 1 FROM ai_input_responses WHERE request_id = ${entry.request_id}`).length).toBe(0)
   })
@@ -271,7 +272,7 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     await expect.poll(() => turnReleased(id), { timeout: 30_000 }).toBe(true)
     await stopWorkers()
     // Decided while no worker runs: the row takes it, and the wake waits in the history.
-    expect(await approve(new DurableGate(env.client, { sql: db.sql }), id, entry.request_id)).toEqual({ kind: 'approval', outcome: 'approved' })
+    expect(await approve(new DurableGate(env.client, { db: { sql: db.sql, events: new EventLog(db.sql) } }), id, entry.request_id)).toEqual({ kind: 'approval', outcome: 'approved' })
     expect((await db.sql`SELECT 1 FROM ai_pending_input WHERE session_id = ${id}`).length).toBe(0)
     await startWorkers()
     await expect.poll(resolutions, { timeout: 120_000 }).toEqual([{ kind: 'approval', outcome: 'approved' }])

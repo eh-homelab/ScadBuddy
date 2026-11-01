@@ -81,12 +81,29 @@ afterEach(() => {
 })
 
 describe('the capabilities tree', () => {
-  it('lists the four built-in sources in order, each tool at its declared tier', async () => {
+  it('lists the five built-in sources in order, each tool at its declared tier', async () => {
     const { caps } = setup()
     const tree = await caps.tree()
-    expect(tree.map((s) => s.id)).toEqual([BUILTIN_SOURCES.scadbuddy, BUILTIN_SOURCES.browser, BUILTIN_SOURCES.http, BUILTIN_SOURCES.ownPlugin])
-    expect(tree.map((s) => s.title)).toEqual(['ScadBuddy tools', 'Your browser tab', 'HTTP requests', 'ScadBuddy skills and subagents'])
-    expect(tree.map((s) => s.switchable)).toEqual([false, true, true, true])
+    expect(tree.map((s) => s.id)).toEqual([
+      BUILTIN_SOURCES.scadbuddy,
+      BUILTIN_SOURCES.browser,
+      BUILTIN_SOURCES.http,
+      BUILTIN_SOURCES.ownPlugin,
+      BUILTIN_SOURCES.claudeCode,
+    ])
+    expect(tree.map((s) => s.title)).toEqual([
+      'ScadBuddy tools',
+      'Your browser tab',
+      'HTTP requests',
+      'ScadBuddy skills and subagents',
+      "Claude Code's built-in tools",
+    ])
+    expect(tree.map((s) => s.switchable)).toEqual([false, true, true, true, true])
+    // Claude Code's own (plan 2026-10-13 Step 9.6): by their own names, Bash off by default.
+    const native = tree[4]!.items
+    expect(native.find((i) => i.id === 'Read')).toMatchObject({ harness_name: 'Read', default: 'read', access: 'read' })
+    expect(native.find((i) => i.id === 'Write')).toMatchObject({ default: 'write', access: 'write' })
+    expect(native.find((i) => i.id === 'Bash')).toMatchObject({ default: 'off', access: 'off', default_note: expect.stringContaining('#779') })
     expect(tree.every((s) => s.enabled && s.kind === 'builtin' && s.children.length === 0)).toBe(true)
     const own = tree[0]!
     expect(own.items.map((i) => [i.id, i.default, i.access, i.overridden])).toEqual([

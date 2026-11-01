@@ -99,7 +99,7 @@ def test_a_fix_whose_target_is_unverified_previews_but_cannot_be_applied(
     assert preview["scope"] == {"kind": "print", "key": output_id}
     assert len(preview["blockers"]) == 2
     assert "outer_wall_speed: unknown → 50 mm/s [derived_process_preset]" in preview["summary"]
-    assert "nothing sends it yet" in preview["route_note"]
+    assert "it sends nothing" in preview["route_note"]
 
     events.clear()
     problem = _ok(

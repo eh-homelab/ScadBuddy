@@ -163,7 +163,8 @@ export const handlers = [
         .map((row) => `${row.setting}: ${row.base_known ? JSON.stringify(row.base) : 'unknown'} → ${JSON.stringify(row.proposed)} [${row.target}]`)
         .join('; '),
       route_note:
-        'Applying records this diff as a decision at its scope; nothing sends it yet.',
+        'Applying records this diff as a decision at its scope; it sends nothing. A print ' +
+        'that names the accepted fix is checked against it again and slices and queues with the diff.',
     } satisfies FixPreview)
   }),
 

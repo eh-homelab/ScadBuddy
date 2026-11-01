@@ -72,6 +72,7 @@ ever kept is no resource to read at once; page further back with `list_print_arc
 | `scadbuddy://settings` | `application/json` | `get_settings` (secrets redacted) |
 | `scadbuddy://sessions` | `application/json` | `sessions_list` (#300) |
 | `scadbuddy://sessions/{session_id}` | `application/json` | `sessions_get` (#300) |
+| `scadbuddy://browser/{tab}/snapshot` | `application/json` | `browser_snapshot` (#254; `{tab}` is `paired`) |
 | `scadbuddy://docs/authoring` | `text/markdown` | `get_authoring_guide` |
 
 `scadbuddy://docs/authoring` (#252) is ScadBuddy's authoring conventions: the plugin's
@@ -93,6 +94,14 @@ or from the source tree when run from it.
   caller may see, as the tools do. Subscribing to `scadbuddy://sessions/{session_id}`
   reads it first (`readToSubscribe` in `catalog.ts`), so a session the caller may not
   see answers `-32002`, the same as one that does not exist.
+- **The paired tab** (#254, [browser-bridge.md](browser-bridge.md)).
+  `scadbuddy://browser/paired/snapshot` is what the tab the user paired with this caller
+  (`browser_pair`) shows, read with `browser_snapshot`, so it reaches the tab on whichever
+  replica holds it. `paired` is the only `{tab}`: a caller has at most one paired tab, and
+  a tab's id is never shown to a caller. Any other value answers `-32002`, and so does
+  subscribing before a tab is paired (the subscribe reads it first, `readToSubscribe`). A
+  tab sends no event when its screen changes, so a subscriber is never notified: read it
+  again.
 - **URIs.** Templates are RFC 6570 level 1
   ([§3.2.2](https://datatracker.ietf.org/doc/html/rfc6570#section-3.2.2)), one path
   segment per variable, percent-encoded. A bundled template's slug `builtin:x` is
@@ -105,8 +114,8 @@ or from the source tree when run from it.
   no resource or the backend answers 404; `-32602` when a variable fails the tool's
   validation (a malformed slug); `-32603` otherwise.
 - **Completion.** `completion/complete` with `ref/resource` offers slugs, and commits
-  and output ids for the `slug` given in `context.arguments`, and registry printer ids
-  (`list_printers`).
+  and output ids for the `slug` given in `context.arguments`, registry printer ids
+  (`list_printers`), and `paired` for `{tab}`.
 
 ### Subscriptions
 
@@ -283,8 +292,7 @@ sequenceDiagram
 
 ### What is not here yet
 
-Issue #264 also lists `scadbuddy://browser/{tab}/snapshot` (#254), and history and
-stats with query filters (`{?template,printer,since,…}`), which level-1 templates
+Issue #264 also lists history and stats with query filters (`{?template,printer,since,…}`), which level-1 templates
 cannot carry; the `list_print_archives` and `get_print_stats` tools take them. LSP
 diagnostics (#252) are the `get_lsp_diagnostics` tool rather than a resource: they are
 worked out from a source the caller passes, not state to read or subscribe to.

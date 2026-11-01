@@ -851,7 +851,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       const m = await durableManager()
       finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
       // The real store writes (gate/store.ts), so the row is what a person's panel and the next send see.
-      writes = { open: (args) => openInput(db.sql, args), resolve: (args) => resolveInput(db.sql, args) }
+      writes = { open: (args) => openInput({ sql: db.sql, events: m.events }, args), resolve: (args) => resolveInput({ sql: db.sql, events: m.events }, args) }
       const describing = held()
       describeHold = describing.promise
       runTurn = async (input) => {
