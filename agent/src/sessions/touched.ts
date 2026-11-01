@@ -614,6 +614,10 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   // tray_spool_links; the spool and its providers' records are unchanged).
   'link_tray_spool',
   'unlink_tray_spool',
+  // ScadBuddy's own spools (#4643, native_spools) are no recorded resource kind: the
+  // shelf lists them, and the overlay's cached copy follows each write.
+  'native_spool_upsert',
+  'native_spool_delete',
   // A re-pin's dry run (#1914): the pin and the history stay as they were. The candidate's
   // checkout is a cache on the volume, swept at boot when nothing pins it.
   'check_library_candidate',
