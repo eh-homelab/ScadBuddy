@@ -312,6 +312,9 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_close: () => [],
   order_cancel: () => [],
   order_reopen: () => [],
+  order_attach: () => [],
+  order_attachment_update: () => [],
+  order_attachment_delete: () => [],
   // The price book (#4250) is a record of its own, edited on the Settings page.
   price_book_set: () => [],
   // Models.
