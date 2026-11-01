@@ -15,7 +15,7 @@ import { ATTENTION_RATE_LIMIT, ATTENTION_RATE_WINDOW_S, DONE_POSTS_PER_TURN, PEN
 import { pendingInput, respond } from '../src/routes/pendingInput.js'
 import { ASK_USER, TIMEOUT_MIN_S, WAIT_FOR_USER } from '../src/gate/entry.js'
 import { TAB_WAIT_CALL } from '../src/sessions/attentionGate.js'
-import { CLAIMED_AT, resolveTabWaits, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
+import { CLAIMED_AT, resolveTabWaits, runningDurableTurn, type SessionManager, TAB_WAIT_S, TAB_WAITS_PER_TURN, waitForTab } from '../src/sessions/manager.js'
 import { browserTools } from '../src/tools/browser.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { SERVER_NAME } from '../src/tools/projections.js'
@@ -767,11 +767,36 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
       await tx`SET LOCAL DateStyle = 'SQL, DMY'`
       await tx`SET LOCAL TimeZone = 'Asia/Kolkata'`
       const [row] = await tx.unsafe<{ claimed_at: string }[]>(
-        `SELECT ${CLAIMED_AT} FROM (SELECT timestamptz '2026-10-13 21:00:00.123456+00' AS updated_at) AS t`,
+        `SELECT ${CLAIMED_AT} FROM (SELECT timestamptz '2026-10-13 21:00:00.123456+00' AS turn_started_at, now() AS updated_at) AS t`,
       )
       expect(row?.claimed_at).toBe('2026-10-13T21:00:00.123456Z')
     })
   })
+
+  // #5050: each placement of a turn reads the session again (an activity retry, a continuation
+  // after a release), and every event and status change writes `updated_at`: the turn's start is
+  // its claim's, or a later placement's summary loses the windows and touches before it.
+  it("gives every placement of a turn the turn's claim time, not the row's last write", async () => {
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const waiting = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await held
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: waiting, approvalPollMs: 20 })
+    const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
+    const [row] = await db.sql<{ turn: string; at: string }[]>`
+      SELECT durable_turn_id::text AS turn, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
+      FROM ai_sessions WHERE id = ${session.id}`
+    const first = (await runningDurableTurn(db.sql, session.id, row!.turn))!.session.claimedAt
+    await db.sql`UPDATE ai_sessions SET updated_at = now() + interval '1 minute' WHERE id = ${session.id}`
+    const later = (await runningDurableTurn(db.sql, session.id, row!.turn))!.session.claimedAt
+    release()
+    await turn!.done
+    expect(later).toBe(first)
+    expect(first <= row!.at).toBe(true)
+  }, LONG_MS)
 
   // #1383: done is outside the rate limit, so a model looping on it is capped per turn,
   // before it scans the turn's touches or writes anything.

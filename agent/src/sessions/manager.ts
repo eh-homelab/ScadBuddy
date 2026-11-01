@@ -448,10 +448,13 @@ export type ClaimedSession = SessionRecord & {
 }
 
 /**
- * The claim's `updated_at` as `claimedAt`: ISO 8601 in UTC at Postgres's microseconds,
- * whatever the connection's `DateStyle` and `TimeZone` (a plain `::text` follows them).
+ * When the running turn was claimed (`turn_started_at`, the send's claim) as `claimedAt`:
+ * ISO 8601 in UTC at Postgres's microseconds, whatever the connection's `DateStyle` and
+ * `TimeZone` (a plain `::text` follows them). Not `updated_at`, which every event and status
+ * change moves: each placement of the turn reads it again (#5050). A row no turn was claimed
+ * on since `turn_started_at` came gives its `updated_at`.
  */
-export const CLAIMED_AT = `to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
+export const CLAIMED_AT = `to_char(coalesce(turn_started_at, updated_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS claimed_at`
 
 type ClaimRow = Row & { unpriced_cost_usd: number; claimed_at: string; agent_model: string | null; agent_effort: EffortLevel | null; agent_type: string | null }
 

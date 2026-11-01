@@ -331,7 +331,7 @@ export class DurableTurns {
     // AgentSession, once a classic turn still running on an older replica has let its lease go.
     const [claimed] = await this.#sql.unsafe<{ prior_status: SessionStatus; durable_offset: string; runtime: SessionRuntime }[]>(
       `WITH prior AS (SELECT status AS prior_status, durable_offset FROM ai_sessions WHERE id = $1 FOR UPDATE)
-       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(),
+       UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(), turn_started_at = now(),
          interrupt_requested = false, turn_id = NULL, lease_until = NULL,
          runtime = coalesce(runtime, CASE WHEN prior.durable_offset = 0 THEN 'unified' ELSE 'durable' END)
        FROM prior
