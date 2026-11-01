@@ -13,7 +13,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Collection
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -89,6 +89,7 @@ from scadbuddy.workflows.client import (
     DEPLOYMENT_NAME,
     DRAINING_MARK,
     POLLER_SEEN_WITHIN,
+    any_serving,
     connect_lazily,
     current_routing,
     drain_mark,
@@ -97,7 +98,7 @@ from scadbuddy.workflows.client import (
     is_current,
     make_current,
     mark_draining,
-    polled_elsewhere,
+    pollers_elsewhere,
 )
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
@@ -572,7 +573,7 @@ def _described(
         ("other@pod-b", "b1", POLLER_SEEN_WITHIN + 5, DEPLOYMENT_NAME, False),  # gone
     ],
 )
-async def test_polled_elsewhere_counts_only_a_recent_poller_of_this_build_not_this_worker(
+async def test_pollers_elsewhere_names_only_a_recent_poller_of_this_build_not_this_worker(
     identity: str, build_id: str, age: float, deployment: str, elsewhere: bool
 ) -> None:
     """#4869: what lets a stopping worker leave its pinned runs to another. The ages are
@@ -580,17 +581,14 @@ async def test_polled_elsewhere_counts_only_a_recent_poller_of_this_build_not_th
     client = _described(
         _poller("me@pod-a", "b1", age=0), _poller(identity, build_id, age, deployment)
     )
-    assert (
-        await polled_elsewhere(
-            client,
-            "render",
-            deployment_name=DEPLOYMENT_NAME,
-            build_id="b1",
-            identities={"me@pod-a"},
-            marked_within=MARKED_WITHIN,
-        )
-        is elsewhere
+    others = await pollers_elsewhere(
+        client,
+        "render",
+        deployment_name=DEPLOYMENT_NAME,
+        build_id="b1",
+        identities={"me@pod-a"},
     )
+    assert others == ({identity} if elsewhere else set())
 
 
 MARKED_WITHIN = 600.0
@@ -605,43 +603,46 @@ MARKED_WITHIN = 600.0
         ({"other@pod-b": 5, "fresh@pod-c": MARKED_WITHIN + 5}, True),
     ],
 )
-async def test_polled_elsewhere_skips_a_poller_that_marked_itself_draining(
+async def test_any_serving_skips_a_poller_that_marked_itself_draining(
     marks: dict[str, float], elsewhere: bool
 ) -> None:
     """#4948: a draining worker keeps polling, so two pods of one build that stop together
-    each saw the other polling and both left their pinned runs."""
+    each saw the other polling and both left their pinned runs. The reads are the ones
+    `still_current` makes: the pollers, then the marks (#5103)."""
     client = _described(
         _poller("me@pod-a", "b1", age=0),
         _poller("other@pod-b", "b1", age=1),
         *([_poller("fresh@pod-c", "b1", age=1)] if "fresh@pod-c" in marks else []),
         marks=marks,
     )
-    assert (
-        await polled_elsewhere(
-            client,
-            "render",
-            deployment_name=DEPLOYMENT_NAME,
-            build_id="b1",
-            identities={"me@pod-a"},
-            marked_within=MARKED_WITHIN,
-        )
-        is elsewhere
-    )
-
-
-async def test_polled_elsewhere_is_false_when_the_marks_cannot_be_read() -> None:
-    """#4948: an unread mark may be the other pod's drain, so the safe answer is no."""
-    client = _described(
-        _poller("me@pod-a", "b1", age=0), _poller("other@pod-b", "b1", age=1), metadata_fails=True
-    )
-    assert not await polled_elsewhere(
+    others = await pollers_elsewhere(
         client,
         "render",
         deployment_name=DEPLOYMENT_NAME,
         build_id="b1",
         identities={"me@pod-a"},
-        marked_within=MARKED_WITHIN,
     )
+    read = await draining_marks(client, deployment_name=DEPLOYMENT_NAME, build_id="b1")
+    assert any_serving(others, read, marked_within=MARKED_WITHIN) is elsewhere
+
+
+async def test_a_peer_is_not_trusted_when_the_marks_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#4948: an unread mark may be the other pod's drain, so the safe answer is no: the
+    worker drains in full. Through `still_current` itself (#5103)."""
+    client = _described(
+        _poller("me@pod-a", "b1", age=0),
+        _poller("other@pod-b", "b1", age=1),
+        metadata_fails=True,
+        updates=[],
+    )
+    _patch_drain(monkeypatch, "b1")
+    with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+        await _serve_fake_and_stop(client, "me@pod-a", timeout=0.5)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("drain timed out") for m in messages), messages
+    assert not any(m.startswith("stopping without draining") for m in messages)
 
 
 @pytest.mark.parametrize("read_fails", [False, True])
@@ -713,8 +714,9 @@ async def test_a_pruned_unparsable_mark_is_no_longer_held_as_logged() -> None:
 async def test_a_poll_that_trusts_a_peer_reads_the_marks_once(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """#4996: `still_current` read the version's metadata for its own mark and again in
-    `polled_elsewhere`; the two reads could disagree, and every poll paid for both."""
+    """#4996: `still_current` read the version's metadata twice per poll, once for its own
+    mark and once for the peer's. Now one `draining_marks` read serves its own-mark check
+    and `any_serving`, so the two never disagree."""
     client = _described(
         _poller("me@pod-a", "b1", age=0),
         _poller("other@pod-b", "b1", age=1),
@@ -1060,30 +1062,8 @@ async def test_a_clear_that_lands_after_the_mark_is_written_over_before_a_peer_i
     Temporal call is faked, so it needs no server (#4996)."""
     build_id = "b1"
     identity = "pod-a"
-    stored: dict[str, datetime] = {}
-    late: list[asyncio.Task[None]] = []
-
-    async def clear(*_: object, identities: Collection[str], **__: object) -> None:
-        async def applied_later() -> None:
-            await asyncio.sleep(0.3)
-            for each in identities:
-                stored.pop(each, None)
-
-        # The request is on its way: cancelling the caller does not take it back.
-        late.append(asyncio.create_task(applied_later()))
-        await asyncio.Event().wait()
-
-    async def mark(*_: object, identities: Collection[str], since: datetime, **__: object) -> None:
-        stored.update(dict.fromkeys(identities, since))
-
-    async def read(*_: object, **__: object) -> dict[str, datetime]:
-        return dict(stored)
-
-    _patch_drain(monkeypatch, build_id)
+    marks = _LateClear(monkeypatch)
     monkeypatch.setattr(worker_module, "DRAIN_CURRENT_GRACE", 1.0)
-    monkeypatch.setattr(worker_module, "clear_draining", clear)
-    monkeypatch.setattr(worker_module, "mark_draining", mark)
-    monkeypatch.setattr(worker_module, "draining_marks", read)
 
     async def a_peer(*_: object, **__: object) -> set[str]:
         return {"pod-b"}
@@ -1092,12 +1072,82 @@ async def test_a_clear_that_lands_after_the_mark_is_written_over_before_a_peer_i
     client = cast(Client, SimpleNamespace(namespace="default", identity="client"))
     with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
         await _serve_fake_and_stop(client, identity, build_id=build_id)
-    assert late, "the start's clear never ran"
-    await asyncio.gather(*late)
+    assert marks.late, "the start's clear never ran"
+    await asyncio.gather(*marks.late)
     messages = [r.getMessage() for r in caplog.records]
     assert any(m.startswith("this worker's drain mark is gone") for m in messages), messages
     assert any(m.startswith("stopping without draining") for m in messages), messages
-    assert identity in stored
+    assert identity in marks.stored
+
+
+async def test_a_mark_a_late_clear_removed_is_written_again_once_a_peer_polls(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """#5103: the clear lands while no peer polls, so no poll reads the marks then. When
+    a peer appears, the worker writes its mark again before it trusts that peer."""
+    identity = "pod-a"
+    marks = _LateClear(monkeypatch)
+    trusted_with_mark: list[bool] = []
+    peers: list[set[str]] = []
+
+    async def a_peer_once_cleared(*_: object, **__: object) -> set[str]:
+        others = {"pod-b"} if marks.cleared.is_set() else set()
+        peers.append(others)
+        return others
+
+    def any_serving_seen(
+        others: Collection[str], read: Mapping[str, datetime], *, marked_within: float
+    ) -> bool:
+        serving = any_serving(others, read, marked_within=marked_within)
+        if serving:
+            trusted_with_mark.append(identity in marks.stored)
+        return serving
+
+    monkeypatch.setattr(worker_module, "pollers_elsewhere", a_peer_once_cleared)
+    monkeypatch.setattr(worker_module, "any_serving", any_serving_seen)
+    client = cast(Client, SimpleNamespace(namespace="default", identity="client"))
+    with caplog.at_level(logging.INFO, logger="scadbuddy.worker"):
+        await _serve_fake_and_stop(client, identity)
+    await asyncio.gather(*marks.late)
+    assert set() in peers and peers[-1] == {"pod-b"}, peers  # no peer, then one
+    messages = [r.getMessage() for r in caplog.records]
+    gone = [i for i, m in enumerate(messages) if m.startswith("this worker's drain mark")]
+    left = [i for i, m in enumerate(messages) if m.startswith("stopping without draining")]
+    assert gone and left and gone[0] < left[0], messages
+    assert trusted_with_mark == [True]
+
+
+class _LateClear:
+    """Faked drain marks whose start-time clear, cancelled at stop, lands 0.3 s later,
+    after the drain's mark (`cleared` is set then); `_patch_drain` is applied too."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.stored: dict[str, datetime] = {}
+        self.late: list[asyncio.Task[None]] = []
+        self.cleared = asyncio.Event()
+        _patch_drain(monkeypatch, "b1")
+        monkeypatch.setattr(worker_module, "clear_draining", self.clear)
+        monkeypatch.setattr(worker_module, "mark_draining", self.mark)
+        monkeypatch.setattr(worker_module, "draining_marks", self.read)
+
+    async def clear(self, *_: object, identities: Collection[str], **__: object) -> None:
+        async def applied_later() -> None:
+            await asyncio.sleep(0.3)
+            for each in identities:
+                self.stored.pop(each, None)
+            self.cleared.set()
+
+        # The request is on its way: cancelling the caller does not take it back.
+        self.late.append(asyncio.create_task(applied_later()))
+        await asyncio.Event().wait()
+
+    async def mark(
+        self, *_: object, identities: Collection[str], since: datetime, **__: object
+    ) -> None:
+        self.stored.update(dict.fromkeys(identities, since))
+
+    async def read(self, *_: object, **__: object) -> dict[str, datetime]:
+        return dict(self.stored)
 
 
 async def _marks(client: Client, build_id: str) -> dict[str, datetime]:
