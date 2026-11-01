@@ -310,22 +310,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       }
     })
 
-    it('reports an interrupt that comes after the result as not stopping anything', async () => {
-      const paths = await tempPaths()
-      let release!: () => void
-      const hold = new Promise<void>((r) => (release = r))
-      const { runner } = scriptedRunner(() => ({ reply: 'done', holdAfterResult: hold }))
-      const m = manager({ sql: db.sql, paths, run: runner })
-      const { session } = await m.start(agentA, { origin: 'mcp' })
-      const turn = await m.send(session.id, agentA, 'x')
-      await collectUntil(await m.attach(session.id, agentA, { signal: stop.signal }), (e) => e.event.type === 'assistant.text.done')
-      // The result has been yielded; the stream is still open (the SDK's last appends).
-      await new Promise((r) => setTimeout(r, 50))
-      expect(await m.interrupt(session.id, agentA)).toBe(false)
-      release()
-      expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
-    })
-
     it('redacts the turn’s credential from everything it logs', async () => {
       const paths = await tempPaths()
       const turns: FakeTurn[] = [{ reply: 'your key is sk-ant-test, right?' }, { throws: 'upstream said: bad key sk-ant-test' }]

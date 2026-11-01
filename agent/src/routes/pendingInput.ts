@@ -365,19 +365,23 @@ async function respondDurable(
       "an approval grant is for approving another agent's outward actions, never your own; ask the user in the ScadBuddy UI",
     )
   }
-  // An entry that has ended is answered from its response row (resolve_input writes it in the
-  // transaction that removes the entry), never by asking its workflow: the same decision again
-  // by the same responder is that decision's outcome (#3717), anything else a 409 saying how.
-  if (await sessions.projection.recorded(requestId)) {
-    const done = await repeated(sessions, requestId, body, principal)
-    if (done) return done
-    const ended = await endedConflict(sessions, requestId)
-    if (ended) throw ended
-  }
   // The decision's own trace, as a classic one's (approvals/service.ts `decisionSpan`): a child
   // of the request that made it, linked to the parked call's span (#5041).
   const decision = body.kind === 'approval' ? await decisionSpan(sessions, requestId, parsed.sessionId, principal) : undefined
   try {
+    // An entry that has ended is answered from its response row (resolve_input writes it in the
+    // transaction that removes the entry), never by asking its workflow, which may have gone
+    // on or be gone: the same decision again by the same responder is that decision's outcome
+    // (#3717), anything else a 409 saying how (#1400, #1479).
+    if (await sessions.projection.recorded(requestId)) {
+      const done = await repeated(sessions, requestId, body, principal)
+      if (done) {
+        decision?.setAttribute('scadbuddy.outcome', done.outcome)
+        return done
+      }
+      const ended = await endedConflict(sessions, requestId)
+      if (ended) throw ended
+    }
     const out = await sessions.durable.respond(parsed.sessionId, { request_id: requestId, response: body, responder: principal, role })
     decision?.setAttribute('scadbuddy.outcome', out.outcome)
     // An answer's audit row, as classic's (#1075); best effort, as classic's `audited` is.
