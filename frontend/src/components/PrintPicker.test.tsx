@@ -2195,7 +2195,9 @@ describe('PrintPicker · Filament profiles (#717)', () => {
       expect.stringContaining('PrintConfig.cpp'),
     )
     expect(within(step).getAllByRole('link')).toHaveLength(2)
-    expect(step).toHaveTextContent('235 °C')
+    // #2799: the temperature is a change now, in the spool's filament preset.
+    expect(within(step).getByText("Nozzle temperature (the spool's filament): → 235 °C")).toBeInTheDocument()
+    expect(within(step).queryByTestId('filament-profile-silk-pla-filament-not-applied')).not.toBeInTheDocument()
 
     await user.click(checkbox)
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
@@ -2214,6 +2216,24 @@ describe('PrintPicker · Filament profiles (#717)', () => {
     await loaded()
     const step = await screen.findByTestId('filament-profile-silk-pla')
     await waitFor(() => expect(within(step).getByRole('checkbox', { name: /Silk PLA/ })).toBeChecked())
+  })
+
+  it("says the temperature isn't applied on Bambuddy's slicer, and keeps the profile on (#2799)", async () => {
+    setSilkPreview(
+      silkPreview({
+        filament_applied: false,
+        filament_reason:
+          "Bambuddy's slicer has no filament setting override, so set them in the spool's filament preset. The native slicer applies them",
+      }),
+    )
+    renderPicker()
+    await loaded()
+
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(await within(step).findByTestId('filament-profile-silk-pla-filament-not-applied')).toHaveTextContent(
+      "Nozzle temperature and Nozzle temperature (first layer) not applied: Bambuddy's slicer has no filament setting override",
+    )
+    expect(within(step).getByRole('checkbox', { name: /Silk PLA/ })).toBeChecked()
   })
 
   it("says why a profile can't apply, and leaves it off", async () => {

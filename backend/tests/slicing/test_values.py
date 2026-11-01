@@ -72,13 +72,17 @@ async def test_profile_overrides_match_bambuddys_for_the_same_values(profiles: P
     async def bambuddy(ref: PresetRef) -> PresetValues:
         return PresetValues(resolved=True, values=flat)
 
-    native = await profile_overrides(None, LEAF, ["silk-pla"], read=native_values(profiles))
-    assert native == await profile_overrides(None, LEAF, ["silk-pla"], read=bambuddy)
-    assert native == ({"outer_wall_speed": ["50", "50"]}, [])
+    native = await profile_overrides(
+        None, LEAF, ["silk-pla"], read=native_values(profiles), native_slicer=True
+    )
+    assert native == await profile_overrides(
+        None, LEAF, ["silk-pla"], read=bambuddy, native_slicer=True
+    )
+    assert native == ({"outer_wall_speed": ["50", "50"]}, [], ["silk-pla"])
 
 
 async def test_a_local_process_skips_a_profile_with_a_warning(profiles: Profiles) -> None:
-    merged, warnings = await profile_overrides(
+    merged, warnings, _ = await profile_overrides(
         None, PresetRef(source="local", id="7"), ["silk-pla"], read=native_values(profiles)
     )
     assert merged == {}

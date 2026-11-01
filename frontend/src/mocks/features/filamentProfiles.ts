@@ -3,8 +3,17 @@ import type { FilamentProfile, ProfilePreview } from '../../api/types'
 
 /**
  * #717 — the built-in Silk PLA profile, and its preview against an H2C process whose
- * outer wall speed is one value per extruder variant (`0.20mm Standard @BBL H2C`).
+ * outer wall speed is one value per extruder variant (`0.20mm Standard @BBL H2C`). Its
+ * nozzle temperature is a filament setting (#2799), applied here as on the native slicer.
  */
+const SILK_TEMPERATURE = {
+  url: 'https://wiki.bambulab.com/en/x1/manual/printing-with-silk-filaments',
+  title: 'Bambu PLA Silk / Silk+ Filament Printing Guide | Bambu Lab Wiki',
+  quote: 'We recommend setting the Nozzle first layer and other layers to 235℃.',
+  accessed: '2026-09-28',
+  supports: ['SB2001', 'nozzle_temperature', 'nozzle_temperature_initial_layer'],
+}
+
 export const SILK_PROFILE: FilamentProfile = {
   id: 'silk-pla',
   name: 'Silk PLA',
@@ -36,20 +45,23 @@ export const SILK_PROFILE: FilamentProfile = {
       ],
     },
   ],
-  notes: [
+  filament_settings: [
     {
-      text: "Bambu also recommends a 235 °C nozzle for silk. ScadBuddy cannot set a filament's temperature yet, so it is not changed here: set it in the spool's filament preset.",
-      sources: [
-        {
-          url: 'https://wiki.bambulab.com/en/x1/manual/printing-with-silk-filaments',
-          title: 'Bambu PLA Silk / Silk+ Filament Printing Guide | Bambu Lab Wiki',
-          quote: 'We recommend setting the Nozzle first layer and other layers to 235℃.',
-          accessed: '2026-09-28',
-          supports: ['SB2001', 'nozzle_temperature', 'nozzle_temperature_initial_layer'],
-        },
-      ],
+      key: 'nozzle_temperature',
+      label: 'Nozzle temperature',
+      value: '235',
+      unit: '°C',
+      sources: [SILK_TEMPERATURE],
+    },
+    {
+      key: 'nozzle_temperature_initial_layer',
+      label: 'Nozzle temperature (first layer)',
+      value: '235',
+      unit: '°C',
+      sources: [SILK_TEMPERATURE],
     },
   ],
+  notes: [],
   builtin: true,
 }
 
@@ -68,6 +80,8 @@ export function silkPreview(overrides: Partial<ProfilePreview> = {}): ProfilePre
         value: '50',
       },
     ],
+    filament_applied: true,
+    filament_reason: null,
     ...overrides,
   }
 }
