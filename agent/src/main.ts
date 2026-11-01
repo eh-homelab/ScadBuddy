@@ -74,7 +74,7 @@ import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type 
 import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
-import { sessionGateActivities } from './temporal/session/gateActivities.js'
+import { gateDb, sessionGateActivities } from './temporal/session/gateActivities.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from './temporal/session/affinity.js'
 import { startHostWorkers } from './temporal/session/hostWorkers.js'
 import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
@@ -905,7 +905,9 @@ const temporalWorker =
             currentTiers: durableToolDeps.currentTiers,
           }),
           // AgentSession's gate (its writers and timers) and its turn end (unified runtime §5.1, flagged off until phase 6).
-          ...sessionGateActivities(temporal.sql),
+          // Its events through this replica's event log, so they wake its followers at once and
+          // go on the bus under its id (#3365); with no session manager, a log that only publishes.
+          ...sessionGateActivities(gateDb(temporal.sql, sessions?.events, sessionEvents?.onAppend)),
           ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),
           ...(sessionAcquire ?? {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
@@ -994,7 +996,7 @@ if (tabRelay && hostWorkers) {
 }
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6), and
 // a recorded entry's decision in its row (R5, plan Step 9.7).
-if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { sql: database.sql } : {})
+if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { db: { sql: database.sql, events: sessions.events } } : {})
 // The browser relay's calls go through Temporal only sealed, each under a key of its own
 // that is deleted once the caller has the answer (#4780): so only with the codec.
 if (tabRelay && temporalClient && dataConverter && payloadKeys && database) {
