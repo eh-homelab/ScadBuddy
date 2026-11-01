@@ -540,7 +540,7 @@ class OrderStore:
 
     # -- the price book's filaments (§5.1, #4250) -------------------------------------
 
-    def _existing_filament(
+    def existing_filament(
         self, conn: Conn, material: str, subtype: str | None, brand: str | None, colour: str
     ) -> str | None:
         row = conn.execute(
@@ -581,7 +581,7 @@ class OrderStore:
         self, material: str, subtype: str | None, brand: str | None, colour: str
     ) -> NoReturn:
         with self._pool.connection() as c:
-            existing = self._existing_filament(c, material, subtype, brand, colour)
+            existing = self.existing_filament(c, material, subtype, brand, colour)
         raise FilamentExistsError(existing or "")
 
     def update_filament(

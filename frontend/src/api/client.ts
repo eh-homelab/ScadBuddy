@@ -199,6 +199,7 @@ import type {
   PriceBook,
   Quote,
   SliceQuoteRequest,
+  SpoolImport,
   Shipment,
   ShipmentEdit,
   ShipmentInput,
@@ -2190,6 +2191,8 @@ export const api = {
     request<Filament>(`/orders/price-book/filaments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   archiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/archive`, { method: 'POST' }),
   unarchiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/unarchive`, { method: 'POST' }),
+  /** #4253 §8.3: the filament records made or updated from Bambuddy's spools, on click only. */
+  importSpools: () => request<SpoolImport>('/orders/price-book/import-spools', { method: 'POST' }),
   /** A rough estimate (§5.3), never a quote: nothing is recorded. */
   orderEstimate: (outputId: string, filamentId: string) =>
     request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),

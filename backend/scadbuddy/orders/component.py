@@ -5,7 +5,9 @@ does, since `Components.build_all` runs before the lifespan opens anything. The 
 uploads reads every item's inputs through `store` (``main.sweep_assets``); the routes
 reach `store` and `lifecycle` (every transition, publishing on the core's bus) through
 `OrdersDep`. ``refs`` holds a slice quote's sliced files (#4250), which the lifecycle
-releases as §3.4 says.
+releases as §3.4 says. ``integrations`` is the Bambuddy seam (#4253, §8): chosen for
+the running ``bambuddy_url``, and chosen again when that changes, which ``api/runtime.py``
+applies on every ``settings.changed``, so no restart is needed to light it up.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
+from scadbuddy.orders.integrations import OrderIntegrations, choose
 from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.pricebook import PriceBookReader
 from scadbuddy.orders.store import OrderStore
@@ -39,6 +42,7 @@ class OrdersComponent:
         self.core = core
         self._store: OrderStore | None = None
         self._lifecycle: Lifecycle | None = None
+        self._integrations: tuple[str | None, OrderIntegrations] | None = None
         #: The slice quotes' holds on their sliced files (#4250 Ruling 3), on the
         #: projection's autocommit pool as every `blob_refs` writer's.
         self.refs = BlobRefs(core.projection.pool)
@@ -66,9 +70,19 @@ class OrdersComponent:
         return self._store
 
     @property
+    def integrations(self) -> OrderIntegrations:
+        """The seam for the running ``bambuddy_url`` (F10, Ruling 7)."""
+        url = self.core.settings.bambuddy_url
+        if self._integrations is None or self._integrations[0] != url:
+            self._integrations = (url, choose(url, self.core.settings_store))
+        return self._integrations[1]
+
+    @property
     def price_book(self) -> PriceBookReader:
         """The book in force (#4250): the stored policy and the filament records."""
-        return PriceBookReader(self.core.settings_store, self.store)
+        return PriceBookReader(
+            self.core.settings_store, self.store, spool_import=self.integrations.linked
+        )
 
     @property
     def lifecycle(self) -> Lifecycle:

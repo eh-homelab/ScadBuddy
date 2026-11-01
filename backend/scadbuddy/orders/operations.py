@@ -22,9 +22,8 @@ from typing import TYPE_CHECKING, Any
 
 from fastapi import status
 
-from scadbuddy.bambuddy.client import client_for, maybe_client
 from scadbuddy.bambuddy.output_reader import LocalOutputs, require
-from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
+from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.print_run import PrintRunRequest, registry_printer, slice_route
 from scadbuddy.bambuddy.print_source import OutputSource
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
@@ -35,6 +34,7 @@ from scadbuddy.library.operations import PIN_TIMEOUT
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, to_thread_to_end
 from scadbuddy.orders import attachments
+from scadbuddy.orders.bambuddy import download_sliced, quote_preview_job, start_quote_preview
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor, Reference
@@ -130,21 +130,20 @@ class PreviewSlicer:
             native=native_reads if lan else None,
         )
         slicing = self.components.get(SLICING)
-        async with maybe_client(settings, native=lan) as client:
-            return await start_preview_plates(
-                client,
-                source,
-                settings,
-                core.uploads,
-                body,
-                subject=subject,
-                native=slicing.starter,
-                native_slices=slicing.store,
-                temporal=slicing.temporal(),
-                native_reads=native_reads,
-                route=route,
-                title=naming.title,
-            )
+        return await start_quote_preview(
+            source,
+            settings,
+            core.uploads,
+            body,
+            lan=lan,
+            subject=subject,
+            native=slicing.starter,
+            native_slices=slicing.store,
+            temporal=slicing.temporal(),
+            native_reads=native_reads,
+            route=route,
+            title=naming.title,
+        )
 
     async def poll(self, started: PreviewStarted, subject: str) -> SlicedPlate | None:
         if started.slicer == "native":
@@ -161,8 +160,7 @@ class PreviewSlicer:
                 plate_id=started.plate_id, slicer="native", blob_key=row.sliced_blob_key
             )
         settings = await asyncio.to_thread(self.core.settings_store.load)
-        async with client_for(settings) as client:
-            job = await preview_job(client, self.core.uploads, started.job_id, subject)
+        job = await quote_preview_job(settings, self.core.uploads, started.job_id, subject)
         if job.status == "failed":
             raise _slice_failed(started.plate_id, job.failure)
         if job.status != "completed":
@@ -191,15 +189,10 @@ class PreviewSlicer:
             return bytes(data)
         assert sliced.file_id is not None
         settings = await asyncio.to_thread(self.core.settings_store.load)
-        async with (
-            client_for(settings) as client,
-            aclosing(client.download_library_file(sliced.file_id)) as chunks,
-        ):
-            async for chunk in chunks:
-                data += chunk
-                if len(data) > MAX_SLICED_BYTES:
-                    raise _too_big(sliced.plate_id)
-        return bytes(data)
+        found = await download_sliced(settings, sliced.file_id, MAX_SLICED_BYTES)
+        if found is None:
+            raise _too_big(sliced.plate_id)
+        return found
 
 
 async def reference_schema(core: Core, reference: Reference) -> CustomizerSchema | None:

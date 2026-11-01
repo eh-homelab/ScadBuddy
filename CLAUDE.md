@@ -679,6 +679,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `OrderTotals` counts an item with no accepted quote at its newest quote's unit price
   times its quantity (`api/orders.py` `item_price`, the browser's `components/orders/price.ts`),
   with `pending_minor` and `unpriced_items`; accepting still needs every quote accepted.
+  Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
+  that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
+  `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
+  the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
+  live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
+  or updates filament records from the spools, on click only (`PriceBook.spool_import`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
