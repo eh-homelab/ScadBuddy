@@ -121,7 +121,6 @@ describe('registry', () => {
           'render-limits',
           'images',
           'workspace',
-          'durable-subagents',
           'memory',
         ],
       ],

@@ -772,8 +772,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     session's owner with its turn's tiers; `mode` is not read, since every session is an
     AgentSession from plan Step 6.3), or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
     run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
-    approval; no browser or answer tools)), a durable turn's other tools (#2320,
-    `turnTools.ts`, built by `turnServers.ts` as a classic turn builds them: remote plugins
+    approval; no browser tools)), a durable turn's other tools (#2320,
+    `turnTools.ts`, built by `turnServers.ts` as a classic turn builds them (its `builtins`
+    and `listing` paths served only the retired Python turn and go with `turnPackages.ts` in
+    plan Step 9.3): remote plugins
     through the forwarder and `http_request`): `turn_tools` lists them per turn as
     `<server>__<tool>`, `turn_tool_tier` tiers a call from its input before it may park,
     and each call is the worker's `default` activity `turn:<server>__<tool>`, which builds
@@ -781,15 +783,11 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     workflow's call too: as the run's starter, approved only by `workflow_run_decisions`,
     with no browser servers; a server whose
     state lives on the pod, `http_request` and the browser, is `pinned`: its calls run on
-    `agent-tools.<hostname>`, which each agent also polls), a durable turn's automatic
-    Hindsight memory (`memoryActivities.ts`, `memory_recall` before the prompt and
-    `memory_retain` before `finish_turn`: the classic hooks of `memory/hindsight.ts`,
-    the transcript rebuilt from the event log; never failing the turn); and `AgentOperation` (`workflows.ts`, bundled by
+    `agent-tools.<hostname>`, which each agent also polls); and `AgentOperation` (`workflows.ts`, bundled by
     `pnpm build` into `dist/temporal/workflow-bundle.js`), the §4.2 command shape for
     the agent's commands, recorded in `ai_operations` (`src/operations/`). A change to
     `AgentOperation` goes behind `patched()`; `test/fixtures/agent_operation_histories/`
-    replays. `pnpm build` also writes `dist/tools.json` (the tool manifest the durable
-    worker declares from; never committed). Temporal tests (`test/*temporal*.test.ts`)
+    replays. Temporal tests (`test/*temporal*.test.ts`)
     skip unless `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` names a Temporal CLI (or
     `temporal` is on `PATH`); the `agent` CI job installs the Dockerfile's pinned one.
     The `@temporalio/*` packages are pinned exactly, all one version.
@@ -800,10 +798,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `test/fixtures/pending-input-vectors.json` pins the two languages together),
     the classic entries (`classic.ts`), the durable projection read (`projection.ts`,
     `ai_pending_input`), the Temporal client of a session's gate handlers (`durable.ts`
-    `DurableGate`), the answer tools' results (`answers.ts`) and the orphan sweep
-    (`sweep.ts`). `routes/pendingInput.ts` serves both reads and `respond`; the
-    durable-only `ask_user` / `wait_for_user` are `tools/answerTools.ts` (manifest only,
-    never /mcp). `input.requested` / `input.resolved` are logged in both modes and never
+    `DurableGate`) and the orphan sweep (`sweep.ts`). `routes/pendingInput.ts` serves
+    both reads and `respond`. `input.requested` / `input.resolved` are logged in both modes and never
     sent on the chat socket (`routes/chat.ts` `sentToPanel`).
   - Durable payloads (#1056 phase 5c, spec §6.5): `src/temporal/payloadCodec.ts` seals
     every payload of a `session-<uuid>` / `flow-<uuid>` workflow under that subject's

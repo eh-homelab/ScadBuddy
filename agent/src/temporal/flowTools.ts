@@ -1,6 +1,5 @@
 import { Context } from '@temporalio/activity'
 import { ApplicationFailure } from '@temporalio/common'
-import { DURABLE_ONLY_NAMES } from '../tools/answerTools.js'
 import { effectiveTool, type Risk, type Tool, type ToolServices } from '../tools/registry.js'
 import { flowOf } from './flowRuns.js'
 
@@ -19,9 +18,9 @@ import { flowOf } from './flowRuns.js'
 
 export const FLOW_TOOL_TIER_ACTIVITY = 'flow_tool_tier'
 
-/** A tool a flow may call: none of a session's answer tools, and no browser tool (a flow has no tab). */
+/** A tool a flow may call: no browser tool (a flow has no tab). */
 export function forFlows(tool: Tool): boolean {
-  return !DURABLE_ONLY_NAMES.has(tool.name) && !tool.name.startsWith('browser_')
+  return !tool.name.startsWith('browser_')
 }
 
 export type FlowToolTier = { name: string; tier: Risk; disabled: boolean }

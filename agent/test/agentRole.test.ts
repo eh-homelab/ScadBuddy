@@ -29,7 +29,7 @@ describe("the worker's HTTP server", () => {
     })
   }
 
-  it.each(['/api/v1/ai/status', '/api/v1/ai/chat', '/api/v1/ai/sessions', '/mcp', '/internal/flows/tools', '/internal/durable/subagent-mcp'])(
+  it.each(['/api/v1/ai/status', '/api/v1/ai/chat', '/api/v1/ai/sessions', '/mcp', '/internal/flows/tools'])(
     'answers 404 on %s',
     async (path) => {
       expect((await app(undefined).request(path)).status).toBe(404)

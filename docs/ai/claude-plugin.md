@@ -101,10 +101,8 @@ Every session is an AgentSession since plan 2026-10-13 Step 6.3, so a subagent r
 the turn's own Claude Code and gets the turn's plugin, `http_request` and browser tools,
 and its outward call parks for the person as the main agent's does (#2660;
 [`agent/test/parity.temporal.test.ts`](../../agent/test/parity.temporal.test.ts)). The
-retired Python turn (Step 8.1) gave its subagents ScadBuddy's own tools only, through the
-agent's loopback `/internal/durable/subagent-mcp`
-([`agent/src/routes/subagentMcp.ts`](../../agent/src/routes/subagentMcp.ts)), which
-Step 8.2 removes.
+retired Python turn (Step 8.1) gave its subagents ScadBuddy's own tools only, through a
+loopback route of the agent that Step 8.2 removed.
 Claude Code refuses `AskUserQuestion` inside a subagent, so in a session the user is in
 the harness also serves `mcp__scadbuddy_questions__ask_user`, which asks the user through
 the same panel card (#940), which the subagents inherit.

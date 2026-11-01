@@ -45,8 +45,8 @@ export function memoryText(text: string, secrets: readonly (string | undefined)[
 
 /**
  * One automatic recall or retain as the session records it: an audit row (never
- * fails, audit/log.ts) and a `memory` panel event, both redacted. Classic turns
- * (`SessionManager.memoryHooks`) and durable ones (temporal/memoryActivities.ts) alike.
+ * fails, audit/log.ts) and a `memory` panel event, both redacted
+ * (`SessionManager.memoryHooks`).
  */
 export async function recordMemoryActivity(
   deps: { audit?: AuditSink | undefined; events: Pick<EventLog, 'append'> },
