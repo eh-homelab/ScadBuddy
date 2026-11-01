@@ -8,7 +8,7 @@ import { connectDatabase, type Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { originPolicy } from '../src/http/origins.js'
-import { registerApprovalRoutes } from '../src/routes/approvals.js'
+import { registerPendingInputRoutes } from '../src/routes/pendingInput.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { harnessTools } from '../src/tools/harness.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
@@ -19,14 +19,15 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 import { browser, collectUntil, manager, stopManagers, tempPaths } from './support/sessions.js'
 import { exportedText, resetTracing, testTracing, waitForSpan } from './support/tracing.js'
 import { fixedCredentials } from './support/fixedCredentials.js'
-import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agentSessions.js'
+import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // The agent's trace on the real Agent SDK and its bundled Claude Code binary,
 // pointed at the fake Anthropic endpoint, with sessions and approvals in
 // Postgres (spec 2026-10-01 §8, agent): a turn yields agent.turn → agent.tool,
 // and the tool's backend request carries the tool's context; a parked call
-// ends its spans before any decision; the decision links to it through
-// ai_approvals.traceparent, and agent.turn.resume is its child.
+// ends its spans before any decision; the decision links to it through the
+// entry's traceparent (ai_pending_input), and agent.turn.resume is its child
+// (through ai_input_responses.decision_traceparent, #5041).
 
 let cliMissing: string | undefined
 try {
@@ -119,8 +120,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent traci
 
   function routes(m: SessionManager): Hono {
     const app = new Hono()
-    registerApprovalRoutes(app, {
-      approvals: m.approvals,
+    // The panel's one way to answer a park (#815).
+    registerPendingInputRoutes(app, {
+      sessions: m,
       ready: () => Promise.resolve(true),
       remoteAddress: () => '10.0.0.7',
       origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
@@ -132,8 +134,12 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent traci
   const named = (name: string) => spans.getFinishedSpans().filter((s) => s.name === name)
 
   async function approve(app: Hono, id: string): Promise<void> {
-    const res = await app.request(`/api/v1/ai/approvals/${id}/approve`, { method: 'POST', headers: UI })
-    expect(res.status).toBe(200)
+    const res = await app.request(`/api/v1/ai/pending-input/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { ...UI, 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'approval', decision: 'approve' }),
+    })
+    expect(res.status, await res.clone().text()).toBe(200)
   }
 
   /** The approval ids the session asked for, once it has asked for `count` (attach replays from the start). */
@@ -173,8 +179,6 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent traci
     script = (r) =>
       lastContent(r).includes('tool_result') ? { text: 'done' } : { toolUse: { name: 'mcp__scadbuddy__ping_backend', input: { job: SENTINEL } } }
     const m = await agent()
-    // The classic gate's park trace (ai_approvals.traceparent); an AgentSession park's is #5041.
-    classicTurns(m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ping it' })
     const [approvalId] = await required(m, session.id, 1)
 
@@ -183,8 +187,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent traci
     const seg0 = await waitForSpan(spans, (s) => s.name === 'agent.turn')
     expect(parkedTool.attributes).toMatchObject({ 'scadbuddy.outcome': 'parked', 'scadbuddy.approval_id': approvalId })
     expect(seg0.attributes).toMatchObject({ 'scadbuddy.outcome': 'parked', 'scadbuddy.approval_id': approvalId })
-    const row = await m.approvals.get(approvalId!, browser)
-    expect(row.traceparent).toBe(`00-${parkedTool.spanContext().traceId}-${parkedTool.spanContext().spanId}-01`)
+    const [row] = await db.sql<{ traceparent: string | null }[]>`SELECT traceparent FROM ai_pending_input WHERE request_id = ${approvalId!}`
+    expect(row?.traceparent).toBe(`00-${parkedTool.spanContext().traceId}-${parkedTool.spanContext().spanId}-01`)
     expect(hits.filter((h) => h.path === '/healthz')).toEqual([])
 
     await approve(routes(m), approvalId!)
@@ -214,8 +218,6 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent traci
       return { toolUse: { name: 'mcp__scadbuddy__ping_backend', input: { job: 'a' } } }
     }
     const m = await agent()
-    // The classic gate's park trace (ai_approvals.traceparent); an AgentSession park's is #5041.
-    classicTurns(m)
     const app = routes(m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'ping twice' })
     const [first] = await required(m, session.id, 1)

@@ -132,6 +132,8 @@ type PendingRow = {
   flow_run_id: string | null
   hop: 'parent' | 'person' | null
   hops: Hop[] | null
+  /** The decision's `agent.approval` span (#5041), which the respond route wrote; an AgentSession's only. */
+  decision_traceparent?: string | null
 }
 
 /** What `audit` reads of an entry: a pending row, or the grant and deny paths' stand-in. */
@@ -236,10 +238,12 @@ async function resolved(
   // The tool and when it was asked, which the attention rate limit counts once the pending row is gone (#5003).
   await tx`
     INSERT INTO ai_input_responses
-      (request_id, session_id, kind, outcome, response, responder, reason, hops, response_hash, tool, requested_at)
+      (request_id, session_id, kind, outcome, response, responder, reason, hops, response_hash, tool, requested_at,
+       decision_traceparent)
     VALUES (${rid}, ${sid}, ${row.kind}, ${outcome},
             ${response === undefined || response === null ? null : tx.json(response as never)}::jsonb,
-            ${tx.json(responder)}, ${reason}, ${tx.json(hops)}, ${hash}, ${row.tool}, ${row.created_at_text}::timestamptz)`
+            ${tx.json(responder)}, ${reason}, ${tx.json(hops)}, ${hash}, ${row.tool}, ${row.created_at_text}::timestamptz,
+            ${row.decision_traceparent ?? null})`
   const person = responder.kind !== 'system'
   const events: ServerEvent[] = []
   if (row.kind === 'approval') {
