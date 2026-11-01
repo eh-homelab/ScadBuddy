@@ -1061,7 +1061,8 @@ export const printTools: Tool[] = [
     label: "Remember a model's print choices",
     description:
       "Remember what a model's (or a Bambuddy library file's, `library_file_id`) print dialog opens on next " +
-      'time: the printer, per-slot spools, nozzles, and the quality tier or named process. Replaces the ' +
+      'time: the printer, per-slot spools, nozzles, the quality tier or named process, and the print sequence. ' +
+      'Replaces the ' +
       "entry whole: an omitted part is forgotten, and passing nothing forgets them all (get_print_choices " +
       'shows the current `model_choices`).',
     input: z
@@ -1073,19 +1074,28 @@ export const printTools: Tool[] = [
         nozzles: z.array(nozzleChoice).max(2).optional(),
         tier: tier.nullable().optional(),
         process_name: z.string().max(200).nullable().optional().describe('An Advanced-mode Bambu process, in place of a tier'),
+        print_sequence: z
+          .enum(['by layer', 'by object'])
+          .nullable()
+          .optional()
+          .describe("An Advanced-mode print sequence (#4970); omit for the template's own"),
       })
       .refine((o) => (o.slug === undefined) !== (o.library_file_id === undefined), {
         message: 'name one: slug or library_file_id',
       }),
     risk: 'write',
     routes: ['PUT /api/v1/print/models/{slug}/choices', 'PUT /api/v1/print/library/{file_id}/choices'],
-    handler: async ({ slug, library_file_id, printer_id, filament_plan, nozzles, tier, process_name }, { backend }) => {
+    handler: async (
+      { slug, library_file_id, printer_id, filament_plan, nozzles, tier, process_name, print_sequence },
+      { backend },
+    ) => {
       const body = {
         printer_id: printer_id ?? null,
         filament_plan: filament_plan ?? [],
         nozzles: nozzles ?? [],
         tier: tier ?? null,
         process_name: process_name ?? null,
+        print_sequence: print_sequence ?? null,
       }
       if (library_file_id !== undefined) {
         return json(

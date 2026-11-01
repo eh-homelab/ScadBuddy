@@ -93,6 +93,7 @@ export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   nozzles: [],
   tier: null,
   process_name: null,
+  print_sequence: null,
 }
 
 /** The backend's forget rule (`set_model_choices`): the body equals `ModelPrintChoices()`. */
@@ -102,7 +103,8 @@ export function isNoModelChoices(choices: ModelPrintChoices): boolean {
     !choices.filament_plan?.length &&
     !choices.nozzles?.length &&
     choices.tier == null &&
-    choices.process_name == null
+    choices.process_name == null &&
+    choices.print_sequence == null
   )
 }
 

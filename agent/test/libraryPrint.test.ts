@@ -163,9 +163,19 @@ describe('the library routes', () => {
         return HttpResponse.json({})
       }),
     )
-    const result = await tool('remember_model_print_choices').execute({ library_file_id: FILE, tier: 'fine' }, ctx())
+    const result = await tool('remember_model_print_choices').execute(
+      { library_file_id: FILE, tier: 'fine', print_sequence: 'by object' },
+      ctx(),
+    )
     expect(result.isError).toBeFalsy()
-    expect(body).toEqual({ printer_id: null, filament_plan: [], nozzles: [], tier: 'fine', process_name: null })
+    expect(body).toEqual({
+      printer_id: null,
+      filament_plan: [],
+      nozzles: [],
+      tier: 'fine',
+      process_name: null,
+      print_sequence: 'by object',
+    })
   })
 
   it("forgets a library file's remembered choices when given nothing else (#1964)", async () => {
@@ -178,7 +188,14 @@ describe('the library routes', () => {
     )
     const result = await tool('remember_model_print_choices').execute({ library_file_id: FILE }, ctx())
     expect(result.isError).toBeFalsy()
-    expect(body).toEqual({ printer_id: null, filament_plan: [], nozzles: [], tier: null, process_name: null })
+    expect(body).toEqual({
+      printer_id: null,
+      filament_plan: [],
+      nozzles: [],
+      tier: null,
+      process_name: null,
+      print_sequence: null,
+    })
     // And the listing says so, rather than sending the user to Settings.
     const listing = tool('get_remembered_choices').description
     expect(listing).toContain('library_file_id')

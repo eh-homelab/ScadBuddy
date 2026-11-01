@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError } from '../api/client'
-import type { ChoicesView, NozzleChoice, OutputPlate, PresetRef, PrintChoices } from '../api/types'
+import type { ChoicesView, NozzleChoice, OutputPlate, PresetRef, PrintChoices, PrintSequence } from '../api/types'
 import type { PlateChoice } from './plateChoice'
 import { DEFAULT_NOZZLES, defaultsOf, refKey } from './printChoices'
 import { sourceApi, sourceKey, type PrintSource } from './printSource'
@@ -85,6 +85,11 @@ export function usePrintChoices(
   const [advanced, setAdvanced] = useState(false)
   const [overrides, setOverrides] = useState<Record<string, PresetRef>>({})
   const [sides, setSides] = useState<Record<string, Side>>({})
+  /**
+   * #1862 — this print's sequence, `null` for the template's or the process's. Remembered
+   * by subject with the other choices (#4970), so a fresh open seeds it from the read.
+   */
+  const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
   /** #83 — the output's plates, and the ones to print: every plate unless chosen (#3652). */
   const [plates, setPlates] = useState<OutputPlate[]>([])
   const [plate, setPlate] = useState<PlateChoice>('all')
@@ -125,12 +130,15 @@ export function usePrintChoices(
     const nextNozzles = remembered.length > 0 ? remembered : defaultsOf(next)
     const nextProcess = remembered.length > 0 ? (last?.process_name ?? null) : null
     const nextTier = nextProcess ? null : (last?.tier ?? 'standard')
+    const nextSequence = last?.print_sequence ?? null
     setNozzles(nextNozzles)
     setTier(nextTier)
     setProcessName(nextProcess)
-    // A named process and a different flow per side are Advanced choices; opening in
-    // Simple would send them unseen. One flow for both is Simple's own choice (#2166).
-    setAdvanced(nextProcess !== null || !oneFlow(nextNozzles))
+    setPrintSequence(nextSequence)
+    // A named process, a different flow per side and a print sequence (#4970) are
+    // Advanced choices; opening in Simple would send them unseen. One flow for both is
+    // Simple's own choice (#2166).
+    setAdvanced(nextProcess !== null || nextSequence !== null || !oneFlow(nextNozzles))
   }
   const reload = useCallback(() => {
     const current = latest.current
@@ -187,6 +195,7 @@ export function usePrintChoices(
     if (carry?.get()) return
     setOverrides({})
     setSides({})
+    setPrintSequence(null)
     seeded.current = false
   }, [resetKey, carry])
 
@@ -217,6 +226,7 @@ export function usePrintChoices(
     setAdvanced(false)
     setOverrides({})
     setSides({})
+    setPrintSequence(null)
     seeded.current = false
     defaulted.current = false
   }
@@ -256,13 +266,14 @@ export function usePrintChoices(
   function toggleAdvanced() {
     if (advanced) {
       defaulted.current = false
-      // Back to Simple: a flow per side, named process, preset override or side chosen
-      // by hand would be sent unseen. Simple's one flow is the first side's (#2166).
+      // Back to Simple: a flow per side, named process, preset override, side chosen by
+      // hand or print sequence would be sent unseen. Simple's one flow is the first side's (#2166).
       setNozzles((current) => current.map((nozzle) => ({ ...nozzle, flow: current[0]?.flow ?? 'standard' })))
       setProcessName(null)
       setTier((current) => current ?? 'standard')
       setOverrides({})
       setSides({})
+      setPrintSequence(null)
     }
     setAdvanced(!advanced)
   }
@@ -310,6 +321,8 @@ export function usePrintChoices(
     setBedType,
     setOverride,
     setPlate,
+    printSequence,
+    setPrintSequence,
     toggleAdvanced,
     reset,
   }

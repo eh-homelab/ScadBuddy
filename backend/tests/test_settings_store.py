@@ -212,6 +212,16 @@ def test_a_connection_save_leaves_the_remembered_choices_alone(store: SettingsSt
     assert loaded.printer_id == 4
 
 
+def test_a_remembered_print_sequence_round_trips(store: SettingsStore) -> None:
+    # #4970: the dialog's Print sequence is remembered by subject, with the other choices.
+    store.set_model_choices("gear", ModelPrintChoices(print_sequence="by object"))
+    store.set_model_choices("library:7", ModelPrintChoices(print_sequence="by layer"))
+
+    loaded = store.load()
+    assert loaded.model_print_choices["gear"].print_sequence == "by object"
+    assert loaded.model_print_choices["library:7"].print_sequence == "by layer"
+
+
 def test_forgetting_removes_the_row(store: SettingsStore, pg_conninfo: str) -> None:
     store.set_model_choices("gear", ModelPrintChoices(tier="fine"))
     store.set_printer_bed_type(1, "Cool Plate")

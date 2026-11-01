@@ -43,6 +43,7 @@ function describeChoices(choices: ModelPrintChoices, printerName: (id: number) =
   if (choices.printer_id !== null && choices.printer_id !== undefined) parts.push(printerName(choices.printer_id))
   if (choices.tier) parts.push(`${choices.tier} quality`)
   if (choices.process_name) parts.push(choices.process_name)
+  if (choices.print_sequence) parts.push(choices.print_sequence)
   const spools = choices.filament_plan?.length ?? 0
   if (spools) parts.push(`${spools} ${spools === 1 ? 'spool' : 'spools'}`)
   if (choices.nozzles?.length) parts.push(`nozzles ${choices.nozzles.map((n) => n.size).join(' / ')} mm`)

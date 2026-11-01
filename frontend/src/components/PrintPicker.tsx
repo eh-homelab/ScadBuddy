@@ -520,11 +520,8 @@ export function PrintPicker({
     const { manual_start: start, ...rest } = options
     return start === null || start === undefined ? rest : options
   }, [options])
-  /**
-   * #1862 — this print's sequence, `null` for the template's or the process's. Per print,
-   * never remembered (until #1754 decides remembered choices by subject).
-   */
-  const [printSequence, setPrintSequence] = useState<PrintSequence | null>(null)
+  // #1862, #4970 — the print's sequence, remembered by subject with the other choices.
+  const { printSequence, setPrintSequence } = picker
   // #1899 — this print's supports; `null` leaves them to the template and the process.
   const [supports, setSupports] = useState<SupportsChoice | null>(null)
   // #3628 — this print's prime tower; `null` leaves it to the template and the process.
@@ -894,7 +891,6 @@ export function PrintPicker({
   useEffect(() => {
     if (carry.get()) return
     setOptions({})
-    setPrintSequence(null)
     setSupports(null)
     setPrimeTower(null)
     resetProfiles()
@@ -1245,7 +1241,8 @@ export function PrintPicker({
     }
     setOptions(seed.options ?? {})
     if (seed.copies !== undefined && seed.copies !== null) setCopies(seed.copies)
-    if (seed.print_sequence) setPrintSequence(seed.print_sequence)
+    // The step's own sequence, over the subject's remembered one (#4970).
+    setPrintSequence(seed.print_sequence ?? null)
     if (batch.seedIsOwn) {
       // Its own choices, the ones a mount resets to the defaults (#2718 review): saving
       // the step again without them would queue it without the supports, tower or
@@ -1270,6 +1267,7 @@ export function PrintPicker({
     changeQuality,
     setPlan,
     setPlate,
+    setPrintSequence,
     restoreProfiles,
   ])
 
@@ -1352,7 +1350,6 @@ export function PrintPicker({
     // The page's project (#317) outlives the dialog; only its own copy is reset.
     setOwnProjectId(null)
     setOptions({})
-    setPrintSequence(null)
     setSupports(null)
     setPrimeTower(null)
     filamentProfiles.reset()
