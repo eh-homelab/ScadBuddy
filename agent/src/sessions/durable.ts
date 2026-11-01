@@ -373,19 +373,19 @@ export class DurableTurns {
       seq = seqs.at(-1) ?? 0
       await this.#sendMessage(session, turn, sent, Number(claimed.durable_offset) > 0, claimed.runtime)
     } catch (err) {
-      if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq)
+      if (err instanceof OutcomeUnknown) return this.#turn(id, turn.turnId, seq, claimed.runtime)
       // The refusal is what the caller hears, whatever the give-back meets.
       await this.#giveBack(id, claimed.prior_status).catch(() => {
         console.warn(`durable send: session ${id}'s claim could not be given back`)
       })
       throw err
     }
-    return this.#turn(id, turn.turnId, seq)
+    return this.#turn(id, turn.turnId, seq, claimed.runtime)
   }
 
-  #turn(id: string, turnId: string, seq: number): Turn {
+  #turn(id: string, turnId: string, seq: number, runtime: SessionRuntime): Turn {
     let done: Promise<TurnOutcome> | undefined
-    const outcome = () => this.#outcome(id, seq)
+    const outcome = () => this.#outcome(id, seq, runtime)
     return {
       turnId,
       // Read only when asked for: a follower per turn nobody waits on would poll for nothing.
@@ -566,7 +566,7 @@ export class DurableTurns {
   }
 
   /** The turn's end, as finish_turn wrote it (agent-durable session/activities.py). */
-  async #outcome(id: string, afterSeq: number): Promise<TurnOutcome> {
+  async #outcome(id: string, afterSeq: number, runtime: SessionRuntime): Promise<TurnOutcome> {
     const controller = new AbortController()
     let result: { costUsd: number; turns: number } | undefined
     let error: { code?: string; message: string } | undefined
@@ -590,9 +590,7 @@ export class DurableTurns {
     // An AgentSession's outcome carries the session's own spend, as a classic turn's does: its
     // event's is the lineage's (the meter), which a fork shares with its parent (#823).
     // DurableSession's finish_turn writes the outcome's figure in the event.
-    const [row] = await this.#sql<{ cost_usd: number; runtime: SessionRuntime | null }[]>`
-      SELECT cost_usd, runtime FROM ai_sessions WHERE id = ${id}`
-    const own = row?.runtime === 'unified' ? row : undefined
+    const [own] = runtime === 'unified' ? await this.#sql<{ cost_usd: number }[]>`SELECT cost_usd FROM ai_sessions WHERE id = ${id}` : []
     return {
       kind: 'result',
       // A result subtype classic reports for an end that leaves the session idle (AgentSession carries it, turnHost.ts).

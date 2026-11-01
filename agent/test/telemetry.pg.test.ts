@@ -17,7 +17,7 @@ import { AGENT_SESSIONS_SKIP, agentSessions, classicTurns } from './support/agen
 
 const spans = testTracing()
 
-describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`turn tracing${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
+describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`turn tracing${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>

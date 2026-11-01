@@ -80,7 +80,7 @@ msw.events.on('request:start', ({ request }) => {
   if (request.url.startsWith(BACKEND)) backendLog.push(`${request.method} ${new URL(request.url).pathname}`)
 })
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`prompt injection against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`prompt injection against the real SDK${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let fake: FakeAnthropic
   let script: (request: RecordedRequest) => Reply

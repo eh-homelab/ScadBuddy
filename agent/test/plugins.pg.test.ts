@@ -31,7 +31,7 @@ const READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fet
 const PUBLIC = () => Promise.resolve(['203.0.113.10'])
 
 describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
-  `plugin registry on Postgres${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`,
+  `plugin registry on Postgres${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}${AGENT_SESSIONS_SKIP}`,
   () => {
   agentSessions()
     let db: Database

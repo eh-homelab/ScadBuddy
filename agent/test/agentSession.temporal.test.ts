@@ -862,7 +862,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(await next.done).toMatchObject({ kind: 'result' })
     })
 
-    it('forks a unified session from its transcript, as classic does: this stub turn wrote none, so classic`s refusal (plan Step 6.3)', async () => {
+    it('forks a unified session from its transcript; with none written it refuses as classic does (plan Step 6.3)', async () => {
       await flag(true)
       const m = await durableManager()
       finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]

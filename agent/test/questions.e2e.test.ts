@@ -29,7 +29,7 @@ const skip = cliMissing ?? (TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL
 const TOKEN = 'gw-questions-e2e-token-4444555566667777'
 const QUESTION = 'Approve this issue draft?'
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`questions against the real SDK${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`questions against the real SDK${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let fake: FakeAnthropic
   let script: (request: RecordedRequest) => Reply

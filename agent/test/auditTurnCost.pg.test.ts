@@ -23,7 +23,7 @@ const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not se
 const stall = { model: 'claude-sonnet-4-5', usage: { input_tokens: 20_000 }, text: 'Once upon a time' }
 const CUT = 0.06 + (4 * 15) / 1_000_000
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`turn cost in the audit log${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`turn cost in the audit log${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>

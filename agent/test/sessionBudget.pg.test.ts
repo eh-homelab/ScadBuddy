@@ -31,7 +31,7 @@ const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-
 const UI_READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const JSON_UI = { ...UI, 'content-type': 'application/json' }
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session budget${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session budget${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>

@@ -22,7 +22,7 @@ const skip = TEST_DATABASE_URL ? undefined : `${TEST_DATABASE_URL_ENV} is not se
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
 const JSON_UI = { ...UI, 'content-type': 'application/json' }
 
-describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session edits${skip ? ` (skipped: ${skip})` : ''}`, () => {
+describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session edits${skip ? ` (skipped: ${skip})` : ''}${AGENT_SESSIONS_SKIP}`, () => {
   agentSessions()
   let db: Database
   let drop: () => Promise<void>

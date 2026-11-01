@@ -57,7 +57,7 @@ describe('titleFrom', () => {
 })
 
 describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
-  `SessionManager${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`,
+  `SessionManager${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}${AGENT_SESSIONS_SKIP}`,
   () => {
   agentSessions()
     let db: Database
