@@ -278,6 +278,7 @@ async def test_a_failing_sweep_fails_its_activity(
                 temporal=object,
                 puts=SimpleNamespace(prune=_broken(OSError("the database is gone"))),
                 refs=object(),
+                push_all=_broken(OSError("the remote is gone")),
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -401,6 +402,12 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         return SimpleNamespace(created=0, linked=0, lan_linked=0, conflicts=0)
 
     monkeypatch.setattr(main, "sync_printers", slow_sync)
+
+    # #4974: the git remote's push, a push or two over the network.
+    def slow_push() -> list[str]:
+        time.sleep(0.1)
+        return []
+
     state.print_runs = SimpleNamespace(client=None, task_queue="bambuddy")
     state.settings_store = SimpleNamespace(load=StoredSettings)
     # #2718: the claims sweep's batch-print store, beside the library index.
@@ -411,6 +418,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             serving_native=serving_native,
             # The transfer PUTs' prune (plan 2026-10-16 Task 12).
             puts=SimpleNamespace(prune=lambda older_than: time.sleep(0.1)),
+            # #4974: the git remote's push, a push or two over the network.
+            push_all=slow_push,
             temporal=object,
             store=None,
             refs=None,

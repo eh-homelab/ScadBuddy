@@ -26,9 +26,12 @@ whose HOME is not the volume), and ``safe.directory`` is passed as command-line
 configuration — which counts as *protected* scope, so it is honoured — because a
 PVC's ownership need not match the runtime uid.
 
-Remote push (the off-box copy in #90) is deliberately not implemented here. The
-seam is :meth:`GitRepo.commit`, which returns the new commit id, and a
-``push`` would be one more ``_run`` with credentials from the settings store.
+The off-box copy (#90, #4974) is :meth:`GitRepo.push`: one more hermetic ``_run``,
+with only the remote's own protocol allowed and the credential handed to git by a
+credential helper that reads it from the child's environment, so it is never on a
+command line, in a config file or in a log. :attr:`GitRepo.after_commit` is told of
+each commit once the write lock is released, so a push never holds up a save
+(`git_remote/push.py`).
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 from scadbuddy.core.authorship import (
     AGENT_AUTHOR_EMAIL,
@@ -86,6 +90,18 @@ MAINTAIN_LOOSE_OBJECTS = 256
 MAINTAIN_PACKS = 20
 #: A `gc` repacks the whole history: well past `DEFAULT_TIMEOUT` on a slow volume.
 MAINTAIN_TIMEOUT = 600.0
+#: A push goes over the network to a host ScadBuddy does not run (#4974).
+PUSH_TIMEOUT = 120.0
+#: Where a push's credential reaches git: the child's environment only. The helper
+#: below prints them for a ``get`` and ignores ``store``/``erase``; it is shell code
+#: git runs, and it names the variables, never their values.
+PUSH_USERNAME_ENV = "SCADBUDDY_GIT_USERNAME"
+PUSH_PASSWORD_ENV = "SCADBUDDY_GIT_PASSWORD"
+CREDENTIAL_HELPER = (
+    '!f() { test "$1" = get || return 0;'
+    ' printf "username=%s\\npassword=%s\\n"'
+    f' "${PUSH_USERNAME_ENV}" "${PUSH_PASSWORD_ENV}"; }}; f'
+)
 
 AUTHOR_NAME = "ScadBuddy"
 AUTHOR_EMAIL = "scadbuddy@localhost"
@@ -278,6 +294,12 @@ class GitRepo:
         self.coordinator = coordinator
         #: The cross-replica hold while this instance has the write lock.
         self._hold: RepoHold | None = None
+        #: The last commit made under the write lock now held, told to
+        #: :attr:`after_commit` once it is released.
+        self._landed_commit: str | None = None
+        #: Told of a commit once the write lock is released (#4974: the off-box push).
+        #: It must not block or raise; one that raises is logged.
+        self.after_commit: Callable[[str], None] | None = None
         git_dir = root / ".git"
         #: What `revalidate_dirs` opens before every git call: where HEAD, the
         #: index, ``packed-refs`` and the branch refs are replaced by rename.
@@ -301,6 +323,7 @@ class GitRepo:
         text: bool = True,
         env: dict[str, str] | None = None,
         timeout: float | None = None,
+        config: Sequence[str] = (),
     ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
         # `None` is the sentinel, so an explicit 0 is honoured (#2343).
         limit = self.timeout if timeout is None else timeout
@@ -313,6 +336,7 @@ class GitRepo:
             "core.hooksPath=/dev/null",
             "-c",
             "core.autocrlf=false",
+            *(part for item in config for part in ("-c", item)),
             *args,
         ]
         # Another replica's commit is visible to this call, not 60 s later (#2385).
@@ -380,6 +404,7 @@ class GitRepo:
         deadline = time.monotonic() + self.timeout
         if not self._lock.acquire(timeout=self.timeout):
             raise GitTimeoutError(f"waited {self.timeout:g}s for the in-process write lock")
+        landed: str | None = None
         try:
             held: AbstractContextManager[RepoHold | None] = (
                 nullcontext() if self.coordinator is None else self.coordinator.hold(self.timeout)
@@ -399,14 +424,28 @@ class GitRepo:
                                 ) from None
                             time.sleep(LOCK_POLL_SECONDS)
                     self._hold = hold
+                    self._landed_commit = None
                     try:
                         self._settle(deadline, adopt=adopt)
                         yield
                     finally:
                         self._hold = None
+                        landed, self._landed_commit = self._landed_commit, None
                         fcntl.flock(handle, fcntl.LOCK_UN)
         finally:
             self._lock.release()
+            if landed is not None:
+                self._told(landed)
+
+    def _told(self, commit: str) -> None:
+        """Tell :attr:`after_commit` of ``commit`` once the lock is released; what it
+        raises is logged, never the commit's failure."""
+        if self.after_commit is None:
+            return
+        try:
+            self.after_commit(commit)
+        except Exception:
+            logger.exception("a commit's follow-up failed", extra={"commit": commit})
 
     def _settle(self, deadline: float, *, adopt: bool = False) -> None:
         """Under the write lock: wait until HEAD is the one the last writer recorded,
@@ -710,6 +749,7 @@ class GitRepo:
                 f"git commit succeeded, but HEAD is {created[:7] if created else 'no revision'},"
                 f" not a new commit on {parent[:7] if parent else 'no revision'}"
             )
+        self._landed_commit = created
         if self._hold is not None:
             try:
                 change = self._change_of(created)
@@ -799,6 +839,68 @@ class GitRepo:
         if allow_empty:
             extra["allow_empty"] = True
         return self._commit_locked(message or f"Restore {path} to {resolved[:7]}", path, **extra)
+
+    # ── the off-box copy (#4974) ──────────────────────────────────────────────
+
+    def push(
+        self,
+        url: str,
+        commit: str,
+        ref: str,
+        *,
+        username: str | None = None,
+        password: str | None = None,
+        timeout: float = PUSH_TIMEOUT,
+    ) -> None:
+        """Push ``commit`` to ``ref`` (``refs/heads/<branch>``) at ``url``. Never a
+        force: a remote ahead of ``commit``, or on another history, refuses it.
+
+        Hermetic as every call is, and more: only the protocol ``url`` names is allowed
+        (no ``ext::``, no other transport), redirects are not followed, and the
+        credential is in the child's environment for :data:`CREDENTIAL_HELPER` to
+        print, never in the argv or a file. Not under the write lock: a push only reads
+        objects.
+        """
+        scheme = urlsplit(url).scheme.lower() if "://" in url else "file"
+        config = [
+            "protocol.allow=never",
+            f"protocol.{scheme}.allow=always",
+            "http.followRedirects=false",
+            # Reset, then ours: nothing else may answer for a credential.
+            "credential.helper=",
+        ]
+        env = git_env()
+        if password:
+            config.append(f"credential.helper={CREDENTIAL_HELPER}")
+            env = {**env, PUSH_USERNAME_ENV: username or "git", PUSH_PASSWORD_ENV: password}
+        self._run(
+            "push",
+            "--quiet",
+            "--no-verify",
+            url,
+            f"{commit}:{ref}",
+            env=env,
+            timeout=timeout,
+            config=config,
+        )
+
+    def is_ancestor(self, ancestor: str, head: str) -> bool:
+        """Whether ``ancestor`` is ``head`` or one of its ancestors; False when either is
+        not an object here."""
+        return ancestor == head or self._descends(head, ancestor)
+
+    def unpushed(self, pushed: str | None, head: str) -> tuple[int, datetime | None]:
+        """How many commits up to ``head`` are neither ``pushed`` nor before it, and when
+        the oldest of them was committed. A ``pushed`` this repository does not have
+        (another history, a remote since changed) counts every commit."""
+        revisions = head
+        if pushed is not None:
+            if self.is_ancestor(head, pushed):
+                return 0, None
+            if self.is_ancestor(pushed, head):
+                revisions = f"{pushed}..{head}"
+        dates = [line for line in self._out("log", "--format=%cI", revisions).splitlines() if line]
+        return len(dates), datetime.fromisoformat(dates[-1]) if dates else None
 
     # ── reading ───────────────────────────────────────────────────────────────
 

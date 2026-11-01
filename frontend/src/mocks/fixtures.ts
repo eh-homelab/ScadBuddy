@@ -978,6 +978,9 @@ export const settingsDefaults = {
   // #4939 — whether a native run waits for a cleared plate between its prints.
   lan_require_plate_clear: false,
   fonts_catalogue_ttl: 86400,
+  // #4974 — the off-box git remote; the token is reported only as `has_git_remote_token`.
+  git_remote_url: null,
+  git_remote_username: null,
   event_log_retention_seconds: 86400,
   flow_approval_timeout_seconds: 0,
   spool_overlay_refresh_seconds: 300,
@@ -997,6 +1000,7 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
   ...Object.fromEntries(Object.keys(settingsDefaults).map((name) => [name, 'live' as const])),
   bambuddy_api_key: 'live',
   google_fonts_api_key: 'live',
+  git_remote_token: 'live',
   // #4249 — copied by each order at create; neither live nor a restart.
   orders_currency: 'next order',
   render_concurrency: 'restart',
@@ -1044,6 +1048,7 @@ export const settings: Settings = {
   activity_repair_window_seconds: null,
   has_google_fonts_api_key: false,
   has_store_s3_secret_access_key: false,
+  has_git_remote_token: false,
   sources: {
     ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),
     bambuddy_url: 'stored',

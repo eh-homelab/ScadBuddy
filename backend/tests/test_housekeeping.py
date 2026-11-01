@@ -27,6 +27,8 @@ from scadbuddy.workflows.housekeeping import (
     ATTACHMENTS_SWEEP,
     ATTACHMENTS_TIMEOUT,
     CLAIMS_TIMEOUT,
+    GIT_REMOTE_SWEEP,
+    GIT_REMOTE_TIMEOUT,
     GIT_SWEEP,
     GIT_TIMEOUT,
     HEARTBEAT_TIMEOUT,
@@ -137,6 +139,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         PRINTER_WATCHES_SWEEP: PRINTER_WATCHES_TIMEOUT,
         QUOTE_HOLDS_SWEEP: QUOTE_HOLDS_TIMEOUT,
         PRINTER_SYNC_SWEEP: PRINTER_SYNC_TIMEOUT,
+        GIT_REMOTE_SWEEP: GIT_REMOTE_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
@@ -283,6 +286,8 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         "housekeeping_printer_watches",
         # #4250 Ruling 3: a quote's hold a release lost is dropped within the interval.
         "housekeeping_reap_quote_holds",
+        # #4974: a commit whose own push failed reaches the git remote within the interval.
+        "housekeeping_push_git_remote",
     ]
     # #4439, #4747: the Bambuddy printer sync calls Bambuddy, so it obeys the switch.
     assert PRINTER_SYNC_SWEEP not in sweeps
@@ -414,8 +419,8 @@ async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:
     assert isinstance(prune_action, ScheduleActionStartWorkflow)
     assert isinstance(sweeps_action, ScheduleActionStartWorkflow)
     assert prune_action.execution_timeout == housekeeping_timeout(PRUNE_SWEEPS)
-    # 50 minutes since #4250's quote-holds reaper joined the prune Schedule (2 minutes).
-    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=50)
+    # 55 minutes since #4974's git remote push joined the prune Schedule (5 minutes).
+    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=55)
     assert sweeps_action.execution_timeout == housekeeping_timeout(SWEEPS)
     assert sweeps_action.execution_timeout > 3 * SWEEP_TIMEOUT + PRUNE_TIMEOUT
 

@@ -12,6 +12,7 @@ export type SectionId =
   | 'uploads'
   | 'rendering'
   | 'fonts'
+  | 'git-remote'
   | 'preview'
   | 'diagnostics'
   | 'administration'
@@ -316,6 +317,28 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     label: 'Refresh the font catalogue after',
     kind: 'seconds',
   },
+  // #4974 — the off-box copy of the model and flow history.
+  {
+    name: 'git_remote_url',
+    section: 'git-remote',
+    label: 'Remote URL',
+    kind: 'url',
+    help: 'An http(s) git URL with no credentials in it. Models go to its `models` branch, flows to `flows`. Empty pushes nothing.',
+  },
+  {
+    name: 'git_remote_username',
+    section: 'git-remote',
+    label: 'Username',
+    kind: 'text',
+    help: 'Who the token belongs to. Empty sends `git`, which GitHub and Gitea take with a token.',
+  },
+  {
+    name: 'git_remote_token',
+    section: 'git-remote',
+    label: 'Token',
+    kind: 'secret',
+    help: 'A token (or password) with write access to the remote, stored sealed under SCADBUDDY_SECRET_KEY_FILE and never shown again.',
+  },
   {
     name: 'log_level',
     section: 'diagnostics',
@@ -351,6 +374,7 @@ const HAS_KEY = {
   bambuddy_api_key: 'has_api_key',
   bambuddy_render_api_key: 'has_render_api_key',
   google_fonts_api_key: 'has_google_fonts_api_key',
+  git_remote_token: 'has_git_remote_token',
 } as const
 export type SecretName = keyof typeof HAS_KEY
 
@@ -369,7 +393,8 @@ export function serverValue(settings: Settings, name: FieldName): string {
     name === 'bambuddy_api_key' ||
     name === 'bambuddy_render_api_key' ||
     name === 'google_fonts_api_key' ||
-    name === 'store_s3_secret_access_key'
+    name === 'store_s3_secret_access_key' ||
+    name === 'git_remote_token'
   )
     return ''
   const value = (settings as Record<string, unknown>)[name]

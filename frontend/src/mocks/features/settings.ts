@@ -34,6 +34,7 @@ const SECRETS = {
   bambuddy_render_api_key: 'has_render_api_key',
   google_fonts_api_key: 'has_google_fonts_api_key',
   store_s3_secret_access_key: 'has_store_s3_secret_access_key',
+  git_remote_token: 'has_git_remote_token',
 } as const
 /** The env-seeded fields a clear can hold; the rest are numbers, switches or a level. */
 const NULLABLE = new Set([
@@ -48,6 +49,9 @@ const NULLABLE = new Set([
   'store_s3_bucket',
   'store_s3_access_key_id',
   'store_s3_secret_access_key',
+  'git_remote_url',
+  'git_remote_username',
+  'git_remote_token',
 ])
 /** ISO 4217's codes with no minor unit (backend `orders/currency.py` `NO_MINOR_UNIT`). */
 const NO_MINOR_UNIT = new Set(['XAG', 'XAU', 'XBA', 'XBB', 'XBC', 'XBD', 'XDR', 'XPD', 'XPT', 'XSU', 'XTS', 'XUA', 'XXX'])

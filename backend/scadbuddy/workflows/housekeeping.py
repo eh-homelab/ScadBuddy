@@ -155,6 +155,12 @@ QUOTE_HOLDS_PATCH = "housekeeping-reap-quote-holds"
 #: or a payload.
 PRINTER_SYNC_SWEEP = "housekeeping_sync_bambuddy_printers"
 PRINTER_SYNC_PATCH = "housekeeping-sync-bambuddy-printers"
+#: #4974: push the model and flow history to the off-box git remote, when one is set,
+#: where a push after a commit did not land (`git_remote/push.py`). Last, behind its own
+#: patch; on the prune Schedule too, so the remote is at most `PRUNE_INTERVAL` behind
+#: once it is reachable, with the sweeps off as well.
+GIT_REMOTE_SWEEP = "housekeeping_push_git_remote"
+GIT_REMOTE_PATCH = "housekeeping-push-git-remote"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -177,6 +183,7 @@ SWEEPS = (
     PRINTER_WATCHES_SWEEP,
     QUOTE_HOLDS_SWEEP,
     PRINTER_SYNC_SWEEP,
+    GIT_REMOTE_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -197,7 +204,8 @@ SWEEPS = (
 #: `QUOTE_HOLDS_PATCH`, so a release lost after its commit leaks for one interval. Not the
 #: Bambuddy printer sync (#4439, #4747): it calls Bambuddy, so it obeys the sweeps'
 #: switch, and the import button, a passing connection test and each virtual printer's
-#: write run it besides.
+#: write run it besides. And the git remote's push (#4974), behind `GIT_REMOTE_PATCH`:
+#: a commit whose own push failed reaches the remote within the interval.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
@@ -208,6 +216,7 @@ PRUNE_SWEEPS = (
     LOST_NATIVE_SLICES_SWEEP,
     PRINTER_WATCHES_SWEEP,
     QUOTE_HOLDS_SWEEP,
+    GIT_REMOTE_SWEEP,
 )
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
@@ -249,6 +258,9 @@ QUOTE_HOLDS_TIMEOUT = timedelta(minutes=2)
 #: Two Bambuddy lists, then per printer with an empty LAN link a read and one probe
 #: (`printers.component.PROBE_TIMEOUT`, 10 s), each in turn.
 PRINTER_SYNC_TIMEOUT = timedelta(minutes=5)
+#: A push per repository, each bounded by `gitrepo.PUSH_TIMEOUT` (2 min), and a margin.
+#: Not imported, as `GIT_TIMEOUT`'s is not.
+GIT_REMOTE_TIMEOUT = timedelta(minutes=5)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -281,6 +293,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return QUOTE_HOLDS_TIMEOUT
     if sweep == PRINTER_SYNC_SWEEP:
         return PRINTER_SYNC_TIMEOUT
+    if sweep == GIT_REMOTE_SWEEP:
+        return GIT_REMOTE_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -325,6 +339,8 @@ class Housekeeping:
             if sweep == QUOTE_HOLDS_SWEEP and not workflow.patched(QUOTE_HOLDS_PATCH):
                 continue
             if sweep == PRINTER_SYNC_SWEEP and not workflow.patched(PRINTER_SYNC_PATCH):
+                continue
+            if sweep == GIT_REMOTE_SWEEP and not workflow.patched(GIT_REMOTE_PATCH):
                 continue
             try:
                 await workflow.execute_activity(
