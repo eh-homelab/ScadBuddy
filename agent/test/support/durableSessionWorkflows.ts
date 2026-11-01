@@ -14,7 +14,8 @@ import { ApplicationFailure, condition, defineQuery, defineSignal, defineUpdate,
 // count is kept by the `fork_point` Query, which a real Query never does, and is in no
 // history: it holds only while the worker's cache keeps the workflow, and starts again if
 // the workflow is evicted and replayed mid-test (the test's worker sets `maxCachedWorkflows`
-// so none is).
+// so none is). `end` (#1056) closes it once no turn runs, as the real one's does, and
+// `pending_input` lists nothing: its parks are not modelled (plan Step 7.2's migration reads both).
 
 type Message = { turn_id: string; text: string; author: unknown; images: { name: string; mediaType: string }[] }
 
@@ -23,6 +24,8 @@ export const cancelInput = defineUpdate<'cancelled' | 'none', [{ reason: string 
 export const interrupt = defineSignal<[{ reason: string }]>('interrupt')
 export const holdCancel = defineSignal('hold_cancel')
 export const endTurn = defineSignal('end_turn')
+export const end = defineSignal<[unknown?]>('end')
+export const pendingInput = defineQuery<unknown[]>('pending_input')
 export const recorded = defineQuery<{ start: unknown; messages: Message[]; calls: string[]; forkPointPage0Queries: number }>('recorded')
 export const turn = defineQuery<string | null>('turn')
 type Owed = { pending?: Record<string, unknown>; fork_next?: boolean; recent_call_ids?: string[] }
@@ -39,6 +42,12 @@ export async function DurableSession(start: unknown): Promise<void> {
   let hold = false
   let held: Held | undefined = (start as { agent?: Conversation } | null)?.agent ?? undefined
   let forkPointPage0Queries = 0
+  let ended = false
+  setHandler(end, () => {
+    calls.push('end')
+    ended = true
+  })
+  setHandler(pendingInput, () => [])
   setHandler(recorded, () => ({ start, messages, calls, forkPointPage0Queries }))
   setHandler(setConversation, (conversation) => {
     held = conversation
@@ -90,5 +99,5 @@ export async function DurableSession(start: unknown): Promise<void> {
   setHandler(endTurn, () => {
     busy = false
   })
-  await condition(() => false)
+  await condition(() => ended && !busy)
 }

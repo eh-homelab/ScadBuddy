@@ -753,7 +753,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
         settings: { get: <T>() => Promise.resolve(undefined as T) },
         run: scriptedRunner(() => ({ throws: 'a durable turn ran in the classic harness' })).runner,
       })
-      m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, taskQueue: STANDIN_QUEUE, sessionQueue: SESSION_QUEUE, liveHosts: polledHosts(env.client, HOST) })
+      m.durableTurns = new DurableTurns({ client: env.client, sql: db.sql, events: m.events, store: m.store, taskQueue: STANDIN_QUEUE, sessionQueue: SESSION_QUEUE, liveHosts: polledHosts(env.client, HOST) })
       return m
     }
 
@@ -782,25 +782,23 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket\n\n[page: /]', 'and a lid'])
     })
 
-    it('keeps a session that started as DurableSession on the Python type and queue', async () => {
+    it('moves a session recorded as DurableSession to AgentSession at its next send (plan Step 7.2)', async () => {
       const m = await durableManager()
+      finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
       const { session } = await m.start(browser, { origin: 'chat', title: 't' })
-      // As a session an earlier release started: its first send recorded the Python runtime.
+      // As a session an earlier release recorded as DurableSession, whose workflow never started.
       await db.sql`UPDATE ai_sessions SET runtime = 'durable' WHERE id = ${session.id}`
-      await m.send(session.id, browser, 'one')
-      expect(await describe_(session.id)).toEqual({ type: 'DurableSession', taskQueue: STANDIN_QUEUE })
-      expect(await runtimeOf(session.id)).toBe('durable')
-      await db.sql`UPDATE ai_sessions SET status = 'idle' WHERE id = ${session.id}`
-      await handleOf(session.id).signal('end_turn')
-      await m.send(session.id, browser, 'two')
-      expect(await describe_(session.id)).toEqual({ type: 'DurableSession', taskQueue: STANDIN_QUEUE })
-      expect(await runtimeOf(session.id)).toBe('durable')
-      const { messages } = await handleOf(session.id).query<{ messages: { text: string }[] }>('recorded')
-      expect(messages.map((x) => x.text)).toEqual(['one', 'two'])
-      expect(turns).toEqual([])
-      // And a session first sent to now is the new type.
-      const fresh = await m.start(browser, { origin: 'chat', prompt: 'three' })
-      expect(await describe_(fresh.session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
+      const turn = await m.send(session.id, browser, 'one')
+      expect(await turn.done).toMatchObject({ kind: 'result' })
+      expect(await describe_(session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
+      expect(await runtimeOf(session.id)).toBe('unified')
+      expect(turns.map((t) => t.message?.text)).toEqual(['one'])
+      // One whose DurableSession ran turns and is gone lost its conversation: refused, never started empty.
+      const { session: gone } = await m.start(browser, { origin: 'chat', title: 'g' })
+      await db.sql`UPDATE ai_sessions SET runtime = 'durable', durable_offset = 3 WHERE id = ${gone.id}`
+      await expect(m.send(gone.id, browser, 'two')).rejects.toMatchObject({ code: 'closed' })
+      await expect(handleOf(gone.id).describe()).rejects.toBeInstanceOf(WorkflowNotFoundError)
+      expect(await runtimeOf(gone.id)).toBe('durable')
     })
 
     it("reads an AgentSession's turn as active while it runs, and a DurableSession's as before (PR 5042's review)", async () => {
@@ -819,16 +817,11 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       running.release()
       await turn!.done
       expect((await m.get(session.id, browser)).turnActive).toBe(false)
-      // A DurableSession's turn holds `durable_turn_id` too, and is read as it was before.
-      const { session: python } = await m.start(browser, { origin: 'chat', title: 'p' })
-      await db.sql`UPDATE ai_sessions SET runtime = 'durable' WHERE id = ${python.id}`
-      await m.send(python.id, browser, 'one')
-      expect(await describe_(python.id)).toEqual({ type: 'DurableSession', taskQueue: STANDIN_QUEUE })
-      expect((await m.get(python.id, browser)).turnActive).toBe(false)
     })
 
-    it('keeps a session that existed before the migration, with offset 0 and a Python workflow, DurableSession', async () => {
+    it('moves a session that existed before the runtime column, with offset 0 and a Python workflow, to AgentSession', async () => {
       const m = await durableManager()
+      finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
       const { session } = await m.start(browser, { origin: 'chat', title: 't' })
       // As a row from before the column: no runtime, nothing output yet, its workflow running.
       await db.sql`UPDATE ai_sessions SET runtime = NULL, durable_offset = 0 WHERE id = ${session.id}`
@@ -838,10 +831,12 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
         await db.sql.unsafe(statement)
       }
       expect(await runtimeOf(session.id)).toBe('durable')
-      await m.send(session.id, browser, 'hello')
-      expect(await describe_(session.id)).toEqual({ type: 'DurableSession', taskQueue: STANDIN_QUEUE })
-      expect(await runtimeOf(session.id)).toBe('durable')
-      expect(turns).toEqual([])
+      const turn = await m.send(session.id, browser, 'hello')
+      expect(await turn.done).toMatchObject({ kind: 'result' })
+      // Its DurableSession, which committed nothing, was ended; the turn ran in its AgentSession.
+      expect(await describe_(session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
+      expect(await runtimeOf(session.id)).toBe('unified')
+      expect(turns.map((t) => t.message?.text)).toEqual(['hello'])
     })
 
     it('a call whose turn ended while it was described writes nothing: the session stays idle and takes the next send', async () => {

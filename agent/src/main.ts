@@ -954,6 +954,8 @@ if (sessions && temporalClient && payloadKeys && database) {
     events: sessions.events,
     audit,
     ended: (id) => sessions.endClassicLeftovers(id),
+    // Where a DurableSession's conversation goes when its next send moves it to AgentSession (Step 7.2).
+    store: sessions.store,
     // A unified session is ready while some replica hosts its turns (§5.2), this one or a worker's (§14.3).
   })
 }

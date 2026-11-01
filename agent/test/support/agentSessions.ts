@@ -202,6 +202,12 @@ export function agentSessions(): void {
   }, 60_000)
 }
 
+/** The file's dev server, once `agentSessions()`' beforeAll has run: for a test's own workers. */
+export function agentSessionsEnv(): TestWorkflowEnvironment {
+  if (!active) throw new Error('no agentSessions() stack is set up in this describe')
+  return active.env
+}
+
 /** The type and task queue of `session-<id>`'s latest run on the file's dev server. */
 export async function sessionWorkflow(id: string): Promise<{ type: string; taskQueue: string }> {
   if (!active) throw new Error('no agentSessions() stack is set up in this describe')
@@ -238,7 +244,7 @@ export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, '
   stack.served.push(served)
   m.durable = new DurableGate(stack.env.client)
   m.durableTurns = new ServedTurns(
-    { client: stack.env.client, sql: deps.sql, events: m.events, liveHosts: polledHosts(stack.env.client, stack.hostQueue) },
+    { client: stack.env.client, sql: deps.sql, events: m.events, store: m.store, liveHosts: polledHosts(stack.env.client, stack.hostQueue) },
     (id) => stack.bySession.set(id, served),
   )
   const stopTurns = m.stopTurns.bind(m)

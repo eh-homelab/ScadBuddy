@@ -114,11 +114,13 @@ export class PendingInputSweep {
  * Resolves `cancelled` the entries no workflow run will resolve: one ended run's (the sweep), or
  * every entry of a session whose workflow is gone (a Stop, #4018). The same guarded DELETE …
  * RETURNING resolve_input uses, so an entry the workflow resolved first is not written twice; the
- * session goes `idle` once it holds none. Returns the entries it resolved.
+ * session goes `idle` once it holds none. `reason` is the outcome's (a migration's own, #4772).
+ * Returns the entries it resolved.
  */
 export async function cancelOrphanedEntries(
   deps: Pick<SweepDeps, 'sql' | 'events' | 'audit'>,
   of: { workflowId: string; runId: string } | { sessionId: string },
+  reason: string = ORPHAN_REASON,
 ): Promise<number> {
   const { sql } = deps
   const ids =
@@ -135,12 +137,12 @@ export async function cancelOrphanedEntries(
       if (!row) return undefined
       await tx`
         INSERT INTO ai_input_responses (request_id, session_id, kind, outcome, responder, reason, tool, requested_at)
-        VALUES (${row.request_id}, ${row.session_id}, ${row.kind}, 'cancelled', ${tx.json(SYSTEM_ACTOR)}, ${ORPHAN_REASON}, ${row.tool}, ${row.created_at_text}::timestamptz)`
+        VALUES (${row.request_id}, ${row.session_id}, ${row.kind}, 'cancelled', ${tx.json(SYSTEM_ACTOR)}, ${reason}, ${row.tool}, ${row.created_at_text}::timestamptz)`
       const events: ServerEvent[] = [
         row.kind === 'approval'
-          ? event({ type: 'approval.resolved', sessionId: row.session_id, id: row.request_id, approved: false, decision: 'cancelled', reason: ORPHAN_REASON })
-          : event({ type: 'question.resolved', sessionId: row.session_id, id: row.request_id, answered: false, reason: ORPHAN_REASON }),
-        inputResolved(row.session_id, row.request_id, row.kind, 'cancelled', ORPHAN_REASON),
+          ? event({ type: 'approval.resolved', sessionId: row.session_id, id: row.request_id, approved: false, decision: 'cancelled', reason: reason })
+          : event({ type: 'question.resolved', sessionId: row.session_id, id: row.request_id, answered: false, reason: reason }),
+        inputResolved(row.session_id, row.request_id, row.kind, 'cancelled', reason),
       ]
       const [idle] = await tx`
         UPDATE ai_sessions SET status = 'idle', updated_at = now()
@@ -154,12 +156,12 @@ export async function cancelOrphanedEntries(
     if (!done) continue
     removed += 1
     deps.events.committed(done.row.session_id, done.events, done.seqs)
-    if (done.row.kind === 'approval') await auditCancelled(deps.audit, done.row)
+    if (done.row.kind === 'approval') await auditCancelled(deps.audit, done.row, reason)
   }
   return removed
 }
 
-async function auditCancelled(audit: AuditSink | undefined, row: Row): Promise<void> {
+async function auditCancelled(audit: AuditSink | undefined, row: Row, reason: string): Promise<void> {
   const parsed = parseRequestId(row.request_id)
   await audit?.record({
     kind: 'approval',
@@ -173,7 +175,7 @@ async function auditCancelled(audit: AuditSink | undefined, row: Row): Promise<v
     inputSummary: row.summary,
     requestId: row.request_id,
     outcome: 'refused',
-    detail: `${row.tool}: ${ORPHAN_REASON} (requested by ${row.requested_by?.label ?? '?'})`,
+    detail: `${row.tool}: ${reason} (requested by ${row.requested_by?.label ?? '?'})`,
     startedAt: row.created_at,
     finishedAt: new Date(),
   })
