@@ -104,7 +104,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     (await db.sql<{ outcome: string; reason: string | null }[]>`SELECT outcome, reason FROM ai_input_responses WHERE request_id = ${requestId}`)[0]
 
   async function setUp() {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: parks, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: parks })
     const post = respondTo(m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     let rows: Pending[] = []
@@ -309,7 +309,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
         )
         yield { ...result, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: done, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: done })
     const post = respondTo(m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'render it' })
     await turn!.done

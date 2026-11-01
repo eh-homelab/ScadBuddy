@@ -142,7 +142,6 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's plug
       packagePlugins,
       toolCalls: () => start,
       turnTools: (context, only) => listTurnTools(listDeps, context, only),
-      approvalPollMs: 50,
       approvalHashKey: Buffer.alloc(32, 5),
     })
   }

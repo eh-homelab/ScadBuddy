@@ -766,7 +766,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   top of it (credential via the per-query `env` only, `maxTurns`, `maxBudgetUsd`,
   abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
   `PreToolUse` hook; outward calls in a session PARK in `canUseTool` until a human
-  decides, via `src/approvals/service.ts` and the `ai_approvals` table, #258; outside
+  decides, as an entry of the session workflow's gate (`src/sessions/turnHost.ts`,
+  `ai_pending_input`; `src/approvals/service.ts` and `ai_approvals` keep /mcp's prepared
+  actions), #258; outside
   a session they are denied as "needs approval"; the built-in `AskUserQuestion`, given
   only to sessions the browser user owns, parks there too until the user answers in the
   panel, via `src/harness/questions.ts` and the session workflow's gate (an `ai_pending_input`
@@ -812,7 +814,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     value to its row and to the columns that say where it is sent (for the credential:
     `kind` and `base_url`). Comparable tokens are stored hashed instead.
   - Temporal (#1055, spec 2026-10-01 §6.3): with `SCADBUDDY_TEMPORAL_ADDRESS` (and the
-    database) `src/temporal/worker.ts` runs one unversioned worker on `agent-tools`:
+    database) `src/temporal/worker.ts` runs one worker on `agent-tools`, a version of
+    `scadbuddy-agent` with `agent-sessions` when the build has an id (#2726 Phase 11; the
+    host queues stay unversioned, `agent/test/temporal.versioning.temporal.test.ts`):
     every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
     `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow (as the
     session's owner with its turn's tiers; `mode` is not read, since every session is an
