@@ -33,6 +33,9 @@ read to its last page (`allPages()` in
 whole collection, in the shape it had before paging. `list_models` and `list_outputs`
 pass `limit` and `after` to the backend, which builds only that page (#843,
 `backendPage()`); the others page over the whole backend answer.
+`scadbuddy://print/history` is the exception (`firstPage` in `catalog.ts`, #4973): it
+is the tool's first page of 100, `next_cursor` kept, since every archive Bambuddy has
+ever kept is no resource to read at once; page further back with `list_print_archives`.
 
 | URI | MIME type | Tool |
 |---|---|---|
@@ -56,6 +59,13 @@ pass `limit` and `after` to the backend, which builds only that page (#843,
 | `scadbuddy://outputs/{output_id}/plates/{plate}/thumbnail` | `image/png` (blob) | `get_output_image` (`plate`) |
 | `scadbuddy://outputs/{output_id}/model.3mf` | `model/3mf` (blob) | `download_3mf` |
 | `scadbuddy://print/outputs/{output_id}/progress` | `application/json` | `get_print_progress` |
+| `scadbuddy://print/library/{file_id}/progress` | `application/json` | `get_print_progress` (`library_file_id`) |
+| `scadbuddy://printers` | `application/json` | `get_printers_now` (#4973) |
+| `scadbuddy://printers/{printer}` | `application/json` | `get_printer` (#4973) |
+| `scadbuddy://print/queue` | `application/json` | `list_print_queue` (#4973) |
+| `scadbuddy://print/inventory` | `application/json` | `get_spool_inventory` (#4973) |
+| `scadbuddy://print/history` | `application/json` | `list_print_archives`, first page (#4973) |
+| `scadbuddy://print/stats` | `application/json` | `get_print_stats` (#4973) |
 | `scadbuddy://plates` | `application/json` | `list_plates` |
 | `scadbuddy://libraries` | `application/json` | `list_libraries` |
 | `scadbuddy://fonts` | `application/json` | `list_fonts` |
@@ -71,8 +81,14 @@ without its frontmatter. It has no backend route: `pnpm build` copies the skill 
 that), and [`agent/src/tools/guide.ts`](../../agent/src/tools/guide.ts) reads it there,
 or from the source tree when run from it.
 
-- `resources/list` returns the six fixed resources and one `scadbuddy://models/{slug}`
+- `resources/list` returns the twelve fixed resources and one `scadbuddy://models/{slug}`
   per model; everything else is reached through `resources/templates/list`.
+- **The farm** (#4973). `scadbuddy://printers` is every registry printer's live state,
+  from its LAN report or Bambuddy's status (`GET /print/printers/now`), so it works on
+  either backend; `scadbuddy://printers/{printer}` is the registry row. The queue,
+  inventory, history and stats are the farm tools' backend routes (`/farm/*`), never
+  Bambuddy directly, and answer as those tools do: with no Bambuddy configured, the
+  backend's problem saying so.
 - **Sessions** ([agent-sessions.md](agent-sessions.md)) answer only for sessions the
   caller may see, as the tools do. Subscribing to `scadbuddy://sessions/{session_id}`
   reads it first (`readToSubscribe` in `catalog.ts`), so a session the caller may not
@@ -89,7 +105,8 @@ or from the source tree when run from it.
   no resource or the backend answers 404; `-32602` when a variable fails the tool's
   validation (a malformed slug); `-32603` otherwise.
 - **Completion.** `completion/complete` with `ref/resource` offers slugs, and commits
-  and output ids for the `slug` given in `context.arguments`.
+  and output ids for the `slug` given in `context.arguments`, and registry printer ids
+  (`list_printers`).
 
 ### Subscriptions
 
@@ -109,7 +126,11 @@ model is created or deleted. What each backend event updates is `affectedBy()` i
 | `version.committed` | `models/{slug}`, `…/versions` |
 | `upstream.available` | `models/{slug}`, `…/upstream` |
 | `output.created`, `output.updated`, `output.deleted` | `models/{slug}/outputs`, `…/thumbnail`, `outputs/{output_id}`, `…/plates` |
-| `print.progress`, `print.settled` | `print/outputs/{output_id}/progress` |
+| `print.progress`, `print.settled` | `print/outputs/{output_id}/progress` (or `print/library/{file_id}/progress`), `printers`, `print/queue` |
+| `print.run` | `printers`, `print/queue` |
+| `print.outcome` | `printers`, `print/queue`, `print/history`, `print/stats`, `print/inventory` |
+| `printer.report` | `printers`, `print/inventory` |
+| `printer.changed` | `printers`, `printers/{printer_id}` |
 | `library.changed` | `libraries`, `models/{slug}` |
 | `library.removed` | `libraries` |
 | `font.installed` | `fonts` |
@@ -117,6 +138,10 @@ model is created or deleted. What each backend event updates is `affectedBy()` i
 | `session.message` (agent, #300) | `sessions/{session_id}` |
 | `session.started`, `session.owner`, `session.waiting`, `session.done` (agent, #300) | `sessions/{session_id}`, `sessions` |
 
+- **The farm's events are ScadBuddy's own.** Bambuddy pushes nothing, so the farm
+  resources are told of ScadBuddy's prints and its printers' reports and rows only; a
+  change made inside Bambuddy alone (a print started there on a Bambuddy-only printer, a
+  spool edited there) shows at the next such event or read.
 - **Coalescing.** Per session and per URI, at most one notification per 250 ms
   (`DEFAULT_MIN_INTERVAL_MS`, [`hub.ts`](../../agent/src/resources/hub.ts)): the first
   at once, then one at the end of the window for everything inside it.
@@ -258,9 +283,9 @@ sequenceDiagram
 
 ### What is not here yet
 
-Issue #264 also lists resources that need a backend route or event source not on
-`main`: Bambuddy printers, queue, inventory, print history and stats (print watcher,
-#268) and `scadbuddy://browser/{tab}/snapshot` (#254). LSP
+Issue #264 also lists `scadbuddy://browser/{tab}/snapshot` (#254), and history and
+stats with query filters (`{?template,printer,since,…}`), which level-1 templates
+cannot carry; the `list_print_archives` and `get_print_stats` tools take them. LSP
 diagnostics (#252) are the `get_lsp_diagnostics` tool rather than a resource: they are
 worked out from a source the caller passes, not state to read or subscribe to.
 

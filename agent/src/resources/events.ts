@@ -19,6 +19,13 @@ function model(slug: string, ...parts: string[]): string[] {
 }
 
 /**
+ * The farm (#4973): what a print moving on changes, whoever's it is. Bambuddy
+ * pushes nothing, so these follow ScadBuddy's own prints and printers only.
+ */
+const FARM = ['scadbuddy://printers', 'scadbuddy://print/queue'] as const
+const SETTLED = ['scadbuddy://print/history', 'scadbuddy://print/stats', 'scadbuddy://print/inventory'] as const
+
+/**
  * Resources announced by NOTIFY-only kinds (the agent's `session.*`, not in
  * the backend's replay log: sessions/busEvents.ts). After the LISTEN
  * connection comes back, every subscription under these is told to re-read
@@ -83,11 +90,27 @@ export function affectedBy(event: BusEvent): Affected {
       // is no output: it has a resource of its own (#1967).
       if (id.startsWith('library:')) {
         const file = id.slice('library:'.length)
-        return /^[1-9]\d*$/.test(file)
-          ? { uris: [u('scadbuddy://print/library/{file_id}/progress', { file_id: file })], listChanged: false }
-          : none
+        return {
+          uris: [...(/^[1-9]\d*$/.test(file) ? [u('scadbuddy://print/library/{file_id}/progress', { file_id: file })] : []), ...FARM],
+          listChanged: false,
+        }
       }
-      return { uris: [u('scadbuddy://print/outputs/{output_id}/progress', { output_id: id })], listChanged: false }
+      return { uris: [u('scadbuddy://print/outputs/{output_id}/progress', { output_id: id }), ...FARM], listChanged: false }
+    }
+    case 'print.run':
+      return { uris: [...FARM], listChanged: false }
+    case 'print.outcome':
+      // Recorded once per settled print (#2665): it is archived, counted, and used filament.
+      return { uris: [...FARM, ...SETTLED], listChanged: false }
+    case 'printer.report':
+      // The LAN report also says what is loaded in each tray.
+      return { uris: ['scadbuddy://printers', 'scadbuddy://print/inventory'], listChanged: false }
+    case 'printer.changed': {
+      const id = event.printer_id
+      return {
+        uris: ['scadbuddy://printers', ...(id ? [u('scadbuddy://printers/{printer}', { printer: id })] : [])],
+        listChanged: false,
+      }
     }
     case 'library.changed':
       return { uris: ['scadbuddy://libraries', ...(slug ? model(slug, '') : [])], listChanged: false }
