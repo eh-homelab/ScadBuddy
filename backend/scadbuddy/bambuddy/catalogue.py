@@ -9,6 +9,7 @@ the only piece of ``print_run.py`` the resolver needs.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import hmac
 import json
@@ -85,7 +86,9 @@ def _choice(preset: Preset) -> PresetChoice:
     )
 
 
-def _local_choice(preset: LocalPreset) -> PresetChoice:
+def local_choice(preset: LocalPreset) -> PresetChoice:
+    """A ``/local-presets/`` row as a catalogue row: Bambuddy's, and the kept copy's on a
+    native run (``slicing/catalogue.py``, #4645)."""
     colours = _local_list(preset.default_filament_colour)
     return PresetChoice(
         ref=preset.ref(),
@@ -142,12 +145,24 @@ class Catalogue:
             for field in ("printer", "process", "filament")
         }
 
+    @cached_property
+    def _held(self) -> dict[str, frozenset[str]]:
+        """Each field's ``local`` ids: on the image's own catalogue, the kept copy's
+        Bambuddy local presets it offers (:meth:`with_held`)."""
+        return {
+            field: frozenset(
+                row.ref.id for row in getattr(self, field) if row.ref.source == "local"
+            )
+            for field in ("printer", "process", "filament")
+        }
+
     def native_ref(self, ref: PresetRef, field: str | None = None) -> PresetRef | None:
-        """On the image's own catalogue, the standard ref of the preset ``ref`` names in
-        ``field`` (``printer``, ``process``, ``filament``) or any of them: a ``standard``
-        ref as it is when offered, a ``cloud`` ref (a ``setting_id``) by the preset it
-        names; ``local``, ``orca_cloud`` and anything not offered is ``None``. On
-        Bambuddy's catalogue every ref is its own, so ``None``."""
+        """On the image's own catalogue, the ref a native slice reads for the preset
+        ``ref`` names in ``field`` (``printer``, ``process``, ``filament``) or any of
+        them: a ``standard`` ref as it is when offered, a ``cloud`` ref (a
+        ``setting_id``) as the standard ref of the preset it names, a ``local`` ref as it
+        is when the kept copy's row is offered (#4645); ``orca_cloud`` and anything not
+        offered is ``None``. On Bambuddy's catalogue every ref is its own, so ``None``."""
         ids = self.native_setting_ids
         if ids is None:
             return None
@@ -156,7 +171,24 @@ class Catalogue:
                 return ref
             if ref.source == "cloud" and ref.id in ids.get(name, {}):
                 return PresetRef(source="standard", id=ids[name][ref.id])
+            if ref.source == "local" and ref.id in self._held[name]:
+                return ref
         return None
+
+    def with_held(
+        self,
+        printer: list[PresetChoice],
+        process: list[PresetChoice],
+        filament: list[PresetChoice],
+    ) -> Catalogue:
+        """This catalogue with the kept copy's local presets' rows after its own
+        (``slicing/catalogue.py`` ``catalogue_for``, #4645)."""
+        return dataclasses.replace(
+            self,
+            printer=[*self.printer, *printer],
+            process=[*self.process, *process],
+            filament=[*self.filament, *filament],
+        )
 
     def names(self) -> dict[tuple[str, str], str]:
         """``(source, id) -> name``, for resolving the refs a pipeline carries."""
@@ -225,11 +257,11 @@ def _build(catalogue: PresetCatalogue, local: LocalPresetCatalogue) -> Catalogue
         printers.extend(_choice(preset) for preset in tier.printer)
         processes.extend(_choice(preset) for preset in tier.process)
         filaments.extend(_choice(preset) for preset in tier.filament)
-    printers.extend(_local_choice(row) for row in local.printer)
-    processes.extend(_local_choice(row) for row in local.process)
+    printers.extend(local_choice(row) for row in local.printer)
+    processes.extend(local_choice(row) for row in local.process)
     # A slot's own preset is one already offered, under ScadBuddy's name (#3962): it
     # is never offered in a picker or matched to a spool beside the preset it copies.
-    filaments.extend(_local_choice(row) for row in local.filament if not is_slot_preset(row.name))
+    filaments.extend(local_choice(row) for row in local.filament if not is_slot_preset(row.name))
     return Catalogue(printer=printers, process=processes, filament=filaments)
 
 

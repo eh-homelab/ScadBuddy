@@ -67,7 +67,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from scadbuddy.slicing.held_presets import HeldPresets
 
 #: One flattened preset: every option, ``inherits`` and ``include`` resolved and gone.
 Flat = dict[str, str | list[str]]
@@ -300,16 +303,22 @@ class _Index:
 
 class Profiles:
     """The image's BBL presets, each kind indexed by name and ``setting_id`` on its
-    first use. Every read is file I/O: an async caller runs it in a thread."""
+    first use. Every read is file I/O: an async caller runs it in a thread.
 
-    def __init__(self, root: Path) -> None:
+    ``held`` is the kept copy of Bambuddy's local presets (#4645,
+    `slicing/held_presets.py`), which a native run offers and slices over this tree; it
+    rides here because every reader of the tree on a native run (the catalogue, the
+    values, the slice's files) reads it too. ``None``: only the tree's presets."""
+
+    def __init__(self, root: Path, *, held: HeldPresets | None = None) -> None:
         self.root = root
+        self.held = held
         self._indexes: dict[Kind, _Index] = {}
 
     @classmethod
-    def installed(cls, root: Path) -> Profiles | None:
+    def installed(cls, root: Path, *, held: HeldPresets | None = None) -> Profiles | None:
         """The tree under ``root``, or ``None`` without one (a dev run outside the image)."""
-        return cls(root) if (root / f"{VENDOR}.json").is_file() else None
+        return cls(root, held=held) if (root / f"{VENDOR}.json").is_file() else None
 
     @cached_property
     def version(self) -> str:

@@ -96,6 +96,7 @@ from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.worker_role import WorkerStoppedError, wait_until_ready
 from scadbuddy.slicing.catalogue import slices_native, warm_catalogue
+from scadbuddy.slicing.held_presets import HeldPresetStore
 from scadbuddy.slicing.profiles import Profiles
 from scadbuddy.slicing.start import native_slice_starter
 from scadbuddy.slicing.store import NativeSliceStore
@@ -1194,8 +1195,11 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         ),
         record_outcome=PrintOutcomeStore(pool, events).record,
     )
-    # The image's profiles, read once for the dialog's starts and the runs' reuse keys.
-    native = native_slice_starter(settings)
+    # The image's profiles, read once for the dialog's starts and the runs' reuse keys,
+    # with the kept copy of Bambuddy's local presets (#4645).
+    native = native_slice_starter(
+        settings, Profiles.installed(settings.slicer_profiles_dir, held=HeldPresetStore(pool))
+    )
     kinds = bambuddy_kinds_over(
         settings_store=settings_store,
         outputs=outputs,

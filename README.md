@@ -1531,6 +1531,10 @@ calls Bambuddy are the housekeeping sweeps and the spool providers' refresh (the
 300 s by default), on their own traces, and any run whose printer's path is `bambuddy`. The
 dialog's filament step reads the loaded trays from the LAN report and lays the cached
 spool records over them; an overlay older than 30 minutes shows trays only, with a note.
+The same refresh keeps a copy of Bambuddy's local presets (its OrcaSlicer imports,
+#4645), which the dialog offers and the native slicer slices from; one imported or
+edited in Bambuddy is there after the next refresh. Bambu Cloud user presets are not
+offered on a native run.
 To go back, set `preferred_path` to `bambuddy` (or `slicer_backend`/`library_backend`
 back); a Bambuddy print is unchanged.
 

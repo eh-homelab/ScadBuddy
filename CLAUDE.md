@@ -455,8 +455,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
   command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
-  presets and a process preset's values in Bambuddy's shapes (`local` presets are not
-  offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
+  presets and a process preset's values in Bambuddy's shapes, with Bambuddy's `local`
+  presets from the kept copy `slicing/held_presets.py` (#4645: `held_local_presets`,
+  refreshed on the spool providers' Schedule, read through `Profiles.held`; cloud user
+  presets are not offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
   native library, marked with its run's subject (`library_files.print_subject`, as is
   its slice); `print_library/sweep.py` `sweep_print_copies` (housekeeping
   `NATIVE_COPIES_SWEEP`, #4337) trashes a folder's superseded copies and what nothing

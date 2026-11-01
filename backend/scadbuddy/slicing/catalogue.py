@@ -30,6 +30,9 @@ copied out of the Dockerfile's ``slicer-dist`` stage, every file of each kind re
   and nozzle), exactly one of them compatible with ``Bambu Lab H2C 0.4 nozzle``
   (``GFA00``: ``Bambu PLA Basic @BBL H2C``). ``OFDSrzZ8`` is in none: a user's own
   preset, which a native run cannot slice (D5).
+- After the tree's rows, :func:`catalogue_for` adds the kept copy of Bambuddy's local
+  presets (#4645, :func:`with_held`), each a ``local`` ref as Bambuddy's catalogue has
+  it; that part is read from Postgres on every call, never kept here.
 - Building it reads each listed file once and flattens every instantiable preset: 4.7 s
   on a loaded WSL2 machine (2.9 s of it the filaments' flattening), so it is built in a
   thread and kept for the life of the process per tree and version. The tree is fixed in
@@ -46,9 +49,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from scadbuddy.bambuddy.catalogue import Catalogue, PresetChoice, _catalogue
+from scadbuddy.bambuddy.catalogue import Catalogue, PresetChoice, _catalogue, local_choice
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.bambuddy.models import LocalPresetDetail, PresetRef
+from scadbuddy.bambuddy.slot_presets import is_slot_preset
 from scadbuddy.slicing.profiles import (
     Flat,
     Kind,
@@ -205,10 +209,66 @@ def native_ref(profiles: Profiles, ref: PresetRef) -> PresetRef | None:
 
 async def catalogue_for(client: BambuddyClient | None, *, native: Profiles | None) -> Catalogue:
     """The catalogue a run resolves against: the image's BBL profiles when ``native`` is
-    given (no Bambuddy call, #3818 tier A), else Bambuddy's, read fresh, with
-    every row saying which printers it fits (#4717)."""
+    given (no Bambuddy call, #3818 tier A), with the kept copy of Bambuddy's local
+    presets after them (:func:`with_held`), else Bambuddy's, read fresh, with every row
+    saying which printers it fits (#4717)."""
     if native is not None:
-        return await asyncio.to_thread(native_catalogue, native)
+        return await with_held(await asyncio.to_thread(native_catalogue, native), native)
     if client is None:
         raise ValueError("the preset catalogue needs a Bambuddy client or the native profiles")
     return await _catalogue(client)
+
+
+#: Whether each kept preset flattens over a tree, by the tree's root and version and the
+#: preset's id: the document digest it was answered for, and the answer. Only the latest
+#: digest per preset is kept, so an edit replaces its entry rather than adding one.
+_flattens: dict[tuple[Path, str, int], tuple[str, bool]] = {}
+_SLOTS: dict[str, Kind] = {"printer": "machine", "process": "process", "filament": "filament"}
+
+
+async def with_held(image: Catalogue, profiles: Profiles) -> Catalogue:
+    """``image`` with the rows of the kept copy of Bambuddy's local presets
+    (:attr:`Profiles.held`, #4645) that the native slicer can read: a Postgres read,
+    never Bambuddy. Each row is Bambuddy's catalogue's for it (``local_choice``), so a
+    remembered ``local`` ref resolves as it does there. A preset that does not flatten
+    over this tree (a parent this Bambu Studio lacks, no settings) is not offered, as the
+    tree's own are not (the module's docstring); nor is a slot's own copy (#3962), as on
+    Bambuddy's. ``image`` itself without a copy."""
+    held = profiles.held
+    if held is None:
+        return image
+    rows = [row for row in await held.rows() if row.preset.preset_type in _SLOTS]
+    root, version = profiles.root, await asyncio.to_thread(lambda: profiles.version)
+    unknown = [
+        row
+        for row in rows
+        if _flattens.get((root, version, row.preset.id), ("", False))[0] != row.sha256
+    ]
+    if unknown:
+        docs = await held.documents([row.preset.id for row in unknown])
+        for row in unknown:
+            doc = docs.get(row.preset.id)
+            ok = doc is not None and await asyncio.to_thread(_flattens_over, profiles, doc)
+            _flattens[(root, version, row.preset.id)] = (row.sha256, ok)
+    offered: dict[str, list[PresetChoice]] = {slot: [] for slot in _SLOTS}
+    for row in rows:
+        if _flattens.get((root, version, row.preset.id)) != (row.sha256, True):
+            continue
+        if is_slot_preset(row.preset.name):
+            continue
+        offered[row.preset.preset_type].append(local_choice(row.preset))
+    if not any(offered.values()):
+        return image
+    return image.with_held(offered["printer"], offered["process"], offered["filament"])
+
+
+def _flattens_over(profiles: Profiles, doc: LocalPresetDetail) -> bool:
+    if not doc.setting:
+        return False
+    try:
+        profiles.flatten_over(_SLOTS[doc.preset_type], doc.name, doc.setting)
+    except ProfileImageError:
+        raise
+    except ProfileError:
+        return False
+    return True
