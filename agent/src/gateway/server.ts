@@ -34,6 +34,9 @@ import { GatewayTokens, sameToken } from './tokens.js'
 //
 //   - refuses it (401) unless its path names a live token and its header
 //     presents the same token;
+//   - refuses it (403) unless it is one of `ENDPOINTS`, matched on the raw path,
+//     so no other endpoint is reached with the credential and no spelling of a
+//     priced one goes unmetered;
 //   - drops the presented token and adds the credential's real header
 //     (`x-api-key` for an API key, `Authorization: Bearer` for an OAuth token
 //     or a gateway's token), sending it to https://api.anthropic.com or, for
@@ -51,6 +54,22 @@ import { GatewayTokens, sameToken } from './tokens.js'
 // The token dies with the run (`release`), and the port is loopback only.
 
 const ANTHROPIC_API = 'https://api.anthropic.com'
+
+/**
+ * The only requests the gateway sends on, matched against the raw path exactly, so a dot
+ * segment, an empty segment or a percent-encoded dot or slash (which an endpoint might
+ * normalise into another endpoint, unmetered) matches none of them. They are what an
+ * Anthropic Messages gateway serves for Claude Code
+ * (https://code.claude.com/docs/en/llm-gateway-protocol): inference, token counting and
+ * model discovery. Only inference is priced: "Token counting is free to use"
+ * (https://docs.claude.com/en/docs/build-with-claude/token-counting). Claude Code 2.1.310
+ * called only `POST /v1/messages` in test/run.test.ts.
+ */
+const ENDPOINTS: readonly { method: string; path: string; priced: boolean }[] = [
+  { method: 'POST', path: '/v1/messages', priced: true },
+  { method: 'POST', path: '/v1/messages/count_tokens', priced: false },
+  { method: 'GET', path: '/v1/models', priced: false },
+]
 
 /** A request body past this is refused (413): the Messages API's own request limit is 32 MB. */
 export const MAX_REQUEST_BYTES = 64 * 1024 * 1024
@@ -264,9 +283,19 @@ export class CredentialGateway {
       return refuse(res, 401, 'authentication_error', 'the credential gateway does not know this token')
     }
     const rest = match?.[2] ?? '/'
+    const at = rest.indexOf('?')
+    const path = at === -1 ? rest : rest.slice(0, at)
+    const endpoint = ENDPOINTS.find((e) => e.method === req.method && e.path === path)
     const { credential } = lease
     const base = credential.kind === 'gateway' ? credential.baseUrl.replace(/\/+$/, '') : this.#anthropicUrl
-    const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : await readBody(req)
+    // The request goes to exactly that endpoint under the pinned base, and nowhere else.
+    const pinned = new URL(base)
+    const target = endpoint ? new URL(`${base}${rest}`) : undefined
+    if (!target || target.origin !== pinned.origin || target.pathname !== `${pinned.pathname.replace(/\/+$/, '')}${path}`) {
+      req.resume()
+      return refuse(res, 403, 'permission_error', 'the credential gateway passes only the Messages, token counting and model list endpoints')
+    }
+    const body =req.method === 'GET' || req.method === 'HEAD' ? undefined : await readBody(req)
     if (body === 'too large') return refuse(res, 413, 'request_too_large', 'the request is larger than the credential gateway passes')
     if (credential.kind === 'gateway') {
       try {
@@ -287,7 +316,7 @@ export class CredentialGateway {
     })
     let upstream: Response
     try {
-      upstream = await this.#fetch(`${base}${rest}`, {
+      upstream = await this.#fetch(target, {
         method: req.method ?? 'GET',
         headers,
         ...(body !== undefined ? { body } : {}),
@@ -306,7 +335,7 @@ export class CredentialGateway {
       if (!DROPPED_RESPONSE.has(name)) out[name] = value
     })
     res.writeHead(upstream.status, out)
-    const priced = req.method === 'POST' && rest.split('?')[0] === '/v1/messages' && upstream.ok
+    const priced = endpoint?.priced === true && upstream.ok
     const type = upstream.headers.get('content-type') ?? ''
     const meter = priced ? new Meter() : undefined
     const stream = meter !== undefined && type.startsWith('text/event-stream')

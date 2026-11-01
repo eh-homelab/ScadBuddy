@@ -372,6 +372,8 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
         // Claude Code still presents an OAuth token as one, which the endpoint needs (measured on 2.1.310).
         expect(String(call.headers['anthropic-beta']).split(',').includes('oauth-2025-04-20')).toBe(run.kind === 'claude_oauth_token')
       }
+      // Only the Messages endpoint, which the gateway's allowlist passes (gateway/server.ts ENDPOINTS).
+      expect(new Set(fake.requests.map((r) => `${r.method} ${r.path}`))).toEqual(new Set(['POST /v1/messages']))
       // The token died with the query.
       expect(credentialGateway().leases).toBe(0)
     })

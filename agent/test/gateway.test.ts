@@ -1,4 +1,4 @@
-import { createServer, type Server } from 'node:http'
+import { createServer, request, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CredentialGateway } from '../src/gateway/server.js'
@@ -12,6 +12,31 @@ import { type FakeAnthropic, type Reply, REPLY_COST_USD, STALL, startFakeAnthrop
 
 const API_KEY = 'sk-ant-api03-gateway-test-key-0000'
 const GATEWAY_SECRET = 'gw-gateway-test-secret-1111'
+
+/** A POST whose path is sent exactly as written (fetch and URL would remove dot segments). */
+function rawPost(baseUrl: string, path: string, headers: Record<string, string>): Promise<{ status: number; body: string }> {
+  const url = new URL(baseUrl)
+  const body = messages(true)
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: url.hostname,
+        port: url.port,
+        method: 'POST',
+        path: `${url.pathname}${path}`,
+        headers: { ...headers, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      },
+      (res) => {
+        let text = ''
+        res.setEncoding('utf8')
+        res.on('data', (c: string) => (text += c))
+        res.on('end', () => resolve({ status: res.statusCode ?? 0, body: text }))
+      },
+    )
+    req.on('error', reject)
+    req.end(body)
+  })
+}
 
 const messages = (stream: boolean) =>
   JSON.stringify({ model: 'claude-sonnet-4-5', max_tokens: 5, stream, messages: [{ role: 'user', content: 'hi' }] })
@@ -91,6 +116,67 @@ describe('the credential gateway', () => {
     expect((await post(lease.baseUrl, { 'x-api-key': lease.token })).status).toBe(401)
     expect(fake.messageCalls()).toHaveLength(0)
     expect(gateway.leases).toBe(1)
+  })
+
+  it.each([
+    '/v1/./messages',
+    '/v1//messages',
+    '/v1/%2e/messages',
+    '/v1/%2E%2E/v1/messages',
+    '/v1/messages/',
+    '/v1/messages%2f',
+    '/v1/x/../messages',
+    '/v1/messages/../messages',
+    '/v1/messages;x',
+    '//v1/messages',
+  ])('refuses %s, a path the endpoint might read as another, and sends nothing on', async (path) => {
+    const spent: number[] = []
+    const lease = gateway.lease({ kind: 'anthropic_api_key', secret: API_KEY }, { onSpend: (usd) => spent.push(usd) })
+    // A raw request: fetch would normalise the dot segments itself.
+    const { status, body } = await rawPost(lease.baseUrl, path, { 'x-api-key': lease.token })
+    expect(status).toBe(403)
+    expect(JSON.parse(body)).toMatchObject({ type: 'error', error: { type: 'permission_error' } })
+    expect(fake.requests).toHaveLength(0)
+    expect(spent).toEqual([])
+  })
+
+  it.each([
+    ['POST', '/v1/files'],
+    ['POST', '/v1/messages/batches'],
+    ['GET', '/v1/messages'],
+    ['GET', '/v1/organizations/me'],
+    ['DELETE', '/v1/models'],
+  ])('refuses %s %s, an endpoint Claude Code does not call', async (method, path) => {
+    const lease = gateway.lease({ kind: 'anthropic_api_key', secret: API_KEY })
+    const res = await fetch(`${lease.baseUrl}${path}`, {
+      method,
+      headers: { 'x-api-key': lease.token, 'content-type': 'application/json' },
+      ...(method === 'POST' ? { body: '{}' } : {}),
+    })
+    expect(res.status).toBe(403)
+    expect(fake.requests).toHaveLength(0)
+  })
+
+  it('passes token counting and the model list, and prices neither', async () => {
+    const spent: number[] = []
+    const lease = gateway.lease({ kind: 'anthropic_api_key', secret: API_KEY }, { onSpend: (usd) => spent.push(usd) })
+    const count = await fetch(`${lease.baseUrl}/v1/messages/count_tokens?beta=true`, {
+      method: 'POST',
+      headers: { 'x-api-key': lease.token, 'content-type': 'application/json' },
+      body: messages(false),
+    })
+    expect(await count.json()).toEqual({ input_tokens: 10 })
+    const models = await fetch(`${lease.baseUrl}/v1/models`, { headers: { 'x-api-key': lease.token } })
+    expect(models.status).toBe(200)
+    expect(fake.requests.map((r) => `${r.method} ${r.path}`)).toEqual(['POST /v1/messages/count_tokens', 'GET /v1/models'])
+    expect(spent).toEqual([])
+  })
+
+  it("keeps a gateway kind's base path, and sends nothing outside it", async () => {
+    const lease = gateway.lease({ kind: 'gateway', baseUrl: `${fake.url}/anthropic`, secret: GATEWAY_SECRET })
+    const res = await post(lease.baseUrl, { authorization: `Bearer ${lease.token}` })
+    await res.text()
+    expect(fake.requests.map((r) => r.path)).toEqual(['/anthropic/v1/messages'])
   })
 
   it('passes a refusal through with its status and headers, and prices nothing', async () => {
