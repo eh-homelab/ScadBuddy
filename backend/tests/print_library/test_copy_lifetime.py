@@ -398,3 +398,26 @@ async def test_the_migration_marks_what_runs_put_in_the_library(
 
 
 MIGRATION = "20261101T1528Z_library_files_print_subject.sql"
+
+
+async def test_a_copy_a_person_moves_during_the_sweep_is_never_trashed(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """The trash takes only files still marked: one a person moved after the sweep read
+    it (here, just before its second read of the subjects in use) is theirs."""
+    elsewhere = (await native.create_folder("Mine", None)).id
+    old = await copy_of(native, uploads, payload)
+    await copy_of(native, uploads, payload, target=X1C)
+    reads = 0
+
+    async def subjects_in_use() -> set[str]:
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            await native.update_file(old, folder_id=elsewhere)
+        return set()
+
+    done = await sweep_print_copies(native, uploads, subjects_in_use, now=datetime.now(UTC))
+
+    assert done.superseded == 0
+    assert live(native, old)

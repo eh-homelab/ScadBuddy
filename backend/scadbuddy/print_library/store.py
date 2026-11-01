@@ -315,9 +315,12 @@ class NativeLibraryStore:
                 _lock_folder_names(conn, target)
             return _update_file(conn, id, sets, params)
 
-    def trash(self, ids: list[int]) -> list[NativeFile]:
+    def trash(self, ids: list[int], *, per_print: bool = False) -> list[NativeFile]:
         """The rows are locked by id first, as `delete_folder_tree` locks them: an UPDATE
-        alone locks them in the order its scan meets them, and would deadlock with it."""
+        alone locks them in the order its scan meets them, and would deadlock with it.
+        ``per_print`` trashes only those still marked (#4337): a file a person made theirs
+        since the caller read it (a move, a restore) stays."""
+        only = " AND print_subject IS NOT NULL" if per_print else ""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(
                 "SELECT id FROM library_files WHERE id = ANY(%s) AND deleted_at IS NULL"
@@ -326,7 +329,8 @@ class NativeLibraryStore:
             )
             rows = conn.execute(
                 f"UPDATE library_files SET deleted_at = now(), updated_at = now()"
-                f" WHERE id = ANY(%s) AND deleted_at IS NULL RETURNING {_FILE_COLUMNS}".encode(),
+                f" WHERE id = ANY(%s) AND deleted_at IS NULL{only}"
+                f" RETURNING {_FILE_COLUMNS}".encode(),
                 (list(ids),),
             ).fetchall()
         return [NativeFile.model_validate(r) for r in rows]

@@ -256,7 +256,8 @@ QUOTE_HOLDS_TIMEOUT = timedelta(minutes=2)
 #: Two Bambuddy lists, then per printer with an empty LAN link a read and one probe
 #: (`printers.component.PROBE_TIMEOUT`, 10 s), each in turn.
 PRINTER_SYNC_TIMEOUT = timedelta(minutes=5)
-#: Three reads, then a trash, and a forget per superseded copy.
+#: Two describes per LAN run with prints still to start (`end_gone_sequences`; few run at
+#: once), twice; a few reads, then a trash, and a forget per superseded copy.
 NATIVE_COPIES_TIMEOUT = timedelta(minutes=5)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)

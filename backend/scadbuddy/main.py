@@ -792,8 +792,15 @@ async def _sweep_native_copies_logged(state: AppState) -> None:
             return
 
         async def subjects_in_use() -> set[str]:
-            # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`).
-            await end_gone_sequences(state.print_runs)
+            # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`). Without
+            # Temporal every LAN run with prints still to start is kept as in use.
+            try:
+                await end_gone_sequences(state.print_runs)
+            except Exception:
+                logger.warning(
+                    "could not check the LAN runs' sequences; their files are kept",
+                    exc_info=True,
+                )
             return await state.print_runs.store.subjects_in_use()
 
         await sweep_print_copies(native, state.uploads, subjects_in_use, now=datetime.now(UTC))

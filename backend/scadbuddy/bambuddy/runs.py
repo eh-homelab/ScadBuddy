@@ -281,10 +281,10 @@ class PrintRunStore:
         still to start, which it starts from its sliced files later (#4541, #4337)."""
         return await asyncio.to_thread(self._running_for, output_id)
 
-    async def lan_waiting_runs(self) -> list[PrintRun]:
+    async def lan_waiting_runs(self) -> list[tuple[str, str | None]]:
         """Every succeeded native run with prints still to start, neither all started nor
-        stopped, whatever its printer: the runs whose sequence may have closed without
-        saying so (#4337)."""
+        stopped, whatever its printer, as its id and its ``PrintRun`` workflow's id: the
+        runs whose sequence may have closed without saying so (#4337)."""
         return await asyncio.to_thread(self._lan_waiting_runs)
 
     async def subjects_in_use(self) -> set[str]:
@@ -467,14 +467,14 @@ class PrintRunStore:
             ).fetchall()
         return [PrintRun.model_validate(row) for row in rows]
 
-    def _lan_waiting_runs(self) -> list[PrintRun]:
+    def _lan_waiting_runs(self) -> list[tuple[str, str | None]]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM print_runs WHERE status = 'succeeded'"
+                "SELECT id, workflow_id FROM print_runs WHERE status = 'succeeded'"
                 " AND result->'lan_waiting' <> '[]'::jsonb"
-                " AND result->>'lan_stopped' IS NULL ORDER BY created_at".encode()
+                " AND result->>'lan_stopped' IS NULL ORDER BY created_at"
             ).fetchall()
-        return [PrintRun.model_validate(row) for row in rows]
+        return [(row["id"], row["workflow_id"]) for row in rows]
 
     def _subjects_in_use(self) -> set[str]:
         with self._pool.connection() as conn:

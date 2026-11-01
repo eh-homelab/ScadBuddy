@@ -12,6 +12,7 @@ import zipfile
 from collections.abc import AsyncGenerator
 from contextlib import aclosing
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import BinaryIO
 from xml.etree import ElementTree
@@ -375,10 +376,13 @@ class NativeLibrary:
             raise _not_found(file_id)
         return row
 
-    async def trash(self, ids: list[int]) -> list[NativeFile]:
-        """The files moved to the trash; one already there or gone is left out."""
+    async def trash(self, ids: list[int], *, per_print: bool = False) -> list[NativeFile]:
+        """The files moved to the trash; one already there or gone is left out, and with
+        ``per_print`` one no run's subject marks any more (#4337)."""
         native = [i for i in ids if is_native_id(i)]
-        return await asyncio.to_thread(self.rows.trash, native) if native else []
+        if not native:
+            return []
+        return await asyncio.to_thread(partial(self.rows.trash, native, per_print=per_print))
 
     async def restore(self, ids: list[int]) -> list[int]:
         native = [i for i in ids if is_native_id(i)]

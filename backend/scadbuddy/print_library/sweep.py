@@ -172,7 +172,8 @@ async def sweep_print_copies(
     busy = await subjects_in_use()
     doomed = [i for subject, ids in superseded.items() if subject not in busy for i in ids]
     lost = [i for subject, ids in orphans.items() if subject not in busy for i in ids]
-    trashed = {f.id for f in await native.trash([*doomed, *lost])}
+    # Only what is still marked: a file a person moved or restored since the read is theirs.
+    trashed = {f.id for f in await native.trash([*doomed, *lost], per_print=True)}
     # After the trash, as a Bambuddy copy is forgotten only once its delete came back.
     for subject, copy_id in forget:
         if copy_id in trashed:

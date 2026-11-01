@@ -182,21 +182,34 @@ def test_a_gone_sequence_stops_using_its_runs_files(
 ) -> None:
     """#4337: before the per-print copies' sweep reads which subjects are in use, a run
     whose sequence is gone (terminated, or never started) records the rest stopped, so
-    its subject's files are not kept for good; a running sequence's run keeps them."""
+    its subject's files are not kept for good. A run whose sequence is running keeps
+    them, and so does one whose own ``PrintRun`` execution is still open: it starts its
+    sequence only after it records the run succeeded."""
     state = _state(client)
     gone = _run(client, workflow_reaper)
     never = _run(client, workflow_reaper)
     alive = _run(client, workflow_reaper)
+    starting = _run(client, workflow_reaper)
     workflow_reaper.run(_sequence(workflow_reaper, gone, sequences).terminate())
     _sequence(workflow_reaper, alive, sequences)
+    assert workflow_reaper.client is not None
+    parent = workflow_reaper.run(
+        workflow_reaper.client.start_workflow(
+            "PrintRun", "stand-in", id=f"print-{starting}", task_queue=f"nobody-{starting[:8]}"
+        )
+    )
+    sequences.append(parent)
 
     workflow_reaper.run(printing_api.end_gone_sequences(state.print_runs))
 
     stopped = printing_api.SEQUENCE_GONE_STOP.model_dump()
     for run_id in (gone, never):
         assert client.get(f"/api/v1/print/runs/{run_id}").json()["result"]["lan_stopped"] == stopped
-    assert client.get(f"/api/v1/print/runs/{alive}").json()["result"]["lan_stopped"] is None
-    assert [r.id for r in workflow_reaper.run(state.print_runs.store.lan_waiting_runs())] == [alive]
+    for run_id in (alive, starting):
+        assert client.get(f"/api/v1/print/runs/{run_id}").json()["result"]["lan_stopped"] is None
+    waiting = workflow_reaper.run(state.print_runs.store.lan_waiting_runs())
+    assert sorted(run_id for run_id, _ in waiting) == sorted([alive, starting])
+    assert "o" * 32 in workflow_reaper.run(state.print_runs.store.subjects_in_use())
 
 
 def test_plate_cleared_signals_how_many_prints_had_started(

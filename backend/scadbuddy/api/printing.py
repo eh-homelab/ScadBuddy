@@ -1112,9 +1112,25 @@ async def end_gone_sequences(runs: PrintCommands) -> None:
     """Record every native run with prints still to start whose ``PrintLanSequence`` is
     gone as stopped (`SEQUENCE_GONE_STOP`), as a control sent to it would (#4337): a
     sequence terminated, or never started, writes no end of its own, and its run would
-    otherwise keep its subject's files in use for good."""
-    for run in await runs.store.lan_waiting_runs():
-        await _to_sequence(runs, run.id, _leave_running)
+    otherwise keep its subject's files in use for good. Only once the run's own
+    ``PrintRun`` execution has closed: until then it may still start the sequence, which
+    it does after it records the run succeeded (`workflows/printing.py`)."""
+    for run_id, workflow_id in await runs.store.lan_waiting_runs():
+        if workflow_id is None or await _execution_open(runs, workflow_id):
+            continue
+        await _to_sequence(runs, run_id, _leave_running)
+
+
+async def _execution_open(runs: PrintCommands, workflow_id: str) -> bool:
+    """Whether workflow ``workflow_id``'s latest execution is running; one gone (past
+    its retention) is not."""
+    try:
+        described = await runs.client.get_workflow_handle(workflow_id).describe()
+    except RPCError as error:
+        if execution_gone(error):
+            return False
+        raise
+    return described.status == WorkflowExecutionStatus.RUNNING
 
 
 async def _leave_running(handle: WorkflowHandle[Any, Any]) -> None:
