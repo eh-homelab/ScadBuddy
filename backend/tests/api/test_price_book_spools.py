@@ -96,6 +96,36 @@ def test_spools_make_and_update_the_records(client: TestClient) -> None:
 
 
 @respx.mock
+def test_two_alphas_of_one_colour_price_one_record_once(client: TestClient) -> None:
+    """#5159 review: FFFFFFFF and FFFFFF80 are one record, priced from the newest spool."""
+    configure(client)
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                spool(9, rgba="FFFFFF80", cost_per_kg=30),
+                spool(3, rgba="FFFFFFFF", cost_per_kg=20),
+                spool(5, rgba="FFFFFF", cost_per_kg=40),
+                spool(4, material="P" * 101, rgba="000000FF", cost_per_kg=10),
+            ],
+        )
+    )
+
+    rows = client.post(IMPORT).json()["rows"]
+
+    white = next(row for row in rows if row["colour"] == "#FFFFFF")
+    assert (white["action"], white["spool_ids"], white["cost_per_kg"]) == (
+        "created",
+        [3, 5, 9],
+        "30",
+    )
+    long = next(row for row in rows if row["spool_ids"] == [4])
+    assert (long["action"], long["reason"]) == ("skipped", "too_long")
+    filaments = client.get(BOOK).json()["filaments"]
+    assert [(f["colour"], f["cost_per_kg"]) for f in filaments] == [("#FFFFFF", "30")]
+
+
+@respx.mock
 def test_a_quote_never_reads_the_spools(client: TestClient) -> None:
     """Ruling 3: the book is ScadBuddy's; reading it never calls Bambuddy."""
     configure(client)

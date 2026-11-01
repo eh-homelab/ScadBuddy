@@ -61,6 +61,7 @@ const ACTIONS: Record<SpoolImportRow['action'], string> = { created: 'added', up
 const REASONS: Record<NonNullable<SpoolImportRow['reason']>, string> = {
   no_colour: 'its spools have only a colour name, no colour',
   no_price: 'none of its spools has a price',
+  too_long: 'a name is longer than a filament record takes (100 characters)',
 }
 
 /** One line of an import's answer: what happened to a filament, and the spread of its spools' prices. */
@@ -219,7 +220,7 @@ export function FilamentsEditor() {
           ) : (
             <ul className="list-disc pl-4">
               {imported.map((row) => (
-                <li key={(row.spool_ids ?? []).join(',')}>{importLine(row)}</li>
+                <li key={row.spool_ids.join(',')}>{importLine(row)}</li>
               ))}
             </ul>
           )}

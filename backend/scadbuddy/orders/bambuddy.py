@@ -16,7 +16,6 @@ from contextlib import aclosing
 from typing import Any
 
 from scadbuddy.bambuddy.client import client_for, maybe_client
-from scadbuddy.bambuddy.farm import _filament_key
 from scadbuddy.bambuddy.models import SliceJob, Spool
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
 from scadbuddy.bambuddy.print_run import PrintRunRequest
@@ -38,13 +37,28 @@ def _colour(rgba: str | None) -> str | None:
     return "#" + text[:6].upper()
 
 
+def _identity(spool: Spool) -> tuple[str, str, str, str]:
+    colour = _colour(spool.rgba)
+    return (
+        spool.material.strip().upper(),
+        (spool.subtype or "").strip().upper(),
+        (spool.brand or "").strip().upper(),
+        colour if colour is not None else "name:" + (spool.color_name or "").strip().upper(),
+    )
+
+
 def spool_groups(spools: list[Spool]) -> list[SpoolGroup]:
-    """Every unarchived spool by ``_filament_key`` (material, subtype, brand, colour), in
-    the key's order. A group's names are its most recent spool's (the highest id)."""
+    """Every unarchived spool by the record identity it would price (material, subtype,
+    brand and ``#RRGGBB``, upper-cased), in that order. That is ``bambuddy/farm.py``
+    ``_filament_key``'s grouping with the colour as a record holds it: the alpha byte and
+    a 6- or 8-digit spelling are dropped, so two spools that would land on one record are
+    one group, priced once (#5159 review). A spool with no ``rgba`` keeps its colour's
+    name as its key, never matched to an rgba one (#2918). A group's names are its most
+    recent spool's (the highest id)."""
     groups: dict[tuple[str, str, str, str], list[Spool]] = defaultdict(list)
     for spool in spools:
         if spool.archived_at is None:
-            groups[_filament_key(spool)].append(spool)
+            groups[_identity(spool)].append(spool)
     out: list[SpoolGroup] = []
     for key in sorted(groups):
         rows = sorted(groups[key], key=lambda s: s.id)

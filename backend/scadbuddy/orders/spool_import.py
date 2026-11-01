@@ -25,6 +25,8 @@ from scadbuddy.orders.store import OrderStore
 #: ``filaments.cost_per_kg``'s ``numeric(12,4)``.
 PLACES = Decimal("0.0001")
 MAX_COST = Decimal(10**8)
+#: ``FilamentInput``'s ``max_length`` for each name.
+MAX_NAME = 100
 
 
 def _price(value: float | None) -> Decimal | None:
@@ -66,6 +68,10 @@ def import_spools(store: OrderStore, groups: list[SpoolGroup]) -> SpoolImport:
                 continue
             if not priced:
                 rows.append(row.model_copy(update={"reason": "no_price"}))
+                continue
+            names = (group.material, group.subtype, group.brand, group.colour_name)
+            if any(name is not None and len(name) > MAX_NAME for name in names):
+                rows.append(row.model_copy(update={"reason": "too_long"}))
                 continue
             price = max(priced)[1]
             existing_id = store.existing_filament(

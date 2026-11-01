@@ -544,8 +544,10 @@ class SpoolImportRow(BaseModel):
 
     action: SpoolImportAction
     #: Why a group was skipped: ``no_colour`` (its spools carry only a colour's name,
-    #: and a record's colour is ``#RRGGBB``) or ``no_price`` (no spool has a price).
-    reason: Literal["no_colour", "no_price"] | None = None
+    #: and a record's colour is ``#RRGGBB``), ``no_price`` (no spool has a price) or
+    #: ``too_long`` (a name past a record's 100 characters).
+    reason: Literal["no_colour", "no_price", "too_long"] | None = None
+    #: The newest spool's names. A matched record keeps its own: only its price changes.
     material: str
     subtype: str | None = None
     brand: str | None = None
@@ -560,7 +562,7 @@ class SpoolImportRow(BaseModel):
     #: The spread of the group's prices, only when its spools' prices differ.
     min_cost_per_kg: str | None = None
     max_cost_per_kg: str | None = None
-    spool_ids: list[int] = Field(default_factory=list)
+    spool_ids: list[int]
 
 
 class SpoolImport(BaseModel):

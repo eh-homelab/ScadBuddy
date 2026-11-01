@@ -47,7 +47,7 @@ function importSpools(): SpoolImportRow[] {
   const groups = new Map<string, typeof SPOOL_INVENTORY>()
   for (const spool of SPOOL_INVENTORY) {
     if (spool.archived) continue
-    const key = [spool.material, spool.subtype ?? '', spool.brand ?? '', spool.rgba ?? spool.color_name ?? ''].map((p) => p.trim().toUpperCase()).join('|')
+    const key = [spool.material, spool.subtype ?? '', spool.brand ?? '', spool.rgba ? spool.rgba.slice(0, 6) : `name:${spool.color_name ?? ''}`].map((p) => p.trim().toUpperCase()).join('|')
     groups.set(key, [...(groups.get(key) ?? []), spool])
   }
   return [...groups.keys()].sort().flatMap((key): SpoolImportRow[] => {

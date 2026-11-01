@@ -6,17 +6,20 @@ from __future__ import annotations
 import ast
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from scadbuddy.bambuddy.models import Spool
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders import bambuddy as orders_bambuddy
 from scadbuddy.orders.bambuddy import BambuddyIntegrations, spool_groups
 from scadbuddy.orders.integrations import NOT_LINKED, NotLinkedError, choose
 
 ORDERS = Path(orders_bambuddy.__file__).parent
 CLIENT = "scadbuddy.bambuddy.client"
+#: Never read: choosing a seam builds nothing.
+NO_STORE = cast(SettingsStore, object())
 
 
 def _imports_client(path: Path) -> bool:
@@ -62,7 +65,7 @@ def test_the_rule_sees_each_spelling(tmp_path: Path) -> None:
 
 def test_without_a_url_the_seam_is_not_linked() -> None:
     for url in (None, ""):
-        seam = choose(url, None)  # type: ignore[arg-type]
+        seam = choose(url, NO_STORE)
         assert seam is NOT_LINKED
         assert seam.linked is False
     with pytest.raises(NotLinkedError):
@@ -70,7 +73,7 @@ def test_without_a_url_the_seam_is_not_linked() -> None:
 
 
 def test_with_a_url_the_seam_is_bambuddys() -> None:
-    seam = choose("https://bambuddy.test", None)  # type: ignore[arg-type]
+    seam = choose("https://bambuddy.test", NO_STORE)
     assert isinstance(seam, BambuddyIntegrations)
     assert seam.linked is True
 
@@ -109,3 +112,18 @@ def test_spools_group_by_filament_key() -> None:
     )
     assert by_ids[(4,)].colour is None
     assert by_ids[(5,)].spools == [(5, 20.0)]
+
+
+def test_spools_of_one_record_are_one_group() -> None:
+    """#5159 review: the alpha byte and a 6-digit spelling land on one ``#RRGGBB`` record,
+    so they are one group, priced once from the newest priced spool."""
+    groups = spool_groups(
+        [
+            _spool(2, rgba="FFFFFFFF", cost_per_kg=20.0),
+            _spool(6, rgba="ffffff80", cost_per_kg=30.0),
+            _spool(4, rgba="FFFFFF", cost_per_kg=25.0),
+        ]
+    )
+    assert [(g.colour, g.spools) for g in groups] == [
+        ("#FFFFFF", [(2, 20.0), (4, 25.0), (6, 30.0)])
+    ]
