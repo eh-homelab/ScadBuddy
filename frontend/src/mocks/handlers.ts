@@ -89,6 +89,7 @@ const bytesOf = (base64: string) => Uint8Array.from(atob(base64), (c) => c.charC
 /** `ModelPrintChoices()` on the backend: every field at its default. */
 export const NO_MODEL_CHOICES: Required<ModelPrintChoices> = {
   printer_id: null,
+  printer: null,
   filament_plan: [],
   nozzles: [],
   tier: null,

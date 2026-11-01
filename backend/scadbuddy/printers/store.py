@@ -188,6 +188,11 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printers", "forwards_to"),
     # #4971: the plate remembered on a printer; the kept printer's own wins.
     PrinterReference("printer_bed_types", "printer", unique=True),
+    # #4971: the LAN-only printer a Bambuddy project last printed on.
+    PrinterReference("project_print_targets", "printer"),
+    # #4971: the printer a rack hotend was last seen on, and a pick's.
+    PrinterReference("rack_nozzle_seen", "printer"),
+    PrinterReference("rack_nozzle_picks", "printer"),
     _repoint_run_activity,
 )
 

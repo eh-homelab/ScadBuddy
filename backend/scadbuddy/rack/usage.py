@@ -116,7 +116,9 @@ class SpoolUse(BaseModel):
 
 
 class RackUsage(Protocol):
-    async def seen(self, printer_id: int, serials: Iterable[str]) -> None: ...
+    async def seen(
+        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
+    ) -> None: ...
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]: ...
 
@@ -153,6 +155,7 @@ class LanUsage(Protocol):
         subtask_name: str,
         printer_id: int | None,
         picks: Sequence[PickedHotend],
+        printer: str | None = None,
     ) -> int: ...
 
     async def settle_lan(
@@ -232,24 +235,30 @@ class RackUsageStore:
                 self._pool.close()
                 self._pool_open = False
 
-    async def seen(self, printer_id: int, serials: Iterable[str]) -> None:
+    async def seen(
+        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
+    ) -> None:
         """Upsert each non-empty serial once: moves its printer, never its
-        ``first_seen_at`` (spec §4)."""
+        ``first_seen_at`` (spec §4). ``printer_id`` is the Bambuddy printer and
+        ``printer`` the registry one (#4971), either or both: a LAN-only printer has
+        only the latter."""
         unique = sorted({serial for serial in serials if serial})
-        if unique:
-            await asyncio.to_thread(self._seen, printer_id, unique)
+        if unique and (printer_id is not None or printer is not None):
+            await asyncio.to_thread(self._seen, printer_id, printer, unique)
 
-    def _seen(self, printer_id: int, unique: list[str]) -> None:
+    def _seen(self, printer_id: int | None, printer: str | None, unique: list[str]) -> None:
         with self._ready().connection() as conn:
             conn.execute(
-                "INSERT INTO rack_nozzle_seen (serial, printer_id)"
-                " SELECT serial, %s FROM unnest(%s::text[]) AS serial"
-                " ON CONFLICT (serial) DO UPDATE SET printer_id = excluded.printer_id"
+                "INSERT INTO rack_nozzle_seen (serial, printer_id, printer)"
+                " SELECT serial, %s, %s FROM unnest(%s::text[]) AS serial"
+                " ON CONFLICT (serial) DO UPDATE"
+                " SET printer_id = excluded.printer_id, printer = excluded.printer"
                 # Rewrite only a hotend that moved: /check re-records the rack on every
                 # debounced re-check (#1082). A row this skips makes no new version, but
                 # is still locked, so a re-check is cheap rather than free.
-                " WHERE rack_nozzle_seen.printer_id IS DISTINCT FROM excluded.printer_id",
-                (printer_id, unique),
+                " WHERE (rack_nozzle_seen.printer_id, rack_nozzle_seen.printer)"
+                " IS DISTINCT FROM (excluded.printer_id, excluded.printer)",
+                (printer_id, printer, unique),
             )
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:
@@ -474,20 +483,26 @@ class RackUsageStore:
         subtask_name: str,
         printer_id: int | None,
         picks: Sequence[PickedHotend],
+        printer: str | None = None,
     ) -> int:
         """The picks sent with one LAN start (#4543), keyed by its run and its
         ``subtask_name``, with their spools; the pick rows written. A start picked again
         (its start may not have been taken, so it was sent again) keeps the newer pick:
-        that one prints. ``printer_id`` is the Bambuddy printer the rack tables key on,
-        ``None`` for a LAN-only printer."""
+        that one prints. ``printer_id`` is the Bambuddy printer, ``None`` for a LAN-only
+        printer, and ``printer`` the registry one (#4971)."""
         if not picks:
             return 0
         return await asyncio.to_thread(
-            self._record_lan_picks, run_id, subtask_name, printer_id, list(picks)
+            self._record_lan_picks, run_id, subtask_name, printer_id, printer, list(picks)
         )
 
     def _record_lan_picks(
-        self, run_id: str, subtask: str, printer_id: int | None, picks: list[PickedHotend]
+        self,
+        run_id: str,
+        subtask: str,
+        printer_id: int | None,
+        printer: str | None,
+        picks: list[PickedHotend],
     ) -> int:
         written = 0
         with self._ready().connection() as conn, conn.transaction():
@@ -504,12 +519,12 @@ class RackUsageStore:
             for pick in picks:
                 cursor = conn.execute(
                     "INSERT INTO rack_nozzle_picks"
-                    " (lan_run_id, lan_subtask, group_id, printer_id, serial)"
-                    " VALUES (%s, %s, %s, %s, %s)"
+                    " (lan_run_id, lan_subtask, group_id, printer_id, printer, serial)"
+                    " VALUES (%s, %s, %s, %s, %s, %s)"
                     " ON CONFLICT (lan_run_id, lan_subtask, group_id) DO UPDATE SET"
-                    " printer_id = EXCLUDED.printer_id, serial = EXCLUDED.serial,"
-                    " picked_at = now()",
-                    (run_id, subtask, pick.group_id, printer_id, pick.serial),
+                    " printer_id = EXCLUDED.printer_id, printer = EXCLUDED.printer,"
+                    " serial = EXCLUDED.serial, picked_at = now()",
+                    (run_id, subtask, pick.group_id, printer_id, printer, pick.serial),
                 )
                 written += cursor.rowcount
                 for spool in pick.spools:
@@ -588,14 +603,18 @@ def group_spools(
 
 
 async def record_seen(
-    store: RackUsage | None, printer_id: int, status: PrinterStatus | None
+    store: RackUsage | None,
+    printer_id: int | None,
+    status: PrinterStatus | None,
+    printer: str | None = None,
 ) -> None:
-    """Record the rack's hotends as seen by the print flow (spec §4). Advisory: a failure
-    is logged by exception type and never stops the read that called it."""
-    if store is None or status is None:
+    """Record the rack's hotends as seen by the print flow (spec §4), on the Bambuddy
+    printer, the registry one (#4971) or both. Advisory: a failure is logged by exception
+    type and never stops the read that called it."""
+    if store is None or status is None or (printer_id is None and printer is None):
         return
     try:
-        await store.seen(printer_id, rack_serials(status.nozzle_rack))
+        await store.seen(printer_id, rack_serials(status.nozzle_rack), printer)
     except Exception as exc:
         logger.warning(
             RACK_SEEN_FALLBACK,
@@ -645,6 +664,7 @@ async def save_lan_picks(
     subtask_name: str,
     printer_id: int | None,
     picks: Sequence[PickedHotend],
+    printer: str | None = None,
 ) -> None:
     """Write the picks sent with a LAN start (#4543), keyed by its run and its
     ``subtask_name``. Advisory, as `save_picks`: the start is sent, so a failure is
@@ -653,7 +673,7 @@ async def save_lan_picks(
     if store is None or not attributable:
         return
     try:
-        await store.record_lan_picks(run_id, subtask_name, printer_id, attributable)
+        await store.record_lan_picks(run_id, subtask_name, printer_id, attributable, printer)
     except Exception as exc:
         logger.warning(
             RACK_PICKS_FALLBACK,

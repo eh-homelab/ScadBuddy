@@ -64,6 +64,7 @@ from scadbuddy.library.settings_store import (
     StoreNotReadyError,
 )
 from scadbuddy.operations.component import OperationCommands, OperationsDep
+from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.workflows.commands import (
     TemporalRefusedError,
     TemporalUnavailableError,
@@ -138,6 +139,9 @@ class SettingsView(BaseModel):
     public_url: str | None = None
     library_folder_id: int | None = None
     printer_id: int | None = None
+    #: The default printer by registry id, when it has no Bambuddy id (#4971); one that
+    #: has one is ``printer_id``.
+    default_printer: str | None = None
     default_plate: str | None = None
     display_unit: DisplayUnit = "mm"
     #: How long a finished print run is kept, in seconds; ``None`` keeps every one.
@@ -294,6 +298,9 @@ class RememberedChoices(BaseModel):
     #: Every remembered plate with its registry printer and its Bambuddy one (#4971), a
     #: LAN-only printer's among them; forgotten by either id.
     printer_plates: list[PrinterPlate] = Field(default_factory=list)
+    #: Registry printer id -> its name (#4971), for the entries keyed by a registry id:
+    #: a printer with no Bambuddy id.
+    printer_names: dict[str, str] = Field(default_factory=dict)
     #: Stringified Bambuddy printer id -> its rack nozzle algorithm (#836).
     printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
     print_options: PrintOptions = Field(default_factory=PrintOptions)
@@ -386,6 +393,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         public_url=stored.public_url,
         library_folder_id=stored.library_folder_id,
         printer_id=stored.printer_id,
+        default_printer=stored.default_printer,
         default_plate=stored.default_plate,
         display_unit=stored.display_unit,
         print_run_retention_seconds=stored.print_run_retention_seconds,
@@ -460,11 +468,21 @@ async def _check_operation_retention(
 
 @router.put("/settings", response_model=SettingsView, summary="Update the settings")
 async def put_settings(
-    patch: SettingsPatch, store: SettingsStoreDep, state: StateDep, ops: OperationsDep
+    patch: SettingsPatch,
+    store: SettingsStoreDep,
+    state: StateDep,
+    ops: OperationsDep,
+    registry: PrintersDep,
 ) -> SettingsView:
     """Saves the fields given; a ``null`` clears one and ``reset`` puts one back on the
     deployment's value. A live field applies before this answers, here and (through
-    ``settings.changed``) on every other replica."""
+    ``settings.changed``) on every other replica.
+
+    The default printer (#4971) is ``printer_id`` for a printer with a Bambuddy id and
+    ``default_printer`` for one with none, never both: a ``default_printer`` naming a
+    printer that has one is saved as its ``printer_id``, and a ``printer_id`` clears
+    ``default_printer``. 422 for a ``default_printer`` the registry does not hold."""
+    patch = await asyncio.to_thread(_default_printer, patch, registry)
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
     try:
@@ -476,6 +494,26 @@ async def put_settings(
     # This process sees its own write at once; workers within the source's TTL.
     state.store.source.invalidate()
     return _view(snapshot, state)
+
+
+def _default_printer(patch: SettingsPatch, registry: Printers) -> SettingsPatch:
+    """``patch`` with the default printer under one key (#4971, `put_settings`)."""
+    if "default_printer" in patch.model_fields_set:
+        if patch.default_printer is None:
+            return patch
+        row = registry.store.get(patch.default_printer)
+        if row is None:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, f"no printer {patch.default_printer}"
+            )
+        if row.bambuddy_printer_id is not None:
+            return patch.model_copy(
+                update={"printer_id": row.bambuddy_printer_id, "default_printer": None}
+            )
+        return patch.model_copy(update={"printer_id": None, "default_printer": row.id})
+    if "printer_id" in patch.model_fields_set:
+        return patch.model_copy(update={"default_printer": None})
+    return patch
 
 
 def _current_model_projects(
@@ -523,8 +561,10 @@ def _remembered(
     settings: StoredSettings,
     project_targets: dict[int, ProjectTarget],
     model_projects: dict[str, ModelProject] | None = None,
+    printer_names: dict[str, str] | None = None,
 ) -> RememberedChoices:
     return RememberedChoices(
+        printer_names=printer_names or {},
         project_print_targets={str(pid): target for pid, target in project_targets.items()},
         model_print_choices=settings.model_print_choices,
         printer_bed_types=settings.printer_bed_types,
@@ -544,7 +584,11 @@ def _remembered(
     summary="What the print dialog remembers",
 )
 async def get_remembered(
-    store: SettingsStoreDep, uploads: UploadsDep, catalogue: CatalogueDep, presets: PresetsDep
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+    catalogue: CatalogueDep,
+    presets: PresetsDep,
+    registry: PrintersDep,
 ) -> RememberedChoices:
     """Each entry is forgotten through its own route: ``PUT /print/models/{slug}/choices``
     with an empty body (a ``library:<file id>`` entry, #1754, through
@@ -562,7 +606,9 @@ async def get_remembered(
     model_projects = await asyncio.to_thread(
         _current_model_projects, settings, catalogue, presets, store
     )
-    return _remembered(settings, await uploads.project_targets(), model_projects)
+    rows = await asyncio.to_thread(registry.store.list)
+    names = {row.id: row.name for row in rows if row.bambuddy_printer_id is None}
+    return _remembered(settings, await uploads.project_targets(), model_projects, names)
 
 
 @router.delete(
@@ -613,10 +659,20 @@ def get_print_options(store: SettingsStoreDep) -> PrintOptionsState:
     response_model=PrintOptionsView,
     summary="Remember print options for one scope",
 )
-def put_print_options(body: PrintOptionsUpdate, store: SettingsStoreDep) -> PrintOptionsView:
-    """Only the named scope changes; the other two are left exactly as they were."""
+def put_print_options(
+    body: PrintOptionsUpdate, store: SettingsStoreDep, registry: PrintersDep
+) -> PrintOptionsView:
+    """Only the named scope changes; the other two are left exactly as they were. A
+    printer's key is its Bambuddy id, or the registry id of one with none (#4971): the
+    registry id of a printer that has one is kept under the Bambuddy id, as the previous
+    build reads it."""
     scope: OptionScope = body.scope
-    return _options_view(store.save_print_options(scope, body.key, body.options))
+    key = body.key
+    if scope == "printer" and key is not None and not (key.isascii() and key.isdecimal()):
+        row = registry.store.get(key)
+        if row is not None and row.bambuddy_printer_id is not None:
+            key = str(row.bambuddy_printer_id)
+    return _options_view(store.save_print_options(scope, key, body.options))
 
 
 @router.post("/settings/test", response_model=ConnectionTest, summary="Verify the API key")

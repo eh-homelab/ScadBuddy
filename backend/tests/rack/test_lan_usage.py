@@ -170,7 +170,12 @@ class _Recording:
         self.fail = fail
 
     async def record_lan_picks(
-        self, run_id: str, subtask_name: str, printer_id: int | None, picks: list[PickedHotend]
+        self,
+        run_id: str,
+        subtask_name: str,
+        printer_id: int | None,
+        picks: list[PickedHotend],
+        printer: str | None = None,
     ) -> int:
         if self.fail:
             raise psycopg.OperationalError("the database is gone")

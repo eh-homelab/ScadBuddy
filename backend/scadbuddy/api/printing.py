@@ -149,6 +149,7 @@ from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.printers.component import Printers, PrintersDep
 from scadbuddy.printers.lan_models import LanStopped
 from scadbuddy.printers.progress import LanProgress, lan_control
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.component import RackUsageDep
 from scadbuddy.rack.rank import Usage, rack_color, rack_positions
 from scadbuddy.rack.usage import RackUsage
@@ -255,6 +256,37 @@ class PrinterBedType(BaseModel):
 #: The largest Bambuddy printer id (``printers.bambuddy_printer_id`` is an ``integer``).
 _BAMBUDDY_ID_MAX = 2**31 - 1
 
+#: A per-printer route's path: a registry printer's id, or a Bambuddy printer's (#4971).
+PrinterIdPath = Annotated[
+    str,
+    Path(max_length=64, description="A registry printer's id, or a Bambuddy printer's (#4971)."),
+]
+
+
+def printer_ids(store: PrinterStore, printer_id: str) -> tuple[int | None, str | None]:
+    """A per-printer route's path as ``(Bambuddy id, registry id)`` (#4971): a Bambuddy
+    integer as itself, with no registry id looked up; a registry id with its row's
+    Bambuddy link. 404 for an integer past Bambuddy's range or a registry id the registry
+    does not hold."""
+    if printer_id.isascii() and printer_id.isdecimal():
+        bambuddy_id = int(printer_id)
+        if bambuddy_id > _BAMBUDDY_ID_MAX:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+        return bambuddy_id, None
+    row = store.get(printer_id)
+    if row is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+    return row.bambuddy_printer_id, row.id
+
+
+def printer_key(bambuddy_id: int | None, printer: str | None) -> str:
+    """A per-printer settings map's key (#4971): the Bambuddy id, which the previous
+    build reads, else the registry id of a printer with none."""
+    if bambuddy_id is not None:
+        return str(bambuddy_id)
+    assert printer is not None, "a printer has one id or the other"
+    return printer
+
 
 class PrinterRackAlgorithmPut(BaseModel):
     """How to pick this printer's rack nozzle (#836); ``null`` forgets it."""
@@ -271,9 +303,11 @@ RACK_ALGORITHM_SUPERSEDED_PROBLEM = "https://scadbuddy.dev/problems/rack-algorit
 
 
 class PrinterRackAlgorithm(BaseModel):
-    """The rack algorithm in force on one printer (#836)."""
+    """The rack algorithm in force on one printer (#836): ``printer_id`` its Bambuddy
+    printer, ``printer`` its registry printer when it has no Bambuddy id (#4971)."""
 
-    printer_id: int
+    printer_id: int | None = None
+    printer: str | None = None
     algorithm: RackAlgorithm
 
 
@@ -424,9 +458,7 @@ def put_model_project(
     summary="Remember the plate on this printer",
 )
 def put_printer_bed_type(
-    printer_id: Annotated[
-        str, Path(description="A registry printer's id, or a Bambuddy printer's (#4971).")
-    ],
+    printer_id: PrinterIdPath,
     body: PrinterBedTypePut,
     store: SettingsStoreDep,
     registry: PrintersDep,
@@ -439,18 +471,10 @@ def put_printer_bed_type(
     printer by its integer id, as before; the plate is kept under both where the registry
     links them. 404 for a registry id the registry does not hold.
     """
-    bambuddy_id: int | None
-    if printer_id.isascii() and printer_id.isdecimal():
-        bambuddy_id = int(printer_id)
-        if bambuddy_id > _BAMBUDDY_ID_MAX:
-            raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
+    bambuddy_id, printer = printer_ids(registry.store, printer_id)
+    if bambuddy_id is not None and printer is None:
         linked = registry.store.by_bambuddy_id(bambuddy_id)
         printer = linked.id if linked is not None else None
-    else:
-        row = registry.store.get(printer_id)
-        if row is None:
-            raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
-        printer, bambuddy_id = row.id, row.bambuddy_printer_id
     settings = store.set_printer_bed_type(bambuddy_id, body.bed_type, printer=printer)
     return PrinterBedType(
         printer_id=bambuddy_id,
@@ -480,12 +504,19 @@ def put_printer_bed_type(
     },
 )
 def put_printer_rack_algorithm(
-    printer_id: int, body: PrinterRackAlgorithmPut, store: SettingsStoreDep
+    printer_id: PrinterIdPath,
+    body: PrinterRackAlgorithmPut,
+    store: SettingsStoreDep,
+    registry: PrintersDep,
 ) -> PrinterRackAlgorithm:
     """The print dialog's Advanced rack algorithm (#836, spec §4), per printer. Needs no
-    Bambuddy, like the printer's remembered plate."""
+    Bambuddy, like the printer's remembered plate. The path is a Bambuddy printer's id or
+    a registry printer's (#4971): one with a Bambuddy id is kept under it, as the
+    previous build reads it, one with none (LAN-only) under its registry id."""
+    bambuddy_id, printer = printer_ids(registry.store, printer_id)
+    key = printer_key(bambuddy_id, printer)
     try:
-        algorithm = store.set_printer_rack_algorithm(printer_id, body.algorithm, body.version)
+        algorithm = store.set_printer_rack_algorithm(key, body.algorithm, body.version)
     except RackAlgorithmSupersededError:
         raise ApiError(
             status.HTTP_409_CONFLICT,
@@ -498,7 +529,7 @@ def put_printer_rack_algorithm(
         # other lost connection may have dropped after the commit.
         logger.warning(
             "rack-algorithm save gave up on the database",
-            extra={"printer_id": printer_id, "error": type(error).__name__},
+            extra={"printer_id": bambuddy_id, "printer": printer, "error": type(error).__name__},
         )
         rolled_back = isinstance(error, PoolTimeout | psycopg.errors.QueryCanceled)
         outcome = (
@@ -519,7 +550,11 @@ def put_printer_rack_algorithm(
             f"{outcome}: {cause} ({type(error).__name__})",
             type_=DATABASE_UNAVAILABLE_PROBLEM,
         ) from None
-    return PrinterRackAlgorithm(printer_id=printer_id, algorithm=algorithm)
+    return PrinterRackAlgorithm(
+        printer_id=bambuddy_id,
+        printer=None if bambuddy_id is not None else printer,
+        algorithm=algorithm,
+    )
 
 
 @router.get(
@@ -1401,7 +1436,22 @@ async def get_preview_toolpath(
 def names_no_printer(settings: StoredSettings, printer: str | None, printer_id: int | None) -> bool:
     """Whether a dialog request names no printer and Settings none either: the check then
     has nothing to judge, and reads nothing (`check_print`)."""
-    return printer is None and (printer_id or settings.printer_id) is None
+    return (
+        printer is None
+        and (printer_id or settings.printer_id) is None
+        and settings.default_printer is None
+    )
+
+
+def remembered_printer(
+    printer: str | None, printer_id: int | None, remembered: ModelPrintChoices | None
+) -> tuple[str | None, int | None]:
+    """The request's printer, else the one the subject last printed on: its Bambuddy id,
+    else the registry id of a printer with none (#4971)."""
+    printer_id = printer_id or (remembered.printer_id if remembered else None)
+    if printer is None and printer_id is None and remembered is not None:
+        printer = remembered.printer
+    return printer, printer_id
 
 
 async def opening_route(
@@ -1513,12 +1563,8 @@ async def get_choices(
     meta = require_output(outputs, output_id)
     settings = store.load()
     remembered = settings.model_print_choices.get(meta.slug)
-    route = await opening_route(
-        settings,
-        printers,
-        printer=printer,
-        printer_id=printer_id or (remembered.printer_id if remembered else None),
-    )
+    printer, printer_id = remembered_printer(printer, printer_id, remembered)
+    route = await opening_route(settings, printers, printer=printer, printer_id=printer_id)
     if route is not None:
         native_view = await native_choices(
             OutputSource(store=outputs, meta=meta, uploads=uploads, settings=settings),

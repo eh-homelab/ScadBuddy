@@ -38,9 +38,11 @@ type Row = {
   forget: () => Promise<unknown>
 }
 
-function describeChoices(choices: ModelPrintChoices, printerName: (id: number) => string): string {
+function describeChoices(choices: ModelPrintChoices, printerName: (id: number | string) => string): string {
   const parts: string[] = []
-  if (choices.printer_id !== null && choices.printer_id !== undefined) parts.push(printerName(choices.printer_id))
+  // #4971 — a LAN-only printer is remembered by its registry id.
+  const printer = choices.printer_id ?? choices.printer
+  if (printer !== null && printer !== undefined) parts.push(printerName(printer))
   if (choices.tier) parts.push(`${choices.tier} quality`)
   if (choices.process_name) parts.push(choices.process_name)
   if (choices.print_sequence) parts.push(choices.print_sequence)
@@ -130,8 +132,13 @@ export function RememberedChoicesPanel({
   const [busy, setBusy] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
+  // #4971 — a printer with no Bambuddy id is keyed by its registry id, named by the server.
   const printerName = (id: number | string) =>
-    targets?.printers?.find((printer) => String(printer.id) === String(id))?.name ?? `Printer ${id}`
+    targets?.printers?.find((printer) => String(printer.id) === String(id))?.name ??
+    state.data?.printer_names?.[String(id)] ??
+    `Printer ${id}`
+  /** A per-printer map's key as the routes take it: a Bambuddy id, or a registry id. */
+  const printerRef = (key: string): number | string => (/^\d+$/.test(key) ? Number(key) : key)
 
   const projectName = (id: string) =>
     projects?.projects?.find((project) => String(project.id) === id)?.name ?? `Project ${id}`
@@ -177,7 +184,7 @@ export function RememberedChoicesPanel({
         kind: 'Rack nozzle',
         subject: printerName(printerId),
         value: ALGORITHM_LABELS[algorithm],
-        forget: () => api.putPrinterRackAlgorithm(Number(printerId), null),
+        forget: () => api.putPrinterRackAlgorithm(printerRef(printerId), null),
       })
     }
     for (const [projectId, target] of Object.entries(remembered.project_print_targets ?? {})) {
@@ -185,7 +192,8 @@ export function RememberedChoicesPanel({
         key: `project:${projectId}`,
         kind: 'Project printer and nozzle',
         subject: projectName(projectId),
-        value: [printerName(target.printer_id), target.nozzle_diameter ? `${target.nozzle_diameter} mm` : null]
+        // #4971 — a LAN-only printer's target has Bambuddy id 0 and its registry id.
+        value: [printerName(target.printer ?? target.printer_id), target.nozzle_diameter ? `${target.nozzle_diameter} mm` : null]
           .filter(Boolean)
           .join(' · '),
         forget: () => api.forgetRememberedProject(projectId),

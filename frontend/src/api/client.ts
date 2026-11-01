@@ -1727,12 +1727,12 @@ export const api = {
    * with a lower `version` than the stored one is refused with 409 (#1216).
    */
   putPrinterRackAlgorithm: (
-    printerId: number,
+    printerId: number | string,
     algorithm: RackAlgorithm | null,
     version: number = nextRackAlgorithmVersion(),
     signal?: AbortSignal,
   ) =>
-    request<PrinterRackAlgorithm>(`/print/printers/${printerId}/rack-algorithm`, {
+    request<PrinterRackAlgorithm>(`/print/printers/${seg(String(printerId))}/rack-algorithm`, {
       method: 'PUT',
       body: JSON.stringify({ algorithm, version }),
       signal,

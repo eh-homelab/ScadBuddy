@@ -1072,6 +1072,12 @@ export const printTools: Tool[] = [
         slug: slug.optional(),
         library_file_id: libraryFileId.optional(),
         printer_id: z.number().int().nullable().optional(),
+        printer: z
+          .string()
+          .max(64)
+          .nullable()
+          .optional()
+          .describe('A registry printer id, for a printer with no Bambuddy id (LAN-only); ignored beside printer_id'),
         filament_plan: z.array(slotChoice).optional().describe('Only spools moved off the suggestion'),
         nozzles: z.array(nozzleChoice).max(2).optional(),
         tier: tier.nullable().optional(),
@@ -1088,11 +1094,12 @@ export const printTools: Tool[] = [
     risk: 'write',
     routes: ['PUT /api/v1/print/models/{slug}/choices', 'PUT /api/v1/print/library/{file_id}/choices'],
     handler: async (
-      { slug, library_file_id, printer_id, filament_plan, nozzles, tier, process_name, print_sequence },
+      { slug, library_file_id, printer_id, printer, filament_plan, nozzles, tier, process_name, print_sequence },
       { backend },
     ) => {
       const body = {
         printer_id: printer_id ?? null,
+        printer: printer ?? null,
         filament_plan: filament_plan ?? [],
         nozzles: nozzles ?? [],
         tier: tier ?? null,
@@ -1150,9 +1157,10 @@ export const printTools: Tool[] = [
       "Remember how a printer's nozzle rack is ranked when a print leaves the hotend to ScadBuddy (#836): " +
       '`least_used` (the default), `oldest_first`, `newest_first`, or `bambuddy` (the printer picks; no ' +
       'nozzle mapping is sent). null forgets it. Every later print on that printer, the dialog\'s and ' +
-      "print_output's, ranks by it. Answers the algorithm now in force.",
+      "print_output's, ranks by it. Answers the algorithm now in force. The printer is its Bambuddy " +
+      'printer id or its registry printer id (a LAN-only printer has only the latter).',
     input: z.object({
-      printer_id: z.number().int(),
+      printer_id: z.union([z.number().int(), z.string().max(64)]),
       algorithm: z.enum(['least_used', 'oldest_first', 'newest_first', 'bambuddy']).nullable(),
     }),
     risk: 'write',
@@ -1162,7 +1170,7 @@ export const printTools: Tool[] = [
       json(
         await ok(
           backend.PUT('/api/v1/print/printers/{printer_id}/rack-algorithm', {
-            params: { path: { printer_id } },
+            params: { path: { printer_id: String(printer_id) } },
             body: { algorithm },
           }),
           `remember rack algorithm of printer ${printer_id}`,
