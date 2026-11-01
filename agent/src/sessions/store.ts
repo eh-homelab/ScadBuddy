@@ -296,33 +296,45 @@ function firstRows(segments: Segment[], n: number): Segment[] {
 /**
  * The rows of `sessionId`'s main transcript, in the order it loads: its inherited rows (a
  * forgotten parent's range, copied in), then its parent's transcript through the cut, then
- * its own; for a fork of a fork, the parent's is built the same way from its own parent. Two
- * statements however long the chain: its links, then every row of the sessions on it. `sql` is
- * one snapshot, so a copy committed meanwhile is read either as the link or as the rows, never
- * both. Only the rows a load takes are opened (`openSegments`).
+ * its own; for a fork of a fork, the parent's is built the same way from its own parent. One
+ * statement however long the chain, its links and every row of the sessions on it, so it is one
+ * snapshot even in a READ COMMITTED transaction (forgetSubject's): a copy committed meanwhile is
+ * read either as the link or as the rows, never both (#5062). Only the rows a load takes are
+ * opened (`openSegments`).
  */
-async function segmentsOf(sql: TransactionSql, sessionId: string): Promise<Segment[]> {
+async function segmentsOf(sql: Sql | TransactionSql, sessionId: string): Promise<Segment[]> {
+  type ChainRow = EntryRow & { owner: string; cut: number | null; depth: number; inherited: boolean | null }
   // From the session up to the first ancestor that is no fork. Links are only ever made to an
-  // existing session at an insert and only ever cleared, so the chain has no cycle.
-  const chain: { id: string; cut: number | null }[] = isUuid(sessionId)
-    ? await sql<{ id: string; cut: number | null }[]>`
+  // existing session at an insert and only ever cleared, so the chain has no cycle. A session's
+  // links come with no row (`id` NULL) when it has no entries of its own.
+  const joined = isUuid(sessionId)
+    ? await sql<ChainRow[]>`
         WITH RECURSIVE chain (id, parent, cut, depth) AS (
           SELECT id, fork_parent_id, fork_cut, 0 FROM ai_sessions WHERE id = ${sessionId}::uuid
           UNION ALL
           SELECT s.id, s.fork_parent_id, s.fork_cut, c.depth + 1 FROM ai_sessions s JOIN chain c ON s.id = c.parent
         )
-        SELECT id::text AS id, cut FROM chain ORDER BY depth`
+        SELECT c.id::text AS owner, c.cut, c.depth, e.id::text AS id, e.uuid, e.entry, e.sealed, e.inherited
+        FROM chain c LEFT JOIN ai_session_entries e ON e.session_id = c.id::text AND e.subpath = ''
+        ORDER BY c.depth, e.inherited DESC, e.id`
     : []
-  if (chain.length === 0) chain.push({ id: sessionId, cut: null })
-  const rows = await sql<(EntryRow & { session_id: string; inherited: boolean })[]>`
-    SELECT session_id, id::text AS id, uuid, entry, sealed, inherited FROM ai_session_entries
-    WHERE session_id IN ${sql(chain.map((link) => link.id))} AND subpath = ''
-    ORDER BY session_id, inherited DESC, ai_session_entries.id`
+  const chain: { id: string; cut: number | null }[] = []
+  for (const row of joined) if (chain.at(-1)?.id !== row.owner) chain.push({ id: row.owner, cut: row.cut })
+  let rows = joined.filter((row) => row.id !== null)
+  if (chain.length === 0) {
+    // No session row: the plain rows of the key, as before forks (a test store, a session not yet inserted).
+    chain.push({ id: sessionId, cut: null })
+    rows = (
+      await sql<(EntryRow & { inherited: boolean })[]>`
+        SELECT id::text AS id, uuid, entry, sealed, inherited FROM ai_session_entries
+        WHERE session_id = ${sessionId} AND subpath = '' ORDER BY inherited DESC, ai_session_entries.id`
+    ).map((row) => ({ ...row, owner: sessionId, cut: null, depth: 0 }))
+  }
   // Built from the far end: each fork takes the first `cut` of the transcript before it.
   let through: Segment[] = []
   for (let i = chain.length - 1; i >= 0; i--) {
     const owner = chain[i]!.id
-    const mine = rows.filter((row) => row.session_id === owner)
+    const mine = rows.filter((row) => row.owner === owner)
     const cut = chain[i]!.cut
     through = [
       { owner, rows: mine.filter((row) => row.inherited) },
@@ -345,7 +357,7 @@ const TRANSCRIPT_TRIES = 3
 /** `sessionId`'s main transcript as it loads (`segmentsOf`), each run opened under its owner's key. */
 async function transcriptOf(sql: Sql, keyOf: KeyOf, sessionId: string): Promise<SessionStoreEntry[]> {
   for (let attempt = 1; ; attempt++) {
-    const segments = await sql.begin('isolation level repeatable read read only', (tx) => segmentsOf(tx, sessionId))
+    const segments = await segmentsOf(sql, sessionId)
     try {
       return await openSegments(keyOf, segments)
     } catch (err) {
