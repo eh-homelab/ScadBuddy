@@ -218,12 +218,13 @@ const CARRY_ON = 'Carry on without the tab'
  * Whether a user entry landed in `id`'s main transcript after row `mark`. A sealed row says so in
  * its plaintext `entry_type`; a row from before sealing has none, so its own top-level `type` is
  * read (a substring match would take an assistant entry that quotes one). An unparseable legacy
- * row is no user entry.
+ * row is no user entry. A row copied in from a forgotten parent (store.ts `inherited`) is none of
+ * this session's turns, whatever its id.
  */
 export async function userEntryLanded(sql: Sql, id: string, mark: number): Promise<boolean> {
   const rows = await sql<{ typed: boolean; entry: string | null }[]>`
     SELECT entry_type = 'user' AS typed, entry FROM ai_session_entries
-    WHERE session_id = ${id} AND subpath = '' AND id > ${mark}
+    WHERE session_id = ${id} AND subpath = '' AND id > ${mark} AND NOT inherited
       AND (entry_type = 'user' OR (entry_type IS NULL AND entry LIKE '%"user"%'))
     ORDER BY id`
   return rows.some((row) => {

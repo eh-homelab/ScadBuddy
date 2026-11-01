@@ -2,14 +2,18 @@ import type { Client } from '@temporalio/client'
 import { WorkflowNotFoundError } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import { backgroundWorkflowId } from '../background/service.js'
-import { payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
+import { type PayloadKeys, payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
+import { copyForkRanges, ForksNeedKeys, hasForks } from './store.js'
 import { notifyWarmEvict } from './warmEvict.js'
 
 // forgetSubject (spec 2026-10-01 §6.5, plan 5c Ruling 12): the one operation every
 // deletion of a durable session or a flow run goes through. In this order:
 //   0. a session's background tasks (src/background/) end: their rows, then their
 //      workflows `bgtask-<session>-<id>`, terminated, so none encodes again under the key;
-//   1. delete the subject's `ai_payload_keys` row and record it in
+//   1. a session's forks that read its transcript through it (store.ts, plan 2026-10-13
+//      Step 6.5) take the range each references, sealed under their own keys, in the
+//      transaction that then goes on to
+//      delete the subject's `ai_payload_keys` row and record it in
 //      `ai_forgotten_subjects`, so no key is ever made for it again: from then on every
 //      copy of its payloads (history, Visibility, Archival) is undecryptable, whatever
 //      fails next. A flow run's images (`ai_flow_blobs`, #2477) are deleted with it.
@@ -32,8 +36,11 @@ export type ForgetDeps = {
   /** The Temporal client; without one, the workflow is left to the namespace's retention. */
   client?: Client | undefined
   namespace?: string
-  /** Drops the subject's data key from this process's cache too. */
-  keys?: { forget(subject: string): void } | undefined
+  /**
+   * Drops the subject's data key from this process's cache too, and opens and seals the
+   * transcript a session's forks take (step 1); a session with forks is not forgotten without it.
+   */
+  keys?: (PayloadKeys & { forget(subject: string): void }) | undefined
   /** Where its large payloads are kept (FilePayloadStore); without one, they stay, unreadable. */
   payloads?: { forget(subject: string): Promise<void> } | undefined
   /** Its saved http bodies on this pod (turnServers.ts `removeTurnDir`); other pods' go to their sweep. */
@@ -66,19 +73,26 @@ async function endBackgroundTasks(deps: ForgetDeps, sessionId: string): Promise<
 
 export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<Forgotten> {
   if (subjectOf(subject) !== subject) throw new Error(`${subject} is not a session-<uuid> or flow-<uuid> subject`)
+  const sessionId = subject.startsWith('session-') ? subject.slice('session-'.length) : undefined
+  // Said before anything ends; the check that holds is copyForkRanges's, under the lock.
+  if (sessionId !== undefined && !deps.keys && (await hasForks(deps.sql, sessionId))) throw new ForksNeedKeys(sessionId)
   deps.keys?.forget(subject)
-  if (subject.startsWith('session-')) await endBackgroundTasks(deps, subject.slice('session-'.length))
+  if (sessionId !== undefined) await endBackgroundTasks(deps, sessionId)
   // The tombstone with the deletion: no encoder still running for the subject (a
   // workflow task or an activity before the termination below) can make it a new key.
   const keys = await deps.sql.begin(async (tx) => {
     // The lock key creation takes (payloadCodec.ts), so no encoder's tombstone check
     // reads from before this commits.
     await tx`SELECT pg_advisory_xact_lock(hashtext(${payloadKeyLock(subject)}))`
+    // While the key still opens its transcript; a fork made later sees the tombstone (manager.ts insert).
+    if (sessionId !== undefined) await copyForkRanges(tx, deps.keys, sessionId)
     await tx`INSERT INTO ai_forgotten_subjects (subject) VALUES (${subject}) ON CONFLICT (subject) DO NOTHING`
     // A flow run's images go with its key (#2477, temporal/flowBlobs.ts).
     if (subject.startsWith('flow-')) await tx`DELETE FROM ai_flow_blobs WHERE subject = ${subject}`
     return tx`DELETE FROM ai_payload_keys WHERE subject = ${subject}`
   })
+  // Again: copyForkRanges read the key to open the transcript, which cached it in this process.
+  deps.keys?.forget(subject)
   let workflow: Forgotten['workflow'] = 'not_reached'
   if (deps.client) {
     const client = deps.client

@@ -820,11 +820,16 @@ their budget and turn cap.
 When a session's budget runs out, the assistant panel says so once ("This chat used
 its $1.00 budget.") and offers:
 
-- **Continue in a new chat**: `POST /api/v1/ai/sessions/:id/fork` copies the transcript
-  into a new session with the current Settings budget, owned by the browser user, and
-  the panel switches to it. It counts against the new-session limit (`429`). With
-  `up_to` (a reply's panel message id, #793) it copies the conversation only through
-  that reply. A fork runs in its parent's mode: a durable parent's conversation is read
+- **Continue in a new chat**: `POST /api/v1/ai/sessions/:id/fork` makes a new session
+  with the transcript so far and the current Settings budget, owned by the browser user,
+  and the panel switches to it. It counts against the new-session limit (`429`). With
+  `up_to` (a reply's panel message id, #793) the child has the conversation only through
+  that reply. The transcript is copy-on-write (plan 2026-10-13 Step 6.5, #4212): the
+  child records where it cut its parent's (`ai_sessions.fork_parent_id`, `fork_cut`),
+  reads the parent's entries through that cut under the parent's key, and stores only
+  what it adds. Forgetting the parent (`forgetSubject`) first copies the range each fork
+  reads into that fork, sealed under the fork's own key, so it needs the KEK mounted
+  while the parent has forks. Forks made before this hold a copy. A fork runs in its parent's mode: a durable parent's conversation is read
   from its workflow (the `fork_point` Query) and the child's workflow starts with a copy,
   sealed under the child's own key (#2688); its replies are matched to the transcript by
   their text, and a parent whose turn is running forks at its last finished reply.

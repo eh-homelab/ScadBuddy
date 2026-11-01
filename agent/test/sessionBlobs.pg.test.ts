@@ -6,11 +6,13 @@ import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
 import type { SessionManager } from '../src/sessions/manager.js'
 import { SessionBlobs, sessionImage } from '../src/sessions/blobs.js'
+import { forgetSubject } from '../src/sessions/forget.js'
 import type { ServerEvent } from '../src/sessions/protocol.js'
 import { expectPanelAccepts } from './support/frontendProtocol.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, type FakeTurn, manager, scriptedRunner, tempPaths } from './support/sessions.js'
+import { testPayloadKeys } from './support/payloadKeys.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
 
 // #782: the images a session's tool results carried, stored per session
@@ -187,7 +189,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     expect(childEvents.find((e) => e.type === 'tool.result')).toMatchObject({ images: [{ name: NAME }] })
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
 
-    await db.sql`DELETE FROM ai_sessions WHERE id = ${id}`
+    // Through forgetSubject, which copies the transcript the fork reads into it first (plan Step 6.5).
+    await forgetSubject({ sql: db.sql, keys: testPayloadKeys(db.sql) }, `session-${id}`)
     expect(await db.sql`SELECT 1 FROM ai_session_blobs WHERE session_id = ${id}`).toHaveLength(0)
     expect((await get(`/api/v1/ai/sessions/${child.id}/blobs/${NAME}`)).status).toBe(200)
   })

@@ -16,7 +16,7 @@ import type { Credential } from '../credentials.js'
 import { RESTORED_EPSILON } from '../harness/fallback.js'
 import { Inbox } from '../harness/inbox.js'
 import { type HarnessRun, runHarness } from '../harness/run.js'
-import type { AppendFence, PostgresSessionStore } from './store.js'
+import { type AppendFence, type PostgresSessionStore, transcriptExists } from './store.js'
 import type { AssembledTurn, FingerprintParts } from './turnRunner.js'
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json }
@@ -607,7 +607,7 @@ export class WarmSessions {
       await pending
       const other = await this.deps.sql<{ uuid: string }[]>`
         SELECT uuid FROM ai_session_entries
-        WHERE session_id = ${slot.entry.sessionId} AND subpath = '' AND uuid IS NOT NULL
+        WHERE session_id = ${slot.entry.sessionId} AND subpath = '' AND uuid IS NOT NULL AND NOT inherited
           AND id > ${mirror.since ?? '0'}::bigint AND NOT (uuid = ANY(${[...mirror.own]}::text[]))
         LIMIT 1`
       if (mirror.pending === pending) return other.length > 0
@@ -620,15 +620,17 @@ export class WarmSessions {
     // resume at all. With a mirror, the cost a resume restores is read from
     // what the process loads through it (`onLoaded`); without one, from the
     // table's last `cost-state`.
-    const [row] = await this.deps.sql<{ since: string | null; resume: boolean }[]>`
-      SELECT
-        (SELECT max(id) FROM ai_session_entries
-          WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NOT NULL)::text AS since,
-        EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '') AS resume`
+    // A fork with no row of its own yet resumes too: from its parent's, through the cut (store.ts).
+    const [[row], resume] = await Promise.all([
+      this.deps.sql<{ since: string | null }[]>`
+        SELECT (SELECT max(id) FROM ai_session_entries
+          WHERE session_id = ${sessionId} AND subpath = '' AND uuid IS NOT NULL AND NOT inherited)::text AS since`,
+      transcriptExists(this.deps.sql, sessionId),
+    ])
     const mirror = turn.run.sessionStore
       ? new MirroredTranscript(turn.run.sessionStore, sessionId, row?.since ?? null, this.log)
       : undefined
-    const costState = row?.resume && !mirror ? await this.deps.store.lastOfType({ projectKey: '', sessionId }, 'cost-state') : null
+    const costState = resume && !mirror ? await this.deps.store.lastOfType({ projectKey: '', sessionId }, 'cost-state') : null
     const carriedUsd = costStateUsd(costState === null ? null : JSON.stringify(costState), this.log)
     const inbox = new Inbox()
     const { resume: _resume, sessionId: _sessionId, ...run } = turn.run
@@ -638,7 +640,7 @@ export class WarmSessions {
       prompt: inbox,
       maxBudgetUsd: Math.max(remainingUsd, MIN_CAP_USD),
       ...(mirror ? { sessionStore: mirror.store } : {}),
-      ...(row?.resume ? { resume: sessionId } : { sessionId }),
+      ...(resume ? { resume: sessionId } : { sessionId }),
     })
     const entry: WarmEntry = {
       sessionId,

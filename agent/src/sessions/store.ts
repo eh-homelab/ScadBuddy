@@ -1,5 +1,6 @@
 import type { SessionKey, SessionStore, SessionStoreEntry } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql, TransactionSql } from 'postgres'
+import { isUuid } from '../harness/uuid.js'
 import { openBytes, sealBytes } from '../secrets.js'
 import { type PayloadKeys, payloadKeyLock, SubjectForgotten } from '../temporal/payloadCodec.js'
 
@@ -60,6 +61,19 @@ import { type PayloadKeys, payloadKeyLock, SubjectForgotten } from '../temporal/
 // colliding with row id 5. Rows written before sealing still hold
 // plaintext `entry` and are read as they are, until the backfill.
 
+// A fork is copy-on-write (plan 2026-10-13 Step 6.5, decision Q8, #4212): its
+// `ai_sessions` row names the session it was forked from (`fork_parent_id`) and how
+// many entries of that session's main transcript it takes (`fork_cut`). `load` of
+// the child's main transcript is the parent's as the parent loads it (so through the
+// parent's own cut, for a fork of a fork), cut there and opened under each owner's
+// key, then the child's own rows. Nothing is copied at the fork. Forgetting a parent
+// copies each child's range into the child first (`copyForkRanges`, forget.ts): those
+// rows are `inherited`, read before the child's own, and the link is cleared. The
+// parent's entries are passed on as they are, with the parent's `sessionId`: Claude
+// Code restores a session-scoped entry (a `cost-state`) only of the session it
+// resumes (warm.ts `restoredCostUsd`, measured in test/warmResumeCost.sdk.test.ts), so
+// the child does not take the parent's spend as its own.
+
 /** A condition an append is written under, checked in its transaction (`appendIf`). */
 export type AppendFence = (tx: TransactionSql) => Promise<boolean>
 
@@ -67,6 +81,12 @@ export type AppendFence = (tx: TransactionSql) => Promise<boolean>
 const ENTRY_TYPE = /^[a-z][a-z0-9_-]{0,63}$/
 
 type EntryRow = { id: string; uuid: string | null; entry: string | null; sealed: Buffer | null }
+
+/** A run of one session's rows in a transcript as it loads, and whose they are (their key and AAD). */
+type Segment = { owner: string; rows: EntryRow[] }
+
+/** At most this many rows in one INSERT of `copyForkRanges` (8 parameters each, under the protocol's 65535). */
+const COPY_BATCH = 1000
 
 export const entryTypeOf = (entry: { type?: unknown }): string | null =>
   typeof entry.type === 'string' && ENTRY_TYPE.test(entry.type) ? entry.type : null
@@ -166,6 +186,10 @@ export class PostgresSessionStore implements SessionStore {
 
   async load(key: SessionKey): Promise<SessionStoreEntry[] | null> {
     const subpath = subpathOf(key)
+    if (subpath === '') {
+      const entries = await transcriptOf(this.sql, (sessionId, create) => this.keyOf(sessionId, create), key.sessionId)
+      return entries.length === 0 ? null : entries
+    }
     const rows = await this.sql<EntryRow[]>`
       SELECT id::text AS id, uuid, entry, sealed FROM ai_session_entries
       WHERE session_id = ${key.sessionId} AND subpath = ${subpath}
@@ -182,28 +206,14 @@ export class PostgresSessionStore implements SessionStore {
     const subpath = subpathOf(key)
     const rows = await this.sql<EntryRow[]>`
       SELECT id::text AS id, uuid, entry, sealed FROM ai_session_entries
-      WHERE session_id = ${key.sessionId} AND subpath = ${subpath} AND uuid IS NULL
+      WHERE session_id = ${key.sessionId} AND subpath = ${subpath} AND uuid IS NULL AND NOT inherited
         AND (entry_type = ${type} OR (entry_type IS NULL AND entry LIKE ${`%"${type}"%`}))
       ORDER BY ai_session_entries.id DESC LIMIT 1`
     return rows.length === 0 ? null : (await this.opened(key.sessionId, subpath, rows))[0]!
   }
 
   private async opened(sessionId: string, subpath: string, rows: EntryRow[]): Promise<SessionStoreEntry[]> {
-    // SubjectForgotten when the session's key is gone; no key is made to read.
-    const dek = rows.some((row) => row.sealed) ? await this.keyOf(sessionId, false) : undefined
-    try {
-      return rows.map((row) => {
-        if (!row.sealed) return JSON.parse(row.entry!) as SessionStoreEntry
-        const json = openBytes(dek!, row.sealed, entryContext(sessionId, subpath, row.uuid ?? `#${row.id}`))
-        try {
-          return JSON.parse(json.toString('utf8')) as SessionStoreEntry
-        } finally {
-          json.fill(0)
-        }
-      })
-    } finally {
-      dek?.fill(0)
-    }
+    return openRows((id, create) => this.keyOf(id, create), sessionId, subpath, rows)
   }
 
   async listSessions(projectKey: string): Promise<{ sessionId: string; mtime: number }[]> {
@@ -233,10 +243,200 @@ export class PostgresSessionStore implements SessionStore {
     return rows.map((row) => row.subpath)
   }
 
-  /** Whether the SDK has written anything for this session (decides `sessionId` vs `resume`). */
+  /** Whether this session has a transcript to resume (decides `sessionId` vs `resume`): rows of its own, or a fork's parent. */
   async exists(sessionId: string): Promise<boolean> {
-    const rows = await this.sql`
-      SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '' LIMIT 1`
-    return rows.length > 0
+    return transcriptExists(this.sql, sessionId)
   }
+}
+
+type KeyOf = (sessionId: string, create: boolean) => Promise<Buffer>
+
+/** Whether `sessionId` has a main transcript to resume: rows of its own, or the parent a fork reads through. */
+export async function transcriptExists(sql: Sql, sessionId: string): Promise<boolean> {
+  const [row] = isUuid(sessionId)
+    ? await sql<{ found: boolean }[]>`
+        SELECT EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '')
+          OR EXISTS (SELECT 1 FROM ai_sessions WHERE id = ${sessionId}::uuid AND fork_parent_id IS NOT NULL) AS found`
+    : await sql<{ found: boolean }[]>`
+        SELECT EXISTS (SELECT 1 FROM ai_session_entries WHERE session_id = ${sessionId} AND subpath = '') AS found`
+  return row?.found === true
+}
+
+async function openRows(keyOf: KeyOf, sessionId: string, subpath: string, rows: EntryRow[]): Promise<SessionStoreEntry[]> {
+  // SubjectForgotten when the session's key is gone; no key is made to read.
+  const dek = rows.some((row) => row.sealed) ? await keyOf(sessionId, false) : undefined
+  try {
+    return rows.map((row) => {
+      if (!row.sealed) return JSON.parse(row.entry!) as SessionStoreEntry
+      const json = openBytes(dek!, row.sealed, entryContext(sessionId, subpath, row.uuid ?? `#${row.id}`))
+      try {
+        return JSON.parse(json.toString('utf8')) as SessionStoreEntry
+      } finally {
+        json.fill(0)
+      }
+    })
+  } finally {
+    dek?.fill(0)
+  }
+}
+
+/** The first `n` rows of a transcript's segments. */
+function firstRows(segments: Segment[], n: number): Segment[] {
+  const out: Segment[] = []
+  let left = n
+  for (const segment of segments) {
+    if (left <= 0) break
+    const rows = segment.rows.slice(0, left)
+    left -= rows.length
+    out.push({ owner: segment.owner, rows })
+  }
+  return out
+}
+
+/**
+ * The rows of `sessionId`'s main transcript, in the order it loads: its inherited rows (a
+ * forgotten parent's range, copied in), then its parent's transcript through the cut, then
+ * its own; for a fork of a fork, the parent's is built the same way from its own parent. Two
+ * statements however long the chain: its links, then every row of the sessions on it. `sql` is
+ * one snapshot, so a copy committed meanwhile is read either as the link or as the rows, never
+ * both. Only the rows a load takes are opened (`openSegments`).
+ */
+async function segmentsOf(sql: TransactionSql, sessionId: string): Promise<Segment[]> {
+  // From the session up to the first ancestor that is no fork. Links are only ever made to an
+  // existing session at an insert and only ever cleared, so the chain has no cycle.
+  const chain: { id: string; cut: number | null }[] = isUuid(sessionId)
+    ? await sql<{ id: string; cut: number | null }[]>`
+        WITH RECURSIVE chain (id, parent, cut, depth) AS (
+          SELECT id, fork_parent_id, fork_cut, 0 FROM ai_sessions WHERE id = ${sessionId}::uuid
+          UNION ALL
+          SELECT s.id, s.fork_parent_id, s.fork_cut, c.depth + 1 FROM ai_sessions s JOIN chain c ON s.id = c.parent
+        )
+        SELECT id::text AS id, cut FROM chain ORDER BY depth`
+    : []
+  if (chain.length === 0) chain.push({ id: sessionId, cut: null })
+  const rows = await sql<(EntryRow & { session_id: string; inherited: boolean })[]>`
+    SELECT session_id, id::text AS id, uuid, entry, sealed, inherited FROM ai_session_entries
+    WHERE session_id IN ${sql(chain.map((link) => link.id))} AND subpath = ''
+    ORDER BY session_id, inherited DESC, ai_session_entries.id`
+  // Built from the far end: each fork takes the first `cut` of the transcript before it.
+  let through: Segment[] = []
+  for (let i = chain.length - 1; i >= 0; i--) {
+    const owner = chain[i]!.id
+    const mine = rows.filter((row) => row.session_id === owner)
+    const cut = chain[i]!.cut
+    through = [
+      { owner, rows: mine.filter((row) => row.inherited) },
+      ...(cut === null ? [] : firstRows(through, cut)),
+      { owner, rows: mine.filter((row) => !row.inherited) },
+    ].filter((s) => s.rows.length > 0)
+  }
+  return through
+}
+
+async function openSegments(keyOf: KeyOf, segments: Segment[]): Promise<SessionStoreEntry[]> {
+  const entries: SessionStoreEntry[] = []
+  for (const segment of segments) entries.push(...(await openRows(keyOf, segment.owner, '', segment.rows)))
+  return entries
+}
+
+/** How often a load is read again when an ancestor was forgotten while it read (its range is then the child's own). */
+const TRANSCRIPT_TRIES = 3
+
+/** `sessionId`'s main transcript as it loads (`segmentsOf`), each run opened under its owner's key. */
+async function transcriptOf(sql: Sql, keyOf: KeyOf, sessionId: string): Promise<SessionStoreEntry[]> {
+  for (let attempt = 1; ; attempt++) {
+    const segments = await sql.begin('isolation level repeatable read read only', (tx) => segmentsOf(tx, sessionId))
+    try {
+      return await openSegments(keyOf, segments)
+    } catch (err) {
+      // An ancestor whose key went after the snapshot: forgetSubject copied the range into the
+      // child in that same transaction, so the next read has it as the child's own.
+      const ancestorGone = err instanceof SubjectForgotten && segments.some((s) => s.owner !== sessionId)
+      if (!ancestorGone || attempt >= TRANSCRIPT_TRIES) throw err
+    }
+  }
+}
+
+/** A session with forks that read through it, forgotten without the data keys that copy its transcript into them. */
+export class ForksNeedKeys extends Error {
+  constructor(parentId: string) {
+    super(`session ${parentId} has forks that read its transcript; forgetting it needs SCADBUDDY_SECRET_KEY_FILE to copy it into them first`)
+    this.name = 'ForksNeedKeys'
+  }
+}
+
+/** Whether a fork reads its transcript through `parentId`. */
+export async function hasForks(sql: Sql, parentId: string): Promise<boolean> {
+  const rows = await sql`SELECT 1 FROM ai_sessions WHERE fork_parent_id = ${parentId}::uuid LIMIT 1`
+  return rows.length > 0
+}
+
+/**
+ * Before `parentId`'s key goes (forgetSubject, in its transaction, under the parent's lock): each
+ * fork that reads through it takes the range it references as rows of its own, `inherited` and
+ * sealed under its own key, and its link is cleared, so it needs neither the parent's rows nor
+ * its key again. A fork being forgotten itself gets no rows, only its link cleared. `keys` opens
+ * the parent's transcript (its own ancestors' too) and seals the copies; without them a parent
+ * with forks is not forgotten. How many forks there were.
+ */
+export async function copyForkRanges(tx: TransactionSql, keys: PayloadKeys | undefined, parentId: string): Promise<number> {
+  const children = await tx<{ id: string; cut: number }[]>`
+    SELECT id::text AS id, fork_cut AS cut FROM ai_sessions WHERE fork_parent_id = ${parentId}::uuid ORDER BY id FOR UPDATE`
+  if (children.length === 0) return 0
+  if (!keys) throw new ForksNeedKeys(parentId)
+  const keyOf: KeyOf = (sessionId, create) => keys.keyFor(`session-${sessionId}`, create)
+  const transcript = await openSegments(keyOf, await segmentsOf(tx, parentId))
+  for (const child of children) {
+    const range = transcript.slice(0, child.cut)
+    const subject = `session-${child.id}`
+    let dek: Buffer | undefined
+    try {
+      // Before its lock: making the key takes that lock itself, on another connection.
+      if (range.length > 0) dek = await keyOf(child.id, true)
+    } catch (err) {
+      if (!(err instanceof SubjectForgotten)) throw err
+    }
+    try {
+      // As an append does (appendNow): a forget of the child either went first, and its tombstone
+      // is seen here, or waits for this to commit and then deletes these rows with the rest.
+      await tx`SELECT pg_advisory_xact_lock_shared(hashtext(${payloadKeyLock(subject)}))`
+      const [forgotten] = await tx`SELECT 1 FROM ai_forgotten_subjects WHERE subject = ${subject}`
+      if (dek && !forgotten) {
+        for (let at = 0; at < range.length; at += COPY_BATCH) {
+          const batch = range.slice(at, at + COPY_BATCH)
+          const ids = await tx<{ id: string }[]>`
+            SELECT nextval(pg_get_serial_sequence('ai_session_entries', 'id'))::text AS id FROM generate_series(1, ${batch.length})`
+          const rows = batch.map((entry, i) => {
+            const uuid = typeof entry.uuid === 'string' ? entry.uuid : null
+            const id = ids[i]!.id
+            const json = Buffer.from(JSON.stringify(entry), 'utf8')
+            return {
+              id,
+              project_key: '',
+              session_id: child.id,
+              subpath: '',
+              uuid,
+              entry_type: entryTypeOf(entry),
+              sealed: sealBytes(dek, json, entryContext(child.id, '', uuid ?? `#${id}`)),
+              inherited: true,
+            }
+          })
+          // A uuid the fork already holds as its own row stays there, after the inherited rows, not
+          // among them: Claude Code's first turn on a fork writes none of the parent's again
+          // (test/forkCow.pg.test.ts), so a skipped row is said, not expected.
+          const written = await tx`
+            INSERT INTO ai_session_entries ${tx(rows, 'id', 'project_key', 'session_id', 'subpath', 'uuid', 'entry_type', 'sealed', 'inherited')}
+            ON CONFLICT (session_id, subpath, uuid) WHERE uuid IS NOT NULL DO NOTHING
+            RETURNING id`
+          if (written.length < rows.length) {
+            console.error(`session transcripts: fork ${child.id} already held ${rows.length - written.length} of the entries copied from ${parentId}; its own rows of them were kept`)
+          }
+        }
+      }
+      await tx`UPDATE ai_sessions SET fork_parent_id = NULL, fork_cut = NULL WHERE id = ${child.id}::uuid`
+    } finally {
+      dek?.fill(0)
+    }
+  }
+  return children.length
 }

@@ -811,7 +811,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     the agent-tools worker and the service's Temporal client carry it when the KEK is
     mounted. `src/sessions/forget.ts` `forgetSubject` (key row, then the workflow, then
     the rows) is the one way a durable subject is deleted; operators run
-    `node dist/forget-subject.js session-<uuid>`. A gated tool's activity runs only
+    `node dist/forget-subject.js session-<uuid>`. A fork reads its parent's transcript
+    through the cut (`ai_sessions.fork_parent_id`, `fork_cut`; `src/sessions/store.ts`,
+    plan Step 6.5), so forgetting a parent first copies each fork's range into it under
+    the fork's key (`copyForkRanges`, `inherited` rows), and refuses without the KEK. A gated tool's activity runs only
     with an `approved` `ai_input_responses` row for its own request id.
   - The workspace (#2329, `docs/ai/operating.md` §13): `src/workspace/store.ts`
     `SessionFiles` over `ai_session_files`, keyed by `workspace` (`session:<id>`, gone
