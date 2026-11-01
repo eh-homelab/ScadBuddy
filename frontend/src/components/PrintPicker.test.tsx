@@ -2195,7 +2195,9 @@ describe('PrintPicker · Filament profiles (#717)', () => {
       expect.stringContaining('PrintConfig.cpp'),
     )
     expect(within(step).getAllByRole('link')).toHaveLength(2)
-    expect(step).toHaveTextContent('235 °C')
+    // #2799: the temperature is a change now, in the spool's filament preset.
+    expect(within(step).getByText("Nozzle temperature (the spool's filament): → 235 °C")).toBeInTheDocument()
+    expect(within(step).queryByTestId('filament-profile-silk-pla-filament-not-applied')).not.toBeInTheDocument()
 
     await user.click(checkbox)
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
@@ -2214,6 +2216,24 @@ describe('PrintPicker · Filament profiles (#717)', () => {
     await loaded()
     const step = await screen.findByTestId('filament-profile-silk-pla')
     await waitFor(() => expect(within(step).getByRole('checkbox', { name: /Silk PLA/ })).toBeChecked())
+  })
+
+  it("says the temperature isn't applied on Bambuddy's slicer, and keeps the profile on (#2799)", async () => {
+    setSilkPreview(
+      silkPreview({
+        filament_applied: false,
+        filament_reason:
+          "Bambuddy's slicer has no filament setting override, so set them in the spool's filament preset. The native slicer applies them",
+      }),
+    )
+    renderPicker()
+    await loaded()
+
+    const step = await screen.findByTestId('filament-profile-silk-pla')
+    expect(await within(step).findByTestId('filament-profile-silk-pla-filament-not-applied')).toHaveTextContent(
+      "Nozzle temperature and Nozzle temperature (first layer) not applied: Bambuddy's slicer has no filament setting override",
+    )
+    expect(within(step).getByRole('checkbox', { name: /Silk PLA/ })).toBeChecked()
   })
 
   it("says why a profile can't apply, and leaves it off", async () => {
@@ -2733,7 +2753,61 @@ describe('PrintPicker · Print sequence (#1862)', () => {
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
   })
 
-  it('is not remembered: a reopened dialog is back on Default', async () => {
+  it('is remembered for the model once it prints (#4970)', async () => {
+    const remember = vi.spyOn(api, 'putModelChoices')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await pick(user, screen.getByLabelText('Print sequence'), 'by object')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() =>
+      expect(remember).toHaveBeenCalledWith(output.slug, expect.objectContaining({ print_sequence: 'by object' })),
+    )
+  })
+
+  it('is remembered for a library file once it prints (#4970)', async () => {
+    const remember = vi.spyOn(api, 'putLibraryChoices')
+    const { user } = renderPage(<PrintPicker open source={LIBRARY} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    await showAdvanced()
+    await pick(user, screen.getByLabelText('Print sequence'), 'by layer')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(remember).toHaveBeenCalledWith(89, expect.objectContaining({ print_sequence: 'by layer' })))
+  })
+
+  it('opens on the remembered sequence, in Advanced so it is not sent unseen (#4970)', async () => {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({
+          ...choicesView,
+          model_choices: { printer_id: null, filament_plan: [], print_sequence: 'by object' },
+        }),
+      ),
+    )
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByLabelText('Print sequence')).toHaveTextContent('By object')
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled())
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ print_sequence: 'by object' })
+  })
+
+  it('is not sent unseen: back to Simple drops it (#4970)', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    await showAdvanced()
+    await pick(user, screen.getByLabelText('Print sequence'), 'by object')
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).not.toHaveProperty('print_sequence')
+  })
+
+  it('is not remembered unprinted: a reopened dialog is back on Default', async () => {
     const { bodies } = watch('POST', '/run')
     const { user } = renderReopenable()
     await loaded()
@@ -3325,6 +3399,7 @@ describe('PrintPicker · Remembered choices', () => {
       ],
       tier: 'standard',
       process_name: null,
+      print_sequence: null,
     })
   })
 
@@ -4811,6 +4886,25 @@ describe('PrintPicker · a sliced library file (#2671)', () => {
     expect(await screen.findByTestId('slice-time')).toHaveTextContent('45')
     expect(screen.getByTestId('run-print')).toBeEnabled()
     expect(previews.urls).toEqual([])
+  })
+
+  it('never sends a remembered print sequence it does not show (#4970)', async () => {
+    const view = (await (await fetch('/api/v1/print/library/104/choices')).json()) as Record<string, unknown>
+    server.use(
+      http.get('/api/v1/print/library/104/choices', () =>
+        HttpResponse.json({
+          ...view,
+          model_choices: { printer_id: null, filament_plan: [], print_sequence: 'by object' },
+        }),
+      ),
+    )
+    const runs = watch('POST', '/run', '/api/v1/print/library/')
+    const { user } = renderSliced()
+    await loaded()
+    expect(screen.getByRole('switch', { name: 'Advanced' })).toHaveAttribute('aria-checked', 'false')
+    await user.click(screen.getByTestId('run-print'))
+    await waitFor(() => expect(runs.bodies).toHaveLength(1))
+    expect(runs.bodies[0]).not.toHaveProperty('print_sequence')
   })
 
   it('prints through the library run with the spools chosen', async () => {

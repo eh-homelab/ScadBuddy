@@ -29,7 +29,8 @@ const CHOICES: { value: PrintSequence; label: string }[] = [
 
 /**
  * #1862 — Bambu's print sequence for this print (#907): every object a layer at a time,
- * or each object finished before the next starts. Per print, never remembered.
+ * or each object finished before the next starts. Remembered by subject with the
+ * other choices once it prints (#4970).
  */
 export function PrintSequenceStep({ value, onChange, inherited = null, objects = null }: Props) {
   const count = objects !== null && objects > 0 ? objects : null

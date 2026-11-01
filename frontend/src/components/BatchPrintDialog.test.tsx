@@ -79,6 +79,27 @@ describe('BatchPrintDialog (#2672)', () => {
     expect(screen.getByTestId('batch-row-1')).toHaveTextContent(/Slot 1: /)
   })
 
+  it("keeps a file's remembered print sequence when the carried step names none (#4970)", async () => {
+    await api.putLibraryChoices(91, { print_sequence: 'by object' })
+    const saved = watchItems()
+    const batch = await newBatch(89, 91)
+    const { user } = renderPage(<BatchPrintDialog batchId={batch.id} onClose={vi.fn()} />)
+    await step(1, 2)
+    await loaded()
+    await waitFor(() => expect(screen.getByTestId('batch-next')).toBeEnabled())
+    await user.click(screen.getByTestId('batch-next'))
+
+    await step(2, 2)
+    await loaded()
+    await waitFor(() => expect(screen.getByLabelText('Print sequence')).toHaveTextContent('By object'))
+    await waitFor(() => expect(screen.getByTestId('batch-next')).toBeEnabled())
+    await user.click(screen.getByTestId('batch-next'))
+
+    await screen.findByRole('dialog', { name: 'Review 2 files' })
+    expect(saved[0]?.request).not.toHaveProperty('print_sequence')
+    expect(saved[1]?.request).toMatchObject({ print_sequence: 'by object' })
+  })
+
   it('saves a choice and its next step in one write, so neither is left behind (#2718 review)', async () => {
     const saved = watchItems()
     const batch = await newBatch(89, 91)

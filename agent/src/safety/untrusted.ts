@@ -180,7 +180,9 @@ export function isPreamble(text: string): boolean {
 /**
  * The content inside an envelope, as text (JSON for structured content), or
  * the text unchanged when it is not one. For display (the panel's
- * tool.result summaries) and tests; never to decide anything.
+ * tool.result summaries), tests, and a tool that hands back an earlier
+ * result as its own (`tool_call_result`, tools/toolCalls.ts), which the
+ * registry wraps again; never to decide anything.
  */
 export function unwrapUntrusted(text: string): string {
   if (!text.trimStart().startsWith(`{`) || !text.includes(UNTRUSTED_KEY)) return text

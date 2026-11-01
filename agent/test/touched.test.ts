@@ -195,6 +195,16 @@ describe('extractors', () => {
     ])
   })
 
+  it('records a withdrawn render as its job modified (#4968), and a running one still answered', () => {
+    expect(touches('withdraw_render', { job_id: 'j1' }, { job_id: 'j1', status: 'cancelled' })).toEqual([
+      { type: 'render_job', id: 'j1', action: 'modified', model: null },
+    ])
+    // Still running for another claimant: the call took this caller's claim all the same.
+    expect(touches('withdraw_render', { job_id: 'j1' }, { job_id: 'j1', status: 'running' })).toEqual([
+      { type: 'render_job', id: 'j1', action: 'modified', model: null },
+    ])
+  })
+
   it('records a render, and the output it saved', () => {
     const job = { job_id: 'j1', status: 'done', model_version: C1 }
     expect(touches('render_model', { slug: 'box', params: {} }, job)).toEqual([

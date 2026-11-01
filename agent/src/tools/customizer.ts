@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 import { z } from 'zod'
-import { ACCEPTING_MS, command, type CommandHeaders, reattachFollowing, RESPOND_ASYNC } from './command.js'
+import { ACCEPTING_MS, command, type CommandHeaders, isRunning, reattachFollowing, RESPOND_ASYNC } from './command.js'
 import { binary } from './binary.js'
 import { ok } from './call.js'
 import { CAMERA, cameraQuery, params, slug, VIEW, VIEW_SIZE, withQuery } from './common.js'
@@ -316,6 +316,33 @@ export const customizerTools: Tool[] = [
       "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: [],
     handler: async ({ job_id }, ctx) => json(jobSummary(await getJob(ctx, job_id))),
+  }),
+
+  defineTool({
+    name: 'withdraw_render',
+    label: 'Withdraw a render',
+    description:
+      'Withdraw your request for a render job that is still pending or running (#4968). If no other request ' +
+      'still waits on the job it is cancelled (status `cancelled`); otherwise it goes on for the others. ' +
+      'A job that has already finished is returned unchanged. Claims are counted, not owned: withdraw only a ' +
+      'job you started yourself (with render_model), or you take away the claim of whoever else waits on it, ' +
+      "such as the user's preview.",
+    input: z.object({ job_id: jobId }),
+    risk: 'write',
+    source:
+      "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
+    routes: ['POST /api/v1/jobs/{job_id}/withdraw'],
+    title: () => 'Withdraw the render',
+    handler: async ({ job_id }, ctx) => {
+      const job = await command(ctx, `withdraw render job ${job_id}`, (headers) =>
+        ctx.backend.POST('/api/v1/jobs/{job_id}/withdraw', {
+          params: { path: { job_id } },
+          headers,
+          signal: ctx.signal,
+        }),
+      )
+      return isRunning(job) ? json(job) : json(jobSummary(job))
+    },
   }),
 
   defineTool({

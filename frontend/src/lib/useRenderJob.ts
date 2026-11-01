@@ -55,6 +55,15 @@ export interface RenderState {
   busy: RenderBusy | undefined
   /** Submits the same render again: after an `error` the caller offers it as "try again". */
   retry: () => void
+  /**
+   * #4968 — withdraws the page's claim on the job being followed; the last claim withdrawn
+   * cancels it, and the job settles `cancelled`. Claims are counted, not owned, so once
+   * withdrawn the page lets go of the job: it stops following it, never withdraws it
+   * again and never names it as the job a later render supersedes, since any claim left
+   * is another caller's. Answers the withdrawn job's id (none when no job was in flight);
+   * rejects when the server refused.
+   */
+  cancel: () => Promise<string | undefined>
   /** #267 — the step the current render is on, while it is running and the socket says. */
   stage: RenderStage | undefined
 }
@@ -263,6 +272,27 @@ export function useRenderJob(
   const generation = useRef(0)
   const last = useRef<Submission | undefined>(undefined)
   const extraRef = useLatest(extra)
+  /** The job being followed while it is unsettled, and how to stop following it (#4968). */
+  const followed = useRef<{ jobId: string; drop: (job: Job) => void } | undefined>(undefined)
+  /** Jobs this page withdrew: never withdrawn or superseded again (their claims are others'). */
+  const withdrawn = useRef(new Set<string>())
+  const cancel = useCallback(async () => {
+    const current = followed.current
+    if (!current || withdrawn.current.has(current.jobId)) return undefined
+    withdrawn.current.add(current.jobId)
+    let answer: Job
+    try {
+      answer = await api.withdrawJob(current.jobId)
+    } catch (cause) {
+      // Refused: the claim is still the page's, so Cancel may be pressed again.
+      withdrawn.current.delete(current.jobId)
+      throw cause
+    }
+    // Settled for this page whatever the answer says: a job still running is running
+    // for another claimant only.
+    current.drop(answer)
+    return current.jobId
+  }, [])
 
   useEffect(() => {
     // An empty `params` is a model with no customizer parameters (#941): its defaults
@@ -307,6 +337,7 @@ export function useRenderJob(
 
       const finish = () => {
         settled = true
+        if (followed.current?.jobId === jobId) followed.current = undefined
         setStage(undefined)
         unfollow?.()
         unfollow = undefined
@@ -356,6 +387,15 @@ export function useRenderJob(
         }
       }
 
+      followed.current = {
+        jobId,
+        drop: (answer) => {
+          if (settled || isStale()) return
+          setJob(answer)
+          setJobFor(params)
+          finish()
+        },
+      }
       // The subscription's confirmation is the first read, so a job that settled
       // before it was followed is still seen.
       unfollow = realtime.subscribe(`job:${jobId}`, (signal) => {
@@ -389,7 +429,10 @@ export function useRenderJob(
     const prior = last.current
     const supersedable = prior && prior.slug === slug && prior.version === version
     const submitted = (async () => {
-      const supersedes = supersedable ? await prior.jobId : undefined
+      const priorJob = supersedable ? await prior.jobId : undefined
+      // A job the page withdrew holds no claim of its own: superseding it would release
+      // another caller's (review of #5119).
+      const supersedes = priorJob && !withdrawn.current.has(priorJob) ? priorJob : undefined
       // A full queue is transient ("about one render"): retry after the delay it
       // names rather than showing a failure. A refused submit created no job, so
       // the same `supersedes` still applies.
@@ -443,6 +486,7 @@ export function useRenderJob(
 
     return () => {
       stopped = true
+      followed.current = undefined
       superseded.abort()
       unfollow?.()
       if (timer) clearTimeout(timer)
@@ -453,5 +497,5 @@ export function useRenderJob(
     }
   }, [slug, params, version, extraRef, attempt])
 
-  return { job, rendering, error, busy, retry, settledFor, jobFor, stage }
+  return { job, rendering, error, busy, retry, cancel, settledFor, jobFor, stage }
 }

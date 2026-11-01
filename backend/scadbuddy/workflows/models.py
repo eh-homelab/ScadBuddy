@@ -333,8 +333,8 @@ ACCEPT_ACTIVITY = "render_accept"
 CLAIMS_ACTIVITY = "render_claims"
 #: The Update a supersede sends the job's execution.
 RELEASE_UPDATE = "release"
-#: Why a claim is released: the API sends ``superseded``; ``cancelled`` is a release
-#: sent by hand (a withdrawal has no route yet, review #1066 3.2).
+#: Why a claim is released: a supersede sends ``superseded``; a withdrawal
+#: (`POST /jobs/{id}/withdraw`, `RenderService.withdraw`, #4968) sends ``cancelled``.
 ReleaseReason = Literal["superseded", "cancelled"]
 #: `render_accept`'s refusal: `render_queue_max` jobs already wait.
 QUEUE_FULL = "QueueFull"

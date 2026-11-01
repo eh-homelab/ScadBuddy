@@ -15,18 +15,25 @@ bare string there would collapse it. So the base preset's values are read first
 applied rather than sent in a guessed shape: the print goes ahead with the preset as it
 is, and its Checks say the profile was not applied and why.
 
-Filament settings (nozzle temperature) have no verified channel yet (#284's
-``UNVERIFIED_TARGETS``), so a profile states them as notes and never sends them.
+A profile's filament settings (Silk's 235 °C nozzle, #2799) go out only on the native
+slicer (``slicer_backend`` ``native``), written into the filament file of each slot
+whose spool matches the profile (:func:`slot_filament_overrides`,
+``SlicePlan.filament_overrides``): the channel measured to change the G-code, where the
+same key in the process file changes nothing (``slicing/presets.py``'s docstring).
+Bambuddy's ``SliceRequest`` has no filament field, so on Bambuddy's slicer they are not
+applied, and the run's warnings say so (:func:`filament_not_applied`).
 """
 
 from __future__ import annotations
+
+from typing import NamedTuple
 
 from pydantic import BaseModel, Field
 
 from scadbuddy.analyzers import sources as src
 from scadbuddy.analyzers.model import Source
 from scadbuddy.bambuddy.client import BambuddyClient, ReadPresetValues, preset_reader
-from scadbuddy.bambuddy.filaments import FilamentWarning
+from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, FilamentWarning
 from scadbuddy.bambuddy.models import NOT_IN_PROFILES, PresetRef, ProcessValue
 from scadbuddy.core.problems import ApiError
 
@@ -50,7 +57,8 @@ class ProfileMatch(BaseModel):
 
 
 class ProfileSetting(BaseModel):
-    """One process setting a profile changes, and why."""
+    """One setting a profile changes, and why: a process setting, or (in
+    :attr:`FilamentProfile.filament_settings`) a setting of the matching slots' filament."""
 
     key: str
     label: str
@@ -72,6 +80,9 @@ class FilamentProfile(BaseModel):
     description: str
     match: ProfileMatch
     settings: list[ProfileSetting]
+    #: Settings of the matching slots' filament presets, such as the nozzle temperature
+    #: (#2799): applied by the native slicer only (the module's docstring).
+    filament_settings: list[ProfileSetting] = Field(default_factory=list)
     notes: list[ProfileNote] = Field(default_factory=list)
     builtin: bool = True
 
@@ -93,15 +104,21 @@ SILK = FilamentProfile(
             sources=[src.SILK_OUTER_WALL, src.OUTER_WALL_SPEED],
         )
     ],
-    notes=[
-        ProfileNote(
-            text=(
-                "Bambu also recommends a 235 °C nozzle for silk. ScadBuddy cannot set "
-                "a filament's temperature yet, so it is not changed here: set it in the "
-                "spool's filament preset."
-            ),
+    filament_settings=[
+        ProfileSetting(
+            key="nozzle_temperature",
+            label="Nozzle temperature",
+            value="235",
+            unit="°C",
             sources=[src.SILK_TEMPERATURE, src.SILK_TEMPERATURE_RANGE],
-        )
+        ),
+        ProfileSetting(
+            key="nozzle_temperature_initial_layer",
+            label="Nozzle temperature (first layer)",
+            value="235",
+            unit="°C",
+            sources=[src.SILK_TEMPERATURE],
+        ),
     ],
 )
 
@@ -129,6 +146,17 @@ class ProfilePreview(BaseModel):
     applicable: bool
     reason: str | None = None
     changes: list[ProfileChange] = Field(default_factory=list)
+    #: Whether the profile's ``filament_settings`` are applied on this slicer: only the
+    #: native one has the channel (#2799). When false, ``filament_reason`` says why.
+    filament_applied: bool = True
+    filament_reason: str | None = None
+
+
+#: Why a profile's filament settings are not applied on Bambuddy's slicer (#2799).
+NO_FILAMENT_CHANNEL = (
+    "Bambuddy's slicer has no filament setting override, so set them in the spool's "
+    "filament preset. The native slicer applies them"
+)
 
 
 _REASONS = {
@@ -155,10 +183,32 @@ async def previews(
     profiles: list[FilamentProfile],
     *,
     read: ReadPresetValues | None = None,
+    native_slicer: bool = False,
 ) -> list[ProfilePreview]:
-    """Each of ``profiles``' changes against ``process``'s values, in their stored shape.
+    """Each of ``profiles``' changes against ``process``'s values, in their stored shape,
+    and whether its filament settings apply (only on the ``native_slicer``, #2799).
     The preset's values are read once, whatever the number of profiles; ``read`` is a
     reader shared with the print's other overrides (#2804 review)."""
+    shown = await _process_previews(client, process, profiles, read=read)
+    if native_slicer:
+        return shown
+    return [
+        preview.model_copy(
+            update={"filament_applied": False, "filament_reason": NO_FILAMENT_CHANNEL}
+        )
+        if preview.profile.filament_settings
+        else preview
+        for preview in shown
+    ]
+
+
+async def _process_previews(
+    client: BambuddyClient | None,
+    process: PresetRef | None,
+    profiles: list[FilamentProfile],
+    *,
+    read: ReadPresetValues | None,
+) -> list[ProfilePreview]:
     if not profiles:
         return []
     if process is None:
@@ -256,22 +306,76 @@ def not_applied(preview: ProfilePreview) -> FilamentWarning:
     )
 
 
+def filament_not_applied(profile: FilamentProfile) -> FilamentWarning:
+    """The Checks warning for a profile whose filament settings Bambuddy's slicer cannot
+    apply (#2799): its process changes still go out."""
+    labels = " and ".join(setting.label.lower() for setting in profile.filament_settings)
+    return FilamentWarning(
+        kind="profile-not-applied",
+        message=f"{profile.name} profile's {labels} not applied: {NO_FILAMENT_CHANNEL}.",
+    )
+
+
+class ProfileOverrides(NamedTuple):
+    #: The process overrides of every profile that applies.
+    process: dict[str, ProcessValue]
+    warnings: list[FilamentWarning]
+    #: The ids of the profiles that apply, whose filament settings
+    #: :func:`slot_filament_overrides` writes on the native slicer.
+    applied: list[str]
+
+
 async def profile_overrides(
     client: BambuddyClient | None,
     process: PresetRef | None,
     profile_ids: list[str],
     *,
     read: ReadPresetValues | None = None,
-) -> tuple[dict[str, ProcessValue], list[FilamentWarning]]:
+    native_slicer: bool = False,
+) -> ProfileOverrides:
     """The process overrides of every profile a print applies, each read against the
     print's own process preset in the shape it stores them. A profile that cannot apply
     is skipped, never guessed at, and a warning says so: the print is not refused for it,
-    and goes ahead with the preset as it is."""
+    and goes ahead with the preset as it is. On Bambuddy's slicer (not ``native_slicer``)
+    a profile's filament settings are not applied, and a warning says so (#2799)."""
     merged: dict[str, ProcessValue] = {}
     warnings: list[FilamentWarning] = []
-    for shown in await previews(client, process, [BUILTIN[i] for i in profile_ids], read=read):
-        if shown.applicable:
-            merged.update(overrides(shown))
-        else:
+    applied: list[str] = []
+    for shown in await previews(
+        client, process, [BUILTIN[i] for i in profile_ids], read=read, native_slicer=native_slicer
+    ):
+        if not shown.applicable:
             warnings.append(not_applied(shown))
-    return merged, warnings
+            continue
+        merged.update(overrides(shown))
+        applied.append(shown.profile.id)
+        if not shown.filament_applied:
+            warnings.append(filament_not_applied(shown.profile))
+    return ProfileOverrides(merged, warnings, applied)
+
+
+def slot_filament_overrides(
+    profile_ids: list[str], options: FilamentOptions, plan: FilamentPlan
+) -> dict[int, dict[str, str]]:
+    """``SlicePlan.filament_overrides`` for one plate (#2799): each applied profile's
+    filament settings, for every slot of the plate whose chosen spool the profile
+    matches (:meth:`ProfileMatch.matches`, as the dialog suggests it for that spool).
+    A later profile's value for a key wins, as in the process overrides."""
+    by_id = {option.spool_id: option for option in options.spools}
+    out: dict[int, dict[str, str]] = {}
+    for slot in options.slots:
+        spool_id = plan.spool_for(slot.slot_id)
+        spool = by_id.get(spool_id) if spool_id is not None else None
+        if spool is None:
+            continue
+        for profile_id in profile_ids:
+            profile = BUILTIN[profile_id]
+            if profile.filament_settings and profile.match.matches(
+                material=spool.material,
+                subtype=spool.subtype,
+                preset_name=spool.slicer_filament_name,
+            ):
+                out.setdefault(slot.slot_id, {}).update(
+                    {setting.key: setting.value for setting in profile.filament_settings}
+                )
+    return out

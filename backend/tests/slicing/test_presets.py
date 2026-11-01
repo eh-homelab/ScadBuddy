@@ -162,6 +162,31 @@ async def test_build_presets_applies_the_overrides(profiles: Profiles, plan: Sli
     assert process["wall_loops"] == "5" and process["outer_wall_speed"] == ["120", "120"]
 
 
+async def test_build_presets_writes_a_slots_filament_overrides_into_its_own_file(
+    profiles: Profiles, plan: SlicePlan
+) -> None:
+    """#2799: a filament setting goes into the slot's filament file, the channel the CLI
+    honours (a process file's ``nozzle_temperature`` is ignored); the other slot's file,
+    and the process, are left as they are."""
+    hot = plan.model_copy(update={"filament_overrides": {2: {"nozzle_temperature": "235"}}})
+    files = await build_presets(hot, profiles, None)
+    first, second = (json.loads(f) for f in files.filaments)
+    plain = [json.loads(f) for f in (await build_presets(plan, profiles, None)).filaments]
+    assert first == plain[0]
+    assert second == {**plain[1], "nozzle_temperature": ["235"]}
+    assert "nozzle_temperature" not in json.loads(files.process)
+
+
+def test_filament_overrides_key_a_native_slice_apart(plan: SlicePlan) -> None:
+    """A slot's filament overrides change its file, so they change the key; a plan
+    without any keys as it always has."""
+    hot = plan.model_copy(update={"filament_overrides": {2: {"nozzle_temperature": "235"}}})
+    other = plan.model_copy(update={"filament_overrides": {1: {"nozzle_temperature": "235"}}})
+    key, hot_key, other_key = (native_preset_key(p, 1, "02.08.02.61") for p in (plan, hot, other))
+    assert hot_key not in (key, other_key)
+    assert hot_key.startswith(key.removesuffix("/flatten=2"))
+
+
 async def test_build_presets_does_not_write_the_colours(
     profiles: Profiles, plan: SlicePlan
 ) -> None:
