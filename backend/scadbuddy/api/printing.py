@@ -1108,6 +1108,19 @@ async def _waiting_run(runs: PrintCommands, run_id: str) -> PrintRun:
     return run
 
 
+async def end_gone_sequences(runs: PrintCommands) -> None:
+    """Record every native run with prints still to start whose ``PrintLanSequence`` is
+    gone as stopped (`SEQUENCE_GONE_STOP`), as a control sent to it would (#4337): a
+    sequence terminated, or never started, writes no end of its own, and its run would
+    otherwise keep its subject's files in use for good."""
+    for run in await runs.store.lan_waiting_runs():
+        await _to_sequence(runs, run.id, _leave_running)
+
+
+async def _leave_running(handle: WorkflowHandle[Any, Any]) -> None:
+    """A running sequence is asked nothing."""
+
+
 async def _to_sequence(
     runs: PrintCommands, run_id: str, send: Callable[[WorkflowHandle[Any, Any]], Awaitable[None]]
 ) -> PrintRun | None:

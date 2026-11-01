@@ -177,6 +177,28 @@ def test_a_sequence_that_closed_records_the_rest_stopped(
     assert response.json()["result"]["lan_stopped"] == printing_api.SEQUENCE_GONE_STOP.model_dump()
 
 
+def test_a_gone_sequence_stops_using_its_runs_files(
+    client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
+) -> None:
+    """#4337: before the per-print copies' sweep reads which subjects are in use, a run
+    whose sequence is gone (terminated, or never started) records the rest stopped, so
+    its subject's files are not kept for good; a running sequence's run keeps them."""
+    state = _state(client)
+    gone = _run(client, workflow_reaper)
+    never = _run(client, workflow_reaper)
+    alive = _run(client, workflow_reaper)
+    workflow_reaper.run(_sequence(workflow_reaper, gone, sequences).terminate())
+    _sequence(workflow_reaper, alive, sequences)
+
+    workflow_reaper.run(printing_api.end_gone_sequences(state.print_runs))
+
+    stopped = printing_api.SEQUENCE_GONE_STOP.model_dump()
+    for run_id in (gone, never):
+        assert client.get(f"/api/v1/print/runs/{run_id}").json()["result"]["lan_stopped"] == stopped
+    assert client.get(f"/api/v1/print/runs/{alive}").json()["result"]["lan_stopped"] is None
+    assert [r.id for r in workflow_reaper.run(state.print_runs.store.lan_waiting_runs())] == [alive]
+
+
 def test_plate_cleared_signals_how_many_prints_had_started(
     client: TestClient, workflow_reaper: WorkflowReaper, sequences: list[Any]
 ) -> None:

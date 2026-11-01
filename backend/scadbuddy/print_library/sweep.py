@@ -9,7 +9,7 @@ puts in the library, its laid-out per-print copies and their slices (``print_sub
 They are ScadBuddy's own working files, as Bambuddy's inbox copies are on the Bambuddy
 path, and they follow the inbox's rules:
 
-* A folder holds a subject's newest copy (case 3). Bambuddy's inbox holds one copy per
+* A folder holds the copy a subject used last (case 3). Bambuddy's inbox holds one copy per
   output: a new upload supersedes the output's others there, whatever they were laid out
   for (`send.upload_copy`). A native folder has no projects (plan 2026-10-18 D6), so the
   project folder's rule (a copy printed from is that project's record, #316) has nothing
@@ -21,8 +21,9 @@ path, and they follow the inbox's rules:
   copy has nothing else that ever would. `COPY_ORPHAN_GRACE` covers a run between its
   upload and its record.
 * A copy a person moved, restored or copied is theirs (case 4): it carries no subject, so
-  nothing here sees it; a recorded copy found out of its folder is released with its
-  slices (`copies.release_moved`). A person's own file of the same name and bytes never
+  nothing here trashes it. A recorded copy found unmarked but live, or out of its folder,
+  is released with its slices (`copies.release_moved`): a move the routes did not release,
+  or one whose release never ran. A person's own file of the same name and bytes never
   carries one either (case 5).
 * A subject a run still uses (`PrintRunStore.subjects_in_use`) is left alone.
 
@@ -96,7 +97,7 @@ class CopySweep(BaseModel):
     superseded: int
     #: Files trashed that nothing records.
     orphans: int
-    #: Files released to the person: a recorded copy they moved, and its slices.
+    #: Recorded copies released to the person (moved or restored), each with its slices.
     released: int
 
 
@@ -109,47 +110,77 @@ async def sweep_print_copies(
     grace: timedelta = COPY_ORPHAN_GRACE,
 ) -> CopySweep:
     """Trash the per-print copies and slices nothing keeps (module docstring). The marked
-    files are read before the subjects in use, so a run that starts in between is seen;
-    a file uploaded after the read waits for the next pass."""
+    files are read before the subjects in use, so a run that started before the read is
+    seen; the subjects in use are read again just before the trash, and a subject a run
+    took up in between keeps all its files. A file uploaded after the read waits for the
+    next pass."""
     files = {f.id: f for f in await asyncio.to_thread(native.rows.per_print)}
     busy = await subjects_in_use()
     recorded = await uploads.recorded_files(list(files))
     subjects = sorted({f.print_subject for f in files.values() if f.print_subject} - busy)
-    superseded: list[int] = []
+    copies = await uploads.for_outputs(subjects, native=True)
+    by_use = await uploads.copies_by_use(subjects)
+    # The recorded copies that carry no mark: theirs if live (moved, restored), else gone.
+    unmarked = [c.id for found in copies.values() for c in found if c.id not in files]
+    live = {f.id: f for f in await asyncio.to_thread(native.rows.files_by_ids, unmarked)}
+    superseded: dict[str, list[int]] = {}
     forget: list[tuple[str, int]] = []
-    moved: list[int] = []
-    released = 0
-    for subject, copies in (await uploads.for_outputs(subjects, native=True)).items():
-        newest: dict[int | None, LibraryCopy] = {}
-        for copy in copies:  # in upload order: a folder's last is its newest
+    gone: list[tuple[str, int]] = []
+    released: list[int] = []
+    for subject in subjects:
+        recorded_copies = {c.id: c for c in copies[subject]}
+        kept: dict[int | None, LibraryCopy] = {}
+        for copy_id in by_use[subject]:  # least recently used first
+            copy = recorded_copies.get(copy_id)
+            if copy is None:
+                continue
             row = files.get(copy.id)
-            if row is None or row.print_subject != subject:
+            if row is None and copy.id not in live:
+                # Trashed, which a restore may undo; or purged, and then its slices have
+                # nothing left to keep them: its record goes, and they are orphans.
+                if await asyncio.to_thread(native.rows.file, copy.id, trashed=True) is None:
+                    gone.append((subject, copy.id))
                 continue
-            if row.folder_id != copy.folder_id:
-                moved.append(copy.id)
-                released += 1 + sum(s.id in files for s in copy.sliced)
+            if row is None or row.folder_id != copy.folder_id:
+                # A person's: moved (outside the routes, or a move whose release never
+                # ran) or restored. Theirs, with its slices.
+                released.append(copy.id)
                 continue
-            older = newest.get(copy.folder_id)
-            newest[copy.folder_id] = copy
+            if row.print_subject != subject:
+                continue
+            older = kept.get(copy.folder_id)
+            kept[copy.folder_id] = copy
             if older is not None:
-                superseded += [older.id, *(s.id for s in older.sliced if s.id in files)]
+                superseded.setdefault(subject, []).extend(
+                    [older.id, *(s.id for s in older.sliced if s.id in files)]
+                )
                 forget.append((subject, older.id))
-    await release_moved(native, uploads, moved)
+    await release_moved(native, uploads, released)
+    for subject, copy_id in gone:
+        await uploads.forget(subject, copy_id)
     cutoff = now - grace
-    orphans = [
-        f.id
-        for f in files.values()
-        if f.id not in recorded and f.print_subject not in busy and f.created_at < cutoff
-    ]
-    trashed = {f.id for f in await native.trash([*superseded, *orphans])}
+    orphans: dict[str, list[int]] = {}
+    for f in files.values():
+        if (
+            f.print_subject is not None
+            and f.print_subject not in busy
+            and f.id not in recorded
+            and f.created_at < cutoff
+        ):
+            orphans.setdefault(f.print_subject, []).append(f.id)
+    # A run that started since the first read: its subject keeps everything.
+    busy = await subjects_in_use()
+    doomed = [i for subject, ids in superseded.items() if subject not in busy for i in ids]
+    lost = [i for subject, ids in orphans.items() if subject not in busy for i in ids]
+    trashed = {f.id for f in await native.trash([*doomed, *lost])}
     # After the trash, as a Bambuddy copy is forgotten only once its delete came back.
     for subject, copy_id in forget:
         if copy_id in trashed:
             await uploads.forget(subject, copy_id)
     done = CopySweep(
-        superseded=len(trashed.intersection(superseded)),
-        orphans=len(trashed.intersection(orphans)),
-        released=released,
+        superseded=len(trashed.intersection(doomed)),
+        orphans=len(trashed.intersection(lost)),
+        released=len(released),
     )
     if done.superseded or done.orphans or done.released:
         logger.info("swept the native per-print copies", extra=done.model_dump())

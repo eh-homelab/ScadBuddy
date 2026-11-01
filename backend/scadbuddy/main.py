@@ -56,6 +56,7 @@ from scadbuddy.api.limits import (
     BodySizeGate,
     RouteLimit,
 )
+from scadbuddy.api.printing import end_gone_sequences
 from scadbuddy.api.realtime import EventCursor
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
@@ -789,9 +790,13 @@ async def _sweep_native_copies_logged(state: AppState) -> None:
         native = await state.components.get(PRINT_LIBRARY).serving_native()
         if native is None:
             return
-        await sweep_print_copies(
-            native, state.uploads, state.print_runs.store.subjects_in_use, now=datetime.now(UTC)
-        )
+
+        async def subjects_in_use() -> set[str]:
+            # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`).
+            await end_gone_sequences(state.print_runs)
+            return await state.print_runs.store.subjects_in_use()
+
+        await sweep_print_copies(native, state.uploads, subjects_in_use, now=datetime.now(UTC))
     except Exception:
         logger.exception("could not sweep the native per-print copies")
         raise

@@ -6,6 +6,9 @@
 ALTER TABLE library_files ADD COLUMN IF NOT EXISTS print_subject text;
 CREATE INDEX IF NOT EXISTS library_files_print_subject ON library_files (print_subject)
     WHERE print_subject IS NOT NULL AND deleted_at IS NULL;
+-- When a run last reused a recorded copy (`ensure_native_copy`): a folder keeps the copy a
+-- subject used last, not the one it uploaded last. NULL until reused: its upload's time.
+ALTER TABLE output_bambuddy_uploads ADD COLUMN IF NOT EXISTS used_at timestamptz;
 
 -- What runs put here before the column, so the sweep reaches it too (the issue's "how to
 -- reach the ones cases 1 and 2 have already orphaned"). Only what a record or a run's

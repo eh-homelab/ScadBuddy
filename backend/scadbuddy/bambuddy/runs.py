@@ -281,6 +281,12 @@ class PrintRunStore:
         still to start, which it starts from its sliced files later (#4541, #4337)."""
         return await asyncio.to_thread(self._running_for, output_id)
 
+    async def lan_waiting_runs(self) -> list[PrintRun]:
+        """Every succeeded native run with prints still to start, neither all started nor
+        stopped, whatever its printer: the runs whose sequence may have closed without
+        saying so (#4337)."""
+        return await asyncio.to_thread(self._lan_waiting_runs)
+
     async def subjects_in_use(self) -> set[str]:
         """Every run subject (``PrintRun.output_id``) one of whose runs `running_for`
         names: what the per-print copies' sweep leaves alone (#4337)."""
@@ -458,6 +464,15 @@ class PrintRunStore:
                 f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s AND {_IN_USE}"
                 " ORDER BY created_at DESC".encode(),
                 (output_id,),
+            ).fetchall()
+        return [PrintRun.model_validate(row) for row in rows]
+
+    def _lan_waiting_runs(self) -> list[PrintRun]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM print_runs WHERE status = 'succeeded'"
+                " AND result->'lan_waiting' <> '[]'::jsonb"
+                " AND result->>'lan_stopped' IS NULL ORDER BY created_at".encode()
             ).fetchall()
         return [PrintRun.model_validate(row) for row in rows]
 

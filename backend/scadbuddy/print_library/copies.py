@@ -28,6 +28,7 @@ import io
 import logging
 from datetime import UTC, datetime
 
+import psycopg
 from fastapi import status
 
 from scadbuddy.bambuddy.models import LibraryFile
@@ -125,6 +126,16 @@ async def _still_there(
     return True
 
 
+async def _touch(uploads: BambuddyUploadStore, key: str, copy_id: int) -> None:
+    """The copy this subject used last is the one its folder keeps (#4337). Best
+    effort: the print goes on without it, and the sweep then judges by the upload's time
+    (a print worker that starts before the API has migrated has no ``used_at`` yet)."""
+    try:
+        await uploads.touch(key, copy_id)
+    except psycopg.Error:
+        logger.warning("could not record a native copy's reuse", extra={"library_file_id": copy_id})
+
+
 async def ensure_native_copy(
     native: NativeCopies,
     uploads: BambuddyUploadStore,
@@ -149,6 +160,7 @@ async def ensure_native_copy(
             if copy.folder_id != folder_id or copy.target_key != target_key:
                 continue
             if await _still_there(native, uploads, printable.key, copy):
+                await _touch(uploads, printable.key, copy.id)
                 return copy.id
         with span("upload.fetch", attributes={"scadbuddy.subject": printable.key}):
             fetched = await printable.fetch()

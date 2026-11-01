@@ -219,9 +219,94 @@ async def test_a_copy_moved_before_the_release_is_released_by_the_sweep(
 
     done = await sweep(native, uploads, after=LATER)
 
-    assert done.released == 2
+    assert done.released == 1
     assert live(native, moved) and live(native, moved_slice)
     assert await uploads.for_output(KEY, native=True) == []
+    for file_id in (moved, moved_slice):
+        row = native.rows.file(file_id)
+        assert row is not None and row.print_subject is None
+
+
+@pytest.mark.parametrize("how", ["moved", "restored"])
+async def test_a_recorded_copy_made_the_persons_is_released_with_its_slices(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes, how: str
+) -> None:
+    """A recorded copy that no longer carries its mark is a person's: one a move cleared
+    whose release never ran (`release_moved` after the move), or one restored from the
+    trash. Its slices are released with it, never left marked under it for good."""
+    copy_id = await copy_of(native, uploads, payload)
+    sliced = await slice_of(native, uploads, copy_id)
+    if how == "moved":
+        elsewhere = (await native.create_folder("Mine", None)).id
+        await native.update_file(copy_id, folder_id=elsewhere)
+    else:
+        await native.trash([copy_id])
+        await native.restore([copy_id])
+
+    done = await sweep(native, uploads, after=LATER)
+
+    assert done.released == 1
+    assert live(native, copy_id) and live(native, sliced)
+    row = native.rows.file(sliced)
+    assert row is not None and row.print_subject is None
+    assert await uploads.for_output(KEY, native=True) == []
+
+
+async def test_a_purged_copys_slices_go_as_orphans(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """A recorded copy whose row is gone (a person trashed it, and the trash was purged)
+    keeps nothing: its record goes, and then its slices as orphans."""
+    copy_id = await copy_of(native, uploads, payload)
+    sliced = await slice_of(native, uploads, copy_id)
+    await native.trash([copy_id])
+    trashed_row = native.rows.file(copy_id, trashed=True)
+    assert trashed_row is not None
+
+    # Trashed: a restore may still bring it back, so its record stays.
+    await sweep(native, uploads, after=LATER)
+    assert [c.id for c in await uploads.for_output(KEY, native=True)] == [copy_id]
+
+    assert await native.purge(copy_id, datetime.now(UTC) + LATER)
+    await sweep(native, uploads, after=LATER)
+    assert await uploads.for_output(KEY, native=True) == []
+    assert (await sweep(native, uploads, after=LATER)).orphans == 1
+    assert trashed(native, sliced)
+
+
+async def test_a_folder_keeps_the_copy_its_subject_used_last(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """A run that reuses an older copy (its target again) makes it the one kept: the
+    copy just printed never goes for one uploaded later and not used since."""
+    reused = await copy_of(native, uploads, payload)
+    later = await copy_of(native, uploads, payload, target=X1C)
+    assert await copy_of(native, uploads, payload) == reused
+
+    done = await sweep(native, uploads)
+
+    assert done.superseded == 1
+    assert live(native, reused) and trashed(native, later)
+    assert [c.id for c in await uploads.for_output(KEY, native=True)] == [reused]
+
+
+async def test_a_subject_a_run_takes_up_during_the_sweep_keeps_its_files(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """The subjects in use are read again just before the trash: a run that starts
+    between the reads (and may reuse any of its copies) keeps every file of its subject."""
+    old = await copy_of(native, uploads, payload)
+    await copy_of(native, uploads, payload, target=X1C)
+    reads: list[set[str]] = [set(), {KEY}]
+
+    async def subjects_in_use() -> set[str]:
+        return reads.pop(0)
+
+    done = await sweep_print_copies(native, uploads, subjects_in_use, now=datetime.now(UTC))
+
+    assert done.superseded == 0
+    assert live(native, old)
+    assert len(await uploads.for_output(KEY, native=True)) == 2
 
 
 async def test_a_persons_file_of_the_same_name_and_bytes_is_never_swept(

@@ -219,6 +219,15 @@ class BambuddyUploadStore:
         that ScadBuddy never deletes on its own; the next send uploads a copy of its own."""
         await asyncio.to_thread(self._forget_files, list(library_file_ids))
 
+    async def touch(self, output_id: str, library_file_id: int) -> None:
+        """Record that a run reused this copy now (#4337): `copies_by_use` orders by it."""
+        await asyncio.to_thread(self._touch, output_id, library_file_id)
+
+    async def copies_by_use(self, output_ids: Iterable[str]) -> dict[str, list[int]]:
+        """Each output's native copies, least recently used first: by the last reuse
+        (`touch`), else the upload (#4337)."""
+        return await asyncio.to_thread(self._copies_by_use, list(output_ids))
+
     async def slices_on(self, library_file_ids: Iterable[int]) -> set[int]:
         """The sliced files any subject records on these copies (#4337): a moved copy's,
         which are the person's with it."""
@@ -755,6 +764,27 @@ class BambuddyUploadStore:
             conn.execute(
                 "DELETE FROM output_bambuddy_uploads WHERE library_file_id = ANY(%s)", (ids,)
             )
+
+    def _touch(self, output_id: str, library_file_id: int) -> None:
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE output_bambuddy_uploads SET used_at = now()"
+                " WHERE output_id = %s AND library_file_id = %s",
+                (output_id, library_file_id),
+            )
+
+    def _copies_by_use(self, ids: list[str]) -> dict[str, list[int]]:
+        found: dict[str, list[int]] = {output_id: [] for output_id in ids}
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT output_id, library_file_id FROM output_bambuddy_uploads"
+                " WHERE output_id = ANY(%s) AND library_file_id >= %s"
+                " ORDER BY COALESCE(used_at, created_at), created_at, library_file_id",
+                (ids, NATIVE_ID_BASE),
+            ).fetchall()
+        for row in rows:
+            found[row["output_id"]].append(row["library_file_id"])
+        return found
 
     def _slices_on(self, ids: list[int]) -> set[int]:
         if not ids:
