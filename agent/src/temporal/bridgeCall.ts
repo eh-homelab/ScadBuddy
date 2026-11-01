@@ -57,7 +57,7 @@ export async function BridgeCall(input: BridgeCallInput): Promise<BridgeCallAnsw
     if (cause instanceof TimeoutFailure && cause.timeoutType === 'SCHEDULE_TO_START') return { op: 'unreachable' }
     if (input.request.op !== 'call') return { op: 'gone' }
     // The owner took the request and went away, stopped answering, or failed while it ran it:
-    // the tab may still act. An answer, as the old relay's (no_answer), never a failed workflow.
+    // the tab may still act. An answer (no_answer), never a failed workflow.
     const message =
       cause instanceof TimeoutFailure
         ? `the agent replica holding the tab did not answer within ${Math.round(runMs / 1000)} s; `

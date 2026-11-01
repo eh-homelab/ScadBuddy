@@ -10,7 +10,6 @@ import {
   type RelayAnswer,
   type RelayRequest,
 } from '../temporal/bridgeCall.js'
-import type { LegacyTabRelay } from './pgRelay.js'
 import type { TabOwnerStore } from './tabOwners.js'
 
 export type { RelayAnswer, RelayRequest } from '../temporal/bridgeCall.js'
@@ -53,15 +52,13 @@ export type { RelayAnswer, RelayRequest } from '../temporal/bridgeCall.js'
 // The owner applies the call's own timeout to the tab; the activity's start-to-close is
 // that plus `ackTimeoutMs`, after which the caller gives up on the owner.
 //
-// For one release (#4868) the Postgres relay (bridge/pgRelay.ts) runs beside it: a replica
-// still on the old build holds tabs with no row here, so a call this path cannot place
-// (no owner, the owner gone or no longer holding the tab, no sealing client) is tried
-// there, and this replica answers the old relay's requests for the tabs it holds.
+// Without a sealing client the call is refused (SEALING_NEEDED), never sent another way: the
+// Postgres relay that ran beside this path for one release is gone (#4868).
 //
 // What is not covered: a cancelled call cancels its workflow, but the tab is not told,
 // the same as a local one (hub.ts `call`).
 
-/** How long a forwarded call waits for the owner's replica to take it (the old relay's ack timeout). */
+/** How long a forwarded call waits for the owner's replica to take it (its schedule-to-start timeout). */
 export const ACK_TIMEOUT_MS = 3_000
 /**
  * The largest request or answer a call carries, as JSON: room past the tab's own cap on a
@@ -89,9 +86,8 @@ export const OWNER_REFRESH_MS = 30_000
 /** A call's workflow ID, and the subject its payloads are sealed under. */
 export const bridgeWorkflowId = (): string => `bridge-${randomUUID()}`
 
-/** The hub's side: whether a tab is held here (for the old relay), the tabs held, and running a request on one. */
+/** The hub's side: the tabs held here, and running a request on one. */
 export type RelayOwner = {
-  holds(tabId: string): boolean
   /** Every tab held here now, for the owner rows' refresh. */
   tabs(): string[]
   run(tabId: string, request: RelayRequest): Promise<RelayAnswer>
@@ -127,8 +123,6 @@ export type TemporalTabRelayOptions = {
   refreshMs?: number
   /** The database is migrated (db.ts `ready`): each owner-row write waits for it, and is skipped when it is down. */
   ready?: () => Promise<boolean>
-  /** The old relay, for one release (#4868): tried when this path cannot place the call. */
-  fallback?: LegacyTabRelay | undefined
   log?: (message: string) => void
 }
 
@@ -141,6 +135,8 @@ export type SealingClient = { client: Client; dropKey: (subject: string) => Prom
 const SEALING_NEEDED =
   'no browser attached: the tab is connected to another agent replica, and reaching it there needs the agent ' +
   "service's secret key (SCADBUDDY_SECRET_KEY_FILE), which seals the call's contents in Temporal. Ask the operator to mount it."
+
+const NO_SEALING: RelayAnswer = { op: 'call', outcome: { ok: false, error: { code: 'no_browser', message: SEALING_NEEDED } } }
 
 const NO_ANSWER: RelayAnswer = {
   op: 'call',
@@ -162,7 +158,6 @@ export class TemporalTabRelay implements TabRelay {
   readonly #ackTimeoutMs: number
   readonly #log: (message: string) => void
   readonly #ready: (() => Promise<boolean>) | undefined
-  readonly #fallback: LegacyTabRelay | undefined
   #client: SealingClient | undefined
   #owner: RelayOwner | undefined
   /** Whether this replica's host worker polls its queue with `bridge.tab` (`startHosting`): only then is a tab claimed here. */
@@ -180,7 +175,6 @@ export class TemporalTabRelay implements TabRelay {
     this.#ackTimeoutMs = options.ackTimeoutMs ?? ACK_TIMEOUT_MS
     this.#log = options.log ?? ((m) => console.error(m))
     this.#ready = options.ready
-    this.#fallback = options.fallback
     this.#refreshMs = options.refreshMs ?? OWNER_REFRESH_MS
   }
 
@@ -190,7 +184,6 @@ export class TemporalTabRelay implements TabRelay {
 
   serve(owner: RelayOwner): void {
     this.#owner = owner
-    this.#fallback?.serve(owner)
   }
 
   /**
@@ -257,25 +250,19 @@ export class TemporalTabRelay implements TabRelay {
     if (options.signal.aborted) throw abortError()
     if (jsonBytes(request) > MAX_BRIDGE_BYTES) return request.op === 'call' ? tooLarge('request') : undefined
     const sealing = this.#client
-    let failed = false
-    if (sealing) {
-      try {
-        const answer = await this.#viaTemporal(sealing, tabId, request, options.signal)
-        if (answer === 'failed') return request.op === 'call' ? NO_ANSWER : undefined
-        if (answer !== undefined) return answer
-      } catch (err) {
-        if (options.signal.aborted) throw abortError()
-        // The owner's row could not be read, or Temporal refused the start: the call ran
-        // nowhere, so the old relay may still take it. Never a throw from the tool.
-        this.#failed(err)
-        failed = true
-      }
+    // Refused rather than sent to Temporal unsealed; a status read answers "not connected".
+    if (!sealing) return request.op === 'call' ? NO_SEALING : undefined
+    try {
+      const answer = await this.#viaTemporal(sealing, tabId, request, options.signal)
+      if (answer === 'failed') return request.op === 'call' ? NO_ANSWER : undefined
+      return answer
+    } catch (err) {
+      if (options.signal.aborted) throw abortError()
+      // The owner's row could not be read, or Temporal refused the start: the call ran
+      // nowhere. Never a throw from the tool.
+      this.#failed(err)
+      return request.op === 'call' ? NO_ANSWER : undefined
     }
-    if (this.#fallback) return this.#fallback.forward(tabId, request, options)
-    if (failed) return request.op === 'call' ? NO_ANSWER : undefined
-    // Refused rather than sent to Temporal unsealed.
-    if (!sealing && request.op === 'call') return { op: 'call', outcome: { ok: false, error: { code: 'no_browser', message: SEALING_NEEDED } } }
-    return undefined
   }
 
   /**
@@ -320,7 +307,7 @@ export class TemporalTabRelay implements TabRelay {
         (err: unknown) => {
           signal.removeEventListener('abort', onAbort)
           // The workflow failed or timed out (a rollout's old replica failing its tasks): the
-          // owner may have run the call, so it is not sent again by the old relay.
+          // owner may have run the call, so it is never sent again.
           this.#failed(err)
           resolve('failed')
         },

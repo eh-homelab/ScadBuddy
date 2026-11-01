@@ -94,17 +94,21 @@ covers the same ground more briefly.
 - **Browser calls across a rollout of #4780.** Since #4780 a browser_* call for a tab on
   another replica is a `BridgeCall` workflow on `agent-tools`, whose one activity runs
   on the queue of the replica that holds the tab (`ai_tab_owners`;
-  [browser-bridge.md](browser-bridge.md#replicas)). For one release (#4868) the
-  Postgres relay of #1916 runs beside it, so replicas on the two builds still reach
-  each other's tabs: an old replica claims no `ai_tab_owners` row, and a new one takes
-  the old relay for any tab it finds no live owner for. `agent-tools` is unversioned,
+  [browser-bridge.md](browser-bridge.md#replicas)). The Postgres relay of #1916 ran
+  beside it for one release, and #4868 removed it: every replica since then claims its
+  tabs in `ai_tab_owners`, so a call finds the owner there or answers "not connected".
+  A new replica's tab has no row until its host worker polls, so for those first seconds
+  of its start a call from another replica answers "not connected" (an old replica could
+  reach it through the Postgres relay before).
+  `ai_bridge_messages` stays until #5109, because a replica of the build before #4868
+  still writes it for a tab it finds no live owner for. `agent-tools` is unversioned,
   so while an old replica still polls it, it can take a `BridgeCall` workflow task. It
   has no such workflow, so it fails the task, and Temporal gives the task again to a
   replica that may be another old one. The workflow's execution timeout leaves 15 s
   past the call's own time for that (`WORKFLOW_SLACK_MS`,
   [`agent/src/bridge/relay.ts`](../../agent/src/bridge/relay.ts)), about one failed task
   and its retry. A call whose workflow still times out is logged and answers
-  `no_answer`; it never fails the tool, and it is not sent again by the old relay, since
+  `no_answer`; it never fails the tool, and it is never sent again, since
   the owner may already have run it. With two or more old replicas polling, the retries'
   backoff can use up those 15 s before a new replica takes the task, so a call that never
   ran can still answer `no_answer` during the rollout. And a bridge call's deleted key is
