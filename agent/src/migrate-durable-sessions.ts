@@ -8,7 +8,7 @@ import { backfill, DurableMigration } from './sessions/migrateDurable.js'
 import { PostgresSessionStore } from './sessions/store.js'
 import { FilePayloadStore, PgPayloadKeys, subjectDataConverter } from './temporal/payloadCodec.js'
 
-// `node dist/migrate-durable-sessions.js [--dry-run]`: the backfill of plan Step 7.2 (spec
+// `node dist/migrate-durable-sessions.js [--dry-run] [--stop-on-failure]`: the backfill of plan Step 7.2 (spec
 // 2026-10-13 §10.2 step 3, #4772). Every open DurableSession is moved to AgentSession, as its
 // next send would move it (sessions/migrateDurable.ts), with a turn that still runs stopped first.
 // Run it from one agent pod with the service's configuration: it needs Postgres, Temporal and the
@@ -18,12 +18,15 @@ import { FilePayloadStore, PgPayloadKeys, subjectDataConverter } from './tempora
 // `--dry-run` changes nothing: a list of the open DurableSessions, and for each a `fork_point`,
 // `turn` and `pending_input` Query (no Update, no Signal, no write; migrateDurable.ts `backfill`).
 // It reports each one's Claude Code versions, entry count and state (parked, busy, at a deferral
-// marker, idle or empty), and every entry type's fields across them.
+// marker, idle or empty), and every entry type's fields across them. `--stop-on-failure` ends the
+// run at the first session that fails, and leaves the rest as they are.
 
+const FLAGS = ['--dry-run', '--stop-on-failure']
 const dryRun = process.argv.includes('--dry-run')
-const unknown = process.argv.slice(2).filter((a) => a !== '--dry-run')
+const stopOnFailure = process.argv.includes('--stop-on-failure')
+const unknown = process.argv.slice(2).filter((a) => !FLAGS.includes(a))
 if (unknown.length > 0) {
-  console.error('usage: migrate-durable-sessions [--dry-run]')
+  console.error('usage: migrate-durable-sessions [--dry-run] [--stop-on-failure]')
   process.exit(2)
 }
 const config = loadConfig()
@@ -59,7 +62,7 @@ try {
     events: new EventLog(sql),
     audit: new AuditLog({ sql }),
   })
-  const report = await backfill(client, sql, migration, { dryRun })
+  const report = await backfill(client, sql, migration, { dryRun, stopOnFailure })
   for (const line of report.lines) console.log(JSON.stringify(line))
   failed = report.failed
   console.log(
@@ -68,6 +71,7 @@ try {
       listed: report.lines.length,
       counts: report.counts,
       failed: report.failed,
+      ...(report.stopped ? { stopped_at_first_failure: true } : {}),
       open_durable_sessions: report.open,
       ...(dryRun ? { shapes: report.shapes } : {}),
     }),

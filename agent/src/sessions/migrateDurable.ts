@@ -544,18 +544,25 @@ export type BackfillReport = {
   shapes: Record<string, string[]>
   /** Open DurableSessions after the run (the same list on a dry run): Phase 8 waits for 0. */
   open: number
+  /** `stopOnFailure` stopped the run at its first failure: the sessions after it were not tried. */
+  stopped: boolean
 }
 
 /**
  * The backfill (spec §10.2 step 3): every open DurableSession migrated as its next send would
  * migrate it, a turn that still runs stopped first; or with `dryRun`, each surveyed and nothing
- * changed (Queries only). `only` narrows the list (tests: another test's workflows).
+ * changed (Queries only). `stopOnFailure` ends the run at the first session that fails, leaving
+ * the rest as they are. `only` narrows the list (tests: another test's workflows).
  */
 export async function backfill(
   client: Client,
   sql: Sql,
   migration: DurableMigration,
-  { dryRun = false, only = () => true }: { dryRun?: boolean; only?: (workflowId: string) => boolean } = {},
+  {
+    dryRun = false,
+    stopOnFailure = false,
+    only = () => true,
+  }: { dryRun?: boolean; stopOnFailure?: boolean; only?: (workflowId: string) => boolean } = {},
 ): Promise<BackfillReport> {
   const listed: string[] = []
   for await (const id of openDurableSessions(client)) if (only(id)) listed.push(id)
@@ -563,6 +570,7 @@ export async function backfill(
   const counts: Record<string, number> = {}
   const shapes: Record<string, Set<string>> = {}
   let failed = 0
+  let stopped = false
   for (const workflowId of listed) {
     const session = workflowId.replace(/^session-/, '')
     const line: BackfillLine = { session, row: null }
@@ -591,11 +599,15 @@ export async function backfill(
     const key = line.error ? 'error' : String(line.state ?? line.outcome)
     counts[key] = (counts[key] ?? 0) + 1
     lines.push(line)
+    if (line.error && stopOnFailure) {
+      stopped = true
+      break
+    }
   }
   let open = listed.length
   if (!dryRun) {
     open = 0
     for await (const id of openDurableSessions(client)) if (only(id)) open++
   }
-  return { lines, counts, failed, shapes: Object.fromEntries(Object.entries(shapes).map(([t, s]) => [t, [...s].sort()])), open }
+  return { lines, counts, failed, stopped, shapes: Object.fromEntries(Object.entries(shapes).map(([t, s]) => [t, [...s].sort()])), open }
 }

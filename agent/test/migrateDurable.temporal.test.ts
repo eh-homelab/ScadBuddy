@@ -312,6 +312,34 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(
       expect(said(fake.messageCalls().at(-1))).toContain(FIRST_PROMPT)
     })
 
+    it('the backfill with stopOnFailure stops at the first session it cannot migrate and leaves the rest', async () => {
+      const m = await agent()
+      const good = await durableSession(m)
+      const bad = await durableSession(m)
+      // A conversation whose checkpoint is not in it: resumeTranscript refuses it.
+      const { texts, meta } = await fixture()
+      await agentSessionsEnv()
+        .client.workflow.getHandle(sessionWorkflowId(bad))
+        .signal('set_conversation', { session_id: meta.session_id, checkpoint: '00000000-0000-4000-8000-00000000dead', conversation: texts })
+      const only = (w: string) => w === sessionWorkflowId(good) || w === sessionWorkflowId(bad)
+      await eventually(
+        async () => (await backfill(agentSessionsEnv().client, db.sql, migration(m), { dryRun: true, only })).lines.length,
+        (n) => n === 2,
+      )
+      const report = await backfill(agentSessionsEnv().client, db.sql, migration(m), { only, stopOnFailure: true })
+      expect(report.failed).toBe(1)
+      expect(report.stopped).toBe(true)
+      // The failure is the last line: nothing after it was tried.
+      expect(report.lines.at(-1)).toMatchObject({ session: bad, error: expect.stringMatching(/checkpoint is not in its conversation/) })
+      const tried = new Set(report.lines.map((l) => l.session))
+      for (const id of [good, bad]) {
+        const types = (await runs(id)).map((r) => `${r.type}:${r.status}`)
+        if (id === bad || !tried.has(id)) expect(types).toEqual(['DurableSession:RUNNING'])
+        else expect(types.sort()).toEqual(['AgentSession:RUNNING', 'DurableSession:COMPLETED'])
+      }
+      expect(await db.sql`SELECT 1 FROM ai_session_entries WHERE session_id = ${bad}`).toHaveLength(0)
+    })
+
     it("a migrated session's events stay readable in the panel", async () => {
       const m = await agent()
       const id = await durableSession(m)
