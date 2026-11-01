@@ -62,7 +62,7 @@ async def refresh_provider(
 
 
 async def record_seen(spools: Spools) -> None:
-    """What every printer's trays show, once a tray source is wired."""
+    """What every printer's trays show (`spools/seen.py`), when a tray source is set."""
     if spools.trays is not None:
         await spools.store.seen(await spools.trays.latest())
 
