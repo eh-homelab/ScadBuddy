@@ -246,15 +246,18 @@ class JobProjection:
                 if counted["pending"] >= max_pending:
                     raise QueueFullError(counted["pending"])
             row = conn.execute(
-                "INSERT INTO render_jobs (id, slug, inputs, model_version, state,"
+                "INSERT INTO render_jobs (id, slug, params, inputs, model_version, state,"
                 " created_at, render_key, workflow_id, workflow_run_id, kind, traceparent)"
-                " VALUES (%s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s)"
+                " VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (workflow_id, workflow_run_id)"
                 " DO UPDATE SET claims = render_jobs.claims"
                 " RETURNING *, (xmax = 0) AS inserted",
                 (
                     job.id,
                     job.slug,
+                    # Still written for the previous build's workers, which read it
+                    # while they drain; never read here (#5139 drops it).
+                    Jsonb(job.params),
                     Jsonb(job.inputs or legacy_inputs(job.params)),
                     job.model_version,
                     job.created_at,

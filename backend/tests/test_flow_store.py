@@ -112,9 +112,7 @@ async def test_a_version_row_names_its_commit_and_the_list_has_the_newest(
 async def test_a_run_records_its_commit(store: FlowStore, jobs: JobProjection) -> None:
     store.insert_version("v1", "swap", 1, A, {"kind": "browser"}, approval_timeout_s=None)
     with jobs.pool.connection() as conn:
-        # A row written before #2503: no commit until the backfill sets one. Its column
-        # stays only where #1142's migration found such a row.
-        conn.execute("ALTER TABLE workflow_definitions ADD COLUMN IF NOT EXISTS script text")
+        # A row written before #2503: no commit until the backfill sets one.
         conn.execute(
             "INSERT INTO workflow_definitions (id, name, version, script, created_by)"
             " VALUES ('old', 'swap', 2, 'x', '{}')"

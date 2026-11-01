@@ -49,8 +49,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow run queue${TEST_DATABASE_URL ? '' : ` 
 
   async function run(): Promise<void> {
     await db.sql`
-      INSERT INTO workflow_definitions (id, name, version, commit, created_by)
-      VALUES ('d1', 'swap', 1, 'c1', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+      INSERT INTO workflow_definitions (id, name, version, script, created_by)
+      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
     const at = new Date().toISOString()
     const steps = [
       { seq: 1, fn: 'ask_session', call_id: 'c0', status: 'running', outward: false, started_at: at, history_length: 5, session_id: child },

@@ -50,12 +50,7 @@ _DECISION = (
     "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder,"
     " input_hash, hops, created_at"
 )
-#: ``script`` only where a row with no commit kept the column (#1142's migration
-#: drops it otherwise): read through the row, so the query works either way.
-_DEFINITION = (
-    "id, name, version, commit, to_jsonb(workflow_definitions) ->> 'script' AS script,"
-    " approval_timeout_s, created_by, created_at"
-)
+_DEFINITION = "id, name, version, commit, script, approval_timeout_s, created_by, created_at"
 _GRANT = (
     "id, run_id, status, spec, used, requested_by, approved_by, approved_at, revoked_by,"
     " revoked_at, expires_at, created_at"
@@ -213,8 +208,7 @@ class FlowStore:
         """The rows written before flows were in git, in ``(name, version)`` order."""
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id, name, version, to_jsonb(workflow_definitions) ->> 'script'"
-                " AS script, created_by, created_at"
+                "SELECT id, name, version, script, created_by, created_at"
                 " FROM workflow_definitions WHERE commit IS NULL ORDER BY name, version"
             ).fetchall()
         return [BackfillRow.model_validate(row) for row in rows]

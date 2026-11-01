@@ -94,7 +94,6 @@ async def test_the_script_is_read_from_git_and_a_missing_commit_is_refused(
     await definitions.start()
     made = await definitions.register("swap", ONE, BROWSER, approval_timeout_s=None)
     with store._pool.connection() as conn:
-        conn.execute("ALTER TABLE workflow_definitions ADD COLUMN IF NOT EXISTS script text")
         conn.execute("UPDATE workflow_definitions SET script = 'edited in the row'")
     got = await definitions.get(made.id)
     assert got is not None and got.script == ONE
@@ -201,11 +200,9 @@ def legacy(
     created_by: dict[str, Any],
     hour: int,
 ) -> str:
-    """A row as registered before #2503: its script in Postgres, no commit. The column
-    is there only where #1142's migration found such a row and kept it."""
+    """A row as registered before #2503: its script in Postgres, no commit."""
     version_id = str(uuid.uuid4())
     with store._pool.connection() as conn:
-        conn.execute("ALTER TABLE workflow_definitions ADD COLUMN IF NOT EXISTS script text")
         conn.execute(
             "INSERT INTO workflow_definitions (id, name, version, script, created_by, created_at)"
             " VALUES (%s, %s, %s, %s, %s, %s)",

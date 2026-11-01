@@ -282,20 +282,27 @@ def _index(slug: str) -> int:
 
 
 @pytest.mark.requires_postgres
-def test_the_contract_migration_drops_what_the_durable_rollout_left(pg_conninfo: str) -> None:
-    # #1142: once no build before #1052/#1053 can run, the expand-only leftovers go.
+def test_the_contract_migration_drops_only_what_the_previous_build_never_names(
+    pg_conninfo: str,
+) -> None:
+    # #1142, expand/contract: the pending key and the old watcher's log go; the columns
+    # the previous build still reads and writes stay for a later file.
     with psycopg.connect(pg_conninfo) as conn:
         migrate(conn)
         columns = conn.execute(
             "SELECT table_name, column_name FROM information_schema.columns"
             " WHERE table_schema = current_schema() AND (table_name, column_name) IN"
             " (('print_runs', 'heartbeat_at'), ('render_jobs', 'params'),"
-            "  ('workflow_definitions', 'script'))"
+            "  ('workflow_definitions', 'script')) ORDER BY 1"
         ).fetchall()
         relations = conn.execute(
             "SELECT to_regclass('render_jobs_pending_key'), to_regclass('print_watches')"
         ).fetchone()
-    assert columns == []
+    assert columns == [
+        ("print_runs", "heartbeat_at"),
+        ("render_jobs", "params"),
+        ("workflow_definitions", "script"),
+    ]
     assert relations == (None, None)
 
 
@@ -306,7 +313,7 @@ def test_the_contract_migration_ends_the_rows_an_older_build_left_unsettled(
     # Nothing of this build settles them: a pre-#1052 run (no execution) and a render row
     # an older build inserted (no `workflow_run_id`). Rows of this build are left alone,
     # and a row written with no inputs keeps its parameters in them.
-    contract = _index("durable_rollout_contract")
+    contract = _index("render_pending_key_and_print_watches")
     with psycopg.connect(pg_conninfo) as conn:
         migrate(conn, MIGRATIONS[:contract])
         conn.execute(
@@ -334,28 +341,3 @@ def test_the_contract_migration_ends_the_rows_an_older_build_left_unsettled(
         ("legacy", "failed", {"params": {}}),
         ("ours", "pending", {"params": {}}),
     ]
-
-
-@pytest.mark.requires_postgres
-def test_the_contract_migration_keeps_the_script_of_a_flow_version_git_does_not_hold(
-    pg_conninfo: str,
-) -> None:
-    # Its script is in the row only: dropping the column would lose it, and raising would
-    # stop the API's start. The column stays, with a notice, for the start's backfill.
-    drop = _index("workflow_definitions_drop_script")
-    notices: list[str] = []
-    with psycopg.connect(pg_conninfo) as conn:
-        conn.add_notice_handler(lambda notice: notices.append(notice.message_primary or ""))
-        migrate(conn, MIGRATIONS[:drop])
-        conn.execute(
-            "INSERT INTO workflow_definitions (id, name, version, script, created_by)"
-            " VALUES ('v1', 'demo', 1, 'pass', '{}')"
-        )
-        conn.commit()
-        migrate(conn)
-        applied = conn.execute(
-            "SELECT 1 FROM scadbuddy_migrations WHERE id = %s", (MIGRATIONS[drop].id,)
-        ).fetchall()
-        assert conn.execute("SELECT script FROM workflow_definitions").fetchall() == [("pass",)]
-    assert applied == [(1,)]
-    assert any("workflow_definitions.script kept" in notice for notice in notices)

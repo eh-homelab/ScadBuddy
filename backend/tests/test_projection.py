@@ -105,7 +105,7 @@ def test_the_migrations_add_the_projection_and_drop_the_queues_lease(
     # Coalescing is the workflow's (#1053): rows are unique per execution, and no pending
     # key holds one per render key once no pre-#1053 API can run (#1142).
     assert "render_jobs_pending_key" not in indexes
-    assert "params" not in columns
+    assert "params" in columns  # written for the previous build until a later file (#1142)
     assert "render_jobs_execution" in indexes
     assert "workflow_run_id" in columns
     assert MIGRATION_ID in applied
@@ -429,6 +429,30 @@ def _accept(
     return store.accept(
         job, key, workflow_id=f"render-{key}", run_id=run_id, max_pending=max_pending
     )
+
+
+def test_params_are_written_for_the_previous_build_and_read_from_inputs(
+    projection: JobProjection, pg_conninfo: str
+) -> None:
+    """#1142, expand/contract: the previous build's workers read `render_jobs.params`
+    while they drain, so it is still written; this build reads `inputs.params`."""
+    job = _accept(projection, "run-1", width=51)
+    with psycopg.connect(pg_conninfo) as conn:
+        conn.execute("UPDATE render_jobs SET params = '{\"width\": 0}' WHERE id = %s", (job.id,))
+        row = conn.execute(
+            "SELECT inputs->'params' FROM render_jobs WHERE id = %s", (job.id,)
+        ).fetchone()
+    assert row == ({"width": 51},)
+    assert projection.read(job.id).params == {"width": 51}
+
+
+def test_accept_writes_params_for_the_previous_build(
+    projection: JobProjection, pg_conninfo: str
+) -> None:
+    job = _accept(projection, "run-1", width=52)
+    with psycopg.connect(pg_conninfo) as conn:
+        row = conn.execute("SELECT params FROM render_jobs WHERE id = %s", (job.id,)).fetchone()
+    assert row == ({"width": 52},)
 
 
 def test_accept_inserts_once_per_execution(pg_conninfo: str, announcing: JobProjection) -> None:

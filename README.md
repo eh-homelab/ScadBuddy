@@ -614,14 +614,14 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   waiting renders as its own (its reconciler) and count requests into them that the
   workflow never sees (its insert). The older render workers may keep running: they
   finish the renders pinned to their build.
-- **Upgrading past #1142** (the contract migrations of the durable rollout): upgrade
-  from a release that already has #1053. Its migrations drop `print_runs.heartbeat_at`,
-  `render_jobs.params`, the `render_jobs_pending_key` index and the old print watcher's
-  `print_watches` log, and fail the print runs a pre-#1052 pod left `running` and the
-  renders a pre-#1053 API left unsettled, as upgraded. They drop
-  `workflow_definitions.script` only when every flow version names a commit; otherwise
-  the column stays (a notice in Postgres's log says so) and the start's backfill
-  commits those versions.
+- **Upgrading past #1142** (the first contract step of the durable rollout): upgrade
+  from a release that already has #1053. Its migration drops the `render_jobs_pending_key`
+  index and the old print watcher's `print_watches` log, which the previous release
+  never names, and fails the print runs a pre-#1052 pod left `running` and the renders
+  a pre-#1053 API left unsettled, as upgraded. It may roll out beside the previous
+  release. `print_runs.heartbeat_at`, `render_jobs.params` and
+  `workflow_definitions.script` stay, unread, until a later release drops them; that one
+  needs this one deployed everywhere first.
 
 ### Bambuddy writes on the `bambuddy` queue (#1052, #1053, #1060)
 

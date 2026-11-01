@@ -50,8 +50,8 @@ NativeSliceOutcome = Literal["completed", "failed", "cancelled"]
 #: cancelling a superseded job.
 StoreOperation = Literal["read", "start_workflow", "cancel_workflow"]
 #: Which settle pass failed a row nothing would settle: ``closed``, a row whose
-#: ``render-<render_key>`` run closed without settling it (terminated, timed out);
-#: ``legacy``, a row an older release inserted that no workflow will run.
+#: ``render-<render_key>`` run closed without settling it (terminated, timed out). The
+#: ``legacy`` pass went with #1142, whose migration failed the rows it was for.
 SettlePass = Literal["closed"]
 #: Why the Postgres event bus did not publish an event: its payload was over the
 #: NOTIFY cap, its outbox overflowed, or the database write failed.
