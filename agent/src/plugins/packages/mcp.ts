@@ -177,6 +177,19 @@ export async function serverAccess(
 export type PackageServerConfig = { pkg: string; server: string; name: string; plugin: RemotePlugin; address: string }
 
 /**
+ * The header values every package's http MCP servers declare, and their bare tokens: what a turn
+ * redacts of them (forwardPackageServers' `secrets`), read from the packages alone, with no
+ * address check and no forwarder route, for a ToolCall's tool (plan 2026-10-13 Step 9.2).
+ */
+export function packageHeaderSecrets(loaded: readonly LoadedPackage[]): string[] {
+  return offeredServers(loaded).flatMap(({ config, local }) =>
+    !local && isRecord(config.headers)
+      ? Object.values(config.headers).flatMap((value) => (typeof value === 'string' ? headerSecretVariants(value) : []))
+      : [],
+  )
+}
+
+/**
  * Each package's http servers that pass their checks, with their tiers and disabled tools
  * from ai_access. A server switched off (`*` off) is left out and says nothing; one whose
  * name another server would carry too is left out, and each such says why.

@@ -18,6 +18,7 @@ import type { CredentialSource } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { ApprovalPreparer, TierResolver } from '../harness/permissions.js'
 import type { ToolCallStarter } from '../tools/activityProjection.js'
+import type { TurnToolsResult } from '../temporal/turnTools.js'
 import type { CallApproval, SeamLedger } from '../harness/seamLedger.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun } from '../harness/run.js'
@@ -644,6 +645,12 @@ export type SessionManagerDeps = {
    * `tools_as_activities` is on; undefined (no Temporal client yet, or none at all) runs them in-process.
    */
   toolCalls?: () => ToolCallStarter | undefined
+  /**
+   * The turn's tools beside ScadBuddy's own, listed as the `turn:` activities that run their calls
+   * list them (temporal/turnTools.ts `listTurnTools`), for the in-process proxies a turn with
+   * `tools_as_activities` gets in place of its plugins and http_request (plan 2026-10-13 Step 9.3).
+   */
+  turnTools?: (context: { session: string; owner: Owner; signal: AbortSignal }, only: ReadonlySet<string>) => Promise<Pick<TurnToolsResult, 'tools'>>
   /**
    * What an outward call parks, for a registry tool that resolves its arguments (#4442,
    * tools/harness.ts `prepareApproval`): bound to the turn's principal, as `mcpServers` is.

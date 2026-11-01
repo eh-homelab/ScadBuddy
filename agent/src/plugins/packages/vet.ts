@@ -536,7 +536,7 @@ export const LISTING_PACKAGES_BUDGET = 1024 * 1024
 /**
  * The most one package's items and aliases may take in a turn's listing, in UTF-8 bytes (#4757
  * Task 6 re-review R1, R9): a package over it is refused at vet, no approval can allow it, and a
- * pin already approved is neither loaded nor shared (temporal/turnPackages.ts `sharePackage`).
+ * pin already approved is not loaded.
  */
 export const LISTING_ITEMS_BUDGET = 256 * 1024
 

@@ -41,7 +41,8 @@ import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
 import { readRuntimeSettings, readToolsAsActivities, RUNTIME_DEFAULTS } from './runtimeSettings.js'
-import type { ToolCallRequest } from '../tools/activityProjection.js'
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
+import { type ProxiedTool, type ToolCallRequest, turnToolProxies } from '../tools/activityProjection.js'
 import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnContext, type TurnSlot } from './turnSlot.js'
 import { PgHttpBodies } from './httpBodies.js'
@@ -50,6 +51,9 @@ import { browserGuard } from '../browser/guard.js'
 import { BrowserOrigins } from '../browser/store.js'
 import { loadAgentDefinitions } from '../harness/agentDefinitions.js'
 import { BACKGROUND_BUILTINS, BUILTIN_SERVER, CLASSIC_BUILTINS, classicBuiltinNote, classicBuiltinServer } from '../builtins/server.js'
+
+/** The longest a turn's assembly waits for its plugin and http tools' listing (temporal/turnTools.ts LIST_TIMEOUT_MS is each server's). */
+const TURN_TOOLS_LIST_MS = 30_000
 
 export type TurnRunnerDeps = Pick<
   SessionManagerDeps,
@@ -61,6 +65,7 @@ export type TurnRunnerDeps = Pick<
   | 'tierOf'
   | 'mcpServers'
   | 'toolCalls'
+  | 'turnTools'
   | 'prepareApproval'
   | 'builtInTools'
   | 'pluginPaths'
@@ -567,6 +572,36 @@ export class TurnRunner {
           : undefined
       // The built-ins the packages name that the session serves instead of Claude Code: the
       // background ones, kept past the turn, and WebFetch, pinned to the addresses it checked (#2684).
+      // With the turn's calls as activities (plan 2026-10-13 Step 9.3), its remote plugins, package
+      // http servers and http_request are in-process proxies of the same names, each call a ToolCall
+      // whose activity builds the server again where it runs: none is handed to Claude Code. Listed
+      // here, as the activity lists them; a listing that fails leaves the turn as it was.
+      let proxies: Record<string, McpSdkServerConfigWithInstance> | undefined
+      if (activities && this.deps.turnTools) {
+        try {
+          const wanted = new Set([...remotePlugins.map((p) => p.name), ...(http ? [HTTP_SERVER] : [])])
+          const listed = await phase('turn tools', () =>
+            this.deps.turnTools!({ session: id, owner: session.owner, signal: AbortSignal.timeout(TURN_TOOLS_LIST_MS) }, wanted),
+          )
+          const byServer = new Map<string, ProxiedTool[]>()
+          for (const entry of listed.tools) {
+            const at = entry.name.indexOf('__')
+            const server = entry.name.slice(0, at)
+            if (at <= 0 || !wanted.has(server)) continue
+            const tools = byServer.get(server) ?? []
+            tools.push({
+              name: entry.name.slice(at + 2),
+              description: entry.description,
+              inputSchema: entry.input_schema,
+              ...(entry.task_queue ? { queue: entry.task_queue } : {}),
+            })
+            byServer.set(server, tools)
+          }
+          proxies = turnToolProxies(byServer, id, activities.start, activities.approvalOf)
+        } catch (err) {
+          this.deps.stderr?.(`session ${id}: its plugin and http tools could not be listed, so they run in this turn's process: ${err instanceof Error ? err.message : String(err)}\n`)
+        }
+      }
       const served = allowedPluginPaths.length
         ? (packages?.builtinTools ?? []).filter(
             (n) => CLASSIC_BUILTINS.includes(n) && (this.deps.background !== undefined || !BACKGROUND_BUILTINS.includes(n)),
@@ -579,7 +614,8 @@ export class TurnRunner {
         includePartialMessages: true,
         maxTurns: session.maxTurns,
         maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
-        tierOf,
+        // The plugins' tiers come with them (run.ts harnessTierOf); proxied, they are not handed over, so their tiers are given here.
+        tierOf: proxies ? pluginTiers : tierOf,
         // The headless browser's lists (#982): every remote plugin's browser_* calls.
         browser: browserGuard({
           store: new BrowserOrigins(this.deps.sql, this.deps.settings),
@@ -616,7 +652,7 @@ export class TurnRunner {
         ...(session.agentEffort ? { effort: session.agentEffort } : {}),
         // The plugin's subagent of that name (its agents/<name>.md), as the turn's main thread.
         ...(agentDefinition && session.agentType ? { agent: { name: session.agentType, definition: agentDefinition } } : {}),
-        ...(this.deps.mcpServers || http || served.length
+        ...(this.deps.mcpServers || http || served.length || proxies
           ? {
               mcpServers: {
                 ...(this.deps.mcpServers
@@ -637,7 +673,8 @@ export class TurnRunner {
                       secrets: () => secrets,
                     })
                   : {}),
-                ...(http ? { [HTTP_SERVER]: http } : {}),
+                ...(http && !proxies ? { [HTTP_SERVER]: http } : {}),
+                ...(proxies ?? {}),
                 ...(served.length
                   ? {
                       [BUILTIN_SERVER]: classicBuiltinServer(served, {
@@ -694,7 +731,7 @@ export class TurnRunner {
           ? { allowedPluginPaths, builtinTools: (packages?.builtinTools ?? []).filter((n) => !served.includes(n)) }
           : {}),
         ...(ownPlugin !== undefined ? { ownPlugin } : {}),
-        ...(remotePlugins.length ? { remotePlugins } : {}),
+        ...(remotePlugins.length && !proxies ? { remotePlugins } : {}),
         disallowedTools: localOff,
         // Shaped like any turn's memory hooks (the same config gives the same
         // events, matchers and timeouts); each runs the current turn's own.

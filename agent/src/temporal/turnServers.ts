@@ -2,13 +2,10 @@ import { mkdir, readdir, rm, stat } from 'node:fs/promises'
 import path from 'node:path'
 import type { Sql } from 'postgres'
 import { toolOffReason } from '../access/items.js'
-import { BUILTIN_SOURCES, packageServerSource, packageSource } from '../access/model.js'
+import { BUILTIN_SOURCES, packageServerSource } from '../access/model.js'
 import { DEFAULT_ACCESS } from '../access/resolve.js'
-import type { AccessResolver, PackageAccess } from '../access/resolver.js'
+import type { AccessResolver } from '../access/resolver.js'
 import type { AuditSink } from '../audit/log.js'
-import { BACKGROUND_BUILTINS, BUILTIN_SERVER, builtinServer, PROVIDED } from '../builtins/server.js'
-import type { BackgroundTasks } from '../background/service.js'
-import type { NestedQueries } from '../builtins/web.js'
 import {
   dirBodies,
   HTTP_READ_TOOL_NAME,
@@ -25,26 +22,18 @@ import type { HttpLimits } from '../harness/httpRequest.js'
 import type { Resolver } from '../http/egress.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
 import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.js'
-import { collidingServerNames, type PackageServers, serverAccess, unofferedLocalServers } from '../plugins/packages/mcp.js'
-import { builtinAccessOf, builtinsOffOf, packageOmitted } from '../plugins/packages/derived.js'
+import { type PackageServers, serverAccess } from '../plugins/packages/mcp.js'
 import { pluginTierResolver } from '../plugins/registry.js'
 import { browserGuard, type BrowserOriginsAccess } from '../browser/guard.js'
 import type { SessionFiles } from '../workspace/store.js'
-import { localPackageServers, sharePackage, switchedOffServer, unparkableBuiltins } from './turnPackages.js'
-import { turnToolName } from './turnTools.js'
-import {
-  connectHttp,
-  connectInProcess,
-  type TurnContext,
-  type TurnPackage,
-  type TurnServer,
-  type TurnServers,
-} from './turnTools.js'
+import { localPackageServers, switchedOffServer } from './packageServers.js'
+import { connectHttp, connectInProcess, type TurnContext, type TurnServer, type TurnServers } from './turnTools.js'
 
-// What a durable turn's other tools are built from (#2320): the same pieces a classic
-// turn's `runTurn` hands Claude Code (sessions/manager.ts), built again for each listing
-// and each call, so a plugin disabled, removed or failing its egress check since is gone
-// at once, as it would be from a classic turn's next query.
+// What a turn's other tools are built from (#2320), for a flow run's `tool(…)` and a session
+// turn's calls as activities (plan 2026-10-13 Step 9.3): the same pieces a turn hands Claude
+// Code (sessions/turnRunner.ts), built again for each listing and each call, so a plugin
+// disabled, removed or failing its egress check since is gone at once, as it would be from a
+// turn's next query.
 
 /**
  * Under the state dir: a flow run's saved http bodies, `flow-<id>/http` (#2496). A durable
@@ -129,52 +118,14 @@ export type TurnServerDeps = {
         files?: SessionFiles | undefined
       }
     | undefined
-  /**
-   * The enabled plugin packages (`loadPackagesForRun`, as a classic turn's), shared with
-   * the segment runner under `packages.root` (turnPackages.ts) on a listing, and their
-   * MCP servers offered as turn tools.
-   */
+  /** The enabled plugin packages (`loadPackagesForRun`, as a turn's): their MCP servers offered as turn tools. */
   packages?:
     | {
         load: () => Promise<PackagesForRun>
-        root: string | undefined
-        /** Where a package's copy without its http MCP servers is made, on this pod (as a classic turn's). */
-        localRoot: string
         /** Their http MCP servers through the loopback forwarder (plugins/packages/mcp.ts). */
         forward: (loaded: readonly LoadedPackage[]) => Promise<PackageServers>
       }
     | undefined
-  /**
-   * The Claude Code built-ins an allowed package names, beyond what the engine runs itself
-   * (#2393, builtins/server.ts): offered as the `builtin` turn tools, on the session's
-   * workspace and its credential. Without it they are not offered, and the session says so.
-   */
-  builtins?:
-    | {
-        files: SessionFiles
-        /** The model work WebFetch and WebSearch need, for the session the call is in. */
-        nested: (context: TurnContext) => NestedQueries
-        audit?: AuditSink | undefined
-        resolve?: Resolver
-        /** The session's background tasks (CronCreate, ScheduleWakeup, TaskStop); without them those are not offered. */
-        background?: { tasks: BackgroundTasks; tz: string; now?: () => Date; commandQueue?: string } | undefined
-      }
-    | undefined
-}
-
-/** What the model is told about the built-ins it gets as turn tools. */
-export function builtinNote(names: readonly string[]): string {
-  const tools = names.map((n) => `${n} (mcp__durable__${turnToolName(BUILTIN_SERVER, n)})`).join(', ')
-  return (
-    `Claude Code's built-in tools ${tools} are provided in this session as tools of the "${BUILTIN_SERVER}" server, because a ` +
-    'plugin package you have names them. Use them where its skills or agents say to use the built-in of that name: they take ' +
-    'the same input and answer the same way. Every call of one asks the user first. Their files are the session workspace, ' +
-    'shown under /workspace (the workspace_* tools see the same files), not a local disk.' +
-    (names.some((n) => BACKGROUND_BUILTINS.includes(n))
-      ? ' The session keeps the jobs, wakeups, watches and workflows they start past this turn: each sends its prompt, events or result to the ' +
-        'session as a new message when it is due and the session is idle.'
-      : '')
-  )
 }
 
 /** A plugin's MCP session kept for the durable session, on a forwarder route of its own (#2581). */
@@ -294,117 +245,14 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       })
     }
     const problems = [...(forwarded?.problems ?? [])]
-    const notes: string[] = []
-    // A flow has no session workspace for the file tools to act on, nor a turn to tell.
-    const provided: ReadonlySet<string> =
-      deps.builtins && !context.flow
-        ? new Set([...PROVIDED].filter((n) => deps.builtins!.background || !BACKGROUND_BUILTINS.includes(n)))
-        : new Set()
     const loaded = deps.packages ? await deps.packages.load() : undefined
     let forwardedPackages: PackageServers | undefined
-    let shared: TurnPackage[] | undefined
     if (loaded) {
       problems.push(...loaded.problems)
-      // A listing shares each package first: one that fails to share (or to be stripped
-      // of its http servers) is not loaded, so its servers are not offered either (#2563).
-      let offered = loaded.loaded
-      // One binding for both branches: the listing and a call decide on the same root (#3523).
-      const { root, localRoot } = deps.packages!
-      // What each package has off and each server's switch and stored tools, in one read
-      // each per listing or call (#4757): what the shared copies leave out, the built-ins
-      // offered and their tiers, as a classic turn reads them.
-      const itemAccess: ReadonlyMap<string, PackageAccess> = deps.access
-        ? await deps.access.packageAccess(loaded.loaded.map((p) => packageSource(p.name)))
-        : new Map()
+      const offered = loaded.loaded
+      // Each server's switch and stored tools, in one read per listing or call (#4757), as a turn reads them.
       const switches = await serverAccess(loaded.loaded, deps.access)
-      const colliding = collidingServerNames(loaded.loaded)
-      const unoffered = unofferedLocalServers(loaded.loaded)
-      const builtinsOff = builtinsOffOf(loaded.loaded, itemAccess)
-      if (context.listing) {
-        shared = []
-        const failed = new Set<string>()
-        for (const pkg of loaded.loaded) {
-          if (root === undefined) {
-            problems.push(
-              `plugin package ${pkg.name} was not loaded: a durable session reads packages from the payload volume, and SCADBUDDY_PAYLOAD_DIR is not set`,
-            )
-            failed.add(pkg.name)
-            continue
-          }
-          try {
-            const turnPackage = await sharePackage(pkg, root, localRoot, packageOmitted(pkg.name, itemAccess, switches, colliding, unoffered), builtinsOff)
-            const dark = unparkableBuiltins(turnPackage, provided)
-            if (dark.length) {
-              problems.push(
-                `plugin package ${pkg.name} names ${dark.join(', ')}: a durable session cannot ask you before ` +
-                  'such a call runs, so they are not offered here; a classic session offers them',
-              )
-            }
-            // The ones provided as turn tools are not the engine's to run.
-            shared.push({ ...turnPackage, builtin_tools: turnPackage.builtin_tools.filter((t) => !dark.includes(t) && !provided.has(t)) })
-          } catch (err) {
-            problems.push(`plugin package ${pkg.name} was not loaded: ${(err as Error).message}`)
-            failed.add(pkg.name)
-          }
-        }
-        offered = loaded.loaded.filter((pkg) => !failed.has(pkg.name))
-      } else if (root === undefined) {
-        // With no payload volume a listing shares nothing, so a call builds nothing
-        // either, whatever it names (#3072).
-        offered = []
-      }
-      // Otherwise a call (not a listing) builds every loaded package's servers: a share
-      // that threw is known only by sharing again, so for that one the listing is the
-      // guard, since a call can only name a tool the listing offered (#2620).
       servers.push(...localPackageServers(offered, problems, switches))
-      // Every served built-in a package names, and of those the ones on: one switched off is
-      // not offered, and its call (a listing from before) is refused in a classic turn's words
-      // (#4757 final review I1), the server kept for it even when none is on.
-      const known = [...new Set(offered.filter((p) => p.allowed).flatMap((p) => p.builtinTools))].filter((n) => provided.has(n)).sort()
-      const named = known.filter((n) => !builtinsOff.has(n))
-      const builtins = deps.builtins
-      if (known.length && builtins) {
-        const files = { files: builtins.files, ws: { kind: 'session' as const, sessionId: context.session } }
-        const web = {
-          nested: builtins.nested(context),
-          secrets: () => secrets,
-          audit: builtins.audit,
-          actor: context.owner,
-          sessionId: context.session,
-          ...(context.turnId ? { turnId: context.turnId } : {}),
-          signal: context.signal,
-          ...(builtins.resolve ? { resolve: builtins.resolve } : {}),
-        }
-        const tasks = builtins.background
-        const background = tasks
-          ? {
-              tasks: tasks.tasks,
-              sessionId: context.session,
-              owner: context.owner,
-              tz: tasks.tz,
-              now: tasks.now ?? (() => new Date()),
-              commandQueue: tasks.commandQueue,
-              workspace: builtins.files,
-            }
-          : undefined
-        servers.push({
-          name: BUILTIN_SERVER,
-          connect: () => connectInProcess(() => builtinServer(named, () => ({ files, web, background }))),
-          // Each by its access across the packages naming it, as a classic turn's seam reads it
-          // (resolver.ts `builtin`). One that is off is refused (`refusal`) before its tier is
-          // read, answered as a refused call is (not outward).
-          tierOf: (harnessName) => {
-            const access = builtinAccessOf(harnessName.slice(`mcp__${BUILTIN_SERVER}__`.length), offered, itemAccess)
-            return access === 'off' ? 'write' : access
-          },
-          refusal: async (harnessName) =>
-            builtinsOff.has(harnessName.slice(`mcp__${BUILTIN_SERVER}__`.length)) ? toolOffReason(harnessName) : undefined,
-          mayPark: () => true,
-          callIds: true,
-          ...(named.length ? {} : { unlisted: true as const }),
-        })
-        if (named.length) notes.push(builtinNote(named))
-      }
       // As a remote plugin's: the forwarder URL, which carries its token, is a secret too.
       forwardedPackages = await deps.packages!.forward(offered)
       problems.push(...forwardedPackages.problems)
@@ -442,8 +290,6 @@ export function turnServers(deps: TurnServerDeps): (context: TurnContext) => Pro
       servers,
       problems,
       secrets,
-      ...(shared ? { packages: shared } : {}),
-      ...(notes.length ? { notes } : {}),
       release: () => {
         forwardedPackages?.release()
         loaded?.release()

@@ -23,6 +23,8 @@ export type ToolCallInput = {
   args: unknown
   /** The most the call may run. */
   timeoutMs: number
+  /** How long it may wait to be taken: set for a replica's own queue, which nothing polls once the pod is gone. */
+  startTimeoutMs?: number
 }
 
 /** What `tool:<name>` is given: the call as the model made it (the approved input, if it parked) and its gate entry. */
@@ -55,6 +57,7 @@ export async function ToolCall(input: ToolCallInput): Promise<unknown> {
   const run = proxyActivities<Record<string, (args: unknown) => Promise<unknown>>>({
     taskQueue: input.queue,
     startToCloseTimeout: input.timeoutMs,
+    ...(input.startTimeoutMs === undefined ? {} : { scheduleToStartTimeout: input.startTimeoutMs }),
     heartbeatTimeout: HEARTBEAT_TIMEOUT,
     // Once: the call may have acted before its worker went away (a write's Idempotency-Key answers a repeat, but nothing else does).
     retry: { maximumAttempts: 1 },
