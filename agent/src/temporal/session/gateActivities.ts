@@ -43,13 +43,12 @@ export async function gateSettings(sql: Sql): Promise<GateSettings> {
 
 /** `db.events` is this replica's session event log, so a write wakes its followers at once (#3365). */
 export function sessionGateActivities(db: GateDb) {
-  const { sql } = db
   return {
-    [SESSION_GATE_ACTIVITIES.settings]: () => gateSettings(sql),
+    [SESSION_GATE_ACTIVITIES.settings]: () => gateSettings(db.sql),
     [SESSION_GATE_ACTIVITIES.open]: (args: Parameters<typeof openInput>[1]) => openInput(db, args),
     [SESSION_GATE_ACTIVITIES.grant]: (args: Parameters<typeof grantInput>[1]) => grantInput(db, args),
     [SESSION_GATE_ACTIVITIES.deny]: (args: Parameters<typeof denyInput>[1]) => denyInput(db, args),
     [SESSION_GATE_ACTIVITIES.resolve]: (args: Parameters<typeof resolveInput>[1]) => resolveInput(db, args),
-    [SESSION_GATE_ACTIVITIES.read]: (args: Parameters<typeof readInput>[1]) => readInput(sql, args),
+    [SESSION_GATE_ACTIVITIES.read]: (args: Parameters<typeof readInput>[1]) => readInput(db.sql, args),
   }
 }
