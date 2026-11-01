@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from fastapi import status
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, model_validator
 
+from scadbuddy.bambuddy.stages import Stage
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.deeplink import edit_url
@@ -73,8 +74,9 @@ UNDRAWABLE_MAX = 4096
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 #: Which Bambuddy route produced the ids below; see ``bambuddy/dispatch.py``. The
-#: ``"pipeline"`` route went with the send bar's queue mode (#312).
-PrintRoute = Literal["slice_queue"]
+#: ``"pipeline"`` route went with the send bar's queue mode (#312). ``"lan"`` is a print
+#: started over the LAN (#4644), which has no Bambuddy ids: its run names it.
+PrintRoute = Literal["slice_queue", "lan"]
 
 #: What the last print left on a record. A record whose last print was a pipeline run
 #: may still carry an *older* slice-and-queue print's ids here, so they go with it.
@@ -100,6 +102,13 @@ class PlateSend(BaseModel):
     queue_item_id: int
     #: ``None`` for a plate queued with no slice (#2671).
     slice_job_id: int | None = None
+
+
+class LanPlateSend(BaseModel):
+    """One plate a LAN print started, or waits to start, and how many copies (#4644)."""
+
+    plate_id: int
+    copies: int
 
 
 class BackfillState(BaseModel):
@@ -182,6 +191,16 @@ class OutputMeta(BaseModel):
     #: ``queue_item_id`` / ``slice_job_id`` above are the last of these. Empty on
     #: records written before multi-plate prints.
     plates: list[PlateSend] = Field(default_factory=list)
+    #: A last print over the LAN (``print_route`` ``lan``, #4644): the run that started
+    #: it, the registry printer it printed on, each plate with its copies, and how the
+    #: print goes as the native follow last read it. ``None`` and empty for any other.
+    print_run_id: str | None = None
+    printer: str | None = None
+    lan_plates: list[LanPlateSend] = Field(default_factory=list)
+    print_stage: Stage | None = None
+    #: Whether ``print_stage`` is final: nothing changes without another print. ``None``
+    #: when the last print was not over the LAN.
+    print_settled: bool | None = None
     #: The library pins the render read (#169): each checkout's name, ref and exact
     #: commit, so an output names what it was built from beyond ``model_version``.
     #: Empty for a model with none, and on records written before the field existed.

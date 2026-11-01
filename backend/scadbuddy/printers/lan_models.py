@@ -60,6 +60,10 @@ class LanStarted(BaseModel):
     #: while it is the printer's print, read from the report.
     ended: Stage | None = None
     ended_message: str | None = None
+    #: The run that started it (#4543): its rack picks are keyed by the run and
+    #: ``subtask_name``, and settled by ``lan_wait`` as it waits it out. ``None`` on a
+    #: start from before it.
+    run_id: str | None = None
 
 
 class LanStopped(BaseModel):

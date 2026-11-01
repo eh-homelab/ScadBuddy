@@ -1208,7 +1208,7 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
         library=deps.library,
         # A native slice's blob, from this process's own store (plan 2026-10-16 Task 9).
         blobs=ContentBlobs(content) if content is not None else None,
-        rack=deps.rack,
+        rack=state.components.get(RACK_USAGE),
         # A run's next plate copy waits on the printer's report (#4541).
         reports=registry.reports,
     )

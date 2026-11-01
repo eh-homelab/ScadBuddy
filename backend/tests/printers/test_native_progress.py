@@ -13,6 +13,7 @@ import pytest
 from scadbuddy.bambuddy.dispatch import QueueOutcome
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.print_run import PlannedRun, PrintRunResult, finish_run
+from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.bambuddy.runs import PrintRun, RecentRuns, given_run, newest_failure
 from scadbuddy.core.events import PrintEvent, PrintRunEvent
 from scadbuddy.printers.lan_models import LanStarted, LanStopped
@@ -26,6 +27,7 @@ from scadbuddy.printers.progress import (
     LanProgress,
     from_lan_report,
     lan_ended,
+    lan_last_print,
     shows,
 )
 from scadbuddy.printers.status import print_error_text
@@ -276,6 +278,8 @@ async def test_a_lan_run_is_read_from_its_printers_report() -> None:
     result = PrintRunResult(library_file_id=41, copies=1, path="native", lan=[OURS])
     progress = await _lan(_run(result), report(gcode_state="FINISH")).read("o" * 32)
     assert progress is not None and (progress.route, progress.stage) == ("lan", "done")
+    # The run it reads (#4644, #4543): what its last print and rack picks are keyed by.
+    assert progress.run_id == "r"
 
 
 @pytest.mark.parametrize(
@@ -426,6 +430,7 @@ async def test_a_sequenced_run_settles_with_its_last_start() -> None:
     progress = await _lan(_run(result), value).read("o" * 32)
     assert progress is not None
     assert (progress.stage, progress.settled, progress.copies_completed) == ("done", True, 2)
+    assert progress.run_id == "r"
 
 
 @pytest.mark.parametrize(
@@ -497,3 +502,45 @@ async def test_a_run_waiting_for_a_cleared_plate_says_so() -> None:
         AWAITING_CLEAR.format(printer="H2C"),
         WAITING,
     ]
+
+
+class _LastPrints:
+    def __init__(self) -> None:
+        self.moved: list[tuple[str, str, str, bool]] = []
+
+    def record_lan_progress(
+        self, output_id: str, run_id: str, *, stage: str, settled: bool
+    ) -> None:
+        self.moved.append((output_id, run_id, stage, settled))
+
+
+@pytest.mark.parametrize(
+    ("progress", "moved"),
+    [
+        (
+            PrintProgress(route="lan", stage="running", bambuddy_url="", run_id="r"),
+            [("o" * 32, "r", "running", False)],
+        ),
+        (
+            PrintProgress(route="lan", stage="done", settled=True, bambuddy_url="", run_id="r"),
+            [("o" * 32, "r", "done", True)],
+        ),
+        (PrintProgress(route="lan", stage="running", bambuddy_url=""), []),
+        (PrintProgress(route="slice_queue", stage="running", bambuddy_url="x"), []),
+    ],
+    ids=["running", "settled", "no run", "bambuddy"],
+)
+async def test_the_follow_moves_a_lan_prints_last_print(
+    progress: PrintProgress, moved: list[tuple[str, str, str, bool]]
+) -> None:
+    """#4644: the output's last print says how its LAN print goes, as the follow reads it."""
+    prints = _LastPrints()
+    await lan_last_print(prints)("o" * 32, progress)
+    assert prints.moved == moved
+
+
+async def test_a_library_files_lan_print_has_no_last_print_row() -> None:
+    prints = _LastPrints()
+    progress = PrintProgress(route="lan", stage="done", settled=True, bambuddy_url="", run_id="r")
+    await lan_last_print(prints)("library:7", progress)
+    assert prints.moved == []

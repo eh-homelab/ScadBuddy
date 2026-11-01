@@ -9,7 +9,7 @@ from typing import Annotated
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
-from scadbuddy.rack.usage import RackUsageStore, settle_hook
+from scadbuddy.rack.usage import RackUsageStore, lan_settle_hook, settle_hook
 
 RACK_USAGE: Key[RackUsageStore] = Key("rack_usage")
 
@@ -21,6 +21,8 @@ def _build(core: Core, components: Components) -> RackUsageStore:
     core.print_follower.on_settled.append(
         settle_hook(store, core.print_links, core.settings_store.load)
     )
+    # A LAN print's picks, settled from its reads: it has no archive (#4543).
+    core.print_follower.on_read.append(lan_settle_hook(store))
     return store
 
 
