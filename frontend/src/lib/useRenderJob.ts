@@ -57,8 +57,11 @@ export interface RenderState {
   retry: () => void
   /**
    * #4968 — withdraws the page's claim on the job being followed; the last claim withdrawn
-   * cancels it, and the job settles `cancelled`. Answers the withdrawn job's id (none
-   * when no job was in flight); rejects when the server refused.
+   * cancels it, and the job settles `cancelled`. Claims are counted, not owned, so once
+   * withdrawn the page lets go of the job: it stops following it, never withdraws it
+   * again and never names it as the job a later render supersedes, since any claim left
+   * is another caller's. Answers the withdrawn job's id (none when no job was in flight);
+   * rejects when the server refused.
    */
   cancel: () => Promise<string | undefined>
   /** #267 — the step the current render is on, while it is running and the socket says. */
@@ -269,14 +272,25 @@ export function useRenderJob(
   const generation = useRef(0)
   const last = useRef<Submission | undefined>(undefined)
   const extraRef = useLatest(extra)
-  /** The job being followed, and a read of it, while it is unsettled (#4968). */
-  const followed = useRef<{ jobId: string; read: () => void } | undefined>(undefined)
+  /** The job being followed while it is unsettled, and how to stop following it (#4968). */
+  const followed = useRef<{ jobId: string; drop: (job: Job) => void } | undefined>(undefined)
+  /** Jobs this page withdrew: never withdrawn or superseded again (their claims are others'). */
+  const withdrawn = useRef(new Set<string>())
   const cancel = useCallback(async () => {
     const current = followed.current
-    if (!current) return undefined
-    await api.withdrawJob(current.jobId)
-    // The event that says so may lag (or the socket be down): read it now.
-    current.read()
+    if (!current || withdrawn.current.has(current.jobId)) return undefined
+    withdrawn.current.add(current.jobId)
+    let answer: Job
+    try {
+      answer = await api.withdrawJob(current.jobId)
+    } catch (cause) {
+      // Refused: the claim is still the page's, so Cancel may be pressed again.
+      withdrawn.current.delete(current.jobId)
+      throw cause
+    }
+    // Settled for this page whatever the answer says: a job still running is running
+    // for another claimant only.
+    current.drop(answer)
     return current.jobId
   }, [])
 
@@ -373,7 +387,15 @@ export function useRenderJob(
         }
       }
 
-      followed.current = { jobId, read: () => void read() }
+      followed.current = {
+        jobId,
+        drop: (answer) => {
+          if (settled || isStale()) return
+          setJob(answer)
+          setJobFor(params)
+          finish()
+        },
+      }
       // The subscription's confirmation is the first read, so a job that settled
       // before it was followed is still seen.
       unfollow = realtime.subscribe(`job:${jobId}`, (signal) => {
@@ -407,7 +429,10 @@ export function useRenderJob(
     const prior = last.current
     const supersedable = prior && prior.slug === slug && prior.version === version
     const submitted = (async () => {
-      const supersedes = supersedable ? await prior.jobId : undefined
+      const priorJob = supersedable ? await prior.jobId : undefined
+      // A job the page withdrew holds no claim of its own: superseding it would release
+      // another caller's (review of #5119).
+      const supersedes = priorJob && !withdrawn.current.has(priorJob) ? priorJob : undefined
       // A full queue is transient ("about one render"): retry after the delay it
       // names rather than showing a failure. A refused submit created no job, so
       // the same `supersedes` still applies.

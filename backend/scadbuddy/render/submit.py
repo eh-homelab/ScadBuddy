@@ -615,6 +615,13 @@ class RenderService:
                         # next task recovers, so the same Update is sent again.
                         if not workflow_not_ready(error):
                             raise
+                        # Counted and logged: a task that fails for good (nondeterminism)
+                        # holds every release for the whole `RELEASE_BOUND`.
+                        self.metrics.store_errors.labels("release_not_ready").inc()
+                        logger.info(
+                            "a render's release met a failed workflow task; sending it again",
+                            extra={"job_id": job.id},
+                        )
                         await asyncio.sleep(NOT_READY_RETRY)
         except RPCError as error:
             if execution_gone(error):

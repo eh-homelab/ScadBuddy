@@ -48,7 +48,7 @@ NativeSliceOutcome = Literal["completed", "failed", "cancelled"]
 #: queue gauges, a render's start (Temporal unavailable, or the start refused or
 #: unstartable; one still accepting is `render_accept_pending`), or releasing or
 #: cancelling a superseded job.
-StoreOperation = Literal["read", "start_workflow", "cancel_workflow"]
+StoreOperation = Literal["read", "start_workflow", "cancel_workflow", "release_not_ready"]
 #: Which settle pass failed a row nothing would settle: ``closed``, a row whose
 #: ``render-<render_key>`` run closed without settling it (terminated, timed out);
 #: ``legacy``, a row an older release inserted that no workflow will run.

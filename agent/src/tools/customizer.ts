@@ -324,7 +324,9 @@ export const customizerTools: Tool[] = [
     description:
       'Withdraw your request for a render job that is still pending or running (#4968). If no other request ' +
       'still waits on the job it is cancelled (status `cancelled`); otherwise it goes on for the others. ' +
-      'A job that has already finished is returned unchanged.',
+      'A job that has already finished is returned unchanged. Claims are counted, not owned: withdraw only a ' +
+      'job you started yourself (with render_model), or you take away the claim of whoever else waits on it, ' +
+      "such as the user's preview.",
     input: z.object({ job_id: jobId }),
     risk: 'write',
     source:

@@ -376,10 +376,11 @@ def test_withdrawing_a_render_cancels_it(
         response = client.post(
             f"/api/v1/jobs/{job_id}/withdraw", headers={"Idempotency-Key": uuid.uuid4().hex}
         )
+        # Asserted while the render is still held, so it cannot have finished first.
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "cancelled"
     finally:
         release.touch()
-    assert response.status_code == 200, response.text
-    assert response.json()["status"] == "cancelled"
     assert wait_for_job(client, job_id)["status"] == "cancelled"
 
 
