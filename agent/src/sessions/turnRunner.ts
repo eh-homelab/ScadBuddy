@@ -40,6 +40,7 @@ import type { ClaimedSession, SessionManagerDeps, SessionRecord, TurnPrincipal }
 import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
+import { readToolsAsActivities } from './runtimeSettings.js'
 import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
 import { createTurnSlot, NO_TURN, slotHooks, slotHttpContext, slotWebContext, type TurnContext, type TurnSlot } from './turnSlot.js'
 import { PgHttpBodies } from './httpBodies.js'
@@ -58,6 +59,7 @@ export type TurnRunnerDeps = Pick<
   | 'tools'
   | 'tierOf'
   | 'mcpServers'
+  | 'toolCalls'
   | 'prepareApproval'
   | 'builtInTools'
   | 'pluginPaths'
@@ -109,6 +111,8 @@ export type FingerprintParts = {
   raisedTiers: string[]
   /** Whether the run has the http_request tool (#827). */
   httpRequest: boolean
+  /** Whether its ScadBuddy tool calls run as activities (plan 2026-10-13 Step 9.2): the in-process server a process keeps is spawned with it. */
+  toolsAsActivities: boolean
   /** http_request's stored access in ai_access (#2171), its tier when one is set; null when none is stored. */
   httpTier: ToolAccess | null
   builtinTools: string[]
@@ -500,14 +504,19 @@ export class TurnRunner {
           }
         }
       }
-      const [cwd, resume, settingModel, httpAccess] = await phase('session', () =>
+      const [cwd, resume, settingModel, httpAccess, asActivities] = await phase('session', () =>
         Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.deps.store.exists(id),
           this.deps.settings?.get<string>(SETTING_MODEL),
           this.deps.httpRequest ? access.entry(BUILTIN_SOURCES.http, HTTP_TOOL) : undefined,
+          this.deps.settings ? readToolsAsActivities(this.deps.settings) : false,
         ]),
       )
+      // The turn's ScadBuddy calls as activities (plan 2026-10-13 Step 9.2), each given the gate
+      // entry the seam approved it on. Without a starter (no Temporal), they run here.
+      const toolCalls = asActivities ? this.deps.toolCalls?.() : undefined
+      const activities = toolCalls ? { start: toolCalls, approvalOf: (toolUseId: string) => ledger.approvalOf(toolUseId) } : undefined
       // A Workflow agent's chat (startChild): its own model, effort and subagent definition.
       const model = session.agentModel ?? settingModel
       // Not while that subagent, or the own plugin, is switched off (#4757 Task 6 review I3): the
@@ -571,9 +580,13 @@ export class TurnRunner {
         }),
         ...(builtIn ? { builtInPolicy: builtIn } : {}),
         ...(live ? { live } : {}),
-        approvalGate: (request) => {
+        approvalGate: async (request) => {
           const turn = slot.current
-          return turn ? turn.approvalGate(request) : Promise.resolve({ approved: false, message: NO_TURN })
+          if (!turn) return { approved: false, message: NO_TURN }
+          const verdict = await turn.approvalGate(request)
+          // The entry it was approved on, which its ToolCall runs on (Step 9.2).
+          if (verdict.approved && verdict.approvalId !== undefined) ledger.approve(request.toolUseId, { requestId: verdict.approvalId, input: verdict.input })
+          return verdict
         },
         // A registry tool that resolves what its arguments name parks that, by name (#4442).
         ...(this.deps.prepareApproval ? { prepareApproval: this.deps.prepareApproval(session, principal) } : {}),
@@ -611,6 +624,7 @@ export class TurnRunner {
                       turnContext: () => slot.current?.trace.context() ?? ROOT_CONTEXT,
                       ...(builtIn ? { builtIn } : {}),
                       ...(live ? { ledger } : {}),
+                      ...(activities ? { activities } : {}),
                       // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
                       secrets: () => secrets,
                     })
@@ -705,6 +719,7 @@ export class TurnRunner {
         disabledTools: [...(builtIn?.disallowed ?? []), ...localOff],
         raisedTiers: [...(builtIn?.raised ?? [])],
         httpRequest: http !== undefined,
+        toolsAsActivities: activities !== undefined,
         httpTier: httpAccess?.access ?? null,
         builtinTools: run.builtinTools ?? [],
         servedBuiltins: served,
@@ -786,19 +801,29 @@ export class TurnRunner {
  * one for each turn the slot holds, dropped with it, so a warm process that serves many
  * turns never holds more than one turn's calls. With no turn it records nothing.
  */
-function turnLedger(slot: TurnSlot): Pick<SeamLedger, 'record' | 'tierOf'> {
+function turnLedger(slot: TurnSlot): Pick<SeamLedger, 'record' | 'tierOf' | 'approve' | 'approvalOf'> {
   const ledgers = new WeakMap<TurnContext, SeamLedger>()
+  const current = (): SeamLedger | undefined => {
+    const turn = slot.current
+    if (!turn) return undefined
+    let ledger = ledgers.get(turn)
+    if (!ledger) ledgers.set(turn, (ledger = new SeamLedger()))
+    return ledger
+  }
   return {
     record(toolUseId, tier) {
-      const turn = slot.current
-      if (!turn) return
-      let ledger = ledgers.get(turn)
-      if (!ledger) ledgers.set(turn, (ledger = new SeamLedger()))
-      ledger.record(toolUseId, tier)
+      current()?.record(toolUseId, tier)
     },
     tierOf(toolUseId) {
       const turn = slot.current
       return turn ? ledgers.get(turn)?.tierOf(toolUseId) : undefined
+    },
+    approve(toolUseId, approval) {
+      current()?.approve(toolUseId, approval)
+    },
+    approvalOf(toolUseId) {
+      const turn = slot.current
+      return turn ? ledgers.get(turn)?.approvalOf(toolUseId) : undefined
     },
   }
 }

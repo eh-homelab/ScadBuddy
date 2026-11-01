@@ -11,6 +11,7 @@ import { refusal } from '../gate/refusal.js'
 import { INPUT_CHANNEL } from '../gate/store.js'
 import { type AttentionSpec, answeredText, BACK_REPLIES, DEFAULT_REPLIES, RECONNECTED_TEXT, timedOutText } from '../harness/attention.js'
 import type { ApprovalGate, ApprovalVerdict } from '../harness/permissions.js'
+import type { FinishedCall } from '../tools/activityProjection.js'
 import type { QuestionGate, QuestionRequest, QuestionVerdict, UserQuestion } from '../harness/questions.js'
 import type { QuestionService } from '../questions/service.js'
 import type { Continuation, OpenInputAnswer, OpenInputArgs, SessionTurnInput, SessionTurnResult, WithdrawInputArgs } from '../temporal/session/models.js'
@@ -95,6 +96,20 @@ import type { WarmEntry } from './warm.js'
 
 export const RESTARTED_PROMPT =
   'The agent service restarted during this turn. Calls that were in flight are marked as interrupted; check before repeating any of them. Continue the task.'
+/**
+ * The restart message when calls in flight had finished as ToolCall workflows (plan 2026-10-13 Step
+ * 9.2): what each returned, so the model need not repeat them; the rest are still to be checked.
+ */
+export function restartedPrompt(finished: readonly FinishedCall[]): string {
+  if (finished.length === 0) return RESTARTED_PROMPT
+  const lines = finished.map((c) => `- ${c.name} (call ${c.id}) ${c.ok ? 'succeeded' : 'failed'} and returned:\n${c.text}`)
+  return (
+    'The agent service restarted during this turn. These calls finished before the restart; do not repeat them:\n' +
+    `${lines.join('\n')}\n` +
+    'Any other call that was in flight is marked as interrupted; check before repeating it. Continue the task.'
+  )
+}
+
 /** What a call that cannot park here reads: an attention request or a tab wait, or a turn with no way to its workflow. */
 export const NO_PARKS = 'this session cannot wait for an approval or an answer yet, so the call was not run'
 /** What a question is told when the session is no longer the user's, or its turn ended: classic's words (questions/service.ts). */
@@ -148,6 +163,8 @@ export type TurnHostDeps = {
   listen?: (channel: string, onNotify: (payload: string) => void) => void
   /** Tests only: how often a held call reads its row (INPUT_POLL_MS). */
   inputPollMs?: number
+  /** The calls in flight at a restart whose ToolCall finished, and what each returned (activityProjection.ts `finishedToolCalls`); absent, none. */
+  finishedCalls?: (sessionId: string, turnId: string) => Promise<FinishedCall[]>
   /** Runs a released turn's approved call once (toolActivities.ts `decidedCalls`); absent, the model is told it was not run. */
   runCall?: (call: DecidedCall) => Promise<DecidedRun>
   /** Where a `done` summary is posted, as a classic turn posts it (#815 §4); absent, it reads NO_PARKS. */
@@ -384,7 +401,14 @@ export class TurnHost {
       const said = `the turn ended: ${decided.stop}`
       return this.#result(tallyTurn(session, { stopped: said, interrupted: said, result: undefined, refused: undefined, failure: undefined, secrets: [], turnUsd: 0, cutUsd: 0 }), [])
     }
-    const text = restarted ? RESTARTED_PROMPT : decided ? decided.text : (input.message?.text ?? '')
+    // Unread (Temporal away), the message says only what it always said: the model checks them.
+    const finished = restarted
+      ? ((await this.#deps.finishedCalls?.(id, turnId).catch((err: unknown) => {
+          this.#deps.core.stderr?.(`restarted turn ${turnId}: its finished calls could not be read: ${describe(err)}\n`)
+          return []
+        })) ?? [])
+      : []
+    const text = restarted ? restartedPrompt(finished) : decided ? decided.text : (input.message?.text ?? '')
     if (!text) throw ApplicationFailure.nonRetryable(`turn ${turnId} of session ${id} has no message`, SESSION_GONE)
     const images = restarted || parked ? [] : await this.#images(id, input.message?.images ?? [])
     const prompt = images.length ? userPrompt(text, images) : text

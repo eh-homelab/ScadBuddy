@@ -21,7 +21,8 @@ import {
   type ToolRun,
   type ToolServices,
 } from '../tools/registry.js'
-import { durableRequestId, flowRequestId } from '../gate/ids.js'
+import { durableRequestId, flowRequestId, parseRequestId } from '../gate/ids.js'
+import { type ToolCallArgs, type ToolCallBlock, type ToolCallResult, toolCallActivity } from './toolCall.js'
 import { turnPrincipal } from '../tools/harness.js'
 import { FLOW_IMAGES_MAX, type FlowBlobStore, type FlowImage, flowImageOf } from './flowBlobs.js'
 import { flowOf, type FlowRuns } from './flowRuns.js'
@@ -679,6 +680,100 @@ export function decidedCalls(tools: readonly Tool[], deps: ToolActivityDeps): (c
     const keep = deps.blobs ? { session: call.sessionId, blobs: deps.blobs, toolUseId: call.toolUseId } : undefined
     return { ran: true, ok: true, text: await resultText(run.result.content, keep) }
   }
+}
+
+// A session turn's call as a workflow of its own (toolCall.ts): `session-<uuid>-call-<tool_use_id>`.
+const TOOL_CALL_WORKFLOW_ID = /^session-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-call-([A-Za-z0-9_-]+)$/
+
+/** The session and tool_use id a ToolCall workflow id names, or undefined for any other workflow. */
+export function toolCallOf(workflowId: string | undefined): { session: string; toolUseId: string } | undefined {
+  const m = workflowId === undefined ? null : TOOL_CALL_WORKFLOW_ID.exec(workflowId)
+  return m ? { session: m[1]!, toolUseId: m[2]! } : undefined
+}
+
+/** A result's blocks as a ToolCall returns them: each image kept in the session's blobs and named, never its bytes. */
+async function callBlocks(content: readonly Block[], keep: { session: string; blobs: ResultBlobs | undefined; toolUseId: string }): Promise<ToolCallBlock[]> {
+  const images: SessionImage[] = []
+  const blocks: ToolCallBlock[] = content.map((block) => {
+    if (block.type === 'text') return { type: 'text', text: block.text ?? '' }
+    if (block.type !== 'image') return { type: 'text', text: `[${block.type}]` }
+    const image = keep.blobs ? imageOfBlock({ type: 'image', source: { type: 'base64', media_type: block.mimeType, data: block.data } }) : undefined
+    if (!image || images.length >= RESULT_IMAGES_MAX) return { type: 'text', text: keep.blobs ? UNUSABLE_IMAGE : FLOW_IMAGE }
+    if (!images.some((i) => i.name === image.name)) images.push(image)
+    return { type: 'image', name: image.name, mimeType: image.mediaType }
+  })
+  if (images.length) await keep.blobs!.put(keep.session, images, keep.toolUseId)
+  return blocks
+}
+
+/**
+ * Each registry tool as `tool:<name>`, the one activity of a session turn's ToolCall workflow
+ * (plan 2026-10-13 Step 9.2). The session and the call are the workflow's id, never its input.
+ * The call runs as decidedCalls runs a released one: gated as the tool is now, with the turn's
+ * tiers, and an outward call only with an approval recorded for its own entry (`requestId`, which
+ * must be this session's entry for this call) and bound to this input, keyed by that entry; any
+ * other call is keyed `call:<session>:<tool_use_id>`, as an in-process call is (projections.ts
+ * `callIds`). Its audit row is the turn's (audit/turn.ts sees every call's result), so none is
+ * written here. A refusal or a failed run is a result the model reads, never a failed workflow.
+ */
+export function toolCallActivities(tools: readonly Tool[], deps: ToolActivityDeps): Record<string, ToolActivity> {
+  const byName = new Map(tools.map((t) => [t.name, t]))
+  const lookup = (name: string): Tool | undefined => byName.get(name)
+  const audit = deps.audit && { hash: deps.audit.hash.bind(deps.audit), summarise: deps.audit.summarise.bind(deps.audit), record: async () => {} }
+  const quiet: ToolActivityDeps = { ...deps, audit }
+  const refused = (text: string): ToolCallResult => ({ ok: false, content: [{ type: 'text', text }] })
+  return Object.fromEntries(
+    tools.map((tool) => [
+      toolCallActivity(tool.name),
+      async (raw: unknown): Promise<ToolCallResult> => {
+        const context = Context.current()
+        const call = toolCallOf(context.info.workflowExecution?.workflowId)
+        if (call === undefined) {
+          throw ApplicationFailure.nonRetryable(
+            `${toolCallActivity(tool.name)} runs only for a session's ToolCall workflow; ${context.info.workflowExecution?.workflowId ?? 'this workflow'} is none`,
+            UNKNOWN_SESSION,
+          )
+        }
+        const { session, toolUseId } = call
+        const args = (raw ?? {}) as Partial<ToolCallArgs>
+        const owner = await deps.sessions.ownerOf(session)
+        if (owner === undefined) return refused(`session ${session} is gone, so ${tool.name} was not run`)
+        const requestId = typeof args.requestId === 'string' ? args.requestId : undefined
+        // Only this session's entry for this very call (gate/ids.ts): another's approval authorises nothing here.
+        if (requestId !== undefined) {
+          const parsed = parseRequestId(requestId)
+          if (parsed?.store !== 'durable' || parsed.sessionId !== session || parsed.toolUseId !== toolUseId) {
+            return refused(`request ${requestId} is not session ${session}'s entry for call ${toolUseId}, so ${tool.name} was not run`)
+          }
+        }
+        const { turnTiers: sent, turnId, ...who } = owner
+        const callKey = requestId ?? `call:${session}:${toolUseId}`
+        const caller: Caller = {
+          owner: who,
+          session,
+          requestId: callKey,
+          approvals: deps.approvals,
+          tiers: await turnTiers(who, sent ?? undefined, deps),
+          turnId: turnId ?? undefined,
+        }
+        let run: ToolRun
+        try {
+          run = await runGated(tool, args.input, quiet, lookup, caller, {
+            toolUseId,
+            signal: context.cancellationSignal,
+            heartbeat: (details) => context.heartbeat(details),
+            describedAs: `${HARNESS_PREFIX}${tool.name}`,
+            callKey,
+          })
+        } catch (err) {
+          if (err instanceof ApplicationFailure && err.nonRetryable) return refused(err.message)
+          throw err
+        }
+        if (context.cancellationSignal.aborted) throw new CancelledFailure('the call was cancelled')
+        return { ok: run.outcome === 'ok', content: await callBlocks(run.result.content, { session, blobs: deps.blobs, toolUseId }) }
+      },
+    ]),
+  )
 }
 
 /**

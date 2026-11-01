@@ -6,6 +6,8 @@ import type { Principal } from '../auth/principal.js'
 import type { AuditLog } from '../audit/log.js'
 import { TOOL_USE_META, toolContextFor, withSpan } from '../telemetry/trace.js'
 import { MCP_UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
+import type { CallApproval } from '../harness/seamLedger.js'
+import type { ToolCallStarter } from './activityProjection.js'
 import { errorResult, parsedOrRaw, type Progress, type Risk, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
 
 // The two projections of the registry (spec §5.1, D3). Both hand every call to
@@ -97,6 +99,13 @@ export function createHarnessServer(
    * seam recorded one (registry.ts ToolContext.seamTier, harness/seamLedger.ts); its own by default.
    */
   seamTierOf: (tool: Tool, toolUseId?: string) => Risk = (tool) => tool.risk,
+  /**
+   * The turn's calls as activities (activityProjection.ts, plan 2026-10-13 Step 9.2): each call
+   * with a tool_use id, in a session, runs as its ToolCall workflow, given the gate entry the seam
+   * approved it on (`approvalOf`). The browser_* tools stay here: their tab is reached through
+   * BridgeCall (#4806) and a call that finds none waits on this turn's gate.
+   */
+  activities?: { start: ToolCallStarter; approvalOf: (toolUseId: string) => CallApproval | undefined },
 ): McpSdkServerConfigWithInstance {
   const lookup = lookupIn(tools)
   return createSdkMcpServer({
@@ -121,6 +130,19 @@ export function createHarnessServer(
           // in the query's context, not the tool's (telemetry/trace.ts).
           otelContext.with(toolContextFor(extra, turnContext), () => {
             const toolUseId = toolUseIdFrom(extra)
+            if (activities && session !== undefined && toolUseId !== undefined && !t.name.startsWith('browser_')) {
+              // An approved call runs the input its approval was given for, as the seam passed it
+              // (the hash binds that, before this server's own parse filled any default).
+              const approval = activities.approvalOf(toolUseId)
+              return activities.start({
+                sessionId: session,
+                toolUseId,
+                tool: t.name,
+                input: approval?.input ?? (args as Record<string, unknown>),
+                ...(approval ? { requestId: approval.requestId } : {}),
+                signal: signalFrom(extra),
+              })
+            }
             // `gate: 'harness'`: the query's permission seam has already parked
             // an outward call for approval (registry.ts ToolContext.gate).
             return runTool(t, args, {

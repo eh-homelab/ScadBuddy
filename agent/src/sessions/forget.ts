@@ -2,6 +2,7 @@ import type { Client } from '@temporalio/client'
 import { WorkflowNotFoundError } from '@temporalio/common'
 import type { Sql } from 'postgres'
 import { backgroundWorkflowId } from '../background/service.js'
+import { terminateOpenToolCalls } from '../tools/activityProjection.js'
 import { type PayloadKeys, payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
 import { copyForkRanges, ForksNeedKeys, hasForks } from './store.js'
 import { notifyWarmEvict } from './warmEvict.js'
@@ -10,6 +11,8 @@ import { notifyWarmEvict } from './warmEvict.js'
 // deletion of a durable session or a flow run goes through. In this order:
 //   0. a session's background tasks (src/background/) end: their rows, then their
 //      workflows `bgtask-<session>-<id>`, terminated, so none encodes again under the key;
+//      and its tool calls still open (`session-<id>-call-<tool_use_id>`, plan 2026-10-13
+//      Step 9.2: every `tool.call` in its events with no `tool.result`) are terminated too;
 //   1. a session's forks that read its transcript through it (store.ts, plan 2026-10-13
 //      Step 6.5) take the range each references, sealed under their own keys, in the
 //      transaction that then goes on to
@@ -78,6 +81,7 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   if (sessionId !== undefined && !deps.keys && (await hasForks(deps.sql, sessionId))) throw new ForksNeedKeys(sessionId)
   deps.keys?.forget(subject)
   if (sessionId !== undefined) await endBackgroundTasks(deps, sessionId)
+  if (sessionId !== undefined && deps.client) await terminateOpenToolCalls({ sql: deps.sql, client: deps.client }, sessionId, 'forgotten (forgetSubject)')
   // The tombstone with the deletion: no encoder still running for the subject (a
   // workflow task or an activity before the termination below) can make it a new key.
   const keys = await deps.sql.begin(async (tx) => {

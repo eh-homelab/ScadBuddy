@@ -42,7 +42,21 @@ export const RuntimePutBody = z.strictObject({
   warm_max_per_replica: field('warm_max_per_replica').optional(),
   warm_idle_seconds: field('warm_idle_seconds').optional(),
   turn_max_seconds: field('turn_max_seconds').optional(),
+  tools_as_activities: z.boolean().optional(),
 })
+
+/**
+ * Whether a turn's ScadBuddy tool calls run as activities, each its own ToolCall workflow (plan
+ * 2026-10-13 Step 9.2): read by every turn's assembly (sessions/turnRunner.ts), and a warm
+ * process's fingerprint input, so a change reaches the next turn of every session. Off by default
+ * for one release; Step 9.9 removes it.
+ */
+export const TOOLS_AS_ACTIVITIES = 'tools_as_activities'
+
+/** The stored flag; off for anything but `true`. */
+export async function readToolsAsActivities(settings: Pick<SettingsRepo, 'get'>): Promise<boolean> {
+  return (await settings.get<unknown>(TOOLS_AS_ACTIVITIES)) === true
+}
 
 export const isRuntimeKey = (key: string): key is keyof RuntimeSettings => (RUNTIME_KEYS as string[]).includes(key)
 

@@ -70,7 +70,8 @@ import { ALL_TOOLS } from './tools/index.js'
 import { PgFlowBlobs } from './temporal/flowBlobs.js'
 import { PgFlowRuns } from './temporal/flowRuns.js'
 import { flowSessionActivities } from './temporal/flowSessions.js'
-import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities } from './temporal/toolActivities.js'
+import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type ToolActivityDeps, toolActivities, toolCallActivities } from './temporal/toolActivities.js'
+import { finishedToolCalls, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
 import { sessionGateActivities } from './temporal/session/gateActivities.js'
@@ -471,6 +472,9 @@ if (role.http && database && dataKeys) {
 // Undefined: the defaults.
 const memory: MemoryOptions | undefined = undefined
 
+// How a turn's ScadBuddy call runs as its ToolCall workflow (plan 2026-10-13 Step 9.2), once the
+// Temporal client below exists; read by each turn that has `tools_as_activities` on.
+let toolCallStart: ToolCallStarter | undefined
 const sessions =
   database && credentials
     ? new SessionManager({
@@ -482,6 +486,7 @@ const sessions =
         access: accessResolver,
         // ScadBuddy's tools and their tiers (tools/harness.ts).
         ...harnessTools(toolServices),
+        toolCalls: () => toolCallStart,
         // Settings → Tools & plugins' overrides of the built-in tools (#1953), per turn.
         builtInTools: () => builtInTools.policy(),
         // ScadBuddy's own plugin (#896, harness/ownPlugin.ts): its skills and
@@ -674,6 +679,9 @@ const turnHost =
         hostQueue: SESSION_HOST_QUEUE,
         ...(events ? { listen: (channel: string, onNotify: (payload: string) => void) => events.listenAlso(channel, onNotify) } : {}),
         ...(durableToolDeps ? { runCall: decidedCalls(ALL_TOOLS, durableToolDeps) } : {}),
+        // A restarted turn's calls that finished as ToolCall workflows (Step 9.2), read with the client below.
+        finishedCalls: (sessionId: string, turnId: string) =>
+          temporalClient ? finishedToolCalls({ sql: temporal.sql, client: temporalClient }, sessionId, turnId) : Promise.resolve([]),
         // A `done` summary, posted as a classic turn's (#5003).
         questions: sessions.questions,
       })
@@ -778,6 +786,7 @@ const temporalClient = temporal
       ...(dataConverter ? { dataConverter } : {}),
     })
   : undefined
+if (temporalClient && temporal) toolCallStart = toolCallStarter({ client: temporalClient, blobs: new SessionBlobs(temporal.sql) })
 // A place in this replica's warm cache, and its session host queue (§5.2): on agent-tools, and on
 // the session host queue for a turn another replica (one it was lost on) refers here.
 const sessionAcquire =
@@ -817,6 +826,8 @@ const temporalWorker =
         identity: workerIdentity(replicaIdentity()),
         activities: {
           ...toolActivities(ALL_TOOLS, durableToolDeps),
+          // A session turn's calls, each its own ToolCall workflow (plan 2026-10-13 Step 9.2).
+          ...toolCallActivities(ALL_TOOLS, durableToolDeps),
           ...gateActivities({
             audit,
             sessions: new PgSessionOwners(temporal.sql),
