@@ -104,7 +104,8 @@ export function temporalTaskRunner(client: Client, taskQueue: string, retryMs?: 
       await client.workflow.start(BACKGROUND_WORKFLOW, {
         workflowId: backgroundWorkflowId(task.sessionId, task.id),
         taskQueue,
-        args: [{ taskId: task.id, kind: task.kind }],
+        // `recurring`: whether its loop asks to become a Schedule (bg_schedule); a one-shot job never does.
+        args: [{ taskId: task.id, kind: task.kind, ...(task.kind === 'cron' ? { recurring: task.spec.recurring !== false } : {}) }],
       })
     },
     // Both, whichever it is: a cron job made before Step 9.8 is a workflow until it is converted.
@@ -119,27 +120,85 @@ export function temporalTaskRunner(client: Client, taskQueue: string, retryMs?: 
   }
 }
 
-export type CronPassDeps = { client: Client; store: Pick<BackgroundTaskStore, 'activeRecurringCrons' | 'finish'>; taskQueue: string }
+export type CronPassDeps = { client: Client; store: Pick<BackgroundTaskStore, 'activeRecurringCrons' | 'finish' | 'get'>; taskQueue: string }
+
+/**
+ * Whether a task's Schedule has a fire running (one still waiting for a busy session): its
+ * latest action's workflow, described, since `runningActions` stayed empty while a fire ran
+ * (Temporal CLI 1.5 dev server, 2026-11-01).
+ */
+async function firing(client: Client, task: Pick<BackgroundTask, 'id' | 'sessionId'>): Promise<boolean> {
+  let latest: string | undefined
+  try {
+    latest = (await client.schedule.getHandle(backgroundWorkflowId(task.sessionId, task.id)).describe()).info.recentActions.at(-1)?.action.workflow.workflowId
+  } catch (err) {
+    if (err instanceof ScheduleNotFoundError) return false
+    throw err
+  }
+  if (latest === undefined) return false
+  try {
+    return (await client.workflow.getHandle(latest).describe()).status.name === 'RUNNING'
+  } catch (err) {
+    if (err instanceof WorkflowNotFoundError) return false
+    throw err
+  }
+}
+
+/** Ends a cron job's timer workflow made before Step 9.8, if it is still running. */
+async function endTimerWorkflow(client: Client, task: Pick<BackgroundTask, 'id' | 'sessionId'>): Promise<void> {
+  const handle = client.workflow.getHandle(backgroundWorkflowId(task.sessionId, task.id))
+  try {
+    if ((await handle.describe()).status.name !== 'RUNNING') return
+  } catch (err) {
+    if (err instanceof WorkflowNotFoundError) return
+    throw err
+  }
+  await ended(handle.terminate('converted to a Schedule (plan 2026-10-13 Step 9.8)'))
+}
+
+/** One job of the pass; whether it made a Schedule. */
+async function convertOne(deps: CronPassDeps, task: BackgroundTask, now: Date): Promise<boolean> {
+  // Stored with syntax a Schedule cannot express: its timer workflow keeps firing it (service.ts isScheduled).
+  if (!isScheduled(task)) return false
+  const end = scheduleEnd(task, now)
+  if (end !== undefined) {
+    // A fire still waiting for a busy session sends, then ends the job itself (bg_next).
+    if (await firing(deps.client, task)) return false
+    await deps.store.finish(task.id, 'done', end)
+    await unscheduleTask(deps.client, task)
+    await endTimerWorkflow(deps.client, task)
+    return false
+  }
+  const made = await scheduleTask(deps.client, task, deps.taskQueue)
+  // Cancelled while the Schedule was being made (CronDelete deletes the Schedule after it ends the row).
+  if (made && (await deps.store.get(task.id))?.state !== 'active') {
+    await unscheduleTask(deps.client, task)
+    return false
+  }
+  await endTimerWorkflow(deps.client, task)
+  return made
+}
 
 /**
  * The pass over every active recurring cron job (decision Q11 of plan 2026-10-13 Step 9.8).
  * A job still fired by its `BackgroundTask` workflow becomes a Schedule, then the workflow is
  * ended. A job with no occurrence left before its expiry (its last one missed, as in a
  * Temporal outage longer than CRON_CATCHUP) is ended, and its Schedule deleted. Idempotent: a
- * job converted already keeps its Schedule, and its workflow is gone. How many Schedules it made.
+ * job converted already keeps its Schedule, and its workflow is gone. Each job is its own: one
+ * that fails leaves the rest to run, and the pass then throws, naming how many failed. How
+ * many Schedules it made.
  */
 export async function convertCronTasks(deps: CronPassDeps, now = new Date()): Promise<number> {
   let n = 0
+  const failed: string[] = []
   for (const task of await deps.store.activeRecurringCrons()) {
-    const end = scheduleEnd(task, now)
-    if (end !== undefined) {
-      await deps.store.finish(task.id, 'done', end)
-      await unscheduleTask(deps.client, task)
-    } else if (await scheduleTask(deps.client, task, deps.taskQueue)) {
-      n += 1
+    try {
+      if (await convertOne(deps, task, now)) n += 1
+    } catch (err) {
+      failed.push(`${task.id}: ${err instanceof Error ? err.message : String(err)}`)
     }
-    await ended(deps.client.workflow.getHandle(backgroundWorkflowId(task.sessionId, task.id)).terminate('converted to a Schedule (plan 2026-10-13 Step 9.8)'))
   }
+  if (failed.length > 0) throw new Error(`${failed.length} cron job${failed.length === 1 ? '' : 's'} not converted (${failed.join('; ')}); ${n} converted`)
   return n
 }
 

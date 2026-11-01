@@ -164,6 +164,54 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`recurring cron jobs as Sch
     expect(await gone(t.id)).toBe(true)
   }, 60_000)
 
+  it('the pass leaves a job whose last fire still waits for a busy session to that fire', async () => {
+    const t = (await cron(inDays(3), new Date(Date.now() + 4 * DAY)))!
+    answers = Array.from({ length: 1_000 }, () => ({ result: 'busy' }) as const)
+    await schedule(t.id).trigger()
+    // Waiting: the session has said busy to it.
+    await expect.poll(() => answers.length, { timeout: 20_000 }).toBeLessThan(1_000)
+    expect(await convertCronTasks({ client: env.client, store, taskQueue: TASK_QUEUE }, new Date(Date.now() + 3.5 * DAY))).toBe(0)
+    expect(await store.get(t.id)).toMatchObject({ state: 'active' })
+    expect(await gone(t.id)).toBe(false)
+    // The session idle again: the fire sends, and the job goes on to its next occurrence.
+    answers = []
+    await expect.poll(() => sent, { timeout: 20_000 }).toEqual(['tick'])
+    await expect.poll(async () => (await store.get(t.id))?.nextAt?.getTime() ?? 0, { timeout: 10_000 }).toBeGreaterThan(Date.now())
+    expect(await store.get(t.id)).toMatchObject({ state: 'active' })
+  }, 90_000)
+
+  it('a job stored before with syntax a Schedule cannot express keeps its own workflow, and the pass goes on past it', async () => {
+    // CronCreate refuses `L` now (schedule.ts checkCron); a row stored before it is still read.
+    const legacy = (await store.create({
+      sessionId,
+      kind: 'cron',
+      description: 'l',
+      spec: { cron: '0 0 L * *', prompt: 'last day', recurring: true, tz: 'UTC' },
+      createdBy: browser,
+      expiresAt: new Date(Date.now() + 3_600_000),
+    }))!
+    const plain = (await store.create({
+      sessionId,
+      kind: 'cron',
+      description: 'p',
+      spec: { cron: inDays(3), prompt: 'tick', recurring: true, tz: 'UTC' },
+      createdBy: browser,
+      expiresAt: new Date(Date.now() + 7 * DAY),
+    }))!
+    expect(await convertCronTasks({ client: env.client, store, taskQueue: TASK_QUEUE })).toBe(1)
+    expect(await gone(legacy.id)).toBe(true)
+    expect(await gone(plain.id)).toBe(false)
+    expect(await store.get(legacy.id)).toMatchObject({ state: 'active' })
+    // Its own workflow, patched, does not hand it to a Schedule: bg_next ends it (no last day in the hour left).
+    await env.client.workflow.execute(BACKGROUND_WORKFLOW, {
+      workflowId: backgroundWorkflowId(sessionId, legacy.id),
+      taskQueue: TASK_QUEUE,
+      args: [{ taskId: legacy.id, kind: 'cron', recurring: true }],
+    })
+    expect(await store.get(legacy.id)).toMatchObject({ state: 'done', detail: 'expired after 7 days' })
+    expect(await gone(legacy.id)).toBe(true)
+  }, 60_000)
+
   it("a fire whose task has no row left deletes its Schedule (made just before the session's forget)", async () => {
     const id = 'deadbeef'
     await scheduleTask(env.client, { id, kind: 'cron', sessionId, spec: { cron: inDays(3), tz: 'UTC' }, expiresAt: new Date(Date.now() + 7 * DAY) }, TASK_QUEUE)
@@ -259,8 +307,13 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`recurring cron jobs as Sch
       createdBy: browser,
     }))!
     expect(await gone(t.id)).toBe(true)
-    await env.client.workflow.getHandle(backgroundWorkflowId(sessionId, t.id)).result()
+    const handle = env.client.workflow.getHandle(backgroundWorkflowId(sessionId, t.id))
+    await handle.result()
     expect(sent).toEqual(['once'])
     expect(await store.get(t.id)).toMatchObject({ state: 'done', fired: 1 })
+    // Started `recurring: false`, it never asks to become a Schedule.
+    const scheduled = (await handle.fetchHistory()).events!.flatMap((e) => e.activityTaskScheduledEventAttributes?.activityType?.name ?? [])
+    expect(scheduled).not.toContain('bg_schedule')
+    expect(scheduled).toContain('bg_fire')
   }, 120_000)
 })

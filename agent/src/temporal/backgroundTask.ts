@@ -52,7 +52,7 @@ export const BUSY_RETRY_MS = 30_000
 export const CRON_SCHEDULE_PATCH = 'cron-schedule-9.8'
 
 /** `retryMs`: how often a busy session is asked again (BUSY_RETRY_MS; tests set less). */
-export async function BackgroundTask(input: { taskId: string; kind?: string; retryMs?: number }): Promise<void> {
+export async function BackgroundTask(input: { taskId: string; kind?: string; recurring?: boolean; retryMs?: number }): Promise<void> {
   const { taskId } = input
   const retryMs = input.retryMs ?? BUSY_RETRY_MS
   try {
@@ -66,8 +66,9 @@ export async function BackgroundTask(input: { taskId: string; kind?: string; ret
     }
     for (;;) {
       // A recurring cron job is a Schedule from Step 9.8 on: one made before it becomes one at its
-      // next occurrence (and the start-time pass converts the rest, background/temporal.ts).
-      if (input.kind === 'cron' && patched(CRON_SCHEDULE_PATCH) && (await acts.bg_schedule({ taskId }))) return
+      // next occurrence (and the start-time pass converts the rest, background/temporal.ts). A
+      // one-shot job, started with `recurring: false`, never asks; one started before it may.
+      if (input.kind === 'cron' && input.recurring !== false && patched(CRON_SCHEDULE_PATCH) && (await acts.bg_schedule({ taskId }))) return
       const step = await acts.bg_next({ taskId })
       if ('end' in step) {
         await acts.bg_finish({ taskId, state: 'done', detail: step.end })

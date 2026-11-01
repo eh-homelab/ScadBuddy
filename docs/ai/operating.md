@@ -972,7 +972,8 @@ timezone, ending at its expiry) whose every fire is a short `BackgroundFire` wor
 at start, and an hourly pass ends any job whose last occurrence before its expiry was
 missed). A job with no occurrence before its expiry (a monthly one, say) is not kept.
 A cron takes numbers, `*`, ranges, steps, lists and month or day names. `L`, `W`, `#` and
-`?` are refused, because Temporal refuses them or reads them differently. A job whose day
+`?` are refused, because Temporal refuses them or reads them differently. A job stored with
+them before keeps its timer workflow until it expires. A job whose day
 fields are both restricted is two Schedule expressions, so it fires when either day field
 matches, as standard cron does (`background/schedule.ts` `scheduleCrons`). A fire's
 payloads are its task id and outcome only, so they are not sealed. Any other task is a `BackgroundTask` workflow `bgtask-<session>-<id>`

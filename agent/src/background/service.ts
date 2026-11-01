@@ -1,3 +1,4 @@
+import { schedulable } from './schedule.js'
 import { type BackgroundTask, type BackgroundTaskStore, type NewTask } from './store.js'
 
 // A session's background tasks as the tools and the panel use them: a task is a row
@@ -22,8 +23,13 @@ export const BACKGROUND_FIRE_WORKFLOW = 'BackgroundFire'
  */
 export const backgroundFireId = (sessionId: string, taskId: string) => `bgfire-${sessionId}-${taskId}`
 
-/** Whether a task is fired by a Schedule: a recurring cron job. */
-export const isScheduled = (task: Pick<BackgroundTask, 'kind' | 'spec'>): boolean => task.kind === 'cron' && task.spec.recurring !== false
+/**
+ * Whether a task is fired by a Schedule: a recurring cron job whose cron a Schedule can
+ * express. One stored with `L`, `W`, `#` or `?` before CronCreate refused them keeps its
+ * `BackgroundTask` workflow until it expires.
+ */
+export const isScheduled = (task: Pick<BackgroundTask, 'kind' | 'spec'>): boolean =>
+  task.kind === 'cron' && task.spec.recurring !== false && schedulable(String(task.spec.cron))
 
 /** What a runner needs of a task to start it. */
 export type StartedTask = Pick<BackgroundTask, 'id' | 'kind' | 'sessionId' | 'spec' | 'expiresAt'>

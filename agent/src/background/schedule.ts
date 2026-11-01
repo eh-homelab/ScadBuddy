@@ -20,11 +20,12 @@ export function agentTimezone(): string {
 
 export class CronError extends Error {}
 
-// What a field may hold: numbers, `*`, ranges, steps and lists, and names in the month and
-// day-of-week fields. The rest of cron-parser's syntax (`L`, `W`, `#`, `?`) is refused,
-// because a recurring job is a Temporal Schedule (background/temporal.ts), and Temporal
-// refuses `L`, `W` and `?` and reads `#` its own way (measured against the Temporal CLI
-// 1.5 dev server, 2026-11-01).
+// What a field may hold for a new job (`checkCron`, CronCreate): numbers, `*`, ranges, steps
+// and lists, and names in the month and day-of-week fields. The rest of cron-parser's syntax
+// (`L`, `W`, `#`, `?`) is refused, because a recurring job is a Temporal Schedule
+// (background/temporal.ts), and Temporal refuses `L`, `W` and `?` and reads `#` its own way
+// (measured against the Temporal CLI 1.5 dev server, 2026-11-01). A job stored before with
+// that syntax keeps its timer workflow (`schedulable`), and nextFire still reads it.
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
 const DAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat']
 const FIELD_NAMES: readonly (readonly string[])[] = [[], [], [], MONTHS, DAYS]
@@ -38,6 +39,12 @@ function plainField(field: string, names: readonly string[]): boolean {
 function fieldsOf(cron: string): string[] {
   const fields = cron.trim().split(/\s+/)
   if (fields.length !== 5) throw new CronError(`Invalid cron expression '${cron}'. Expected 5 fields: M H DoM Mon DoW.`)
+  return fields
+}
+
+/** Refuses, as a CronError, what a Schedule cannot express. */
+export function checkCron(cron: string): string[] {
+  const fields = fieldsOf(cron)
   const odd = fields.findIndex((f, i) => !plainField(f, FIELD_NAMES[i]!))
   if (odd >= 0) {
     throw new CronError(
@@ -47,6 +54,17 @@ function fieldsOf(cron: string): string[] {
   return fields
 }
 
+/** Whether a Schedule can express a cron: false for one stored before checkCron with `L`, `W`, `#` or `?`. */
+export function schedulable(cron: string): boolean {
+  try {
+    checkCron(cron)
+    return true
+  } catch (err) {
+    if (err instanceof CronError) return false
+    throw err
+  }
+}
+
 /**
  * The cron expressions of a job's Schedule. When neither day field is `*`, cron-parser
  * fires when either matches (as standard cron does) and Temporal only when both do
@@ -54,7 +72,7 @@ function fieldsOf(cron: string): string[] {
  * is two expressions, one per day field, whose union is cron-parser's.
  */
 export function scheduleCrons(cron: string): string[] {
-  const [m, h, dom, mon, dow] = fieldsOf(cron)
+  const [m, h, dom, mon, dow] = checkCron(cron)
   if (dom === '*' || dow === '*') return [[m, h, dom, mon, dow].join(' ')]
   return [`${m} ${h} ${dom} ${mon} *`, `${m} ${h} * ${mon} ${dow}`]
 }
