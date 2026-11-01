@@ -398,7 +398,11 @@ describe('plugin packages in a durable turn', () => {
       async () => ['203.0.113.7'],
     )
     const options = buildHarnessOptions({ ...base, allowedPluginPaths: [copy], remotePlugins: ok.plugins })
-    const urls = JSON.stringify(options).match(/https?:\/\/[^"\\]+/g) ?? []
+    // The one URL in its env is the credential gateway's (gateway/server.ts); every other is the forwarder's.
+    const { env, ...rest } = options
+    expect(env?.ANTHROPIC_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/t\//)
+    expect(JSON.stringify({ ...env, ANTHROPIC_BASE_URL: undefined })).not.toMatch(/https?:\/\//)
+    const urls = JSON.stringify(rest).match(/https?:\/\/[^"\\]+/g) ?? []
     expect(urls.length).toBeGreaterThan(0)
     for (const url of urls) expect(url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/p\//)
     ok.release()

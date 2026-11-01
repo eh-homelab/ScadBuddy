@@ -103,6 +103,8 @@ export type CoreTurnRun = {
   cutUsd: number
   /** What the turn's WebFetch model calls cost (builtins/nested.ts), which no result prices, in every outcome (#2684). */
   nestedUsd: number
+  /** What the credential gateway priced the turn's process requests at (gateway/server.ts), a command's with its token too. */
+  meteredUsd: number
   /** The warm entries it ran on, one per attempt. */
   served: WarmEntry[]
 }
@@ -134,6 +136,8 @@ export class CoreTurn {
   readonly #unpriced = new UnpricedSpend()
   /** What the session's own WebFetch model calls cost this turn (classicBuiltinServer, through the slot). */
   readonly #nested = { usd: 0 }
+  /** What the credential gateway metered for the process this turn (through the slot, turnRunner.ts `onSpend`). */
+  readonly #metered = { usd: 0 }
 
   constructor(deps: TurnCoreDeps, args: CoreTurnArgs) {
     this.#deps = deps
@@ -255,6 +259,7 @@ export class CoreTurn {
           trace: traced,
           http: { turnId, signal },
           nested: this.#nested,
+          metered: this.#metered,
           credential: onCredential,
           ...(memory ? { memory: continuing ? continuationMemory(memory) : memory } : {}),
           signalInterrupt: () => this.#args.interrupt(),
@@ -344,6 +349,7 @@ export class CoreTurn {
       spentUsd: attempts?.spentUsd() ?? 0,
       cutUsd: unpriced.usd(),
       nestedUsd: this.#nested.usd,
+      meteredUsd: this.#metered.usd,
       served: [...this.#served],
     }
   }
@@ -351,10 +357,12 @@ export class CoreTurn {
   /**
    * What the turn's model requests have cost so far at the table's prices, finished or still
    * open: an AgentSession placement's running spend (turnHost.ts), written as it goes so a
-   * placement that dies before its result still counts against the budget.
+   * placement that dies before its result still counts against the budget. The stream's own
+   * requests, or what the credential gateway metered for the process when that is more (a
+   * command's requests with its token, which the stream never shows).
    */
   runningUsd(): number {
-    return this.#unpriced.completedUsd() + this.#unpriced.usd() + this.#nested.usd
+    return Math.max(this.#unpriced.completedUsd() + this.#unpriced.usd(), this.#metered.usd) + this.#nested.usd
   }
 
   /**

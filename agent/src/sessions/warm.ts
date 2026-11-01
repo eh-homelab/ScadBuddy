@@ -586,8 +586,11 @@ export class WarmSessions {
 
   /** Why the process cannot serve this turn (§5.3 "Reuse rule"), or undefined when it can. */
   private async mismatch(slot: Slot, print: string, credential: Credential, remainingUsd: number): Promise<RecycleReason | undefined> {
-    // The credential is in the process's env (run.ts `credentialEnv`); a
-    // fallback to another candidate keeps the fingerprint but not the key.
+    // The process's gateway token maps to the credential it was spawned on, and to
+    // no other (run.ts `credentialEnv`, gateway/server.ts); a fallback to another
+    // candidate keeps the fingerprint but not the credential. A process whose
+    // credential row is disabled or re-keyed is recycled by `revalidate` (the row's
+    // id and epoch), and its token goes with it.
     if (slot.entry.fingerprint !== print || slot.credential !== credentialHash(credential)) return 'fingerprint'
     if (await this.tailMoved(slot)) return 'tail'
     const entry = slot.entry

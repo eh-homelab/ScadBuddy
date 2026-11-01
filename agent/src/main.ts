@@ -34,6 +34,7 @@ import { ensureStateDirs, removeLegacyBrowserDir, StateDirError } from './harnes
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
+import { startCredentialGateway, stopCredentialGateway } from './gateway/server.js'
 import { endOwnSessions, PluginSessions, replicaIdentity, runPluginSessionSweep, startMark } from './plugins/pluginSessions.js'
 import { GitFetcher } from './plugins/packages/git.js'
 import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview, warmPackages } from './plugins/packages/install.js'
@@ -253,6 +254,9 @@ const pluginForwarder = await PluginForwarder.start({
   ...(database ? { sessions: new PluginSessions(database.sql) } : {}),
   log: (message) => console.error(message),
 })
+// Every Claude Code process reaches the model through this loopback gateway, which holds the
+// credential; the process gets only a token (gateway/server.ts, plan 2026-10-13 Step 9.4).
+await startCredentialGateway()
 // The database's clock the moment it is ready, before a turn can record a session: the pass at
 // start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
 const pluginSessionMark = database ? database.ready().then((ok) => (ok ? startMark(database.sql) : undefined)) : undefined
@@ -1173,6 +1177,7 @@ async function stop(): Promise<void> {
     closeServer: async () => {
       await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
       await pluginForwarder.close()
+      await stopCredentialGateway()
     },
     // The session-event publisher closes only now, after the drain: turns
     // stopped above append their final session.status/session.done while they
