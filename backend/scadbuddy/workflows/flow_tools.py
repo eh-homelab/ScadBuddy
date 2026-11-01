@@ -181,6 +181,11 @@ _TOOL_TIMEOUT = timedelta(seconds=120)
 #: their sum, 14 s.
 UNKNOWN_TOOL = "UnknownTool"
 UNREGISTERED = "NotFoundError"
+#: The agent's two "no such activity" texts, the only `NotFoundError`s taken as "nothing
+#: ran": its catch-all `default` (turnTools.ts) and the TypeScript SDK's own, on a worker
+#: without one. A tool's own failure is never that type (the agent's tool errors are
+#: `ToolError`, agent/src/temporal/toolActivities.ts).
+_UNREGISTERED_TEXTS = ("is served on this queue", "is not registered on this Worker")
 UNREGISTERED_WAITS = (timedelta(seconds=2), timedelta(seconds=4), timedelta(seconds=8))
 FLOW_UNREGISTERED_PATCH = "flow-unregistered-2726"
 
@@ -739,6 +744,7 @@ async def _call_tool(
             if isinstance(err.cause, ApplicationError):
                 if (
                     err.cause.type == UNREGISTERED
+                    and any(t in err.cause.message for t in _UNREGISTERED_TEXTS)
                     and unregistered_waits
                     and workflow.patched(FLOW_UNREGISTERED_PATCH)
                 ):
@@ -957,12 +963,11 @@ async def _live_tier(name: str, own: str | None) -> tuple[str, bool]:
                 if waits and workflow.patched(FLOW_UNREGISTERED_PATCH):
                     await workflow.sleep(waits.pop(0))
                     continue
-                asked = len(UNREGISTERED_WAITS) + 1
-                total = int(sum(w.total_seconds() for w in UNREGISTERED_WAITS))
-                raise ValueError(
-                    f"there is no tool {name!r}: {cause.message} "
-                    f"(asked {asked} times over {total}s)"
-                ) from None
+                # The waits actually spent: none in a run recorded before the patch.
+                spent = UNREGISTERED_WAITS[: len(UNREGISTERED_WAITS) - len(waits)]
+                total = int(sum(w.total_seconds() for w in spent))
+                over = f" (asked {len(spent) + 1} times over {total}s)" if spent else ""
+                raise ValueError(f"there is no tool {name!r}: {cause.message}{over}") from None
             if isinstance(cause, ApplicationError) and cause.type in ("ToolError", "NotForFlows"):
                 raise ValueError(f"there is no tool {name!r}: {cause.message}") from None
             if isinstance(cause, ApplicationError):

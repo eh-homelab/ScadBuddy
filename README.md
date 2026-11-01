@@ -1177,7 +1177,12 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   Temporal would give a versioned one's tasks to no one while the old replica still ran
   its turns. Roll the worker Deployment out with `RollingUpdate` (`maxSurge: 1`,
   `maxUnavailable: 0`) and its `readinessProbe` on `/readyz`, so an old pod stops only
-  once the new build is current. A rollback to a build before Phase 11 needs nothing:
+  once the new build is current. That `/readyz` is the `worker` role's only: an `all`
+  process (the default) serves the full app and has no such readiness, so run turns in a
+  `worker` Deployment for this. A release that stops polling one of these queues must
+  make its build current with `ignoreMissingTaskQueues` for it (Temporal refuses a build
+  that misses a queue the current one polls with recent tasks), or its rollout waits at
+  `/readyz`. A rollback to a build before Phase 11 needs nothing:
   its `agent-tools` worker is unversioned, and a queue the current build does not poll
   goes to unversioned pollers (measured,
   `agent/test/temporal.versioning.temporal.test.ts`;

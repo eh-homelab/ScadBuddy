@@ -69,6 +69,7 @@ NAMES = [
     "retried",
     "beatless",
     "lowered",
+    "unregistered",
 ]
 RECORD = os.environ.get("SCADBUDDY_RECORD_HISTORIES") == "1"
 
