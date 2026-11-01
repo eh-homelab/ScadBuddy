@@ -1514,7 +1514,9 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   sha256 against what it last synced, with the source `{kind: "session_dir"}`. A placement on
   the worker that synced last writes back first what changed since, such as a Monitor
   command's output between turns or a file whose write-back failed, before it removes
-  anything. A panel upload or a `workspace_*` write during the turn wins over the
+  anything. A file the record cannot take now (`unavailable`) is never removed or
+  overwritten: placements, the eviction and the sweep keep it until a write-back succeeds.
+  While a Monitor command runs, nothing in the directory is removed. A panel upload or a `workspace_*` write during the turn wins over the
   directory's change to the same file, and reaches the directory at the next turn. A turn
   cut off because another placement took it writes nothing back. A worker that dies
   mid-turn loses only that turn's changes since its last sync.

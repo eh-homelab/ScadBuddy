@@ -195,6 +195,13 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     await writeFile(path.join(turn.dir, 'result.txt'), 'keep me')
     expect((await dirs.writeBack(turn)).skipped.map((s) => s.code)).toEqual(['unavailable'])
     dirs.done(turn)
+    // Still down: neither an eviction, nor the idle sweep, nor a placement removes the only copy.
+    expect(await dirs.evict(id)).toBe(false)
+    expect(await dirs.sweep(db.sql, 0)).toEqual([])
+    const meanwhile = await dirs.place(id)
+    expect(await readFile(path.join(meanwhile.dir, 'result.txt'), 'utf8')).toBe('keep me')
+    dirs.done(meanwhile)
+    expect(await dirs.evict(id)).toBe(false)
     down = false
     const next = await dirs.place(id)
     expect(await readFile(path.join(next.dir, 'result.txt'), 'utf8')).toBe('keep me')

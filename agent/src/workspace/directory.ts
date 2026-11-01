@@ -58,6 +58,14 @@ export const IDLE_MS = 24 * 60 * 60 * 1000
 /** The refusals that mean a file is past a cap: such a file leaves the directory at the write-back. */
 const CAPPED: ReadonlySet<WorkspaceErrorCode> = new Set(['too_large', 'quota'])
 
+/**
+ * The paths a write-back could not offer to the record for now (`unavailable`, say): not past a
+ * cap and not lost to a newer record (`conflict`). Their copy here is the only one, so it is kept.
+ */
+export function pendingPaths(back: WriteBack): Set<string> {
+  return new Set(back.skipped.filter((s) => !CAPPED.has(s.code) && s.code !== 'conflict').map((s) => s.path))
+}
+
 /** A placement: the directory, and the record's sha256 of each file it holds as synced (moved on by each write-back). */
 export type Placement = { sessionId: string; dir: string; base: Map<string, string> }
 
@@ -206,6 +214,8 @@ export class SessionDirectory {
    * write-back failed) reaches the record rather than being removed as unrecorded.
    */
   readonly #last = new Map<string, Placement>()
+  /** The sessions a Monitor command runs in now, by how many (a subset of `#busy`). */
+  readonly #monitors = new Map<string, number>()
 
   constructor(files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits'>, root: string) {
     this.#files = files
@@ -259,10 +269,14 @@ export class SessionDirectory {
   hold(sessionId: string): () => void {
     const id = sessionId.toLowerCase()
     this.#busy.set(id, (this.#busy.get(id) ?? 0) + 1)
+    this.#monitors.set(id, (this.#monitors.get(id) ?? 0) + 1)
     let released = false
     return () => {
       if (released) return
       released = true
+      const n = (this.#monitors.get(id) ?? 1) - 1
+      if (n > 0) this.#monitors.set(id, n)
+      else this.#monitors.delete(id)
       this.#unbusy(id)
     }
   }
@@ -277,17 +291,28 @@ export class SessionDirectory {
     const dir = this.dirOf(sessionId)
     // What changed here since the last sync goes to the record first: compared by sha256 against
     // that base, so a record changed elsewhere since still wins (expectedSha256).
-    const last = this.#last.get(sessionId.toLowerCase())
-    if (last) await this.#writeBack(last)
+    const id = sessionId.toLowerCase()
+    const last = this.#last.get(id)
+    // Paths the record could not take now (`unavailable`): their copy here is the only one, so
+    // it is neither removed nor overwritten, and keeps its old base for the next try.
+    const unsynced = last ? pendingPaths(await this.#writeBack(last)) : new Set<string>()
+    // A Monitor command still runs here (`hold`, besides this placement): what it writes from now
+    // on is its own, so nothing unrecorded is removed under it; the next write-back offers it.
+    const monitored = this.#monitors.has(id)
     await ensureDir(dir)
     const [record, found] = await Promise.all([this.#files.list(ws(sessionId)), walk(dir)])
-    for (const stray of found.strays) await rm(stray, { recursive: true, force: true })
+    if (!monitored) for (const stray of found.strays) await rm(stray, { recursive: true, force: true })
     const base = new Map<string, string>()
+    for (const rel of unsynced) {
+      const was = last?.base.get(rel)
+      if (was !== undefined) base.set(rel, was)
+    }
     const held = new Set(record.map((f) => f.path))
     for (const [rel, abs] of found.files) {
-      if (!held.has(rel)) await rm(abs, { force: true })
+      if (!held.has(rel) && !unsynced.has(rel) && !monitored) await rm(abs, { force: true })
     }
     for (const file of record) {
+      if (unsynced.has(file.path)) continue
       const there = found.files.get(file.path)
       const current = there === undefined ? undefined : await readRegular(there, file.size)
       if (current && 'bytes' in current && sha256(current.bytes) === file.sha256) {
@@ -326,6 +351,9 @@ export class SessionDirectory {
     const out: WriteBack = { written: [], deleted: [], skipped: [], strays: 0 }
     const { fileMaxBytes } = await this.#files.limits()
     const found = await walk(dir)
+    // A file a running Monitor command writes to stays, past a cap too: removing it would leave the
+    // command writing to an unlinked file. The next write-back once it has ended takes it out.
+    const monitored = this.#monitors.has(sessionId.toLowerCase())
     // Deletions first: what they free counts toward the writes' quota.
     for (const [rel, digest] of [...base].sort(([a], [b]) => a.localeCompare(b))) {
       if (found.files.has(rel)) continue
@@ -335,6 +363,8 @@ export class SessionDirectory {
       } catch (err) {
         if (!(err instanceof WorkspaceError)) throw err
         out.skipped.push({ path: rel, why: err.message, code: err.code })
+        // Changed in the record meanwhile: the record wins, so this is not tried (and logged) again.
+        if (err.code === 'conflict') base.delete(rel)
       }
     }
     for (const [rel, abs] of [...found.files].sort(([a], [b]) => a.localeCompare(b))) {
@@ -342,7 +372,7 @@ export class SessionDirectory {
       if (!read) continue
       if (!('bytes' in read)) {
         out.skipped.push({ path: rel, why: `${rel} is ${read.size} bytes; a workspace file holds at most ${fileMaxBytes}`, code: 'too_large' })
-        await rm(abs, { force: true })
+        if (!monitored) await rm(abs, { force: true })
         continue
       }
       const was = base.get(rel)
@@ -355,12 +385,16 @@ export class SessionDirectory {
       } catch (err) {
         if (!(err instanceof WorkspaceError)) throw err
         out.skipped.push({ path: rel, why: err.message, code: err.code })
+        // Changed in the record meanwhile: the record wins (the next placement brings it in), so this is not tried again.
+        if (err.code === 'conflict') base.set(rel, digest)
         // Past a cap: not kept on this disk either.
-        if (CAPPED.has(err.code)) await rm(abs, { force: true })
+        if (CAPPED.has(err.code) && !monitored) await rm(abs, { force: true })
       }
     }
-    for (const stray of found.strays) await rm(stray, { recursive: true, force: true })
-    out.strays = found.strays.length
+    if (!monitored) {
+      for (const stray of found.strays) await rm(stray, { recursive: true, force: true })
+      out.strays = found.strays.length
+    }
     return out
   }
 
@@ -387,7 +421,7 @@ export class SessionDirectory {
       // What was written since the last sync (a monitor's output) goes to the record first; if
       // that fails, the copy stays for the next placement here to try again.
       const last = this.#last.get(id)
-      if (last) await this.#writeBack(last)
+      if (last && pendingPaths(await this.#writeBack(last)).size > 0) return false
       await this.#drop(id)
       return true
     })
@@ -411,7 +445,7 @@ export class SessionDirectory {
           const placedAt = await stat(sessionDirOf(this.#root, id)).then((st) => st.mtimeMs, () => now)
           if (now - placedAt < idleMs) return false
           const last = this.#last.get(id)
-          if (last) await this.#writeBack(last)
+          if (last && pendingPaths(await this.#writeBack(last)).size > 0) return false
         }
         await this.#drop(id)
         return true
