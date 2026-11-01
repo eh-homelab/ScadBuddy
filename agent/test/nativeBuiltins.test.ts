@@ -92,6 +92,8 @@ describe('the file tools are confined to the session directory', () => {
       ['Glob', { pattern: '{..,x}/*' }],
       ['Glob', { pattern: 'notes/{x,..}/*' }],
       ['Glob', { pattern: '{.,..}/**/secret' }],
+      ['Glob', { pattern: '@(..|x)/*' }],
+      ['Glob', { pattern: '+(..)/secret' }],
       ['Glob', { pattern: path.join(root, 'dirlink', '*') }],
       ['Glob', { pattern: '*', path: outside }],
       ['Grep', { pattern: 'kek', path: outside }],

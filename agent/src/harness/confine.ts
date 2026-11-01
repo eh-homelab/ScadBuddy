@@ -96,9 +96,11 @@ export function confineGuard(root: string | undefined): InputGuard {
     if (toolName === 'Glob') {
       const pattern = args.pattern
       if (typeof pattern !== 'string') return deny(toolName, 'its pattern is not a string')
-      // A `..` segment anywhere, a brace alternative's too (`{..,x}/*`). Claude Code 2.1.310's Glob
-      // found nothing for that one (test/nativeBuiltins.sdk.test.ts), but the guard does not rely on it.
-      if (pattern.split(/[\\/{},]/).includes('..')) return deny(toolName, `its pattern ${pattern} climbs out with ..`)
+      // A `..` anywhere in the pattern, whatever glob syntax wraps it: a brace alternative
+      // (`{..,x}/*`), an extglob (`@(..|x)/*`). Claude Code 2.1.310's Glob found nothing for the
+      // brace one (test/nativeBuiltins.sdk.test.ts), but the guard does not rely on the engine.
+      // A name with `..` in it (`a..b`) is refused too; `path` can name such a directory instead.
+      if (pattern.includes('..')) return deny(toolName, `its pattern ${pattern} has a ..`)
       if (fromHome(pattern)) return deny(toolName, `its pattern ${pattern} starts at a home directory`)
       if (path.isAbsolute(pattern)) {
         // The part before the first wildcard is a directory the pattern starts from.
