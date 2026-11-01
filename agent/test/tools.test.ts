@@ -1823,6 +1823,36 @@ describe('analyze_geometry', () => {
   })
 })
 
+describe('withdraw_render (#4968)', () => {
+  const id = '0123456789abcdef0123456789abcdef'
+  it('is a write that withdraws with a key, re-sent with the same one while unanswered', async () => {
+    const keys: (string | null)[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/jobs/${id}/withdraw`, ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        return keys.length === 1
+          ? HttpResponse.json(
+              {
+                type: 'https://scadbuddy.dev/problems/command-still-accepting',
+                title: 'Service Unavailable',
+                status: 503,
+                detail: 'ScadBuddy is still checking this request.',
+              },
+              { status: 503, headers: { 'Retry-After': '0' } },
+            )
+          : HttpResponse.json({ id, slug: 'box', created_at: '', status: 'cancelled', error: 'cancelled' })
+      }),
+    )
+    expect(tool('withdraw_render').risk).toBe('write')
+    const result = await runTool(tool('withdraw_render'), { job_id: id }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(firstText(result)).toMatchObject({ job_id: id, status: 'cancelled' })
+    expect(keys).toHaveLength(2)
+    expect(keys[0]).toMatch(/^[0-9a-f]{32,}$/)
+    expect(keys[1]).toBe(keys[0])
+  })
+})
+
 describe('preset tools carry a description and tags (#327)', () => {
   it('save_preset and update_preset send them, and refuse a comma in a tag', async () => {
     const bodies: unknown[] = []

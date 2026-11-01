@@ -55,6 +55,12 @@ export interface RenderState {
   busy: RenderBusy | undefined
   /** Submits the same render again: after an `error` the caller offers it as "try again". */
   retry: () => void
+  /**
+   * #4968 — withdraws the page's claim on the job being followed; the last claim withdrawn
+   * cancels it, and the job settles `cancelled`. Answers the withdrawn job's id (none
+   * when no job was in flight); rejects when the server refused.
+   */
+  cancel: () => Promise<string | undefined>
   /** #267 — the step the current render is on, while it is running and the socket says. */
   stage: RenderStage | undefined
 }
@@ -263,6 +269,16 @@ export function useRenderJob(
   const generation = useRef(0)
   const last = useRef<Submission | undefined>(undefined)
   const extraRef = useLatest(extra)
+  /** The job being followed, and a read of it, while it is unsettled (#4968). */
+  const followed = useRef<{ jobId: string; read: () => void } | undefined>(undefined)
+  const cancel = useCallback(async () => {
+    const current = followed.current
+    if (!current) return undefined
+    await api.withdrawJob(current.jobId)
+    // The event that says so may lag (or the socket be down): read it now.
+    current.read()
+    return current.jobId
+  }, [])
 
   useEffect(() => {
     // An empty `params` is a model with no customizer parameters (#941): its defaults
@@ -307,6 +323,7 @@ export function useRenderJob(
 
       const finish = () => {
         settled = true
+        if (followed.current?.jobId === jobId) followed.current = undefined
         setStage(undefined)
         unfollow?.()
         unfollow = undefined
@@ -356,6 +373,7 @@ export function useRenderJob(
         }
       }
 
+      followed.current = { jobId, read: () => void read() }
       // The subscription's confirmation is the first read, so a job that settled
       // before it was followed is still seen.
       unfollow = realtime.subscribe(`job:${jobId}`, (signal) => {
@@ -443,6 +461,7 @@ export function useRenderJob(
 
     return () => {
       stopped = true
+      followed.current = undefined
       superseded.abort()
       unfollow?.()
       if (timer) clearTimeout(timer)
@@ -453,5 +472,5 @@ export function useRenderJob(
     }
   }, [slug, params, version, extraRef, attempt])
 
-  return { job, rendering, error, busy, retry, settledFor, jobFor, stage }
+  return { job, rendering, error, busy, retry, cancel, settledFor, jobFor, stage }
 }

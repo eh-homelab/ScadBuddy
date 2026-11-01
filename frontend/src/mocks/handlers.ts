@@ -2855,6 +2855,19 @@ export const handlers = [
     return HttpResponse.json(job)
   }),
 
+  // #4968 — the page's one claim withdrawn: an unsettled job is cancelled.
+  http.post(`${base}/jobs/:id/withdraw`, ({ params }) => {
+    const id = String(params['id'])
+    const job = state.jobs.get(id)
+    if (!job) return problem(404, 'Job not found')
+    if (job.status === 'pending' || job.status === 'running') {
+      job.status = 'cancelled'
+      job.error = fixtures.CANCELLED_ERROR
+      emitRealtime('job.cancelled', [`job:${id}`], { job_id: id, slug: job.slug })
+    }
+    return HttpResponse.json(job)
+  }),
+
   http.get(`${base}/jobs/:id/preview.glb`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')

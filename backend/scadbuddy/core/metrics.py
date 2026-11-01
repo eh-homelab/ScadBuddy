@@ -34,7 +34,7 @@ __all__ = [
 ]
 
 #: How a job settled; ``superseded`` was replaced by a newer render first.
-RenderOutcome = Literal["done", "failed", "superseded"]
+RenderOutcome = Literal["done", "failed", "superseded", "cancelled"]
 
 #: Which workflow a queue job runs, ``render.job_models.JobTableKind`` (spec 2026-09-27
 #: §7): spelled out here, not imported, so the metrics never load the render stack.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -351,6 +352,76 @@ def test_a_render_can_supersede_the_previous_one(client: TestClient, model: str)
     # The first is cancelled unless its render finished first; the newer one renders.
     assert wait_for_job(client, second.json()["job_id"])["status"] == "done"
     assert wait_for_job(client, first.json()["job_id"])["status"] in ("done", "cancelled")
+
+
+def test_withdrawing_a_render_cancels_it(
+    client: TestClient, model: str, settings: Settings, tmp_path: Path
+) -> None:
+    """#4968: the one claim withdrawn, the job is cancelled. The fake openscad holds,
+    so the render is still running when the withdrawal reaches it."""
+    started, release = tmp_path / "started", tmp_path / "release"
+    set_fake_env(
+        Path(settings.openscad).parent,
+        "FAKE_HOLD",
+        {"started": str(started), "release": str(release)},
+    )
+    try:
+        accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 21}})
+        assert accepted.status_code == 202, accepted.text
+        job_id = accepted.json()["job_id"]
+        deadline = time.monotonic() + 30
+        while not started.exists():
+            assert time.monotonic() < deadline, "the render never started"
+            time.sleep(0.05)
+        response = client.post(
+            f"/api/v1/jobs/{job_id}/withdraw", headers={"Idempotency-Key": uuid.uuid4().hex}
+        )
+    finally:
+        release.touch()
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert wait_for_job(client, job_id)["status"] == "cancelled"
+
+
+def test_withdrawing_a_finished_render_answers_it_unchanged(client: TestClient, model: str) -> None:
+    job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 22}}).json()[
+        "job_id"
+    ]
+    assert wait_for_job(client, job_id)["status"] == "done"
+    response = client.post(
+        f"/api/v1/jobs/{job_id}/withdraw", headers={"Idempotency-Key": uuid.uuid4().hex}
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "done"
+
+
+def test_a_withdrawal_needs_an_idempotency_key(client: TestClient) -> None:
+    withdraw = mock.AsyncMock()
+    with mock.patch.object(RenderService, "withdraw", withdraw):
+        response = client.post("/api/v1/jobs/" + "0" * 32 + "/withdraw")
+    assert response.status_code == 422
+    assert "Idempotency-Key" in response.json()["detail"]
+    withdraw.assert_not_awaited()
+
+
+def test_withdrawing_an_unknown_job_is_a_404(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/jobs/" + "0" * 32 + "/withdraw", headers={"Idempotency-Key": "k" * 32}
+    )
+    assert response.status_code == 404
+
+
+def test_a_withdrawal_temporal_does_not_answer_is_a_503_to_send_again(
+    client: TestClient,
+) -> None:
+    withdraw = mock.AsyncMock(side_effect=CommandStillAcceptingError("render-x"))
+    with mock.patch.object(RenderService, "withdraw", withdraw):
+        response = client.post(
+            "/api/v1/jobs/" + "0" * 32 + "/withdraw", headers={"Idempotency-Key": "k" * 32}
+        )
+    assert response.status_code == 503
+    assert response.json()["type"] == STILL_ACCEPTING_PROBLEM
+    withdraw.assert_awaited_once_with("0" * 32, request_id="k" * 32)
 
 
 def test_a_supersede_without_an_idempotency_key_is_refused(client: TestClient, model: str) -> None:

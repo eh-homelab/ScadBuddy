@@ -1510,6 +1510,13 @@ export const api = {
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
 
+  /**
+   * #4968 — withdraw this page's claim on a render: the last claim withdrawn cancels it.
+   * A command, so a re-send after a lost answer withdraws once. Answers the job as it now
+   * stands (a settled one unchanged).
+   */
+  withdrawJob: (jobId: string) => command<Job>(`/jobs/${seg(jobId)}/withdraw`, { method: 'POST' }),
+
   previewUrl: (jobId: string) => `${API_BASE}/jobs/${seg(jobId)}/preview.glb`,
 
   /**

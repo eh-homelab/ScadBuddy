@@ -76,6 +76,30 @@ describe('useRenderJob', () => {
     vi.restoreAllMocks()
   })
 
+  it('cancel withdraws the job it follows, and the render settles cancelled (#4968)', async () => {
+    let status: Job['status'] = 'running'
+    vi.spyOn(api, 'getJob').mockImplementation(async (id) => job(id, status))
+    const withdraw = vi.spyOn(api, 'withdrawJob').mockImplementation(async (id) => {
+      status = 'cancelled'
+      return job(id, 'cancelled')
+    })
+    const { result } = mount({ slug: 'demo', params: { w: 1 } })
+    await settle()
+    expect(result.current.rendering).toBe(true)
+    await act(async () => {
+      await result.current.cancel()
+    })
+    await settle()
+    expect(withdraw).toHaveBeenCalledWith(JOB_A)
+    expect(result.current.job?.status).toBe('cancelled')
+    expect(result.current.rendering).toBe(false)
+    // Settled: nothing left to withdraw.
+    await act(async () => {
+      await result.current.cancel()
+    })
+    expect(withdraw).toHaveBeenCalledTimes(1)
+  })
+
   it('submits inputs: the params plus the UI state', async () => {
     const params = { name: 'Hi' }
     const extra = { tab: 'lid' }
