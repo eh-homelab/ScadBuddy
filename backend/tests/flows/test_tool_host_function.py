@@ -1078,7 +1078,7 @@ class _OldBuild:
 
 
 async def _new_build_takes_over(
-    outward: Outward, old: _OldBuild, asked: Callable[[], bool]
+    outward: Outward, old: _OldBuild, asked: Callable[[], bool], record: str | None = None
 ) -> list[tuple[str, str, dict[str, Any]]]:
     """A run of `tool('new_tool', ...)` that the old build answers first. Once it has
     (`asked`), the old replica stops and the new build, which has the tool, polls the queue
@@ -1104,6 +1104,9 @@ async def _new_build_takes_over(
     async with Worker(outward.client, task_queue=queue, activities=[new.activity(), new_tool]):
         run = await outward.finished(run_id)
     assert run.result == "result: 'new'"
+    if RECORD and record:
+        handle = outward.client.get_workflow_handle(f"flow-{run_id}")
+        (HISTORIES / f"{record}.json").write_text((await handle.fetch_history()).to_json())
     return served.calls
 
 
@@ -1114,7 +1117,9 @@ async def test_a_tool_new_in_this_build_whose_tier_an_old_build_answers_first_ru
     build (#2726 Phase 11), which does not know the tool. It is asked again after a wait,
     the new build answers, and the call runs once."""
     old = _OldBuild({"get_model": "read"})
-    calls = await _new_build_takes_over(outward, old, lambda: "new_tool" in old.agent.asked)
+    calls = await _new_build_takes_over(
+        outward, old, lambda: "new_tool" in old.agent.asked, record="unregistered"
+    )
     assert old.agent.asked == ["new_tool"]
     assert old.unregistered == []
     assert [(name, args) for name, _, args in calls] == [("new_tool", {"n": 1})]

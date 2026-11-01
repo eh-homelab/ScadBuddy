@@ -196,8 +196,8 @@ describe.skipIf(!TEMPORAL_CLI)(`worker versioning on a shared queue${TEMPORAL_SK
         taskQueue,
         activities,
         ...(workflows ? { workflows: { workflowBundle: bundle } } : {}),
-        // As main.ts gives both of a build's versioned workers (VERSIONED_QUEUES).
-        deployment: { name: deployment, buildId, queues: [q.tools, q.sessions] },
+        // As main.ts gives both of a build's versioned workers (`versionedQueues`).
+        deployment: { name: deployment, buildId, queues: () => [q.tools, q.sessions] },
         retryMs: 300,
         log: () => undefined,
       })
