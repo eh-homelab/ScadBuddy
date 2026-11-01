@@ -24,6 +24,8 @@ type ChoicesView struct {
 	filaments FilamentOptionsable
 	// The installed property
 	installed []InstalledNozzleable
+	// The lan_blocked property
+	lan_blocked []LanBlockable
 	// The lan_printers property
 	lan_printers []string
 	// The last_bed_type property
@@ -373,6 +375,22 @@ func (m *ChoicesView) GetFieldDeserializers() map[string]func(i878a80d2330e89d26
 		}
 		return nil
 	}
+	res["lan_blocked"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfObjectValues(CreateLanBlockFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]LanBlockable, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = v.(LanBlockable)
+				}
+			}
+			m.SetLanBlocked(res)
+		}
+		return nil
+	}
 	res["lan_printers"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetCollectionOfPrimitiveValues("string")
 		if err != nil {
@@ -512,6 +530,12 @@ func (m *ChoicesView) GetInstalled() []InstalledNozzleable {
 	return m.installed
 }
 
+// GetLanBlocked gets the lan_blocked property value. The lan_blocked property
+// returns a []LanBlockable when successful
+func (m *ChoicesView) GetLanBlocked() []LanBlockable {
+	return m.lan_blocked
+}
+
 // GetLanPrinters gets the lan_printers property value. The lan_printers property
 // returns a []string when successful
 func (m *ChoicesView) GetLanPrinters() []string {
@@ -624,6 +648,18 @@ func (m *ChoicesView) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6
 			}
 		}
 		err := writer.WriteCollectionOfObjectValues("installed", cast)
+		if err != nil {
+			return err
+		}
+	}
+	if m.GetLanBlocked() != nil {
+		cast := make([]i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, len(m.GetLanBlocked()))
+		for i, v := range m.GetLanBlocked() {
+			if v != nil {
+				cast[i] = v.(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable)
+			}
+		}
+		err := writer.WriteCollectionOfObjectValues("lan_blocked", cast)
 		if err != nil {
 			return err
 		}
@@ -744,6 +780,11 @@ func (m *ChoicesView) SetInstalled(value []InstalledNozzleable) {
 	m.installed = value
 }
 
+// SetLanBlocked sets the lan_blocked property value. The lan_blocked property
+func (m *ChoicesView) SetLanBlocked(value []LanBlockable) {
+	m.lan_blocked = value
+}
+
 // SetLanPrinters sets the lan_printers property value. The lan_printers property
 func (m *ChoicesView) SetLanPrinters(value []string) {
 	m.lan_printers = value
@@ -804,6 +845,7 @@ type ChoicesViewable interface {
 	GetFilamentPresets() ChoicesView_filament_presetsable
 	GetFilaments() FilamentOptionsable
 	GetInstalled() []InstalledNozzleable
+	GetLanBlocked() []LanBlockable
 	GetLanPrinters() []string
 	GetLastBedType() ChoicesView_ChoicesView_last_bed_typeable
 	GetModelChoices() ModelPrintChoicesable
@@ -821,6 +863,7 @@ type ChoicesViewable interface {
 	SetFilamentPresets(value ChoicesView_filament_presetsable)
 	SetFilaments(value FilamentOptionsable)
 	SetInstalled(value []InstalledNozzleable)
+	SetLanBlocked(value []LanBlockable)
 	SetLanPrinters(value []string)
 	SetLastBedType(value ChoicesView_ChoicesView_last_bed_typeable)
 	SetModelChoices(value ModelPrintChoicesable)
