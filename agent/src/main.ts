@@ -40,6 +40,7 @@ import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview,
 import { reviewsByHash } from './access/packageProvider.js'
 import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
+import { PluginOAuth } from './plugins/oauthStore.js'
 import { headerSecretVariants, loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
@@ -212,6 +213,13 @@ const database = config.databaseUrl
               (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
           )
         }
+        const grants = await new PluginOAuth(sql).rewrapFrom(previousKek.kek, kek.kek)
+        if (grants.rewrapped || grants.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${grants.rewrapped} plugin sign-in(s)` +
+              (grants.failed ? `; ${grants.failed} could not be opened with the previous key` : ''),
+          )
+        }
       },
     })
   : undefined
@@ -245,7 +253,9 @@ const access = database ? new AccessStore(database.sql, audit) : undefined
 const listings = database ? new ToolListings(database.sql, database.locks) : undefined
 // Each item's effective access, read at each call (#2171): the turns' http_request and own-plugin switches.
 const accessResolver = new AccessResolver(access)
-const plugins = database ? new PluginStore(database.sql) : undefined
+// OAuth sign-in for remote plugins (#780): the forwarder asks it for each request's token.
+const pluginOAuth = database ? new PluginOAuth(database.sql) : undefined
+const plugins = database ? new PluginStore(database.sql, pluginOAuth ? { oauth: pluginOAuth } : {}) : undefined
 // ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_access (#2171).
 const builtInTools = new BuiltInTools(access)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
@@ -1076,6 +1086,7 @@ const app = !role.http
   credentials,
   access,
   plugins,
+  pluginOAuth,
   pluginForwarder,
   listings,
   pluginPackages,

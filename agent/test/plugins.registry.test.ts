@@ -98,6 +98,7 @@ describe('stored plugins whose name Claude Code now reserves (#2127)', () => {
       created_at: '2026-10-01T00:00:00.000Z',
       updated_at: '2026-10-01T00:00:00.000Z',
       kekId: null,
+      oauth: null,
     })
     const kek: KekStatus = { ok: false, reason: 'no key' }
     expect(pluginView(summary('webagent'), kek).problem).toMatch(/"webagent" is reserved by Claude Code/)

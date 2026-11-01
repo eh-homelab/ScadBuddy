@@ -1682,3 +1682,60 @@ writes the print options (`PUT /api/v1/settings/print-options`,
 and each call approved, can reach any LAN URL, ScadBuddy's own `PUT /api/v1/settings`
 included, so approving such a call is approving a settings write. A print an agent starts slices
 on whichever slicer is set when its run is planned.
+
+## 15. Signing a remote plugin in with OAuth (#780)
+
+A remote MCP plugin can use a short-lived OAuth token in place of a static header, as
+the [MCP authorization spec, revision 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization/index.md)
+describes. In Settings → Tools & plugins → Plugins, a plugin with no header shows
+**Sign in**. It opens a new window, where you sign in at the plugin's authorization
+server. When you come back, the card reads "Signed in with …".
+
+How the agent does it
+([`agent/src/plugins/oauth.ts`](../../agent/src/plugins/oauth.ts),
+[`oauthStore.ts`](../../agent/src/plugins/oauthStore.ts)):
+
+1. **Discovery.** The agent sends an unauthenticated MCP request. It follows the 401's
+   `resource_metadata` ([RFC 9728](https://www.rfc-editor.org/rfc/rfc9728)), or the
+   well-known URLs when the 401 has none. The metadata's `resource` must name the
+   plugin's URL. Then it reads the first authorization server's
+   [RFC 8414](https://www.rfc-editor.org/rfc/rfc8414) or OIDC metadata. That metadata
+   must give the same `issuer` and offer PKCE with `S256`.
+2. **Client.** If you give a client id (and secret) under **Use my own OAuth app**,
+   the agent uses that app. Otherwise it registers one with
+   [RFC 7591](https://www.rfc-editor.org/rfc/rfc7591), if the server offers
+   registration. If the server offers neither, the start says so.
+3. **Sign-in.** The start returns a one-use link on ScadBuddy's own origin
+   (`/api/v1/ai/plugin-oauth/authorize?ticket=…`, valid 10 minutes). The link sets a
+   cookie in your browser and redirects to the authorization server. The request
+   carries `state`, the PKCE challenge and `resource`
+   ([RFC 8707](https://www.rfc-editor.org/rfc/rfc8707)).
+4. **Callback.** The server redirects back to
+   `<origin>/api/v1/ai/plugin-oauth/callback`. That is the origin the start came
+   through, so it must be on the allowlist (§6). The callback is accepted only once,
+   only before its flow expires, and only in the browser that opened the link (the
+   cookie). The agent checks `iss`
+   ([RFC 9207](https://www.rfc-editor.org/rfc/rfc9207)) before it sends the code to
+   the token endpoint.
+5. **Tokens.** The access token, the refresh token and any client secret are sealed
+   under the KEK (§3) in `ai_plugin_oauth`. The AAD binds them to the plugin, its URL,
+   the resource, the issuer, the token endpoint and the client id. The forwarder asks
+   for a token on every request and refreshes it shortly before it expires. The
+   refresh runs under the row's lock, so replicas never spend one refresh token twice.
+   Claude Code, the browser and every route see only the sign-in's state.
+6. **Failure.** A refused refresh, or a server that refuses a renewed token, marks the
+   sign-in `error` and the card shows **Sign in again**. Until then, turns run without
+   the plugin, and the reason is listed among the turn's plugin problems.
+
+A plugin uses either a header or a sign-in, never both. Saving a header signs the
+plugin out, a URL change drops its sign-in, and **Sign out** forgets it.
+
+**GitHub** (`https://api.githubcopilot.com/mcp/`). Its authorization server
+(`https://github.com/login/oauth`, metadata at
+`https://github.com/.well-known/oauth-authorization-server/login/oauth`, read on
+2026-11-01) offers no dynamic registration, so register an app yourself. Prefer a
+**GitHub App** to an OAuth App: its user tokens expire after 8 hours, they come with a
+refresh token, and they can act only on the repositories the App is installed on
+([GitHub docs](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)).
+Set the App's callback URL to the one the card shows, then give its client id and a
+client secret under **Use my own OAuth app**.
