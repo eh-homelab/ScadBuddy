@@ -131,8 +131,14 @@ export function attentionGate(deps: AttentionGateDeps): (request: QuestionReques
     const checking = new AbortController()
     let tabCard: string | undefined
     let parking: ReturnType<AttentionGateDeps['park']> | undefined
-    /** Replaces this side's open request for the reason and opens the entry; done once the entry is open or the park ended. */
-    const open = async () => {
+    /**
+     * Replaces this side's open request for the reason and opens the entry; done once the entry is
+     * open or the park ended. Once only: the limit may stop waiting on it (questions/service.ts
+     * OPEN_WAIT_MS) while the withdraw it starts with still runs, and the call then waits on it here.
+     */
+    let opening: Promise<void> | undefined
+    const open = () => (opening ??= openEntry())
+    const openEntry = async () => {
       const superseded = openCards.get(side)
       if (superseded !== undefined) await deps.withdraw(superseded, SUPERSEDED).catch(() => {})
       openCards.set(side, callId)
@@ -163,6 +169,7 @@ export function attentionGate(deps: AttentionGateDeps): (request: QuestionReques
         ? await deps.questions.attentionLimit({ sessionId: session.id, turnId, toolUseId: request.toolUseId, tool: request.tool, reason: attention.reason, own }, open)
         : await open()
       if (limited !== undefined) return { answered: false, message: limited }
+      await open()
       parked = await parking!
     } catch (err) {
       if (deps.released.aborted) return deps.release()

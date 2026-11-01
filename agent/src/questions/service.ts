@@ -108,9 +108,11 @@ export const TAB_WAIT_RATE_LIMIT = 10
  */
 export const DONE_POSTS_PER_TURN = 3
 /** The advisory lock the rate limit's count and insert are taken under. */
+const ATTENTION_RATE_LOCK = 'scadbuddy:attention-rate'
 /** How long `attentionLimit` holds its lock for the entry's open (a workflow Update round trip). */
 const OPEN_WAIT_MS = 10_000
-const ATTENTION_RATE_LOCK = 'scadbuddy:attention-rate'
+/** How long `attentionLimit` waits before it tries the lock again, at most; it holds no connection meanwhile. */
+const RATE_LOCK_RETRY_MS = 50
 
 export type QuestionErrorCode = 'not_found' | 'forbidden' | 'conflict' | 'invalid'
 
@@ -794,6 +796,22 @@ export class QuestionService {
    * `gate`'s lock, as `gate`'s insert does, so two requests raised at once cannot both pass at the
    * limit. Else the refusal the model reads, audited as `gate` audits one, and `open` never runs.
    */
+  /**
+   * Runs `work` in a transaction that holds ATTENTION_RATE_LOCK. The lock is tried, not waited
+   * on: its holder may wait up to OPEN_WAIT_MS on a workflow Update, whose activity needs a
+   * connection of the same pool, and a waiter blocked in the lock would hold one all that time.
+   */
+  private async underRateLock<T>(work: (tx: TransactionSql) => Promise<T>): Promise<T> {
+    for (;;) {
+      const done = await this.deps.sql.begin(async (tx) => {
+        const [lock] = await tx<{ held: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0)) AS held`
+        return lock?.held ? { value: await work(tx) } : undefined
+      })
+      if (done) return done.value
+      await new Promise((resolve) => setTimeout(resolve, Math.ceil(Math.random() * RATE_LOCK_RETRY_MS)))
+    }
+  }
+
   async attentionLimit(
     context: { sessionId: string; turnId: string; toolUseId: string; tool: string; reason: string; own: boolean },
     open: () => Promise<void>,
@@ -801,8 +819,7 @@ export class QuestionService {
     const { own } = context
     const tab = '%:tab:%'
     const limit = own ? ATTENTION_RATE_LIMIT : TAB_WAIT_RATE_LIMIT
-    const recent = await this.deps.sql.begin(async (tx) => {
-      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
+    const recent = await this.underRateLock(async (tx) => {
       const [row] = await tx<{ n: number }[]>`
         SELECT
           (SELECT count(*) FROM ai_questions

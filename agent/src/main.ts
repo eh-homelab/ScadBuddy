@@ -953,6 +953,7 @@ if (sessions && temporalClient && payloadKeys && database) {
     sql: database.sql,
     events: sessions.events,
     audit,
+    ended: (id) => sessions.endClassicLeftovers(id),
     // A unified session is ready while some replica hosts its turns (§5.2), this one or a worker's (§14.3).
   })
 }
@@ -960,7 +961,12 @@ if (sessions && temporalClient && payloadKeys && database) {
 // classic turn's whose lease lapsed with no replica left to end it (plan Step 6.3: no reaper).
 const stopDurableSweep =
   role.http && sessions && temporalClient && database
-    ? new DurableRunningSweep({ sql: database.sql, events: sessions.events, describe: durableDescriber(temporalClient) }).start(
+    ? new DurableRunningSweep({
+        sql: database.sql,
+        events: sessions.events,
+        describe: durableDescriber(temporalClient),
+        ended: (id) => sessions.endClassicLeftovers(id),
+      }).start(
         SESSION_REAP_MS,
         {
           ready: database.ready,

@@ -766,8 +766,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   - Temporal (#1055, spec 2026-10-01 §6.3): with `SCADBUDDY_TEMPORAL_ADDRESS` (and the
     database) `src/temporal/worker.ts` runs one unversioned worker on `agent-tools`:
     every `ALL_TOOLS` entry as an activity under its name (`toolActivities.ts`,
-    `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow whose
-    `ai_sessions.mode` is `durable`, or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
+    `runToolWithOutcome` with `gate: 'workflow'`, only for a `session-<id>` workflow (as the
+    session's owner with its turn's tiers; `mode` is not read, since every session is an
+    AgentSession from plan Step 6.3), or a flow run's `flow-<id>` (`flowRuns.ts`, #1057: as the
     run's starter, in no session; a gated call needs the backend's `workflow_run_decisions`
     approval; no browser or answer tools)), a durable turn's other tools (#2320,
     `turnTools.ts`, built by `turnServers.ts` as a classic turn builds them: remote plugins

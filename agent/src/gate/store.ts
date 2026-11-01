@@ -287,7 +287,7 @@ async function resolved(
   // kind still waiting (an approval first), as classic's stores hand back (approvals/service.ts,
   // questions/service.ts `withStatus`). Read under the session row's lock, so two resolves that
   // overlap cannot each see the other's entry still there and both leave it waiting (#3685).
-  // Beyond Python, whose `_resolved` moves to running only once nothing is parked.
+  // agent-durable's gate/store.py `_resolved` does the same, and audits as below (#5052).
   await tx`SELECT 1 FROM ai_sessions WHERE id = ${sid} FOR UPDATE`
   const moved = await tx<{ status: 'running' | 'waiting_approval' | 'waiting_input' }[]>`
     WITH next AS (

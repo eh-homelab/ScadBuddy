@@ -851,7 +851,38 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       describe: options.describe ?? durableDescriber(env.client),
       graceMs: options.graceMs ?? 0,
       ...(options.batch ? { batch: options.batch } : {}),
+      ended: (id) => m.endClassicLeftovers(id),
     })
+
+  // #5051's review: no release resumes a classic turn's approval now (resumeApproved is gone), so
+  // the sweep that ends a lost classic turn ends what it left parked, as the reaper revoked them.
+  it("ends a lost classic turn's pending approval and question with the turn", async () => {
+    const m = await durableManager()
+    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
+    const turn = randomUUID()
+    await db.sql`
+      UPDATE ai_sessions SET mode = 'classic', runtime = NULL, status = 'waiting_approval', turn_id = ${turn},
+        lease_until = now() - interval '1 minute', updated_at = now() - interval '1 hour'
+      WHERE id = ${session.id}`
+    const [approval] = await db.sql<{ id: string }[]>`
+      INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
+                                requested_by_kind, requested_by_id, requested_by_label, expires_at)
+      VALUES (gen_random_uuid(), ${session.id}, ${turn}, 'toolu_out', 'send_to_bambuddy', 'send', 'h', 'outward',
+              'browser', 'browser', 'you', now() + interval '10 minutes')
+      RETURNING id::text`
+    const [question] = await db.sql<{ id: string }[]>`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, expires_at)
+      VALUES (gen_random_uuid(), ${session.id}, ${turn}, 'AskUserQuestion', 'toolu_q', '[]', now() + interval '10 minutes')
+      RETURNING id::text`
+
+    expect(await sweepOf(m, { describe: async () => 'not_found' }).sweep()).toEqual([session.id])
+    expect(await status(session.id)).toBe('idle')
+    const [a] = await db.sql<{ decision: string | null }[]>`SELECT decision FROM ai_approvals WHERE id = ${approval!.id}`
+    expect(a?.decision).toBe('cancelled')
+    const [q] = await db.sql<{ outcome: string | null }[]>`SELECT outcome FROM ai_questions WHERE id = ${question!.id}`
+    expect(q?.outcome).toBe('cancelled')
+    expect(await status(session.id)).toBe('idle')
+  }, 60_000)
 
   const status = async (id: string) =>
     (await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${id}`)[0]?.status

@@ -443,11 +443,6 @@ async function decisionSpan(sessions: SessionManager, requestId: string, session
 }
 
 /**
- * A request already decided exactly as `body` says, by `principal`: its recorded outcome. An
- * approval is the same when its decision is; an answer when the hash of the response
- * the person sent (`ai_input_responses.response_hash`, #3724) is.
- */
-/**
  * An AgentSession entry that has ended, as classic answers one (#1400, #1479): a 409 saying how,
  * whatever kind the body names, from its response row; undefined when it has none (never asked).
  */
@@ -465,6 +460,11 @@ async function endedConflict(sessions: SessionManager, requestId: string): Promi
   return new RespondError(409, `${requestId} is no longer waiting for ${what}`, how)
 }
 
+/**
+ * A request already decided exactly as `body` says, by `principal`: its recorded outcome. An
+ * approval is the same when its decision is; an answer when the hash of the response
+ * the person sent (`ai_input_responses.response_hash`, #3724) is.
+ */
 async function repeated(sessions: SessionManager, requestId: string, body: RespondBody, principal: Owner): Promise<RespondResult | undefined> {
   const done = await sessions.projection.recorded(requestId)
   if (!done || done.kind !== body.kind) return undefined

@@ -669,7 +669,9 @@ export class TurnHost {
     const questionGate: QuestionGate = async (request): Promise<QuestionVerdict> => {
       // Only the user is asked, and only by the turn that holds the session: a handoff since the
       // turn started ends its asking (classic's QuestionService.ask reads the same, per call).
-      if (!(await this.#stillAsks(session.id, turnId))) return { answered: false, message: NOT_ASKED }
+      const asks = await this.#stillAsks(session.id, turnId).catch((err: unknown) => err as Error)
+      if (asks instanceof Error) return { answered: false, message: `The question was not asked: the session could not be read (${asks.message}).` }
+      if (!asks) return { answered: false, message: NOT_ASKED }
       if (request.attention) return attend(request, request.attention)
       if (stop.aborted) return { answered: false, message: 'The user did not answer: the turn is stopping.' }
       // The card the panel shows, with the turn's secrets redacted as the classic QuestionService does.

@@ -1318,10 +1318,22 @@ export class SessionManager {
     )
   }
 
-  /** Tells a durable session's workflow it was marked done (#1056), or refuses `unavailable`. */
+  /**
+   * What a classic turn left parked when it is found lost (DurableRunningSweep, a Stop on a gone
+   * workflow): its pending approvals and questions are cancelled and its approved, unused ones
+   * voided, as the reaper did. No release resumes them now (plan Step 6.3: no `resumeApproved`),
+   * so an approval left open would approve nothing. An AgentSession parks on the gate's
+   * entries, which PendingInputSweep and the Stop cancel; a done summary is kept.
+   */
+  async endClassicLeftovers(id: string): Promise<void> {
+    await this.approvals.cancelPending(id, 'the turn ended', { refresh: false })
+    await this.questions.cancelPending(id, 'the turn ended', { refresh: false })
+  }
+
+  /** Tells a session's workflow it was marked done (#1056), or refuses `unavailable`. */
   private async endDurable(id: string): Promise<void> {
     if (!this.durable) {
-      throw new SessionError('unavailable', 'this session is durable, and this agent service has no Temporal to end it; try again once it has')
+      throw new SessionError('unavailable', 'this agent service has no Temporal to tell the session it is done; try again once it has')
     }
     try {
       await this.durable.end(id)

@@ -208,6 +208,8 @@ export type DurableTurnsDeps = {
   cancelTimeoutMs?: number
   /** Tests only: how Stop describes a gone workflow (default durableDescriber). */
   describe?: DescribeSession
+  /** Run when a Stop ended a lost turn: what a classic one left parked (SessionManager.endClassicLeftovers). */
+  ended?: (sessionId: string) => Promise<unknown>
 }
 
 const wire = (o: Pick<Owner, 'kind' | 'id'> & { label?: string }): WireOwner => ({ kind: o.kind, id: o.id, label: o.label ?? '' })
@@ -226,6 +228,7 @@ export class DurableTurns {
   readonly #sql: Sql
   readonly #events: EventLog
   readonly #audit: AuditSink | undefined
+  readonly #ended: ((sessionId: string) => Promise<unknown>) | undefined
   readonly #gate: DurableGate
   readonly #blobs: SessionBlobs
   readonly #taskQueue: string
@@ -241,6 +244,7 @@ export class DurableTurns {
     this.#sql = deps.sql
     this.#events = deps.events
     this.#audit = deps.audit
+    this.#ended = deps.ended
     this.#gate = new DurableGate(deps.client, deps.cancelTimeoutMs ? { cancelTimeoutMs: deps.cancelTimeoutMs } : {})
     this.#blobs = new SessionBlobs(deps.sql)
     this.#taskQueue = deps.taskQueue ?? DURABLE_TASK_QUEUE
@@ -657,6 +661,7 @@ export class DurableTurns {
     // waiting on a claim this ends.
     if (state !== 'closed' && !row.settled) return false
     const ended = await endLostTurn(this.#sql, this.#events, row, state)
+    if (ended) await this.#ended?.(row.id).catch(() => {})
     // A parked turn's entries (#4018): no run will resolve them now, so they are cancelled here
     // rather than left for PendingInputSweep's next look, ten minutes or more away.
     const cancelled = await cancelOrphanedEntries({ sql: this.#sql, events: this.#events, audit: this.#audit }, { sessionId: row.id })

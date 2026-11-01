@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { attentionCard, attentionSpec, parseAttention } from '../src/harness/attention.js'
 import { ATTENTION_TOOL, type QuestionRequest } from '../src/harness/questions.js'
-import { ATTENTION_GRACE_MS, attentionGate, type AttentionGateDeps, type HeldRow, TAB_WAIT_CALL } from '../src/sessions/attentionGate.js'
+import { ATTENTION_GRACE_MS, attentionGate, type AttentionGateDeps, type HeldRow, SUPERSEDED, TAB_WAIT_CALL } from '../src/sessions/attentionGate.js'
 
 // The attention gate of an AgentSession turn (#5003), on stand-ins for TurnHost's park and hold:
 // each opened entry's row is answered by the test. End to end, against the workflow and the real
@@ -136,6 +136,42 @@ describe('an AgentSession turn`s attention gate', () => {
     h.opened[1]!.answer(reconnected)
     expect(await second).toEqual({ answered: false, reconnected: true, message: 'the ScadBuddy tab is connected again' })
     expect(h.ended).toEqual([])
+  })
+
+  // #5051's review: the limit stops holding its lock for the open past a bound (questions/service.ts
+  // OPEN_WAIT_MS), and the open may still be withdrawing the request it replaces then.
+  it('a request whose open outlasts the limit`s wait parks once the request it replaces is withdrawn', async () => {
+    const withdrawing = deferred<void>()
+    const withdrawn: string[] = []
+    const h = harness({
+      withdraw: async (callId) => {
+        await withdrawing.promise
+        withdrawn.push(callId)
+        return true
+      },
+      questions: {
+        attentionLimit: async (_context, open) => {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          await Promise.race([open(), new Promise<void>((resolve) => (timer = setTimeout(resolve, 20)))]).finally(() => clearTimeout(timer))
+          return undefined
+        },
+      },
+    })
+    const one = request({ reason: 'blocked', message: 'First' }, true, 'toolu_one')
+    const two = request({ reason: 'blocked', message: 'Second' }, true, 'toolu_two')
+    const first = h.gate(one.req, one.spec)
+    await until(() => h.opened.length === 1)
+    const second = h.gate(two.req, two.spec)
+    // The limit's wait ends while the withdraw still runs: nothing is parked for the second yet.
+    await new Promise((r) => setTimeout(r, 60))
+    expect(h.opened).toHaveLength(1)
+    withdrawing.resolve()
+    await until(() => h.opened.length === 2)
+    expect(withdrawn).toEqual(['toolu_one'])
+    h.opened[0]!.answer({ outcome: 'cancelled', response: null, reason: SUPERSEDED, responder: { kind: 'system' } })
+    expect(await first).toMatchObject({ answered: false })
+    h.opened[1]!.answer(answered('Here'))
+    expect(await second).toEqual({ answered: true, answers: { [two.question]: 'Here' } })
   })
 
   it('a rate limit refuses the request before anything parks', async () => {

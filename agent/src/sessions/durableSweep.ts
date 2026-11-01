@@ -104,6 +104,8 @@ export type DurableRunningSweepDeps = {
   batch?: number
   /** How long the sweep waits on one describe, whatever `describe` does (default DESCRIBE_DEADLINE_MS + 1 s). */
   describeTimeoutMs?: number
+  /** Run for each session a pass ended: what a lost classic turn left parked (SessionManager.endClassicLeftovers). */
+  ended?: (sessionId: string) => Promise<unknown>
 }
 
 export class DurableRunningSweep {
@@ -149,7 +151,9 @@ export class DurableRunningSweep {
         continue
       }
       if (state === 'open') continue
-      if (await endLostTurn(sql, events, row, state)) reset.push(row.id)
+      if (!(await endLostTurn(sql, events, row, state))) continue
+      reset.push(row.id)
+      await this.#deps.ended?.(row.id).catch((err: unknown) => console.warn(`durable running sweep: ${row.id}'s parked calls were not ended:`, (err as Error).message))
     }
     // Once per pass and payload-free, so a describe that always fails (codec, permission) shows.
     if (undescribed) console.warn(`durable running sweep: ${undescribed} of ${rows.length} sessions' workflows could not be described`)

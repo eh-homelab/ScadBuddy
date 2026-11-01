@@ -235,3 +235,42 @@ async def test_the_activities_run_over_their_connection(
     env = ActivityEnvironment()
     assert await env.run(gate.open_input, args) is True
     assert await env.run(gate.resolve_input, ResolveInput(args.request_id, "denied", ME)) is True
+
+
+async def test_the_status_follows_what_is_still_parked_and_an_unanswered_question_is_audited(
+    agent_db: Conn,
+) -> None:
+    """#5052: as the agent's gate/store.ts ``resolved``: the status is the kind still waiting
+    (an approval first), and a question nobody answered gets its ``question`` audit row."""
+    sid = await _session(agent_db)
+    approval = _open(sid)
+    question = _open(sid, kind="answer", tool_use="toolu_2")
+    await open_input(agent_db, approval)
+    await open_input(agent_db, question)
+    await agent_db.execute("UPDATE ai_sessions SET status = 'waiting_input' WHERE id = %s", (sid,))
+    await resolve_input(
+        agent_db, ResolveInput(question.request_id, "cancelled", SYSTEM, reason="the turn ended")
+    )
+    cur = await agent_db.execute("SELECT status FROM ai_sessions WHERE id = %s", (sid,))
+    assert await cur.fetchone() == ("waiting_approval",)
+    last = (await _events(agent_db, sid))[-1]
+    assert (last["type"], last["status"]) == ("session.status", "waiting_approval")
+    cur = await agent_db.execute(
+        "SELECT kind, action, surface, principal_kind, request_id, tier, outcome, detail"
+        " FROM ai_audit"
+    )
+    assert await cur.fetchall() == [
+        (
+            "question",
+            "cancelled",
+            "system",
+            "system",
+            question.request_id,
+            "read",
+            "refused",
+            f"ask_user question {question.request_id}: the turn ended",
+        )
+    ]
+    await resolve_input(agent_db, ResolveInput(approval.request_id, "denied", ME))
+    cur = await agent_db.execute("SELECT status FROM ai_sessions WHERE id = %s", (sid,))
+    assert await cur.fetchone() == ("running",)
