@@ -308,6 +308,38 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     expect(existsSync(path.join(turn.dir, 'notes.txt'))).toBe(true)
   })
 
+  it('an eviction asked while a turn is placed runs once the turn is done, unless a placement comes first', async () => {
+    const id = await session()
+    const dirs = new SessionDirectory(files, await root(), { sql: db.sql })
+    const turn = await dirs.place(id)
+    await writeFile(path.join(turn.dir, 'released.txt'), 'kept in the record')
+    // The process closed while the turn still unwinds (a cut placement, a released park).
+    expect(await dirs.evict(id)).toBe(false)
+    dirs.done(turn)
+    await expect.poll(() => existsSync(turn.dir)).toBe(false)
+    expect((await files.read(ws(id), 'released.txt'))?.bytes.toString()).toBe('kept in the record')
+
+    // A new placement voids the wish: its own process is warm.
+    const again = await dirs.place(id)
+    expect(await dirs.evict(id)).toBe(false)
+    const third = await dirs.place(id)
+    dirs.done(again)
+    dirs.done(third)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(existsSync(third.dir)).toBe(true)
+  })
+
+  it("a deleted session's copy is evicted without a write-back", async () => {
+    const id = await session()
+    const dirs = new SessionDirectory(files, await root(), { sql: db.sql })
+    const turn = await dirs.place(id)
+    await writeFile(path.join(turn.dir, 'orphan.txt'), 'no record to go to')
+    dirs.done(turn)
+    await db.sql`DELETE FROM ai_sessions WHERE id = ${id}`
+    expect(await dirs.evict(id)).toBe(true)
+    expect(existsSync(turn.dir)).toBe(false)
+  })
+
   it('a monitor that starts before any turn here places the directory first', async () => {
     const id = await session()
     await files.write(ws(id), 'input.txt', Buffer.from('from the record'))

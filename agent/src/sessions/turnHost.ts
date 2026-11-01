@@ -530,13 +530,21 @@ export class TurnHost {
         let checks = 0
         /** The cap as the last check read it (`usage`), which a sync tick measures against. */
         let lastCap: number | undefined
+        /** Checks left to skip: the directory was under half the cap at the last one. */
+        let idle = 0
         capCheck = setInterval(() => {
           checks += 1
+          const syncing = checks % DIR_SYNC_EVERY === 0
+          // Far under the cap, the walk waits for the minute's sync: a large tree is walked less.
+          if (idle > 0 && !syncing) {
+            idle -= 1
+            return
+          }
           // A long turn with no park still writes back now and then (a lost pod then loses less);
           // that write-back's own walk measures the directory, so it is walked once a tick.
           const known = lastCap
           const measured =
-            checks % DIR_SYNC_EVERY === 0 && known !== undefined
+            syncing && known !== undefined
               ? sync(false).then((bytes) => (bytes === undefined ? undefined : { bytes, cap: known }))
               : this.#deps.directory!.usage(checking)
           void measured.then(
@@ -544,6 +552,7 @@ export class TurnHost {
               if (!usage) return
               const { bytes, cap } = usage
               lastCap = cap
+              idle = bytes < cap / 2 ? DIR_SYNC_EVERY - 1 : 0
               if (bytes <= cap || controller.signal.aborted) return
               console.warn(`session directory cap: session ${id}'s working directory holds ${bytes} bytes, past the workspace's ${cap}; the turn is stopped`)
               controller.abort(new Error(`the session's working directory grew past the workspace cap (${cap} bytes)`))

@@ -44,7 +44,10 @@ import { sha256, type SessionFiles, WORKSPACE_PATH_MAX, WorkspaceError, type Wor
 // So a panel upload or a `workspace_*` write needs no marker: the next placement compares the
 // record with the directory. A pod that dies mid-turn loses only that turn's writes since its
 // last park, which the restart message already tells the model to check. The directory holds
-// plaintext, where the record's bytes are sealed: forgetSubject removes it
+// plaintext, where the record's bytes are sealed. What this pod remembers of its last sync is in
+// memory: after a container restart (the emptyDir survives it) the next placement here finds no
+// base, so it, or the 24 h sweep, drops what the old process never wrote back, as for a placement
+// that died. forgetSubject removes it
 // (`removeSessionDir`), and `sweep` removes one whose session is gone.
 
 /** A path segment the workspace takes (store.ts WORKSPACE_PATH's). */
@@ -191,7 +194,9 @@ async function writeInside(dir: string, rel: string, bytes: Uint8Array): Promise
     if (!st || !st.isDirectory()) await mkdir(at, { mode: 0o700 })
   }
   // A directory swapped for a link between its check and the open would be followed (O_NOFOLLOW
-  // guards the last part only): the parent must still resolve inside `dir`.
+  // guards the last part only): the parent must still resolve inside `dir`. A window remains
+  // between this check and the open, which a process of the same uid could use; Step 9.6's
+  // openat-style walk is to close it.
   if (!(await within(dir, at))) throw new Error(`${rel} resolves outside the session's directory`)
   const target = path.join(at, parts.at(-1)!)
   const st = await lstat(target).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))
@@ -230,10 +235,20 @@ export class SessionDirectory {
   readonly #last = new Map<string, Placement>()
   /** The sessions a Monitor command runs in now, by how many (a subset of `#busy`). */
   readonly #monitors = new Map<string, number>()
+  /** Evictions refused while the session was busy: each runs once it is not, unless a placement came first. */
+  readonly #evictWanted = new Set<string>()
+  /** Whether a session's row still stands; without it (tests), every session's does. */
+  readonly #exists: (sessionId: string) => Promise<boolean>
 
-  constructor(files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits'>, root: string) {
+  constructor(
+    files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits'>,
+    root: string,
+    options: { sql?: Sql | undefined } = {},
+  ) {
     this.#files = files
     this.#root = root
+    const sql = options.sql
+    this.#exists = sql ? async (id) => (await sql`SELECT 1 FROM ai_sessions WHERE id = ${id}`).length > 0 : () => Promise.resolve(true)
   }
 
   /** The session's directory: the `cwd` its turns run in (harness/stateDirs.ts `sessionWorkDir`, from the same root). */
@@ -258,6 +273,8 @@ export class SessionDirectory {
    */
   place(sessionId: string): Promise<Placement> {
     const id = sessionId.toLowerCase()
+    // A new process will be spawned for it: an eviction wished for the old one is void.
+    this.#evictWanted.delete(id)
     this.#busy.set(id, (this.#busy.get(id) ?? 0) + 1)
     return this.#serial(sessionId, () => this.#place(sessionId)).catch((err: unknown) => {
       this.#unbusy(id)
@@ -309,8 +326,18 @@ export class SessionDirectory {
 
   #unbusy(id: string): void {
     const n = (this.#busy.get(id) ?? 1) - 1
-    if (n > 0) this.#busy.set(id, n)
-    else this.#busy.delete(id)
+    if (n > 0) {
+      this.#busy.set(id, n)
+      return
+    }
+    this.#busy.delete(id)
+    // Its process closed while a turn or a monitor held the directory (a cut placement, a released
+    // park): the eviction it then asked for runs now.
+    if (this.#evictWanted.delete(id)) {
+      void this.evict(id).catch((err: unknown) =>
+        console.error(`session ${id}: its working directory could not be removed: ${err instanceof Error ? err.message : String(err)}`),
+      )
+    }
   }
 
   async #place(sessionId: string): Promise<Placement> {
@@ -445,7 +472,16 @@ export class SessionDirectory {
   evict(sessionId: string): Promise<boolean> {
     const id = sessionId.toLowerCase()
     return this.#serial(sessionId, async () => {
-      if (this.#busy.has(id)) return false
+      if (this.#busy.has(id)) {
+        // Asked again once it is not busy any more (`#unbusy`), unless a placement comes first.
+        this.#evictWanted.add(id)
+        return false
+      }
+      // A session deleted since has no record to write to: its copy just goes.
+      if (!(await this.#exists(id))) {
+        await this.#drop(id)
+        return true
+      }
       // What was written since the last sync (a monitor's output) goes to the record first; if
       // that fails, the copy stays for the next placement here to try again.
       const last = this.#last.get(id)
