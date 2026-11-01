@@ -38,9 +38,9 @@ async function newSession(sql: Sql, id: string = randomUUID()): Promise<string> 
   await sql`
     INSERT INTO ai_sessions
       (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-       status, max_turns, budget_usd, mode)
+       status, max_turns, budget_usd)
     VALUES (${id}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser',
-            'running', 10, 1, 'durable')`
+            'running', 10, 1)`
   return id
 }
 

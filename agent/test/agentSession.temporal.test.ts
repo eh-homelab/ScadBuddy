@@ -14,6 +14,7 @@ import { openInput, type OpenInput, resolveInput, type ResolveInput } from '../s
 import type { Database } from '../src/db.js'
 import { DurableTurns } from '../src/sessions/durable.js'
 import { type SessionManager } from '../src/sessions/manager.js'
+import { transcriptExists } from '../src/sessions/store.js'
 import { RUNTIME_DEFAULTS } from '../src/sessions/runtimeSettings.js'
 import { TASK_QUEUE } from '../src/temporal/names.js'
 import { sessionFinishActivities } from '../src/temporal/session/finishActivity.js'
@@ -777,6 +778,34 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       const second = await m.send(session.id, browser, 'and a lid')
       expect(await second.done).toMatchObject({ kind: 'result' })
       expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket\n\n[page: /]', 'and a lid'])
+    })
+
+    // Plan Phase 10: #2078 refused a session whose workflow retention removed, for DurableSession,
+    // whose history held the chat. An AgentSession's transcript is in ai_session_entries, so its
+    // next send starts the workflow again and the turn resumes there (sessions/durable.ts).
+    it('starts a session whose workflow retention removed again, with its transcript kept to resume', async () => {
+      const m = await durableManager()
+      finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
+      const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make me a bracket' })
+      expect(await turn!.done).toMatchObject({ kind: 'result' })
+      // The turn's transcript line, as the SessionStore mirror writes it (sessions/store.ts).
+      await db.sql`
+        INSERT INTO ai_session_entries (project_key, session_id, subpath, entry)
+        VALUES ('p', ${session.id}, '', ${JSON.stringify({ type: 'user', uuid: 'u1' })})`
+      // Ended, then removed by retention: Temporal no longer knows it.
+      await handleOf(session.id).terminate('ended')
+      await env.client.workflowService.deleteWorkflowExecution({
+        namespace: env.client.options.namespace,
+        workflowExecution: { workflowId: sessionWorkflowId(session.id) },
+      })
+      await expect.poll(async () => handleOf(session.id).describe().then(() => 'found', (err: unknown) => (err instanceof WorkflowNotFoundError ? 'gone' : 'found')), { timeout: 30_000 }).toBe('gone')
+
+      const again = await m.send(session.id, browser, 'and a lid')
+      expect(await again.done).toMatchObject({ kind: 'result' })
+      expect(await describe_(session.id)).toEqual({ type: SESSION_WORKFLOW, taskQueue: SESSION_QUEUE })
+      expect(turns.map((t) => t.message?.text)).toEqual(['make me a bracket', 'and a lid'])
+      // What the restarted turn resumes from (warm.ts reads it with transcriptExists).
+      expect(await transcriptExists(db.sql, session.id)).toBe(true)
     })
 
     it('refuses `closed` a send to a session still recorded as DurableSession, and starts no workflow (plan Step 8.1)', async () => {
