@@ -374,17 +374,21 @@ async function respondDurable(
     decision?.setAttribute('scadbuddy.outcome', out.outcome)
     return { id: requestId, kind: out.kind, outcome: out.outcome }
   } catch (err) {
-    if (decision) recordFailure(decision, err)
     if (err instanceof RespondRefusal) {
       // A retry after the run continued as new (#3717): the Update ID is per run, so the
       // new run refuses a decision the old one took. The same decision by the same
-      // responder is that decision's outcome, read from the record, not a refusal.
+      // responder is that decision's outcome, read from the record, not a refusal, and
+      // its span says so, with no error (#5045).
       if (err.code === 'resolved' || err.code === 'stale') {
         const done = await repeated(sessions, requestId, body, principal)
-        if (done) return done
+        if (done) {
+          decision?.setAttribute('scadbuddy.outcome', done.outcome)
+          return done
+        }
       }
-      throw refused(err)
     }
+    if (decision) recordFailure(decision, err)
+    if (err instanceof RespondRefusal) throw refused(err)
     if (err instanceof WorkflowNotFoundError) throw stale
     if (err instanceof DurableUnavailable) throw new RespondError(503, err.message)
     throw err
@@ -407,6 +411,8 @@ async function decisionSpan(sessions: SessionManager, requestId: string, session
     attributes: {
       'scadbuddy.approval_id': requestId,
       'scadbuddy.tool': parked.tool,
+      // Every parked approval is outward: only a call `decide` finds `needs_approval` parks,
+      // and that decision's tier is always outward (harness/permissions.ts, #5045).
       'scadbuddy.tier': 'outward',
       'scadbuddy.outcome': 'unknown',
       'scadbuddy.wait_seconds': Math.max((Date.now() - parked.createdAt.getTime()) / 1000, 0),
