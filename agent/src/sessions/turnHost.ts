@@ -23,7 +23,7 @@ import { type ClaimedSession, runningDurableTurn, TAB_WAIT_S, type TurnOutcome, 
 import { scrubForLog } from './sdkEvents.js'
 import { CoreTurn, type TallyInput, tallyTurn, type TurnCoreDeps, type TurnGates, type TurnTally } from './turnCore.js'
 import type { WarmEntry } from './warm.js'
-import type { Placement, SessionDirectory } from '../workspace/directory.js'
+import { MAX_ENTRIES, type Placement, type SessionDirectory } from '../workspace/directory.js'
 
 // An AgentSession's turn on this replica (unified runtime spec 2026-10-13 §5.2, §5.5): what
 // the `session_turn` activity runs (temporal/session/turnActivity.ts). The turn is a classic
@@ -526,34 +526,43 @@ export class TurnHost {
       // A directory past the workspace cap stops the turn: what it holds then is written back
       // up to the cap, and the rest removed (directory.ts), so this disk stays bounded.
       if (placed) {
-        const checking = placed
+        const checking = { placed, busy: false }
         let checks = 0
-        /** The cap as the last check read it (`usage`), which a sync tick measures against. */
-        let lastCap: number | undefined
         // Every DIR_CHECK_MS, never fewer: what a process can write between two checks is the
         // overrun past the cap the worker's emptyDir must leave room for (clusters' sizeLimit).
         // The walk is lstat-only and stops counting once past the cap (`usage`), so it stays cheap.
         capCheck = setInterval(() => {
+          // One check at a time: a walk still running when the next tick comes (a huge tree) is
+          // not walked again over it.
+          if (checking.busy) return
           checks += 1
           const syncing = checks % DIR_SYNC_EVERY === 0
-          // A long turn with no park still writes back now and then (a lost pod then loses less);
-          // that write-back's own walk measures the directory, so it is walked once a tick.
-          const known = lastCap
-          const measured =
-            syncing && known !== undefined
-              ? sync(false).then((bytes) => (bytes === undefined ? undefined : { bytes, cap: known }))
-              : this.#deps.directory!.usage(checking)
-          void measured.then(
-            (usage) => {
-              if (!usage) return
-              const { bytes, cap } = usage
-              lastCap = cap
-              if (bytes <= cap || controller.signal.aborted) return
-              console.warn(`session directory cap: session ${id}'s working directory holds ${bytes} bytes, past the workspace's ${cap}; the turn is stopped`)
-              controller.abort(new Error(`the session's working directory grew past the workspace cap (${cap} bytes)`))
+          checking.busy = true
+          void this.#deps.directory!.usage(checking.placed).then(
+            async (usage) => {
+              const { bytes, cap, overEntries } = usage
+              if (bytes <= cap && !overEntries) {
+                // A long turn with no park still writes back now and then: a lost pod then loses less.
+                if (syncing) await sync(false)
+                return
+              }
+              if (controller.signal.aborted) return
+              const why = overEntries
+                ? `holds too many entries (past ${MAX_ENTRIES})`
+                : `holds ${bytes} bytes, past the workspace's ${cap}`
+              console.warn(`session directory cap: session ${id}'s working directory ${why}; the turn is stopped`)
+              controller.abort(
+                new Error(
+                  overEntries
+                    ? `the session's working directory holds too many entries (past ${MAX_ENTRIES})`
+                    : `the session's working directory grew past the workspace cap (${cap} bytes)`,
+                ),
+              )
             },
             () => {},
-          )
+          ).finally(() => {
+            checking.busy = false
+          })
         }, this.#deps.dirCheckMs ?? DIR_CHECK_MS)
         capCheck.unref()
       }

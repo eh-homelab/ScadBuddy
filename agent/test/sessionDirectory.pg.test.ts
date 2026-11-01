@@ -311,6 +311,24 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     expect(existsSync(path.join(turn.dir, 'notes.txt'))).toBe(true)
   })
 
+  it("a late close's eviction never removes the directory of a process spawned since", async () => {
+    const id = await session()
+    let warmNow = false
+    const dirs = new SessionDirectory(files, await root(), { warm: () => warmNow })
+    // The next turn is placed; the old process's onClosed lands before the new one is in the cache.
+    const turn = await dirs.place(id)
+    expect(await dirs.evict(id)).toBe(false)
+    // The new process is spawned, with this directory as its cwd.
+    warmNow = true
+    dirs.done(turn)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(existsSync(turn.dir)).toBe(true)
+    expect(await dirs.evict(id)).toBe(false)
+    // Once that process closes too, the directory may go.
+    warmNow = false
+    expect(await dirs.evict(id)).toBe(true)
+  })
+
   it('an eviction asked while a turn is placed runs once the turn is done, unless a placement comes first', async () => {
     const id = await session()
     const dirs = new SessionDirectory(files, await root(), { sql: db.sql })
@@ -357,6 +375,81 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     expect((await files.read(ws(id), 'out.log'))?.bytes.toString()).toBe('the monitor wrote this')
   })
 
+  /** A hanging AgentSession turn on TurnHost over `directory` (a stand-in), ended only by a cap stop or `stopAfterMs`. */
+  async function cappedTurn(
+    directory: ConstructorParameters<typeof TurnHost>[0]['directory'],
+    options: { dirCheckMs: number; stopAfterMs?: number },
+  ): Promise<{ result: unknown; warned: string[] }> {
+    const stateDir = await mkdtemp(path.join(os.tmpdir(), 'sessions-'))
+    m = manager({ sql: db.sql, paths: { stateDir }, run: scriptedRunner(() => ({ hang: true })).runner, workspace: files })
+    const { session: started } = await m.start(browser, { origin: 'chat' })
+    const turnId = randomUUID()
+    await db.sql`
+      UPDATE ai_sessions SET status = 'running', mode = 'durable', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
+      WHERE id = ${started.id}`
+    const warned: string[] = []
+    const warn = console.warn
+    console.warn = (...args: unknown[]) => {
+      warned.push(args.map(String).join(' '))
+    }
+    const interrupt = new AbortController()
+    const timer = options.stopAfterMs === undefined ? undefined : setTimeout(() => interrupt.abort(), options.stopAfterMs)
+    try {
+      const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: options.dirCheckMs })
+      const result = await host.run(
+        { sessionId: started.id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'go', images: [], system_append: null } },
+        { heartbeat: () => {}, cancelled: interrupt.signal, cancelReason: () => 'interrupt' },
+      )
+      await host.stop({ graceMs: 0, abortWaitMs: 0 })
+      return { result, warned }
+    } finally {
+      clearTimeout(timer)
+      console.warn = warn
+    }
+  }
+
+  const noWriteBack = async () => ({ written: [], deleted: [], skipped: [], strays: 0, bytes: 0 })
+
+  it('a check still walking when the next tick comes is not walked again over it', async () => {
+    const dir = await root()
+    let walks = 0
+    const directory = {
+      place: async (sessionId: string) => ({ sessionId, dir, base: new Map<string, string>() }),
+      writeBack: noWriteBack,
+      // The first walk never ends (a huge tree): no tick may start another under it.
+      usage: () => {
+        walks += 1
+        return new Promise<never>(() => {})
+      },
+      done: () => {},
+    }
+    await cappedTurn(directory, { dirCheckMs: 20, stopAfterMs: 300 })
+    expect(walks).toBe(1)
+  })
+
+  it('a flood of entries stops the turn as bytes past the cap do, and usage reports it', async () => {
+    const id = await session()
+    const dirs = new SessionDirectory(files, await root(), { maxEntries: 50 })
+    const turn = await dirs.place(id)
+    for (let i = 0; i < 80; i++) await writeFile(path.join(turn.dir, `empty-${i}`), '')
+    const usage = await dirs.usage(turn)
+    expect(usage).toMatchObject({ bytes: 0, overEntries: true })
+    dirs.done(turn)
+
+    const dir = await root()
+    const { result, warned } = await cappedTurn(
+      {
+        place: async (sessionId: string) => ({ sessionId, dir, base: new Map<string, string>() }),
+        writeBack: noWriteBack,
+        usage: async () => ({ bytes: 0, cap: 1_000, overEntries: true }),
+        done: () => {},
+      },
+      { dirCheckMs: 20 },
+    )
+    expect(JSON.stringify(result)).toContain('too many entries')
+    expect(warned.some((w) => w.startsWith('session directory cap:'))).toBe(true)
+  })
+
   it('a burst right after a walk far under the cap is caught at the very next check, and the placement still ends', async () => {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), 'sessions-'))
     const scripted = scriptedRunner(() => ({ hang: true }))
@@ -370,16 +463,18 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     const dir = await root()
     let walks = 0
     let walksAtStop = 0
-    let firstWalkAt = 0
-    let stoppedAt = 0
+    let writeBacks = 0
+    let writeBacksAtStop = -1
     const done: unknown[] = []
     const directory = {
       place: async () => ({ sessionId: id, dir, base: new Map<string, string>() }),
-      writeBack: async () => ({ written: [], deleted: [], skipped: [], strays: 0, bytes: 0 }),
+      writeBack: async () => {
+        writeBacks += 1
+        return { written: [], deleted: [], skipped: [], strays: 0, bytes: 0 }
+      },
       // Far under the cap at the first check (a quarter), then a burst past it: no check is skipped.
       usage: async () => {
         walks += 1
-        if (walks === 1) firstWalkAt = Date.now()
         return walks === 1 ? { bytes: 250, cap: 1_000 } : { bytes: 10_000, cap: 1_000 }
       },
       done: (p: unknown) => {
@@ -392,12 +487,12 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       const line = args.map(String).join(' ')
       if (line.startsWith('session directory cap:') && walksAtStop === 0) {
         walksAtStop = walks
-        stoppedAt = Date.now()
+        writeBacksAtStop = writeBacks
       }
       warned.push(line)
     }
     try {
-      const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: 200 })
+      const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: 20 })
       const result = await host.run(
         { sessionId: id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'fill the disk', images: [], system_append: null } },
         { heartbeat: () => {}, cancelled: new AbortController().signal, cancelReason: () => 'interrupt' },
@@ -408,10 +503,11 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       console.warn = warn
     }
     expect(warned.some((w) => w.startsWith('session directory cap:'))).toBe(true)
-    // The next check, one DIR_CHECK_MS on (200 ms here), not after skipped ones: that interval
+    // The next check, one DIR_CHECK_MS on, not after skipped ones: that interval
     // bounds how far past the cap a burst can write before the turn stops.
     expect(walksAtStop).toBe(2)
-    expect(stoppedAt - firstWalkAt).toBeLessThan(500)
+    // No check skipped to the minute's sync: none had run when the turn stopped.
+    expect(writeBacksAtStop).toBe(0)
     expect(done).toHaveLength(1)
   })
 

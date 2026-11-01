@@ -1528,8 +1528,10 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   - Caps: the workspace's. A file past `workspace_file_max_bytes`, or one the
     `workspace_max_bytes` quota refuses, is removed from the directory at the write-back, as is
     every entry that cannot be synced. A turn whose directory grows past `workspace_max_bytes`
-    is stopped. The check runs every 15 s (`DIR_CHECK_MS`) and is never skipped. It uses lstat
-    only, and it stops counting once past the cap. So a turn can overrun its cap by at most its
+    is stopped, as is one that holds more than 20,000 entries (`MAX_ENTRIES`; empty files and
+    directories cost inodes and walk time but no bytes). The check runs every 15 s
+    (`DIR_CHECK_MS`) and is never skipped. A tick is skipped only while the previous walk still
+    runs. It uses lstat only, and it stops counting once past either cap. So a turn can overrun its cap by at most its
     write rate times 15 s, and the emptyDir's `sizeLimit` must leave room for that. Each refusal logs a line starting
     `session directory cap:`. A session's directory is removed once its warm process on that
     worker closes, unless a Monitor command still runs in it, and only after what changed since

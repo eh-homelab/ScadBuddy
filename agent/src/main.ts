@@ -673,7 +673,10 @@ const durableToolDeps: ToolActivityDeps | undefined = temporal
 // Each session's working directory (workspace/directory.ts, plan Step 9.5): a copy of its workspace
 // under SCADBUDDY_SESSION_DIR (the worker's own capped emptyDir), refilled from the workspace at each
 // placement. The directories of sessions gone since are swept every hour, by every process that runs turns.
-const sessionDirectory = role.sessionHost && workspace ? new SessionDirectory(workspace, sessionsRoot(paths), { sql: database?.sql }) : undefined
+const sessionDirectory =
+  role.sessionHost && workspace
+    ? new SessionDirectory(workspace, sessionsRoot(paths), { sql: database?.sql, ...(sessions ? { warm: (id: string) => sessions.warm.has(id) } : {}) })
+    : undefined
 // A session's copy goes once its warm process here has: this disk holds the warm sessions' copies only.
 if (sessionDirectory && sessions) {
   sessions.warm.onClosed((id) =>

@@ -60,6 +60,14 @@ const SOURCE = { kind: 'session_dir' } as const
 export const IDLE_MS = 24 * 60 * 60 * 1000
 /** The refusals that mean a file is past a cap: such a file leaves the directory at the write-back. */
 const CAPPED: ReadonlySet<WorkspaceErrorCode> = new Set(['too_large', 'quota'])
+/**
+ * How many entries (files, directories, links) a session's directory may hold before a turn is
+ * stopped, as past the byte cap: empty files and directories cost inodes and walk time but no
+ * bytes. A workspace holds a few hundred files at most in practice (each one a row of
+ * `ai_session_files`, under a 200 MiB quota), so 20,000 leaves room for a turn's scratch tree,
+ * and a walk of that many lstat calls stays well under the 15 s between two checks.
+ */
+export const MAX_ENTRIES = 20_000
 
 /**
  * The paths a write-back could not offer to the record for now (`unavailable`, say): not past a
@@ -133,11 +141,16 @@ async function walk(dir: string): Promise<Walked> {
   return out
 }
 
-/** Every byte under `dir`, never following a link (a link counts as itself); it stops counting once past `limit`. */
-async function sizeOf(dir: string, limit = Infinity): Promise<number> {
+/**
+ * Every byte under `dir`, never following a link (a link counts as itself), and how many entries;
+ * it stops counting once past `limit` bytes or `maxEntries` entries.
+ */
+async function measure(dir: string, limit = Infinity, maxEntries = Infinity): Promise<{ bytes: number; entries: number }> {
   let total = 0
+  let count = 0
+  const over = () => total > limit || count > maxEntries
   const visit = async (abs: string): Promise<void> => {
-    if (total > limit) return
+    if (over()) return
     let entries
     try {
       entries = await readdir(abs, { withFileTypes: true })
@@ -147,13 +160,19 @@ async function sizeOf(dir: string, limit = Infinity): Promise<number> {
     }
     for (const entry of entries) {
       const at = path.join(abs, entry.name)
-      if (total > limit) return
+      if (over()) return
+      count += 1
       if (entry.isDirectory()) await visit(at)
       else total += await lstat(at).then((st) => st.size, () => 0)
     }
   }
   await visit(dir)
-  return total
+  return { bytes: total, entries: count }
+}
+
+/** Every byte under `dir`, never following a link (a link counts as itself). */
+async function sizeOf(dir: string): Promise<number> {
+  return (await measure(dir)).bytes
 }
 
 /** Whether `at` resolves to `inside` or below it (a directory swapped for a link would not). */
@@ -241,14 +260,23 @@ export class SessionDirectory {
   readonly #evictWanted = new Set<string>()
   /** Whether a session's row still stands; without it (tests), every session's does. */
   readonly #exists: (sessionId: string) => Promise<boolean>
+  readonly #maxEntries: number
+  readonly #warm: (sessionId: string) => boolean
 
   constructor(
     files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits'>,
     root: string,
-    options: { sql?: Sql | undefined } = {},
+    options: {
+      sql?: Sql | undefined
+      maxEntries?: number | undefined
+      /** Whether the session has a warm process here now (warm.ts `has`): its cwd is never removed. */
+      warm?: ((sessionId: string) => boolean) | undefined
+    } = {},
   ) {
     this.#files = files
     this.#root = root
+    this.#warm = options.warm ?? (() => false)
+    this.#maxEntries = options.maxEntries ?? MAX_ENTRIES
     const sql = options.sql
     this.#exists = sql ? async (id) => (await sql`SELECT 1 FROM ai_sessions WHERE id = ${id}`).length > 0 : () => Promise.resolve(true)
   }
@@ -457,12 +485,14 @@ export class SessionDirectory {
 
   /**
    * The bytes the directory holds now, every entry counted (a link as itself), and the workspace
-   * cap (`workspace_max_bytes`). lstat only, and the count stops once past the cap, so a turn's
-   * check every 15 s stays cheap however large the tree grows.
+   * cap (`workspace_max_bytes`); `overEntries` past MAX_ENTRIES entries. lstat only, and the count
+   * stops once past either, so a turn's check every 15 s stays cheap however large the tree grows:
+   * `bytes` is exact only up to the cap, never a measure of the directory past it.
    */
-  async usage(placement: Placement): Promise<{ bytes: number; cap: number }> {
+  async usage(placement: Placement): Promise<{ bytes: number; cap: number; overEntries?: boolean }> {
     const { workspaceMaxBytes } = await this.#files.limits()
-    return { bytes: await sizeOf(placement.dir, workspaceMaxBytes), cap: workspaceMaxBytes }
+    const { bytes, entries } = await measure(placement.dir, workspaceMaxBytes, this.#maxEntries)
+    return entries > this.#maxEntries ? { bytes, cap: workspaceMaxBytes, overEntries: true } : { bytes, cap: workspaceMaxBytes }
   }
 
   /** Removes the session's directory (forgetSubject). */
@@ -478,6 +508,12 @@ export class SessionDirectory {
   evict(sessionId: string): Promise<boolean> {
     const id = sessionId.toLowerCase()
     return this.#serial(sessionId, async () => {
+      // A process spawned since the close that asked (a late `onClosed`, a wish deferred past a
+      // new placement) works in this directory: it stays, and the wish with the old process goes.
+      if (this.#warm(id)) {
+        this.#evictWanted.delete(id)
+        return false
+      }
       if (this.#busy.has(id)) {
         // Asked again once it is not busy any more (`#unbusy`), unless a placement comes first.
         this.#evictWanted.add(id)

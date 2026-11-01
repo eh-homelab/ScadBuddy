@@ -482,6 +482,11 @@ export class WarmSessions {
     return this.slots.size
   }
 
+  /** Whether the session has a process here now, running a turn or idle (workspace/directory.ts never evicts under one). */
+  has(sessionId: string): boolean {
+    return this.slots.has(sessionId)
+  }
+
   /** Whether a turn holds the session's process here now. */
   busy(sessionId: string): boolean {
     return this.slots.get(sessionId)?.busy === true
