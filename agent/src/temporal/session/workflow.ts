@@ -132,6 +132,12 @@ const FULL_HOME_PATCH = 'agent-session-full-home'
  * history opened (its turns answered every attention request NO_PARKS).
  */
 const ATTENTION_TIMEOUTS_PATCH = 'agent-session-attention-timeouts'
+/**
+ * An entry's row is the record of its request (R5, plan Step 9.7): the respond route decides it
+ * there and wakes the workflow, which reads it (gate.ts). Asked as each entry parks; an entry of
+ * an older history is held by the workflow, as it was.
+ */
+const GATE_RECORD_PATCH = 'gate-record-r5'
 const THE_TURN_ENDED = 'the turn ended'
 
 type Activities = Record<string, (input?: unknown) => Promise<unknown>>
@@ -227,6 +233,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
     kindOf: (tool: string) => (tool === ASK_USER || tool === WAIT_FOR_USER ? 'answer' : 'approval'),
     taskQueue: TASK_QUEUE,
     onTimeout: () => patched(ATTENTION_TIMEOUTS_PATCH),
+    record: () => patched(GATE_RECORD_PATCH),
   })
   gate.install()
 

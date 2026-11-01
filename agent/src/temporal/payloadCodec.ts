@@ -15,7 +15,9 @@ import { KEK_BYTES, type Kek, openBytes, type RandomSource, SealError, sealBytes
 // browser call between replicas (`bridge-<uuid>`, bridge/relay.ts, #4780) is a subject of
 // its own, whatever session it is for, and never stored by reference: the caller deletes
 // its key once it has the answer (`dropPayloadKey`), and `sweepBridgeKeys` deletes the
-// keys of calls that never got one.
+// keys of calls that never got one. A session's or flow's own child workflows
+// (`session-<uuid>-<suffix>`, Step 9.2's `ToolCall` `session-<uuid>-call-<tool_use_id>`) are
+// sealed under that subject's key too (plan 2026-10-13 Step 9.1); a browser call has none.
 //
 // The subject comes from the serialization context on encode (the workflow the payload
 // belongs to, `@temporalio/common` 1.24 gives it to every client and worker call), and
@@ -52,12 +54,16 @@ const SUBJECT = /^(session|flow|bridge)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9
 const encoder = new TextEncoder()
 const decoder = new TextDecoder()
 
+// The suffix takes capitals and `_`: an Anthropic tool_use_id has both (`toolu_01Ab…`).
+const CHILD = /^((?:session|flow)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[A-Za-z0-9_-]+$/
 const BACKGROUND_TASK = /^bgtask-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[0-9a-f]{8}$/
 
 /** The subject a workflow ID names, or undefined for a workflow that carries no conversation. */
 export function subjectOf(workflowId: string | undefined): string | undefined {
   if (workflowId === undefined) return undefined
   if (SUBJECT.test(workflowId)) return workflowId
+  const child = CHILD.exec(workflowId)
+  if (child) return child[1]
   const task = BACKGROUND_TASK.exec(workflowId)
   return task ? `session-${task[1]}` : undefined
 }

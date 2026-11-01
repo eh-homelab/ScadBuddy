@@ -24,6 +24,7 @@ describe('sessionPendingInput for a grant holder', () => {
           lookups.push([...ids])
           return new Set(['b'])
         },
+        decidedOf: async () => new Set<string>(),
       },
       approvals: { holdsGrant: async () => true },
       durable: { pendingInput: async () => [entry('a', 'approval'), entry('b', 'approval'), entry('q', 'question'), entry('c', 'approval')] },

@@ -99,7 +99,7 @@ async def test_a_sessions_payloads_are_sealed_and_others_pass_through() -> None:
         assert sealed.metadata["encoding"] == SUBJECT_ENCODING
         assert b"the user" not in sealed.data
         assert await codec.decode([sealed]) == [PLAIN]
-    for other in ("render-abc", "session-nope", f"{SUBJECT}-x"):
+    for other in ("render-abc", "session-nope", f"{SUBJECT}x"):
         ctx = WorkflowSerializationContext(namespace="default", workflow_id=other)
         assert await codec.with_context(ctx).encode([PLAIN]) == [PLAIN]
     assert await codec.encode([PLAIN]) == [PLAIN]
@@ -194,3 +194,14 @@ def test_a_background_task_is_sealed_under_its_session() -> None:
     sid = "0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60"
     assert subject_of(f"bgtask-{sid}-ab12cd34") == f"session-{sid}"
     assert subject_of("bgtask-ab12cd34") is None
+
+
+SUBJECT_VECTORS = VECTORS.parent / "subject-vectors.json"
+
+
+def test_every_workflow_id_names_the_subject_the_agent_names() -> None:
+    """agent/test/fixtures/subject-vectors.json: the agent's subjectOf, workflow id by id."""
+    vectors: list[dict[str, Any]] = json.loads(SUBJECT_VECTORS.read_text())
+    assert vectors
+    for v in vectors:
+        assert subject_of(v["workflow_id"]) == v["subject"], v["workflow_id"]

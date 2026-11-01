@@ -717,7 +717,7 @@ describe.skipIf(!TEMPORAL_CLI)(`AgentSession${TEMPORAL_SKIP}`, { timeout: 90_000
       for (const [name, history] of Object.entries(recorded)) await writeFile(new URL(`${name}.json`, FIXTURES), `${historyToJSON(history)}\n`)
     }
     const names = (await readdir(FIXTURES)).filter((f) => f.endsWith('.json')).map((f) => f.slice(0, -'.json'.length))
-    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home', 'attention_tab']))
+    expect(names).toEqual(expect.arrayContaining(['turn', 'ended', 'park_respond', 'end_while_finishing', 'full_home', 'attention_tab', 'park_record']))
     const fixtures = await Promise.all(
       names.map(async (name) => ({
         workflowId: `fixture-${name}`,
