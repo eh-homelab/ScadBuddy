@@ -74,6 +74,7 @@ from scadbuddy.core.secrets import (
 )
 from scadbuddy.core.settings import ENV_SEEDED, SECRET_FIELDS, Settings, check_value, env_var
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
+from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
 
 logger = logging.getLogger(__name__)
@@ -253,8 +254,9 @@ class ModelPrintChoices(BaseModel):
     falls back to the auto-match for that slot.
 
     ``nozzles``, ``tier`` and ``process_name`` are the spool-first dialog's own choices
-    (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file
-    written before them still loads; an empty ``nozzles`` means the dialog's default.
+    (spec 2026-09-27 §7). ``print_sequence`` is its Print sequence (#4970), ``None`` for
+    the template's or the process's. All default to "nothing remembered", so a settings
+    file written before them still loads; an empty ``nozzles`` means the dialog's default.
     """
 
     printer_id: int | None = None
@@ -262,6 +264,7 @@ class ModelPrintChoices(BaseModel):
     nozzles: list[NozzleChoice] = Field(default_factory=list, max_length=2)
     tier: Tier | None = None
     process_name: str | None = Field(default=None, max_length=200)
+    print_sequence: PrintSequence | None = None
 
     @field_validator("nozzles")
     @classmethod
