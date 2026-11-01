@@ -1,7 +1,6 @@
-import { randomUUID } from 'node:crypto'
 import type { Sql, TransactionSql } from 'postgres'
+import type { EventLog } from '../sessions/eventLog.js'
 import type { InputEntry, InputOutcome, Owner, ServerEvent } from '../sessions/protocol.js'
-import { busKindOf } from '../sessions/busEvents.js'
 import { responseHash } from './canonical.js'
 import { parseRequestId } from './ids.js'
 import { cut } from './limits.js'
@@ -11,7 +10,7 @@ import { type GateEntry, RespondRefusal, type Role, validateRespond } from './va
 // opens and closes"), ported whole from agent-durable's gate/store.py; the SQL is the
 // same. Line numbers are that file's at the port:
 //   _hop :139, _cap :159, _entry :163, _rows :183  -> hop, cap, entryOf, the tagged queries
-//   _append :191 (events, then the bus NOTIFY on commit)  -> append
+//   _append :191 (events, then the bus NOTIFY on commit)  -> EventLog.append (#3365)
 //   _resolved :236, _audit :324                   -> resolved, audit
 //   openInput :368, grantInput :478, denyInput :536, resolveInput :577
 //   run_grant_responder :115, flow_responder :119, _actor :132
@@ -26,18 +25,23 @@ import { type GateEntry, RespondRefusal, type Role, validateRespond } from './va
 // The channel is new; Python does not send it. Nor does Python resolve an entry with the response
 // `{reconnected: true}` (an AgentSession's tab wait, #5003), whose `question.resolved` says
 // `reconnected` as a classic one does.
+//
+// Events go through the agent's own EventLog (#3365): appended in the transaction that
+// writes the rows they report, so both commit together, and told to the log once it has
+// committed (`committed`), which wakes this replica's followers and publishes `session.*`
+// under this replica's id, as every other append does. Python sends that NOTIFY inside the
+// transaction, under the id `agent-durable`.
 
 const PROTOCOL_VERSION = 1
-const PG_CHANNEL = 'scadbuddy_events'
 export const INPUT_CHANNEL = 'scadbuddy_input'
-// A foreign id on purpose: this agent's own LISTEN consumer then wakes its local followers, since
-// this file does not write through EventLog.append. If the gate ever does, use the publisher's id.
-const REPLICA = 'agent-durable'
 const SYSTEM: Responder = { kind: 'system', id: 'scadbuddy', label: 'ScadBuddy' }
 // approvals/service.ts APPROVAL_SUMMARY_MAX: the arguments' 500, plus a resolving tool's line (#4442).
 const APPROVAL_SUMMARY_MAX = 500 + 200 + 1
 
 export type Responder = { kind: string; id: string; label: string }
+
+/** Where the gate writes: the database, and the event log its session events go through. */
+export type GateDb = { sql: Sql; events: EventLog }
 type Hop = { hop: string; action: string; actor: string; at: string; reason?: string }
 
 export type OpenInput = {
@@ -201,38 +205,26 @@ function entryOf(row: PendingRow): InputEntry {
   }
 }
 
-/** agent/src/sessions/eventLog.ts `append`, then the batch's bus NOTIFY (on commit). */
-async function append(tx: TransactionSql, sessionId: string, events: ServerEvent[]): Promise<void> {
+/** A transaction's writes: its connection, and the batches it appended, for `committed` after. */
+type Tx = { tx: TransactionSql; events: EventLog; appended: { sessionId: string; events: ServerEvent[]; seqs: number[] }[] }
+
+/** Runs `fn` in one transaction; once it has committed, tells the event log of every batch it appended. */
+async function transaction<T>(db: GateDb, fn: (w: Tx) => Promise<T>): Promise<T> {
+  const appended: Tx['appended'] = []
+  const result = (await db.sql.begin((tx) => fn({ tx, events: db.events, appended }))) as T
+  for (const a of appended) db.events.committed(a.sessionId, a.events, a.seqs)
+  return result
+}
+
+/** EventLog.append in the transaction; the log is told once it commits (`transaction`). */
+async function append(w: Tx, sessionId: string, events: ServerEvent[]): Promise<void> {
   if (events.length === 0) return
-  const texts = events.map((e) => JSON.stringify(e))
-  const rows = await tx<{ seq: string }[]>`
-    WITH s AS (
-      UPDATE ai_sessions SET event_seq = event_seq + ${texts.length}, updated_at = now()
-      WHERE id = ${sessionId}
-      RETURNING event_seq - ${texts.length} AS base
-    )
-    INSERT INTO ai_session_events (session_id, seq, event)
-    SELECT ${sessionId}, s.base + e.ord, e.event
-    FROM s, unnest(${tx.array(texts)}::text[]) WITH ORDINALITY AS e(event, ord)
-    RETURNING seq`
-  if (rows.length !== texts.length) throw new Error(`session ${sessionId} does not exist`)
-  const seqs = rows.map((r) => Number(r.seq))
-  const { kind, status } = busKindOf(events)
-  const payload = {
-    id: randomUUID().replaceAll('-', ''),
-    at: iso(new Date()),
-    kind,
-    session_id: sessionId,
-    seq: Math.max(...seqs),
-    replica: REPLICA,
-    ...(status === undefined ? {} : { status }),
-  }
-  await tx`SELECT pg_notify(${PG_CHANNEL}, ${JSON.stringify(payload)})`
+  w.appended.push({ sessionId, events, seqs: await w.events.append(sessionId, events, w.tx) })
 }
 
 /** Records the end of the entry `row` (already deleted, in this transaction). */
 async function resolved(
-  tx: TransactionSql,
+  w: Tx,
   row: PendingRow,
   outcome: InputOutcome,
   responder: Responder,
@@ -240,6 +232,7 @@ async function resolved(
   reason: string | null,
   hash: string | null = null,
 ): Promise<void> {
+  const { tx } = w
   const sid = String(row.session_id)
   const rid = row.request_id
   // An attention request's timer gives no reason (the workflow's `#expire`); it gets classic's
@@ -311,7 +304,7 @@ async function resolved(
     WHERE id = ${sid} AND ai_sessions.status IN ('waiting_approval', 'waiting_input') AND ai_sessions.status <> next.status
     RETURNING ai_sessions.status`
   if (moved[0]) events.push(event({ type: 'session.status', sessionId: sid, status: moved[0].status }))
-  await append(tx, sid, events)
+  await append(w, sid, events)
   await tx`SELECT pg_notify(${INPUT_CHANNEL}, ${rid})`
   if (row.kind === 'approval') await audit(tx, { ...row, created_at: row.created_at_text }, outcome, responder, reason)
   else if (outcome !== 'answered') await auditUnanswered(tx, row, outcome, reason)
@@ -367,16 +360,18 @@ async function audit(
  * Reset started a new one) are resolved `cancelled`, reason `reset`, so after a Reset
  * the read shows exactly one entry for the call.
  */
-export async function openInput(sql: Sql, args: OpenInput): Promise<boolean> {
-  await sql.begin(async (tx) => {
+export async function openInput(db: GateDb, args: OpenInput): Promise<boolean> {
+  await transaction(db, async (w) => {
+    const { tx } = w
     // The session first, as every resolution takes it (lockSessionOf).
     await tx`SELECT 1 FROM ai_sessions WHERE id = ${args.sessionId} FOR UPDATE`
     const stale = await tx<PendingRow[]>`
       DELETE FROM ai_pending_input WHERE session_id = ${args.sessionId} AND workflow_run_id <> ${args.workflowRunId}
       RETURNING *, created_at::text AS created_at_text`
-    for (const old of stale) await resolved(tx, old, 'cancelled', SYSTEM, null, 'reset')
+    for (const old of stale) await resolved(w, old, 'cancelled', SYSTEM, null, 'reset')
   })
-  return await sql.begin(async (tx) => {
+  return await transaction(db, async (w) => {
+    const { tx } = w
     const hops = args.hop == null ? [] : [hop(args.hop, 'parked', 'flow', args.outsideReason)]
     const inserted = await tx<PendingRow[]>`
       INSERT INTO ai_pending_input
@@ -436,7 +431,7 @@ export async function openInput(sql: Sql, args: OpenInput): Promise<boolean> {
       UPDATE ai_sessions SET status = ${status}, updated_at = now()
       WHERE id = ${sid} AND status <> ${status} RETURNING status`
     if (changed.length > 0) events.push(event({ type: 'session.status', sessionId: sid, status }))
-    await append(tx, sid, events)
+    await append(w, sid, events)
     return true
   })
 }
@@ -449,9 +444,9 @@ export async function openInput(sql: Sql, args: OpenInput): Promise<boolean> {
  * of the verdict is taken on trust. False when it does not hold; the call then parks.
  * No entry, no events: nothing is listed and nobody is notified.
  */
-export async function grantInput(sql: Sql, args: GrantInput): Promise<boolean> {
+export async function grantInput(db: GateDb, args: GrantInput): Promise<boolean> {
   const responder = runGrantResponder(args.grantId)
-  return await sql.begin(async (tx) => {
+  return await transaction(db, async ({ tx }) => {
     const holds = await tx`
       SELECT 1 FROM flow_grants g JOIN flow_grant_uses u ON u.grant_id = g.id
       WHERE g.id = ${args.grantId} AND u.request_id = ${args.requestId} AND u.session_id = ${args.sessionId}
@@ -480,9 +475,9 @@ export async function grantInput(sql: Sql, args: GrantInput): Promise<boolean> {
  * the grant's reason; audited as a decision is. False when the request id was resolved
  * already (a retried activity writes nothing twice).
  */
-export async function denyInput(sql: Sql, args: DenyInput): Promise<boolean> {
+export async function denyInput(db: GateDb, args: DenyInput): Promise<boolean> {
   const responder = flowResponder(args.runId)
-  return await sql.begin(async (tx) => {
+  return await transaction(db, async ({ tx }) => {
     const inserted = await tx`
       INSERT INTO ai_input_responses
         (request_id, session_id, kind, outcome, responder, reason, hops)
@@ -521,13 +516,14 @@ async function lockSessionOf(tx: TransactionSql, requestId: string): Promise<voi
 }
 
 /** Resolves the entry; false when it was gone (resolved by another, or never opened). */
-export async function resolveInput(sql: Sql, args: ResolveInput): Promise<boolean> {
-  return await sql.begin(async (tx) => {
+export async function resolveInput(db: GateDb, args: ResolveInput): Promise<boolean> {
+  return await transaction(db, async (w) => {
+    const { tx } = w
     await lockSessionOf(tx, args.requestId)
     const deleted = await tx<PendingRow[]>`DELETE FROM ai_pending_input WHERE request_id = ${args.requestId} RETURNING *, created_at::text AS created_at_text`
     const row = deleted[0]
     if (row === undefined) return false
-    await resolved(tx, row, args.outcome, args.responder, args.response, args.reason ?? null, args.rawResponse === undefined ? null : responseHash(args.rawResponse))
+    await resolved(w, row, args.outcome, args.responder, args.response, args.reason ?? null, args.rawResponse === undefined ? null : responseHash(args.rawResponse))
     return true
   })
 }
@@ -557,8 +553,9 @@ export type Decided = { kind: 'approval' | 'answer'; outcome: InputOutcome } | '
  * was stopped does not run the call, as with an approval that lands just before a Stop; the
  * respond Update refused it `resolving` instead, a window the record no longer has.
  */
-export async function decideInput(sql: Sql, args: DecideInput): Promise<Decided> {
-  return await sql.begin(async (tx) => {
+export async function decideInput(db: GateDb, args: DecideInput): Promise<Decided> {
+  return await transaction(db, async (w) => {
+    const { tx } = w
     await lockSessionOf(tx, args.requestId)
     const [row] = await tx<(PendingRow & { gate: GateRecord | null; expired: boolean; workflow_id: string; workflow_run_id: string })[]>`
       SELECT *, created_at::text AS created_at_text, expires_at <= now() AS expired
@@ -576,7 +573,7 @@ export async function decideInput(sql: Sql, args: DecideInput): Promise<Decided>
     const outcome: InputOutcome = 'decision' in valid ? (valid.decision === 'approve' ? 'approved' : 'denied') : 'answered'
     const response = 'decision' in valid ? { decision: valid.decision } : { answers: [...valid.answers] }
     await tx`DELETE FROM ai_pending_input WHERE request_id = ${args.requestId}`
-    await resolved(tx, row, outcome, args.responder, response, null, responseHash(args.response))
+    await resolved(w, row, outcome, args.responder, response, null, responseHash(args.response))
     return { kind: row.kind, outcome }
   })
 }
