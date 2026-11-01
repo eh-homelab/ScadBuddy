@@ -29,7 +29,7 @@ import type { QuestionGate, UserQuestion } from './questions.js'
 // is no timer, no quick reply the model would read, and the row outlives its turn
 // so the badge still counts it when the user comes back. The user dismisses it
 // on its card. ScadBuddy adds its own record of what the turn touched
-// (questions/doneSummary.ts), split around the attention request nobody
+// (gate/doneSummary.ts), split around the attention request nobody
 // answered, so what was done unattended is read first.
 
 export const ATTENTION_TOOL_NAME = 'request_user_attention'
@@ -56,7 +56,7 @@ export const DEFAULT_REPLIES = ["I'm here", 'Carry on without me'] as const
 export const IM_BACK = "I'm back"
 /**
  * Replies that say only "the tab is back": a reconnect that resolved the row first
- * already did what they ask (questions/service.ts answer). Any other reply is words
+ * already did what they ask (gate/questions.ts answer). Any other reply is words
  * the model would never read, so it is not one of these.
  */
 export const BACK_REPLIES: readonly string[] = [IM_BACK, DEFAULT_REPLIES[0]]
@@ -115,7 +115,7 @@ export type AttentionSpec =
       /** Seconds until the timer fires: `timeout_s`, or WAIT_CEILING_S for `wait`. */
       timeoutS: number
       /**
-       * Called once the request is recorded and shown (questions/service.ts `gate`),
+       * Called once the request is recorded and shown (the gate's entry, temporal/session/gate.ts),
        * with its id. `signal` aborts once the wait stops waiting for it (its timer, an
        * abort): a check still running then must not act, and whatever it does act on
        * is this request (`id`), never a later wait's.

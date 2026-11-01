@@ -543,7 +543,7 @@ agent then makes still parks for its own approval; `wait` and `stop` end the tur
 quick replies or timer, and the row outlives its turn on the badge until the user dismisses
 it. Beside the agent's message its card shows ScadBuddy's own list of what the turn created,
 changed or deleted, read from `ai_session_resources` rather than from the model
-([`agent/src/questions/doneSummary.ts`](../../agent/src/questions/doneSummary.ts)), with what
+([`agent/src/gate/doneSummary.ts`](../../agent/src/gate/doneSummary.ts)), with what
 was done while an attention request went unanswered listed first, so an outward write made
 unattended would be visible there. A query
 without the plugin has no built-in tool at all. Plugin packages add the rules in the

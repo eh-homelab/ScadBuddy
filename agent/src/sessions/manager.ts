@@ -28,7 +28,7 @@ import type { LoadedPackage, PackagesForRun } from '../plugins/packages/install.
 import type { PackageServers } from '../plugins/packages/mcp.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { ApprovalService, type GrantCheck } from '../approvals/service.js'
-import { QuestionService } from '../questions/service.js'
+import { QuestionService } from '../gate/questions.js'
 import { attentionCard, attentionSpec, BACK_REPLIES, DEFAULT_REPLIES, IM_BACK, parseAttention, timedOutText } from '../harness/attention.js'
 import type { QuestionGate } from '../harness/questions.js'
 import { SERVER_NAME } from '../tools/projections.js'
@@ -173,7 +173,7 @@ export const TAB_WAIT_S = 300
  * How many tab waits one turn may open. A tab back on another replica answers
  * `reconnected` while this replica still has none, so each retry can fail and
  * wait again; this bounds that, and tab waits are outside the model's own rate
- * limit (questions/service.ts).
+ * limit (gate/questions.ts).
  */
 export const TAB_WAITS_PER_TURN = 3
 const CARRY_ON = 'Carry on without the tab'
@@ -281,7 +281,7 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
       if (verdict.answered) {
         const reply = verdict.answers[card.question] ?? ''
         // The model's own tab_disconnected card, which this wait may have joined
-        // (questions/service.ts gate), says the same in its own words.
+        // (QuestionService `gate` before plan Step 9.7), said the same in its own words.
         if (BACK_REPLIES.includes(reply)) return { back: true, why: 'user_back' }
         if (reply !== CARRY_ON && reply !== DEFAULT_REPLIES[1]) {
           gaveUp =
@@ -309,18 +309,12 @@ export function waitForTab(gate: QuestionGate, turn: AbortSignal, reconnected: (
 /**
  * #815 §2: a session whose tab is connected again (bridge/hub.ts `onSessionTab`)
  * stops waiting for it. main.ts wires the hub with this, on the process that holds
- * the tab (the `api` role's, runtime/role.ts). A classic turn's waits are its
- * `ai_questions` rows, which a turn on any replica polls; an AgentSession turn's
- * are entries of its workflow (#5003), which this sends `tab_reconnected` to when
- * the projection lists one, so the turn on whichever worker holds it goes on.
+ * the tab (the `api` role's, runtime/role.ts). A turn's waits are entries of its
+ * workflow (#5003), which this sends `tab_reconnected` to when the projection lists
+ * one, so the turn on whichever worker holds it goes on.
  */
 export function resolveTabWaits(tabs: { onSessionTab: ((sessionId: string) => Promise<unknown>) | undefined }, sessions: SessionManager): void {
-  tabs.onSessionTab = async (sessionId) => {
-    const [classic, durable] = await Promise.allSettled([sessions.questions.reconnected(sessionId), durableTabWaits(sessions, sessionId)])
-    if (classic.status === 'rejected') throw classic.reason
-    if (durable.status === 'rejected') throw durable.reason
-    return classic.value + durable.value
-  }
+  tabs.onSessionTab = (sessionId) => durableTabWaits(sessions, sessionId)
 }
 
 /** An AgentSession's pending tab waits ended by its workflow (`tab_reconnected`); how many. */
@@ -894,7 +888,7 @@ export class SessionManager {
   readonly events: EventLog
   /** Approvals of outward calls (#258); `approvals.decide` is the decision API. */
   readonly approvals: ApprovalService
-  /** Questions the agent asks the user (#940); `questions.answer` is the panel's answer. */
+  /** The gate's questions outside the workflow (gate/questions.ts): done summaries, and the attention rate limits. */
   readonly questions: QuestionService
   /** Durable sessions' parked calls as projected in ai_pending_input (spec §6.6). */
   readonly projection: PendingProjection
@@ -957,13 +951,7 @@ export class SessionManager {
       ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
       workspace: this.files,
     })
-    this.questions = new QuestionService({
-      sql: deps.sql,
-      events: this.events,
-      ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
-      ...(deps.audit ? { audit: deps.audit } : {}),
-      ...(deps.settings ? { settings: deps.settings } : {}),
-    })
+    this.questions = new QuestionService({ sql: deps.sql, events: this.events, ...(deps.audit ? { audit: deps.audit } : {}) })
     this.projection = new PendingProjection(deps.sql)
     this.warm = new WarmSessions({
       sql: deps.sql,
@@ -1334,14 +1322,13 @@ export class SessionManager {
 
   /**
    * What a classic turn left parked when it is found lost (DurableRunningSweep, a Stop on a gone
-   * workflow): its pending approvals and questions are cancelled and its approved, unused ones
-   * voided, as the reaper did. No release resumes them now (plan Step 6.3: no `resumeApproved`),
-   * so an approval left open would approve nothing. An AgentSession parks on the gate's
-   * entries, which PendingInputSweep and the Stop cancel; a done summary is kept.
+   * workflow): its pending approvals are cancelled and its approved, unused ones voided, as the
+   * reaper did. No release resumes them now (plan Step 6.3: no `resumeApproved`), so an approval
+   * left open would approve nothing. An AgentSession parks on the gate's entries, which
+   * PendingInputSweep and the Stop cancel; a done summary is kept.
    */
   async endClassicLeftovers(id: string): Promise<void> {
     await this.approvals.cancelPending(id, 'the turn ended', { refresh: false })
-    await this.questions.cancelPending(id, 'the turn ended', { refresh: false })
   }
 
   /** Tells a session's workflow it was marked done (#1056), or refuses `unavailable`. */
@@ -1523,7 +1510,6 @@ export class SessionManager {
     await durable?.handoff(session, `the session was handed off to ${publicLabel(to)}`, to)
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
     await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
-    await this.questions.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     // Its warm process was spawned for the previous owner (the owner is in the
     // fingerprint, and its question gate is the browser user's): gone here and
     // on every other replica (spec 2026-10-13 §5.3, warmEvict.ts).

@@ -3,7 +3,7 @@ import { join, relative } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 // #1383: "is this ai_questions row waiting on the user?" is spelled once, in
-// src/questions/waiting.ts. A query that writes its own copy of the done rule could
+// src/gate/waiting.ts. A query that writes its own copy of the done rule could
 // drift from it (the old `outcome IS NULL` check alone counted a posted done summary as
 // a wait); its behaviour is checked by test/attention.pg.test.ts.
 
@@ -21,9 +21,9 @@ function sources(dir: string): string[] {
 }
 
 describe('the done-summary rule', () => {
-  it('is written only in questions/waiting.ts', () => {
+  it('is written only in gate/waiting.ts', () => {
     const copies = sources(SRC)
-      .filter((path) => !path.endsWith(join('questions', 'waiting.ts')))
+      .filter((path) => !path.endsWith(join('gate', 'waiting.ts')))
       .filter((path) => RULE.test(readFileSync(path, 'utf8')))
       .map((path) => relative(SRC, path))
     expect(copies).toEqual([])
