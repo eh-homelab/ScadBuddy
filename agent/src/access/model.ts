@@ -23,6 +23,8 @@ export const BUILTIN_SOURCES = {
   browser: 'builtin:browser',
   http: 'builtin:http',
   ownPlugin: 'builtin:own-plugin',
+  /** Claude Code's own built-ins (access/nativeBuiltins.ts, plan 2026-10-13 Step 9.6). */
+  claudeCode: 'builtin:claude-code',
 } as const
 
 export function remoteSource(name: string): string {

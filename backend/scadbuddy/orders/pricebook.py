@@ -12,9 +12,13 @@ from scadbuddy.orders.store import OrderStore
 
 
 class PriceBookReader:
-    def __init__(self, settings: SettingsStore, store: OrderStore) -> None:
+    def __init__(
+        self, settings: SettingsStore, store: OrderStore, *, spool_import: bool = False
+    ) -> None:
         self.settings = settings
         self.store = store
+        #: Whether the integrations seam links a Bambuddy (§8.3, #4253).
+        self.spool_import = spool_import
 
     def policy(self) -> tuple[str, PricingPolicy, str]:
         """``orders_currency``, the policy and ``rough_estimate_factor``, as stored now."""
@@ -38,4 +42,5 @@ class PriceBookReader:
             policy=policy,
             rough_estimate_factor=factor,
             filaments=self.store.filaments(include_archived=include_archived),
+            spool_import=self.spool_import,
         )

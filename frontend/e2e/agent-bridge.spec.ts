@@ -123,4 +123,39 @@ test.describe('agent bridge', () => {
     const save = await call(page, 'click', { role: 'button', name: 'Save Preview' })
     expect(save).toMatchObject({ ok: false, error: { code: 'refused' } })
   })
+
+  // The tab draws its own viewport under the page's CSP (modern-screenshot, a lazy chunk).
+  test('takes a screenshot of the viewport, scaled to the long-side cap', async ({ page }) => {
+    await page.setViewportSize({ width: 2000, height: 1000 })
+    await page.goto('/m/name-keychain')
+    await page.waitForFunction(() => Boolean((globalThis as { __scadbuddyBridge?: unknown }).__scadbuddyBridge))
+    await expect.poll(() => liveTools(page)).toContain('get_params')
+    const shot = await page.evaluate(async () => {
+      const outcome = await (globalThis as unknown as { __scadbuddyBridge: Bridge }).__scadbuddyBridge.call('screenshot')
+      if (!outcome.ok) return { error: outcome.error }
+      const { image, width, height } = outcome.result as { image: Blob; width: number; height: number }
+      // This file is typed without the DOM library; the page has both.
+      type Bitmap = { width: number; height: number }
+      const page = globalThis as unknown as {
+        createImageBitmap: (blob: Blob) => Promise<Bitmap>
+        OffscreenCanvas: new (width: number, height: number) => {
+          getContext: (kind: '2d') => {
+            drawImage: (image: Bitmap, x: number, y: number) => void
+            getImageData: (x: number, y: number, width: number, height: number) => { data: Uint8ClampedArray }
+          } | null
+        }
+      }
+      const bitmap = await page.createImageBitmap(image)
+      const canvas = new page.OffscreenCanvas(bitmap.width, bitmap.height)
+      const context = canvas.getContext('2d')!
+      context.drawImage(bitmap, 0, 0)
+      const pixels = context.getImageData(0, 0, bitmap.width, bitmap.height).data
+      const colours = new Set<number>()
+      for (let at = 0; at < pixels.length; at += 4 * 97) colours.add((pixels[at]! << 16) | (pixels[at + 1]! << 8) | pixels[at + 2]!)
+      return { type: image.type, width, height, decoded: [bitmap.width, bitmap.height], colours: colours.size }
+    })
+    expect(shot).toMatchObject({ type: 'image/png', width: 1568, height: 784, decoded: [1568, 784] })
+    // A drawn page, not a blank canvas.
+    expect((shot as { colours: number }).colours).toBeGreaterThan(10)
+  })
 })

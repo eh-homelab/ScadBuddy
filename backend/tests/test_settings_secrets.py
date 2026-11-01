@@ -97,6 +97,7 @@ def test_a_saved_key_is_sealed_in_its_row_and_reads_back(
             bambuddy_render_api_key="render-key-123456",
             google_fonts_api_key="fonts-key-123456",
             store_s3_secret_access_key="s3-key-123456",
+            git_remote_token="git-key-123456",
         )
     )
     rows = _rows(keyed.database_url)

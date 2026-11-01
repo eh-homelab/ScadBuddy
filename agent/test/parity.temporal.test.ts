@@ -8,6 +8,7 @@ import type { Database } from '../src/db.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { HTTP_TOOL_NAME } from '../src/harness/httpRequest.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { hashTree } from '../src/plugins/packages/hash.js'
 import { forwardForRun, PluginForwarder, type PluginsForRun } from '../src/plugins/forwarder.js'
 import type { PackagesForRun } from '../src/plugins/packages/install.js'
 import type { CheckedPlugin } from '../src/plugins/registry.js'
@@ -111,8 +112,10 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`an AgentSessi
     const shell = await pluginDir('shell', {
       'skills/run/SKILL.md': `---\nname: run\ndescription: Runs things.\nallowed-tools: ${BUILTINS.join(', ')}\n---\n\nRun it.\n`,
     })
+    // The allowed package is loaded, as install.ts gives it: who names a built-in decides Bash (Step 9.6).
+    const shellPkg = { name: 'shell', contentHash: (await hashTree(shell)).hash, dir: shell, allowed: true, builtinTools: BUILTINS }
     const packagePlugins = (): Promise<PackagesForRun> =>
-      Promise.resolve({ paths: [greeter], allowedPaths: [shell], builtinTools: BUILTINS, loaded: [], problems: [], release: () => {} })
+      Promise.resolve({ paths: [greeter], allowedPaths: [shell], builtinTools: BUILTINS, loaded: [shellPkg], problems: [], release: () => {} })
     // A remote MCP plugin through the forwarder, and Hindsight beside it (never given to Claude Code).
     const memory: CheckedPlugin = {
       plugin: { name: 'my-memory', url: mcp.url, toolTiers: { recall: 'read' }, disabledTools: [] },
@@ -173,14 +176,14 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`an AgentSessi
 
   // What test/builtins.durable.e2e.test.ts pinned for the retired Python turn (#2393, plan Step 8.1):
   // an allowed package's named built-in is offered, its call parks for the person, and once
-  // approved it runs and the model gets its result.
+  // approved it runs and the model gets its result. Since Step 9.6 the file tools are Claude
+  // Code's own at read or write, so the one a package switches on, and that parks, is Bash.
   it("parks an allowed package's built-in call for the person, then runs it once approved", async () => {
-    const file = path.join(dir, 'notes', 'a.txt')
     let write: string | undefined
     script = (r) => {
-      write ??= ['Write', 'mcp__builtin__Write'].find((n) => tools(r).includes(n))
+      write ??= ['Bash'].find((n) => tools(r).includes(n))
       if (lastContent(r).includes('tool_result')) return { text: 'Jotted.' }
-      return { toolUse: { name: write!, input: { file_path: file, content: 'jotted\n' } } }
+      return { toolUse: { name: write!, input: { command: 'echo jotted-by-bash' } } }
     }
     const m = await agent()
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'jot it down' })
@@ -200,7 +203,7 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`an AgentSessi
     expect(await respond(m, browser, entry!.request_id, { kind: 'approval', decision: 'approve' })).toMatchObject({ outcome: 'approved' })
     expect(await turn!.done).toMatchObject({ kind: 'result', subtype: 'success' })
     const told = turnCalls().map(lastContent).find((c) => c.includes('tool_result'))
-    expect(told).toContain('File created successfully')
+    expect(told).toContain('jotted-by-bash')
     expect(told).not.toContain('denied')
   }, 120_000)
 

@@ -30,6 +30,7 @@ from temporalio.service import RPCError
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
 from scadbuddy.activity.index import attribute_request
+from scadbuddy.api.accepted_fixes import Amend, FixesDep
 from scadbuddy.api.accepting import accepting, prefers_async
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
@@ -828,6 +829,7 @@ async def post_run(
     outputs: OutputsDep,
     runs: PrintRunsDep,
     activity: Annotated[ActivityComponent, component_dep(ACTIVITY)],
+    fixes: FixesDep,
 ) -> PrintRun | JSONResponse:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
@@ -858,6 +860,11 @@ async def post_run(
     With ``Prefer: respond-async``, a run no worker has picked up within a few seconds
     answers **202** ``accepting`` instead of 503 ``command-still-accepting``: follow its
     ``follow_url`` to this answer (spec 2026-10-13, #2793).
+
+    ``accepted_fixes`` (#284) are checked again against this request before the run
+    starts: one no longer accepted for it, or whose diff changed, is a 409
+    ``analyzer-fix-stale`` naming each in ``stale``; one whose target is unverified a 409
+    ``analyzer-fix-unverified``. The rest are laid over the request's options and choices.
     """
     meta = require_output(outputs, output_id)
     return await accept_run(
@@ -869,6 +876,7 @@ async def post_run(
         request=body,
         source=SourceSpec(kind="output", output_id=meta.id),
         activity=activity,
+        amend=fixes.for_output(meta.id),
     )
 
 
@@ -893,6 +901,7 @@ async def accept_run(
     activity: ActivityComponent,
     prepare: Callable[[SourceSpec], Awaitable[SourceSpec]] | None = None,
     http: Request | None = None,
+    amend: Amend | None = None,
 ) -> PrintRun | JSONResponse:
     """The 202-and-follow model every print run shares (#470, #742), on Temporal
     (#1052, spec 2026-10-01 §5.1).
@@ -909,6 +918,9 @@ async def accept_run(
     the request's ``request_id``. A request without one, or with one a URL path cannot
     carry, keeps the 503 re-send: a repeat
     of an ended run must start anew (``ended``), which a follow cannot tell apart.
+    ``amend`` lays the accepted analyzer fixes the request names over it (#284,
+    ``api/accepted_fixes.py``) for a run that is not a repeat; the key stays the
+    request's as sent, so a retry finds its run whatever the fixes do since.
     """
     key = run_key(subject.run_subject, request)
     has_request_id = request.request_id is not None
@@ -916,6 +928,13 @@ async def accept_run(
     if repeated is not None:
         response.status_code = status.HTTP_200_OK
         return repeated.model_copy(update={"repeated": True})
+    if request.accepted_fixes:
+        if amend is None:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "this print cannot apply accepted analyzer fixes; print it from its dialog",
+            )
+        request = await amend(request)
     if prepare is not None:
         source = await prepare(source)
     arg = PrintRunInput(

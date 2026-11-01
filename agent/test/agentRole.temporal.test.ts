@@ -232,7 +232,7 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
       events: p.m.events,
       liveHosts: async () => new Set([...(await liveHostQueues(client))].filter((q) => processes.some((other) => sessionHostQueue(other.identity) === q))),
     })
-    p.m.durable = new DurableGate(client, { timeoutMs: 30_000, sql: pool.sql })
+    p.m.durable = new DurableGate(client, { timeoutMs: 30_000, db: { sql: pool.sql, events: p.m.events } })
     // As main.ts: the hub's process resolves a session's tab waits; every process follows the evictions.
     if (parts.http) resolveTabWaits(p.tabs, p.m)
     p.stopRuntimeSync = wireRuntimeSync({ settings: { get: () => Promise.resolve(undefined) }, warm: p.m.warm, revalidate: () => p.m.revalidateWarm(), events: listener, log: () => {} })
@@ -256,7 +256,7 @@ describe.skipIf(skip !== '')(`one api process and one worker process${skip}`, { 
         AgentWorker.start({
           ...common,
           taskQueue: TASK_QUEUE,
-          activities: { ...acquire, ...sessionFinishActivities(pool.sql, p.m.events), ...sessionGateActivities(pool.sql) },
+          activities: { ...acquire, ...sessionFinishActivities(pool.sql, p.m.events), ...sessionGateActivities({ sql: pool.sql, events: p.m.events }) },
           // BridgeCall and AgentSession's own bundle, as every shared agent-tools worker carries it.
           workflows: { workflowBundle: bundle },
         }),

@@ -56,6 +56,7 @@ COPY = 41
 INPUT = b"PK\x03\x04 the dialog's laid-out copy"
 GCODE = b"M620 S0A\nM620 S1A\nM620 S0A\n"
 CREATED = "2026-10-18T18:00:00.000000"
+NATIVE_SLICES = Path(__file__).parents[1] / "fixtures" / "native_slices"
 #: The presets the recorded H2C catalogue resolves the dialog's choices to (`body()`),
 #: by their setting ids.
 DIALOG_PRESETS = {
@@ -253,6 +254,21 @@ def test_a_native_preview_completes(
     assert answer["warnings"] == ["a warning"]
     assert answer["slots"] and all(slot["side"] is None for slot in answer["slots"])
     assert slicer.downloads[0][0] == INPUT
+
+
+def test_a_native_preview_names_each_slots_side(
+    native_client: TestClient, model: str, slicer: FakeSlicer
+) -> None:
+    """#4232: the side each slot was sliced for, from the sliced file, as the Bambuddy
+    path answers it, so the dialog's side-mismatch warning fires on native too."""
+    slicer.sliced = (NATIVE_SLICES / "h2d-two-filaments.gcode.3mf").read_bytes()
+    output_id = prepared(native_client, model)
+    started = start(native_client, output_id)
+
+    answer = settled(native_client, output_id, started["job_id"])
+
+    assert answer["status"] == "completed", answer
+    assert [(slot["slot_id"], slot["side"]) for slot in answer["slots"]] == [(1, "R"), (2, "L")]
 
 
 def test_a_silk_profile_sets_the_silk_slots_nozzle_temperature_in_its_filament_file(

@@ -138,6 +138,7 @@ function remoteRepo(): PluginRepo {
           created_at: '2026-10-10T00:00:00.000Z',
           updated_at: '2026-10-10T00:00:00.000Z',
           kekId: null,
+          oauth: null,
         },
       ]),
     get: () => Promise.resolve(undefined),

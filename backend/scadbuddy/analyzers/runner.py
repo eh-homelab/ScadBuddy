@@ -52,6 +52,9 @@ class AcceptedChange(BaseModel):
     diagnostic_id: str
     diagnostic_key: str
     fix_id: str
+    #: The accepting decision: what a print names to apply it
+    #: (``PrintRunRequest.accepted_fixes``).
+    decision_id: str
     scope: ScopeRef
     change: SettingChange
 
@@ -207,6 +210,7 @@ def apply_decisions(
                 diagnostic_id=diagnostic.id,
                 diagnostic_key=diagnostic.key,
                 fix_id=fix.id,
+                decision_id=decision.id,
                 scope=decision.scope,
                 change=item,
             )

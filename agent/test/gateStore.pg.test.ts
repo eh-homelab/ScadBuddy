@@ -12,9 +12,16 @@ import {
   openInput,
   readInput,
   resolveInput,
+  type GateDb,
   type OpenInput,
   type Responder,
 } from '../src/gate/store.js'
+import { type BusEvent } from '../src/events/bus.js'
+import { PgEventListener } from '../src/events/pgListener.js'
+import { followSessionEvents, SessionEventPublisher } from '../src/sessions/busEvents.js'
+import { EventLog } from '../src/sessions/eventLog.js'
+import { gateDb, sessionGateActivities } from '../src/temporal/session/gateActivities.js'
+import { SESSION_GATE_ACTIVITIES } from '../src/temporal/session/names.js'
 import type { Owner, ServerEvent } from '../src/sessions/protocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase, type Throwaway } from './support/postgres.js'
 
@@ -91,10 +98,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
   () => {
     let t: Throwaway
     let sql: Sql
+    let db: GateDb
 
     beforeEach(async () => {
       t = await throwawayDatabase()
       sql = t.db.sql
+      db = { sql, events: new EventLog(sql) }
     })
     afterEach(async () => {
       await t.drop()
@@ -103,7 +112,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it("keeps the arguments' full room in approval.required beside a resolving tool's line (#4442 N1)", async () => {
       const sid = await newSession(sql)
       const line = 'L'.repeat(200)
-      await openInput(sql, { ...open(sid), summary: `${line}\n${'a'.repeat(1000)}` } as OpenInput)
+      await openInput(db, { ...open(sid), summary: `${line}\n${'a'.repeat(1000)}` } as OpenInput)
       const [required] = await events(sql, sid)
       const summary = (required as { summary: string }).summary
       expect(summary.startsWith(`print_output ${line}\n`)).toBe(true)
@@ -114,8 +123,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('open writes the row and its events once', async () => {
       const sid = await newSession(sql)
       const args = open(sid)
-      expect(await openInput(sql, args)).toBe(true)
-      expect(await openInput(sql, args)).toBe(false) // a retried activity adds nothing
+      expect(await openInput(db, args)).toBe(true)
+      expect(await openInput(db, args)).toBe(false) // a retried activity adds nothing
       expect(await count(sql, 'ai_pending_input')).toBe(1)
       const logged = await events(sql, sid)
       expect(logged.map((e) => e.type)).toEqual(['approval.required', 'input.requested', 'session.status'])
@@ -130,8 +139,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('resolve records the outcome, events and audit', async () => {
       const sid = await newSession(sql)
       const args = open(sid)
-      await openInput(sql, args)
-      expect(await resolveInput(sql, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })).toBe(true)
+      await openInput(db, args)
+      expect(await resolveInput(db, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })).toBe(true)
       expect(await count(sql, 'ai_pending_input')).toBe(0)
       const responses = await sql`SELECT outcome, responder FROM ai_input_responses`
       expect(responses.map((r) => ({ ...r }))).toEqual([{ outcome: 'approved', responder: ME }])
@@ -147,9 +156,9 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it("audits started_at at the entry's own microsecond", async () => {
       const sid = await newSession(sql)
       const args = open(sid)
-      await openInput(sql, args)
+      await openInput(db, args)
       const [pending] = await sql<{ created: string }[]>`SELECT created_at::text AS created FROM ai_pending_input`
-      await resolveInput(sql, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })
+      await resolveInput(db, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })
       const [audited] = await sql<{ started: string }[]>`SELECT started_at::text AS started FROM ai_audit`
       expect(audited?.started).toBe(pending?.created)
     })
@@ -157,17 +166,17 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('an open retried after its resolution opens nothing', async () => {
       const sid = await newSession(sql)
       const args = open(sid)
-      await openInput(sql, args)
-      await resolveInput(sql, { requestId: args.requestId, outcome: 'denied', responder: ME_RESPONDER })
-      expect(await openInput(sql, args)).toBe(false)
+      await openInput(db, args)
+      await resolveInput(db, { requestId: args.requestId, outcome: 'denied', responder: ME_RESPONDER })
+      expect(await openInput(db, args)).toBe(false)
       expect(await count(sql, 'ai_pending_input')).toBe(0)
     })
 
     it('an expiry is recorded as expired by the system', async () => {
       const sid = await newSession(sql)
       const args = open(sid)
-      await openInput(sql, args)
-      await resolveInput(sql, { requestId: args.requestId, outcome: 'expired', responder: SYSTEM, reason: 'timeout' })
+      await openInput(db, args)
+      await resolveInput(db, { requestId: args.requestId, outcome: 'expired', responder: SYSTEM, reason: 'timeout' })
       const audit = await sql`SELECT surface, principal_kind, action, outcome FROM ai_audit`
       expect(audit.map((r) => ({ ...r }))).toEqual([
         { surface: 'system', principal_kind: 'system', action: 'expired', outcome: 'refused' },
@@ -180,10 +189,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('an answer keeps its response', async () => {
       const sid = await newSession(sql)
       const args = open(sid, 'run-1', 'answer')
-      await openInput(sql, args)
+      await openInput(db, args)
       expect((await events(sql, sid))[0]?.type).toBe('question.asked')
       const response = { answers: ['Red'] }
-      await resolveInput(sql, { requestId: args.requestId, outcome: 'answered', responder: ME_RESPONDER, response })
+      await resolveInput(db, { requestId: args.requestId, outcome: 'answered', responder: ME_RESPONDER, response })
       const rows = await sql`SELECT response, response_hash FROM ai_input_responses`
       expect(rows.map((r) => ({ ...r }))).toEqual([{ response, response_hash: null }])
       expect(await count(sql, 'ai_audit')).toBe(0)
@@ -192,8 +201,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('keeps the hash of the raw response, key order aside (#3724)', async () => {
       const sid = await newSession(sql)
       const args = open(sid, 'run-1', 'answer')
-      await openInput(sql, args)
-      await resolveInput(sql, {
+      await openInput(db, args)
+      await resolveInput(db, {
         requestId: args.requestId,
         outcome: 'answered',
         responder: ME_RESPONDER,
@@ -207,10 +216,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('two resolutions race and one wins', async () => {
       const sid = await newSession(sql)
       const args = open(sid)
-      await openInput(sql, args)
+      await openInput(db, args)
       const results = await Promise.all([
-        resolveInput(sql, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER }),
-        resolveInput(sql, { requestId: args.requestId, outcome: 'denied', responder: ME_RESPONDER }),
+        resolveInput(db, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER }),
+        resolveInput(db, { requestId: args.requestId, outcome: 'denied', responder: ME_RESPONDER }),
       ])
       expect([...results].sort()).toEqual([false, true])
       expect((await events(sql, sid)).filter((e) => e.type === 'input.resolved')).toHaveLength(1)
@@ -221,14 +230,14 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const sid = await newSession(sql)
       const before = open(sid, 'run-1')
       const after = open(sid, 'run-2')
-      await openInput(sql, before)
-      await openInput(sql, after)
+      await openInput(db, before)
+      await openInput(db, after)
       const pending = await sql`SELECT request_id FROM ai_pending_input`
       expect(pending.map((r) => ({ ...r }))).toEqual([{ request_id: after.requestId }])
       const responses = await sql`SELECT request_id, outcome, reason FROM ai_input_responses`
       expect(responses.map((r) => ({ ...r }))).toEqual([{ request_id: before.requestId, outcome: 'cancelled', reason: 'reset' }])
       // A respond carrying the pre-Reset id finds nothing.
-      expect(await resolveInput(sql, { requestId: before.requestId, outcome: 'approved', responder: ME_RESPONDER })).toBe(false)
+      expect(await resolveInput(db, { requestId: before.requestId, outcome: 'approved', responder: ME_RESPONDER })).toBe(false)
     })
 
     it('runs over a connection of its own (the activities case)', async () => {
@@ -238,8 +247,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
       try {
         const sid = await newSession(sql)
         const args = open(sid)
-        expect(await openInput(other, args)).toBe(true)
-        expect(await resolveInput(other, { requestId: args.requestId, outcome: 'denied', responder: ME_RESPONDER })).toBe(true)
+        expect(await openInput({ sql: other, events: new EventLog(other) }, args)).toBe(true)
+        expect(await resolveInput({ sql: other, events: new EventLog(other) }, { requestId: args.requestId, outcome: 'denied', responder: ME_RESPONDER })).toBe(true)
       } finally {
         await other.end({ timeout: 5 })
       }
@@ -252,13 +261,13 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await listener.listen(INPUT_CHANNEL, (payload) => heard.push(payload))
         const sid = await newSession(sql)
         const args = open(sid)
-        await openInput(sql, args)
+        await openInput(db, args)
         await new Promise((r) => setTimeout(r, 100))
         expect(heard).toEqual([]) // an open is not a resolution
-        await resolveInput(sql, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })
+        await resolveInput(db, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })
         await expect.poll(() => heard, { timeout: 5000 }).toEqual([args.requestId])
         // A second, losing resolve writes nothing and notifies nobody.
-        await resolveInput(sql, { requestId: args.requestId, outcome: 'denied', responder: ME_RESPONDER })
+        await resolveInput(db, { requestId: args.requestId, outcome: 'denied', responder: ME_RESPONDER })
         await new Promise((r) => setTimeout(r, 100))
         expect(heard).toEqual([args.requestId])
       } finally {
@@ -273,12 +282,120 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await listener.listen(INPUT_CHANNEL, (payload) => heard.push(payload))
         const sid = await newSession(sql)
         const before = open(sid, 'run-1')
-        await openInput(sql, before)
-        await openInput(sql, open(sid, 'run-2'))
+        await openInput(db, before)
+        await openInput(db, open(sid, 'run-2'))
         await expect.poll(() => heard, { timeout: 5000 }).toEqual([before.requestId])
       } finally {
         await listener.end({ timeout: 5 })
       }
+    })
+
+    describe('its session events go live as an event-log append does (#3365)', () => {
+      // A poll far past every wait below: a follower that sees the events in time was woken.
+      const SLOW = 60_000
+      const closers: (() => Promise<void> | void)[] = []
+      afterEach(async () => {
+        for (const close of closers.splice(0).reverse()) await close()
+      })
+
+      /** A replica: its event log, its publisher, and (with `bus`) its own LISTEN consumer. */
+      async function replica(options: { bus?: boolean } = {}) {
+        const publisher = new SessionEventPublisher(sql, { throttleMs: 10 })
+        const log = new EventLog(sql, { pollMs: SLOW, onAppend: publisher.onAppend })
+        closers.push(() => publisher.close())
+        const heard: BusEvent[] = []
+        if (options.bus) {
+          const bus = new PgEventListener(t.url, { searchPath: t.schema, retryMinMs: 20, log: () => {} })
+          bus.start()
+          closers.push(() => bus.close())
+          await bus.ready()
+          const stopWake = followSessionEvents(bus, log, publisher.replica)
+          const stopHear = bus.follow({ onEvent: (e) => void heard.push(e), onResync: () => {}, onReconnect: () => {} })
+          closers.push(stopWake, stopHear)
+        }
+        return { publisher, log, heard, gate: { sql, events: log } satisfies GateDb }
+      }
+
+      /** Follows `sid` on `log` from its current end; `next(type)` resolves once that event arrives. */
+      async function follower(log: EventLog, sid: string) {
+        const stop = new AbortController()
+        closers.push(() => stop.abort())
+        const seen: string[] = []
+        const waiters: { type: string; resolve: () => void }[] = []
+        void (async () => {
+          for await (const { event } of log.follow(sid, await log.lastSeq(sid), stop.signal)) {
+            seen.push(event.type)
+            for (const w of waiters.filter((x) => x.type === event.type)) w.resolve()
+          }
+        })()
+        // Its first (empty) read done, it is waiting when the write lands.
+        await new Promise((r) => setTimeout(r, 100))
+        return {
+          next: (type: string) =>
+            seen.includes(type)
+              ? Promise.resolve()
+              : new Promise<void>((resolve, reject) => {
+                  const timer = setTimeout(() => reject(new Error(`no ${type} within 5 s: only the ${SLOW} ms poll would wake it`)), 5_000)
+                  waiters.push({ type, resolve: () => (clearTimeout(timer), resolve()) })
+                }),
+        }
+      }
+
+      it('a rolled-back write neither wakes a follower nor publishes', async () => {
+        const a = await replica()
+        const sid = await newSession(sql)
+        const args = open(sid)
+        await openInput(a.gate, args)
+        const watching = await follower(a.log, sid)
+        const sent = a.publisher.sent
+        // The approval's audit row is written after its events are appended: failing it rolls them back.
+        await sql.unsafe(`
+          CREATE FUNCTION refuse_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'refused'; END $$;
+          CREATE TRIGGER refuse_audit BEFORE INSERT ON ai_audit FOR EACH ROW EXECUTE FUNCTION refuse_audit();`)
+        await expect(resolveInput(a.gate, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })).rejects.toThrow('refused')
+        await expect(watching.next('input.resolved')).rejects.toThrow('no input.resolved')
+        expect(a.publisher.sent).toBe(sent)
+        expect(await count(sql, 'ai_pending_input')).toBe(1)
+        expect((await events(sql, sid)).filter((e) => e.type === 'input.resolved')).toHaveLength(0)
+      })
+
+      it("publishes through main.ts's log of its own when there is no session manager", async () => {
+        const publisher = new SessionEventPublisher(sql, { throttleMs: 10 })
+        closers.push(() => publisher.close())
+        const sid = await newSession(sql)
+        expect(await sessionGateActivities(gateDb(sql, undefined, publisher.onAppend))[SESSION_GATE_ACTIVITIES.open](open(sid))).toBe(true)
+        expect(publisher.sent).toBe(1)
+      })
+
+      it("wakes this replica's follower itself, with no bus to do it", async () => {
+        const a = await replica()
+        const sid = await newSession(sql)
+        const watching = await follower(a.log, sid)
+        const args = open(sid)
+        await openInput(a.gate, args)
+        await watching.next('input.requested')
+        await resolveInput(a.gate, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })
+        await watching.next('input.resolved')
+      })
+
+      it("is announced under this replica's own id: its own consumer skips it, another replica's wakes", async () => {
+        const a = await replica({ bus: true })
+        const b = await replica({ bus: true })
+        const sid = await newSession(sql)
+        const onA = await follower(a.log, sid)
+        const onB = await follower(b.log, sid)
+        const args = open(sid)
+        await openInput(a.gate, args)
+        await Promise.all([onA.next('input.requested'), onB.next('input.requested')])
+        await expect.poll(() => b.heard.filter((e) => e.session_id === sid).map((e) => [e.kind, e.replica]), { timeout: 5_000 }).toEqual([
+          ['session.waiting', a.publisher.replica],
+        ])
+        // B stands for an older build too: busEvents.ts at sha-7626da9 is byte-identical (git show), its
+        // followSessionEvents skipping only its own id.
+        expect(a.publisher.replica).not.toBe(b.publisher.replica)
+        await resolveInput(a.gate, { requestId: args.requestId, outcome: 'approved', responder: ME_RESPONDER })
+        await Promise.all([onA.next('input.resolved'), onB.next('input.resolved')])
+      })
     })
 
     it('deny records the flow refusal once, audited', async () => {
@@ -293,8 +410,8 @@ describe.skipIf(!TEST_DATABASE_URL)(
         reason: 'outside the grant',
         requestedBy: ME,
       }
-      expect(await denyInput(sql, args)).toBe(true)
-      expect(await denyInput(sql, args)).toBe(false)
+      expect(await denyInput(db, args)).toBe(true)
+      expect(await denyInput(db, args)).toBe(false)
       const [row] = await sql`SELECT outcome, responder, reason, hops FROM ai_input_responses`
       expect(row).toMatchObject({
         outcome: 'denied',
@@ -337,10 +454,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
         const sid = await newSession(sql)
         const requestId = durableRequestId(sid, 'run-1', 'toolu_2')
         await grantable(sid, requestId, 'c'.repeat(64))
-        expect(await grantInput(sql, grant(sid, requestId, 'd'.repeat(64)))).toBe(false)
+        expect(await grantInput(db, grant(sid, requestId, 'd'.repeat(64)))).toBe(false)
         expect(await count(sql, 'ai_input_responses')).toBe(0)
-        expect(await grantInput(sql, grant(sid, requestId, 'c'.repeat(64)))).toBe(true)
-        expect(await grantInput(sql, grant(sid, requestId, 'c'.repeat(64)))).toBe(true)
+        expect(await grantInput(db, grant(sid, requestId, 'c'.repeat(64)))).toBe(true)
+        expect(await grantInput(db, grant(sid, requestId, 'c'.repeat(64)))).toBe(true)
         expect(await count(sql, 'ai_input_responses')).toBe(1)
         expect(await count(sql, 'ai_audit')).toBe(1)
         const [row] = await sql`SELECT outcome, responder FROM ai_input_responses`
@@ -348,7 +465,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         await sql`UPDATE flow_grants SET revoked_at = now()`
         const other = durableRequestId(sid, 'run-1', 'toolu_3')
         await sql`INSERT INTO flow_grant_uses VALUES (${other}, 'g1', ${sid}, ${'c'.repeat(64)})`
-        expect(await grantInput(sql, grant(sid, other, 'c'.repeat(64)))).toBe(false)
+        expect(await grantInput(db, grant(sid, other, 'c'.repeat(64)))).toBe(false)
       })
     })
 
@@ -448,12 +565,12 @@ describe.skipIf(!TEST_DATABASE_URL)(
         ]
         const py = await throwawayDatabase()
         try {
-          for (const db of [t.db.sql, py.db.sql]) for (const id of [s1, s2, s3]) await newSession(db, id)
+          for (const s of [t.db.sql, py.db.sql]) for (const id of [s1, s2, s3]) await newSession(s, id)
           for (const step of steps) {
             const a = step.args as never
-            if (step.op === 'open') await openInput(sql, a)
-            else if (step.op === 'resolve') await resolveInput(sql, a)
-            else await denyInput(sql, a)
+            if (step.op === 'open') await openInput(db, a)
+            else if (step.op === 'resolve') await resolveInput(db, a)
+            else await denyInput(db, a)
           }
           execFileSync('uv', ['run', '--frozen', 'python', script, py.url, py.schema], { cwd, input: JSON.stringify(steps), stdio: ['pipe', 'inherit', 'inherit'] })
           const ts = await dump(sql)
@@ -473,9 +590,11 @@ describe.skipIf(!TEST_DATABASE_URL)(
 describe.skipIf(!TEST_DATABASE_URL)(`a recorded entry${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   let t: Throwaway
   let sql: Sql
+  let db: GateDb
   beforeEach(async () => {
     t = await throwawayDatabase()
     sql = t.db.sql
+    db = { sql, events: new EventLog(sql) }
   })
   afterEach(async () => {
     await t.drop()
@@ -492,12 +611,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`a recorded entry${TEST_DATABASE_URL ? '' : 
     ...(o.kind === 'answer' ? { questions: [{ question: 'Which colour?', multiSelect: false }] } : {}),
   })
   const approve = (requestId: string, response: unknown = { kind: 'approval', decision: 'approve' }) =>
-    decideInput(sql, { requestId, response, responder: ME_RESPONDER, role: 'browser' })
+    decideInput(db, { requestId, response, responder: ME_RESPONDER, role: 'browser' })
 
   it('decides it in one transaction: the row gone, its resolution written as resolve_input writes one', async () => {
     const sid = await newSession(sql)
     const o = open(sid)
-    await openInput(sql, { ...o, gate: gate(o) })
+    await openInput(db, { ...o, gate: gate(o) })
     expect(await approve(o.requestId)).toEqual({ kind: 'approval', outcome: 'approved' })
     expect(await count(sql, 'ai_pending_input')).toBe(0)
     expect(await readInput(sql, { requestId: o.requestId })).toEqual({ outcome: 'approved', response: { decision: 'approve' }, responder: ME, reason: null })
@@ -510,7 +629,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`a recorded entry${TEST_DATABASE_URL ? '' : 
   it("answers a question with the validator's answers, and keeps the hash of what was sent", async () => {
     const sid = await newSession(sql)
     const o = open(sid, 'run-1', 'answer')
-    await openInput(sql, { ...o, gate: gate(o) })
+    await openInput(db, { ...o, gate: gate(o) })
     const body = { kind: 'answer', answers: { 'Which colour?': 'Blue' } }
     expect(await approve(o.requestId, body)).toEqual({ kind: 'answer', outcome: 'answered' })
     const [row] = await sql<{ response: unknown; response_hash: string }[]>`SELECT response, response_hash FROM ai_input_responses WHERE request_id = ${o.requestId}`
@@ -520,10 +639,10 @@ describe.skipIf(!TEST_DATABASE_URL)(`a recorded entry${TEST_DATABASE_URL ? '' : 
   it('refuses what the validator refuses, and writes nothing', async () => {
     const sid = await newSession(sql)
     const o = open(sid)
-    await openInput(sql, { ...o, gate: gate(o) })
+    await openInput(db, { ...o, gate: gate(o) })
     await expect(approve(o.requestId, { kind: 'answer', text: 'yes' })).rejects.toMatchObject({ code: 'malformed' })
     await expect(approve(o.requestId, { kind: 'approval', decision: 'approve', input_hash: 'b'.repeat(64) })).rejects.toMatchObject({ code: 'input_mismatch' })
-    await expect(decideInput(sql, { requestId: o.requestId, response: { kind: 'approval', decision: 'approve' }, responder: ME_RESPONDER, role: 'grant' })).rejects.toMatchObject({
+    await expect(decideInput(db, { requestId: o.requestId, response: { kind: 'approval', decision: 'approve' }, responder: ME_RESPONDER, role: 'grant' })).rejects.toMatchObject({
       code: 'self',
     })
     expect(await count(sql, 'ai_pending_input')).toBe(1)
@@ -533,7 +652,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`a recorded entry${TEST_DATABASE_URL ? '' : 
   it('refuses a row past its timer as resolving: its workflow is about to end it', async () => {
     const sid = await newSession(sql)
     const o = { ...open(sid), expiresAt: new Date(Date.now() - 1_000).toISOString() }
-    await openInput(sql, { ...o, gate: gate(o) })
+    await openInput(db, { ...o, gate: gate(o) })
     await expect(approve(o.requestId)).rejects.toMatchObject({ code: 'resolving' })
     expect(await count(sql, 'ai_pending_input')).toBe(1)
   })
@@ -541,7 +660,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`a recorded entry${TEST_DATABASE_URL ? '' : 
   it('leaves a row with no gate to its workflow, and says so', async () => {
     const sid = await newSession(sql)
     const o = open(sid)
-    await openInput(sql, o)
+    await openInput(db, o)
     expect(await approve(o.requestId)).toBe('workflow')
     expect(await count(sql, 'ai_pending_input')).toBe(1)
     expect(await readInput(sql, { requestId: o.requestId })).toBeNull()

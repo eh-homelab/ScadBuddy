@@ -364,12 +364,25 @@ describe('pricing tools (#4250)', () => {
   }
 
   it('tiers the book, the quote and the estimate as Ruling 11 does', () => {
-    expect(['price_book_get', 'price_book_set', 'order_estimate', 'order_item_quote'].map((n) => tool(n).risk)).toEqual([
-      'read',
-      'write',
-      'read',
-      'write',
-    ])
+    expect(
+      ['price_book_get', 'price_book_set', 'price_book_import_spools', 'order_estimate', 'order_item_quote'].map(
+        (n) => tool(n).risk,
+      ),
+    ).toEqual(['read', 'write', 'write', 'read', 'write'])
+  })
+
+  // #4253 §8.3
+  it('imports the filaments from spools', async () => {
+    const rows = [{ action: 'created', material: 'PLA', spool_ids: [3] }]
+    let posted = 0
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/price-book/import-spools`, () => {
+        posted += 1
+        return HttpResponse.json({ rows })
+      }),
+    )
+    expect(firstText(await tool('price_book_import_spools').execute({}, ctx()))).toEqual({ rows })
+    expect(posted).toBe(1)
   })
 
   it('quotes from a slice: sends a key, follows the 202 to the quote', async () => {

@@ -1,5 +1,6 @@
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { createHash, randomBytes } from 'node:crypto'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { WebSocket } from 'ws'
@@ -47,6 +48,8 @@ try {
 
 const TAB_ID = 'e2e-tab-0123456789abcdef'
 const TOKEN = 'gw-bridge-e2e-token-5555666677778888'
+/** A PNG-signed image of 300 KB: three binary frames. */
+const SCREENSHOT = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), randomBytes(300_000)])
 
 async function until<T>(read: () => T | undefined, what: string, timeoutMs = 10_000): Promise<T> {
   const deadline = performance.now() + timeoutMs
@@ -126,6 +129,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the browser
         },
         // A page that never settles, for the timeout.
         render: () => new Promise(() => {}),
+        // An image larger than one binary frame (link.ts IMAGE_CHUNK_BYTES).
+        screenshot: () => ({ image: new Blob([SCREENSHOT], { type: 'image/png' }), width: 3, height: 2, hidden: 1 }),
       } as Record<string, (args: never) => unknown>,
       { label: 'customize' },
     )
@@ -187,7 +192,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the browser
       attached: true,
       via: 'pairing',
       route: '/m/box',
-      live_tools: ['browser_get_params', 'browser_set_param', 'browser_render'],
+      live_tools: ['browser_get_params', 'browser_set_param', 'browser_render', 'browser_screenshot'],
     })
     // Agent → socket → the tab's handler → back.
     expect((await call('browser_set_param', { name: 'width', value: 30 })).body).toEqual({ name: 'width', value: 30 })
@@ -216,6 +221,30 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`the browser
     expect(tab.end(tab.getState().paired[0]!.id)).toBe(true)
     await until(() => tab.getState().paired.length === 0 || undefined, 'the pairing to end')
     expect((await call('browser_get_params')).text).toMatch(/^no browser attached/)
+    await client.close()
+  }, 60_000)
+
+  it("returns the tab's screenshot, its bytes sent as binary frames and stored by the name the agent gives them (#254)", async () => {
+    const { tokens } = await start()
+    const tab = await openTab()
+    const { token } = await tokens.mint({ name: 'laptop', tier: 'write' })
+    const client = await mcpClient(token)
+    const { code } = firstText(await client.callTool({ name: 'browser_pair', arguments: {} })) as { code: string }
+    const request = await until(() => tab.getState().pending[0], 'the pairing request in the tab')
+    expect(tab.accept(request.id, code)).toBe(true)
+    await until(() => tab.getState().paired[0], 'the pairing in the tab')
+
+    const result = (await client.callTool({ name: 'browser_screenshot', arguments: {} })) as {
+      isError?: boolean
+      content: { type: string; data?: string; mimeType?: string }[]
+    }
+    expect(result.isError ?? false).toBe(false)
+    const image = result.content.find((c) => c.type === 'image')!
+    expect(image.mimeType).toBe('image/png')
+    expect(Buffer.from(image.data!, 'base64').equals(SCREENSHOT)).toBe(true)
+    // Named by the agent, and taken by the tool's read.
+    const name = `${createHash('sha256').update(SCREENSHOT).digest('hex')}.png`
+    expect(await tabs.image(name)).toBeUndefined()
     await client.close()
   }, 60_000)
 

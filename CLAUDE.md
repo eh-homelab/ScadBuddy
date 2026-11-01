@@ -550,6 +550,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `flows/history.py` is the Reset preview, not git). Both repositories are shared by
   every replica over NFS, so each writer holds a Postgres lock that carries the last HEAD
   (`library/repo_lock.py`: `models_repo_head`, and `flows_coordinator`'s `flows_repo_head`).
+  The off-box copy (#4974) is `git_remote/` (`push.py` `RemotePush`, `store.py`
+  `git_remote_pushes`): `GitRepo.after_commit` asks for a push on a thread once the write
+  lock is released, the `housekeeping_push_git_remote` sweep (prune Schedule too) retries,
+  `GET /settings/git-remote` is the lag. `GitRepo.push` never forces, allows only the URL's
+  protocol and hands the token (`git_remote_token`, a sealed secret; a save needs the KEK)
+  to git through `CREDENTIAL_HELPER` from the child's env, never the argv.
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
@@ -697,6 +703,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `print_runs` and `print_outcomes` only (`Lifecycle.follow_print`, the component's
   `listen_for_prints`), never by asking a printer or Bambuddy. Agent `order_item_print`
   (outward); frontend `components/orders/PrintItem.tsx` over `PrintPicker`'s `itemPrint`.
+  Bambuddy (phase 5, #4253, spec §8): `orders/bambuddy.py` is the one file in `orders/`
+  that imports `bambuddy.client` (`tests/test_orders_bambuddy_seam.py`), reached through
+  `orders/integrations.py` `OrderIntegrations` (`OrdersComponent.integrations`, chosen for
+  the running `bambuddy_url`; `NotLinked` without one); the quote's Bambuddy slice calls
+  live there too. `POST /orders/price-book/import-spools` (`orders/spool_import.py`) makes
+  or updates filament records from the spools, on click only (`PriceBook.spool_import`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
   `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
@@ -898,7 +910,12 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     plugin's URL or secret: it gets `http://127.0.0.1:<port>/p/<token>` on the loopback
     forwarder (`src/plugins/forwarder.ts`), which pins the checked address, refuses
     redirects and 401/OAuth discovery, and adds the header (Claude Code's own MCP client
-    follows both with the header). Claude Code renames tool-name characters outside
+    follows both with the header). A plugin with no header may be signed in with OAuth
+    instead (#780, `src/plugins/oauth.ts`, `oauthStore.ts`, `ai_plugin_oauth`): only
+    Settings starts discovery (`POST …/:name/oauth/start`, then the browser's
+    `/api/v1/ai/plugin-oauth/authorize` and `/callback`, `routes/pluginOAuth.ts`), the
+    tokens stay sealed in the agent, and the forwarder asks the plugin's `oauth` token
+    source for each request's header; a refused refresh marks the grant for "Sign in again". Claude Code renames tool-name characters outside
     `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
     colliding tools are hidden. Unlisted plugin tools are `outward`.
   - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
@@ -910,14 +927,30 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     use local git repos (`test/support/gitRepo.ts`). Their MCP servers' http ones go
     through the forwarder (`plugins/packages/mcp.ts`); `temporal/turnPackages.ts` shares a
     package under `<payload dir>/plugins/<content hash>/` for the retired Python turn
-    (Step 8.2 removes it). Of an allowed package's built-ins the engine
-    runs `Bash`/`PowerShell` (each parked for approval); the agent provides the rest as
-    the `builtin` turn tools (`src/builtins/`, #2393: the file tools on the session
-    workspace under `/workspace`, WebFetch through the egress check, WebSearch and
-    WebFetch's model work as one-shot queries on the session's credential, the task
-    list as a workspace file), each outward, and the listing's `system_note` tells the
-    model; `src/builtins/schemas.json` is Claude Code's own input schemas
-    (`test/builtins.sdk.test.ts`, `UPDATE_BUILTIN_SCHEMAS=1`). `CronCreate`, `CronDelete`,
+    (Step 8.2 removes it).
+  - Claude Code's own built-ins (plan 2026-10-13 Step 9.6): every session offers `Read`,
+    `Glob`, `Grep` and the task list (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`) at
+    `read`, and `Write`, `Edit` and `NotebookEdit` at `write`, native in its Claude Code
+    process, each an item of the access source `builtin:claude-code`
+    (`src/access/nativeBuiltins.ts`; `resolver.ts` `native`, `live.ts`). Their paths are
+    confined to the session's working directory by the seam (`src/harness/confine.ts`, an
+    `InputGuard` in both canUseTool and the PreToolUse hook: `..`, absolute paths and links
+    out are refused, and so is any path, Glob pattern or Grep glob starting with `~`, which
+    Claude Code expands to HOME after the seam for Glob and Grep, measured on 2.1.310; with
+    no working directory the file tools are not offered). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
+    worker pod (no bwrap, and `unshare --mount` is refused under AppArmor; measured
+    2026-11-01), so a sandbox pod (#779) comes first. An allowed package's `builtinTools`
+    only switch on one that is `off` by default, at its package tier (`outward` by default),
+    never one a person switched off (the source, or the item's row); they no longer decide
+    what exists. The task list is `$CLAUDE_CONFIG_DIR/tasks/<session id>/` (measured
+    on SDK 0.3.310), linked to the session directory's `_claude/tasks/`
+    (`stateDirs.ts` `linkTaskList`), so it moves with the workspace.
+    **Breaking for package authors:** the `builtin__<Name>` file and task tools of the
+    retired durable turn, and their `/workspace` paths, are gone; a skill names Claude
+    Code's own `Read`, `Write` and the rest, with paths in the session directory (its cwd).
+    The agent still provides `WebFetch` and `WebSearch` (egress-checked, decision Q2) and the
+    background ones in place of Claude Code's (`src/builtins/server.ts`, in-process
+    `builtin` server, `mcp__builtin__<Name>`). `CronCreate`, `CronDelete`,
     `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own in both modes
     (`src/background/`: `ai_background_tasks`, one `BackgroundTask` workflow per task on
     `agent-tools` that sends the prompt when due and the session is idle; a Monitor's source

@@ -24,7 +24,6 @@ agent/src/sessions/images.ts	type: 'base64' as const	the SDK boundary: an SDK us
 agent/src/tools/registry.ts	type: 'image', data: Buffer	the model boundary: MCP image content a tool returns, which Claude Code turns into the Messages API request
 agent/src/tools/registry.ts	resource: \{ uri, mimeType, blob	an MCP embedded resource (GLB, 3MF), not an image; binary.ts links instead past its cap
 agent/src/tools/workspace.ts	const base64 = file.bytes.toString	the model boundary: workspace_read shows the model an image file as MCP image content
-agent/src/builtins/files.ts	image: \{ data: file.bytes.toString\(.base64.\)	the model boundary: a durable turn's Read shows the model an image file as MCP image content, which the turn tool activity stores as a session blob
 agent/src/tools/activityProjection.ts	data: stored.bytes.toString\('base64'\), mimeType: stored.mediaType	the model boundary: a ToolCall's result image, read back from its session blob, as the MCP image content Claude Code shows the model
 agent/src/temporal/toolActivities.ts	source: \{ type: 'base64', media_type: block.mimeType	decodes an MCP result's image into a session blob (inbound); the result names it
 agent/src/temporal/payloadCodec.ts	const b64 = 	the Temporal payload codec: sealed ciphertext, not images
@@ -36,6 +35,7 @@ frontend/src/agent/tabId.ts	return btoa\(binary\)	the bridge tab id: random byte
 backend/scadbuddy/activity/index.py	return base64.urlsafe_b64encode\(raw.encode\(\)\)	the activity list's opaque cursor (created_at|id), not an image
 backend/scadbuddy/orders/store.py	return base64.urlsafe_b64encode\(f"\{at.isoformat\(\)\}\|\{order_id\}".encode\(\)\)	the orders list's opaque cursor (created_at|id), not an image
 backend/scadbuddy/slicing/transfer_token.py	return base64.urlsafe_b64encode\(data\)	the slicer's transfer token (method, key, expiry and its HMAC) as base64url, not an image
+agent/src/plugins/oauth.ts	headers.authorization = .Basic 	RFC 6749 §2.3.1 client_secret_basic: an OAuth client id and secret, not an image
 EOF
 )
 

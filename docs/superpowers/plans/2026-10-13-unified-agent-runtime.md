@@ -1389,6 +1389,22 @@ Decisions Q2, Q3 and Q4.
 operating notes say so.
 **Depends on:** Steps 9.4 and 9.5; Q2, Q3 and Q4. **Closes:** none.
 
+**As built (2026-11-01, #5163).**
+- Q4's measurement came first. In the prod `scadbuddy-agent-worker` pod, `unshare --user
+  --map-root-user --pid --fork` works, but `--mount` is refused under AppArmor, and the image
+  has no `bwrap`. So `Bash` and `PowerShell` are `off` by default, and #779 follows.
+- The task list is kept neither in the transcript nor in the directory. Claude Code keeps it
+  in `$CLAUDE_CONFIG_DIR/tasks/<session id>/` (SDK 0.3.310). That path is linked to the
+  session directory's `_claude/tasks/`, so the files are workspace files. The test moves it
+  between two pods' roots.
+- Durable turns were already gone (Step 8.2), so `turnServers.ts` had no `builtin__` file
+  tools left to drop. `builtinServer` keeps only `WebFetch`, `WebSearch` and the background
+  tools; its input schemas now come from its zod shapes, not `schemas.json`.
+- The `Bash` test does not cover the sandbox's KEK denial, because there is no sandbox.
+  It checks that `Bash` parks as outward once a package switches it on.
+- The evals replay in `pnpm test` (`test/evals.test.ts`). The live run (`pnpm evals`) needs a
+  credential and was not run for this step.
+
 ### Step 9.7: `ai_pending_input` is the record of an open request (R5) (PR, `feat(agent): the gate's record is ai_pending_input`)
 
 Decision Q7.

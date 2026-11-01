@@ -48,7 +48,7 @@ spec §8.1.
 
 | Scope (where it is live) | Tool | Tier |
 |---|---|---|
-| global (any page) | `navigate`, `snapshot`, `highlight` (points, changes nothing) | read |
+| global (any page) | `navigate`, `snapshot`, `highlight` (points, changes nothing), `screenshot` (fallback) | read |
 | | `click`, `fill` (fallbacks) | write |
 | catalogue (`/`) | `search`, `open_model` | read |
 | customize (`/m/<slug>`) | `get_params`, `render` | read |
@@ -63,6 +63,19 @@ Notes, each from the tool's own entry:
 
 - `open_print_dialog` only opens the Print or Send dialog. "The user reviews it and
   presses the confirmation themselves."
+- `screenshot` is the fallback for what `snapshot` cannot say (a layout, a colour, the
+  3D preview). The tab draws its own viewport with
+  [modern-screenshot](https://github.com/qq15725/modern-screenshot) (DOM to SVG
+  `foreignObject` to canvas, keeping scroll positions), loaded as its own chunk only when
+  a screenshot is asked for, at most 1568 px on its long side, as a PNG (a JPEG past
+  the agent's 3.75 MB image cap). The preview's WebGL canvas keeps its drawing buffer
+  (`Preview.tsx` `preserveDrawingBuffer`), so it is drawn as shown. What `snapshot`
+  never reads back is painted over grey before the image leaves the page: password
+  fields, every user-only element (the pairing code being typed, a new MCP token) and
+  what a user-only trigger controls, and the assistant panel with what it portals, so a paired agent is not
+  shown the user's chats ([`screenshot.ts`](../../frontend/src/agent/screenshot.ts)
+  `hiddenElements`). WebMCP does not offer it: its content would carry the image as
+  base64 (#2479).
 - `test_connection` is `read` although it reaches Bambuddy. `POST /settings/test` only
   runs `GET /printers/` with the stored settings, and the handler refuses while the form
   has unsaved changes (comment in `catalog.ts`; `test_settings` in
@@ -176,7 +189,7 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
 |---|---|---|
 | `browser_status` | read | (the agent's own: attached or not, why not, the route and the live tools) |
 | `browser_pair` | write | (the agent's own: ask the user to pair, [Pairing](#pairing-spec-85)) |
-| `browser_snapshot`, `browser_highlight`, `browser_get_params`, `browser_render`, `browser_get_editor_text`, `browser_get_problems`, `browser_get_form`, `browser_search`, `browser_test_connection` | read | same tier |
+| `browser_snapshot`, `browser_screenshot`, `browser_highlight`, `browser_get_params`, `browser_render`, `browser_get_editor_text`, `browser_get_problems`, `browser_get_form`, `browser_search`, `browser_test_connection` | read | same tier |
 | `browser_navigate`, `browser_open_model` | **write** | `read` in the tab |
 | `browser_click`, `browser_fill`, `browser_set_param`, `browser_set_params`, `browser_reset_param`, `browser_generate`, `browser_select_plate`, `browser_replace_range`, `browser_set_field` | write | same tier |
 | `browser_open_print_dialog` | **outward** (gated) | same tier |
@@ -240,14 +253,27 @@ tools, so the two lists stay equal (`test/projections.test.ts`).
   as a `failed` error that asks for less (`MAX_RESULT_BYTES`,
   [`link.ts`](../../frontend/src/agent/link.ts)), because the agent's tab socket takes
   frames up to 256 KiB (`routes/bridge.ts` `BRIDGE_FRAME_MAX`).
-- **Not here:** `screenshot()`, which PR #339 left out of the tab on purpose; and the
-  Playwright MCP plugin ([headless-browser.md](headless-browser.md)), a separate
+- **Images** (`browser_screenshot`) never go as base64 in a JSON frame (#2479). The tab
+  sends an `image` frame with the image's type and size, its bytes in binary frames of at
+  most 128 KiB (`IMAGE_CHUNK_BYTES`), then the `result`, whose `image` is `{mediaType}`.
+  The replica holding the tab checks the bytes against the type's signature, names them by
+  their sha256 (the tab needs no `crypto.subtle`, which a plain-http origin lacks, as
+  `tabId.ts`), stores them before the call's answer resolves (`ai_tab_images`,
+  [`bridge/tabImages.ts`](../../agent/src/bridge/tabImages.ts); in memory without a
+  database), and writes the name into the answer's `image`. So the answer crosses the relay
+  as a pointer, and the tool, on whichever replica it runs, takes the bytes by name (the
+  read deletes them) and returns them as MCP image content with the rest of the answer as
+  JSON. One never read (its call gave up) is dropped after ten minutes, by the next read or
+  write. A result holding an image whose bytes did not arrive, or could not be stored,
+  fails `not_stored`.
+- **Not here:** the Playwright MCP plugin ([headless-browser.md](headless-browser.md)), a separate
   browser whose tools are `mcp__playwright__browser_*`.
 
 ## The tab's socket
 
 `GET /api/v1/ai/bridge` ([`agent/src/routes/bridge.ts`](../../agent/src/routes/bridge.ts)),
-a WebSocket carrying one JSON object per text frame, version 1
+a WebSocket carrying one JSON object per text frame, and an image's bytes as binary
+frames after the `image` frame that names them, version 1
 ([`agent/src/bridge/protocol.ts`](../../agent/src/bridge/protocol.ts) and the tab's
 [`linkProtocol.ts`](../../frontend/src/agent/linkProtocol.ts)).
 
@@ -255,6 +281,7 @@ a WebSocket carrying one JSON object per text frame, version 1
 |---|---|---|
 | tab | `hello {tabId, route, live}` | First frame. Nothing else is taken before it. |
 | tab | `state {route, live}` | The route or the live tools changed (issue #254: "The tab reports its live handlers on each route change"). |
+| tab | `image {id, mediaType, size}` | The image the next `result` of call `id` holds; its `size` bytes follow as binary frames, and the agent names it (#254). |
 | tab | `result {id, outcome}` | The answer to a `call`: `CallResult`, never a throw. |
 | tab | `pairing.accept {id, code}`, `pairing.deny {id}`, `pairing.end {id}` | The user's answers in the pairing prompt. |
 | agent | `call {id, tool, args}` | Run one tool of `TOOLS`. |
@@ -435,7 +462,12 @@ reaches an agent.
 - The agent's side without a socket:
   [`agent/test/browserTools.test.ts`](../../agent/test/browserTools.test.ts) (parity
   with `catalog.ts`, tiers, forwarding, "no browser attached", the timeout, a dropped
-  or replaced tab, the harness and `/mcp` projections, `tab.bind`, and pairing by code).
+  or replaced tab, the harness and `/mcp` projections, `tab.bind`, pairing by code, and
+  the `scadbuddy://browser/paired/snapshot` resource), and
+  [`browserScreenshot.test.ts`](../../agent/test/browserScreenshot.test.ts) (an image's
+  frames, the checks on its bytes, and its store); the tab's side is
+  [`screenshot.test.tsx`](../../frontend/src/agent/screenshot.test.tsx) and `link.test.ts`,
+  and `e2e/agent-bridge.spec.ts` takes one in Chromium under the page's CSP.
   The Postgres store: [`bridgePairings.pg.test.ts`](../../agent/test/bridgePairings.pg.test.ts).
   Two replicas through Temporal:
   [`bridgeRelay.temporal.test.ts`](../../agent/test/bridgeRelay.temporal.test.ts), and the
@@ -443,7 +475,7 @@ reaches an agent.
 - The round trip in Node:
   [`agent/test/bridge.e2e.test.ts`](../../agent/test/bridge.e2e.test.ts) runs the tab's
   own `bridge.ts` and `link.ts` over a real socket against the agent's real server: an
-  MCP client pairs by code and drives the tab, and a chat turn's
+  MCP client pairs by code and drives the tab (a screenshot's bytes included), and a chat turn's
   `mcp__scadbuddy__browser_set_param` (the real SDK against the fake Anthropic
   endpoint) runs the tab's handler and hands its answer to the model.
 - The DOM, in a real browser:

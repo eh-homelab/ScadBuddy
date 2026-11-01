@@ -4,7 +4,7 @@ import type { Credential } from '../credentials.js'
 import { type CredentialSource, type FallbackOptions, NoUsableCredentialError, runWithFallback } from '../harness/fallback.js'
 import type { HarnessPaths } from '../harness/options.js'
 import { type HarnessRun, runHarness } from '../harness/run.js'
-import type { BuiltinResult } from './files.js'
+import type { BuiltinResult } from './result.js'
 import type { NestedQueries, WebSearchInput } from './web.js'
 
 // The model work WebFetch and WebSearch need in a durable turn (#2393), as one-shot Claude

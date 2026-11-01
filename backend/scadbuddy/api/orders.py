@@ -55,6 +55,7 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.currency import minor_exponent
+from scadbuddy.orders.integrations import NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
     FulfilmentInput,
     LifecycleError,
@@ -83,6 +84,7 @@ from scadbuddy.orders.models import (
     PricingPolicy,
     Quote,
     Shipment,
+    SpoolImport,
 )
 from scadbuddy.orders.operations import ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
 from scadbuddy.orders.pricing import estimate_grams, to_minor
@@ -90,6 +92,7 @@ from scadbuddy.orders.printing import print_request_id
 from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
+from scadbuddy.orders.spool_import import import_spools as import_spools_into
 from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
 
 router = APIRouter(prefix="/orders", tags=["orders"])
@@ -474,6 +477,29 @@ async def unarchive_filament(filament_id: str, orders: OrdersDep) -> Filament:
     if found is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no filament {filament_id!r}")
     return found
+
+
+@router.post(
+    "/price-book/import-spools",
+    response_model=SpoolImport,
+    summary="Import filament records from Bambuddy's spools",
+)
+async def import_spools(orders: OrdersDep) -> SpoolImport:
+    """One filament record per filament of Bambuddy's spool inventory (§8.3, #4253):
+    made when the book has none of its material, subtype, brand and colour, else given
+    the most recent priced spool's ``cost_per_kg``; a row's ``min_cost_per_kg`` and
+    ``max_cost_per_kg`` show the spread when its spools' prices differ. A filament known
+    only by its colour's name, or with no priced spool, is ``skipped`` with its
+    ``reason``. Run on click only: no quote reads Bambuddy (Ruling 3). 409 ``not_linked``
+    without a Bambuddy URL."""
+    try:
+        groups = await orders.integrations.spool_groups()
+    except NotLinkedError:
+        raise not_linked() from None
+    try:
+        return await asyncio.to_thread(import_spools_into, orders.store, groups)
+    except FilamentExistsError as error:
+        raise _filament_exists(error) from None
 
 
 # -- the rough estimate (§5.3, #4250 Ruling 9) ---------------------------------------------------

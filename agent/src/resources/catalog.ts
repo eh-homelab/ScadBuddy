@@ -1,5 +1,5 @@
 import { type Tier, TIERS } from '../auth/principal.js'
-import type { Tool } from '../tools/registry.js'
+import { type Tool, ToolError } from '../tools/registry.js'
 
 // The `scadbuddy://` resources (issue #264; spec §5.4), as MCP resources
 // (https://modelcontextprotocol.io/specification/2025-11-25/server/resources;
@@ -35,7 +35,14 @@ import type { Tool } from '../tools/registry.js'
 // reports and rows (`printer.*`; events.ts). Changes made only inside
 // Bambuddy reach a subscriber at the next ScadBuddy event or read.
 //
-// Not here yet: `scadbuddy://browser/{tab}/snapshot` (#254).
+// The browser bridge (#254): `scadbuddy://browser/{tab}/snapshot` is the tab the
+// user paired with this caller (bridge/pairings.ts), read with `browser_snapshot`, so
+// it reaches that tab on whichever replica holds it (bridge/relay.ts, #4780). A caller
+// has at most one paired tab, and its id is never shown to the caller (it would let
+// anyone who learns it act as the tab), so `{tab}` is `paired`, the one value
+// (`PAIRED_TAB`); a tab sends no event when its screen changes, so a subscriber is not
+// told: read it again.
+//
 // `scadbuddy://docs/authoring` (#252) needs no backend route: its tool reads
 // the authoring skill the agent ships with (tools/guide.ts).
 
@@ -71,6 +78,9 @@ export type ResourceDef = {
 }
 
 const JSON_TYPE = 'application/json'
+
+/** `scadbuddy://browser/{tab}/snapshot`'s one `{tab}`: the tab paired with the caller. */
+export const PAIRED_TAB = 'paired'
 
 export const RESOURCES: readonly ResourceDef[] = [
   // ── catalogue ───────────────────────────────────────────────────────────
@@ -357,6 +367,23 @@ export const RESOURCES: readonly ResourceDef[] = [
       'updates; page the rest with sessions_get.',
     mimeType: JSON_TYPE,
     tool: 'sessions_get',
+    readToSubscribe: true,
+  },
+  // ── the browser bridge (#254) ───────────────────────────────────────────
+  {
+    template: 'scadbuddy://browser/{tab}/snapshot',
+    name: 'browser-snapshot',
+    title: "Paired tab's screen",
+    description:
+      "What the user's ScadBuddy tab paired with this caller (browser_pair) shows now, as browser_snapshot reads " +
+      'it: route, open dialogs, form values, errors and the interactive elements. `{tab}` is `paired`. Not ' +
+      'pushed: read it again.',
+    mimeType: JSON_TYPE,
+    tool: 'browser_snapshot',
+    args: ({ tab }) => {
+      if (tab !== PAIRED_TAB) throw new ToolError(`no tab "${tab}": the paired tab is "${PAIRED_TAB}"`, 404)
+      return {}
+    },
     readToSubscribe: true,
   },
   // ── docs (#252) ─────────────────────────────────────────────────────────

@@ -798,8 +798,10 @@ export function text(value: string): CallToolResult {
   return { content: [{ type: 'text', text: value }] }
 }
 
-export function image(bytes: ArrayBuffer, mimeType: string): CallToolResult {
-  return { content: [{ type: 'image', data: Buffer.from(bytes).toString('base64'), mimeType }] }
+export function image(bytes: ArrayBuffer | Uint8Array, mimeType: string): CallToolResult {
+  // A view is encoded where it is, not copied first.
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)
+  return { content: [{ type: 'image', data: Buffer.from(view.buffer, view.byteOffset, view.byteLength).toString('base64'), mimeType }] }
 }
 
 /**

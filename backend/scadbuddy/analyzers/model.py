@@ -82,10 +82,10 @@ UNVERIFIED_TARGETS: dict[FixTarget, str] = {
     ),
 }
 
-#: Targets whose change would reach Bambuddy once a send consumes accepted diffs.
-#: Nothing does yet: accepting only records a decision in ScadBuddy (``write`` tier).
-#: The send path that consumes them must put them through AI spec §8.2's outward
-#: approval (a pending action and a UI approval), not through this flag.
+#: Targets whose change reaches the printer on a print that names the accepted fix
+#: (``PrintRunRequest.accepted_fixes``, ``analyzers/apply.py``). Accepting only records a
+#: decision in ScadBuddy (``write`` tier); the print that applies it is the outward
+#: action AI spec §8.2 approves (the dialog's Print, the agent's approval), not this flag.
 OUTWARD_TARGETS: frozenset[FixTarget] = frozenset(
     {
         "print_options",
@@ -152,7 +152,7 @@ class SettingChange(BaseModel):
     #: False while the target is on the AI spec's §3.2 "to verify" list.
     verified: bool
     to_verify: str | None = None
-    #: Would reach Bambuddy once a send consumes accepted diffs (see OUTWARD_TARGETS).
+    #: Reaches the printer on a print that names the accepted fix (see OUTWARD_TARGETS).
     outward: bool
 
 

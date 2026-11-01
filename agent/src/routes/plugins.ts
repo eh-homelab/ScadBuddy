@@ -3,7 +3,9 @@ import { z } from 'zod'
 import type { PluginListingPut, ToolListings } from '../access/listings.js'
 import type { AppDeps } from '../app.js'
 import { EgressError, type Resolver, systemResolver } from '../http/egress.js'
-import type { OriginPolicy } from '../http/origins.js'
+import { checkOrigin, type OriginPolicy } from '../http/origins.js'
+import { OAuthError } from '../plugins/oauth.js'
+import { CALLBACK_PATH, GrantError, OAUTH_PATH, type PluginOAuth } from '../plugins/oauthStore.js'
 import { BuiltInTools, type BuiltInToolSet } from '../plugins/builtInTools.js'
 import type { PluginForwarder } from '../plugins/forwarder.js'
 import {
@@ -18,7 +20,8 @@ import {
 } from '../plugins/registry.js'
 import { DEFAULT_PLUGIN_TEST_TIMEOUT_MS, type PluginTest, testPlugin } from '../plugins/testConnection.js'
 import { type KekStatus, SealError } from '../secrets.js'
-import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { type RemoteAddress, requestFacts, uiReadProblem, uiRequestProblem } from './guard.js'
+import { BROWSER_USER } from './approvals.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/plugins (issue #297): the admin surface of the plugin registry
@@ -30,6 +33,12 @@ import { ready, type RouteModule } from './module.js'
 //   PATCH  /api/v1/ai/plugins/:name        update    (omitted fields are kept)
 //   DELETE /api/v1/ai/plugins/:name        remove
 //   POST   /api/v1/ai/plugins/:name/test   connect, one tools/list, report tools and tiers
+//   POST   /api/v1/ai/plugins/:name/oauth/start   begin an OAuth sign-in (#780; plugins/oauthStore.ts)
+//   DELETE /api/v1/ai/plugins/:name/oauth         sign out: forget the grant
+//
+// A sign-in's start answers `authorize_url`, a one-use link on this origin that the page
+// opens in a new window (routes/pluginOAuth.ts serves it and the callback). The redirect URI
+// is the callback on the origin the start came through, one of the allowlisted origins.
 //
 // Every write, and the test (it sends the stored secret to the endpoint), goes
 // through the same guard as the credential routes (guard.ts: HTTPS through a
@@ -60,6 +69,8 @@ export type PluginRouteDeps = {
   builtIns: BuiltInTools
   /** Where a good connection test's tools/list is stored (#2171); undefined without a database. */
   listings?: ToolListings
+  /** OAuth sign-in (#780); undefined without a database. */
+  pluginOAuth?: PluginOAuth | undefined
 }
 
 export type PluginView = {
@@ -77,6 +88,8 @@ export type PluginView = {
   problem: string | null
   tool_tiers: PluginSummary['tool_tiers']
   disabled_tools: string[]
+  /** The OAuth sign-in (#780): its state, never a token; null when it has none. */
+  oauth: PluginSummary['oauth']
   created_at: string
   updated_at: string
 }
@@ -89,6 +102,13 @@ const CreateBody = z.strictObject({
   url: z.string().max(2048),
   auth_header: z.string().max(64).nullable().optional(),
   secret: z.string().min(1).max(4096).optional(),
+})
+const OAuthStartBody = z.strictObject({
+  /** An OAuth app the person registered (GitHub's: no dynamic registration); omitted, RFC 7591 registration. */
+  client_id: z.string().min(1).max(256).optional(),
+  client_secret: z.string().min(1).max(1024).optional(),
+  /** Space-separated scopes, replacing the discovered ones (to ask for less). */
+  scope: z.string().max(1024).optional(),
 })
 const PatchBody = z.strictObject({
   url: z.string().max(2048).optional(),
@@ -109,6 +129,7 @@ export function pluginView(plugin: PluginSummary, kek: KekStatus): PluginView {
     problem: reservedNameProblem(plugin.name),
     tool_tiers: plugin.tool_tiers,
     disabled_tools: plugin.disabled_tools,
+    oauth: plugin.oauth,
     created_at: plugin.created_at,
     updated_at: plugin.updated_at,
   }
@@ -256,6 +277,60 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
     return c.body(null, 204)
   })
 
+  app.post(`${base}/:name/oauth/start`, async (c) => {
+    const repo = await store()
+    if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+    const name = c.req.param('name')
+    if (builtIn(name)) return isBuiltIn(c, name, 'signed in: it runs inside the agent')
+    const body = await parseBody(c, OAuthStartBody)
+    if (typeof body === 'string') return c.json({ detail: body }, 400)
+    if (body.client_secret !== undefined && body.client_id === undefined) {
+      return c.json({ detail: 'client_secret needs its client_id' }, 400)
+    }
+    if (!deps.pluginOAuth) return c.json({ detail: NO_DATABASE }, 503)
+    const plugin = await repo.get(name)
+    if (!plugin) return c.json({ detail: `no plugin named "${name}"` }, 404)
+    if (plugin.auth_header !== null) {
+      return c.json({ detail: `plugin ${name} has a header credential: remove it (secret: null) before signing in` }, 409)
+    }
+    // The middleware above passed this origin; the callback goes back to it.
+    const verdict = checkOrigin(requestFacts(c, deps.remoteAddress), deps.origins)
+    if (!verdict.ok) return c.json({ detail: 'sign-in must start from the ScadBuddy UI' }, 403)
+    try {
+      const started = await deps.pluginOAuth.start(
+        {
+          plugin: { name, url: plugin.url },
+          redirectUri: `${verdict.origin}${CALLBACK_PATH}`,
+          ...(body.client_id === undefined ? {} : { clientId: body.client_id }),
+          ...(body.client_secret === undefined ? {} : { clientSecret: body.client_secret }),
+          ...(body.scope === undefined ? {} : { scope: body.scope }),
+          by: BROWSER_USER.id,
+        },
+        kek(),
+      )
+      return c.json({
+        authorize_url: `${OAUTH_PATH}/authorize?ticket=${started.ticket}`,
+        redirect_uri: started.redirect_uri,
+        issuer: started.issuer,
+        registration: started.registration,
+        scope: started.scope,
+      })
+    } catch (err) {
+      if (err instanceof OAuthError) return c.json({ detail: err.message }, err.status)
+      throw err
+    }
+  })
+
+  app.delete(`${base}/:name/oauth`, async (c) => {
+    const repo = await store()
+    if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+    const name = c.req.param('name')
+    if (builtIn(name)) return isBuiltIn(c, name, 'signed out: it runs inside the agent')
+    if (!deps.pluginOAuth) return c.json({ detail: NO_DATABASE }, 503)
+    if (!(await deps.pluginOAuth.forget(name))) return c.json({ detail: `plugin "${name}" is not signed in` }, 404)
+    return c.body(null, 204)
+  })
+
   app.post(`${base}/:name/test`, async (c) => {
     const name = c.req.param('name')
     if (builtIn(name)) return isBuiltIn(c, name, 'tested: it has no endpoint; its tools are listed with it')
@@ -302,6 +377,12 @@ export async function testAndList(
     } catch (err) {
       if (err instanceof SealError) {
         return { status: 409, body: { detail: `the plugin secret cannot be decrypted: ${err.message}; save it again` } }
+      }
+      if (err instanceof GrantError) {
+        return { status: 409, body: { detail: `plugin ${name} needs signing in again: ${err.message}` } }
+      }
+      if (err instanceof OAuthError) {
+        return { status: 409, body: { detail: `plugin ${name}'s access token could not be renewed: ${err.message}` } }
       }
       throw err
     }
@@ -374,6 +455,8 @@ declare module '../app.js' {
     pluginForwarder?: PluginForwarder
     /** The tools each remote or package source last listed (#2171); undefined without a database. */
     listings?: ToolListings
+    /** OAuth sign-in for remote plugins (#780); undefined without a database. */
+    pluginOAuth?: PluginOAuth | undefined
   }
 }
 
@@ -385,6 +468,7 @@ export const route: RouteModule = {
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
       builtIns: new BuiltInTools(deps.access),
+      pluginOAuth: deps.pluginOAuth,
       ...pluginTestDeps(deps),
     })
   },
