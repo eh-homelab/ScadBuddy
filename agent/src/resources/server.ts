@@ -25,7 +25,7 @@ import {
   type ToolServices,
   UNEXPECTED_ERROR_SOURCE,
 } from '../tools/registry.js'
-import { allPages, isPaged } from '../tools/pagination.js'
+import { allPages, isPaged, MAX_PAGE_SIZE } from '../tools/pagination.js'
 import { expand, isTemplate, matchUri, RESOURCES, type ResourceDef, tierFor, variablesOf } from './catalog.js'
 import { type ResourceHub, SubscriptionLimitError } from './hub.js'
 
@@ -134,9 +134,15 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
     progress: async () => {},
     signal: extra.signal,
   })
-  // A resource is the whole collection, so a paged list tool is read to its last page (#837).
-  const run = async (def: ResourceDef, vars: Record<string, string>, principal: Principal, extra: Extra) =>
-    readTool(toolOf(def), def.args ? def.args(vars) : vars, principal, extra)
+  // A resource is the whole collection, so a paged list tool is read to its last page (#837),
+  // unless the resource is only its first page (catalog.ts `firstPage`, #4973).
+  const run = async (def: ResourceDef, vars: Record<string, string>, principal: Principal, extra: Extra) => {
+    const tool = toolOf(def)
+    const args = def.args ? def.args(vars) : vars
+    return def.firstPage && isPaged(tool)
+      ? tool.execute({ ...args, limit: MAX_PAGE_SIZE }, ctx(principal, extra))
+      : readTool(tool, args, principal, extra)
+  }
   const readTool = (tool: Tool, args: Record<string, unknown>, principal: Principal, extra: Extra) =>
     isPaged(tool) ? allPages((a) => tool.execute(a, ctx(principal, extra)), args) : tool.execute(args, ctx(principal, extra))
 
@@ -326,6 +332,8 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
         return context.slug
           ? field(await readJson(byName.get('list_versions')!, { slug: context.slug }, principal, extra), 'commit')
           : []
+      case 'printer':
+        return field(await readJson(byName.get('list_printers')!, {}, principal, extra), 'id')
       case 'output_id':
         return context.slug
           ? field(await readJson(byName.get('list_outputs')!, { slug: context.slug }, principal, extra), 'id')

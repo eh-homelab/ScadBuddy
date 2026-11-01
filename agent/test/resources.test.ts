@@ -95,6 +95,10 @@ describe('the resource catalogue', () => {
       { kind: 'settings.changed', section: 'connection' },
       { kind: 'session.started', session_id: '0e5a3c1e-1111-4222-8333-944455556666', seq: 2 },
       { kind: 'session.message', session_id: '0e5a3c1e-1111-4222-8333-944455556666', seq: 3 },
+      { kind: 'print.run', slug: 's', output_id: 'o', run_id: 'r' },
+      { kind: 'print.outcome', slug: 's', output_id: 'o', run_id: 'r', outcome: 'finished' },
+      { kind: 'printer.report', printer_id: '7d3c1e2a-1111-4222-8333-944455556666' },
+      { kind: 'printer.changed', printer_id: '7d3c1e2a-1111-4222-8333-944455556666' },
     ]
     for (const e of events) {
       const { uris } = affectedBy({ id: 'x', ...e })
@@ -132,6 +136,8 @@ describe('event → resource mapping', () => {
   it('print progress touches the print progress resource', () => {
     expect(affectedBy({ id: '1', kind: 'print.progress', output_id: 'o1', slug: 'k' }).uris).toEqual([
       'scadbuddy://print/outputs/o1/progress',
+      'scadbuddy://printers',
+      'scadbuddy://print/queue',
     ])
   })
 
@@ -139,9 +145,14 @@ describe('event → resource mapping', () => {
     for (const kind of ['print.progress', 'print.settled']) {
       expect(affectedBy({ id: '1', kind, output_id: 'library:42', slug: 'library-42' }).uris, kind).toEqual([
         'scadbuddy://print/library/42/progress',
+        'scadbuddy://printers',
+        'scadbuddy://print/queue',
       ])
     }
-    expect(affectedBy({ id: '1', kind: 'print.progress', output_id: 'library:x', slug: 's' }).uris).toEqual([])
+    expect(affectedBy({ id: '1', kind: 'print.progress', output_id: 'library:x', slug: 's' }).uris).toEqual([
+      'scadbuddy://printers',
+      'scadbuddy://print/queue',
+    ])
     expect(matchUri('scadbuddy://print/library/42/progress')?.def.tool).toBe('get_print_progress')
     const def = RESOURCES.find((r) => r.template === 'scadbuddy://print/library/{file_id}/progress')!
     expect(def.args?.({ file_id: '42' })).toEqual({ library_file_id: 42 })
@@ -158,6 +169,64 @@ describe('event → resource mapping', () => {
       })
     }
     expect(affectedBy({ id: '1', kind: 'session.done' })).toEqual({ uris: [], listChanged: false })
+  })
+
+  it('a print moving on touches the printers and the queue; its outcome also the history, stats and inventory (#4973)', () => {
+    for (const kind of ['print.progress', 'print.settled', 'print.run']) {
+      expect(affectedBy({ id: '1', kind, output_id: 'o1', slug: 'k', run_id: 'r' }).uris, kind).toEqual(
+        expect.arrayContaining(['scadbuddy://printers', 'scadbuddy://print/queue']),
+      )
+    }
+    // A library file's print too: the farm moved, whatever the subject.
+    expect(affectedBy({ id: '1', kind: 'print.run', output_id: 'library:42', slug: 'l', run_id: 'r' }).uris).toEqual([
+      'scadbuddy://printers',
+      'scadbuddy://print/queue',
+    ])
+    expect(affectedBy({ id: '1', kind: 'print.outcome', output_id: 'o1', slug: 'k', run_id: 'r', outcome: 'failed' })).toEqual({
+      uris: [
+        'scadbuddy://printers',
+        'scadbuddy://print/queue',
+        'scadbuddy://print/history',
+        'scadbuddy://print/stats',
+        'scadbuddy://print/inventory',
+      ],
+      listChanged: false,
+    })
+  })
+
+  it("a printer's report touches the live printers and the inventory; a row write the printer too (#4973)", () => {
+    const printer_id = '7d3c1e2a-1111-4222-8333-944455556666'
+    expect(affectedBy({ id: '1', kind: 'printer.report', printer_id })).toEqual({
+      uris: ['scadbuddy://printers', 'scadbuddy://print/inventory'],
+      listChanged: false,
+    })
+    expect(affectedBy({ id: '1', kind: 'printer.changed', printer_id })).toEqual({
+      uris: ['scadbuddy://printers', `scadbuddy://printers/${printer_id}`],
+      listChanged: false,
+    })
+    expect(affectedBy({ id: '1', kind: 'printer.changed' })).toEqual({ uris: ['scadbuddy://printers'], listChanged: false })
+    expect(matchUri(`scadbuddy://printers/${printer_id}`)).toMatchObject({
+      def: { tool: 'get_printer' },
+      vars: { printer: printer_id },
+    })
+  })
+
+  it('backs the farm resources with the read tools that read the same routes (#4973)', () => {
+    const backing = Object.fromEntries(
+      ['printers', 'print/queue', 'print/inventory', 'print/history', 'print/stats'].map((p) => [
+        p,
+        matchUri(`scadbuddy://${p}`)?.def.tool,
+      ]),
+    )
+    expect(backing).toEqual({
+      printers: 'get_printers_now',
+      'print/queue': 'list_print_queue',
+      'print/inventory': 'get_spool_inventory',
+      'print/history': 'list_print_archives',
+      'print/stats': 'get_print_stats',
+    })
+    // The history is the newest page, never every archive Bambuddy ever kept.
+    expect(matchUri('scadbuddy://print/history')?.def.firstPage).toBe(true)
   })
 
   it('ignores kinds it does not know and events missing their ids', () => {
@@ -363,6 +432,11 @@ describe('the resource list covers the catalogue', () => {
         'scadbuddy://libraries',
         'scadbuddy://models',
         'scadbuddy://plates',
+        'scadbuddy://printers',
+        'scadbuddy://print/history',
+        'scadbuddy://print/inventory',
+        'scadbuddy://print/queue',
+        'scadbuddy://print/stats',
         'scadbuddy://sessions',
         'scadbuddy://settings',
       ].sort(),

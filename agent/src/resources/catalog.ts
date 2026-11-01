@@ -25,9 +25,17 @@ import type { Tool } from '../tools/registry.js'
 // Sessions (#300) are backed by the `sessions_*` read tools, which answer
 // only for sessions the caller may see (tools/sessions.ts).
 //
-// Not here yet (each needs a backend route or event source that is not on
-// main): the Bambuddy printers, queue, inventory, history and stats resources
-// (the print watcher, #268) and `scadbuddy://browser/{tab}/snapshot` (#254).
+// The farm (#4973): the printers' live state and the registry rows are
+// ScadBuddy's own (`get_printers_now` reads each printer's LAN report or
+// Bambuddy's status, whichever path reaches it); the queue, inventory, history
+// and stats are the farm tools' (tools/farm.ts), read through the backend's
+// `/farm/*` routes, never Bambuddy directly, so they answer as those tools do
+// on either backend. Bambuddy pushes nothing, so their notifications come from
+// what ScadBuddy itself sees: its prints (`print.*`) and its printers'
+// reports and rows (`printer.*`; events.ts). Changes made only inside
+// Bambuddy reach a subscriber at the next ScadBuddy event or read.
+//
+// Not here yet: `scadbuddy://browser/{tab}/snapshot` (#254).
 // `scadbuddy://docs/authoring` (#252) needs no backend route: its tool reads
 // the authoring skill the agent ships with (tools/guide.ts).
 
@@ -54,6 +62,12 @@ export type ResourceDef = {
    * tier (a session, #300), so nobody can follow what it may not see.
    */
   readToSubscribe?: boolean
+  /**
+   * A paged tool is read to its last page by default; with this, only its
+   * first (largest) page, `next_cursor` kept so the rest can be paged with the
+   * tool. For a list with no end worth reading at once (every archive, #4973).
+   */
+  firstPage?: boolean
 }
 
 const JSON_TYPE = 'application/json'
@@ -232,6 +246,64 @@ export const RESOURCES: readonly ResourceDef[] = [
     mimeType: JSON_TYPE,
     tool: 'get_print_progress',
     args: ({ file_id }) => ({ library_file_id: /^\d+$/.test(file_id ?? '') ? Number(file_id) : file_id }),
+  },
+  // ── the farm (#4973) ────────────────────────────────────────────────────
+  {
+    template: 'scadbuddy://printers',
+    name: 'printers',
+    title: 'Printers now',
+    description:
+      'What each registry printer is doing now, whoever started it: activity, job, progress, time left and HMS ' +
+      "errors, from its LAN report or Bambuddy's status (`path`). Updates as printers report and prints move on.",
+    mimeType: JSON_TYPE,
+    tool: 'get_printers_now',
+  },
+  {
+    template: 'scadbuddy://printers/{printer}',
+    name: 'printer',
+    title: 'Printer',
+    description: "One registry printer: name, model, its Bambuddy link and its LAN link (never the access code).",
+    mimeType: JSON_TYPE,
+    tool: 'get_printer',
+  },
+  {
+    template: 'scadbuddy://print/queue',
+    name: 'print-queue',
+    title: 'Print queue',
+    description:
+      "Bambuddy's print queue, in its order, finished items included: status, printer, file, times and why an " +
+      'item waits or failed.',
+    mimeType: JSON_TYPE,
+    tool: 'list_print_queue',
+  },
+  {
+    template: 'scadbuddy://print/inventory',
+    name: 'print-inventory',
+    title: 'Spool inventory',
+    description: 'Every spool with what is left and where it is loaded, and each loaded slot with its remaining grams.',
+    mimeType: JSON_TYPE,
+    tool: 'get_spool_inventory',
+  },
+  {
+    template: 'scadbuddy://print/history',
+    name: 'print-history',
+    title: 'Print history',
+    description:
+      "The newest archived prints with their outcomes: status, printer, times, filament, cost and failure reason. " +
+      'Page further back with list_print_archives from `next_cursor`.',
+    mimeType: JSON_TYPE,
+    tool: 'list_print_archives',
+    firstPage: true,
+  },
+  {
+    template: 'scadbuddy://print/stats',
+    name: 'print-stats',
+    title: 'Print statistics',
+    description:
+      'Prints by outcome, print hours, filament grams, cost and energy, by filament type and by printer, and how ' +
+      'close the time estimates came.',
+    mimeType: JSON_TYPE,
+    tool: 'get_print_stats',
   },
   {
     template: 'scadbuddy://plates',
