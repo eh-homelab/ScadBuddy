@@ -201,9 +201,9 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     })
     expect(JSON.stringify(log)).not.toContain(PNG.slice(0, 40))
     expect(log.at(-1)?.event).toMatchObject({ type: 'session.status', status: 'running' })
-    const [row] = await db.sql<{ status: string; turn_id: string | null }[]>`SELECT status, turn_id FROM ai_sessions WHERE id = ${session.id}`
-    // Durable turns take no turn_id/lease claim (Ruling 7).
-    expect(row).toEqual({ status: 'running', turn_id: null })
+    const [row] = await db.sql<{ status: string; durable_turn_id: string | null }[]>`SELECT status, durable_turn_id FROM ai_sessions WHERE id = ${session.id}`
+    // The claim names the turn the workflow runs (Ruling 7).
+    expect(row).toEqual({ status: 'running', durable_turn_id: turn!.turnId })
   }, 60_000)
 
   it("marks a turn a flow run sent with the run and its step, and no other turn (#2481)", async () => {
@@ -246,8 +246,8 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     connection.close()
     expect(out.filter((e) => e.type === 'error')).toEqual([])
     // receive() returns once the turn has started; its events reach `out` later, so the row names the session.
-    const [session] = await db.sql<{ id: string; mode: string }[]>`SELECT id, mode FROM ai_sessions`
-    expect(session?.mode).toBe('durable')
+    const [session] = await db.sql<{ id: string; runtime: string }[]>`SELECT id, runtime FROM ai_sessions`
+    expect(session?.runtime).toBe('unified')
     const { messages } = await recorded(session!.id)
     expect(messages).toEqual([expect.objectContaining({ images: [{ name: PNG_NAME, mediaType: 'image/png' }] })])
     const [blob] = await db.sql<{ name: string }[]>`SELECT name FROM ai_session_blobs WHERE session_id = ${session!.id}`
@@ -567,32 +567,7 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       describe: options.describe ?? durableDescriber(env.client),
       graceMs: options.graceMs ?? 0,
       ...(options.batch ? { batch: options.batch } : {}),
-      ended: (id) => m.endClassicLeftovers(id),
     })
-
-  // #5051's review: no release resumes a classic turn's approval now (resumeApproved is gone), so
-  // the sweep that ends a lost classic turn ends what it left parked, as the reaper revoked them.
-  // No classic question parks now (plan Step 9.7 folded them into the gate), so only the approval is left to end.
-  it("ends a lost classic turn's pending approval with the turn", async () => {
-    const m = await durableManager()
-    const { session } = await m.start(browser, { origin: 'chat', title: 't' })
-    const turn = randomUUID()
-    await db.sql`
-      UPDATE ai_sessions SET mode = 'classic', runtime = NULL, status = 'waiting_approval', turn_id = ${turn},
-        lease_until = now() - interval '1 minute', updated_at = now() - interval '1 hour'
-      WHERE id = ${session.id}`
-    const [approval] = await db.sql<{ id: string }[]>`
-      INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
-                                requested_by_kind, requested_by_id, requested_by_label, expires_at)
-      VALUES (gen_random_uuid(), ${session.id}, ${turn}, 'toolu_out', 'send_to_bambuddy', 'send', 'h', 'outward',
-              'browser', 'browser', 'you', now() + interval '10 minutes')
-      RETURNING id::text`
-
-    expect(await sweepOf(m, { describe: async () => 'not_found' }).sweep()).toEqual([session.id])
-    expect(await status(session.id)).toBe('idle')
-    const [a] = await db.sql<{ decision: string | null }[]>`SELECT decision FROM ai_approvals WHERE id = ${approval!.id}`
-    expect(a?.decision).toBe('cancelled')
-  }, 60_000)
 
   const status = async (id: string) =>
     (await db.sql<{ status: string }[]>`SELECT status FROM ai_sessions WHERE id = ${id}`)[0]?.status
@@ -686,33 +661,25 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
     expect((await recorded(session.id)).messages.map((x) => x.text)).toEqual(['hello', 'hello again'])
   }, 60_000)
 
-  it('refuses `closed`, and never starts an empty workflow, for a session whose workflow ran turns and was removed (#2078)', async () => {
+  // Plan Phase 10: an AgentSession's transcript is in ai_session_entries, so a session whose
+  // workflow is gone (removed by retention after it ended) starts it again and resumes there;
+  // #2078's refusal was for DurableSession, whose history held the chat.
+  it('starts the workflow again for a session whose workflow is not found, and the sweep says it could not be found', async () => {
     const m = await durableManager()
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
-    // What the row keeps of a workflow that ran a turn (follow_session moved the offset
-    // past its output), then ended and was removed by namespace retention: Temporal no
-    // longer knows it. The dev server deletes too slowly to wait for here.
-    await db.sql`UPDATE ai_sessions SET durable_offset = 3 WHERE id = ${session.id}`
     const workflowId = sessionWorkflowId(session.id)
     const describe = durableDescriber(env.client)
     expect(await describe(workflowId)).toBe('not_found')
 
-    await expect(m.send(session.id, browser, 'hello again')).rejects.toMatchObject({
-      code: 'closed',
-      message: expect.stringMatching(/has ended; continue in a new chat/),
-    })
-    expect(await describe(workflowId)).toBe('not_found')
-    expect(await status(session.id)).toBe('idle')
-
-    // A kept claim on it: the sweep says the workflow is gone, not that it never started.
+    // A kept claim on it: the sweep says the workflow could not be found.
     await db.sql`UPDATE ai_sessions SET status = 'running' WHERE id = ${session.id}`
     expect(await sweepOf(m).sweep()).toEqual([session.id])
     expect((await m.events.read(session.id)).slice(-2).map((e) => e.event)).toMatchObject([
-      { type: 'error', code: 'turn_failed', message: expect.stringMatching(/workflow is gone.*new chat/) },
+      { type: 'error', code: 'turn_failed', message: expect.stringMatching(/could not be found; send the message again/) },
       { type: 'session.status', status: 'idle' },
     ])
-    await expect(m.send(session.id, browser, 'and again')).rejects.toMatchObject({ code: 'closed' })
-    expect(await describe(workflowId)).toBe('not_found')
+    await m.send(session.id, browser, 'hello again')
+    expect((await recorded(session.id)).messages.map((x) => x.text)).toEqual(['hello again'])
   }, 60_000)
 
   it('refuses `closed`, as ended, a session whose workflow ran turns and ended but is still retained (#2078)', async () => {
@@ -722,9 +689,8 @@ describe.skipIf(!TEMPORAL_CLI || !TEST_DATABASE_URL)(`a durable session's dispat
       { type: 'session.result', costUsd: 0.1, turns: 1, budgetUsd: 5 },
       { type: 'session.status', status: 'idle' },
     ])
-    await db.sql`UPDATE ai_sessions SET durable_offset = 3 WHERE id = ${session.id}`
     await env.client.workflow.getHandle(sessionWorkflowId(session.id)).terminate('ended')
-    // A plain Update to an ended workflow is NOT_FOUND too: the message must not say "removed".
+    // REJECT_DUPLICATE: an ended workflow is never started afresh under the same session.
     const refused = await m.send(session.id, browser, 'hello again').catch((err: unknown) => err)
     expect(refused).toMatchObject({ code: 'closed', message: expect.stringMatching(/has ended; continue in a new chat/) })
     expect((refused as Error).message).not.toMatch(/removed/)
