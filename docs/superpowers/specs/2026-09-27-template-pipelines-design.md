@@ -445,7 +445,10 @@ Custom elements, usable inside the shadow root under any framework:
 
 - `<sb-param file="model.scad" name="lid_color">` — every existing widget by type,
   extruder numbers for colours, fonts, file upload with the asset store; bound to
-  `inputs[name]` by default, or to a path via `bind="style.exterior"`.
+  `inputs.params[name]` by default, or to a path via `bind="style.exterior"`. A path outside
+  `params` is the UI's own state (#425): saved with presets and outputs and handed to
+  the pipeline's `run(ctx, inputs)`, never a `-D`, so the widget shows no extruder
+  number; only a pipeline that renders it (`ctx.render(..., name=…)`) decides its slot.
 - `<sb-preview>` — the react-three-fiber preview of the last job.
 - `<sb-generate>` — the Generate button with the job's progress.
 
