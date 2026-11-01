@@ -181,7 +181,6 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`a turn's tool
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : key === 'turn_max_seconds' ? TURN_MAX_SECONDS : undefined) as T) },
       ...harnessTools(services(), TOOLS),
       toolCalls: () => start,
-      approvalPollMs: 50,
       approvalHashKey: Buffer.alloc(32, 5),
       audit: deps!.audit!,
     })

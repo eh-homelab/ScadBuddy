@@ -599,7 +599,7 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 > - **§6.1 Mode** is gone. Since plan Step 6.3 (#5051, #5054) every new session is an
 >   `AgentSession`, and nothing reads `ai_sessions.mode` or the `session_mode` setting; the
 >   panel has no Classic / Durable picker and no Durable badge. Phase 10 drops the columns
->   (#5174 removes their last readers, a later PR the columns).
+>   (#5174 removed their last readers; a later PR drops them).
 > - **§6.2, §6.3, §6.3a and §6.3b** are replaced by spec 2026-10-13 §5 and §14:
 >   `AgentSession` (`session-<id>` on `agent-sessions`, `agent/src/temporal/session/workflow.ts`)
 >   runs each turn as the TypeScript `session_turn` activity on a replica of the
@@ -612,8 +612,8 @@ retry it (`maximum_attempts = 1`), so the run reports `may_have_queued`.
 >   Python worker image (2026-10-13 §14.4), with no turn code.
 > - **§6.5** (the payload codec, `forgetSubject`) stays.
 >
-> If #5173 (versioned agent queues, Phase 11) has merged, `agent-tools` is versioned too; see
-> `docs/ai/operating.md` §1.
+> Since #5173 (Phase 11) `agent-tools` is versioned with `agent-sessions` too; see
+> `docs/ai/operating.md` §1.2.
 
 ### 6.1 Mode
 

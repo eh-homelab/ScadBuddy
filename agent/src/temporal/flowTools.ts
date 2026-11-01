@@ -53,7 +53,10 @@ export function flowToolTierActivity(
     const name = (input as { tool?: unknown } | null | undefined)?.tool
     if (typeof name !== 'string') throw ApplicationFailure.nonRetryable(`${FLOW_TOOL_TIER_ACTIVITY} takes {tool: string}`, 'ToolError')
     const tool = byName.get(name)
-    if (tool === undefined) throw ApplicationFailure.nonRetryable(`the agent has no tool ${name}`, 'ToolError')
+    // Retryable, and its own type: right after a new build is made current a flow's tier can
+    // still reach an old replica for a few seconds (plan 2026-10-13 Phase 11), so the run asks
+    // again before it takes the name as unknown (backend workflows/flow_tools.py UNKNOWN_TOOL).
+    if (tool === undefined) throw ApplicationFailure.retryable(`the agent has no tool ${name}`, 'UnknownTool')
     if (!forFlows(tool)) {
       throw ApplicationFailure.nonRetryable(`${name} is not for flows: a flow has no session and no browser tab`, 'NotForFlows')
     }

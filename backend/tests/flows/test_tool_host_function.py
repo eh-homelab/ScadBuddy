@@ -5,7 +5,7 @@ the agent's names on a test queue. An outward tool waits for a person's approval
 import asyncio
 import os
 import uuid
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from datetime import timedelta
 from typing import Any
 
@@ -1053,3 +1053,98 @@ async def test_tool_answers_text_and_tool_result_answers_the_images_as_pointers(
     assert str(IMAGE["name"]).encode() in payloads
     assert b"\x89PNG" not in payloads
     assert b"iVBORw0KGgo" not in payloads
+
+
+class _OldBuild:
+    """An agent replica of the build before a new tool (#2726 Phase 11): its tier does not
+    know `new_tool` (`UnknownTool`), or it knows the tier but registers no such activity,
+    which its catch-all `default` answers as a retryable `NotFoundError`
+    (agent/src/temporal/turnTools.ts). Either way nothing runs."""
+
+    def __init__(self, tiers: dict[str, str]) -> None:
+        self.agent = AgentTiers(tiers)
+        self.unregistered: list[str] = []
+
+    def activities(self) -> list[Any]:
+        @activity.defn(dynamic=True)
+        async def default(args: Sequence[RawValue]) -> str:
+            name = activity.info().activity_type
+            self.unregistered.append(name)
+            raise ApplicationError(
+                f"no activity {name} is served on this queue", type="NotFoundError"
+            )
+
+        return [self.agent.activity(), default]
+
+
+async def _new_build_takes_over(
+    outward: Outward, old: _OldBuild, asked: Callable[[], bool]
+) -> list[tuple[str, str, dict[str, Any]]]:
+    """A run of `tool('new_tool', ...)` that the old build answers first. Once it has
+    (`asked`), the old replica stops and the new build, which has the tool, polls the queue
+    alone, as once Temporal's routing reaches it. The new build's calls."""
+    queue = f"agent-tools-{uuid.uuid4().hex[:8]}"
+    served = Tools()
+
+    @activity.defn(name="new_tool")
+    async def new_tool(args: dict[str, Any]) -> str:
+        served._record("new_tool", args)
+        return "new"
+
+    new = AgentTiers({"new_tool": "write"})
+    async with Worker(outward.client, task_queue=queue, activities=old.activities()):
+        run_id = await outward.run(
+            script("return await tool('new_tool', {'n': 1})"), tools_queue=queue
+        )
+        for _ in range(400):
+            if asked():
+                break
+            await asyncio.sleep(0.05)
+        assert asked(), "the old build was never asked"
+    async with Worker(outward.client, task_queue=queue, activities=[new.activity(), new_tool]):
+        run = await outward.finished(run_id)
+    assert run.result == "result: 'new'"
+    return served.calls
+
+
+async def test_a_tool_new_in_this_build_whose_tier_an_old_build_answers_first_runs(
+    outward: Outward,
+) -> None:
+    """Right after a new agent build is made current, the run's tier can still reach the old
+    build (#2726 Phase 11), which does not know the tool. It is asked again after a wait,
+    the new build answers, and the call runs once."""
+    old = _OldBuild({"get_model": "read"})
+    calls = await _new_build_takes_over(outward, old, lambda: "new_tool" in old.agent.asked)
+    assert old.agent.asked == ["new_tool"]
+    assert old.unregistered == []
+    assert [(name, args) for name, _, args in calls] == [("new_tool", {"n": 1})]
+
+
+async def test_a_call_an_old_build_does_not_register_is_sent_again_and_runs_once(
+    outward: Outward,
+) -> None:
+    """The run's tier was answered, but its call reached the old build, which registers no
+    such activity: nothing ran, so even a write (one attempt) is sent again after a wait,
+    and it runs once, on the new build."""
+    old = _OldBuild({"new_tool": "write"})
+    calls = await _new_build_takes_over(outward, old, lambda: bool(old.unregistered))
+    assert old.unregistered == ["new_tool"]
+    assert [(name, args) for name, _, args in calls] == [("new_tool", {"n": 1})]
+
+
+async def test_a_tool_that_does_not_exist_still_fails_after_the_waits_and_says_so(
+    outward: Outward, tools: tuple[Tools, str], agent: AgentTiers
+) -> None:
+    """The waits are bounded: a name no build has fails after them, with how long it was
+    asked about."""
+    served, queue = tools
+    run_id = await outward.run(
+        script("try:", "    await tool('nope', {})", "except Exception as e:", "    return str(e)"),
+        tools_queue=queue,
+    )
+    run = await outward.finished(run_id)
+    assert "there is no tool 'nope': the agent has no tool nope (asked 4 times over 14s)" in (
+        run.result or ""
+    )
+    assert agent.asked == ["nope"] * 4
+    assert served.calls == []

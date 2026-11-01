@@ -403,7 +403,11 @@ export type SessionRecord = {
   tags: string[]
   scope: Record<string, unknown>
   parentId: string | null
-  /** `classic` runs in this service's harness, `durable` as a DurableSession workflow; set at insert. */
+  /**
+   * Deprecated on the wire: always `durable`, since every session runs as an AgentSession (plan
+   * Step 6.3). The column it was read from is dropped in plan Phase 10; the field can go once
+   * the panel and the sessions_* tools stop reading it.
+   */
   mode: SessionMode
   /**
    * The workflow a durable session runs as (`ai_sessions.runtime`, durable.ts): AgentSession
@@ -741,11 +745,6 @@ export type SessionManagerDeps = {
    * (audit/turn.ts), and every approval decision.
    */
   audit?: AuditDeps
-  /**
-   * How often a parked turn polls its approval, or its question (#940), for a
-   * decision or answer given on another replica: one interval for both.
-   */
-  approvalPollMs?: number
   /** How long a handoff offer lasts (HANDOFF_OFFER_TTL_MS by default). */
   handoffOfferTtlMs?: number
   /** New sessions per owner per window (MAX_NEW_SESSIONS per NEW_SESSION_WINDOW_MS by default). */
@@ -779,7 +778,6 @@ type Row = {
   tags: string[]
   scope: Record<string, unknown>
   parent_id: string | null
-  mode: SessionMode
   runtime: SessionRuntime | null
   max_turns: number
   budget_usd: number
@@ -800,9 +798,9 @@ const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, cr
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_id END AS offer_id,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_label END AS offer_label,
   CASE WHEN ${LIVE_OFFER} THEN pending_owner_until END AS offer_until,
-  status, title, tags, scope, parent_id, mode, runtime, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
+  status, title, tags, scope, parent_id, runtime, max_turns, ${POOL_BUDGET} AS budget_usd, cost_usd,
   ${POOL_COST} AS pool_cost_usd, turns,
-  ((turn_id IS NOT NULL AND lease_until > now()) OR (runtime = 'unified' AND durable_turn_id IS NOT NULL)) AS turn_active, created_at, updated_at, archived_at`
+  (runtime = 'unified' AND durable_turn_id IS NOT NULL) AS turn_active, created_at, updated_at, archived_at`
 
 function record(row: Row): SessionRecord {
   return {
@@ -819,7 +817,7 @@ function record(row: Row): SessionRecord {
     tags: row.tags,
     scope: row.scope,
     parentId: row.parent_id,
-    mode: row.mode,
+    mode: 'durable',
     runtime: row.runtime,
     maxTurns: row.max_turns,
     budgetUsd: row.budget_usd,
@@ -961,7 +959,6 @@ export class SessionManager {
       events: this.events,
       ...(deps.settings ? { settings: deps.settings } : {}),
       ...(deps.approvalGrants ? { grants: deps.approvalGrants } : {}),
-      ...(deps.approvalPollMs === undefined ? {} : { pollMs: deps.approvalPollMs }),
       ...(deps.audit ? { audit: deps.audit } : {}),
       ...(deps.approvalHashKey ? { hashKey: deps.approvalHashKey } : {}),
       workspace: this.files,
@@ -1149,7 +1146,6 @@ export class SessionManager {
       tags: string[]
       scope: Record<string, unknown>
       parentId: string | null
-      mode: SessionMode
       /** Fixed now rather than at the first send: a fork of an AgentSession session is one too. */
       runtime?: SessionRuntime
       /** A fork that reads its parent's transcript through the cut (store.ts): the parent, and how many of its entries. */
@@ -1164,13 +1160,15 @@ export class SessionManager {
     const budgetUsd = from ? from.budgetUsd : fresh
     const forkOf = fields.forkOf
     const insert = async (sql: Sql) => {
+      // `mode` is not written: the next release drops the column (plan Phase 10), and a pod of
+      // this one still inserting it during that rollout would fail. Its default fills it until then.
       await sql`
         INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
-                                 status, title, tags, scope, parent_id, mode, runtime, max_turns, budget_usd, budget_root_id,
+                                 status, title, tags, scope, parent_id, runtime, max_turns, budget_usd, budget_root_id,
                                  fork_parent_id, fork_cut)
         VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
                 ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
-                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${fields.mode}, ${fields.runtime ?? null}, ${maxTurns}, ${budgetUsd},
+                ${sql.json(fields.scope as never)}, ${fields.parentId}, ${fields.runtime ?? null}, ${maxTurns}, ${budgetUsd},
                 ${from ? sql`(SELECT coalesce(budget_root_id, id) FROM ai_sessions WHERE id = ${from.id})` : null},
                 ${forkOf?.parentId ?? null}, ${forkOf?.cut ?? null})`
     }
@@ -1231,7 +1229,6 @@ export class SessionManager {
       tags: options.tags ?? [],
       scope: options.scope ?? {},
       parentId: null,
-      mode: 'durable',
       runtime: 'unified',
     }, { rateLimited: true })
     await this.events.append(id, [
@@ -1273,7 +1270,7 @@ export class SessionManager {
     const session = await this.insert(
       id,
       principal,
-      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, mode: 'durable', runtime: 'unified' },
+      { origin: parent.origin, title: options.title, tags: options.tags ?? [], scope: parent.scope, parentId, runtime: 'unified' },
       { budgetOf: parent },
     )
     const agent = options.agent
@@ -1333,17 +1330,6 @@ export class SessionManager {
       'unavailable',
       'sessions run on Temporal (spec 2026-10-13 §10.1), and this agent service has no Temporal or secret key; try again once it has',
     )
-  }
-
-  /**
-   * What a classic turn left parked when it is found lost (DurableRunningSweep, a Stop on a gone
-   * workflow): its pending approvals are cancelled and its approved, unused ones voided, as the
-   * reaper did. No release resumes them now (plan Step 6.3: no `resumeApproved`), so an approval
-   * left open would approve nothing. An AgentSession parks on the gate's entries, which
-   * PendingInputSweep and the Stop cancel; a done summary is kept.
-   */
-  async endClassicLeftovers(id: string): Promise<void> {
-    await this.approvals.cancelPending(id, 'the turn ended', { refresh: false })
   }
 
   /** Tells a session's workflow it was marked done (#1056), or refuses `unavailable`. */
@@ -1524,7 +1510,6 @@ export class SessionManager {
     // interrupt Signal when cancel_input goes unanswered).
     await durable?.handoff(session, `the session was handed off to ${publicLabel(to)}`, to)
     await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
-    await this.approvals.cancelPending(id, `the session was handed off to ${publicLabel(to)}`)
     // Its warm process was spawned for the previous owner (the owner is in the
     // fingerprint, and its question gate is the browser user's): gone here and
     // on every other replica (spec 2026-10-13 §5.3, warmEvict.ts).
@@ -1637,7 +1622,7 @@ export class SessionManager {
     const child = await this.insert(
       randomUUID(),
       principal,
-      { ...fields, mode: 'durable', runtime: 'unified', ...(forkOf ? { forkOf } : {}) },
+      { ...fields, runtime: 'unified', ...(forkOf ? { forkOf } : {}) },
       insertOptions,
     )
     try {

@@ -76,9 +76,9 @@ covers the same ground more briefly.
   calls to the agent take a 30 s heartbeat timeout
   ([`backend/scadbuddy/workflows/flow_tools.py`](../../backend/scadbuddy/workflows/flow_tools.py)
   `_agent_heartbeat`). An agent replica from before #4200 sends no beats, and
-  `agent-tools` is unversioned, so while one still polls (during the API Deployment's
-  rolling update, or after rolling the agent back past #4200) any attempt may land on
-  it. A `turn_tool_tier` whose last attempt missed its beats (the failure the call ends
+  `agent-tools` was unversioned before #2726 Phase 11, so while one still polled (during
+  a rolling update, or after rolling the agent back past #4200) any attempt could land on
+  it; since Phase 11 only the current build takes them (README, "Versioning"). A `turn_tool_tier` whose last attempt missed its beats (the failure the call ends
   with, whatever the earlier attempts did) is asked once more with no heartbeat timeout
   (#4262), so it cannot fail the run's tier check for that; it only takes longer. A
   tier whose attempts are all lost (recorded as started but never delivered, or taken
@@ -99,8 +99,8 @@ covers the same ground more briefly.
   of its start a call from another replica answers "not connected" (an old replica could
   reach it through the Postgres relay before).
   `ai_bridge_messages` stays until #5109, because a replica of the build before #4868
-  still writes it for a tab it finds no live owner for. `agent-tools` is unversioned,
-  so while an old replica still polls it, it can take a `BridgeCall` workflow task. It
+  still writes it for a tab it finds no live owner for. `agent-tools` was unversioned
+  then, so while an old replica still polled it, it could take a `BridgeCall` workflow task. It
   has no such workflow, so it fails the task, and Temporal gives the task again to a
   replica that may be another old one. The workflow's execution timeout leaves 15 s
   past the call's own time for that (`WORKFLOW_SLACK_MS`,
@@ -289,9 +289,10 @@ main on 2026-11-01:
   `scadbuddy.continuation`) and tool activities by queue (`scadbuddy.task_queue`), from
   TraceQL metrics.
 
-If #5173 (Phase 11, versioned agent queues) has merged, `agent-tools` is versioned with
-`agent-sessions`; if #5174's follow-up (Phase 10) has merged, `ai_sessions.mode` and its
-siblings are dropped. Neither changes the behaviour above.
+Since #5173 (Phase 11) `agent-tools` is versioned with `agent-sessions` (deployment
+`scadbuddy-agent`), and the host queues stay unversioned. #5174 (Phase 10, part 1) removed
+the last readers of `ai_sessions.mode`, `turn_id`, `lease_until` and `durable_offset`; once
+its drop PR merges, those columns are gone. Neither changes the behaviour above.
 
 ## 2. Environment variables
 

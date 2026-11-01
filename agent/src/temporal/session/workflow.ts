@@ -275,7 +275,7 @@ export async function AgentSession(started: SessionStart): Promise<void> {
       return
     }
     // Who stopped it (`interrupted by <label>`, manager.ts `interrupt`) is what each waiting entry
-    // ends with, as a classic Stop's cancelled calls say (approvals/service.ts `cancelPending`).
+    // ends with.
     interrupted = arg?.reason || INTERRUPTED
     // Before the activity starts the flag alone stops the turn; once it runs, the cancel does.
     running?.cancel()
