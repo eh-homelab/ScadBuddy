@@ -108,9 +108,8 @@ export type PendingInputEntry = InputEntry & {
   run?: { id: string; name?: string; hop: 'parent' | 'person' | null; reason: string | null; starter_session?: string | null }
 }
 
-/** A session as the gate needs it: its mode, and who owns and started it. */
+/** A session as the gate needs it: who owns and started it. */
 export type GateSession = {
-  mode: 'classic' | 'durable'
   owner: Owner
   creator: Pick<Owner, 'kind' | 'id'>
 }
@@ -263,11 +262,10 @@ export class PendingProjection {
   /** The session, or undefined when there is none. */
   async session(id: string): Promise<GateSession | undefined> {
     const [row] = await this.#sql<
-      { mode: GateSession['mode']; owner_kind: Owner['kind']; owner_id: string; owner_label: string; creator_kind: Owner['kind']; creator_id: string }[]
-    >`SELECT mode, owner_kind, owner_id, owner_label, creator_kind, creator_id FROM ai_sessions WHERE id = ${id}`
+      { owner_kind: Owner['kind']; owner_id: string; owner_label: string; creator_kind: Owner['kind']; creator_id: string }[]
+    >`SELECT owner_kind, owner_id, owner_label, creator_kind, creator_id FROM ai_sessions WHERE id = ${id}`
     return row
       ? {
-          mode: row.mode,
           owner: { kind: row.owner_kind, id: row.owner_id, label: row.owner_label },
           creator: { kind: row.creator_kind, id: row.creator_id },
         }

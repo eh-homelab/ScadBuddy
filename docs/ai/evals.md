@@ -82,7 +82,7 @@ Every parked outward call is **denied** through the pending-input route's `respo
 ([`agent/src/routes/pendingInput.ts`](../../agent/src/routes/pendingInput.ts)), as the
 browser user denies one: an eval never approves anything. The model then gets the
 session's refusal, `The user denied <tool>; it was not run. …`
-([`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)). The outcome is
+([`agent/src/gate/refusal.ts`](../../agent/src/gate/refusal.ts)). The outcome is
 folded from the worker's Claude Code message stream, so it records what the model saw,
 the init message's model and Claude Code version included. Its tier decisions are the
 permission seam's own, as each call ran (`onDecision`,

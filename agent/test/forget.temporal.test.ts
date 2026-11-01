@@ -42,7 +42,6 @@ describe.skipIf(SKIP)(`durable payloads and forgetSubject${WHY}`, () => {
   it("seals a session's history under its key, and forgetSubject shreds it with its rows", async () => {
     const m = manager({ sql: db.sql, paths: await tempPaths(), run: scriptedRunner(() => ({ reply: 'ok' })).runner })
     const { session } = await m.start(browser, { origin: 'chat', title: 't' })
-    await db.sql`UPDATE ai_sessions SET mode = 'durable' WHERE id = ${session.id}`
     const subject = `session-${session.id}`
     const keys = new PgPayloadKeys(db.sql, kek)
     const dataConverter = { payloadCodecs: [new SubjectPayloadCodec(keys)] }

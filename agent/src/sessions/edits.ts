@@ -79,8 +79,8 @@ export class SessionEdits {
     const dismissed = await this.deps.sql.begin(async (tx) => {
       const [before] = await tx<Before[]>`
         SELECT status AS was, archived_at IS NOT NULL AS archived,
-               -- A turn holds it: a classic claim, or a durable session's running or waiting status.
-               (turn_id IS NOT NULL OR status IN ('running', 'waiting_approval', 'waiting_input')) AS busy,
+               -- A turn holds it: running, or parked on one of its calls.
+               status IN ('running', 'waiting_approval', 'waiting_input') AS busy,
                (EXISTS (SELECT 1 FROM ai_approvals WHERE session_id = ${id} AND decision IS NULL)
                 OR EXISTS (SELECT 1 FROM ai_questions q WHERE q.session_id = ${id} AND q.outcome IS NULL
                            AND NOT ${isDoneSummary(tx, 'q')})
