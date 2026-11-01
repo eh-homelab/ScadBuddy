@@ -890,14 +890,27 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     use local git repos (`test/support/gitRepo.ts`). Their MCP servers' http ones go
     through the forwarder (`plugins/packages/mcp.ts`); `temporal/turnPackages.ts` shares a
     package under `<payload dir>/plugins/<content hash>/` for the retired Python turn
-    (Step 8.2 removes it). Of an allowed package's built-ins the engine
-    runs `Bash`/`PowerShell` (each parked for approval); the agent provides the rest as
-    the `builtin` turn tools (`src/builtins/`, #2393: the file tools on the session
-    workspace under `/workspace`, WebFetch through the egress check, WebSearch and
-    WebFetch's model work as one-shot queries on the session's credential, the task
-    list as a workspace file), each outward, and the listing's `system_note` tells the
-    model; `src/builtins/schemas.json` is Claude Code's own input schemas
-    (`test/builtins.sdk.test.ts`, `UPDATE_BUILTIN_SCHEMAS=1`). `CronCreate`, `CronDelete`,
+    (Step 8.2 removes it).
+  - Claude Code's own built-ins (plan 2026-10-13 Step 9.6): every session offers `Read`,
+    `Glob`, `Grep` and the task list (`TaskCreate`, `TaskGet`, `TaskList`, `TaskUpdate`) at
+    `read`, and `Write`, `Edit` and `NotebookEdit` at `write`, native in its Claude Code
+    process, each an item of the access source `builtin:claude-code`
+    (`src/access/nativeBuiltins.ts`; `resolver.ts` `native`, `live.ts`). Their paths are
+    confined to the session's working directory by the seam (`src/harness/confine.ts`, an
+    `InputGuard` in both canUseTool and the PreToolUse hook: `..`, absolute paths and links
+    out are refused). `Bash` and `PowerShell` are `off`: Claude Code's sandbox cannot run in the
+    worker pod (no bwrap, and `unshare --mount` is refused under AppArmor; measured
+    2026-11-01), so a sandbox pod (#779) comes first. An allowed package's `builtinTools`
+    only switch an `off` one on, at its package tier (`outward` by default); they no longer
+    decide what exists. The task list is `$CLAUDE_CONFIG_DIR/tasks/<session id>/` (measured
+    on SDK 0.3.310), linked to the session directory's `_claude/tasks/`
+    (`stateDirs.ts` `linkTaskList`), so it moves with the workspace.
+    **Breaking for package authors:** the `builtin__<Name>` file and task tools of the
+    retired durable turn, and their `/workspace` paths, are gone; a skill names Claude
+    Code's own `Read`, `Write` and the rest, with paths in the session directory (its cwd).
+    The agent still provides `WebFetch` and `WebSearch` (egress-checked, decision Q2) and the
+    background ones in place of Claude Code's (`src/builtins/server.ts`, in-process
+    `builtin` server, `mcp__builtin__<Name>`). `CronCreate`, `CronDelete`,
     `CronList`, `ScheduleWakeup`, `Monitor`, `Workflow` and `TaskStop` are the session's own in both modes
     (`src/background/`: `ai_background_tasks`, one `BackgroundTask` workflow per task on
     `agent-tools` that sends the prompt when due and the session is idle; a Monitor's source

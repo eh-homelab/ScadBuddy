@@ -120,6 +120,19 @@ export class AccessResolver {
     return strictest(each) ?? 'outward'
   }
 
+  /**
+   * One of Claude Code's own built-ins (access/nativeBuiltins.ts): its item under
+   * `builtin:claude-code` (its row, else `declared`; `off` with the source switched off). A
+   * package can switch an `off` one on: then `builtin` over the `packages` that name it.
+   */
+  async native(name: string, declared: ToolAccess, packages: readonly string[]): Promise<ToolAccess> {
+    const rows = this.reader ? await this.reader.rows([BUILTIN_SOURCES.claudeCode]) : []
+    const row = rows.find((r) => r.source === BUILTIN_SOURCES.claudeCode && r.item === name)
+    const own = !sourceEnabled(BUILTIN_SOURCES.claudeCode, rows) ? 'off' : row && isToolAccess(row.access) ? row.access : declared
+    if (own !== 'off' || packages.length === 0) return own
+    return this.builtin(name, packages)
+  }
+
   /** Every row of the given sources, in one read (the call rule's, items.ts `offCallItem`); none without a reader. */
   async rows(sources: readonly string[]): Promise<AccessRow[]> {
     return this.reader && sources.length > 0 ? this.reader.rows(sources) : []

@@ -21,12 +21,15 @@ import {
   type ApprovalGate,
   type ApprovalPreparer,
   type DecisionListener,
+  type InputGuard,
   type LiveSeam,
   makeCanUseTool,
   makePreToolUseHook,
   makeResultScreenHook,
+  type RiskTier,
   type TierResolver,
 } from './permissions.js'
+import { confineGuard } from './confine.js'
 import { OWN_PLUGIN_TOOLS, ownPluginTierOf } from './ownPlugin.js'
 import { webFetchEgressHook } from './webFetchEgress.js'
 import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, type QuestionGate, questionServer } from './questions.js'
@@ -164,6 +167,12 @@ export type HarnessRun = {
    * of the pin is its only check; without Bash it refuses the command.
    */
   builtinTools?: string[]
+  /**
+   * Claude Code's own built-ins the session offers (plan 2026-10-13 Step 9.6,
+   * access/nativeBuiltins.ts), each at its tier. Their path inputs are confined to
+   * `cwd` (harness/confine.ts), as both canUseTool and the PreToolUse hook.
+   */
+  nativeTools?: readonly { name: string; tier: RiskTier }[]
   /**
    * Built-ins a nested one-shot query gets on its own, without a package
    * (builtins/nested.ts: a durable turn's WebSearch runs Claude Code's). Tiered by
@@ -348,9 +357,11 @@ function loadsPlugins(run: Pick<HarnessRun, 'ownPlugin' | 'pluginPaths' | 'allow
  * then its plugins' tiers, then `run.tierOf`.
  */
 export function harnessTierOf(
-  run: Pick<HarnessRun, 'remotePlugins' | 'tierOf' | 'ownPlugin' | 'pluginPaths' | 'allowedPluginPaths'>,
+  run: Pick<HarnessRun, 'remotePlugins' | 'tierOf' | 'ownPlugin' | 'pluginPaths' | 'allowedPluginPaths' | 'nativeTools'>,
 ): TierResolver {
-  const given = run.tierOf ?? (() => undefined)
+  const native = new Map((run.nativeTools ?? []).map((t) => [t.name, t.tier]))
+  const tiers = run.tierOf ?? (() => undefined)
+  const given: TierResolver = native.size ? (toolName, input) => native.get(toolName) ?? tiers(toolName, input) : tiers
   const remote = run.remotePlugins?.length ? pluginTierResolver(run.remotePlugins) : undefined
   const base: TierResolver = remote ? (toolName, input) => remote(toolName) ?? given(toolName, input) : given
   if (!loadsPlugins(run)) return base
@@ -433,7 +444,12 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     }
   }
   const browser = run.browser
-  const guard = browser ? (name: string, input: unknown) => browser.check(name, input) : undefined
+  // The native file tools' paths first: a call outside the session directory is refused whatever else says.
+  const confine = run.nativeTools?.length && run.cwd !== undefined ? confineGuard(run.cwd) : undefined
+  const guard: InputGuard | undefined =
+    confine || browser
+      ? async (name, input) => (await confine?.(name, input)) ?? (browser ? browser.check(name, input) : undefined)
+      : undefined
   const permission = makeCanUseTool(tierOf, run.onDecision, gate, guard, run.prepareApproval, run.live)
   const abort = new AbortController()
   const options: Options = {
@@ -508,6 +524,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       ...(loadsPlugins(run) ? OWN_PLUGIN_TOOLS : []),
       ...(questions ? [ASK_USER_QUESTION] : []),
       ...(run.allowedPluginPaths?.length ? (run.builtinTools ?? []) : []),
+      ...(run.nativeTools ?? []).map((t) => t.name),
       ...(run.nestedTools ?? []),
     ]),
   ]

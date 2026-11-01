@@ -1,5 +1,5 @@
 import { constants } from 'node:fs'
-import { access, chmod, mkdir, rm } from 'node:fs/promises'
+import { access, chmod, copyFile, lstat, mkdir, readdir, readlink, rm, symlink } from 'node:fs/promises'
 import path from 'node:path'
 import { isUuid } from './uuid.js'
 import { claudeConfigDir, pluginCacheDir, scratchDir, type HarnessPaths } from './options.js'
@@ -46,6 +46,34 @@ export function sessionWorkDir(paths: HarnessPaths, sessionId: string): string {
  */
 export async function removeLegacyBrowserDir(paths: HarnessPaths): Promise<void> {
   await rm(path.join(paths.stateDir, 'browser'), { recursive: true, force: true })
+}
+
+/** Where in a session's working directory its Claude Code task list is: a workspace path, so the write-back keeps it. */
+export const TASK_LIST_DIR = '_claude/tasks'
+
+/**
+ * Points Claude Code's task list for the session at its working directory (plan 2026-10-13
+ * Step 9.6). Measured on the bundled Claude Code (SDK 0.3.310, 2026-11-01): TaskCreate keeps
+ * the list in `$CLAUDE_CONFIG_DIR/tasks/<session id>/<n>.json`, in neither the transcript nor
+ * the cwd, and the config directory is the pod's own. So that path is made a link to
+ * `<session dir>/_claude/tasks`: the files are then workspace files, written back with the
+ * directory and refilled at any pod's placement. A list an older image kept there is moved in.
+ */
+export async function linkTaskList(paths: HarnessPaths, sessionDir: string, sessionId: string): Promise<void> {
+  if (!isUuid(sessionId)) throw new StateDirError(`not a session id: ${JSON.stringify(sessionId)}`)
+  const target = path.join(sessionDir, TASK_LIST_DIR)
+  await mkdir(target, { recursive: true, mode: 0o700 })
+  const link = path.join(claudeConfigDir(paths), 'tasks', sessionId.toLowerCase())
+  await mkdir(path.dirname(link), { recursive: true })
+  const st = await lstat(link).catch(() => undefined)
+  if (st?.isSymbolicLink() && (await readlink(link)) === target) return
+  if (st?.isDirectory()) {
+    for (const name of await readdir(link)) {
+      if (!name.startsWith('.')) await copyFile(path.join(link, name), path.join(target, name), constants.COPYFILE_EXCL).catch(() => {})
+    }
+  }
+  if (st) await rm(link, { recursive: true, force: true })
+  await symlink(target, link, 'dir')
 }
 
 /** Creates the session's working directory on this replica, idempotently. */

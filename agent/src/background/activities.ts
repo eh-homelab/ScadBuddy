@@ -1,6 +1,5 @@
 import { Context } from '@temporalio/activity'
 import { createHash } from 'node:crypto'
-import { WORKSPACE_ROOT } from '../builtins/files.js'
 import type { SessionFiles } from '../workspace/store.js'
 import { type SessionDirectory, watchCaps } from '../workspace/directory.js'
 import type { HarnessPaths } from '../harness/options.js'
@@ -103,6 +102,9 @@ export type BackgroundActivityDeps = {
   /** The session workspace, where a workflow({scriptPath}) script is read. */
   workspace?: Pick<SessionFiles, 'read'> | undefined
 }
+
+/** The root a Workflow's scriptPath names workspace files under (the workspace_* tools' paths, relative to it). */
+export const WORKSPACE_ROOT = '/workspace'
 
 /** Where a Workflow's script is kept in the session workspace, for scriptPath (Claude Code keeps it in its session dir). */
 export function workflowScriptPath(name: string, taskId: string): string {
