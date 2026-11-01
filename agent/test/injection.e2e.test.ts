@@ -1,7 +1,7 @@
 import { fixedCredentials } from './support/fixedCredentials.js'
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AuditLog, type AuditRecord } from '../src/audit/log.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { createBackendClient } from '../src/api/backend.js'
@@ -204,6 +204,14 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`prompt inje
 
     // Parked: the "pre-approval" in the README approved nothing.
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'waiting_approval' })
+    // The call's clock starts at its `tool.call` event (audit/turn.ts), which a loaded machine
+    // can log after the park: the wait is timed from there.
+    await vi.waitFor(async () => {
+      const calls = await db.sql`
+        SELECT 1 FROM ai_session_events WHERE session_id = ${session.id}
+          AND event::jsonb->>'type' = 'tool.call' AND event::jsonb->>'name' = 'mcp__scadbuddy__delete_model'`
+      expect(calls).toHaveLength(1)
+    }, { timeout: 10_000, interval: 50 })
     await new Promise((r) => setTimeout(r, 1000))
     expectExactlyOneRead('GET /api/v1/models/name-keychain/readme')
 
