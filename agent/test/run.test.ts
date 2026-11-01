@@ -1,11 +1,13 @@
+import { type ChildProcess, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { createSdkMcpServer, type SDKMessage, type SDKResultMessage, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { Credential } from '../src/credentials.js'
+import { credentialGateway, startCredentialGateway, stopCredentialGateway } from '../src/gateway/server.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { RiskTier, ToolDecision } from '../src/harness/permissions.js'
 import { PluginRefusedError } from '../src/harness/plugins.js'
@@ -35,34 +37,44 @@ describe('buildHarnessOptions', () => {
   const paths = { stateDir: '/var/lib/scadbuddy-agent' }
   const base: HarnessRun = { paths, credential: { kind: 'anthropic_api_key', secret: API_KEY }, prompt: 'hi' }
 
-  it('passes an API key as ANTHROPIC_API_KEY and nothing else', () => {
-    expect(credentialEnv({ kind: 'anthropic_api_key', secret: API_KEY })).toEqual({ ANTHROPIC_API_KEY: API_KEY })
+  const lease = { baseUrl: 'http://127.0.0.1:1234/t/tok', token: 'tok' }
+
+  it('passes an API key kind as the gateway lease, its token in ANTHROPIC_API_KEY', () => {
+    expect(credentialEnv({ kind: 'anthropic_api_key', secret: API_KEY }, lease)).toEqual({
+      ANTHROPIC_BASE_URL: lease.baseUrl,
+      ANTHROPIC_API_KEY: 'tok',
+    })
   })
 
-  it('passes a Claude Code OAuth token as CLAUDE_CODE_OAUTH_TOKEN and nothing else', () => {
+  it('passes a Claude Code OAuth token kind as the gateway lease, its token in CLAUDE_CODE_OAUTH_TOKEN', () => {
     // In x-api-key (ANTHROPIC_API_KEY) Anthropic answers an sk-ant-oat01- token with 401.
-    expect(credentialEnv({ kind: 'claude_oauth_token', secret: OAUTH_TOKEN })).toEqual({
-      CLAUDE_CODE_OAUTH_TOKEN: OAUTH_TOKEN,
+    expect(credentialEnv({ kind: 'claude_oauth_token', secret: OAUTH_TOKEN }, lease)).toEqual({
+      ANTHROPIC_BASE_URL: lease.baseUrl,
+      CLAUDE_CODE_OAUTH_TOKEN: 'tok',
     })
   })
 
-  it('passes a gateway as ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN', () => {
-    expect(credentialEnv({ kind: 'gateway', baseUrl: 'https://llm.example', secret: GATEWAY_TOKEN })).toEqual({
-      ANTHROPIC_BASE_URL: 'https://llm.example',
-      ANTHROPIC_AUTH_TOKEN: GATEWAY_TOKEN,
+  it("passes a gateway kind as the lease, never its own base URL, its token in ANTHROPIC_AUTH_TOKEN", () => {
+    expect(credentialEnv({ kind: 'gateway', baseUrl: 'https://llm.example', secret: GATEWAY_TOKEN }, lease)).toEqual({
+      ANTHROPIC_BASE_URL: lease.baseUrl,
+      ANTHROPIC_AUTH_TOKEN: 'tok',
     })
   })
 
-  it('keeps the least-privilege base and puts the credential in env only', () => {
+  it('keeps the least-privilege base, and gives Claude Code a gateway token, never the credential (Step 9.4)', () => {
     const options = buildHarnessOptions(base)
     expect(options.tools).toEqual([])
     expect(options.settingSources).toEqual([])
     expect(options.strictMcpConfig).toBe(true)
     expect(options.permissionMode).toBe('default')
     expect(options.allowedTools).toBeUndefined()
+    expect(options.env?.ANTHROPIC_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/t\/[A-Za-z0-9_-]{32}$/)
+    expect(options.env?.ANTHROPIC_BASE_URL?.endsWith(`/t/${options.env.ANTHROPIC_API_KEY}`)).toBe(true)
+    expect(JSON.stringify(options)).not.toContain(API_KEY)
     expect(Object.keys(options.env ?? {}).sort()).toEqual(
       [
         'ANTHROPIC_API_KEY',
+        'ANTHROPIC_BASE_URL',
         'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS',
         'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
         'CLAUDE_CONFIG_DIR',
@@ -71,9 +83,6 @@ describe('buildHarnessOptions', () => {
         ...(process.env.PATH === undefined ? [] : ['PATH']),
       ].sort(),
     )
-    // Nowhere else in the options.
-    const { env: _env, ...rest } = options
-    expect(JSON.stringify(rest)).not.toContain(API_KEY)
     expect(process.env.ANTHROPIC_API_KEY).not.toBe(API_KEY)
   })
 
@@ -295,6 +304,79 @@ describe.skipIf(cliMissing !== undefined)(`the harness against a fake Anthropic 
     // The credential appears in no message and no stderr line.
     expect(JSON.stringify(messages)).not.toContain(GATEWAY_TOKEN)
     expect(stderr.join('\n')).not.toContain(GATEWAY_TOKEN)
+  })
+
+  describe('through the credential gateway (Step 9.4)', () => {
+    beforeEach(async () => {
+      // The API-key kinds' upstream is api.anthropic.com; here, the fake.
+      await stopCredentialGateway()
+      await startCredentialGateway({ anthropicUrl: fake.url })
+    })
+    afterEach(async () => {
+      await stopCredentialGateway()
+      await startCredentialGateway()
+    })
+
+    const kinds: { name: string; credential: () => Credential; header: (r: RecordedRequest) => unknown; expected: string }[] = [
+      { name: 'anthropic_api_key', credential: () => ({ kind: 'anthropic_api_key', secret: API_KEY }), header: (r) => r.headers['x-api-key'], expected: API_KEY },
+      {
+        name: 'claude_oauth_token',
+        credential: () => ({ kind: 'claude_oauth_token', secret: OAUTH_TOKEN }),
+        header: (r) => r.headers.authorization,
+        expected: `Bearer ${OAUTH_TOKEN}`,
+      },
+      { name: 'gateway', credential: gateway, header: (r) => r.headers.authorization, expected: `Bearer ${GATEWAY_TOKEN}` },
+    ]
+
+    it.each(kinds)('runs a turn on $name with the credential only upstream, never in the process', async ({ credential, header, expected }) => {
+      script = () => ({ text: 'Hello through the gateway.' })
+      const run = credential()
+      let child: ChildProcess | undefined
+      let environ: string | undefined
+      const given: (Record<string, string | undefined> | undefined)[] = []
+      const messages: SDKMessage[] = []
+      const q = runHarness({
+        paths: { stateDir },
+        credential: run,
+        prompt: 'Say hello',
+        model: 'claude-sonnet-4-5',
+        maxTurns: 1,
+        spawnClaudeCodeProcess: (o) => {
+          given.push(o.env)
+          const spawned = spawn(o.command, o.args, { cwd: o.cwd, env: o.env, stdio: ['pipe', 'pipe', 'inherit'], signal: o.signal })
+          child = spawned
+          return spawned
+        },
+      })
+      for await (const m of q) {
+        // The live process's own environment, as the kernel holds it.
+        if (environ === undefined && child?.pid !== undefined) environ = await readFile(`/proc/${child.pid}/environ`, 'utf8').catch(() => '')
+        messages.push(m)
+      }
+      expect(messages.find((m) => m.type === 'result')).toMatchObject({ subtype: 'success', result: 'Hello through the gateway.' })
+      expect(given).toHaveLength(1)
+      const env = given[0] ?? {}
+      expect(env.ANTHROPIC_BASE_URL).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/t\//)
+      expect(JSON.stringify(env)).not.toContain(run.secret)
+      if (process.platform === 'linux') {
+        expect(environ).toContain('ANTHROPIC_BASE_URL=http://127.0.0.1:')
+        expect(environ).not.toContain(run.secret)
+      }
+      // The endpoint got the real credential, in its kind's own header, and never the token.
+      const calls = fake.messageCalls()
+      expect(calls.length).toBeGreaterThanOrEqual(1)
+      const token = env.ANTHROPIC_BASE_URL?.split('/t/')[1] ?? ''
+      for (const call of calls) {
+        expect(header(call)).toBe(expected)
+        expect(JSON.stringify(call.headers)).not.toContain(token)
+        // Claude Code still presents an OAuth token as one, which the endpoint needs (measured on 2.1.310).
+        expect(String(call.headers['anthropic-beta']).split(',').includes('oauth-2025-04-20')).toBe(run.kind === 'claude_oauth_token')
+      }
+      // Only the Messages endpoint, which the gateway's allowlist passes (gateway/server.ts ENDPOINTS).
+      expect(new Set(fake.requests.map((r) => `${r.method} ${r.path}`))).toEqual(new Set(['POST /v1/messages']))
+      // The token died with the query.
+      expect(credentialGateway().leases).toBe(0)
+    })
   })
 
   it("runs the turn as a plugin's subagent when given one (a Workflow agent's agentType, #2393)", async () => {

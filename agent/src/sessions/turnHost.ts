@@ -575,6 +575,10 @@ export class TurnHost {
             ? controller.signal.reason.message
             : 'the turn was interrupted'
           : undefined
+      const cut = stopped !== undefined || !result ? run.cutUsd : 0
+      // What the credential gateway metered past Claude Code's own reckoning (gateway/server.ts):
+      // requests made with the process's token that no result prices, a command's (Step 9.4).
+      const uncounted = Math.max(run.meteredUsd - (run.spentUsd + cut), 0)
       const end: TallyInput = {
         stopped,
         interrupted: stopped,
@@ -584,7 +588,7 @@ export class TurnHost {
         secrets: run.secrets,
         turnUsd: run.spentUsd,
         // WebFetch's own model calls are in no result, so they are added in every outcome (#2684).
-        cutUsd: (stopped !== undefined || !result ? run.cutUsd : 0) + run.nestedUsd,
+        cutUsd: cut + uncounted + run.nestedUsd,
       }
       const tally = tallyTurn(session, end)
       outcome = tally.outcome

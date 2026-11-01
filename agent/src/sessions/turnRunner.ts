@@ -207,6 +207,7 @@ export class TurnRunner {
     'memoryHooks',
     'traceHooks',
     'stderr',
+    'onSpend',
   ]
 
   /**
@@ -247,6 +248,7 @@ export class TurnRunner {
     memoryHooks: 'slot',
     traceHooks: 'slot',
     stderr: 'spawn', // a constant sink (fingerprint rule)
+    onSpend: 'slot', // the credential gateway's meter, to the slot's turn (gateway/server.ts)
   }
 
   private readonly deps: TurnRunnerDeps
@@ -679,6 +681,8 @@ export class TurnRunner {
         ...(memory ? { memoryHooks: slotHooks(memory.hooks('', '').hooks, slot, (turn) => turn.memory?.hooks) } : {}),
         traceHooks: TurnTrace.hooksFor(() => slot.current?.trace),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
+        // What the credential gateway priced, to the turn the process serves (turnCore.ts `runningUsd`).
+        onSpend: (usd) => slot.meter(usd),
       }
       inProcessServers = Object.keys(run.mcpServers ?? {})
       const first = candidates[0]

@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
@@ -6,6 +5,7 @@ import path from 'node:path'
 import { createSdkMcpServer, type SDKMessage, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
+import { startCredentialGateway, stopCredentialGateway } from '../src/gateway/server.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import {
   type AttemptOutcome,
@@ -212,26 +212,31 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     }
     const reports: { id: string; outcome: AttemptOutcome; next: string | undefined }[] = []
     const messages: SDKMessage[] = []
-    for await (const m of runWithFallback(
-      {
-        paths: { stateDir },
-        prompt: 'Make a box',
-        model: 'claude-sonnet-4-5',
-        maxTurns: 4,
-        sessionId: randomUUID(),
-        // An OAuth key's requests go to api.anthropic.com; this sends them to the fake.
-        spawnClaudeCodeProcess: (o) =>
-          spawn(o.command, o.args, { cwd: o.cwd, env: { ...o.env, ANTHROPIC_BASE_URL: fake.url }, stdio: ['pipe', 'pipe', 'ignore'] }),
-      },
-      {
-        candidates: [subscription, pooled('b', TOKEN_B)],
-        report: (attempt, outcome, next) => {
-          reports.push({ id: attempt.id, outcome, next: next?.id })
-          return Promise.resolve()
+    // An OAuth key's requests go to api.anthropic.com; the credential gateway sends them to the fake.
+    await stopCredentialGateway()
+    await startCredentialGateway({ anthropicUrl: fake.url })
+    try {
+      for await (const m of runWithFallback(
+        {
+          paths: { stateDir },
+          prompt: 'Make a box',
+          model: 'claude-sonnet-4-5',
+          maxTurns: 4,
+          sessionId: randomUUID(),
         },
-      },
-    )) {
-      messages.push(m)
+        {
+          candidates: [subscription, pooled('b', TOKEN_B)],
+          report: (attempt, outcome, next) => {
+            reports.push({ id: attempt.id, outcome, next: next?.id })
+            return Promise.resolve()
+          },
+        },
+      )) {
+        messages.push(m)
+      }
+    } finally {
+      await stopCredentialGateway()
+      await startCredentialGateway()
     }
     expect(messages.find((m) => m.type === 'result')).toMatchObject({ subtype: 'success', is_error: false, result: 'Box made.' })
     expect(callsWith(OAUTH_A)).toHaveLength(1)
