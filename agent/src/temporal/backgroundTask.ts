@@ -5,6 +5,7 @@ import {
   continueAsNew,
   defineSignal,
   isCancellation,
+  patched,
   proxyActivities,
   setHandler,
   sleep,
@@ -30,6 +31,8 @@ type Activities = {
   bg_monitor_end(input: { taskId: string; end: MonitorEnd }): Promise<void>
   bg_deliver(input: { taskId: string; waitedMs: number }): Promise<DeliverResult>
   wf_end(input: { taskId: string; outcome: Exclude<WorkflowOutcome, { status: 'gone' }> }): Promise<void>
+  bg_schedule(input: { taskId: string }): Promise<boolean>
+  bg_unschedule(input: { taskId: string; sessionId: string }): Promise<void>
 }
 
 type Source = (input: { taskId: string }) => Promise<MonitorResult>
@@ -45,8 +48,11 @@ const acts = proxyActivities<Activities>({
 /** How often a due task asks a busy session again. */
 export const BUSY_RETRY_MS = 30_000
 
+/** A recurring cron job's workflow hands its fires to a Schedule (plan 2026-10-13 Step 9.8). */
+export const CRON_SCHEDULE_PATCH = 'cron-schedule-9.8'
+
 /** `retryMs`: how often a busy session is asked again (BUSY_RETRY_MS; tests set less). */
-export async function BackgroundTask(input: { taskId: string; kind?: string; retryMs?: number }): Promise<void> {
+export async function BackgroundTask(input: { taskId: string; kind?: string; recurring?: boolean; retryMs?: number }): Promise<void> {
   const { taskId } = input
   const retryMs = input.retryMs ?? BUSY_RETRY_MS
   try {
@@ -59,6 +65,10 @@ export async function BackgroundTask(input: { taskId: string; kind?: string; ret
       return
     }
     for (;;) {
+      // A recurring cron job is a Schedule from Step 9.8 on: one made before it becomes one at its
+      // next occurrence (and the start-time pass converts the rest, background/temporal.ts). A
+      // one-shot job, started with `recurring: false`, never asks; one started before it may.
+      if (input.kind === 'cron' && input.recurring !== false && patched(CRON_SCHEDULE_PATCH) && (await acts.bg_schedule({ taskId }))) return
       const step = await acts.bg_next({ taskId })
       if ('end' in step) {
         await acts.bg_finish({ taskId, state: 'done', detail: step.end })
@@ -84,6 +94,41 @@ export async function BackgroundTask(input: { taskId: string; kind?: string; ret
     // The row was ended by the cancel already (service.ts); this covers a cancel from
     // elsewhere (the Temporal UI, an operator).
     await CancellationScope.nonCancellable(() => acts.bg_finish({ taskId, state: 'cancelled', detail: 'cancelled' }))
+  }
+}
+
+/** The session and task a Schedule's fire is for, from its workflow id: `bgfire-<session>-<task>-<fire time>` (background/service.ts). */
+export function fireTask(workflowId: string): { sessionId: string; taskId: string } | undefined {
+  const m = /^bgfire-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-([0-9a-f]{8})-/.exec(workflowId)
+  return m ? { sessionId: m[1]!, taskId: m[2]! } : undefined
+}
+
+/**
+ * One occurrence of a recurring cron job, started by its Schedule (plan 2026-10-13 Step 9.8):
+ * sends the prompt once the session is idle (asked again every `retryMs`; given up after an
+ * hour busy), then records the next occurrence. A task that ends (cancelled, its session gone,
+ * past its 7 days) ends its row and its Schedule.
+ */
+export async function BackgroundFire(input?: { retryMs?: number }): Promise<void> {
+  const fire = fireTask(workflowInfo().workflowId)
+  if (fire === undefined) return
+  const { taskId } = fire
+  const retryMs = input?.retryMs ?? BUSY_RETRY_MS
+  const due = Date.now()
+  for (;;) {
+    const fired = await acts.bg_fire({ taskId, waitedMs: Date.now() - due })
+    if (fired.result === 'sent' || fired.result === 'skipped') break
+    if (fired.result === 'end') {
+      await acts.bg_finish({ taskId, state: fired.state, detail: fired.reason })
+      await acts.bg_unschedule(fire)
+      return
+    }
+    await sleep(retryMs)
+  }
+  const step = await acts.bg_next({ taskId })
+  if ('end' in step) {
+    await acts.bg_finish({ taskId, state: 'done', detail: step.end })
+    await acts.bg_unschedule(fire)
   }
 }
 

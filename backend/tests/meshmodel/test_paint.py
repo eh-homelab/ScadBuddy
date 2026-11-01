@@ -25,10 +25,11 @@ from scadbuddy.meshmodel.paint import (
     CarriedPaint,
     Source,
     carry_paint,
-    paint_warnings,
+    mirrored,
     placement,
     read_carried,
     scene_notes,
+    select,
     transfer,
     turned,
     with_params,
@@ -40,12 +41,12 @@ from scadbuddy.meshmodel.scene import (
     Scene,
     SceneObject,
     SceneSource,
-    Transform,
     dump_scene,
     text_sha256,
 )
-from scadbuddy.render.objects3mf import ReadObject
+from scadbuddy.render.objects3mf import ReadObject, read_objects
 from scadbuddy.render.split import ColourPart, Paint
+from tests.test_objects3mf import MIRROR, _at_origin, _split_box, _triangles
 
 SOURCE = SceneSource(kind="upload", name="box.3mf", sha256="ab" * 32)
 ORANGE, GREEN, PURPLE = "#F08A24", "#3A7D2C", "#7B2FBE"
@@ -86,12 +87,10 @@ def written(directory: Path, read: list[ReadObject]) -> Scene:
     return save(directory, scene)
 
 
-def rendered(
-    directory: Path, scene: Scene, colour: str, *, mirror: bool = False
-) -> trimesh.Trimesh:
+def rendered(directory: Path, scene: Scene, colour: str) -> trimesh.Trimesh:
     """What OpenSCAD's op-free render of the scene's ``colour`` parts looks like: world
     coordinates to 6 decimals, each face starting at another vertex; wound the other
-    way where the object is mirrored (``mirror``), as the render re-orients it."""
+    way where the object is mirrored, as the render re-orients it."""
     load = mesh_loader(directory)
     meshes = []
     for obj in scene.objects:
@@ -101,7 +100,7 @@ def rendered(
                 continue
             mesh = load(part.mesh)
             faces = np.asarray(mesh.faces)
-            if mirror:
+            if mirrored(obj):
                 faces = faces[:, ::-1]
             rolled = np.array([np.roll(face, -(i % 3)) for i, face in enumerate(faces)])
             world = np.round(np.asarray(mesh.vertices) @ m.T + t, 6)
@@ -125,8 +124,9 @@ def carried_one(
     directory: Path, output: trimesh.Trimesh, colour: str = ORANGE, **params: float
 ) -> CarriedPaint:
     found, _ = carry_paint(directory, params, [ColourPart(1, "Body", colour, output)])
-    assert found[0] is not None
-    return found[0]
+    (one,) = found[0]
+    assert one.faces is None
+    return one
 
 
 def test_an_op_free_part_keeps_every_code_verbatim(tmp_path: Path) -> None:
@@ -214,26 +214,108 @@ def test_an_exposed_translate_carries_the_paint_to_where_it_renders(tmp_path: Pa
     assert carried_one(tmp_path, output, box_x=30).paint.codes == codes
     # At the scene's own value the render is 30 mm away from every source triangle.
     found, _ = carry_paint(tmp_path, {}, [ColourPart(1, "Body", ORANGE, output)])
-    assert found == [None]
+    assert found == [()]
 
 
-def test_a_mirrored_part_keeps_only_whole_colours_and_says_so(tmp_path: Path) -> None:
-    # That OpenSCAD renders a mirrored object's faces reversed is an assumption here;
-    # the image test (Task 6) measures it.
-    scene = written(tmp_path, body())
-    flipped = scene.objects[0].model_copy(update={"transform": Transform(scale=(-1.0, 1.0, 1.0))})
-    scene = save(tmp_path, scene.model_copy(update={"objects": [flipped]}))
+def flip(scene: Scene, *indices: int) -> Scene:
+    """``scene`` with the objects at ``indices`` mirrored in x about their own origin."""
+    objects = [
+        obj.model_copy(
+            update={"transform": obj.transform.model_copy(update={"scale": (-1.0, 1.0, 1.0)})}
+        )
+        if index in indices
+        else obj
+        for index, obj in enumerate(scene.objects)
+    ]
+    return scene.model_copy(update={"objects": objects})
+
+
+def test_a_mirrored_part_keeps_every_code_verbatim_its_corners_reversed(
+    tmp_path: Path,
+) -> None:
+    """#4976: a mirrored object renders wound the other way (an assumption here, which
+    `tests/test_mesh_models_openscad.py` measures in the image), so its codes run against
+    its rendered faces' corner order: the carried painting is `Paint.reversed`, as
+    Arrange's is (#4015), and no finer painting is lost."""
+    scene = save(tmp_path, flip(written(tmp_path, body()), 0))
     _, codes = painted_box()
-    found, warnings = carry_paint(
-        tmp_path,
-        {},
-        [ColourPart(1, "Body", ORANGE, rendered(tmp_path, scene, ORANGE, mirror=True))],
+    output = rendered(tmp_path, scene, ORANGE)
+    carried = carried_one(tmp_path, output)
+    assert carried.paint.codes == codes
+    assert carried.paint.reversed
+    # Turned, each face's corners reversed are its source triangle's, as its code reads them.
+    corners = turned(output, carried.turns).triangles[:, ::-1]
+    assert np.allclose(corners, world_triangles(tmp_path, scene), atol=1e-5)
+    assert carry_paint(tmp_path, {}, [ColourPart(1, "Body", ORANGE, output)])[1] == []
+    assert scene_notes(scene) == []
+    write_carried(tmp_path / "paint-1-1.json", carried, len(output.faces))
+    assert read_carried(tmp_path / "paint-1-1.json", output)[1] == carried.paint
+
+
+def test_a_part_painted_mirrored_and_not_is_carried_as_two(tmp_path: Path) -> None:
+    """A painting has one corner order, so a colour painted on a mirrored and on an
+    unmirrored object is split by its shells: each keeps every code, the mirrored one's
+    `Paint.reversed`, and the two together are every face of the rendered part."""
+    scene = save(tmp_path, flip(written(tmp_path, body(count=2)), 1))
+    _, codes = painted_box()
+    output = rendered(tmp_path, scene, ORANGE)
+    found, warnings = carry_paint(tmp_path, {}, [ColourPart(1, "Body", ORANGE, output)])
+    assert warnings == []
+    [(plain, mirrored_one)] = found
+    half = len(codes)
+    assert plain.faces is not None and mirrored_one.faces is not None
+    assert plain.faces.tolist() == list(range(half))
+    assert mirrored_one.faces.tolist() == list(range(half, 2 * half))
+    assert (plain.paint.codes, plain.paint.reversed) == (codes, False)
+    assert (mirrored_one.paint.codes, mirrored_one.paint.reversed) == (codes, True)
+    # Each written with its faces, which its re-read selects.
+    for carried in (plain, mirrored_one):
+        write_carried(tmp_path / "paint.json", carried, len(output.faces))
+        mesh, paint = read_carried(tmp_path / "paint.json", output)
+        assert paint == carried.paint
+        assert np.array_equal(
+            mesh.triangles, turned(select(output, carried.faces), carried.turns).triangles
+        )
+
+
+def test_a_face_wound_against_its_painting_keeps_only_a_whole_colour_and_says_so(
+    tmp_path: Path,
+) -> None:
+    """Where a shell joins a mirrored painting to an unmirrored one, its faces of the
+    other way are carried as rule 2 carries them, from their own source triangle."""
+    scene = written(tmp_path, body())
+    _, codes = painted_box()
+    output = rendered(tmp_path, scene, ORANGE)
+    against = trimesh.Trimesh(output.vertices, np.asarray(output.faces)[:, ::-1], process=False)
+    source, _ = paint_module._source(
+        tmp_path, [(scene.objects[0], scene.objects[0].parts[0])], mesh_loader(tmp_path)
     )
-    assert found[0] is not None
+    problems: list[str] = []
+    found, _, verbatim = transfer(against, source, problems, label="o1 p1")
     whole = {"": "", "8": "8", SPLIT_GREEN: "8", MIXED: ""}
-    assert list(found[0].paint.codes) == [whole[code] for code in codes]
-    assert warnings == paint_warnings(scene)
-    assert len(warnings) == 1 and warnings[0].startswith("o1 (Box) is mirrored")
+    assert verbatim == 0
+    assert found == [whole[code] for code in codes]
+    lost = sum(1 for code in codes if code == MIXED)
+    assert problems == [
+        f"o1 p1: {lost} painted faces are joined to a painting mirrored the other way, so "
+        "they print in the part's own colour"
+    ]
+
+
+def test_a_painted_mirrored_file_opens_and_renders_its_painting_where_it_was(
+    tmp_path: Path,
+) -> None:
+    """#4976, the shape of library file 2440 (#4015): a painted object placed mirrored.
+    Opened as a mesh model and rendered, its printed pieces are the file's own."""
+    read = read_objects(_split_box(MIRROR))
+    scene = written(tmp_path, read)
+    assert [o.transform.scale for o in scene.objects] == [(-1.0, 1.0, 1.0)]
+    (painted,) = [p for p in read[0].parts if p.paint is not None]
+    output = rendered(tmp_path, scene, painted.colour)
+    carried = carried_one(tmp_path, output, colour=painted.colour)
+    assert carried.paint.reversed
+    part = ColourPart(1, "Body", painted.colour, turned(output, carried.turns), carried.paint)
+    assert _at_origin(_triangles([part])) == _at_origin(_triangles([painted]))
 
 
 def test_a_recoloured_part_keeps_its_painted_colours(tmp_path: Path) -> None:
@@ -258,17 +340,17 @@ def test_a_hand_edited_model_carries_no_paint_and_says_so(tmp_path: Path) -> Non
     output = rendered(tmp_path, scene, ORANGE)
     (tmp_path / "model.scad").write_text("cube(10);\n")
     assert carry_paint(tmp_path, {}, [ColourPart(1, "Body", ORANGE, output)]) == (
-        [None],
+        [()],
         [HAND_EDITED],
     )
 
 
 def test_a_model_without_a_scene_or_paint_is_left_alone(tmp_path: Path) -> None:
     part = ColourPart(1, "Body", ORANGE, trimesh.creation.box((10, 10, 10)))
-    assert carry_paint(tmp_path, {}, [part]) == ([None], [])
+    assert carry_paint(tmp_path, {}, [part]) == ([()], [])
     plain = [ReadObject(name="Box", count=1, parts=[ColourPart(0, "Body", ORANGE, part.mesh)])]
     written(tmp_path, plain)
-    assert carry_paint(tmp_path, {}, [part]) == ([None], [])
+    assert carry_paint(tmp_path, {}, [part]) == ([()], [])
 
 
 def test_another_colours_part_is_left_alone(tmp_path: Path) -> None:
@@ -276,14 +358,14 @@ def test_another_colours_part_is_left_alone(tmp_path: Path) -> None:
     found, _ = carry_paint(
         tmp_path, {}, [ColourPart(1, "Leaves", GREEN, rendered(tmp_path, scene, ORANGE))]
     )
-    assert found == [None]
+    assert found == [()]
 
 
 def test_carried_paint_round_trips_through_its_file(tmp_path: Path) -> None:
     scene = written(tmp_path, body())
     output = rendered(tmp_path, scene, ORANGE)
     carried = carried_one(tmp_path, output)
-    write_carried(tmp_path / "paint-1-1.json", carried)
+    write_carried(tmp_path / "paint-1-1.json", carried, len(output.faces))
     mesh, paint = read_carried(tmp_path / "paint-1-1.json", output)
     assert paint == carried.paint
     assert np.array_equal(mesh.faces, turned(output, carried.turns).faces)
@@ -310,11 +392,11 @@ def test_an_unreadable_painting_is_a_warning_not_a_failure(tmp_path: Path) -> No
     output = rendered(tmp_path, scene, ORANGE)
     (tmp_path / "meshes" / "o1-p1.paint.json").unlink()
     found, warnings = carry_paint(tmp_path, {}, [ColourPart(1, "Body", ORANGE, output)])
-    assert found == [None]
+    assert found == [()]
     assert len(warnings) == 1 and "missing or unreadable" in warnings[0]
     (tmp_path / "meshes" / "o1-p1.paint.json").write_text("{not json")
     found, warnings = carry_paint(tmp_path, {}, [ColourPart(1, "Body", ORANGE, output)])
-    assert found == [None]
+    assert found == [()]
     assert len(warnings) == 1 and "missing or unreadable" in warnings[0]
 
 
@@ -327,7 +409,7 @@ def test_a_painting_naming_an_extruder_it_has_no_colour_for_costs_only_that_part
     document = json.loads(path.read_text())
     path.write_text(json.dumps({**document, "colours": document["colours"][:1]}))
     found, warnings = carry_paint(tmp_path, {}, [ColourPart(1, "Body", ORANGE, output)])
-    assert found == [None]
+    assert found == [()]
     assert len(warnings) == 1 and "o1 p1" in warnings[0] and "own colour" in warnings[0]
 
 
@@ -422,8 +504,7 @@ def test_a_bad_painting_on_one_object_leaves_the_others_painted(tmp_path: Path) 
     path.write_text(json.dumps({**document, "colours": document["colours"][:1]}))
     found, warnings = carry_paint(tmp_path, {}, [ColourPart(1, "Body", ORANGE, output)])
     assert len(warnings) == 1 and "o1 p1" in warnings[0] and "own colour" in warnings[0]
-    [carried] = found
-    assert carried is not None
+    [(carried,)] = found
     # o1's faces come first in the render and print in the part's own colour; o2 keeps
     # every code.
     half = len(codes)

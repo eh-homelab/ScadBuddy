@@ -57,6 +57,13 @@ export type Config = {
    */
   payloadDir: string | undefined
   /**
+   * SCADBUDDY_SESSION_DIR (plan 2026-10-13 Step 9.5): where each session's working directory,
+   * `<dir>/<session id>/`, is kept: a capped volume of the worker's own. A working copy of the
+   * session's workspace, refilled at each placement (workspace/directory.ts). Unset → under the
+   * state directory.
+   */
+  sessionDir: string | undefined
+  /**
    * The build the `agent-sessions` worker is versioned as (unified runtime spec 2026-10-13
    * §5.1, D4): SCADBUDDY_BUILD_ID, else the image's tag, SCADBUDDY_VERSION (the Dockerfile's
    * `dev` default is no tag). Neither → that worker runs unversioned.
@@ -91,6 +98,7 @@ export const ENV_VARS = [
   'SCADBUDDY_TEMPORAL_NAMESPACE',
   'SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES',
   'SCADBUDDY_PAYLOAD_DIR',
+  'SCADBUDDY_SESSION_DIR',
   'SCADBUDDY_BUILD_ID',
   'SCADBUDDY_VERSION',
   'SCADBUDDY_AGENT_ROLE',
@@ -128,6 +136,12 @@ function agentRole(value: string | undefined): AgentRole {
   const role = AGENT_ROLES.find((r) => r === value)
   if (!role) throw new ConfigError(`SCADBUDDY_AGENT_ROLE must be all, api or worker, not ${JSON.stringify(value)}`)
   return role
+}
+
+/** A directory the service writes under: absolute, so no working directory decides where. */
+function absoluteDir(name: string, value: string | undefined): string | undefined {
+  if (value !== undefined && !value.startsWith('/')) throw new ConfigError(`${name} must be an absolute path, not ${JSON.stringify(value)}`)
+  return value?.replace(/(.)\/+$/, '$1')
 }
 
 function imageTag(value: string | undefined): string | undefined {
@@ -191,6 +205,7 @@ export function loadConfig(env: Env = process.env): Config {
       present(env.SCADBUDDY_TEMPORAL_SEARCH_ATTRIBUTES),
     ),
     payloadDir: present(env.SCADBUDDY_PAYLOAD_DIR),
+    sessionDir: absoluteDir('SCADBUDDY_SESSION_DIR', present(env.SCADBUDDY_SESSION_DIR)),
     buildId: temporalValue('SCADBUDDY_BUILD_ID', present(env.SCADBUDDY_BUILD_ID)) ?? imageTag(env.SCADBUDDY_VERSION),
     agentRole: agentRole(present(env.SCADBUDDY_AGENT_ROLE)),
   }

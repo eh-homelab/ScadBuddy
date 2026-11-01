@@ -73,8 +73,8 @@ export function TemplateUi({ slug, ui, version, deps, inputs, onFailure, element
     .filter((el) => el.localName === 'sb-preview')
     .sort((a, b) => (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))[0]
   // Extruder numbers follow what renders, `inputs.params`: a value an `<sb-param bind>`
-  // keeps elsewhere is the UI's own state, and no render or slot sees it (phase 2).
-  // Once per render, for every widget.
+  // keeps elsewhere is the UI's own state, which reaches the pipeline but no `-D`, so
+  // its widget shows no extruder (HostElementContent). Once per render, for every widget.
   const extruders = elementContext ? extrudersOf(elementContext.schema, splitInputs(inputs).params) : NO_EXTRUDERS
 
   useEffect(() => {

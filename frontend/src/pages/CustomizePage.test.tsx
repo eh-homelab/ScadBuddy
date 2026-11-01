@@ -48,6 +48,7 @@ vi.mock('../components/Preview', () => ({
     controls,
     rejected,
     blocked,
+    onCancel,
   }: {
     job?: Job
     rendering: boolean
@@ -56,8 +57,14 @@ vi.mock('../components/Preview', () => ({
     controls?: ReactNode
     rejected?: boolean
     blocked?: string
+    onCancel?: () => void
   }) => (
     <div data-testid="preview">
+      {rendering && onCancel && (job?.status === 'pending' || job?.status === 'running') && (
+        <button type="button" onClick={onCancel}>
+          Cancel
+        </button>
+      )}
       {rejected && <span data-testid="preview-rejected" />}
       {blocked && <span data-testid="preview-blocked" data-reason={blocked} />}
       {leading}
@@ -478,6 +485,34 @@ describe('CustomizePage', () => {
     const log = await screen.findByTestId('render-log', {}, { timeout: 4000 })
     expect(log).toHaveTextContent(CANCELLED_ERROR)
     expect(log).not.toHaveTextContent('Compilation failed')
+  })
+
+  it('cancels a render in flight: Cancel withdraws its claim, and it settles cancelled (#4968)', async () => {
+    const { user } = render()
+    await firstRender()
+    const held = holdRenders()
+    const withdrawn: (string | null)[] = []
+    server.use(
+      http.post('/api/v1/jobs/:id/withdraw', ({ params, request }) => {
+        withdrawn.push(request.headers.get('Idempotency-Key'))
+        const job = heldJobs.get(String(params['id']))
+        if (!job) return undefined
+        job['status'] = 'cancelled'
+        job['error'] = CANCELLED_ERROR
+        job['log_tail'] = [CANCELLED_ERROR]
+        return HttpResponse.json(job)
+      }),
+    )
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'slow')
+    await waitFor(() => expect(held.posted).toBe(1), { timeout: 4000 })
+    await user.click(await screen.findByRole('button', { name: 'Cancel' }))
+
+    expect(await screen.findByTestId('render-log', {}, { timeout: 4000 })).toHaveTextContent(CANCELLED_ERROR)
+    expect(withdrawn).toHaveLength(1)
+    expect(withdrawn[0]).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
   })
 
   describe('links a render to its workflow in the Temporal UI (#1293)', () => {

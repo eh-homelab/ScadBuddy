@@ -98,6 +98,9 @@ class PrintProgress(BaseModel):
     #: A native run's prints still to start, and its controls (``route`` ``lan``); ``None``
     #: once none is left to start, or the run stopped them.
     lan_run: LanRunControl | None = None
+    #: The run whose print this is, on a LAN print (``route`` ``lan``); ``None`` on any
+    #: other. The output's last print and the rack's picks are keyed by it (#4644, #4543).
+    run_id: str | None = None
 
 
 #: The fix per failing stage. Each is an action the user can actually take from the

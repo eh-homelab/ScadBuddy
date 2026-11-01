@@ -23,8 +23,10 @@ also run ``LIBRARY_SWEEP``, ``NATIVE_SLICES_SWEEP``, ``TRANSFER_PUTS_SWEEP`` and
 recorded with none of its own) and ``QUOTE_HOLDS_PATCH`` (#4250), which also run
 ``PRINTER_WATCHES_SWEEP`` and ``QUOTE_HOLDS_SWEEP``, and ``printer_sync`` with
 ``PRINTER_SYNC_PATCH`` (#4439, #4747), which also runs ``PRINTER_SYNC_SWEEP``, and
-``git_remote`` with ``GIT_REMOTE_PATCH`` (#4974), which also runs ``GIT_REMOTE_SWEEP``
-(``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
+``native_copies`` with ``NATIVE_COPIES_PATCH`` (#4337), which also runs
+``NATIVE_COPIES_SWEEP``, and ``git_remote`` with ``GIT_REMOTE_PATCH`` (#4974), which
+also runs ``GIT_REMOTE_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording
+below).
 Never re-record them: a later change adds a history recorded on the changed code beside
 them.
 """
@@ -62,6 +64,7 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
         "native_slices",
         "quote_holds",
         "printer_sync",
+        "native_copies",
         "git_remote",
     ],
 )

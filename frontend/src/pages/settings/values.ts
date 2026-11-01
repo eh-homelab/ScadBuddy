@@ -72,6 +72,8 @@ export const HAND_LAID: Partial<Record<SectionId, readonly FieldName[]>> = {
   ],
   preview: ['display_unit', 'default_plate'],
   administration: ['activity_follow', 'activity_ttl_seconds', 'activity_repair_window_seconds'],
+  // #959 — where the agent's `fetch_asset` (and `POST /models/{slug}/assets/fetch`) may fetch from.
+  uploads: ['asset_fetch_domains'],
 }
 
 export const SPECS: Record<string, FieldSpec> = Object.fromEntries(RUNTIME_FIELDS.map((spec) => [spec.name, spec]))
@@ -125,6 +127,12 @@ export const ACTIVITY_TTL = { min: 86400, max: RETENTION_MAX_DAYS * 86400, defau
 export const ACTIVITY_REPAIR = { min: 600, max: 7 * 86400, default: 86400 }
 /** `activity_follow` empty is the default (`["browser"]`); this word follows nobody (`[]`). */
 export const FOLLOW_NOBODY = 'none'
+/**
+ * #959 — `asset_fetch_domains` is shown resolved, a domain a line: empty saves `null`
+ * (the server's defaults, shown again once saved) and this word saves `[]`, fetching from
+ * nowhere. The server normalises each domain and names one it refuses.
+ */
+export const FETCH_NOWHERE = 'none'
 
 export function baseline(settings: Settings, name: FieldName): string {
   if (name === 'display_unit') return settings.display_unit ?? 'mm'
@@ -132,6 +140,10 @@ export function baseline(settings: Settings, name: FieldName): string {
   if (name === 'activity_follow') {
     const follow = settings.activity_follow
     return follow == null ? '' : follow.length === 0 ? FOLLOW_NOBODY : follow.join(', ')
+  }
+  if (name === 'asset_fetch_domains') {
+    const domains = settings.asset_fetch_domains ?? []
+    return domains.length === 0 ? FETCH_NOWHERE : domains.join('\n')
   }
   if (RETENTIONS.includes(name)) {
     const seconds = settings[name as 'print_run_retention_seconds' | 'operation_retention_seconds']
@@ -166,6 +178,12 @@ export function toPatchValue(name: FieldName, raw: string, settings: Settings): 
     const items = raw.split(',').map((one) => one.trim()).filter((one) => one !== '')
     if (items.length === 0) return null
     if (items.length === 1 && items[0] === FOLLOW_NOBODY) return []
+    return items
+  }
+  if (name === 'asset_fetch_domains') {
+    const items = [...new Set(raw.split(/[\s,]+/).filter((one) => one !== ''))]
+    if (items.length === 0) return null
+    if (items.length === 1 && items[0] === FETCH_NOWHERE) return []
     return items
   }
   if (name === 'activity_ttl_seconds' || name === 'activity_repair_window_seconds') {

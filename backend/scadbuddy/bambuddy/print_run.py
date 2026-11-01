@@ -150,7 +150,7 @@ from scadbuddy.print_library.copies import (
     require_native_folder,
 )
 from scadbuddy.print_library.reads import LibraryReads, NativeCopies
-from scadbuddy.printers.hot_path import hot_path_native, native_backends
+from scadbuddy.printers.hot_path import NATIVE_STORES, hot_path_native, native_backends
 from scadbuddy.printers.lan_models import LanReport, LanStarted, LanStopped
 from scadbuddy.printers.models import PrinterRow
 from scadbuddy.printers.status import is_fresh, status_from_report
@@ -1765,6 +1765,87 @@ def run_path(row: PrinterRow, seen_at: datetime | None, *, now: datetime) -> Run
     return "native" if row.lan_host is not None and fresh else "bambuddy"
 
 
+#: Why a run on a registry printer is not native (#3823): a stored backend that is not the
+#: hot path's (D2: ``slicer_backend`` and ``library_backend`` ``native``, ``store_backend``
+#: one of `NATIVE_STORES`), the row set to print through Bambuddy, or, on ``auto``, what
+#: keeps its LAN report from being fresh: no LAN link, no access code (the watch cannot
+#: sign in without one), no report yet, or a stale one.
+LanBlockReason = Literal[
+    "slicer_backend",
+    "library_backend",
+    "store_backend",
+    "preferred_path",
+    "no_lan_link",
+    "no_access_code",
+    "no_report",
+    "stale_report",
+]
+
+
+class LanBlock(BaseModel):
+    """A registry printer a run would not reach natively, and every reason why (#3823):
+    what the print dialog says of a LAN-only row it cannot offer."""
+
+    printer: str
+    reasons: list[LanBlockReason]
+    #: The last LAN report's time, with ``stale_report``.
+    seen_at: datetime | None = None
+
+
+def lan_block(
+    settings: StoredSettings, row: PrinterRow, seen_at: datetime | None, *, now: datetime
+) -> list[LanBlockReason]:
+    """Why a run on the physical ``row`` is not native (`run_path`, `hot_path_native`):
+    empty exactly when it is."""
+    reasons: list[LanBlockReason] = []
+    if settings.slicer_backend != "native":
+        reasons.append("slicer_backend")
+    if settings.library_backend != "native":
+        reasons.append("library_backend")
+    if settings.store_backend not in NATIVE_STORES:
+        reasons.append("store_backend")
+    if row.preferred_path == "bambuddy":
+        reasons.append("preferred_path")
+    elif run_path(row, seen_at, now=now) != "native":
+        if row.lan_host is None:
+            reasons.append("no_lan_link")
+        elif not row.has_access_code:
+            reasons.append("no_access_code")
+        elif seen_at is None:
+            reasons.append("no_report")
+        else:
+            reasons.append("stale_report")
+    return reasons
+
+
+async def lan_reach(
+    settings: StoredSettings,
+    printers: PrinterStore,
+    reports: PrinterReportStore | None,
+) -> tuple[list[str], list[LanBlock]]:
+    """Of the physical registry rows, those a run would reach over the LAN
+    (:func:`lan_printers`) and, for each other one, why not (:func:`lan_block`). Reads the
+    registry whatever the backends, so the dialog can say what a LAN-only printer lacks.
+    The reports are one query (#4516): this is on every choices read."""
+    rows = [row for row in await asyncio.to_thread(printers.list) if row.kind == "physical"]
+    seen = {} if reports is None else await asyncio.to_thread(reports.all)
+    now = datetime.now(UTC)
+    native: list[str] = []
+    blocked: list[LanBlock] = []
+    for row in rows:
+        report = seen.get(row.id)
+        seen_at = None if report is None else report[1]
+        reasons = lan_block(settings, row, seen_at, now=now)
+        if not reasons:
+            native.append(row.id)
+        else:
+            stale = "stale_report" in reasons
+            blocked.append(
+                LanBlock(printer=row.id, reasons=reasons, seen_at=seen_at if stale else None)
+            )
+    return native, blocked
+
+
 async def lan_printers(
     settings: StoredSettings,
     printers: PrinterStore | None,
@@ -1773,20 +1854,11 @@ async def lan_printers(
     """The registry rows a run would reach over the LAN (#3818): those `run_path` puts on
     the LAN, when the stored backends make such a run native (`hot_path_native`, D2).
     None otherwise, so the dialog keeps its project, Bambuddy's folders and "queued" for
-    every printer, and the registry is not read. The reports are one query (#4516):
-    this is on every choices read."""
+    every printer, and the registry is not read."""
     if printers is None or not native_backends(settings):
         return []
-    rows = [row for row in await asyncio.to_thread(printers.list) if row.kind == "physical"]
-    seen = {} if reports is None else await asyncio.to_thread(reports.all)
-    now = datetime.now(UTC)
-    out: list[str] = []
-    for row in rows:
-        report = seen.get(row.id)
-        path = run_path(row, None if report is None else report[1], now=now)
-        if hot_path_native(settings, path):
-            out.append(row.id)
-    return out
+    native, _ = await lan_reach(settings, printers, reports)
+    return native
 
 
 async def all_native(

@@ -767,7 +767,9 @@ class PrintRunWorkflow(_PlateStarts):
         # An upload's budget, beating (review I1): a sliced 3MF carries its G-code.
         uploaded = await workflow.execute_activity(
             SLICED_UPLOAD_ACTIVITY,
-            SlicedUploadInput(planned=planned, plate_id=plate.plate_id, sliced=native),
+            SlicedUploadInput(
+                planned=planned, plate_id=plate.plate_id, sliced=native, subject=subject
+            ),
             result_type=int,
             task_queue=planned.library_queue,
             start_to_close_timeout=PLAN_TIMEOUT,

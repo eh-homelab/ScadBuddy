@@ -648,6 +648,53 @@ def get_job(job_id: JobIdPath, request: Request, render: RenderDep) -> JobStatus
     return view
 
 
+@router.post(
+    "/jobs/{job_id}/withdraw",
+    response_model=JobStatus,
+    summary="Withdraw a render request",
+    description=(
+        "Withdraw the caller's claim on a render job (#4968): its execution is sent "
+        "`release` with `cancelled`. While another request still claims the job it goes "
+        "on with one claim fewer; the last claim withdrawn cancels it (`status` "
+        "`cancelled`) and its run ends. A settled job is answered unchanged. Needs an "
+        "`Idempotency-Key` header, so a re-send withdraws once."
+    ),
+    responses={
+        status.HTTP_404_NOT_FOUND: {"description": "no job with that id"},
+        status.HTTP_422_UNPROCESSABLE_CONTENT: {
+            "description": "no `Idempotency-Key` header: each send would take a claim"
+        },
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": (
+                "Temporal is unreachable (`temporal-unavailable`), or the withdrawal is "
+                "still being taken (`command-still-accepting`): send it again with the "
+                "same `Idempotency-Key` after `Retry-After` seconds"
+            )
+        },
+    },
+)
+async def withdraw_job(
+    job_id: JobIdPath,
+    request: Request,
+    render: RenderDep,
+    idempotency_key: IdempotencyKey = None,
+) -> JobStatus:
+    if idempotency_key is None:
+        # Without a key a re-send would take a second claim, another caller's.
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "withdrawing a render needs an Idempotency-Key header",
+        )
+    with submit_problems():
+        try:
+            job = await render.withdraw(job_id, request_id=idempotency_key)
+        except JobNotFoundError:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no job with id {job_id!r}") from None
+    view = _job_status(job, request.url_for("get_job_preview", job_id=job_id).path)
+    view.queue_position = await asyncio.to_thread(render.store.queue_position, job)
+    return view
+
+
 #: A done job's plate cut, which never changes: the piece its 3MF is in is keyed by
 #: its content.
 PLATE_GLB_CACHE_CONTROL = "private, max-age=86400, immutable"

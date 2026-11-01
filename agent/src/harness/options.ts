@@ -28,6 +28,12 @@ export const DEFAULT_STATE_DIR = '/var/lib/scadbuddy-agent'
 export type HarnessPaths = {
   /** Service-owned state directory; the Claude Code config dir lives under it. */
   stateDir: string
+  /**
+   * Where each session's working directory is (SCADBUDDY_SESSION_DIR, plan 2026-10-13 Step 9.5):
+   * a volume of the worker's own, refilled from the workspace at each placement. Unset,
+   * `work/sessions` under `stateDir` (harness/stateDirs.ts `sessionsRoot`).
+   */
+  sessionsDir?: string | undefined
 }
 
 export function claudeConfigDir(paths: HarnessPaths): string {

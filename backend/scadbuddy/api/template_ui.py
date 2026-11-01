@@ -148,10 +148,14 @@ async def get_ui_file_at(
 
 def _live_ui_is(history: ModelHistory, slug: str, commit: str) -> bool:
     """Whether the live ``ui/`` holds exactly ``commit``'s: the same tree as HEAD's,
-    and nothing uncommitted under it (#1481). Two cheap git calls, no history walk."""
+    and nothing uncommitted under it (#1481). No history walk, and one git call once
+    the commit's and HEAD's trees are known: those are kept by commit id (#849)."""
     ui = f"{model_path(slug)}/{UI_DIR}"
     try:
         tree = history.tree(commit, ui)
-        return tree is not None and tree == history.tree("HEAD", ui) and history.clean(ui)
+        if tree is None:
+            return False
+        head = history.head_if_clean(ui)
+        return head is not None and history.tree(head, ui) == tree
     except GitError:
         return False

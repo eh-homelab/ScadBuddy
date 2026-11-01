@@ -1,6 +1,7 @@
 import type { Client } from '@temporalio/client'
 import type { Sql } from 'postgres'
 import { backgroundWorkflowId } from '../background/service.js'
+import { unscheduleTask } from '../background/temporal.js'
 import { terminateOpenToolCalls, workflowNotFound as notFound } from '../tools/activityProjection.js'
 import { type PayloadKeys, payloadKeyLock, subjectOf } from '../temporal/payloadCodec.js'
 import { copyForkRanges, ForksNeedKeys, hasForks } from './store.js'
@@ -24,7 +25,8 @@ import { notifyWarmEvict } from './warmEvict.js'
 //      Its large payloads, files on the data share (#2243), are ciphertext under that
 //      key, so they are unreadable from here on too; step 3 removes them;
 //   2. terminate the workflow if it is open, then DeleteWorkflowExecution;
-//   3. remove its stored payloads' directory (when this process has the share), and
+//   3. remove its stored payloads' directory (when this process has the share) and a session's
+//      working directory on this pod, and
 //      delete our rows, as a session's deletion always did: `ai_sessions`, whose
 //      cascade takes its events, `ai_pending_input`, `ai_input_responses`, blobs,
 //      resources, approvals and questions, and `ai_session_entries`, which is not keyed
@@ -47,6 +49,11 @@ export type ForgetDeps = {
   payloads?: { forget(subject: string): Promise<void> } | undefined
   /** Its saved http bodies on this pod (turnServers.ts `removeTurnDir`); other pods' go to their sweep. */
   turnDirs?: ((subject: string) => Promise<void>) | undefined
+  /**
+   * A session's working directory (workspace/directory.ts `removeSessionDir`), its workspace's
+   * plaintext copy, on this pod; another worker's copy goes with its sweep once the row is gone.
+   */
+  sessionDirs?: ((sessionId: string) => Promise<void>) | undefined
 }
 
 export type Forgotten = {
@@ -60,6 +67,8 @@ async function endBackgroundTasks(deps: ForgetDeps, sessionId: string): Promise<
     UPDATE ai_background_tasks SET state = 'cancelled', detail = 'the chat was forgotten', next_at = NULL, updated_at = now()
      WHERE session_id = ${sessionId} AND state = 'active' RETURNING id`
   for (const { id } of ended) {
+    // A recurring cron job's Schedule and its running fire (plan 2026-10-13 Step 9.8), or any task's workflow.
+    if (deps.client) await unscheduleTask(deps.client, { id, sessionId }, 'forgotten (forgetSubject)')
     try {
       await deps.client?.workflow.getHandle(backgroundWorkflowId(sessionId, id)).terminate('forgotten (forgetSubject)')
     } catch (err) {
@@ -112,6 +121,7 @@ export async function forgetSubject(deps: ForgetDeps, subject: string): Promise<
   }
   await deps.payloads?.forget(subject)
   await deps.turnDirs?.(subject)
+  if (sessionId !== undefined) await deps.sessionDirs?.(sessionId)
   let rows = 0
   if (subject.startsWith('session-')) {
     const id = subject.slice('session-'.length)

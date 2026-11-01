@@ -57,7 +57,7 @@ def test_counters_alerts_read_with_increase_start_at_zero(client: TestClient) ->
     assert 'scadbuddy_render_store_errors_total{operation="read"} 0.0' in text
     # Every kind and outcome, so Arrange is charted apart from renders (#2294).
     for kind in ("render", "arrange"):
-        for outcome in ("done", "failed", "superseded"):
+        for outcome in ("done", "failed", "superseded", "cancelled"):
             finished = f'scadbuddy_render_jobs_finished_total{{kind="{kind}",outcome="{outcome}"}}'
             assert f"{finished} 0.0" in text
         assert f'scadbuddy_render_accept_pending_total{{kind="{kind}"}} 0.0' in text
@@ -72,9 +72,12 @@ def test_counters_alerts_read_with_increase_start_at_zero(client: TestClient) ->
             )
             assert f"{latency} 0.0" in text
     # Only outcomes something emits: a series stuck at 0 reads as "never happens"
-    # (review #1066 4.2). No render job ends cancelled.
-    render = [line for line in text.splitlines() if line.startswith("scadbuddy_render_")]
-    assert not [line for line in render if 'outcome="cancelled"' in line]
+    # (review #1066 4.2). A render withdrawn ends cancelled (#4968); none has a render
+    # duration, which only a render that ran to `done` or `failed` records.
+    for kind in ("render", "arrange"):
+        latency = f'scadbuddy_render_job_latency_seconds_count{{kind="{kind}",outcome="cancelled"}}'
+        assert f"{latency} 0.0" in text
+    assert 'scadbuddy_render_duration_seconds_count{kind="render",outcome="cancelled"}' not in text
     # A native slice does end cancelled (its workflow cancelled), so each of its three
     # outcomes starts at 0 (plan 2026-10-16 Task 15).
     for outcome in ("completed", "failed", "cancelled"):

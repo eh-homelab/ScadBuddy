@@ -319,6 +319,39 @@ def test_a_ui_file_request_walks_no_history(
 
 
 @pytest.mark.requires_git
+def test_each_pinned_ui_file_costs_one_git_call(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#849: a commit's id and its ``ui/`` tree never change, so after the first file
+    each one asks git only whether the live ``ui/`` is still that commit's."""
+    from scadbuddy.library.history import ModelHistory
+
+    names = [f"m{n}.js" for n in range(5)]
+    _with_ui(paths, model, {name: b"// one\n" for name in ["index.js", *names]})
+    first = _commit(paths, "ui one")
+    _with_ui(paths, model, {name: b"// two\n" for name in ["index.js", *names]})
+    head = _commit(paths, "ui two")
+    calls: list[str] = []
+    run = ModelHistory._run
+
+    def counted(self: ModelHistory, *args: str, **kwargs: object) -> object:
+        calls.append(args[0])
+        return run(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ModelHistory, "_run", counted)
+    for commit, body, cache in ((head, "// two\n", "no-cache"), (first, "// one\n", "public")):
+        url = f"/api/v1/models/{model}/versions/{commit}/ui"
+        assert client.get(f"{url}/index.js").status_code == 200
+        calls.clear()
+        for name in names:
+            served = client.get(f"{url}/{name}")
+            assert served.status_code == 200
+            assert served.text == body
+            assert served.headers["cache-control"].startswith(cache)
+        assert calls == ["status"] * len(names)
+
+
+@pytest.mark.requires_git
 def test_a_deleted_ui_has_no_ui_version(client: TestClient, model: str, paths: DataPaths) -> None:
     """#1469: the commit that deleted ``ui/`` is no revision of the interface, even
     while model.json still declares one."""

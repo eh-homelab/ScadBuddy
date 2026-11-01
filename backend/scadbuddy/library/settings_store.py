@@ -13,7 +13,9 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
 - ``model_print_choices``: what the print dialog last chose, one row per options scope
   (:func:`~scadbuddy.bambuddy.options.options_scope`): a model's slug, or a Bambuddy
   library file's ``library:<file id>`` (#313, #1754).
-- ``printer_bed_types``: the plate last printed on, one row per printer.
+- ``printer_bed_types``: the plate last printed on, one row per printer, keyed by the
+  registry printer and, while the previous build may still read it, the Bambuddy
+  printer too (#4971, ``migrations/20261101T1804Z_printer_bed_types_registry.sql``).
 
 ``library_print_choices`` (#313) held a library file's choices until #1754 copied them
 into ``model_print_choices`` (``migrations/20261009T0541Z_print_choices_by_subject.sql``);
@@ -74,6 +76,7 @@ from scadbuddy.core.secrets import (
 )
 from scadbuddy.core.settings import ENV_SEEDED, SECRET_FIELDS, Settings, check_value, env_var
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS, normalise_domain
+from scadbuddy.library.catalogue import PrintSequence
 from scadbuddy.render.pg_store import MIGRATION_LOCK, migrate
 
 logger = logging.getLogger(__name__)
@@ -120,7 +123,7 @@ RENDER_FIELDS = (
     "solid_concurrency",
 )
 #: The fields kept in tables of their own rather than as ``settings`` rows.
-OWN_TABLES = frozenset({"model_print_choices", "printer_bed_types"})
+OWN_TABLES = frozenset({"model_print_choices", "printer_bed_types", "printer_plates"})
 #: Settings rows #312 retired with the slicer pipeline. A load already ignores them, as
 #: it does any name it does not know; :meth:`SettingsStore.save` deletes them, so they do
 #: not outlive the first write.
@@ -253,8 +256,9 @@ class ModelPrintChoices(BaseModel):
     falls back to the auto-match for that slot.
 
     ``nozzles``, ``tier`` and ``process_name`` are the spool-first dialog's own choices
-    (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file
-    written before them still loads; an empty ``nozzles`` means the dialog's default.
+    (spec 2026-09-27 §7). ``print_sequence`` is its Print sequence (#4970), ``None`` for
+    the template's or the process's. All default to "nothing remembered", so a settings
+    file written before them still loads; an empty ``nozzles`` means the dialog's default.
     """
 
     printer_id: int | None = None
@@ -262,6 +266,7 @@ class ModelPrintChoices(BaseModel):
     nozzles: list[NozzleChoice] = Field(default_factory=list, max_length=2)
     tier: Tier | None = None
     process_name: str | None = Field(default=None, max_length=200)
+    print_sequence: PrintSequence | None = None
 
     @field_validator("nozzles")
     @classmethod
@@ -283,6 +288,51 @@ def model_project_scope(model_id: str, preset_id: str | None) -> str:
     """The ``model_projects`` key for a model and the preset in use (#1660). A model id
     and a preset id never hold a ``/``, so the two cannot run together."""
     return model_id if preset_id is None else f"{model_id}/{preset_id}"
+
+
+class PrinterPlate(BaseModel):
+    """The plate remembered on one printer (#83), with both of its keys (#4971):
+    ``printer`` the registry printer, ``bambuddy_printer_id`` the Bambuddy printer it
+    links. A LAN-only printer has no Bambuddy id; a Bambuddy printer the registry does not
+    hold yet has no registry id. ``name`` is the registry's, when it has the printer."""
+
+    printer: str | None = None
+    bambuddy_printer_id: int | None = None
+    name: str | None = None
+    bed_type: str
+
+
+#: Each ``printer_bed_types`` row with both of its keys as the registry has them now
+#: (#4971): a row the previous build wrote names only the Bambuddy printer, so its registry
+#: printer is the one that links that id; a row with a registry printer takes its Bambuddy
+#: id from that printer's current link. Oldest first, so a newer row for the same printer
+#: wins.
+_PLATES: LiteralString = (
+    "SELECT coalesce(b.printer, linked.id)::text AS printer,"
+    " CASE WHEN own.id IS NOT NULL THEN own.bambuddy_printer_id ELSE b.printer_id END"
+    " AS bambuddy_printer_id,"
+    " coalesce(own.name, linked.name) AS name, b.bed_type"
+    " FROM printer_bed_types AS b"
+    " LEFT JOIN printers AS own ON own.id = b.printer"
+    " LEFT JOIN printers AS linked"
+    " ON b.printer IS NULL AND linked.bambuddy_printer_id = b.printer_id"
+    " ORDER BY b.updated_at, b.bed_type"
+)
+
+
+def _plates(rows: list[DictRow]) -> list[PrinterPlate]:
+    """One plate per printer from :data:`_PLATES`' rows, the newest for each."""
+    plates: dict[tuple[str, object], PrinterPlate] = {}
+    for row in rows:
+        plate = PrinterPlate.model_validate(row)
+        key = (
+            ("printer", plate.printer)
+            if plate.printer is not None
+            else ("bambuddy", plate.bambuddy_printer_id)
+        )
+        plates.pop(key, None)
+        plates[key] = plate
+    return list(plates.values())
 
 
 class StoredSettings(BambuddyIds):
@@ -348,6 +398,9 @@ class StoredSettings(BambuddyIds):
     #: printer, not per model: the plate is a property of the machine. Set one printer at
     #: a time (:meth:`SettingsStore.set_printer_bed_type`).
     printer_bed_types: dict[str, str] = Field(default_factory=dict)
+    #: Every remembered plate with its registry printer (#4971): the one a LAN-only
+    #: printer's is in. ``printer_bed_types`` is the same plates by Bambuddy id.
+    printer_plates: list[PrinterPlate] = Field(default_factory=list)
 
     #: The default Bambuddy project (#79), set only in Settings (#3188). A project
     #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
@@ -434,6 +487,19 @@ class StoredSettings(BambuddyIds):
             except ValidationError:
                 logger.warning("unreadable print choices", extra={"options_scope": scope})
         return kept
+
+    def bed_type_of(
+        self, *, printer: str | None = None, bambuddy_printer_id: int | None = None
+    ) -> str | None:
+        """The plate remembered on a printer (#83): by its registry id first (#4971),
+        else by its Bambuddy id."""
+        if printer is not None:
+            for plate in self.printer_plates:
+                if plate.printer == printer:
+                    return plate.bed_type
+        if bambuddy_printer_id is None:
+            return None
+        return self.printer_bed_types.get(str(bambuddy_printer_id))
 
     def rack_algorithm(self, printer_id: int | None) -> RackAlgorithm:
         """The printer's remembered rack algorithm, else Least used (spec §4)."""
@@ -751,7 +817,7 @@ class SettingsStore:
 
             rows = read("SELECT name, value FROM settings")
             choices = read("SELECT model_id, choices FROM model_print_choices")
-            beds = read("SELECT printer_id, bed_type FROM printer_bed_types")
+            beds = read(_PLATES)
         stored_rows = _opened(self._kek, {row["name"]: row["value"] for row in rows})
         runtime = self.defaults.model_copy()
         sources: dict[str, SettingSource] = {}
@@ -786,7 +852,13 @@ class SettingsStore:
             ):
                 values[name] = value
         values["model_print_choices"] = {row["model_id"]: row["choices"] for row in choices}
-        values["printer_bed_types"] = {str(row["printer_id"]): row["bed_type"] for row in beds}
+        plates = _plates(beds)
+        values["printer_plates"] = plates
+        values["printer_bed_types"] = {
+            str(plate.bambuddy_printer_id): plate.bed_type
+            for plate in plates
+            if plate.bambuddy_printer_id is not None
+        }
         return SettingsSnapshot(
             stored=StoredSettings.model_validate(values), runtime=runtime, sources=sources
         )
@@ -907,17 +979,47 @@ class SettingsStore:
         self._put_choices(slug, choices)
         return self._written("model_choices")
 
-    def set_printer_bed_type(self, printer_id: int, bed_type: str | None) -> StoredSettings:
-        """Remember the plate on one printer; ``None`` forgets it."""
-        with self._pool.connection() as conn:
+    def set_printer_bed_type(
+        self, printer_id: int | None, bed_type: str | None, *, printer: str | None = None
+    ) -> StoredSettings:
+        """Remember the plate on one printer; ``None`` forgets it. ``printer`` is the
+        registry printer and ``printer_id`` the Bambuddy printer it links, either or both
+        (#4971): the row carries both, so the previous build, which reads only
+        ``printer_id``, still finds a Bambuddy printer's plate."""
+        if printer is None and printer_id is None:
+            raise ValueError("a plate is remembered on a printer")
+        with self._pool.connection() as conn, conn.transaction():
             if bed_type is None:
-                conn.execute("DELETE FROM printer_bed_types WHERE printer_id = %s", (printer_id,))
-            else:
+                conn.execute(
+                    "DELETE FROM printer_bed_types WHERE printer = %s OR printer_id = %s",
+                    (printer, printer_id),
+                )
+            elif printer is None:
                 conn.execute(
                     "INSERT INTO printer_bed_types (printer_id, bed_type) VALUES (%s, %s)"
                     " ON CONFLICT (printer_id) DO UPDATE"
                     " SET bed_type = EXCLUDED.bed_type, updated_at = now()",
                     (printer_id, bed_type),
+                )
+            else:
+                if printer_id is not None:
+                    # This printer's row from before it had a registry id goes, and a row
+                    # of another printer that once linked this Bambuddy id lets it go.
+                    conn.execute(
+                        "DELETE FROM printer_bed_types WHERE printer_id = %s AND printer IS NULL",
+                        (printer_id,),
+                    )
+                    conn.execute(
+                        "UPDATE printer_bed_types SET printer_id = NULL"
+                        " WHERE printer_id = %s AND printer <> %s",
+                        (printer_id, printer),
+                    )
+                conn.execute(
+                    "INSERT INTO printer_bed_types (printer, printer_id, bed_type)"
+                    " VALUES (%s, %s, %s) ON CONFLICT (printer) DO UPDATE"
+                    " SET printer_id = EXCLUDED.printer_id, bed_type = EXCLUDED.bed_type,"
+                    " updated_at = now()",
+                    (printer, printer_id, bed_type),
                 )
         return self._written("printer_bed_type")
 

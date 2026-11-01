@@ -333,8 +333,8 @@ ACCEPT_ACTIVITY = "render_accept"
 CLAIMS_ACTIVITY = "render_claims"
 #: The Update a supersede sends the job's execution.
 RELEASE_UPDATE = "release"
-#: Why a claim is released: the API sends ``superseded``; ``cancelled`` is a release
-#: sent by hand (a withdrawal has no route yet, review #1066 3.2).
+#: Why a claim is released: a supersede sends ``superseded``; a withdrawal
+#: (`POST /jobs/{id}/withdraw`, `RenderService.withdraw`, #4968) sends ``cancelled``.
 ReleaseReason = Literal["superseded", "cancelled"]
 #: `render_accept`'s refusal: `render_queue_max` jobs already wait.
 QUEUE_FULL = "QueueFull"
@@ -343,18 +343,17 @@ QUEUE_FULL = "QueueFull"
 #: for the run that starts next (review #1066 (7) 1).
 CLOSING = "RenderClosing"
 #: `accepted`'s failure when the run's first step failed past its bounded retries (an
-#: error no retry fixes; an older build's row on the key is `LEGACY_PENDING`): the run
+#: error no retry fixes): the run
 #: completes with no row, and the route answers 500 `render-unstartable` (review #1066
 #: (10) 1).
 RENDER_UNSTARTABLE = "RenderUnstartable"
-#: `render_accept`'s failure while an older build's pending row holds the key and its
-#: workflow still runs: past the retries the run closes with no row, and `accepted`
-#: answers `closing`, so the request is still accepting and is sent again (review #1066
-#: (11) 2).
+#: `render_accept`'s failure while an older build's pending row held the key (review
+#: #1066 (11) 2). No longer raised since that build's rows are gone (#1142); still
+#: answered as `ACCEPT_TRANSIENT` is, so a history that recorded it replays as it ran.
 LEGACY_PENDING = "LegacyPending"
-#: `render_accept`'s failure on another state that passes, answered as `LEGACY_PENDING`
-#: is: Postgres out of reach, or Temporal unable to say whether an older row's workflow
-#: runs (review #1066 (11)).
+#: `render_accept`'s failure on a state that passes, Postgres out of reach: past the
+#: retries the run closes with no row, and `accepted` answers `closing`, so the request
+#: is still accepting and is sent again (review #1066 (11)).
 ACCEPT_TRANSIENT = "AcceptTransient"
 
 

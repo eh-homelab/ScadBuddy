@@ -8,6 +8,7 @@ from __future__ import annotations
 import math
 import subprocess
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,12 +18,22 @@ from pydantic import TypeAdapter
 from scadbuddy.meshmodel.compile import compile_scene
 from scadbuddy.meshmodel.edits import Edit, apply_edits
 from scadbuddy.meshmodel.ingest import scene_from_objects
-from scadbuddy.meshmodel.scene import Joint, Scene, SceneSource, value
+from scadbuddy.meshmodel.paint import carry_paint, turned
+from scadbuddy.meshmodel.scene import (
+    SCENE_NAME,
+    Joint,
+    Scene,
+    SceneSource,
+    dump_scene,
+    text_sha256,
+    value,
+)
 from scadbuddy.meshmodel.section import measure
-from scadbuddy.render.objects3mf import ReadObject
+from scadbuddy.render.objects3mf import ReadObject, read_objects
 from scadbuddy.render.split import DEFAULT_MATERIAL_NAME, ColourPart, split_by_material
 from tests.conftest import openscad_binary
 from tests.meshmodel.test_section import neck
+from tests.test_objects3mf import MIRROR, _at_origin, _split_box, _triangles
 
 pytestmark = pytest.mark.requires_openscad
 
@@ -73,6 +84,31 @@ def polygon_area(sides: int, radius: float) -> float:
 
 def test_an_imported_part_renders_in_the_scenes_colour(tmp_path: Path) -> None:
     assert [p.colour for p in render(tmp_path, written(tmp_path))] == ["#F08A24"]
+
+
+def test_a_painted_mirrored_object_renders_its_painting_where_it_was(tmp_path: Path) -> None:
+    """#4976: the shape of library file 2440 (#4015), a painted object placed mirrored,
+    opened and rendered: OpenSCAD renders the mirrored object wound the other way (what
+    meshmodel/paint.py assumes), and the painting carried onto it prints the file's own
+    pieces."""
+    read = read_objects(_split_box(MIRROR))
+    scene, files = scene_from_objects(read, SOURCE)
+    for name, data in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_bytes(data)
+    scene = scene.model_copy(update={"generated_sha256": text_sha256(compile_scene(scene))})
+    (tmp_path / SCENE_NAME).write_text(dump_scene(scene))
+
+    parts = render(tmp_path, scene)
+    carried, warnings = carry_paint(tmp_path, {}, parts)
+
+    assert warnings == []
+    painted = []
+    for part, found in zip(parts, carried, strict=True):
+        (one,) = found
+        assert one.paint.reversed and one.faces is None
+        painted.append(replace(part, mesh=turned(part.mesh, one.turns), paint=one.paint))
+    assert _at_origin(_triangles(painted)) == _at_origin(_triangles(read[0].parts))
 
 
 def test_set_colour_changes_the_render(tmp_path: Path) -> None:

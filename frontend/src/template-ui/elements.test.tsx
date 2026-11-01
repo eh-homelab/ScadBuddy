@@ -156,17 +156,32 @@ describe('host custom elements', () => {
     expect(shadowOf(container).textContent).toContain('style.padding')
   })
 
-  it('numbers extruders from the rendered values (inputs.params), not from a value bound elsewhere', async () => {
+  it('gives a colour bound outside params no extruder: only the pipeline decides what renders it', async () => {
     setUiModuleLoader(async () => ({
       mount: (root: ShadowRoot) => {
-        root.innerHTML = '<sb-param name="text_color" bind="style.text"></sb-param>'
+        root.innerHTML = '<sb-param name="text_color" bind="style.text"></sb-param><sb-param name="body_color"></sb-param>'
       },
     }))
-    // `style.text` is UI state: the render has text_color #222222, a second extruder.
+    // `style.text` is UI state, never a -D: neither extruder 1 (its colour's) nor
+    // extruder 2 (text_color's in params) is known to be where it goes.
     const inputs = { params: { body_color: '#111111', text_color: '#222222' }, style: { text: '#111111' } }
     const { container } = render(page(inputs, vi.fn()))
+    await waitFor(() => expect(shadowOf(container).textContent).toContain('extruder 1'))
+    const bound = shadowOf(container).querySelector('sb-param[bind="style.text"]')
+    expect(bound?.querySelector('input')).not.toBeNull()
+    expect(bound?.textContent).not.toContain('extruder')
+  })
+
+  it('numbers a colour bound to another params key by the parameter it renders as', async () => {
+    setUiModuleLoader(async () => ({
+      mount: (root: ShadowRoot) => {
+        root.innerHTML = '<sb-param name="text_color" bind="params.body_color"></sb-param>'
+      },
+    }))
+    const inputs = { params: { body_color: '#111111', text_color: '#222222' } }
+    const { container } = render(page(inputs, vi.fn()))
     await waitFor(() => expect(shadowOf(container).textContent).toContain('extruder'))
-    expect(shadowOf(container).textContent).toContain('extruder 2')
+    expect(shadowOf(container).textContent).toContain('extruder 1')
   })
 
   it('numbers a parameter by its default-bound element, not one rebound elsewhere', async () => {

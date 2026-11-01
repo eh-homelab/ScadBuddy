@@ -3,6 +3,7 @@ import { useAsync } from '../../lib/useAsync'
 import { Skeleton } from '@/components/ui/skeleton'
 import { McpAuthBanner } from '../McpAuthBanner'
 import { AssistantChat, type OpenRequest } from './AssistantChat'
+import { NotificationsOffer } from './NotificationsOffer'
 
 interface Props {
   onClose: () => void
@@ -41,6 +42,8 @@ export function AssistantPanel({ onClose, focusKey, factory, embedded, openReque
     <div className="flex h-full min-h-0 flex-col">
       {/* #1921 — while /mcp takes calls without a token, the panel says so too. */}
       <McpAuthBanner link className="m-2 shrink-0" />
+      {/* #815 — not in Bambuddy's frame, where the shell raises none (a cross-origin frame cannot ask). */}
+      {!embedded && <NotificationsOffer className="shrink-0 border-b border-line px-3 py-2" />}
       <div className="min-h-0 flex-1">
         <AssistantChat
           factory={loaded.data}

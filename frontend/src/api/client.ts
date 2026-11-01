@@ -178,6 +178,9 @@ import type {
   Filament,
   FilamentInput,
   FilamentPatch,
+  NativeSpool,
+  NativeSpoolCreate,
+  NativeSpoolPatch,
   Fulfilment,
   FulfilmentInput,
   OrderAttachment,
@@ -199,6 +202,7 @@ import type {
   PolicyUpdate,
   PriceBook,
   Quote,
+  OrderItemPrintRequest,
   SliceQuoteRequest,
   Shipment,
   ShipmentEdit,
@@ -1513,6 +1517,13 @@ export const api = {
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
 
+  /**
+   * #4968 — withdraw this page's claim on a render: the last claim withdrawn cancels it.
+   * A command, so a re-send after a lost answer withdraws once. Answers the job as it now
+   * stands (a settled one unchanged).
+   */
+  withdrawJob: (jobId: string) => command<Job>(`/jobs/${seg(jobId)}/withdraw`, { method: 'POST' }),
+
   previewUrl: (jobId: string) => `${API_BASE}/jobs/${seg(jobId)}/preview.glb`,
 
   /**
@@ -1708,9 +1719,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** #83 — the plate on this printer, which the picker opens on next; `null` forgets it. */
-  putPrinterBedType: (printerId: number, bedType: string | null) =>
-    request<PrinterBedType>(`/print/printers/${printerId}/bed-type`, {
+  /**
+   * #83 — the plate on this printer, which the picker opens on next; `null` forgets it. The
+   * printer is its Bambuddy id or its registry id (#4971).
+   */
+  putPrinterBedType: (printerId: number | string, bedType: string | null) =>
+    request<PrinterBedType>(`/print/printers/${seg(String(printerId))}/bed-type`, {
       method: 'PUT',
       body: JSON.stringify({ bed_type: bedType }),
     }),
@@ -1761,6 +1775,14 @@ export const api = {
   /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
   getSpoolInventory: (includeArchived = false) =>
     request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
+  /** #4643 — ScadBuddy's own spools, the native spool provider's records. */
+  nativeSpools: (includeArchived = false) =>
+    request<NativeSpool[]>(`/native-spools${includeArchived ? '?include_archived=true' : ''}`),
+  createNativeSpool: (body: NativeSpoolCreate) =>
+    request<NativeSpool>('/native-spools', { method: 'POST', body: JSON.stringify(body) }),
+  updateNativeSpool: (id: string, body: NativeSpoolPatch) =>
+    request<NativeSpool>(`/native-spools/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteNativeSpool: (id: string) => request<void>(`/native-spools/${seg(id)}`, { method: 'DELETE' }),
 
   /**
    * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,
@@ -2160,6 +2182,11 @@ export const api = {
       undefined,
       onAccepted,
     ),
+  /** #4719 — the `order_item_print` operation: a print run of the item's output with the
+   * dialog's choices, every plate, the quantity still to print; followed to the attempt
+   * it recorded, the item `queued`. */
+  printItem: (orderId: string, itemId: string, body: OrderItemPrintRequest) =>
+    command<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/print`, { method: 'POST', body: JSON.stringify(body) }),
   /**
    * #4736 — the slice quotes still running, as the activity index lists them: each row's
    * `subject` is `order_item:<id>`, its `id` `operation:<operation id>`. Running quotes are

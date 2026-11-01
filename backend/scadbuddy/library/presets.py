@@ -557,11 +557,13 @@ class PresetStore:
         with self._pool.connection() as conn:
             return [self._view(row) for row in self._saved(conn, model_id)]
 
-    def saved_params(self) -> list[dict[str, ParamValue]]:
-        """Every saved preset's values, of every template: references the upload sweep
-        keeps. Raises when the database cannot be read, so that sweep removes nothing."""
+    def saved_inputs(self) -> list[dict[str, Any]]:
+        """Every saved preset's inputs, of every template, UI state and all (#725):
+        references the upload sweep keeps. Raises when the database cannot be read, so
+        that sweep removes nothing."""
         with self._pool.connection() as conn:
-            return [row["params"] for row in conn.execute("SELECT params FROM saved_presets")]
+            rows = conn.execute("SELECT params, inputs FROM saved_presets")
+            return [self._inputs(row) for row in rows]
 
     def presets(self, model_id: str, strict: bool = False) -> list[ParamPreset]:
         """The template's presets, then the saved ones, each in their own order

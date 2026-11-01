@@ -29,12 +29,13 @@ import asyncio
 import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
-from scadbuddy.bambuddy.follow import MAX_AGE
+from scadbuddy.bambuddy.follow import MAX_AGE, ReadHook
 from scadbuddy.bambuddy.progress import CopyProgress, LanRunControl, PrintProgress, from_plates
 from scadbuddy.bambuddy.runs import LatestRun, PrintRun, read_latest
 from scadbuddy.bambuddy.stages import Stage
+from scadbuddy.bambuddy.subject import PrintSubject
 from scadbuddy.core.problems import DATABASE_ERRORS
 from scadbuddy.printers.lan_models import LanStarted, LanStopped
 from scadbuddy.printers.reports import PrinterReportStore
@@ -264,7 +265,7 @@ class LanProgress:
             reasons[0] = AWAITING_CLEAR.format(printer=name or "the printer")
         plates += [_waiting(name, result.lan_stopped, reason) for reason in reasons]
         if len(plates) == 1:
-            return plates[0]
+            return plates[0].model_copy(update={"run_id": run.id})
         merged = from_plates(
             plates,
             [
@@ -275,4 +276,33 @@ class LanProgress:
             queue_item_id=None,
             bambuddy_url="",
         )
-        return merged.model_copy(update={"route": "lan", "lan_run": lan_control(run)})
+        return merged.model_copy(
+            update={"route": "lan", "lan_run": lan_control(run), "run_id": run.id}
+        )
+
+
+class LanLastPrints(Protocol):
+    def record_lan_progress(
+        self, output_id: str, run_id: str, *, stage: Stage, settled: bool
+    ) -> None: ...
+
+
+def lan_last_print(prints: LanLastPrints) -> ReadHook:
+    """The print follow's read hook for an output's LAN print (#4644): its last print
+    (`library.output_prints`) says how the print goes, as each read finds it. A library
+    file's print has no last-print row."""
+
+    async def hook(run_subject: str, progress: PrintProgress) -> None:
+        if progress.route != "lan" or progress.run_id is None:
+            return
+        if PrintSubject.from_run_subject(run_subject).kind != "output":
+            return
+        await asyncio.to_thread(
+            prints.record_lan_progress,
+            run_subject,
+            progress.run_id,
+            stage=progress.stage,
+            settled=progress.settled,
+        )
+
+    return hook

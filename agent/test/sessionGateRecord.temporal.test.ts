@@ -52,6 +52,10 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
   let workers: { worker: Worker; run: Promise<void> }[] = []
   let continuations: Continuation[]
   let reads: number
+  /** The entries' first recheck (GateSettings.recheckS), read as each turn starts. */
+  let recheckS: number
+  /** While set, a read of the row returns what it read only once `release` resolves (`held` says one waits). */
+  let hold: { release: Promise<void>; held: boolean } | undefined
   const started = new Set<string>()
 
   beforeAll(async () => {
@@ -66,6 +70,8 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     expect(await db.ready()).toBe(true)
     continuations = []
     reads = 0
+    recheckS = 1
+    hold = undefined
     await startWorkers()
   })
   afterEach(async () => {
@@ -95,7 +101,7 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     return { status: 'released', hostQueue: HOST, parked: [opened.request_id] }
   }
 
-  /** The workers main.ts runs for a session, the gate's activities real and their first recheck at 1 s. */
+  /** The workers main.ts runs for a session, the gate's activities real and their first recheck at `recheckS`. */
   async function startWorkers(): Promise<void> {
     const gate = sessionGateActivities(db.sql)
     const make = (taskQueue: string, activities: Record<string, (...args: never[]) => unknown>, workflowBundle?: WorkflowBundle) =>
@@ -113,10 +119,16 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
       await make(SESSION_QUEUE, { [SESSION_SETTINGS_ACTIVITY]: async () => RUNTIME_DEFAULTS }, bundle),
       await make(TASK_QUEUE, {
         ...gate,
-        [GATE.settings]: async () => ({ approvalExpiryS: 600, questionExpiryS: 3600, recheckS: 1 }),
+        [GATE.settings]: async () => ({ approvalExpiryS: 600, questionExpiryS: 3600, recheckS }),
         [GATE.read]: async (args: { requestId: string }) => {
           reads++
-          return gate[GATE.read](args)
+          const row = await gate[GATE.read](args)
+          const held = hold
+          if (held) {
+            held.held = true
+            await held.release
+          }
+          return row
         },
         [GATE.describe]: async () => ({ summary: 'o1', input_hash: 'a'.repeat(64) }),
         [ACQUIRE_WORKER_ACTIVITY]: async () => ({ hostQueue: HOST, identity: 'gate-record-test' }),
@@ -158,6 +170,15 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     return rows[0]!
   }
 
+  /**
+   * The run that parked the session's entry. A turn's end continues the session as new, so the
+   * workflow id alone reads whichever run is latest, which may have no part in the park.
+   */
+  const parkedRun = async (id: string) => {
+    const { runId } = await env.client.workflow.getHandle(sessionWorkflowId(id)).describe()
+    return env.client.workflow.getHandle(sessionWorkflowId(id), runId)
+  }
+
   /** Whether the history holds a completed `session_turn`: the first placement's `released`. */
   async function turnReleased(id: string): Promise<boolean> {
     const events = (await env.client.workflow.getHandle(sessionWorkflowId(id)).fetchHistory()).events ?? []
@@ -175,14 +196,14 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
     const id = randomUUID()
     await send(env.client, id)
     const entry = await parked(id)
+    const run = await parkedRun(id)
     // Recorded with what the validator reads: the respond is decided in the row.
     expect(entry.gate).toEqual(expect.objectContaining({ id: entry.request_id, kind: 'approval', inputHash: 'a'.repeat(64), inRun: false }))
     const lost = new DurableGate(env.client, { sql: db.sql, wake: async () => {} })
     expect(await approve(lost, id, entry.request_id)).toEqual({ kind: 'approval', outcome: 'approved' })
     // Nothing was sent to the workflow; its recheck read the row, and the turn went on with the decision.
     await expect.poll(resolutions, { timeout: 20_000 }).toEqual([{ kind: 'approval', outcome: 'approved' }])
-    const handle = env.client.workflow.getHandle(sessionWorkflowId(id))
-    const history = await handle.fetchHistory()
+    const history = await run.fetchHistory()
     expect(history.events?.some((e) => e.workflowExecutionSignaledEventAttributes?.signalName === INPUT_DECIDED_SIGNAL)).toBe(false)
     expect(history.events?.some((e) => e.workflowExecutionUpdateAcceptedEventAttributes?.acceptedRequest?.input?.name === 'respond')).toBe(false)
     expect(reads).toBeGreaterThan(0)
@@ -190,15 +211,45 @@ describe.skipIf(skip !== '')(`the gate's record${skip}`, { timeout: 180_000 }, (
   })
 
   it('a woken workflow reads the decision at once, without waiting for its recheck', async () => {
+    // No recheck comes due within the test: only the wake can end the entry.
+    recheckS = 600
     const id = randomUUID()
     await send(env.client, id)
     const entry = await parked(id)
+    const run = await parkedRun(id)
     const before = reads
     expect(await approve(new DurableGate(env.client, { sql: db.sql }), id, entry.request_id)).toEqual({ kind: 'approval', outcome: 'approved' })
     await expect.poll(resolutions, { timeout: 20_000 }).toEqual([{ kind: 'approval', outcome: 'approved' }])
-    const history = await env.client.workflow.getHandle(sessionWorkflowId(id)).fetchHistory()
+    // The parked run's history: the turn's end may have continued the session as new by now.
+    const history = await run.fetchHistory()
     expect(history.events?.some((e) => e.workflowExecutionSignaledEventAttributes?.signalName === INPUT_DECIDED_SIGNAL)).toBe(true)
     expect(reads).toBeGreaterThan(before)
+  })
+
+  it('a wake that lands while a read of the row is in flight reads it again once that read found nothing', async () => {
+    recheckS = 600
+    const id = randomUUID()
+    await send(env.client, id)
+    const entry = await parked(id)
+    const run = await parkedRun(id)
+    // A read that reads the row before the decision commits, still in flight: a spurious wake starts it.
+    let release!: () => void
+    const held = { release: new Promise<void>((r) => (release = r)), held: false }
+    hold = held
+    await run.signal(INPUT_DECIDED_SIGNAL, { request_id: entry.request_id })
+    await expect.poll(() => held.held, { timeout: 20_000 }).toBe(true)
+    hold = undefined
+    expect(await approve(new DurableGate(env.client, { sql: db.sql }), id, entry.request_id)).toEqual({ kind: 'approval', outcome: 'approved' })
+    // The decision's wake reaches the workflow while that read still waits, so it joins it.
+    const wakeTaken = async () => {
+      const events = (await run.fetchHistory()).events ?? []
+      const last = events.findLastIndex((e) => e.workflowExecutionSignaledEventAttributes?.signalName === INPUT_DECIDED_SIGNAL)
+      return events.slice(last + 1).some((e) => e.workflowTaskCompletedEventAttributes)
+    }
+    await expect.poll(wakeTaken, { timeout: 20_000 }).toBe(true)
+    release()
+    // That read found nothing; the wake reads again, rather than the entry waiting 600 s for its recheck.
+    await expect.poll(resolutions, { timeout: 20_000 }).toEqual([{ kind: 'approval', outcome: 'approved' }])
   })
 
   it('a respond to an entry whose run has ended (before the sweep removes its row) is stale, and decides nothing', async () => {

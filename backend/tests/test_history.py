@@ -1622,3 +1622,47 @@ def test_a_crlf_template_takes_a_built_in_update_and_keeps_its_line_endings(
     assert catalogue.paths.model_source("name-keychain").read_bytes() == (
         crlf.replace('"hi"', '"mine"').replace("size = 10", "size = 12").encode()
     )
+
+
+def test_a_full_ids_answers_are_kept_and_a_refs_are_not(
+    models: Path, history: ModelHistory
+) -> None:
+    """#849: a full id resolves, and its tree reads, once; HEAD and a miss are asked
+    each time."""
+    write_model(models, "keychain", "cube(10);\n")
+    commit = history.ensure_repo()
+    assert commit is not None
+    calls: list[str] = []
+    run = history._run
+
+    def counted(*args: str, **kwargs: object) -> object:
+        calls.append(args[0])
+        return run(*args, **kwargs)  # type: ignore[arg-type]
+
+    with patch.object(history, "_run", counted):
+        for _ in range(3):
+            assert history.resolve(commit) == commit
+            assert history.tree(commit, "keychain") is not None
+        assert calls == ["rev-parse", "rev-parse"]
+        calls.clear()
+        for _ in range(2):
+            history.resolve(commit[:7])
+            history.tree("HEAD", "keychain")
+            assert history.tree(commit, "nothing") is None
+        assert calls == ["rev-parse"] * 6
+
+
+def test_head_if_clean_names_head_only_while_the_path_is_clean(
+    models: Path, history: ModelHistory
+) -> None:
+    write_model(models, "keychain", "cube(10);\n")
+    write_model(models, "box", "cube(5);\n")
+    commit = history.ensure_repo()
+    assert history.head_if_clean("keychain") == commit
+    (models / "box" / "model.scad").write_text("cube(6);\n", encoding="utf-8")
+    assert history.head_if_clean("keychain") == commit
+    (models / "keychain" / "new.txt").write_text("x", encoding="utf-8")
+    assert history.head_if_clean("keychain") is None
+    (models / "keychain" / "new.txt").unlink()
+    (models / "keychain" / "model.scad").write_text("cube(11);\n", encoding="utf-8")
+    assert history.head_if_clean("keychain") is None
