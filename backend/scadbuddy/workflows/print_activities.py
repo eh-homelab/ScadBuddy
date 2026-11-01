@@ -176,6 +176,21 @@ class PrintDeps:
     spools: Spools | None = None
 
 
+def lan_plates(result: PrintRunResult) -> list[LanPlateSend]:
+    """A LAN run's plates in order, each with the copies it started or will start
+    (#4644): its starts, and its waiting copies unless the run stopped them.
+
+    A start's ``plate_id`` is ``None`` only in a run whose ``lan_print`` ran on a build
+    before it named the plate, through `PrintRunWorkflow._print`'s one plate of one
+    copy (`_print_lan` names it itself): read as plate 1, a one-plate output's plate."""
+    started = [start.plate_id or 1 for start in result.lan]
+    waiting = result.lan_waiting if result.lan_stopped is None else []
+    counts: dict[int, int] = {}
+    for plate_id in [*started, *waiting]:
+        counts[plate_id] = counts.get(plate_id, 0) + 1
+    return [LanPlateSend(plate_id=plate_id, copies=copies) for plate_id, copies in counts.items()]
+
+
 def plate_clear_of(planned: PlannedRun, settings: SettingsStore) -> PlannedRun:
     """``planned`` with ``lan_require_plate_clear`` as it is now (#4939), for a native run
     of several prints: the run keeps it, so a change applies from the next run. Any
@@ -698,19 +713,13 @@ class PrintActivities:
         the follow read the run itself."""
         if self.d.prints is None:
             return
-        # A start from a build before `lan_print` named its plate is a run of one plate.
-        plate_ids = [start.plate_id or 1 for start in result.lan] + result.lan_waiting
-        plates = [
-            LanPlateSend(plate_id=plate_id, copies=result.copies)
-            for plate_id in dict.fromkeys(plate_ids)
-        ]
         try:
             await asyncio.to_thread(
                 self.d.prints.record_lan,
                 output_id,
                 run_id=run.id,
                 printer=run.printer,
-                plates=plates,
+                plates=lan_plates(result),
             )
         except psycopg.Error as exc:
             logger.warning(
@@ -720,8 +729,13 @@ class PrintActivities:
     @activity.defn(name=PRINT_LAN_UPDATE_ACTIVITY)
     async def lan_update(self, input: LanUpdateInput) -> PrintRun:
         """A succeeded LAN run's result as its later starts are made (#4541): retried
-        without limit, as ``print_succeed`` is, since the plates it names are printing."""
-        return await self.d.store.update_result(input.run_id, input.slug, input.result)
+        without limit, as ``print_succeed`` is, since the plates it names are printing.
+        The output's last print follows it (#4644): a stop drops the copies never started."""
+        run = await self.d.store.update_result(input.run_id, input.slug, input.result)
+        subject = PrintSubject.parse(run.subject)
+        if subject.kind == "output" and input.result.lan:
+            await self._record_lan(subject.id, run, input.result)
+        return run
 
     @activity.defn(name="print_fail")
     async def fail(self, input: FailInput) -> PrintRun:

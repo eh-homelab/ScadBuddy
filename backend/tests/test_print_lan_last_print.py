@@ -20,9 +20,14 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.library.output_prints import OutputPrintStore
 from scadbuddy.library.outputs import LanPlateSend
 from scadbuddy.library.settings_store import SettingsStore
-from scadbuddy.printers.lan_models import LanStarted
+from scadbuddy.printers.lan_models import LanStarted, LanStopped
 from scadbuddy.workflows.print_activities import PrintActivities, PrintDeps
-from scadbuddy.workflows.print_models import PrintRunInput, SourceSpec, SucceedInput
+from scadbuddy.workflows.print_models import (
+    LanUpdateInput,
+    PrintRunInput,
+    SourceSpec,
+    SucceedInput,
+)
 
 OUTPUT = "a" * 32
 PRINTER = "0b2c6f0e-8d1a-4c35-9b8e-2f6d4a1c7e90"
@@ -39,6 +44,9 @@ class Runs:
             result=result,
             printer=PRINTER,
         )
+
+    async def update_result(self, run_id: str, slug: str, result: PrintRunResult) -> PrintRun:
+        return await self.succeed(run_id, slug, result)
 
 
 class Prints:
@@ -146,6 +154,31 @@ async def test_anything_else_records_no_lan_last_print(result: PrintRunResult, k
     prints = Prints()
     await ActivityEnvironment().run(_activities(prints).succeed, _input(result, kind=kind))
     assert prints.lan == []
+
+
+async def test_a_later_start_and_a_stop_rewrite_the_last_print() -> None:
+    """The run's later starts update its result (`print_lan_update`), and the last print
+    with it: a stop drops the copies it will never start."""
+    prints = Prints()
+    started = PrintRunResult(
+        library_file_id=41,
+        copies=2,
+        path="native",
+        lan=[_started(1), _started(1)],
+        lan_waiting=[3, 3],
+    )
+    stopped = started.model_copy(
+        update={"lan_stopped": LanStopped(stage="cancelled", message="Stopped.")}
+    )
+    activities = _activities(prints)
+    for result in (started, stopped):
+        await ActivityEnvironment().run(
+            activities.lan_update, LanUpdateInput(run_id="run-1", slug="demo", result=result)
+        )
+    assert [plates for _, _, _, plates in prints.lan] == [
+        [LanPlateSend(plate_id=1, copies=2), LanPlateSend(plate_id=3, copies=2)],
+        [LanPlateSend(plate_id=1, copies=2)],
+    ]
 
 
 async def test_a_last_print_that_cannot_be_recorded_never_fails_the_run() -> None:

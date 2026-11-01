@@ -272,10 +272,12 @@ class RackUsageStore:
                 # Open picks (#1079): each of a pick's copies with no print row for its
                 # item (or its LAN start, #4543) and group yet, as every copy settles its
                 # own (#2134).
+                # One count per key shape, each on its own index (not one OR).
                 " (SELECT coalesce(sum(greatest(k.copies - (SELECT count(*)"
                 "   FROM rack_nozzle_prints AS done"
-                "   WHERE (done.queue_item_id = k.queue_item_id"
-                "    OR (done.lan_run_id = k.lan_run_id AND done.lan_subtask = k.lan_subtask))"
+                "   WHERE done.queue_item_id = k.queue_item_id AND done.group_id = k.group_id)"
+                "  - (SELECT count(*) FROM rack_nozzle_prints AS done"
+                "   WHERE done.lan_run_id = k.lan_run_id AND done.lan_subtask = k.lan_subtask"
                 "   AND done.group_id = k.group_id), 0)), 0)"
                 "  FROM rack_nozzle_picks AS k"
                 "  WHERE k.serial = s.serial AND k.picked_at > now() - %s) AS pending"
@@ -308,26 +310,33 @@ class RackUsageStore:
     def _spool_history(self, unique: list[str]) -> dict[str, list[SpoolUse]]:
         with self._ready().connection() as conn:
             rows = conn.execute(
-                "SELECT p.serial, s.spool_id,"
+                "SELECT u.serial, u.spool_id,"
                 # A spool's newest label, colour and material: it may have been renamed.
-                " (array_agg(s.label ORDER BY p.settled_at DESC))[1] AS label,"
-                " (array_agg(s.material ORDER BY p.settled_at DESC))[1] AS material,"
-                " (array_agg(s.colour ORDER BY p.settled_at DESC))[1] AS colour,"
-                # A print is its archive, or its LAN start (#4543).
-                " count(DISTINCT coalesce(p.archive_id::text,"
-                "  p.lan_run_id || '/' || p.lan_subtask)) AS prints,"
-                " coalesce(sum(s.grams), 0) AS grams,"
-                " max(p.settled_at) AS last_used_at"
-                " FROM rack_nozzle_prints AS p"
-                " JOIN rack_nozzle_pick_spools AS s"
-                "  ON s.group_id = p.group_id AND (s.queue_item_id = p.queue_item_id"
-                "  OR (s.lan_run_id = p.lan_run_id AND s.lan_subtask = p.lan_subtask))"
-                " WHERE p.serial = ANY(%s)"
+                " (array_agg(u.label ORDER BY u.settled_at DESC))[1] AS label,"
+                " (array_agg(u.material ORDER BY u.settled_at DESC))[1] AS material,"
+                " (array_agg(u.colour ORDER BY u.settled_at DESC))[1] AS colour,"
+                " count(DISTINCT u.print_key) AS prints,"
+                " coalesce(sum(u.grams), 0) AS grams,"
+                " max(u.settled_at) AS last_used_at"
+                # A print is its archive, or its LAN start (#4543): one join per key
+                # shape, each on its own index.
+                " FROM (SELECT p.serial, p.settled_at, p.archive_id::text AS print_key,"
+                "  s.spool_id, s.label, s.material, s.colour, s.grams"
+                "  FROM rack_nozzle_prints AS p JOIN rack_nozzle_pick_spools AS s"
+                "  ON s.queue_item_id = p.queue_item_id AND s.group_id = p.group_id"
+                "  WHERE p.serial = ANY(%s)"
+                " UNION ALL"
+                " SELECT p.serial, p.settled_at, p.lan_run_id || '/' || p.lan_subtask,"
+                "  s.spool_id, s.label, s.material, s.colour, s.grams"
+                "  FROM rack_nozzle_prints AS p JOIN rack_nozzle_pick_spools AS s"
+                "  ON s.lan_run_id = p.lan_run_id AND s.lan_subtask = p.lan_subtask"
+                "  AND s.group_id = p.group_id"
+                "  WHERE p.serial = ANY(%s)) AS u"
                 # No inventory spool: one row per label instead.
-                " GROUP BY p.serial, s.spool_id,"
-                "  CASE WHEN s.spool_id IS NULL THEN s.label END"
-                " ORDER BY p.serial, prints DESC, last_used_at DESC",
-                (unique,),
+                " GROUP BY u.serial, u.spool_id,"
+                "  CASE WHEN u.spool_id IS NULL THEN u.label END"
+                " ORDER BY u.serial, prints DESC, last_used_at DESC",
+                (unique, unique),
             ).fetchall()
         history: dict[str, list[SpoolUse]] = {}
         for row in rows:

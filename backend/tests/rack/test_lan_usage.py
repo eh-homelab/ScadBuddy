@@ -103,6 +103,28 @@ async def test_each_copy_is_a_start_of_its_own(store: RackUsageStore) -> None:
     assert ((await store.usage([A]))[A].prints, (await store.usage([A]))[A].pending) == (2, 0)
 
 
+async def test_a_copy_lan_wait_settled_is_not_settled_again_by_the_follow(
+    store: RackUsageStore, pg_conninfo: str
+) -> None:
+    """``lan_wait`` settles copy 1 as the printer ends it; the follow's run-wide settle
+    then writes only copy 2's row, never a second one for copy 1."""
+    await store.record_lan_picks(RUN, FIRST, None, [_picked(A, GREEN)])
+    await store.record_lan_picks(RUN, SECOND, None, [_picked(A, GREEN)])
+    await settle_lan_print(store, RUN, FIRST)
+    await lan_settle_hook(store)("o" * 32, _lan("done", settled=True))
+
+    with psycopg.connect(pg_conninfo) as conn:
+        rows = conn.execute(
+            "SELECT lan_subtask, count(*) FROM rack_nozzle_prints WHERE lan_run_id = %s"
+            " GROUP BY lan_subtask ORDER BY lan_subtask",
+            (RUN,),
+        ).fetchall()
+    assert rows == [(FIRST, 1), (SECOND, 1)]
+    usage = (await store.usage([A]))[A]
+    assert (usage.prints, usage.pending) == (2, 0)
+    assert [(use.prints, use.grams) for use in (await store.spool_history([A]))[A]] == [(2, 20.0)]
+
+
 async def test_an_untimed_settle_counts_the_print_without_a_time(
     store: RackUsageStore, pg_conninfo: str
 ) -> None:
