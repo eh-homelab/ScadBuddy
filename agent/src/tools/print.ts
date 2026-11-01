@@ -1120,14 +1120,22 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'remember_printer_bed_type',
     label: "Remember a printer's bed type",
-    description: 'Remember which build plate type is on a printer (null to forget it).',
-    input: z.object({ printer_id: z.number().int(), bed_type: z.string().max(64).nullable() }),
+    description:
+      'Remember which build plate type is on a printer (null to forget it). The printer is its Bambuddy ' +
+      'printer id or its registry printer id (a LAN-only printer has only the latter).',
+    input: z.object({
+      printer_id: z.union([z.number().int(), z.string().max(64)]),
+      bed_type: z.string().max(64).nullable(),
+    }),
     risk: 'write',
     routes: ['PUT /api/v1/print/printers/{printer_id}/bed-type'],
     handler: async ({ printer_id, bed_type }, { backend }) =>
       json(
         await ok(
-          backend.PUT('/api/v1/print/printers/{printer_id}/bed-type', { params: { path: { printer_id } }, body: { bed_type } }),
+          backend.PUT('/api/v1/print/printers/{printer_id}/bed-type', {
+            params: { path: { printer_id: String(printer_id) } },
+            body: { bed_type },
+          }),
           `remember bed type of printer ${printer_id}`,
         ),
       ),
