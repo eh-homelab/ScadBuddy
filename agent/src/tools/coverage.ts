@@ -4,11 +4,6 @@ import type { Operation } from './registry.js'
 // operation in backend/openapi.json has neither a tool nor an explicit
 // allowlist entry"). test/coverage.test.ts enforces it.
 
-const ANALYZERS_LATER =
-  'The print analyzers (#284) land API-first; their agent tools are a follow-up (#368 wraps them). ' +
-  'Recording a decision or applying a fix writes only to ScadBuddy (write tier) and sends nothing; ' +
-  'a send that consumes accepted diffs must go through the outward approval flow (AI spec §8.2).'
-
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
@@ -209,39 +204,11 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       'get_source_file and sees the image path in it.',
   },
   {
-    operation: 'GET /api/v1/analyzers',
-    reason: ANALYZERS_LATER,
-  },
-  {
-    operation: 'POST /api/v1/analyzers/run',
-    reason: ANALYZERS_LATER,
-  },
-  {
-    operation: 'POST /api/v1/analyzers/fixes/preview',
-    reason: ANALYZERS_LATER,
-  },
-  {
-    operation: 'POST /api/v1/analyzers/fixes/apply',
-    reason: ANALYZERS_LATER,
-  },
-  {
     operation: 'POST /api/v1/print/filament-profiles/preview',
     reason:
       "The print dialog's preview of a profile against the process preset its choices resolve to (#717). An " +
       'agent reads profiles with get_filament_profiles and applies one through print_output, whose run ' +
       'warns (profile-not-applied) when one cannot apply.',
-  },
-  {
-    operation: 'GET /api/v1/analyzers/decisions',
-    reason: ANALYZERS_LATER,
-  },
-  {
-    operation: 'POST /api/v1/analyzers/decisions',
-    reason: ANALYZERS_LATER,
-  },
-  {
-    operation: 'DELETE /api/v1/analyzers/decisions/{decision_id}',
-    reason: ANALYZERS_LATER,
   },
   ...(['POST /api/v1/print/outputs/{output_id}/check', 'POST /api/v1/print/library/{file_id}/check'] as const).map(
     (operation) => ({

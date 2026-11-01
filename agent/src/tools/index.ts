@@ -1,4 +1,5 @@
 import { activityTools } from './activity.js'
+import { analyzerTools } from './analyzers.js'
 import { approvalTools } from './approvals.js'
 import { arrangeTools } from './arrange.js'
 import { authoringTools } from './authoring.js'
@@ -57,6 +58,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...printHistoryTools,
   ...printMediaTools,
   ...farmTools,
+  ...analyzerTools,
   ...traySpoolTools,
   ...printerTools,
   ...browserTools,
