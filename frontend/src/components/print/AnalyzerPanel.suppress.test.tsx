@@ -17,7 +17,7 @@ import {
   openEdgesDiagnostic,
   overhangDiagnostic,
 } from '../../mocks/analyzers'
-import { storedDecisions } from '../../mocks/features/analyzers'
+import { setMockAnalyzerDiagnostics, storedDecisions } from '../../mocks/features/analyzers'
 import * as fixtures from '../../mocks/fixtures'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -219,12 +219,19 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     expect(deleted).toHaveLength(1)
   })
 
-  it('does not remove an enforced suppression from the print dialog', async () => {
+  it('asks before removing an enforced suppression, then removes it', async () => {
+    const { deleted } = watchDecisions()
     await stored({ kind: 'template', key: output.slug }, 'policy', { enforced: true })
     const { user } = renderPanel()
     await user.click(await screen.findByText('1 not shown'))
-    expect(setAside().queryByRole('button', { name: /Remove/ })).toBeNull()
-    expect(setAside().getByText('(enforced, so not removable from here)')).toBeVisible()
+    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-2' }))
+    const ask = await screen.findByRole('alertdialog', { name: 'Remove the suppression of SB1002:part-2?' })
+    expect(ask).toHaveTextContent('It is enforced over narrower scopes')
+    await user.click(
+      within(ask).getByRole('button', { name: 'Confirm removing the suppression of SB1002:part-2' }),
+    )
+    expect(await screen.findByTestId('diagnostic-SB1002:part-2')).toBeVisible()
+    expect(deleted).toHaveLength(1)
   })
 
   it('offers a finding with an accepted fix only scopes at or under the acceptance', async () => {
@@ -432,7 +439,7 @@ describe('SuppressForm', () => {
     expect(screen.getByLabelText('Decision')).toHaveTextContent('Suppress')
     expect(screen.getByRole('button', { name: 'Suppress' })).toBeDisabled()
     await choose(user, screen.getByLabelText('Decision'), 'Ignore')
-    expect(screen.getByText(/records no reason/)).toBeVisible()
+    expect(screen.getByText('No reason needed; one is kept if given.')).toBeVisible()
     expect(screen.getByLabelText('Reason (optional)')).not.toBeRequired()
     const submit = screen.getByRole('button', { name: 'Ignore' })
     expect(submit).toBeEnabled()
@@ -449,6 +456,37 @@ describe('SuppressForm', () => {
     })
   })
 
+  it('keeps a reason typed under Suppress when the decision becomes Ignore', async () => {
+    const { posted } = watchDecisions()
+    const user = userEvent.setup()
+    render(
+      <SuppressForm diagnostic={openEdgesDiagnostic} scopes={scopesFor(1)} onDone={() => {}} onCancel={() => {}} />,
+    )
+    await user.type(screen.getByLabelText('Reason'), 'hollow by design')
+    await choose(user, screen.getByLabelText('Decision'), 'Ignore')
+    expect(screen.getByLabelText('Reason (optional)')).toHaveValue('hollow by design')
+    await user.click(screen.getByRole('button', { name: 'Ignore' }))
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]).toMatchObject({ kind: 'ignore', reason: 'hollow by design' })
+  })
+
+  it('shows the refusal when the backend wants a confirmation the form did not ask for', async () => {
+    // The report is stale: the rule is an error now, so post_decision asks (428).
+    setMockAnalyzerDiagnostics([{ ...openEdgesDiagnostic, severity: 'error' }])
+    const user = userEvent.setup()
+    render(
+      <SuppressForm diagnostic={openEdgesDiagnostic} scopes={scopesFor(1)} onDone={() => {}} onCancel={() => {}} />,
+    )
+    await choose(user, screen.getByLabelText('Scope'), 'This template')
+    await user.click(screen.getByRole('checkbox', { name: /Enforce over narrower scopes/ }))
+    await user.type(screen.getByLabelText('Reason'), 'policy')
+    await user.click(screen.getByRole('button', { name: 'Suppress' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /enforcing a suppression of SB1002 .* hides it from every print in the scope; confirm it/,
+    )
+    expect(screen.getByRole('button', { name: 'Suppress' })).toBeEnabled()
+  })
+
   it('enforces a decision over narrower scopes, never at this print', async () => {
     const { posted } = watchDecisions()
     const user = userEvent.setup()
@@ -461,6 +499,7 @@ describe('SuppressForm', () => {
     const enforce = screen.getByRole('checkbox', { name: /Enforce over narrower scopes/ })
     await user.click(enforce)
     expect(screen.getByText(/wins over any decision made for a narrower scope/)).toBeVisible()
+    expect(screen.getByText(/removing it asks first/)).toBeVisible()
     await user.type(screen.getByLabelText('Reason'), 'house rule')
     await user.click(screen.getByRole('button', { name: 'Suppress' }))
     await waitFor(() => expect(posted).toHaveLength(1))

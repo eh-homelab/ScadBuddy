@@ -22,7 +22,7 @@ type Kind = 'suppress' | 'ignore'
 /** What each decision kind does, shown under the choice (`runner.apply_decisions`). */
 const KIND_HELP: Record<Kind, string> = {
   suppress: 'Sets the finding aside with a reason, as #pragma warning disable does.',
-  ignore: 'Sets the finding aside and records no reason; one is optional.',
+  ignore: 'No reason needed; one is kept if given.',
 }
 
 const KIND_VERB: Record<Kind, string> = { suppress: 'Suppress', ignore: 'Ignore' }
@@ -60,8 +60,9 @@ interface Props {
  * Both kinds `DecisionCreate` takes are offered (#4967): `suppress`, which needs a
  * reason, and `ignore`, which does not (`_well_formed`). `enforced` makes the decision
  * win over any narrower one (`decisions.resolve`), so it is offered only above this
- * print, the narrowest scope, where nothing is narrower; the panel does not remove an
- * enforced decision (`RemoveButton`).
+ * print, the narrowest scope, where nothing is narrower; the panel removes an enforced
+ * decision only after a confirmation (`RemoveButton`). A reason typed under one kind
+ * is kept when the kind changes.
  */
 export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: Props) {
   const id = useId()
@@ -199,8 +200,7 @@ export function SuppressForm({ diagnostic, scopes: offered, onDone, onCancel }: 
             </Label>
             {enforced && (
               <p className="text-[12px] text-muted-foreground">
-                It wins over any decision made for a narrower scope, and is not removable from
-                the print dialog.
+                It wins over any decision made for a narrower scope; removing it asks first.
               </p>
             )}
           </div>
