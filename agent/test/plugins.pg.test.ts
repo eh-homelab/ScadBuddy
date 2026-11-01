@@ -164,13 +164,11 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         expect(loaded.problems).toEqual([expect.stringMatching(/plugin moved was not loaded: .*169\.254\.169\.254/)])
       })
 
-      // The old ai_plugins columns keep their defaults: nothing writes them any more (#4828).
-      const DEFAULTS = { enabled: false, tool_tiers: {}, disabled_tools: [] }
       const accessRows = async (name: string) =>
         db.sql<{ item: string; access: string }[]>`
           SELECT item, access FROM ai_access WHERE source = ${`remote:${name}`} ORDER BY item`
 
-      it('stores tool_tiers, disabled_tools and enabled in ai_access only; the old ai_plugins columns keep their defaults', async () => {
+      it('stores tool_tiers, disabled_tools and enabled in ai_access only', async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp', tool_tiers: { c: 'write' } }, kek)
         expect(await accessRows('mem')).toEqual([
           { item: '*', access: 'off' },
@@ -182,9 +180,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
           { item: 'a', access: 'read' },
           { item: 'b', access: 'off' },
         ])
-        const [old] = await db.sql<{ enabled: boolean; tool_tiers: unknown; disabled_tools: string[] }[]>`
-          SELECT enabled, tool_tiers, disabled_tools FROM ai_plugins WHERE name = 'mem'`
-        expect(old).toEqual(DEFAULTS)
         // Disabled wins over a tier for the same tool.
         await store.update('mem', { tool_tiers: { a: 'read', b: 'read' } }, kek)
         expect(await accessRows('mem')).toEqual([
@@ -198,9 +193,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
         await store.create({ name: 'other', url: 'https://other.example/mcp' }, kek)
         await store.update('mem', { enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] }, kek)
-        // The old columns disagree: ai_access wins, either way.
-        await db.sql`UPDATE ai_plugins SET enabled = false, tool_tiers = '{"a":"outward"}', disabled_tools = '{}' WHERE name = 'mem'`
-        await db.sql`UPDATE ai_plugins SET enabled = true WHERE name = 'other'`
         const { plugins } = await store.enabled(kek)
         expect(plugins.map((p) => [p.name, p.toolTiers, p.disabledTools])).toEqual([['mem', { a: 'read' }, ['b']]])
         expect(await store.get('mem')).toMatchObject({ enabled: true, tool_tiers: { a: 'read' }, disabled_tools: ['b'] })
@@ -230,18 +222,12 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       const rowsBy = (name: string) =>
         db.sql<{ item: string; access: string; updated_by: string }[]>`
           SELECT item, access, updated_by FROM ai_access WHERE source = ${`remote:${name}`} ORDER BY item`
-      const oldColumns = async (name: string) => {
-        const [row] = await db.sql<{ enabled: boolean; tool_tiers: unknown; disabled_tools: string[] }[]>`
-          SELECT enabled, tool_tiers, disabled_tools FROM ai_plugins WHERE name = ${name}`
-        return row
-      }
 
       it('setToolAccess writes ai_access only', async () => {
         await store.create({ name: 'mem', url: 'https://hs.example/mcp' }, kek)
         await store.setToolAccess('mem', 'b', 'off', UI_CONTEXT)
         const summary = await store.setToolAccess('mem', 'a', 'read', UI_CONTEXT)
         expect(summary).toMatchObject({ tool_tiers: { a: 'read' }, disabled_tools: ['b'], enabled: false })
-        expect(await oldColumns('mem')).toEqual(DEFAULTS)
         expect(await rowsBy('mem')).toEqual([
           { item: '*', access: 'off', updated_by: 'system' },
           { item: 'a', access: 'read', updated_by: 'browser:browser' },
@@ -249,12 +235,10 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         ])
         // A tier over a disabled tool moves it out of disabled_tools.
         await store.setToolAccess('mem', 'b', 'write', UI_CONTEXT)
-        expect(await oldColumns('mem')).toEqual(DEFAULTS)
         await expect(store.setToolAccess('gone', 'a', 'off', UI_CONTEXT)).rejects.toMatchObject({ name: 'PluginError', status: 404 })
         // A tier needs a name Claude Code keeps; off takes any.
         await expect(store.setToolAccess('mem', 'files.list', 'read', UI_CONTEXT)).rejects.toMatchObject({ status: 400 })
         await store.setToolAccess('mem', 'files.list', 'off', UI_CONTEXT)
-        expect(await oldColumns('mem')).toEqual(DEFAULTS)
       })
 
       it('setToolAccess refuses the 257th change of one kind in the page\'s words, not a field the page never shows (final review M7)', async () => {
@@ -298,8 +282,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         const rows = () =>
           db.sql`SELECT item, access, updated_by, updated_at::text AS t FROM ai_access WHERE source = 'remote:mem' ORDER BY item`
         const saved = await db.sql`SELECT source, item, access, updated_by, updated_at FROM ai_access WHERE source = 'remote:mem'`
-        // The old columns disagree with ai_access, as after an older replica's write: put ai_access back as it was.
-        await db.sql`UPDATE ai_plugins SET tool_tiers = '{"a":"outward"}', disabled_tools = '{}' WHERE name = 'mem'`
         await db.sql`DELETE FROM ai_access WHERE source = 'remote:mem'`
         await db.sql`INSERT INTO ai_access ${db.sql(saved.map((r) => ({ ...r })) as never)}`
         const before = await rows()
@@ -332,7 +314,6 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         await store.setToolAccess('mem', 'a', null, UI_CONTEXT)
         const summary = await store.setToolAccess('mem', 'b', null, UI_CONTEXT)
         expect(summary).toMatchObject({ tool_tiers: {}, disabled_tools: [] })
-        expect(await oldColumns('mem')).toEqual(DEFAULTS)
         expect(await rowsBy('mem')).toEqual([{ item: '*', access: 'off', updated_by: 'system' }])
       })
 
@@ -577,9 +558,10 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
       })
 
       it('a plugin switched on before the migration stays on', async () => {
+        // Through the copy, whose mirror trigger carries the old columns into ai_access.
         await migrate(
           empty.sql,
-          MIGRATIONS.filter((m) => m.id < '20261026T2200Z_access'),
+          MIGRATIONS.filter((m) => m.id <= '20261026T2201Z_access_copy'),
         )
         await empty.sql`
           INSERT INTO ai_plugins (name, kind, url, enabled, tool_tiers, disabled_tools)
