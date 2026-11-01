@@ -1298,7 +1298,7 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     or `PATCH /plugins/{name}` (a body that names one answers 400, #4828). They are
     `ai_access` rows, changed through `/api/v1/ai/capabilities` (below and
     [`docs/ai/operating.md`, "The capabilities API"](docs/ai/operating.md#the-capabilities-api)).
-    The old `ai_plugins` columns are no longer written, and #5014 drops them.
+    The old `ai_plugins` columns were dropped by `20261101T1527Z_access_drop_columns.sql` (#5014).
   - New plugins start disabled. Run the test, review the tools, then turn the
     plugin's source switch on.
 

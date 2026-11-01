@@ -761,13 +761,15 @@ design is [spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-de
 - **Forced tiers stay.** A tool Claude Code renames stays `outward`, and colliding tools
   are hidden (spec §4.1).
 - **Old keys.** The `ai_settings` keys `builtin_tools.scadbuddy`, `scadbuddy_plugin_enabled`,
-  `http_request_enabled` and `printer_camera_enabled`, and the `ai_plugins` columns
+  `http_request_enabled` and `printer_camera_enabled`, and the dropped `ai_plugins` columns
   `enabled`, `tool_tiers` and `disabled_tools`, no longer decide. Migration
   [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql)
   carried their values into `ai_access`. `20261030T1020Z_access_drop_mirrors.sql` (#4828) dropped the
-  mirror triggers and deleted the four keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only. The
-  `ai_plugins` columns stay, unread and unwritten, until a follow-up migration. Rolling back
-  the agent past #4838 is not supported. `20261026T2200Z_access.sql` made the table.
+  mirror triggers and deleted the four keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only.
+  `20261101T1527Z_access_drop_columns.sql` (#5014) dropped the `ai_plugins` columns and deleted the four keys again.
+  Rolling back the agent past #4838 is not supported. Rolling back to a build before #4828 is
+  not supported either: it names the dropped columns, and its plugin reads and writes fail.
+  Build `sha-7626da9` and later are safe. `20261026T2200Z_access.sql` made the table.
 
 ## A browser plugin (Playwright MCP)
 
@@ -779,8 +781,8 @@ gets:
 
 - Its tools are `outward` until an admin tiers them in Settings → Tools & plugins, so every call
   parks for a human until then. Those tiers and the tool switches are the plugin's own
-  `ai_access` rows (`remote:<name>`, spec §4.2); `ai_plugins.tool_tiers` and
-  `disabled_tools` no longer decide.
+  `ai_access` rows (`remote:<name>`, spec §4.2); the dropped `ai_plugins.tool_tiers` and
+  `disabled_tools` decide nothing.
 - ScadBuddy no longer marks or limits what that browser requests. Nothing on the backend
   tells its requests from a person's. Where it may go is decided where it is deployed:
   its `--allowed-origins`/`--blocked-origins` and the network. Do not let it reach

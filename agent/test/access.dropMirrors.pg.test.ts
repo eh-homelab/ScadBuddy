@@ -75,7 +75,11 @@ describe.skipIf(skip !== '')(`the mirror-drop migration${skip}`, () => {
   })
 
   it('an old-column write after the drop changes no access row', async () => {
-    await migrate(db.sql, MIGRATIONS)
+    // Through this file only: a later migration (#5014) drops the columns.
+    await migrate(
+      db.sql,
+      MIGRATIONS.filter((m) => m.id <= DROP),
+    )
     await db.sql`
       INSERT INTO ai_plugins (name, kind, url, enabled, tool_tiers, disabled_tools)
       VALUES ('hs', 'remote_mcp', 'https://example.test/mcp', true, '{"a":"read"}', '{b}')`

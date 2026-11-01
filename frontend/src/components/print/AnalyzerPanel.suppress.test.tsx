@@ -17,7 +17,7 @@ import {
   openEdgesDiagnostic,
   overhangDiagnostic,
 } from '../../mocks/analyzers'
-import { storedDecisions } from '../../mocks/features/analyzers'
+import { setMockAnalyzerDiagnostics, storedDecisions } from '../../mocks/features/analyzers'
 import * as fixtures from '../../mocks/fixtures'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
@@ -113,6 +113,19 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     expect(screen.getByTestId('checks-headline')).toHaveTextContent('1 suggestion')
   })
 
+  it('ignores a finding, which the set-aside list names as ignored', async () => {
+    const { user } = renderPanel()
+    const row = await screen.findByTestId('diagnostic-SB1002:part-2')
+    await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
+    const form = within(row).getByRole('form', { name: 'Suppress SB1002:part-2' })
+    await choose(user, within(form).getByLabelText('Decision'), 'Ignore')
+    await user.click(within(form).getByRole('button', { name: 'Ignore' }))
+    await waitFor(() => expect(screen.queryByTestId('diagnostic-SB1002:part-2')).toBeNull())
+    await user.click(screen.getByText('1 not shown'))
+    expect(setAside().getByText(/ignored for This print/)).toBeVisible()
+    expect(setAside().getByRole('button', { name: 'Remove the ignore of SB1002:part-2' })).toBeEnabled()
+  })
+
   it('suppresses every finding of the rule when asked', async () => {
     const { posted } = watchDecisions()
     const { user } = renderPanel()
@@ -206,12 +219,19 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     expect(deleted).toHaveLength(1)
   })
 
-  it('does not remove an enforced suppression from the print dialog', async () => {
+  it('asks before removing an enforced suppression, then removes it', async () => {
+    const { deleted } = watchDecisions()
     await stored({ kind: 'template', key: output.slug }, 'policy', { enforced: true })
     const { user } = renderPanel()
     await user.click(await screen.findByText('1 not shown'))
-    expect(setAside().queryByRole('button', { name: /Remove/ })).toBeNull()
-    expect(setAside().getByText('(enforced, so not removable from here)')).toBeVisible()
+    await user.click(setAside().getByRole('button', { name: 'Remove the suppression of SB1002:part-2' }))
+    const ask = await screen.findByRole('alertdialog', { name: 'Remove the suppression of SB1002:part-2?' })
+    expect(ask).toHaveTextContent('It is enforced over narrower scopes')
+    await user.click(
+      within(ask).getByRole('button', { name: 'Confirm removing the suppression of SB1002:part-2' }),
+    )
+    expect(await screen.findByTestId('diagnostic-SB1002:part-2')).toBeVisible()
+    expect(deleted).toHaveLength(1)
   })
 
   it('offers a finding with an accepted fix only scopes at or under the acceptance', async () => {
@@ -408,5 +428,108 @@ describe('SuppressForm', () => {
     await user.click(submit)
     await waitFor(() => expect(posted).toHaveLength(1))
     expect(posted[0]).toMatchObject({ scope: { kind: 'template', key: output.slug } })
+  })
+
+  it('ignores a finding without a reason', async () => {
+    const { posted } = watchDecisions()
+    const user = userEvent.setup()
+    render(
+      <SuppressForm diagnostic={openEdgesDiagnostic} scopes={scopesFor(1)} onDone={() => {}} onCancel={() => {}} />,
+    )
+    expect(screen.getByLabelText('Decision')).toHaveTextContent('Suppress')
+    expect(screen.getByRole('button', { name: 'Suppress' })).toBeDisabled()
+    await choose(user, screen.getByLabelText('Decision'), 'Ignore')
+    expect(screen.getByText('No reason needed; one is kept if given.')).toBeVisible()
+    expect(screen.getByLabelText('Reason (optional)')).not.toBeRequired()
+    const submit = screen.getByRole('button', { name: 'Ignore' })
+    expect(submit).toBeEnabled()
+    await user.click(submit)
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]).toEqual({
+      diagnostic_id: 'SB1002',
+      instance: 'SB1002:part-2',
+      kind: 'ignore',
+      scope: { kind: 'print', key: output.id },
+      reason: null,
+      enforced: false,
+      confirm: false,
+    })
+  })
+
+  it('keeps a reason typed under Suppress when the decision becomes Ignore', async () => {
+    const { posted } = watchDecisions()
+    const user = userEvent.setup()
+    render(
+      <SuppressForm diagnostic={openEdgesDiagnostic} scopes={scopesFor(1)} onDone={() => {}} onCancel={() => {}} />,
+    )
+    await user.type(screen.getByLabelText('Reason'), 'hollow by design')
+    await choose(user, screen.getByLabelText('Decision'), 'Ignore')
+    expect(screen.getByLabelText('Reason (optional)')).toHaveValue('hollow by design')
+    await user.click(screen.getByRole('button', { name: 'Ignore' }))
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]).toMatchObject({ kind: 'ignore', reason: 'hollow by design' })
+  })
+
+  it('shows the refusal when the backend wants a confirmation the form did not ask for', async () => {
+    // The report is stale: the rule is an error now, so post_decision asks (428).
+    setMockAnalyzerDiagnostics([{ ...openEdgesDiagnostic, severity: 'error' }])
+    const user = userEvent.setup()
+    render(
+      <SuppressForm diagnostic={openEdgesDiagnostic} scopes={scopesFor(1)} onDone={() => {}} onCancel={() => {}} />,
+    )
+    await choose(user, screen.getByLabelText('Scope'), 'This template')
+    await user.click(screen.getByRole('checkbox', { name: /Enforce over narrower scopes/ }))
+    await user.type(screen.getByLabelText('Reason'), 'policy')
+    await user.click(screen.getByRole('button', { name: 'Suppress' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /enforcing a suppression of SB1002 .* hides it from every print in the scope; confirm it/,
+    )
+    expect(screen.getByRole('button', { name: 'Suppress' })).toBeEnabled()
+  })
+
+  it('enforces a decision over narrower scopes, never at this print', async () => {
+    const { posted } = watchDecisions()
+    const user = userEvent.setup()
+    render(
+      <SuppressForm diagnostic={openEdgesDiagnostic} scopes={scopesFor(1)} onDone={() => {}} onCancel={() => {}} />,
+    )
+    // This print is the narrowest scope: nothing narrower to win over.
+    expect(screen.queryByRole('checkbox', { name: /Enforce/ })).toBeNull()
+    await choose(user, screen.getByLabelText('Scope'), 'This template')
+    const enforce = screen.getByRole('checkbox', { name: /Enforce over narrower scopes/ })
+    await user.click(enforce)
+    expect(screen.getByText(/wins over any decision made for a narrower scope/)).toBeVisible()
+    expect(screen.getByText(/removing it asks first/)).toBeVisible()
+    await user.type(screen.getByLabelText('Reason'), 'house rule')
+    await user.click(screen.getByRole('button', { name: 'Suppress' }))
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]).toMatchObject({
+      kind: 'suppress',
+      scope: { kind: 'template', key: output.slug },
+      enforced: true,
+      confirm: false,
+    })
+  })
+
+  it('asks before enforcing the suppression of a problem, and sends the confirmation', async () => {
+    const { posted } = watchDecisions()
+    const user = userEvent.setup()
+    const problem: AnalyzerDiagnostic = { ...openEdgesDiagnostic, severity: 'error' }
+    render(
+      <SuppressForm diagnostic={problem} scopes={scopesFor(1)} onDone={() => {}} onCancel={() => {}} />,
+    )
+    await choose(user, screen.getByLabelText('Scope'), 'This template')
+    await user.click(screen.getByRole('checkbox', { name: /Enforce over narrower scopes/ }))
+    await user.type(screen.getByLabelText('Reason'), 'policy')
+    const submit = screen.getByRole('button', { name: 'Suppress' })
+    expect(submit).toBeDisabled()
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: 'SB1002 is a problem. Suppress it for this template over every narrower decision?',
+      }),
+    )
+    await user.click(submit)
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]).toMatchObject({ enforced: true, confirm: true })
   })
 })

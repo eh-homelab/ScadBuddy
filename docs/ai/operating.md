@@ -94,17 +94,21 @@ covers the same ground more briefly.
 - **Browser calls across a rollout of #4780.** Since #4780 a browser_* call for a tab on
   another replica is a `BridgeCall` workflow on `agent-tools`, whose one activity runs
   on the queue of the replica that holds the tab (`ai_tab_owners`;
-  [browser-bridge.md](browser-bridge.md#replicas)). For one release (#4868) the
-  Postgres relay of #1916 runs beside it, so replicas on the two builds still reach
-  each other's tabs: an old replica claims no `ai_tab_owners` row, and a new one takes
-  the old relay for any tab it finds no live owner for. `agent-tools` is unversioned,
+  [browser-bridge.md](browser-bridge.md#replicas)). The Postgres relay of #1916 ran
+  beside it for one release, and #4868 removed it: every replica since then claims its
+  tabs in `ai_tab_owners`, so a call finds the owner there or answers "not connected".
+  A new replica's tab has no row until its host worker polls, so for those first seconds
+  of its start a call from another replica answers "not connected" (an old replica could
+  reach it through the Postgres relay before).
+  `ai_bridge_messages` stays until #5109, because a replica of the build before #4868
+  still writes it for a tab it finds no live owner for. `agent-tools` is unversioned,
   so while an old replica still polls it, it can take a `BridgeCall` workflow task. It
   has no such workflow, so it fails the task, and Temporal gives the task again to a
   replica that may be another old one. The workflow's execution timeout leaves 15 s
   past the call's own time for that (`WORKFLOW_SLACK_MS`,
   [`agent/src/bridge/relay.ts`](../../agent/src/bridge/relay.ts)), about one failed task
   and its retry. A call whose workflow still times out is logged and answers
-  `no_answer`; it never fails the tool, and it is not sent again by the old relay, since
+  `no_answer`; it never fails the tool, and it is never sent again, since
   the owner may already have run it. With two or more old replicas polling, the retries'
   backoff can use up those 15 s before a new replica takes the task, so a call that never
   ran can still answer `no_answer` during the rollout. And a bridge call's deleted key is
@@ -1354,12 +1358,16 @@ can use ([spec §4](../superpowers/specs/2026-10-18-settings-and-tool-access-des
   `agent/src/db/migrations/20261026T2200Z_access.sql` made the table.
   `20261026T2201Z_access_copy.sql` copied the old values into it (`updated_by` is
   `migration:2171`). `20261030T1020Z_access_drop_mirrors.sql` (#4828) dropped the two mirror
-  triggers and deleted the four `ai_settings` keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only. The
-  `ai_plugins` columns stay in the schema, unread and unwritten, until a follow-up
-  migration drops them. Rolling the agent back past #4838 is not supported: that build
-  reads the deleted keys as absent, which means on. The copied `migration:2171` rows stay.
-  See [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql)
-  and [`20261030T1020Z_access_drop_mirrors.sql`](../../agent/src/db/migrations/20261030T1020Z_access_drop_mirrors.sql).
+  triggers and deleted the four `ai_settings` keys (and the stray `builtin_tools.claude`). The agent writes `ai_access` only.
+  `20261101T1527Z_access_drop_columns.sql` (#5014) dropped the three `ai_plugins` columns and
+  deleted the four keys again, for those that older replicas wrote after the first delete.
+  Rolling the agent back past #4838 is not supported: that build
+  reads the deleted keys as absent, which means on. Rolling back to a build that names the
+  dropped columns (any build before #4828) is not supported either: its plugin reads and writes
+  fail. Build `sha-7626da9` and later are safe. The copied `migration:2171` rows stay.
+  See [`20261026T2201Z_access_copy.sql`](../../agent/src/db/migrations/20261026T2201Z_access_copy.sql),
+  [`20261030T1020Z_access_drop_mirrors.sql`](../../agent/src/db/migrations/20261030T1020Z_access_drop_mirrors.sql)
+  and [`20261101T1527Z_access_drop_columns.sql`](../../agent/src/db/migrations/20261101T1527Z_access_drop_columns.sql).
 - The printer camera is the access of `get_printer_camera` (`builtin:scadbuddy`): `off`
   replaces the old switch (spec §4.2, #1911). The old route `/api/v1/ai/settings/printer-camera`
   is gone (#4828): change it in Settings → Tools & plugins, or with

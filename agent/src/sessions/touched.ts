@@ -317,6 +317,11 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_attachment_delete: () => [],
   // The price book (#4250) is a record of its own, edited on the Settings page.
   price_book_set: () => [],
+  // Analyzer decisions (#4966) are a print's checks, not a resource: the print dialog's
+  // analyzer panel and list_analyzer_decisions show them, and an apply sends nothing.
+  apply_analyzer_fix: () => [],
+  record_analyzer_decision: () => [],
+  remove_analyzer_decision: () => [],
   // Models.
   create_model: (_input, result) => modelCreated(result),
   import_model: (_input, result) => modelCreated(result),

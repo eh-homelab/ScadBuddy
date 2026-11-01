@@ -49,7 +49,6 @@ import { approvalHashKey, sweepErrorText } from './approvals/service.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
-import { PgTabRelay } from './bridge/pgRelay.js'
 import { TemporalTabRelay } from './bridge/relay.js'
 import { PostgresTabOwnerStore } from './bridge/tabOwners.js'
 import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
@@ -271,15 +270,12 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 const HOST_QUEUE = `${TASK_QUEUE}.${replicaIdentity()}`
 // browser_* calls for a tab connected to another replica (#4780, bridge/relay.ts): an
 // activity on the owner's HOST_QUEUE, through Temporal, sealed. Its client is set once made
-// (temporalClient below), only with the KEK. For one release (#4868) the Postgres relay
-// (#1916, bridge/pgRelay.ts) runs beside it, for replicas still on the old build: on the
-// listener's connection, made before start(), so its first LISTEN covers it.
+// (temporalClient below), only with the KEK; without it, such a call is refused.
 const tabRelay = database
   ? new TemporalTabRelay({
       owners: new PostgresTabOwnerStore(database.sql),
       hostQueue: HOST_QUEUE,
       ready: database.ready,
-      fallback: events ? new PgTabRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined,
     })
   : undefined
 // The rows a process before this one left under the same identity (a container restart).
