@@ -1355,7 +1355,8 @@ need a shared disk. Every placement refills the directory from `SessionFiles`. E
 the turn's end write it back. A session's copy goes once its warm process on that worker
 closes. There is no stale marker: each placement compares sha256 with the record. The
 workspace caps bound the directory, and a turn whose directory grows past `workspace_max_bytes`
-is stopped. Each directory is 0700. A separate NAS share outside the backup is still possible
+is stopped, as is one past 20,000 entries or whose walk takes past 10 s. A workspace holds at
+most 5,000 files, so a placement never makes more entries than that. Each directory is 0700. A separate NAS share outside the backup is still possible
 if the refill costs too much. `docs/ai/operating.md` §13 has the details.
 
 ### Step 9.6: Claude Code's own built-ins (R2) (PR, `feat(agent)!: Claude Code's own built-ins in every session`)

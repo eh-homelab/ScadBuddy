@@ -63,9 +63,10 @@ const CAPPED: ReadonlySet<WorkspaceErrorCode> = new Set(['too_large', 'quota'])
 /**
  * How many entries (files, directories, links) a session's directory may hold before a turn is
  * stopped, as past the byte cap: empty files and directories cost inodes and walk time but no
- * bytes. A workspace holds a few hundred files at most in practice (each one a row of
- * `ai_session_files`, under a 200 MiB quota), so 20,000 leaves room for a turn's scratch tree,
- * and a walk of that many lstat calls stays well under the 15 s between two checks.
+ * bytes. A workspace holds a few hundred files in practice and at most store.ts
+ * WORKSPACE_MAX_FILES (5,000, each with at most three parent directories), so a placement makes
+ * at most 20,000 entries and can never make a directory this check stops; past that is a turn's
+ * own scratch tree. A walk of that many lstat calls stays well under the 15 s between two checks.
  */
 export const MAX_ENTRIES = 20_000
 
@@ -242,7 +243,7 @@ async function ensureDir(dir: string): Promise<void> {
 }
 
 export class SessionDirectory {
-  readonly #files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits'>
+  readonly #files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits' | 'fileCount' | 'maxFiles'>
   readonly #root: string
   /** Each session's operations on its directory, one at a time: a sweep or an eviction never runs into a placement. */
   readonly #chains = new Map<string, Promise<unknown>>()
@@ -264,7 +265,7 @@ export class SessionDirectory {
   readonly #warm: (sessionId: string) => boolean
 
   constructor(
-    files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits'>,
+    files: Pick<SessionFiles, 'list' | 'read' | 'write' | 'delete' | 'limits' | 'fileCount' | 'maxFiles'>,
     root: string,
     options: {
       sql?: Sql | undefined
@@ -452,7 +453,16 @@ export class SessionDirectory {
         if (err.code === 'conflict') base.delete(rel)
       }
     }
+    // A new file is offered only while the record holds fewer than its file quota (store.ts
+    // WORKSPACE_MAX_FILES), so a flood of files costs one count, not one refused write each, and
+    // what a placement brings back stays within MAX_ENTRIES. The write's own check is what holds.
+    let held = [...found.files.keys()].some((rel) => !base.has(rel)) ? await this.#files.fileCount(ws(sessionId)) : 0
     for (const [rel, abs] of [...found.files].sort(([a], [b]) => a.localeCompare(b))) {
+      if (!base.has(rel) && held >= this.#files.maxFiles) {
+        out.skipped.push({ path: rel, why: `the workspace holds at most ${this.#files.maxFiles} files`, code: 'quota' })
+        if (!keepAll) await rm(abs, { force: true })
+        continue
+      }
       const read = await readRegular(dir, abs, fileMaxBytes)
       if (!read) continue
       if (!('bytes' in read)) {
@@ -465,6 +475,7 @@ export class SessionDirectory {
       if (was === digest) continue
       try {
         await this.#files.write(ws(sessionId), rel, read.bytes, { source: SOURCE, expectedSha256: was ?? null })
+        if (was === undefined) held += 1
         out.written.push(rel)
         base.set(rel, digest)
       } catch (err) {

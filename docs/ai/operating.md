@@ -1526,12 +1526,16 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     whole share and cannot leave a subPath out. A separate NAS share outside that backup stays
     possible if the refill costs too much.
   - Caps: the workspace's. A file past `workspace_file_max_bytes`, or one the
-    `workspace_max_bytes` quota refuses, is removed from the directory at the write-back, as is
-    every entry that cannot be synced. A turn whose directory grows past `workspace_max_bytes`
+    `workspace_max_bytes` or 5,000-file quota refuses, is removed from the directory at the
+    write-back, as is every entry that cannot be synced. Once the workspace holds 5,000 files, a
+    write-back offers no new file at all. Each file brings at most three parent directories, so a
+    placement makes at most 20,000 entries and never makes a directory the entry check stops. A turn whose directory grows past `workspace_max_bytes`
     is stopped, as is one that holds more than 20,000 entries (`MAX_ENTRIES`; empty files and
     directories cost inodes and walk time but no bytes). The check runs every 15 s
     (`DIR_CHECK_MS`) and is never skipped. A tick is skipped only while the previous walk still
-    runs. It uses lstat only, and it stops counting once past either cap. So a turn can overrun its cap by at most its
+    runs. A walk that takes longer than 10 s (`DIR_WALK_TIMEOUT_MS`) counts as past the cap and
+    stops the turn (fail closed). The minute's write-back runs beside the walks and never holds
+    them up. A walk uses lstat only, and it stops counting once past either cap. So a turn can overrun its cap by at most its
     write rate times 15 s, and the emptyDir's `sizeLimit` must leave room for that. Each refusal logs a line starting
     `session directory cap:`. A session's directory is removed once its warm process on that
     worker closes, unless a Monitor command still runs in it, and only after what changed since
@@ -1557,7 +1561,8 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
   and forgetting deletes the key that opens its blobs); a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
   principal's own workspace, whose files are swept 24 h after their last write (every
   10 minutes, `WORKSPACE_SWEEP_MS`).
-- Caps: 25 MiB a file and 200 MiB a workspace by default, the `ai_settings` keys
+- Caps: 25 MiB a file, 200 MiB and 5,000 files a workspace by default (the file count is
+  fixed, `WORKSPACE_MAX_FILES`), the byte caps the `ai_settings` keys
   `workspace_file_max_bytes` and `workspace_max_bytes` (bytes), which Settings →
   Assistant workspace writes through `PUT /api/v1/ai/settings/workspace`
   `{file_max_bytes, workspace_max_bytes}` (1 MiB to 100 MiB a file, 1 MiB to 2 GiB a

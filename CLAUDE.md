@@ -823,7 +823,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
     `SessionFiles` over `ai_session_files`, keyed by `workspace` (`session:<id>`, gone
     with its session, copied by a fork; or `principal:<kind>:<id>` outside a session,
     swept 24 h after its last write) and a checked `path`; caps
-    `workspace_file_max_bytes`/`workspace_max_bytes`. Reached as
+    `workspace_file_max_bytes`/`workspace_max_bytes` and `WORKSPACE_MAX_FILES` (5,000). Reached as
     `ToolServices.workspace` (so in-process, `/mcp` and the durable activities alike),
     with `workspaceOf(ctx)`; the `workspace_*` tools are `src/tools/workspace.ts`, and
     `http_request`'s `save_to_workspace` gets the session's from `sessions/manager.ts`.

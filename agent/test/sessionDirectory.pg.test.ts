@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { existsSync, writeFileSync } from 'node:fs'
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -378,7 +378,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
   /** A hanging AgentSession turn on TurnHost over `directory` (a stand-in), ended only by a cap stop or `stopAfterMs`. */
   async function cappedTurn(
     directory: ConstructorParameters<typeof TurnHost>[0]['directory'],
-    options: { dirCheckMs: number; stopAfterMs?: number },
+    options: { dirCheckMs: number; dirWalkTimeoutMs?: number; stopAfterMs?: number },
   ): Promise<{ result: unknown; warned: string[] }> {
     const stateDir = await mkdtemp(path.join(os.tmpdir(), 'sessions-'))
     m = manager({ sql: db.sql, paths: { stateDir }, run: scriptedRunner(() => ({ hang: true })).runner, workspace: files })
@@ -395,7 +395,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     const interrupt = new AbortController()
     const timer = options.stopAfterMs === undefined ? undefined : setTimeout(() => interrupt.abort(), options.stopAfterMs)
     try {
-      const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: options.dirCheckMs })
+      const host = new TurnHost({ core: m.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a', directory, dirCheckMs: options.dirCheckMs, ...(options.dirWalkTimeoutMs === undefined ? {} : { dirWalkTimeoutMs: options.dirWalkTimeoutMs }) })
       const result = await host.run(
         { sessionId: started.id, turnId, attempt: 'run:1', message: { turn_id: turnId, author: browser, text: 'go', images: [], system_append: null } },
         { heartbeat: () => {}, cancelled: interrupt.signal, cancelReason: () => 'interrupt' },
@@ -410,21 +410,82 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
 
   const noWriteBack = async () => ({ written: [], deleted: [], skipped: [], strays: 0, bytes: 0 })
 
-  it('a check still walking when the next tick comes is not walked again over it', async () => {
+  it('a walk that never ends stops the turn at its timeout (fail closed), and no tick walks again under it', async () => {
     const dir = await root()
     let walks = 0
     const directory = {
       place: async (sessionId: string) => ({ sessionId, dir, base: new Map<string, string>() }),
       writeBack: noWriteBack,
-      // The first walk never ends (a huge tree): no tick may start another under it.
+      // The first walk never ends (a hung disk): no tick may start another under it, and enforcement must not end with it.
       usage: () => {
         walks += 1
         return new Promise<never>(() => {})
       },
       done: () => {},
     }
-    await cappedTurn(directory, { dirCheckMs: 20, stopAfterMs: 300 })
+    const { result, warned } = await cappedTurn(directory, { dirCheckMs: 20, dirWalkTimeoutMs: 100, stopAfterMs: 2_000 })
     expect(walks).toBe(1)
+    expect(JSON.stringify(result)).toContain('could not be measured')
+    expect(warned.some((w) => w.startsWith('session directory cap:'))).toBe(true)
+  })
+
+  it('a long write-back on the timer does not stop the measuring, and a burst during it stops the turn', async () => {
+    const dir = await root()
+    let walks = 0
+    let timerWriteBacks = 0
+    let over = false
+    const directory = {
+      place: async (sessionId: string) => ({ sessionId, dir, base: new Map<string, string>() }),
+      // A write-back during the turn never ends (a slow store); the turn's last one (prune) does.
+      writeBack: (_placed: unknown, options: { prune?: boolean } = {}) => {
+        if (options.prune !== false) return noWriteBack()
+        timerWriteBacks += 1
+        over = true
+        return new Promise<never>(() => {})
+      },
+      usage: async () => {
+        walks += 1
+        return { bytes: over ? 5_000 : 0, cap: 1_000 }
+      },
+      done: () => {},
+    }
+    const { result } = await cappedTurn(directory, { dirCheckMs: 20, stopAfterMs: 2_000 })
+    expect(timerWriteBacks).toBe(1)
+    expect(walks).toBeGreaterThan(4)
+    expect(JSON.stringify(result)).toContain('grew past the workspace cap')
+  })
+
+  it('a workspace holds at most maxFiles files: a new one past it is refused quota, a rewrite is not', async () => {
+    const id = await session()
+    const few = new SessionFiles(db.sql, { maxFiles: 3 })
+    for (const name of ['a', 'b', 'c']) await few.write(ws(id), name, Buffer.from(name))
+    await expect(few.write(ws(id), 'd', Buffer.from('d'))).rejects.toMatchObject({ code: 'quota' })
+    await few.write(ws(id), 'a', Buffer.from('a again'))
+    await few.delete(ws(id), 'b')
+    await few.write(ws(id), 'd', Buffer.from('d'))
+    expect((await few.list(ws(id))).map((f) => f.path).sort()).toEqual(['a', 'c', 'd'])
+  })
+
+  it('a write-back offers no new file once the workspace holds maxFiles, so a placement never brings back more', async () => {
+    const id = await session()
+    const few = new SessionFiles(db.sql, { maxFiles: 3 })
+    let writes = 0
+    const write = few.write.bind(few)
+    few.write = (...args: Parameters<SessionFiles['write']>) => {
+      writes += 1
+      return write(...args)
+    }
+    const dirs = new SessionDirectory(few, await root())
+    const turn = await dirs.place(id)
+    for (let i = 0; i < 10; i++) await writeFile(path.join(turn.dir, `f-${i}`), `file ${i}`)
+    const back = await dirs.writeBack(turn)
+    expect(back.written).toHaveLength(3)
+    expect(back.skipped.filter((s) => s.code === 'quota')).toHaveLength(7)
+    expect(writes).toBe(3)
+    expect((await readdir(turn.dir)).sort()).toEqual(['f-0', 'f-1', 'f-2'])
+    dirs.done(turn)
+    const next = await new SessionDirectory(few, await root()).place(id)
+    expect((await readdir(next.dir)).sort()).toEqual(['f-0', 'f-1', 'f-2'])
   })
 
   it('a flood of entries stops the turn as bytes past the cap do, and usage reports it', async () => {

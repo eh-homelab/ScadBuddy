@@ -131,6 +131,12 @@ const GATE_ASK = 'ask_user'
 export const DIR_CHECK_MS = 15_000
 /** Every this many checks (each minute), a running turn also writes its directory back. */
 const DIR_SYNC_EVERY = 4
+/**
+ * How long one check's walk may take before the directory counts as past the cap and the turn is
+ * stopped (fail closed): a walk stops at MAX_ENTRIES lstat calls, well under a second on the
+ * worker's emptyDir, so one this slow is a hung disk or a tree built to stall it.
+ */
+export const DIR_WALK_TIMEOUT_MS = 10_000
 /** How often a running placement checks that it still holds the turn, and writes what it has spent. */
 export const FENCE_MS = 1_000
 
@@ -190,6 +196,8 @@ export type TurnHostDeps = {
   directory?: Pick<SessionDirectory, 'place' | 'writeBack' | 'done' | 'usage'>
   /** Tests only: how often a running turn checks its directory against the workspace cap (DIR_CHECK_MS). */
   dirCheckMs?: number
+  /** Tests only: how long one check's walk may take (DIR_WALK_TIMEOUT_MS). */
+  dirWalkTimeoutMs?: number
 }
 
 /** A placement's holds (§5.4): the calls held now, the hold's length, and the release that ends them all. */
@@ -554,42 +562,64 @@ export class TurnHost {
       // A directory past the workspace cap stops the turn: what it holds then is written back
       // up to the cap, and the rest removed (directory.ts), so this disk stays bounded.
       if (placed) {
-        const checking = { placed, busy: false }
+        const checking = { placed, measuring: false, syncing: false }
         let checks = 0
+        const walkTimeoutMs = this.#deps.dirWalkTimeoutMs ?? DIR_WALK_TIMEOUT_MS
+        const stop = (why: string, message: string) => {
+          if (controller.signal.aborted) return
+          console.warn(`session directory cap: session ${id}'s working directory ${why}; the turn is stopped`)
+          controller.abort(new Error(message))
+        }
         // Every DIR_CHECK_MS, never fewer: what a process can write between two checks is the
         // overrun past the cap the worker's emptyDir must leave room for (clusters' sizeLimit).
         // The walk is lstat-only and stops counting once past the cap (`usage`), so it stays cheap.
         capCheck = setInterval(() => {
-          // One check at a time: a walk still running when the next tick comes (a huge tree) is
-          // not walked again over it.
-          if (checking.busy) return
+          // One walk at a time: a walk still running when the next tick comes is not walked again
+          // over it, and one that outlives DIR_WALK_TIMEOUT_MS stops the turn, so a hung walk never
+          // ends enforcement. The timer's write-back has a flag of its own and never holds the walk's.
+          if (checking.measuring) return
           checks += 1
           const syncing = checks % DIR_SYNC_EVERY === 0
-          checking.busy = true
-          void this.#deps.directory!.usage(checking.placed).then(
-            async (usage) => {
+          checking.measuring = true
+          let timeout: ReturnType<typeof setTimeout> | undefined
+          const timedOut = new Promise<'timeout'>((resolve) => {
+            timeout = setTimeout(() => resolve('timeout'), walkTimeoutMs)
+            timeout.unref()
+          })
+          void Promise.race([this.#deps.directory!.usage(checking.placed), timedOut]).then(
+            (usage) => {
+              if (usage === 'timeout') {
+                stop(
+                  `could not be measured within ${walkTimeoutMs} ms`,
+                  `the session's working directory could not be measured within ${walkTimeoutMs} ms, so it counts as past the workspace cap`,
+                )
+                return
+              }
               const { bytes, cap, overEntries } = usage
               if (bytes <= cap && !overEntries) {
                 // A long turn with no park still writes back now and then: a lost pod then loses less.
-                if (syncing) await sync(false)
+                if (syncing && !checking.syncing) {
+                  checking.syncing = true
+                  void sync(false).then(
+                    () => {},
+                    () => {},
+                  ).finally(() => {
+                    checking.syncing = false
+                  })
+                }
                 return
               }
-              if (controller.signal.aborted) return
-              const why = overEntries
-                ? `holds too many entries (past ${MAX_ENTRIES})`
-                : `holds ${bytes} bytes, past the workspace's ${cap}`
-              console.warn(`session directory cap: session ${id}'s working directory ${why}; the turn is stopped`)
-              controller.abort(
-                new Error(
-                  overEntries
-                    ? `the session's working directory holds too many entries (past ${MAX_ENTRIES})`
-                    : `the session's working directory grew past the workspace cap (${cap} bytes)`,
-                ),
-              )
+              if (overEntries) {
+                stop(`holds too many entries (past ${MAX_ENTRIES})`, `the session's working directory holds too many entries (past ${MAX_ENTRIES})`)
+              } else {
+                stop(`holds ${bytes} bytes, past the workspace's ${cap}`, `the session's working directory grew past the workspace cap (${cap} bytes)`)
+              }
             },
             () => {},
           ).finally(() => {
-            checking.busy = false
+            clearTimeout(timeout)
+            // A timed-out walk keeps the flag: the turn is stopping, and no tick walks over the hung one.
+            if (!controller.signal.aborted) checking.measuring = false
           })
         }, this.#deps.dirCheckMs ?? DIR_CHECK_MS)
         capCheck.unref()
