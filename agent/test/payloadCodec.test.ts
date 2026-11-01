@@ -304,6 +304,38 @@ it("seals a session's child workflows under the session's key", async () => {
   expect(await codec.decode([sealed!])).toEqual([plain])
 })
 
+// The workflow id → subject rule all three codecs share (Step 9.1 review): written here, read by
+// agent-durable's tests/test_codec.py and the backend's copy (tests/fixtures/subject-vectors.json,
+// which lint-codec-copies.sh checks). `bridge-<uuid>` is the TypeScript codec's alone (#4780), so
+// it is pinned below, not in the file.
+// Regenerate: UPDATE_SUBJECT_VECTORS=1 pnpm vitest run test/payloadCodec.test.ts
+const SUBJECTS = new URL('./fixtures/subject-vectors.json', import.meta.url)
+it('names the subject of each workflow id as the committed subject vectors say', () => {
+  const s = '0b6c1e4e-7d3a-4f5e-9a51-3f1c2d4e5f60'
+  const ids = [
+    `session-${s}`,
+    `flow-${s}`,
+    `bgtask-${s}-ab12cd34`,
+    `session-${s}-call-toolu_01AbC_d`,
+    `flow-${s}-call-toolu_01AbC_d`,
+    `session-${s}-a-b_C-9`,
+    `session-${s}x`,
+    `session-${s}-`,
+    `session-${s}-call/x`,
+    `session-${s}-call x`,
+    `session-${s.toUpperCase()}`,
+    `bgtask-${s}-ab12cd34x`,
+    `bgtask-${s}-ab12cd34-call-x`,
+    'bgtask-ab12cd34',
+    'session-not-a-uuid',
+    'render-abc',
+    'print-abc',
+  ]
+  const built = ids.map((workflow_id) => ({ workflow_id, subject: subjectOf(workflow_id) ?? null }))
+  if (process.env.UPDATE_SUBJECT_VECTORS === '1') writeFileSync(SUBJECTS, `${JSON.stringify(built, null, 2)}\n`)
+  expect(JSON.parse(readFileSync(SUBJECTS, 'utf8'))).toEqual(built)
+})
+
 it('seals every browser call between replicas under a key of its own (#4780)', () => {
   const call = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d'
   expect(subjectOf(`bridge-${call}`)).toBe(`bridge-${call}`)

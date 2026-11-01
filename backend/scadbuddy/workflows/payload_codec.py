@@ -65,11 +65,21 @@ _BACKGROUND_TASK = re.compile(
 )
 
 
+# A session's or flow's own child workflow (`<subject>-<suffix>`, the agent's ToolCall
+# `session-<uuid>-call-<tool_use_id>`), sealed under that subject's key, as payloadCodec.ts does.
+_CHILD = re.compile(
+    r"^((?:session|flow)-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-[A-Za-z0-9_-]+$"
+)
+
+
 def subject_of(workflow_id: str | None) -> str | None:
     if workflow_id is None:
         return None
     if _SUBJECT.match(workflow_id):
         return workflow_id
+    child = _CHILD.match(workflow_id)
+    if child:
+        return child.group(1)
     task = _BACKGROUND_TASK.match(workflow_id)
     return f"session-{task.group(1)}" if task else None
 
