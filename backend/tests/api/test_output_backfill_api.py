@@ -80,11 +80,15 @@ def legacy_output(client: TestClient, app: FastAPI, slug: str = "pasted") -> str
 
 
 def attached(client: TestClient, output_id: str, timeout: float = 30) -> dict[str, Any]:
-    """The output once the API has attached its re-render, on the job's event."""
+    """The output once the API has attached its re-render, on the job's event.
+
+    `attach_backfill` writes the manifest before it removes the marker, so a read
+    between the two sees both: wait for the marker to go too."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         detail: dict[str, Any] = client.get(f"/api/v1/outputs/{output_id}").json()
-        if detail["manifest"] or (detail["backfill"] or {}).get("error"):
+        backfill = detail["backfill"] or {}
+        if (detail["manifest"] and not backfill) or backfill.get("error"):
             return detail
         time.sleep(0.1)
     raise AssertionError(f"output {output_id} was never attached")
