@@ -164,8 +164,11 @@ def test_the_component_reads_the_printer_registry() -> None:
     core = SimpleNamespace(
         projection=SimpleNamespace(pool=object()),
         settings_store=SimpleNamespace(load=None, pool=None),
+        print_follower=SimpleNamespace(on_read=[]),
     )
     components = SimpleNamespace(get=lambda key: printers if key is PRINTERS else None)
     built = spools_component._build(cast(Core, core), cast(Components, components))
     assert isinstance(built.trays, ReportTrays)
     assert built.trays.registry is printers
+    # What a native print used comes off its spools from the follow's reads (#4643).
+    assert len(core.print_follower.on_read) == 1
