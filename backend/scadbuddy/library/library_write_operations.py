@@ -252,6 +252,7 @@ def library_write_kinds(state: Core, components: Components) -> list[OperationKi
         native = await library.serving_native()
         if native is not None:
             place = _place(body.folder_id)
+            before = await asyncio.to_thread(native.rows.file, request["file_id"])
             row = await native.update_file(
                 request["file_id"],
                 name=body.filename,
@@ -259,8 +260,9 @@ def library_write_kinds(state: Core, components: Components) -> list[OperationKi
                 # Ruling 8: a file moved is no longer the output's filed copy.
                 filed=None if isinstance(place, UnsetType) else False,
             )
-            if not isinstance(place, UnsetType):
-                # A run's per-print copy a person moves is theirs, with its slices (#4337).
+            if before is not None and before.folder_id != row.folder_id:
+                # A run's per-print copy a person moves to another folder is theirs, with
+                # its slices (#4337).
                 await release_moved(native, state.uploads, [row.id])
             return LibraryEntryUpdated(
                 id=row.id, filename=row.name, folder_id=row.folder_id

@@ -257,7 +257,8 @@ QUOTE_HOLDS_TIMEOUT = timedelta(minutes=2)
 #: (`printers.component.PROBE_TIMEOUT`, 10 s), each in turn.
 PRINTER_SYNC_TIMEOUT = timedelta(minutes=5)
 #: Two describes per LAN run with prints still to start (`end_gone_sequences`; few run at
-#: once), twice; a few reads, then a trash, and a forget per superseded copy.
+#: once); a few reads, then a trash, and per folder with superseded copies a lock, a read,
+#: a trash and a forget per copy.
 NATIVE_COPIES_TIMEOUT = timedelta(minutes=5)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)

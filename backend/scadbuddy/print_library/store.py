@@ -288,17 +288,21 @@ class NativeLibraryStore:
         """A rename, a move or both, under the names lock of the folder the file ends up
         in (`_lock_folder_names`); the row is locked first, as `trash` and
         `delete_folder_tree` take it. Like an upload, it keeps the name it is given. A
-        per-print file a person moves is theirs (#4337, case 4), as Bambuddy's inbox copy
-        once moved is: its ``print_subject`` is cleared."""
+        per-print file a person moves to another folder is theirs (#4337, case 4), as
+        Bambuddy's inbox copy once moved is: its ``print_subject`` is cleared."""
         sets = ["updated_at = now()"]
         params: list[Any] = []
         if name is not None:
             sets.append("name = %s")
             params.append(name)
         if not isinstance(folder_id, UnsetType):
+            # Every SET reads the row as it was: this compares the folder it leaves.
+            sets.append(
+                "print_subject = CASE WHEN folder_id IS NOT DISTINCT FROM %s THEN print_subject END"
+            )
+            params.append(folder_id)
             sets.append("folder_id = %s")
             params.append(folder_id)
-            sets.append("print_subject = NULL")
         if filed is not None:
             sets.append("filed = %s")
             params.append(filed)
@@ -355,6 +359,16 @@ class NativeLibraryStore:
             f"SELECT {_FILE_COLUMNS} FROM library_files"
             f" WHERE print_subject IS NOT NULL AND deleted_at IS NULL ORDER BY id"
         )
+
+    def existing(self, ids: list[int]) -> set[int]:
+        """Those of ``ids`` whose row is still there, live or trashed."""
+        if not ids:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id FROM library_files WHERE id = ANY(%s)", (list(ids),)
+            ).fetchall()
+        return {int(r["id"]) for r in rows}
 
     def release(self, ids: list[int]) -> None:
         """These files are a person's now (#4337): no sweep trashes them."""

@@ -35,22 +35,29 @@ WHERE f.id = s.sliced_library_file_id
 -- 3. A copy, and then a slice, a finished run's result names, still in the run's folder,
 -- that no record names: its output or model was deleted (cases 1 and 2). Never the file a
 -- library print printed as it is (its own subject), and a slice only while the run's copy
--- is still in the run's folder (a moved copy's slices are the person's, with it).
+-- is still in the run's folder (a moved copy's slices are the person's, with it). A value
+-- that is not a number is no file: the casts are guarded, so an odd result never stops
+-- the migration.
 UPDATE library_files f SET print_subject = r.output_id
 FROM print_runs r
 WHERE r.status = 'succeeded'
-    AND f.id = (r.result->>'library_file_id')::bigint
+    AND f.id = CASE WHEN jsonb_typeof(r.result->'library_file_id') = 'number'
+        THEN (r.result->>'library_file_id')::bigint END
     AND r.output_id <> 'library:' || f.id
-    AND f.folder_id IS NOT DISTINCT FROM (r.result->>'folder_id')::bigint
+    AND f.folder_id IS NOT DISTINCT FROM CASE WHEN jsonb_typeof(r.result->'folder_id') = 'number'
+        THEN (r.result->>'folder_id')::bigint END
     AND f.output_id IS NULL AND NOT f.filed AND f.print_subject IS NULL
     AND NOT EXISTS (SELECT 1 FROM output_bambuddy_uploads u WHERE u.library_file_id = f.id);
 UPDATE library_files f SET print_subject = r.output_id
 FROM print_runs r
-JOIN library_files c ON c.id = (r.result->>'library_file_id')::bigint
+JOIN library_files c ON c.id = CASE WHEN jsonb_typeof(r.result->'library_file_id') = 'number'
+    THEN (r.result->>'library_file_id')::bigint END
 WHERE r.status = 'succeeded'
-    AND f.id = (r.result->>'sliced_library_file_id')::bigint
+    AND f.id = CASE WHEN jsonb_typeof(r.result->'sliced_library_file_id') = 'number'
+        THEN (r.result->>'sliced_library_file_id')::bigint END
     AND f.id <> c.id
-    AND c.folder_id IS NOT DISTINCT FROM (r.result->>'folder_id')::bigint
+    AND c.folder_id IS NOT DISTINCT FROM CASE WHEN jsonb_typeof(r.result->'folder_id') = 'number'
+        THEN (r.result->>'folder_id')::bigint END
     AND f.folder_id IS NOT DISTINCT FROM c.folder_id
     AND f.output_id IS NULL AND NOT f.filed AND f.print_subject IS NULL
     AND NOT EXISTS (

@@ -790,20 +790,17 @@ async def _sweep_native_copies_logged(state: AppState) -> None:
         native = await state.components.get(PRINT_LIBRARY).serving_native()
         if native is None:
             return
-
-        async def subjects_in_use() -> set[str]:
-            # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`). Without
-            # Temporal every LAN run with prints still to start is kept as in use.
-            try:
-                await end_gone_sequences(state.print_runs)
-            except Exception:
-                logger.warning(
-                    "could not check the LAN runs' sequences; their files are kept",
-                    exc_info=True,
-                )
-            return await state.print_runs.store.subjects_in_use()
-
-        await sweep_print_copies(native, state.uploads, subjects_in_use, now=datetime.now(UTC))
+        # A LAN run whose sequence is gone uses nothing (`end_gone_sequences`). Without
+        # Temporal every LAN run with prints still to start is kept as in use.
+        try:
+            await end_gone_sequences(state.print_runs)
+        except Exception:
+            logger.warning(
+                "could not check the LAN runs' sequences; their files are kept", exc_info=True
+            )
+        await sweep_print_copies(
+            native, state.uploads, state.print_runs.store.subjects_in_use, now=datetime.now(UTC)
+        )
     except Exception:
         logger.exception("could not sweep the native per-print copies")
         raise

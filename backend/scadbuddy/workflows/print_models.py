@@ -176,6 +176,9 @@ class SlicedUploadInput(BaseModel):
     planned: PlannedRun
     plate_id: int
     sliced: NativeSliced
+    #: The run's subject, which marks the sliced file (#4337); ``None`` in a history
+    #: from before it, and the copy's own mark is read instead.
+    subject: str | None = None
 
 
 class EnqueueInput(BaseModel):

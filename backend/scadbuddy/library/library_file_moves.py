@@ -412,9 +412,18 @@ def library_file_move_kinds(state: Core, components: Components) -> list[Operati
         folder_id: int | None = checked["folder_id"]
         native = await library.serving_native()
         if native is not None:
+            ids = [entry["id"] for entry in checked["files"]]
+            was = {
+                f.id: f.folder_id for f in await asyncio.to_thread(native.rows.files_by_ids, ids)
+            }
             done = await _native_move(native, checked)
-            # A run's per-print copy a person moves is theirs, with its slices (#4337).
-            await release_moved(native, state.uploads, [file.id for file in done.moved])
+            # A run's per-print copy a person moves to another folder is theirs, with its
+            # slices (#4337).
+            await release_moved(
+                native,
+                state.uploads,
+                [file.id for file in done.moved if was.get(file.id, folder_id) != folder_id],
+            )
             return done.model_dump(mode="json")
         files = [MovedLibraryFile.model_validate(entry) for entry in checked["files"]]
         settings = await asyncio.to_thread(state.settings_store.load)

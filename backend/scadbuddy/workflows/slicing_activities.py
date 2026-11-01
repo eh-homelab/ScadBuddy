@@ -527,9 +527,12 @@ class RunActivities:
                     )
                     if earlier is not None:
                         return earlier.id
-                    # The copy's subject (#4337), so the slice's lifetime is its copy's;
-                    # a library file printed as it is has no mark of its own.
-                    subject = await native.subject_of(copy_id) or f"library:{copy_id}"
+                    # The run's subject (#4337), whatever became of the copy since; a
+                    # history from before it names none, and the copy's mark is read (a
+                    # library file printed as it is has none: the file's own subject).
+                    subject = (
+                        input.subject or await native.subject_of(copy_id) or f"library:{copy_id}"
+                    )
                     return (
                         await native.upload(name, body, planned.folder_id, print_subject=subject)
                     ).id

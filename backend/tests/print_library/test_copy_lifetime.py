@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 from collections.abc import Iterable
@@ -173,14 +174,19 @@ async def test_an_orphaned_copy_and_its_slice_go_to_the_trash_after_a_grace(
 async def test_a_slice_never_recorded_goes_too(
     native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
 ) -> None:
-    """A slice of a library file printed as it is (no copy to record it on) is recorded
-    nowhere: litter once its run has ended."""
+    """A slice of a library file printed as it is is recorded nowhere: the run's
+    `record_sliced` against the file is a no-op, since no copy row records the person's
+    file. Litter once its run has ended, so an orphan."""
+    own = await native.upload("bracket.3mf", io.BytesIO(payload), None)
+    subject = f"library:{own.id}"
     stray = await native.upload(
-        "bracket.plate1.gcode.3mf", io.BytesIO(b"g"), None, print_subject="library:1000000001"
+        "bracket.plate1.gcode.3mf", io.BytesIO(b"g"), None, print_subject=subject
     )
+    await uploads.record_sliced(subject, own.id, SlicedCopy(id=stray.id, preset_key="k"))
+    assert await uploads.recorded_files([stray.id]) == set()
 
     assert (await sweep(native, uploads, after=LATER)).orphans == 1
-    assert trashed(native, stray.id)
+    assert trashed(native, stray.id) and live(native, own.id)
 
 
 async def test_a_moved_copy_and_its_slices_are_the_persons(
@@ -388,6 +394,16 @@ async def test_the_migration_marks_what_runs_put_in_the_library(
                 " VALUES (%s, %s, %s, 'succeeded', %s::jsonb)",
                 (run_id, subject, run_id, json.dumps({**result, "copies": 1, "folder_id": None})),
             )
+        # A result whose ids are not numbers names no file, and stops nothing.
+        conn.execute(
+            "INSERT INTO print_runs (id, output_id, idempotency_key, status, result)"
+            " VALUES ('r-odd', 'o', 'r-odd', 'succeeded', %s::jsonb)",
+            (
+                json.dumps(
+                    {"library_file_id": "x", "sliced_library_file_id": "y", "folder_id": "z"}
+                ),
+            ),
+        )
         conn.execute((MIGRATIONS_DIR / MIGRATION).read_text())
 
     marks = {f.id: f.print_subject for f in native.rows.files(None, every_folder=True)}
@@ -421,3 +437,52 @@ async def test_a_copy_a_person_moves_during_the_sweep_is_never_trashed(
 
     assert done.superseded == 0
     assert live(native, old)
+
+
+async def test_a_move_within_its_folder_keeps_the_mark(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """Only a move to another folder makes a copy the person's: a rename that names the
+    folder it is in keeps it the run's."""
+    folder = (await native.create_folder("Bracket", None)).id
+    copy_id = await copy_of(native, uploads, payload, folder_id=folder)
+
+    await native.update_file(copy_id, name="renamed.3mf", folder_id=folder)
+
+    row = native.rows.file(copy_id)
+    assert row is not None and row.print_subject == KEY
+
+
+async def test_the_folders_copy_lock_holds_the_superseded_copies_trash(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """The sweep trashes a folder's superseded copies under `ensure_native_copy`'s own
+    lock, so a run that holds it (finding, reusing, recording a copy) goes first."""
+    old = await copy_of(native, uploads, payload)
+    await copy_of(native, uploads, payload, target=X1C)
+
+    async with uploads.copy_lock(f"native:{KEY}:None"):
+        sweeping = asyncio.create_task(sweep(native, uploads))
+        done, _ = await asyncio.wait({sweeping}, timeout=1)
+        assert not done
+        assert live(native, old)
+
+    assert (await sweeping).superseded == 1
+    assert trashed(native, old)
+
+
+async def test_a_run_that_takes_the_subject_up_under_the_lock_keeps_its_copies(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """Under the lock the subjects in use are read once more: a run that reused a copy
+    there before the sweep got the lock has its subject in use by then."""
+    old = await copy_of(native, uploads, payload)
+    await copy_of(native, uploads, payload, target=X1C)
+    reads: list[set[str]] = [set(), set(), {KEY}]
+
+    async def subjects_in_use() -> set[str]:
+        return reads.pop(0)
+
+    done = await sweep_print_copies(native, uploads, subjects_in_use, now=datetime.now(UTC))
+
+    assert done.superseded == 0 and live(native, old)

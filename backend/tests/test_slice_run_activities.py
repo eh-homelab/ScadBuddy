@@ -134,6 +134,22 @@ async def test_a_library_files_own_slice_carries_its_library_subject(tmp_path: P
     assert native.subjects == [f"library:{COPY}"]
 
 
+async def test_the_runs_own_subject_marks_its_slice(tmp_path: Path) -> None:
+    """#4337 review: the run names its subject, which marks the slice whatever became of
+    the copy since (a person moved it, and it carries none)."""
+    native = _Native(subject=None)
+    run = _activities(tmp_path, native=native)
+    planned = PlannedRun.model_construct(library_file_id=COPY, folder_id=None)
+    sliced = NativeSliced(slice_id=1, preset_key="k", sliced_blob_key="native-slice-1")
+
+    await ActivityEnvironment().run(
+        run.print_sliced_upload,
+        SlicedUploadInput(planned=planned, plate_id=1, sliced=sliced, subject="out-9"),
+    )
+
+    assert native.subjects == ["out-9"]
+
+
 async def test_slice_run_beats_before_its_wait(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
