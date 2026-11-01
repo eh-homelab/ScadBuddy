@@ -1,5 +1,5 @@
 import type { RiskTier } from '../harness/permissions.js'
-import type { ToolAccess } from './model.js'
+import { type AccessRow, BUILTIN_SOURCES, type ToolAccess } from './model.js'
 
 // Claude Code's own built-ins in every session (plan 2026-10-13 Step 9.6, decision Q3): the
 // source `builtin:claude-code`, one item per tool, each at its default access until an admin
@@ -53,7 +53,9 @@ export const TASK_TOOLS: ReadonlySet<string> = new Set(['TaskCreate', 'TaskGet',
 
 /** One built-in's access now: its item under `builtin:claude-code`, and the packages that name it (resolver.ts `native`). */
 export type NativeAccess = {
-  native(name: string, declared: ToolAccess, packages: readonly string[]): Promise<ToolAccess>
+  native(name: string, declared: ToolAccess, packages: readonly string[], rows?: readonly AccessRow[]): Promise<ToolAccess>
+  /** The source's rows, read once for every built-in; absent where there are no rows (DEFAULT_ACCESS). */
+  rows?(sources: readonly string[]): Promise<AccessRow[]>
 }
 
 /**
@@ -67,9 +69,10 @@ export async function nativeBuiltinTools(
   named: readonly { name: string; packages: readonly string[] }[],
 ): Promise<{ name: string; tier: RiskTier }[]> {
   const out: { name: string; tier: RiskTier }[] = []
+  const rows = access.rows ? await access.rows([BUILTIN_SOURCES.claudeCode]) : undefined
   for (const b of NATIVE_BUILTINS) {
     const packages = named.find((n) => n.name === b.name)?.packages ?? []
-    const now = await access.native(b.name, b.access, packages)
+    const now = await access.native(b.name, b.access, packages, rows)
     if (now !== 'off') out.push({ name: b.name, tier: now })
   }
   return out

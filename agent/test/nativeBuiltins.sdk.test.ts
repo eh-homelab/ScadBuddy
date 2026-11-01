@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
@@ -133,6 +133,18 @@ describe.skipIf(cliMissing !== undefined)("Claude Code's own built-ins in a sess
   // Measured on 2.1.310: Read and Write expand `~` before the seam, but Glob's and Grep's
   // `path` reach it as `~` and the tool then searches HOME (the state dir); `$HOME`,
   // `${HOME}`, `~user` and a `~` in a pattern are taken as names in the directory.
+  it('refuses a Glob pattern that climbs out through a brace alternative', async () => {
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'native-brace-'))
+    const { paths } = await session()
+    const cwd = path.join(parent, 'cwd')
+    await mkdir(cwd)
+    await writeFile(path.join(parent, 'sibling-secret.txt'), 'the key')
+    steps = [{ toolUse: { name: 'Glob', input: { pattern: '{..,x}/*.txt' } } }]
+    const { decisions } = await turn({ paths, cwd })
+    expect(decisions.map(([n, d]) => `${n}:${d.decision}`)).toEqual(['Glob:deny'])
+    expect(JSON.stringify(toolResults())).not.toContain('sibling-secret')
+  }, 60_000)
+
   it('refuses a path that starts at a home directory', async () => {
     const { paths, cwd } = await session()
     await writeFile(path.join(paths.stateDir, 'marker'), 'HOME-MARKER')
