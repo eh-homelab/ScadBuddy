@@ -458,6 +458,8 @@ export function PrintPicker({
    * and only the plates it holds G-code for are offered.
    */
   const sliced = choices?.sliced ?? null
+  /** #284 — the accepted analyzer fixes the checks panel holds, which Print sends. */
+  const [acceptedFixes, setAcceptedFixes] = useState<string[]>(NO_IDS)
   const slicedPlates = useMemo(() => (sliced?.plates ?? []).map((entry) => entry.index), [sliced])
   const plates = useMemo(
     () =>
@@ -840,6 +842,7 @@ export function PrintPicker({
     filamentProfiles: filamentProfiles.active,
     rackPosition,
     rackAlgorithm: chosenAlgorithm,
+    acceptedFixes: sliced ? NO_IDS : acceptedFixes,
     onRan,
   })
   const { run, running, runError, refused, result, unanswered } = runPrint
@@ -2020,7 +2023,12 @@ export function PrintPicker({
                   {sliced ? (
                     verdict
                   ) : (
-                    <AnalyzerPanel target={analysisTarget} request={analysisRequest} allPlates={single === null}>
+                    <AnalyzerPanel
+                      target={analysisTarget}
+                      request={analysisRequest}
+                      allPlates={single === null}
+                      onAcceptedFixes={setAcceptedFixes}
+                    >
                       {verdict}
                     </AnalyzerPanel>
                   )}

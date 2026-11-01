@@ -314,6 +314,21 @@ class PrintRunRequest(BaseModel):
     #: Omitted means whatever those and the process say (on, unless the plate prints
     #: one filament).
     prime_tower: PrimeTowerChoice | None = None
+    #: Accepted analyzer fixes this print applies (#284), by the decision id
+    #: ``POST /analyzers/fixes/apply`` answered (``accepted_changes[].decision_id`` on a
+    #: run). Before the run starts each is checked again against this request: one no
+    #: longer accepted for it, or whose diff changed, refuses the print (409
+    #: ``analyzer-fix-stale``). Only verified targets land (``analyzers/apply.py``): the
+    #: options overlay and the request's own choices, over what the request sent.
+    accepted_fixes: list[Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]] = Field(
+        default_factory=list, max_length=32
+    )
+
+    @field_validator("accepted_fixes")
+    @classmethod
+    def _fixes_once_in_order(cls, ids: list[str]) -> list[str]:
+        # Each once and sorted, so the same fixes are the same run's key.
+        return sorted(set(ids))
 
     @field_validator("filament_profiles")
     @classmethod

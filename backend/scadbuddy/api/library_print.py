@@ -23,6 +23,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from scadbuddy.activity.component import ACTIVITY, ActivityComponent
+from scadbuddy.api.accepted_fixes import Amend, FixesDep
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import (
     DownloadsDep,
@@ -1278,9 +1279,11 @@ async def post_library_run(
     budget: ReadBudgetDep,
     downloads: DownloadsDep,
     library: PrintLibraryDep,
+    fixes: FixesDep,
 ) -> PrintRun | JSONResponse:
     """As ``/print/outputs/{id}/run`` (202, then follow ``GET /print/runs/{id}``; a
-    repeat of the same request is its run, #742), on the file as it stands in Bambuddy.
+    repeat of the same request is its run, #742; its ``accepted_fixes`` checked and
+    applied as there, #284), on the file as it stands in Bambuddy.
     A sliced file is queued as it is, with no slice (#2671), and never refused: one
     sliced for another printer model or a nozzle the printer lacks queues with a
     warning that says so. A file deleted in Bambuddy is its 404, before the 202. The
@@ -1299,6 +1302,7 @@ async def post_library_run(
         response=response,
         http=http,
         native=await library.serving_native(),
+        amend=fixes.for_library(file_id),
     )
 
 
@@ -1315,6 +1319,7 @@ async def start_library_run(
     response: Response | None = None,
     http: Request | None = None,
     native: LibraryReads | None = None,
+    amend: Amend | None = None,
 ) -> PrintRun | JSONResponse:
     """A library file's run, as ``POST /print/library/{file_id}/run`` starts it: the route
     and a batch's Queue all both start one here, so neither depends on the other's
@@ -1340,6 +1345,7 @@ async def start_library_run(
         source=SourceSpec(kind="library", file_id=file_id),
         activity=activity,
         prepare=prepare,
+        amend=amend,
     )
 
 

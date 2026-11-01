@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { api, ApiError } from '../../api/client'
 import type {
   AnalysisRequest,
@@ -294,6 +294,12 @@ interface Props {
   allPlates?: boolean
   /** #755, #760 — the run's own refusals, listed first: the one check that holds Print. */
   children?: ReactNode
+  /**
+   * #284 — the accepted fixes the report holds for this print, by decision id: what the
+   * dialog's Print sends as `accepted_fixes`. Called again whenever they change, and with
+   * none once the panel unmounts.
+   */
+  onAcceptedFixes?: (decisionIds: string[]) => void
 }
 
 /**
@@ -301,8 +307,15 @@ interface Props {
  * dialog. Advisory throughout: no finding disables Print (`lib/analyzers.ts`). The
  * nozzle verdict passed as `children` is not an analyzer finding, and its errors do.
  */
-export function AnalyzerPanel({ target, request, allPlates = false, children }: Props) {
+export function AnalyzerPanel({ target, request, allPlates = false, children, onAcceptedFixes }: Props) {
   const { report, error, checking, reload } = useAnalysis(target, request)
+  const acceptedKey = [...new Set((report?.accepted_changes ?? []).map((row) => row.decision_id))]
+    .sort()
+    .join(',')
+  useEffect(() => {
+    onAcceptedFixes?.(acceptedKey ? acceptedKey.split(',') : [])
+  }, [acceptedKey, onAcceptedFixes])
+  useEffect(() => () => onAcceptedFixes?.([]), [onAcceptedFixes])
   const { shown, setAside } = partition(report?.diagnostics ?? [])
   const skipped = report?.skipped ?? []
   /** Decisions are stored in Postgres; without it the run says why (`decisions_reason`). */
@@ -365,11 +378,10 @@ export function AnalyzerPanel({ target, request, allPlates = false, children }: 
       )}
 
       {accepted > 0 && (
-        // backend/scadbuddy/api/analyzers.py:7-9: "Applying records a decision; it sends
-        // nothing. … Nothing reads ``accepted_changes`` into a print yet."
+        // backend/scadbuddy/analyzers/apply.py: a print that names its accepted fixes is
+        // checked against them again and sends them with it.
         <p data-testid="accepted-changes" className="mt-1.5 text-[12px] text-faint">
-          {accepted} accepted {accepted === 1 ? 'change is' : 'changes are'} recorded; nothing
-          sends {accepted === 1 ? 'it' : 'them'} to Bambuddy yet.
+          {accepted} accepted {accepted === 1 ? 'change goes' : 'changes go'} with this print.
         </p>
       )}
 
