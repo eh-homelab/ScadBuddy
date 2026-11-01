@@ -615,13 +615,13 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   workflow never sees (its insert). The older render workers may keep running: they
   finish the renders pinned to their build.
 - **Upgrading past #1142** (the contract migrations of the durable rollout): upgrade
-  from a release that already has #1053 and #2503. Its migration drops `print_runs.heartbeat_at`,
-  `render_jobs.params`, the `render_jobs_pending_key` index, the old print watcher's
-  `print_watches` log and `workflow_definitions.script`. It fails the print runs a
-  pre-#1052 pod left `running` and the renders a pre-#1053 API left unsettled, as
-  upgraded, and it stops the start, changing nothing, while a flow version has no
-  commit: start the release before it once (its backfill commits each script to git),
-  then this one.
+  from a release that already has #1053. Its migrations drop `print_runs.heartbeat_at`,
+  `render_jobs.params`, the `render_jobs_pending_key` index and the old print watcher's
+  `print_watches` log, and fail the print runs a pre-#1052 pod left `running` and the
+  renders a pre-#1053 API left unsettled, as upgraded. They drop
+  `workflow_definitions.script` only when every flow version names a commit; otherwise
+  the column stays (a notice in Postgres's log says so) and the start's backfill
+  commits those versions.
 
 ### Bambuddy writes on the `bambuddy` queue (#1052, #1053, #1060)
 
@@ -766,9 +766,9 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
   (`<name>/flow.py`), a repository of its own beside `/data/models` on the API's data
   volume, on the same git code (`core/gitrepo.py`). Only the API reads it: a run's
   script goes to the worker as the run's input. `workflow_definitions` keeps a row per
-  version naming its commit, and `workflow_runs` the commit each run ran. A release
-  before #1142 backfilled the versions Postgres held at its first start; #1142 dropped
-  the column they were held in (see "Upgrading past #1142").
+  version naming its commit, and `workflow_runs` the commit each run ran. The first
+  start after the upgrade backfills the versions Postgres held (`flows/backfill.py`),
+  one commit each with its author and date; it is idempotent, and the log says how many.
 - **`tool`, `agent`, `ask_session`** run on the agent's `agent-tools` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS`, read by the API when it starts a run).
 - **Tool tiers come from the agent** (#2704), as its own turns resolve them (the tool's

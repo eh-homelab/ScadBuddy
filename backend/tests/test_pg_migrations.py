@@ -337,19 +337,25 @@ def test_the_contract_migration_ends_the_rows_an_older_build_left_unsettled(
 
 
 @pytest.mark.requires_postgres
-def test_the_contract_migration_refuses_a_flow_version_git_does_not_hold(
+def test_the_contract_migration_keeps_the_script_of_a_flow_version_git_does_not_hold(
     pg_conninfo: str,
 ) -> None:
-    # Its script is in the row only: dropping the column would lose it (#2503 backfill).
+    # Its script is in the row only: dropping the column would lose it, and raising would
+    # stop the API's start. The column stays, with a notice, for the start's backfill.
     drop = _index("workflow_definitions_drop_script")
+    notices: list[str] = []
     with psycopg.connect(pg_conninfo) as conn:
+        conn.add_notice_handler(lambda notice: notices.append(notice.message_primary or ""))
         migrate(conn, MIGRATIONS[:drop])
         conn.execute(
             "INSERT INTO workflow_definitions (id, name, version, script, created_by)"
             " VALUES ('v1', 'demo', 1, 'pass', '{}')"
         )
         conn.commit()
-        with pytest.raises(psycopg.errors.RaiseException, match="has no commit"):
-            migrate(conn)
-        conn.rollback()
+        migrate(conn)
+        applied = conn.execute(
+            "SELECT 1 FROM scadbuddy_migrations WHERE id = %s", (MIGRATIONS[drop].id,)
+        ).fetchall()
         assert conn.execute("SELECT script FROM workflow_definitions").fetchall() == [("pass",)]
+    assert applied == [(1,)]
+    assert any("workflow_definitions.script kept" in notice for notice in notices)

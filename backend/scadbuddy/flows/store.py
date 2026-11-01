@@ -30,6 +30,7 @@ from scadbuddy.flows.grants import Consumption, Grant, GrantSpec, GrantStatus, G
 from scadbuddy.flows.models import (
     RESULT_MAX,
     TERMINAL,
+    BackfillRow,
     Decision,
     Proposal,
     Run,
@@ -49,7 +50,12 @@ _DECISION = (
     "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder,"
     " input_hash, hops, created_at"
 )
-_DEFINITION = "id, name, version, commit, approval_timeout_s, created_by, created_at"
+#: ``script`` only where a row with no commit kept the column (#1142's migration
+#: drops it otherwise): read through the row, so the query works either way.
+_DEFINITION = (
+    "id, name, version, commit, to_jsonb(workflow_definitions) ->> 'script' AS script,"
+    " approval_timeout_s, created_by, created_at"
+)
 _GRANT = (
     "id, run_id, status, spec, used, requested_by, approved_by, approved_at, revoked_by,"
     " revoked_at, expires_at, created_at"
@@ -197,10 +203,33 @@ class FlowStore:
         return StoredDefinition.model_validate(row)
 
     def version_commits(self) -> dict[str, str | None]:
-        """Every version id, and the commit it names: the reconciler's check."""
+        """Every version id, and the commit it names (None before its backfill): the
+        reconciler's check."""
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT id, commit FROM workflow_definitions").fetchall()
         return {row["id"]: row["commit"] for row in rows}
+
+    def unbackfilled(self) -> list[BackfillRow]:
+        """The rows written before flows were in git, in ``(name, version)`` order."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT id, name, version, to_jsonb(workflow_definitions) ->> 'script'"
+                " AS script, created_by, created_at"
+                " FROM workflow_definitions WHERE commit IS NULL ORDER BY name, version"
+            ).fetchall()
+        return [BackfillRow.model_validate(row) for row in rows]
+
+    def set_commit(self, definition_id: str, commit: str) -> None:
+        """Join a row to its commit, and its runs with it."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "UPDATE workflow_definitions SET commit = %s WHERE id = %s AND commit IS NULL",
+                (commit, definition_id),
+            )
+            conn.execute(
+                "UPDATE workflow_runs SET commit = %s WHERE definition_id = %s AND commit IS NULL",
+                (commit, definition_id),
+            )
 
     def stored_definition(self, definition_id: str) -> StoredDefinition | None:
         with self._pool.connection() as conn:

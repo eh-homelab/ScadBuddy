@@ -2,8 +2,8 @@
 ``data/flows`` (#2503; spec 2026-10-11-flow-grants-and-git-design.md §6.2).
 
 A version's script is read from git at the commit its row names, never from the row. A
-registration or restore holds the flows repository's write lock across the reconcile, the
-commit and the row's insert (``FlowHistory.register``). If the insert fails, the
+registration or restore holds the flows repository's write lock across the backfill and reconcile,
+the commit and the row's insert (``FlowHistory.register``). If the insert fails, the
 commit stays and the request fails; the next registration, or the next start, indexes
 it at its own position (``flows/backfill.py``).
 """
@@ -16,7 +16,7 @@ import uuid
 from typing import Any
 
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
-from scadbuddy.flows.backfill import created_by, reconcile, reconcile_locked
+from scadbuddy.flows.backfill import backfill, backfill_locked, created_by
 from scadbuddy.flows.models import (
     Definition,
     DefinitionSummary,
@@ -56,8 +56,8 @@ class FlowDefinitions:
     # -- start ------------------------------------------------------------------
 
     async def start(self) -> None:
-        """Initialise the repository, and index any commit a failed insert left (spec
-        §6.4)."""
+        """Initialise the repository, backfill the rows written before flows were in
+        git, and index any commit a failed insert left (spec §6.4)."""
         await asyncio.to_thread(self._start)
 
     def _start(self) -> None:
@@ -65,10 +65,14 @@ class FlowDefinitions:
         if not self.history.available:
             return
         try:
-            reconcile(self.history, self.store)
+            done = backfill(self.history, self.store)
         except (GitError, OSError):
-            # The app boots either way: the next registration reconciles first.
-            logger.exception("could not reconcile flow versions with git")
+            # The app boots either way: the rows keep their scripts until a later
+            # start or the next registration (which backfills first) commits them.
+            logger.exception("could not backfill flow versions into git")
+            return
+        if done:
+            logger.info("backfilled flow versions into git", extra={"count": done})
 
     # -- writes -----------------------------------------------------------------
 
@@ -132,7 +136,7 @@ class FlowDefinitions:
             script=script,
             inputs=inputs_schema,
             restore=restore,
-            reconcile=lambda: reconcile_locked(self.history, self.store),
+            reconcile=lambda: backfill_locked(self.history, self.store),
         )
         return Definition.model_validate(
             {
@@ -189,20 +193,22 @@ class FlowDefinitions:
 
     async def get(self, definition_id: str) -> Definition | None:
         """A version with its script: from git at its commit (:class:`ScriptMissingError`
-        when that is gone)."""
+        when that is gone), or the row's own before its backfill."""
         return await asyncio.to_thread(self._get, definition_id)
 
     def _get(self, definition_id: str) -> Definition | None:
         row = self.store.stored_definition(definition_id)
         if row is None:
             return None
-        assert row.commit is not None  # every row names one (#1142's migration)
-        self._require()
-        try:
-            script = self.history.script_at(row.name, row.commit)
-            inputs = self.history.inputs_at(row.name, row.commit)
-        except RevisionNotFoundError:
-            raise ScriptMissingError(row.commit) from None
+        script, inputs = row.script, None
+        if row.commit is not None:
+            self._require()
+            try:
+                script = self.history.script_at(row.name, row.commit)
+                inputs = self.history.inputs_at(row.name, row.commit)
+            except RevisionNotFoundError:
+                raise ScriptMissingError(row.commit) from None
+        assert script is not None
         return Definition.model_validate(
             {
                 **row.model_dump(),

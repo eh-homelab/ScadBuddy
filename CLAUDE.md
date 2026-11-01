@@ -529,7 +529,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
 - `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
   model history (`library/history.py` `ModelHistory`) and flow scripts
   (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per
-  version; `flows/backfill.py` is the reconciler (its backfill went with #1142);
+  version; `flows/backfill.py` is the start-time backfill and reconciler;
   `flows/history.py` is the Reset preview, not git). Both repositories are shared by
   every replica over NFS, so each writer holds a Postgres lock that carries the last HEAD
   (`library/repo_lock.py`: `models_repo_head`, and `flows_coordinator`'s `flows_repo_head`).
@@ -616,7 +616,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   Phase 2, pricing (#4250, plan `2026-10-22-orders-phase-2-pricing.md`): the price book is
   `filaments` rows (`pricebook.py` `PriceBookReader`, the store's `*_filament` methods) and
   the stored settings `pricing_*` and `rough_estimate_factor` (`live`), behind `GET`/`PUT
-  /orders/price-book` and `…/price-book/filaments`; `currency.py` is the one table of
+  /orders/price-book` and `…/price-book/filaments` (an archived filament comes back, its id
+  kept, through `…/{id}/unarchive`, 409 `filament_exists` when its identity was taken since,
+  #4977); `currency.py` is the one table of
   minor-unit exponents (ISO 4217), published as `minor_exponent` on every order and on the
   book (the browser's `lib/money.ts` takes it as an argument and never asks `Intl` for the
   digits), and `orders_currency` refuses a code with no minor unit. `pricing.py` is the
@@ -652,8 +654,8 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   `derive` gives its rows; a cancelled one back to the status its cancel's audit row
   recorded, with the items it took) and `reopen_item` (a cancelled item back to what its
   quotes and attempts give it), each taking its quotes' sliced-file holds again (`_hold`);
-  `POST /customers/{id}/unarchive`. Agent `order_reopen` (outward, as a cancel) and
-  `customer_upsert`'s `unarchive`. `Lifecycle.unfulfil_item` (#4952, `POST
+  `POST /customers/{id}/unarchive`. Agent `order_reopen` (outward, as a cancel),
+  `customer_upsert`'s `unarchive` and `price_book_set`'s filament `unarchive`. `Lifecycle.unfulfil_item` (#4952, `POST
   …/items/{item}/unfulfil`, agent `order_item_unfulfil`, outward) clears the latest
   accepted attempt's `accepted_at` (the row stays) and sets the item to what its latest
   attempt gives; refused for an item on a shipment (`order_item_shipped`) and on hold.
@@ -723,13 +725,13 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   decides, via `src/approvals/service.ts` and the `ai_approvals` table, #258; outside
   a session they are denied as "needs approval"; the built-in `AskUserQuestion`, given
   only to sessions the browser user owns, parks there too until the user answers in the
-  panel, via `src/harness/questions.ts`, `src/questions/service.ts` and `ai_questions`,
-  #940, and never outlives its turn; the agent's `request_user_attention` tool, #815,
-  `src/harness/attention.ts`, parks on the same gate as an `ai_questions` row of kind
-  `attention`, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
-  `stop` end the turn; its `done` reason waits for nothing and outlives its turn, shown
-  beside the badge's waiting count (not in it) until dismissed, at most
-  `DONE_POSTS_PER_TURN` a turn, carrying `src/questions/doneSummary.ts`'s record of what the turn
+  panel, via `src/harness/questions.ts` and the session workflow's gate (an `ai_pending_input`
+  entry, the request's record, plan Step 9.7), #940, and never outlives its turn; the agent's
+  `request_user_attention` tool, #815, `src/harness/attention.ts`, parks on the same gate as a
+  `wait_for_user` entry, with a timer that never answers: `proceed` returns `timed_out`, `wait` and
+  `stop` end the turn; its `done` reason waits for nothing and outlives its turn, an `ai_questions`
+  row (`src/gate/questions.ts`), shown beside the badge's waiting count (not in it) until dismissed, at most
+  `DONE_POSTS_PER_TURN` a turn, carrying `src/gate/doneSummary.ts`'s record of what the turn
   touched, unattended actions first; `GET /api/v1/ai/pending-input`, `src/routes/pendingInput.ts`, is
   the one read of every parked call, approvals and answers, that the badge counts, and
   `POST /api/v1/ai/pending-input/{request_id}` the one respond route the panel answers
