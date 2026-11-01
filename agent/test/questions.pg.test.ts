@@ -73,15 +73,24 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(
     })
 
     /** A turn that asks QUESTIONS through its gate (when it has one) with `tool`, then ends. */
-    const askingWith = (tool: string) => (run: HarnessRun): AsyncIterable<SDKMessage> => {
-      runs.push(run)
-      return (async function* () {
-        await Promise.resolve()
-        if (run.questionGate) {
-          verdicts.push(await run.questionGate({ tool, questions: QUESTIONS, toolUseId: 'toolu_q1', signal: new AbortController().signal }))
-        }
-        yield result(run)
-      })()
+    // Each of a session's calls its own tool_use id (toolu_q1, toolu_q2, …), as the model's are: a
+    // second turn that asked as toolu_q1 again would, on the same workflow run, find the first
+    // one's answer (#5053's CI).
+    const askingWith = (tool: string) => {
+      const asked = new Map<string, number>()
+      return (run: HarnessRun): AsyncIterable<SDKMessage> => {
+        runs.push(run)
+        return (async function* () {
+          await Promise.resolve()
+          if (run.questionGate) {
+            const session = run.sessionId ?? run.resume ?? ''
+            const n = (asked.get(session) ?? 0) + 1
+            asked.set(session, n)
+            verdicts.push(await run.questionGate({ tool, questions: QUESTIONS, toolUseId: `toolu_q${n}`, signal: new AbortController().signal }))
+          }
+          yield result(run)
+        })()
+      }
     }
     const asking = askingWith(ASK_USER_QUESTION)
 
