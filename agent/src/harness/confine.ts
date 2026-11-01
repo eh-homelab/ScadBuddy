@@ -36,6 +36,20 @@ const fromHome = (value: string): boolean => value.startsWith('~')
 
 const GLOB_CHARS = /[*?[\]{}]/
 
+/** Every character glob syntax can wrap a `.` in: escapes, braces, classes, extglobs, wildcards. */
+const GLOB_SYNTAX = /[\\{},[\]()|!@+?*]/g
+const DOTS_AND_SYNTAX = /^[.\\{},[\]()|!@+?*]+$/
+
+/**
+ * Whether a glob could reach `..`, whatever syntax spells it, failing closed: a `..` once the
+ * glob syntax is taken out (`.{.,x}`, `.\.`, `[.][.]`, `@(.).`, `{..,x}`), or a segment of
+ * only dots and glob syntax other than `.` (`.?`, `.*`, `*.*`). The engine is not relied on.
+ */
+function mayClimb(glob: string): boolean {
+  if (glob.replace(GLOB_SYNTAX, '').includes('..')) return true
+  return glob.split('/').some((segment) => segment !== '.' && segment.includes('.') && DOTS_AND_SYNTAX.test(segment))
+}
+
 const inside = (root: string, abs: string): boolean => {
   const rel = path.relative(root, abs)
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel))
@@ -96,11 +110,10 @@ export function confineGuard(root: string | undefined): InputGuard {
     if (toolName === 'Glob') {
       const pattern = args.pattern
       if (typeof pattern !== 'string') return deny(toolName, 'its pattern is not a string')
-      // A `..` anywhere in the pattern, whatever glob syntax wraps it: a brace alternative
-      // (`{..,x}/*`), an extglob (`@(..|x)/*`). Claude Code 2.1.310's Glob found nothing for the
-      // brace one (test/nativeBuiltins.sdk.test.ts), but the guard does not rely on the engine.
-      // A name with `..` in it (`a..b`) is refused too; `path` can name such a directory instead.
-      if (pattern.includes('..')) return deny(toolName, `its pattern ${pattern} has a ..`)
+      // Claude Code 2.1.310's Glob found nothing for `{..,x}/*` (test/nativeBuiltins.sdk.test.ts),
+      // but the guard does not rely on the engine. A name with `..` in it (`a..b`) is refused too;
+      // `path` can name such a directory instead.
+      if (mayClimb(pattern)) return deny(toolName, `its pattern ${pattern} may reach ..`)
       if (fromHome(pattern)) return deny(toolName, `its pattern ${pattern} starts at a home directory`)
       if (path.isAbsolute(pattern)) {
         // The part before the first wildcard is a directory the pattern starts from.
@@ -110,8 +123,11 @@ export function confineGuard(root: string | undefined): InputGuard {
         if (await outside(fixed)) return deny(toolName, `its pattern ${pattern} starts outside it`)
       }
     }
-    if (toolName === 'Grep' && typeof args.glob === 'string' && fromHome(args.glob)) {
-      return deny(toolName, `its glob ${args.glob} starts at a home directory`)
+    // Grep's `path` is a path (checked above, no glob); its `glob` filter follows the Glob rule.
+    if (toolName === 'Grep' && args.glob !== undefined) {
+      if (typeof args.glob !== 'string') return deny(toolName, 'its glob is not a string')
+      if (fromHome(args.glob)) return deny(toolName, `its glob ${args.glob} starts at a home directory`)
+      if (mayClimb(args.glob)) return deny(toolName, `its glob ${args.glob} may reach ..`)
     }
     return undefined
   }
