@@ -6,7 +6,7 @@ import { ASK_USER_QUESTION, ASK_USER_TOOL, type QuestionVerdict, type UserQuesti
 import type { HarnessRun } from '../src/harness/run.js'
 import type { EventLog } from '../src/sessions/eventLog.js'
 import type { SessionManager } from '../src/sessions/manager.js'
-import { QuestionService } from '../src/questions/service.js'
+import { ATTENTION_RATE_LOCK, QuestionService } from '../src/questions/service.js'
 import { respond, RespondError } from '../src/routes/pendingInput.js'
 import { ChatConnection } from '../src/routes/chat.js'
 import { type Owner, PROTOCOL_VERSION, type ServerEvent } from '../src/sessions/protocol.js'
@@ -70,6 +70,30 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(
     })
     afterEach(async () => {
       await drop()
+    })
+
+    // #5053: the rate lock is tried and tried again, never waited on; a holder that never lets go
+    // gives the model a refusal past the bound, not a call that never returns.
+    it('an attention request whose rate lock is never free is refused past the bound, and opens nothing', async () => {
+      const holder = await db.sql.reserve()
+      await holder`SELECT pg_advisory_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0))`
+      try {
+        const service = new QuestionService({ sql: db.sql, events: {} as EventLog, rateLockWaitMs: 200 })
+        let opened = 0
+        const started = performance.now()
+        const refused = await service.attentionLimit(
+          { sessionId: '00000000-0000-4000-8000-000000000001', turnId: '00000000-0000-4000-8000-000000000002', toolUseId: 'toolu_a', tool: 'request_user_attention', reason: 'blocked', own: true },
+          async () => {
+            opened += 1
+          },
+        )
+        expect(refused).toMatch(/^The user was not asked: /)
+        expect(opened).toBe(0)
+        expect(performance.now() - started).toBeLessThan(5_000)
+      } finally {
+        await holder`SELECT pg_advisory_unlock_all()`
+        holder.release()
+      }
     })
 
     /** A turn that asks QUESTIONS through its gate (when it has one) with `tool`, then ends. */

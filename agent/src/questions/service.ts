@@ -108,11 +108,13 @@ export const TAB_WAIT_RATE_LIMIT = 10
  */
 export const DONE_POSTS_PER_TURN = 3
 /** The advisory lock the rate limit's count and insert are taken under. */
-const ATTENTION_RATE_LOCK = 'scadbuddy:attention-rate'
+export const ATTENTION_RATE_LOCK = 'scadbuddy:attention-rate'
 /** How long `attentionLimit` holds its lock for the entry's open (a workflow Update round trip). */
 const OPEN_WAIT_MS = 10_000
 /** How long `attentionLimit` waits before it tries the lock again, at most; it holds no connection meanwhile. */
 const RATE_LOCK_RETRY_MS = 50
+/** How long `attentionLimit` tries the lock before it refuses: past one holder's OPEN_WAIT_MS, twice over (#5053). */
+const RATE_LOCK_WAIT_MS = 2 * OPEN_WAIT_MS + 5_000
 
 export type QuestionErrorCode = 'not_found' | 'forbidden' | 'conflict' | 'invalid'
 
@@ -135,6 +137,8 @@ export type QuestionServiceDeps = {
   audit?: Pick<AuditLog, 'record' | 'hash'>
   /** ai_settings, for `question_expiry_seconds`. */
   settings?: SettingsReader
+  /** Tests only: how long `attentionLimit` tries the rate lock before it refuses (default RATE_LOCK_WAIT_MS). */
+  rateLockWaitMs?: number
 }
 
 /** What `gate()` needs to know about the turn it parks. */
@@ -784,6 +788,25 @@ export class QuestionService {
   }
 
   /**
+   * Runs `work` in a transaction that holds ATTENTION_RATE_LOCK. The lock is tried, not waited
+   * on: its holder may wait up to OPEN_WAIT_MS on a workflow Update, whose activity needs a
+   * connection of the same pool, and a waiter blocked in the lock would hold one all that time.
+   * Undefined when the lock was not had within `rateLockWaitMs` (#5053).
+   */
+  private async underRateLock<T>(work: (tx: TransactionSql) => Promise<T>): Promise<{ value: T } | undefined> {
+    const until = performance.now() + (this.deps.rateLockWaitMs ?? RATE_LOCK_WAIT_MS)
+    for (;;) {
+      const done = await this.deps.sql.begin(async (tx) => {
+        const [lock] = await tx<{ held: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0)) AS held`
+        return lock?.held ? { value: await work(tx) } : undefined
+      })
+      if (done) return done
+      if (performance.now() >= until) return undefined
+      await new Promise((resolve) => setTimeout(resolve, Math.ceil(Math.random() * RATE_LOCK_RETRY_MS)))
+    }
+  }
+
+  /**
    * #815 §5's limits for an AgentSession turn's attention request (#5003), whose entry its
    * workflow opens (sessions/turnHost.ts): the model's own request (`own`) against
    * ATTENTION_RATE_LIMIT, a browser call's tab wait against TAB_WAIT_RATE_LIMIT, each counting
@@ -795,23 +818,10 @@ export class QuestionService {
    * Undefined when it was asked: `open`, which the workflow's entry is written by, runs under
    * `gate`'s lock, as `gate`'s insert does, so two requests raised at once cannot both pass at the
    * limit. Else the refusal the model reads, audited as `gate` audits one, and `open` never runs.
+   * Best effort past OPEN_WAIT_MS: an open that takes longer goes on outside the lock, so a
+   * request counted meanwhile does not see its entry. A lock not had within RATE_LOCK_WAIT_MS
+   * refuses the request, as the limit does (#5053).
    */
-  /**
-   * Runs `work` in a transaction that holds ATTENTION_RATE_LOCK. The lock is tried, not waited
-   * on: its holder may wait up to OPEN_WAIT_MS on a workflow Update, whose activity needs a
-   * connection of the same pool, and a waiter blocked in the lock would hold one all that time.
-   */
-  private async underRateLock<T>(work: (tx: TransactionSql) => Promise<T>): Promise<T> {
-    for (;;) {
-      const done = await this.deps.sql.begin(async (tx) => {
-        const [lock] = await tx<{ held: boolean }[]>`SELECT pg_try_advisory_xact_lock(hashtextextended(${ATTENTION_RATE_LOCK}, 0)) AS held`
-        return lock?.held ? { value: await work(tx) } : undefined
-      })
-      if (done) return done.value
-      await new Promise((resolve) => setTimeout(resolve, Math.ceil(Math.random() * RATE_LOCK_RETRY_MS)))
-    }
-  }
-
   async attentionLimit(
     context: { sessionId: string; turnId: string; toolUseId: string; tool: string; reason: string; own: boolean },
     open: () => Promise<void>,
@@ -819,7 +829,7 @@ export class QuestionService {
     const { own } = context
     const tab = '%:tab:%'
     const limit = own ? ATTENTION_RATE_LIMIT : TAB_WAIT_RATE_LIMIT
-    const recent = await this.underRateLock(async (tx) => {
+    const counted = await this.underRateLock(async (tx) => {
       const [row] = await tx<{ n: number }[]>`
         SELECT
           (SELECT count(*) FROM ai_questions
@@ -841,6 +851,12 @@ export class QuestionService {
       }
       return n
     })
+    if (!counted) {
+      return own
+        ? 'The user was not asked: ScadBuddy could not check the attention request limit in time. Say what you need in your reply instead.'
+        : 'The user was not asked for the tab: ScadBuddy could not check the tab wait limit in time. Carry on without the tab.'
+    }
+    const recent = counted.value
     if (recent < limit) return undefined
     const limited = own
       ? `The user was not asked: at most ${ATTENTION_RATE_LIMIT} attention requests are sent in ` +
