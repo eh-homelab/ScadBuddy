@@ -58,15 +58,24 @@ class _Content:
 
 
 class _Native:
-    def __init__(self) -> None:
+    def __init__(self, subject: str | None = "out-1") -> None:
         self.uploads: list[tuple[str, bytes, int | None]] = []
+        self.subjects: list[str] = []
+        self.subject = subject
 
     async def library_file(self, file_id: int) -> Any:
         assert file_id == COPY
         return SimpleNamespace(id=COPY, filename="demo-elan.3mf", file_hash=None)
 
-    async def upload(self, filename: str, data: BinaryIO, folder_id: int | None) -> Any:
+    async def subject_of(self, file_id: int) -> str | None:
+        assert file_id == COPY
+        return self.subject
+
+    async def upload(
+        self, filename: str, data: BinaryIO, folder_id: int | None, *, print_subject: str
+    ) -> Any:
         self.uploads.append((filename, data.read(), folder_id))
+        self.subjects.append(print_subject)
         return SimpleNamespace(id=COPY + 1)
 
 
@@ -106,6 +115,23 @@ async def test_a_native_copys_sliced_file_goes_to_the_native_library(tmp_path: P
     # the name, `print_library/store.py` `file_type_of`).
     assert file_type_of(name) == "gcode.3mf"
     assert name == "demo-elan.plate2.gcode.3mf"
+    # #4337: the slice lives as long as its copy, by the copy's subject.
+    assert native.subjects == ["out-1"]
+
+
+async def test_a_library_files_own_slice_carries_its_library_subject(tmp_path: Path) -> None:
+    """#4337: a library file printed as it is carries no subject of its own; its slice
+    is the run's, under the file's ``library:<id>`` subject."""
+    native = _Native(subject=None)
+    run = _activities(tmp_path, native=native)
+    planned = PlannedRun.model_construct(library_file_id=COPY, folder_id=None)
+    sliced = NativeSliced(slice_id=1, preset_key="k", sliced_blob_key="native-slice-1")
+
+    await ActivityEnvironment().run(
+        run.print_sliced_upload, SlicedUploadInput(planned=planned, plate_id=1, sliced=sliced)
+    )
+
+    assert native.subjects == [f"library:{COPY}"]
 
 
 async def test_slice_run_beats_before_its_wait(
@@ -242,9 +268,11 @@ async def test_the_sliced_upload_beats_while_it_uploads(
     monkeypatch.setattr(print_activities, "HEARTBEAT_EVERY", 0.05)
 
     class Slow(_Native):
-        async def upload(self, filename: str, data: BinaryIO, folder_id: int | None) -> Any:
+        async def upload(
+            self, filename: str, data: BinaryIO, folder_id: int | None, *, print_subject: str
+        ) -> Any:
             await asyncio.sleep(0.3)
-            return await super().upload(filename, data, folder_id)
+            return await super().upload(filename, data, folder_id, print_subject=print_subject)
 
     run = _activities(tmp_path, native=Slow())
     beats: list[Any] = []

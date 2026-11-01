@@ -5,6 +5,7 @@ with an `Idempotency-Key`, so the operation kinds really run."""
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import time
@@ -25,6 +26,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from scadbuddy.api.deps import STATE_ATTR, get_render
 from scadbuddy.api.library_print import start_library_run
 from scadbuddy.bambuddy.print_run import PrintRunRequest
+from scadbuddy.bambuddy.uploads import LibraryCopy, SlicedCopy
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
@@ -526,6 +528,55 @@ def test_move_clears_filed_and_names_no_project(native_client: TestClient, three
     native_client.post("/api/v1/print/library/move", json={"file_ids": [f.id]}, headers=press())
     row = native.rows.file(f.id)
     assert row is not None and row.folder_id is None
+
+
+@pytest.mark.parametrize("route", ["move", "patch"])
+def test_a_moved_per_print_copy_is_the_persons_with_its_slices(
+    native_client: TestClient, three_mf: Path, route: str
+) -> None:
+    """#4337, case 4: a run's copy a person moves, by either route, is theirs: neither it
+    nor the slices recorded on it carry the run's subject any more, and its record is
+    forgotten, so no sweep trashes them and no run reuses the copy."""
+    native = _native(native_client)
+    uploads = getattr(native_client.app.state, STATE_ATTR).uploads  # type: ignore[attr-defined]
+    assert native_client.portal is not None
+    with three_mf.open("rb") as data:
+        copy = native_client.portal.call(
+            partial(native.upload, "bracket.3mf", data, None, print_subject="out-moved")
+        )
+    sliced = native_client.portal.call(
+        partial(
+            native.upload,
+            "bracket.plate1.gcode.3mf",
+            io.BytesIO(b"g"),
+            None,
+            print_subject="out-moved",
+        )
+    )
+    native_client.portal.call(
+        uploads.record, "out-moved", LibraryCopy(id=copy.id, folder_id=None, target_key="t")
+    )
+    native_client.portal.call(
+        uploads.record_sliced, "out-moved", copy.id, SlicedCopy(id=sliced.id, preset_key="k")
+    )
+    d = mkdir(native_client, "Mine")
+
+    if route == "move":
+        r = native_client.post(
+            "/api/v1/print/library/move",
+            json={"file_ids": [copy.id], "folder_id": d["id"]},
+            headers=press(),
+        )
+    else:
+        r = native_client.patch(
+            f"/api/v1/print/library/{copy.id}", json={"folder_id": d["id"]}, headers=press()
+        )
+
+    assert r.status_code == 200, r.text
+    for file_id in (copy.id, sliced.id):
+        row = native.rows.file(file_id)
+        assert row is not None and row.print_subject is None
+    assert native_client.portal.call(partial(uploads.for_output, "out-moved", native=True)) == []
 
 
 def test_rename_keeps_the_extension(native_client: TestClient, three_mf: Path) -> None:

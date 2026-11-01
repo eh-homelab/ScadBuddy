@@ -219,6 +219,11 @@ class BambuddyUploadStore:
         that ScadBuddy never deletes on its own; the next send uploads a copy of its own."""
         await asyncio.to_thread(self._forget_files, list(library_file_ids))
 
+    async def slices_on(self, library_file_ids: Iterable[int]) -> set[int]:
+        """The sliced files any subject records on these copies (#4337): a moved copy's,
+        which are the person's with it."""
+        return await asyncio.to_thread(self._slices_on, list(library_file_ids))
+
     async def recorded_as(self, library_file_id: int) -> list[tuple[str, str]]:
         """Each ``(output_id, target_key)`` that records ``library_file_id`` as a copy:
         what a byte-for-byte copy of it is a copy of too (#2670)."""
@@ -750,6 +755,17 @@ class BambuddyUploadStore:
             conn.execute(
                 "DELETE FROM output_bambuddy_uploads WHERE library_file_id = ANY(%s)", (ids,)
             )
+
+    def _slices_on(self, ids: list[int]) -> set[int]:
+        if not ids:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT sliced_library_file_id FROM output_bambuddy_slices"
+                " WHERE source_library_file_id = ANY(%s)",
+                (ids,),
+            ).fetchall()
+        return {row["sliced_library_file_id"] for row in rows}
 
     def _recorded_as(self, library_file_id: int) -> list[tuple[str, str]]:
         with self._pool.connection() as conn:

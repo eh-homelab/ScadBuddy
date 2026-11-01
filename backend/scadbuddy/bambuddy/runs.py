@@ -71,6 +71,13 @@ _COLUMNS = (
     " (status = 'failed' AND enqueue_attempted) AS may_have_queued,"
     " workflow_id, workflow_run_id, printer::text AS printer"
 )
+#: A run that may still read its subject's files (`PrintRunStore.running_for`): one still
+#: running, or a native run with prints still to start (`print_runs_lan_waiting`'s
+#: predicate), which it starts from its sliced files later (#4541).
+_IN_USE = (
+    "(status = 'running' OR (status = 'succeeded'"
+    " AND result->'lan_waiting' <> '[]'::jsonb AND result->>'lan_stopped' IS NULL))"
+)
 
 
 class PrintRunError(BaseModel):
@@ -269,9 +276,15 @@ class PrintRunStore:
         return await asyncio.to_thread(self._record_lan_stopped, run_id, stopped)
 
     async def running_for(self, output_id: str) -> list[PrintRun]:
-        """The output's runs still ``running``, newest first: what may still read a
-        slice of it (#4312 re-review I-a)."""
+        """The output's runs that may still read a slice of it, newest first (#4312
+        re-review I-a): those still ``running``, and a succeeded native run with prints
+        still to start, which it starts from its sliced files later (#4541, #4337)."""
         return await asyncio.to_thread(self._running_for, output_id)
+
+    async def subjects_in_use(self) -> set[str]:
+        """Every run subject (``PrintRun.output_id``) one of whose runs `running_for`
+        names: what the per-print copies' sweep leaves alone (#4337)."""
+        return await asyncio.to_thread(self._subjects_in_use)
 
     async def failed_before_queueing(self, output_ids: list[str]) -> set[str]:
         """Which of ``output_ids`` have a newest run that failed before it queued
@@ -442,11 +455,18 @@ class PrintRunStore:
     def _running_for(self, output_id: str) -> list[PrintRun]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s AND status = 'running'"
-                " ORDER BY created_at DESC",
+                f"SELECT {_COLUMNS} FROM print_runs WHERE output_id = %s AND {_IN_USE}"
+                " ORDER BY created_at DESC".encode(),
                 (output_id,),
             ).fetchall()
         return [PrintRun.model_validate(row) for row in rows]
+
+    def _subjects_in_use(self) -> set[str]:
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT DISTINCT output_id FROM print_runs WHERE {_IN_USE}".encode()
+            ).fetchall()
+        return {row["output_id"] for row in rows}
 
     def _failed_before_queueing(self, output_ids: list[str]) -> set[str]:
         if not output_ids:

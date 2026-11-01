@@ -258,9 +258,14 @@ class NativeLibrary:
         *,
         output_id: str | None = None,
         filed: bool = False,
+        print_subject: str | None = None,
     ) -> NativeFile:
+        """``print_subject`` marks a run's per-print copy or slice (#4337), never a
+        person's upload or an output's filed copy."""
         await self._folder_must_exist(folder_id)
         row = await self.stage(filename, data, folder_id, output_id=output_id, filed=filed)
+        if print_subject is not None:
+            row = row.model_copy(update={"print_subject": print_subject})
         return await self._insert(row, folder_id)
 
     async def stage(
@@ -336,6 +341,8 @@ class NativeLibrary:
                 "folder_id": folder_id,
                 "blob_key": key,
                 "filed": False,
+                # A person's copy of a per-print file is theirs (#4337).
+                "print_subject": None,
                 "created_at": now,
                 "updated_at": now,
                 "deleted_at": None,
@@ -389,14 +396,21 @@ class NativeLibrary:
         return found
 
     async def per_print_files(self, folder_id: int | None) -> list[LibraryListRow]:
-        """`NativeCopies.per_print_files`: no ``output_id``, not ``filed``."""
+        """`NativeCopies.per_print_files`: what a run put here (``print_subject``, #4337),
+        naming no output and not ``filed``."""
         rows = await self.library_listing(folder_id=folder_id)
         own = {
             f.id
             for f in await asyncio.to_thread(self.rows.files, folder_id)
-            if f.output_id is None and not f.filed
+            if f.print_subject is not None and f.output_id is None and not f.filed
         }
         return [row for row in rows if row.id in own]
+
+    async def subject_of(self, file_id: int) -> str | None:
+        """The print subject whose run put live file ``file_id`` here (#4337); ``None``
+        for any other file, or none."""
+        row = await asyncio.to_thread(self.rows.file, file_id)
+        return None if row is None else row.print_subject
 
     async def template_folder(self, name: str) -> NativeFolder:
         """The top-level folder ``name`` the filing uses (`filing.file_output`), found or

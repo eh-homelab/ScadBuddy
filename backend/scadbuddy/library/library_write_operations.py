@@ -55,6 +55,7 @@ from scadbuddy.library.operations import PIN_TIMEOUT
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind, waiting_on_bambuddy
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.copies import release_moved
 from scadbuddy.print_library.store import Unset, UnsetType
 from scadbuddy.store.content_models import StoreFullError
 
@@ -258,6 +259,9 @@ def library_write_kinds(state: Core, components: Components) -> list[OperationKi
                 # Ruling 8: a file moved is no longer the output's filed copy.
                 filed=None if isinstance(place, UnsetType) else False,
             )
+            if not isinstance(place, UnsetType):
+                # A run's per-print copy a person moves is theirs, with its slices (#4337).
+                await release_moved(native, state.uploads, [row.id])
             return LibraryEntryUpdated(
                 id=row.id, filename=row.name, folder_id=row.folder_id
             ).model_dump(mode="json")
