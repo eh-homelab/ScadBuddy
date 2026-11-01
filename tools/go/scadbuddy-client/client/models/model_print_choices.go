@@ -7,7 +7,7 @@ import (
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91 "github.com/microsoft/kiota-abstractions-go/serialization"
 )
 
-// ModelPrintChoices what the print dialog last chose for one model (#78). “printer_id“ is the printer it printed on. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
+// ModelPrintChoices what the print dialog last chose for one model (#78). “printer_id“ is the printer it printed on. “filament_plan“ is only a plan the user moved off the auto-match: a spool no longer in the inventory is dropped by the picker, which then falls back to the auto-match for that slot. “nozzles“, “tier“ and “process_name“ are the spool-first dialog's own choices (spec 2026-09-27 §7). “print_sequence“ is its Print sequence (#4970), “None“ for the template's or the process's. All default to "nothing remembered", so a settings file written before them still loads; an empty “nozzles“ means the dialog's default.
 type ModelPrintChoices struct {
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any
@@ -15,12 +15,100 @@ type ModelPrintChoices struct {
 	filament_plan []SlotChoiceable
 	// The nozzles property
 	nozzles []NozzleChoiceable
+	// The print_sequence property
+	print_sequence ModelPrintChoices_ModelPrintChoices_print_sequenceable
 	// The printer_id property
 	printer_id ModelPrintChoices_ModelPrintChoices_printer_idable
 	// The process_name property
 	process_name ModelPrintChoices_ModelPrintChoices_process_nameable
 	// The tier property
 	tier ModelPrintChoices_ModelPrintChoices_tierable
+}
+
+// ModelPrintChoices_ModelPrintChoices_print_sequence composed type wrapper for classes ModelPrintChoices_print_sequenceMember1able, string
+type ModelPrintChoices_ModelPrintChoices_print_sequence struct {
+	// Composed type representation for type ModelPrintChoices_print_sequenceMember1able
+	modelPrintChoices_print_sequenceMember1 ModelPrintChoices_print_sequenceMember1able
+	// Composed type representation for type string
+	string *string
+}
+
+// NewModelPrintChoices_ModelPrintChoices_print_sequence instantiates a new ModelPrintChoices_ModelPrintChoices_print_sequence and sets the default values.
+func NewModelPrintChoices_ModelPrintChoices_print_sequence() *ModelPrintChoices_ModelPrintChoices_print_sequence {
+	m := &ModelPrintChoices_ModelPrintChoices_print_sequence{}
+	return m
+}
+
+// CreateModelPrintChoices_ModelPrintChoices_print_sequenceFromDiscriminatorValue creates a new instance of the appropriate class based on discriminator value
+// returns a Parsable when successful
+func CreateModelPrintChoices_ModelPrintChoices_print_sequenceFromDiscriminatorValue(parseNode i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) (i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable, error) {
+	result := NewModelPrintChoices_ModelPrintChoices_print_sequence()
+	if parseNode != nil {
+		if val, err := parseNode.GetStringValue(); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			result.SetString(val)
+		} else if val, err := parseNode.GetObjectValue(CreateModelPrintChoices_print_sequenceMember1FromDiscriminatorValue); val != nil {
+			if err != nil {
+				return nil, err
+			}
+			if cast, ok := val.(ModelPrintChoices_print_sequenceMember1able); ok {
+				result.SetModelPrintChoicesPrintSequenceMember1(cast)
+			}
+		}
+	}
+	return result, nil
+}
+
+// GetFieldDeserializers the deserialization information for the current model
+// returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
+func (m *ModelPrintChoices_ModelPrintChoices_print_sequence) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+	return make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+}
+
+// GetIsComposedType determines if the current object is a wrapper around a composed type
+// returns a bool when successful
+func (m *ModelPrintChoices_ModelPrintChoices_print_sequence) GetIsComposedType() bool {
+	return true
+}
+
+// GetModelPrintChoicesPrintSequenceMember1 gets the ModelPrintChoices_print_sequenceMember1 property value. Composed type representation for type ModelPrintChoices_print_sequenceMember1able
+// returns a ModelPrintChoices_print_sequenceMember1able when successful
+func (m *ModelPrintChoices_ModelPrintChoices_print_sequence) GetModelPrintChoicesPrintSequenceMember1() ModelPrintChoices_print_sequenceMember1able {
+	return m.modelPrintChoices_print_sequenceMember1
+}
+
+// GetString gets the string property value. Composed type representation for type string
+// returns a *string when successful
+func (m *ModelPrintChoices_ModelPrintChoices_print_sequence) GetString() *string {
+	return m.string
+}
+
+// Serialize serializes information the current object
+func (m *ModelPrintChoices_ModelPrintChoices_print_sequence) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetString() != nil {
+		err := writer.WriteStringValue("", m.GetString())
+		if err != nil {
+			return err
+		}
+	} else if m.GetModelPrintChoicesPrintSequenceMember1() != nil {
+		err := writer.WriteObjectValue("", m.GetModelPrintChoicesPrintSequenceMember1())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SetModelPrintChoicesPrintSequenceMember1 sets the ModelPrintChoices_print_sequenceMember1 property value. Composed type representation for type ModelPrintChoices_print_sequenceMember1able
+func (m *ModelPrintChoices_ModelPrintChoices_print_sequence) SetModelPrintChoicesPrintSequenceMember1(value ModelPrintChoices_print_sequenceMember1able) {
+	m.modelPrintChoices_print_sequenceMember1 = value
+}
+
+// SetString sets the string property value. Composed type representation for type string
+func (m *ModelPrintChoices_ModelPrintChoices_print_sequence) SetString(value *string) {
+	m.string = value
 }
 
 // ModelPrintChoices_ModelPrintChoices_printer_id composed type wrapper for classes int32, ModelPrintChoices_printer_idMember1able
@@ -281,6 +369,14 @@ func (m *ModelPrintChoices_ModelPrintChoices_tier) SetString(value *string) {
 	m.string = value
 }
 
+type ModelPrintChoices_ModelPrintChoices_print_sequenceable interface {
+	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetModelPrintChoicesPrintSequenceMember1() ModelPrintChoices_print_sequenceMember1able
+	GetString() *string
+	SetModelPrintChoicesPrintSequenceMember1(value ModelPrintChoices_print_sequenceMember1able)
+	SetString(value *string)
+}
+
 type ModelPrintChoices_ModelPrintChoices_printer_idable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
 	GetInteger() *int32
@@ -360,6 +456,16 @@ func (m *ModelPrintChoices) GetFieldDeserializers() map[string]func(i878a80d2330
 		}
 		return nil
 	}
+	res["print_sequence"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetObjectValue(CreateModelPrintChoices_ModelPrintChoices_print_sequenceFromDiscriminatorValue)
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			m.SetPrintSequence(val.(ModelPrintChoices_ModelPrintChoices_print_sequenceable))
+		}
+		return nil
+	}
 	res["printer_id"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetObjectValue(CreateModelPrintChoices_ModelPrintChoices_printer_idFromDiscriminatorValue)
 		if err != nil {
@@ -411,6 +517,12 @@ func (m *ModelPrintChoices) GetPrinterId() ModelPrintChoices_ModelPrintChoices_p
 	return m.printer_id
 }
 
+// GetPrintSequence gets the print_sequence property value. The print_sequence property
+// returns a ModelPrintChoices_ModelPrintChoices_print_sequenceable when successful
+func (m *ModelPrintChoices) GetPrintSequence() ModelPrintChoices_ModelPrintChoices_print_sequenceable {
+	return m.print_sequence
+}
+
 // GetProcessName gets the process_name property value. The process_name property
 // returns a ModelPrintChoices_ModelPrintChoices_process_nameable when successful
 func (m *ModelPrintChoices) GetProcessName() ModelPrintChoices_ModelPrintChoices_process_nameable {
@@ -456,6 +568,12 @@ func (m *ModelPrintChoices) Serialize(writer i878a80d2330e89d26896388a3f487eef27
 		}
 	}
 	{
+		err := writer.WriteObjectValue("print_sequence", m.GetPrintSequence())
+		if err != nil {
+			return err
+		}
+	}
+	{
 		err := writer.WriteObjectValue("process_name", m.GetProcessName())
 		if err != nil {
 			return err
@@ -496,6 +614,11 @@ func (m *ModelPrintChoices) SetPrinterId(value ModelPrintChoices_ModelPrintChoic
 	m.printer_id = value
 }
 
+// SetPrintSequence sets the print_sequence property value. The print_sequence property
+func (m *ModelPrintChoices) SetPrintSequence(value ModelPrintChoices_ModelPrintChoices_print_sequenceable) {
+	m.print_sequence = value
+}
+
 // SetProcessName sets the process_name property value. The process_name property
 func (m *ModelPrintChoices) SetProcessName(value ModelPrintChoices_ModelPrintChoices_process_nameable) {
 	m.process_name = value
@@ -512,11 +635,13 @@ type ModelPrintChoicesable interface {
 	GetFilamentPlan() []SlotChoiceable
 	GetNozzles() []NozzleChoiceable
 	GetPrinterId() ModelPrintChoices_ModelPrintChoices_printer_idable
+	GetPrintSequence() ModelPrintChoices_ModelPrintChoices_print_sequenceable
 	GetProcessName() ModelPrintChoices_ModelPrintChoices_process_nameable
 	GetTier() ModelPrintChoices_ModelPrintChoices_tierable
 	SetFilamentPlan(value []SlotChoiceable)
 	SetNozzles(value []NozzleChoiceable)
 	SetPrinterId(value ModelPrintChoices_ModelPrintChoices_printer_idable)
+	SetPrintSequence(value ModelPrintChoices_ModelPrintChoices_print_sequenceable)
 	SetProcessName(value ModelPrintChoices_ModelPrintChoices_process_nameable)
 	SetTier(value ModelPrintChoices_ModelPrintChoices_tierable)
 }
