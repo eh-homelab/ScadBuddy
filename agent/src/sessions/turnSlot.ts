@@ -47,6 +47,12 @@ export type TurnContext = {
   http?: HttpState
   /** What the turn's WebFetch model calls cost (builtins/nested.ts), which no result prices (#2684). */
   nested?: { usd: number }
+  /**
+   * What the process's model requests cost this turn as the credential gateway priced them
+   * (gateway/server.ts): every request made with its token, a command's too, which Claude Code
+   * prices only for its own (Step 9.4).
+   */
+  metered?: { usd: number }
   /** The credential the turn is on now, which a fallback moves (#2973): WebFetch's model call asks on it. */
   credential?: { current: PooledCredential | undefined }
   /** #815 §2: how this turn's browser_* calls wait for a missing tab; only with a question gate. */

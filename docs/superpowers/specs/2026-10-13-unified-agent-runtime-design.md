@@ -765,13 +765,16 @@ The row's owner changes, as today. Then:
 
 ### 6.7 Credential, KEK, security
 
-- **The credential.** It is opened per spawn by the `CredentialPool`, and goes only into
-  the query's `env` (`credentialEnv`, `run.ts:233`, `383-389`), as classic does today.
-  - A warm process holds its credential in its environment for its life. That is at
-    most `warm_idle_seconds` past its last turn, or until its credential row changes
-    (fingerprint, plus `NOTIFY`).
-  - A fallback (`runWithFallback`, `manager.ts:1793`) means a respawn with the next
-    credential.
+- **The credential.** It is opened per spawn by the `CredentialPool`, and stays in the
+  worker: the spawn leases a token from the loopback credential gateway
+  (`agent/src/gateway/server.ts`, plan Step 9.4, R4), and the token goes into the query's
+  `env` (`credentialEnv`, `harness/run.ts`). The gateway adds the credential's header
+  upstream and meters each request.
+  - A warm process holds its token in its environment for its life. That is at most
+    `warm_idle_seconds` past its last turn, or until its credential row changes
+    (fingerprint, plus `NOTIFY`). The token is released when the process's query ends.
+  - A fallback (`runWithFallback`, `harness/fallback.ts`) means a respawn with the next
+    credential, under a new token.
 - **Plugin vetting is unchanged** (`agent/src/harness/plugins.ts`,
   `plugins/packages/vet.ts`). Nothing that starts a process inherits the credential env.
 - **The KEK** is needed by the agent alone: for the codec, the sealing store, credentials

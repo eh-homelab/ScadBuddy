@@ -35,7 +35,9 @@ export default defineConfig({
     // descendant of the worker's pid, so it needs one file per process: `forks`, isolated
     // (vitest's defaults, pinned here). Files sharing a worker (`threads`, `vmThreads`,
     // `isolate: false`) would fail, and kill, each other's processes.
-    setupFiles: ['test/support/leakGuard.ts'],
+    // test/support/gateway.ts starts the credential gateway every query goes through (main.ts
+    // starts it in the service); first, so it closes after the leak guard's check.
+    setupFiles: ['test/support/gateway.ts', 'test/support/leakGuard.ts'],
     pool: 'forks',
     isolate: true,
   },

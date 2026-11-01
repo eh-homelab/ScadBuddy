@@ -14,6 +14,7 @@ import {
   type SessionStore,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
+import { credentialGateway, type GatewayLease } from '../gateway/server.js'
 import type { Resolver } from '../http/egress.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
 import {
@@ -43,18 +44,23 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 // `settingSources: []`, `strictMcpConfig` and the service-owned
 // CLAUDE_CONFIG_DIR (spec §4.4). This module adds, per query:
 //
-//   - the credential, through the SDK's `env` option only. `env` "REPLACES the
-//     subprocess environment entirely" (sdk.d.ts, 0.3.283 and 0.3.287), so the key reaches
-//     that one Claude Code process and never the container environment
-//     (spec §4.4, "Credentials are passed per query through the SDK's `env`
-//     option"). Variable names, from
+//   - a token for the credential, never the credential (plan 2026-10-13 Step
+//     9.4, spec 2026-10-13 §14.7 R4): the run leases a token from the
+//     process's loopback credential gateway (gateway/server.ts), which holds
+//     the credential, adds its real header upstream and meters each request,
+//     and releases it when the query ends. Through the SDK's `env` option only:
+//     `env` "REPLACES the subprocess environment entirely" (sdk.d.ts, 0.3.283
+//     and 0.3.287). Claude Code gets ANTHROPIC_BASE_URL (the gateway, the token
+//     as its path) and the token in the variable the credential's kind is read
+//     from, so it presents the token in the header it would have presented the
+//     credential in. Variable names, from
 //     https://code.claude.com/docs/en/llm-gateway-connect ("Each variable sends
 //     the credential in a different HTTP header: `ANTHROPIC_AUTH_TOKEN` in
 //     `Authorization: Bearer`, `ANTHROPIC_API_KEY` in `x-api-key`"):
 //       anthropic_api_key  → ANTHROPIC_API_KEY
 //       claude_oauth_token → CLAUDE_CODE_OAUTH_TOKEN, the token `claude setup-token`
 //                            prints (an sk-ant-oat01- token in x-api-key is a 401)
-//       gateway            → ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
+//       gateway            → ANTHROPIC_AUTH_TOKEN (its own base URL is the gateway's upstream)
 //   - CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1: without it Claude Code "also
 //     sends nonessential background traffic outside the gateway path, to
 //     Anthropic and to third-party services such as GitHub: version checks,
@@ -251,6 +257,12 @@ export type HarnessRun = {
   traceHooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>
   /** Claude Code's stderr, whole lines, already redacted of the credential. */
   stderr?: (line: string) => void
+  /**
+   * What each of the process's model requests cost, priced by the credential gateway as its
+   * response ends (gateway/server.ts): Claude Code's own, its subagents', and any that a
+   * command it runs makes with the token (sessions/turnHost.ts counts what Claude Code did not price).
+   */
+  onSpend?: (usd: number) => void
   /** Tests only: the SDK's own process hook, to count and inspect spawns (test/warm.sdk.test.ts). */
   spawnClaudeCodeProcess?: Options['spawnClaudeCodeProcess']
   /** The resolver WebFetch's egress check uses (webFetchEgress.ts); the system's when omitted. */
@@ -269,15 +281,15 @@ function mergeHooks(
   return out
 }
 
-/** The credential's environment variables, and nothing else. */
-export function credentialEnv(credential: Credential): Record<string, string> {
+/** The variables that point Claude Code at a gateway lease for `credential`, and nothing else: never its secret. */
+export function credentialEnv(credential: Credential, lease: Pick<GatewayLease, 'baseUrl' | 'token'>): Record<string, string> {
   switch (credential.kind) {
     case 'anthropic_api_key':
-      return { ANTHROPIC_API_KEY: credential.secret }
+      return { ANTHROPIC_BASE_URL: lease.baseUrl, ANTHROPIC_API_KEY: lease.token }
     case 'claude_oauth_token':
-      return { CLAUDE_CODE_OAUTH_TOKEN: credential.secret }
+      return { ANTHROPIC_BASE_URL: lease.baseUrl, CLAUDE_CODE_OAUTH_TOKEN: lease.token }
     case 'gateway':
-      return { ANTHROPIC_BASE_URL: credential.baseUrl, ANTHROPIC_AUTH_TOKEN: credential.secret }
+      return { ANTHROPIC_BASE_URL: lease.baseUrl, ANTHROPIC_AUTH_TOKEN: lease.token }
   }
 }
 
@@ -380,7 +392,8 @@ const QUESTION_PROMPT_HOOK: HookCallbackMatcher = {
  * first instead (`stopFirst`).
  */
 export function buildHarnessOptions(run: HarnessRun): Options {
-  const { options, abort } = buildHarness(run)
+  const { options, abort, lease } = buildHarness(run)
+  abort.signal.addEventListener('abort', () => lease.release(), { once: true })
   if (run.signal) {
     if (run.signal.aborted) abort.abort(run.signal.reason)
     else run.signal.addEventListener('abort', () => abort.abort(run.signal?.reason), { once: true })
@@ -391,8 +404,9 @@ export function buildHarnessOptions(run: HarnessRun): Options {
 /** How long an interrupted query may take to end on its own before it is aborted. */
 export const INTERRUPT_GRACE_MS = 5_000
 
-function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor | undefined; abort: AbortController } {
+function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor | undefined; abort: AbortController; lease: GatewayLease } {
   const base = buildQueryOptions(run.paths)
+  const lease = credentialGateway().lease(run.credential, run.onSpend ? { onSpend: run.onSpend } : {})
   const harnessTiers = harnessTierOf(run)
   const questions = run.questionGate
   // AskUserQuestion and ask_user only ask the user; the first is answered in
@@ -424,7 +438,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     ...base,
     env: {
       ...base.env,
-      ...credentialEnv(run.credential),
+      ...credentialEnv(run.credential, lease),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
       ...(run.maxRetries === undefined ? {} : { CLAUDE_CODE_MAX_RETRIES: String(run.maxRetries) }),
@@ -524,12 +538,13 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   }
   let stderr: LineRedactor | undefined
   if (run.stderr) {
-    // Line-buffered: a secret split across two chunks is still one line here.
-    const redactor = lineRedactor([run.credential.secret], run.stderr)
+    // Line-buffered: a secret split across two chunks is still one line here. The process
+    // never holds the credential now; its token is redacted beside it all the same.
+    const redactor = lineRedactor([run.credential.secret, lease.token], run.stderr)
     stderr = redactor
     options.stderr = (data) => redactor.write(data)
   }
-  return { options, stderr, abort }
+  return { options, stderr, abort, lease }
 }
 
 /**
@@ -538,14 +553,22 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
  * stderr line is flushed, redacted.
  */
 export function runHarness(run: HarnessRun): Query {
-  const { options, stderr, abort } = buildHarness(run)
-  const q = query({ prompt: run.prompt, options })
+  const { options, stderr, abort, lease } = buildHarness(run)
+  let q: Query
+  try {
+    q = query({ prompt: run.prompt, options })
+  } catch (err) {
+    lease.release()
+    throw err
+  }
   const ended = stopFirst(q, run.signal, abort)
   const next = q.next.bind(q)
   const ret = q.return.bind(q)
   const thr = q.throw.bind(q)
   const end = () => {
     ended()
+    // The token dies with the process: nothing it started can use it afterwards.
+    lease.release()
     stderr?.flush()
   }
   q.next = async (...args) => {
