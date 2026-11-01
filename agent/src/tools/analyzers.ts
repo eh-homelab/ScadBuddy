@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { ok } from './call.js'
 import { outputId, params, slug } from './common.js'
 import { nozzles, presetRef, printOptions, slotChoice, tier } from './print.js'
+import { page, PAGED, pageInput } from './pagination.js'
 import { defineTool, json, type Tool } from './registry.js'
 
 // The print analyzers (#284, #4966): the bundled checks run over an output, a
@@ -95,11 +96,15 @@ export const analyzerTools: Tool[] = [
     label: 'List the print analyzers',
     description:
       'The bundled print analyzers: id (SB####), title, severity, category, the inputs each needs, the fixes it ' +
-      'can offer, and the sources it cites (URL and quoted line).',
-    input: z.object({}),
+      'can offer, and the sources it cites (URL and quoted line).' +
+      PAGED,
+    input: z.object({ ...pageInput }),
     risk: 'read',
     routes: ['GET /api/v1/analyzers'],
-    handler: async (_args, { backend }) => json(await ok(backend.GET('/api/v1/analyzers'), 'list the analyzers')),
+    handler: async (args, { backend }) => {
+      const analyzers = await ok(backend.GET('/api/v1/analyzers'), 'list the analyzers')
+      return json(page(analyzers, args, (row) => row.id, 'list_analyzers'))
+    },
   }),
 
   defineTool({
@@ -193,16 +198,21 @@ export const analyzerTools: Tool[] = [
     label: 'List analyzer decisions',
     description:
       'Recorded analyzer decisions (accept, ignore, suppress), broadest scope first: every one, or those at one ' +
-      'scope kind (and key), or about one rule.',
+      'scope kind (and key), or about one rule.' +
+      PAGED,
     input: z.object({
       scope: scopeKind.optional(),
       scope_key: z.string().max(200).optional().describe('Needs `scope`'),
       diagnostic_id: z.string().regex(/^SB[0-9]{4}$/).optional(),
+      ...pageInput,
     }),
     risk: 'read',
     routes: ['GET /api/v1/analyzers/decisions'],
-    handler: async (query, { backend }) =>
-      json(await ok(backend.GET('/api/v1/analyzers/decisions', { params: { query } }), 'list the decisions')),
+    handler: async (args, { backend }) => {
+      const query = { scope: args.scope, scope_key: args.scope_key, diagnostic_id: args.diagnostic_id }
+      const decisions = await ok(backend.GET('/api/v1/analyzers/decisions', { params: { query } }), 'list the decisions')
+      return json(page(decisions, args, (row) => row.id, 'list_analyzer_decisions'))
+    },
   }),
 
   defineTool({

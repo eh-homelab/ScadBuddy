@@ -65,7 +65,7 @@ describe('analyzer tools (#4966)', () => {
 
   it('list_analyzers returns the catalogue', async () => {
     server.use(http.get(`${BACKEND}/api/v1/analyzers`, () => HttpResponse.json([{ id: 'SB1001' }])))
-    expect(firstText(await runTool(tool('list_analyzers'), {}, ctx('read')))).toEqual([{ id: 'SB1001' }])
+    expect(firstText(await runTool(tool('list_analyzers'), {}, ctx('read')))).toMatchObject({ items: [{ id: 'SB1001' }] })
   })
 
   it('run_analyzers sends an output target and the base request', async () => {
