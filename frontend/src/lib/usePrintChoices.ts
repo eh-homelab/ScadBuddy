@@ -130,7 +130,8 @@ export function usePrintChoices(
     const nextNozzles = remembered.length > 0 ? remembered : defaultsOf(next)
     const nextProcess = remembered.length > 0 ? (last?.process_name ?? null) : null
     const nextTier = nextProcess ? null : (last?.tier ?? 'standard')
-    const nextSequence = last?.print_sequence ?? null
+    // A sliced file shows no Print sequence step, so a remembered one would be sent unseen.
+    const nextSequence = next.sliced ? null : (last?.print_sequence ?? null)
     setNozzles(nextNozzles)
     setTier(nextTier)
     setProcessName(nextProcess)

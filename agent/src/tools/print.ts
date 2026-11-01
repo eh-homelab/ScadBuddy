@@ -1062,9 +1062,8 @@ export const printTools: Tool[] = [
     description:
       "Remember what a model's (or a Bambuddy library file's, `library_file_id`) print dialog opens on next " +
       'time: the printer, per-slot spools, nozzles, the quality tier or named process, and the print sequence. ' +
-      'Replaces the ' +
-      "entry whole: an omitted part is forgotten, and passing nothing forgets them all (get_print_choices " +
-      'shows the current `model_choices`).',
+      'Replaces the entry whole: an omitted part is forgotten, and passing nothing forgets them all ' +
+      '(get_print_choices shows the current `model_choices`).',
     input: z
       .object({
         slug: slug.optional(),

@@ -205,8 +205,9 @@ export function useRunPrint({
 
   /**
    * #78 / spec §7 — what this model reopens on next time: the printer, the nozzles,
-   * tier and process, the print sequence (#4970), and the spools where they differ from the suggestion (re-sending
-   * the suggestion is not a choice). Best effort, and only once the print has started.
+   * tier and process, the print sequence (#4970), and the spools where they differ from
+   * the suggestion (re-sending the suggestion is not a choice). Best effort, and only once
+   * the print has started.
    */
   function rememberChoices() {
     const last = choices?.model_choices

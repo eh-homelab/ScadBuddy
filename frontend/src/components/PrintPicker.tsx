@@ -1241,8 +1241,10 @@ export function PrintPicker({
     }
     setOptions(seed.options ?? {})
     if (seed.copies !== undefined && seed.copies !== null) setCopies(seed.copies)
-    // The step's own sequence, over the subject's remembered one (#4970).
-    setPrintSequence(seed.print_sequence ?? null)
+    // A step's own seed is its sequence, Default included; another step's names one only
+    // when it has one, and otherwise leaves the subject's remembered one (#4970).
+    if (batch.seedIsOwn) setPrintSequence(seed.print_sequence ?? null)
+    else if (seed.print_sequence) setPrintSequence(seed.print_sequence)
     if (batch.seedIsOwn) {
       // Its own choices, the ones a mount resets to the defaults (#2718 review): saving
       // the step again without them would queue it without the supports, tower or

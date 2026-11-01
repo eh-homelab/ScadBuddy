@@ -191,6 +191,7 @@ def test_choices_carry_what_this_model_last_printed_with(client: TestClient, mod
         "nozzles": [],
         "tier": None,
         "process_name": None,
+        "print_sequence": None,
     }
 
 
@@ -205,6 +206,7 @@ def test_the_dialogs_nozzles_tier_and_process_are_remembered_per_model(
         "nozzles": [{"size": "0.2", "flow": "high_flow"}, {"size": "0.2", "flow": "high_flow"}],
         "tier": None,
         "process_name": "0.06mm Fine @BBL H2C 0.2 nozzle",
+        "print_sequence": "by object",
     }
     assert client.put(f"/api/v1/print/models/{model}/choices", json=remembered).json() == (
         remembered

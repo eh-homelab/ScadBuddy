@@ -4868,6 +4868,25 @@ describe('PrintPicker · a sliced library file (#2671)', () => {
     expect(previews.urls).toEqual([])
   })
 
+  it('never sends a remembered print sequence it does not show (#4970)', async () => {
+    const view = (await (await fetch('/api/v1/print/library/104/choices')).json()) as Record<string, unknown>
+    server.use(
+      http.get('/api/v1/print/library/104/choices', () =>
+        HttpResponse.json({
+          ...view,
+          model_choices: { printer_id: null, filament_plan: [], print_sequence: 'by object' },
+        }),
+      ),
+    )
+    const runs = watch('POST', '/run', '/api/v1/print/library/')
+    const { user } = renderSliced()
+    await loaded()
+    expect(screen.getByRole('switch', { name: 'Advanced' })).toHaveAttribute('aria-checked', 'false')
+    await user.click(screen.getByTestId('run-print'))
+    await waitFor(() => expect(runs.bodies).toHaveLength(1))
+    expect(runs.bodies[0]).not.toHaveProperty('print_sequence')
+  })
+
   it('prints through the library run with the spools chosen', async () => {
     const runs = watch('POST', '/run', '/api/v1/print/library/')
     const { user } = renderSliced()
