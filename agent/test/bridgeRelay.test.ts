@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { LegacyTabRelay } from '../src/bridge/pgRelay.js'
 import { type RelayOwner, type SealingClient, TemporalTabRelay } from '../src/bridge/relay.js'
 import type { TabOwnerStore } from '../src/bridge/tabOwners.js'
 
@@ -42,14 +41,7 @@ function failingWorkflowClient(): SealingClient {
   return { client: { workflow: { start: async () => handle } } as never, dropKey: async () => {} }
 }
 
-function oldRelay(): LegacyTabRelay & { forward: ReturnType<typeof vi.fn> } {
-  return {
-    serve: () => {},
-    forward: vi.fn(async () => ({ op: 'call' as const, outcome: { ok: true as const, result: 'from the old relay' } })),
-  }
-}
-
-const owner = (tabs: string[]): RelayOwner => ({ holds: () => true, tabs: () => tabs, run: async () => ({ op: 'gone' }) })
+const owner = (tabs: string[]): RelayOwner => ({ tabs: () => tabs, run: async () => ({ op: 'gone' }) })
 
 describe('TemporalTabRelay', () => {
   it('claims no tab until its host worker polls, and claims the ones it holds once it does', async () => {
@@ -100,29 +92,38 @@ describe('TemporalTabRelay', () => {
     expect(await relay.forward('tab-1', { op: 'status' }, options())).toBeUndefined()
   })
 
-  it('takes the old relay when Temporal refuses the start, while it is there (#4868): the call ran nowhere', async () => {
+  it('refuses a call with no sealed Temporal client, and reads no owner row (#4868): it fails closed', async () => {
     const owners = memoryOwners()
     owners.rows.set('tab-1', 'agent-tools.b')
-    const fallback = oldRelay()
-    const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', client: refusingClient().sealing, fallback, log: () => {} })
-    expect(await relay.forward('tab-1', call, options())).toEqual({ op: 'call', outcome: { ok: true, result: 'from the old relay' } })
-    expect(fallback.forward).toHaveBeenCalledOnce()
+    const ownerOf = vi.spyOn(owners, 'ownerOf')
+    const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', log: () => {} })
+    expect(await relay.forward('tab-1', call, options())).toMatchObject({
+      op: 'call',
+      outcome: { ok: false, error: { code: 'no_browser', message: expect.stringMatching(/SCADBUDDY_SECRET_KEY_FILE/) } },
+    })
+    // A status read answers "not connected".
+    expect(await relay.forward('tab-1', { op: 'status' }, options())).toBeUndefined()
+    expect(ownerOf).not.toHaveBeenCalled()
   })
 
-  it('never sends a call again by the old relay once its workflow started: a click must not run twice', async () => {
+  it("answers no_answer, and logs, when the owner's row cannot be read: the tool never throws", async () => {
+    const owners = memoryOwners()
+    owners.ownerOf = () => Promise.reject(new Error('connection refused'))
+    const logged: string[] = []
+    const { sealing, start } = refusingClient()
+    const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', client: sealing, log: (m) => logged.push(m) })
+    expect(await relay.forward('tab-1', call, options())).toMatchObject({ op: 'call', outcome: { ok: false, error: { code: 'no_answer' } } })
+    expect(await relay.forward('tab-1', { op: 'status' }, options())).toBeUndefined()
+    expect(start).not.toHaveBeenCalled()
+    expect(logged.join('\n')).toMatch(/connection refused/)
+  })
+
+  it('answers no_answer, once, when its workflow started and then failed: a click must not run twice', async () => {
     const owners = memoryOwners()
     owners.rows.set('tab-1', 'agent-tools.b')
-    const fallback = oldRelay()
     const logged: string[] = []
-    const relay = new TemporalTabRelay({
-      owners,
-      hostQueue: 'agent-tools.a',
-      client: failingWorkflowClient(),
-      fallback,
-      log: (m) => logged.push(m),
-    })
+    const relay = new TemporalTabRelay({ owners, hostQueue: 'agent-tools.a', client: failingWorkflowClient(), log: (m) => logged.push(m) })
     expect(await relay.forward('tab-1', call, options())).toMatchObject({ op: 'call', outcome: { ok: false, error: { code: 'no_answer' } } })
-    expect(fallback.forward).not.toHaveBeenCalled()
     expect(logged.join('\n')).toMatch(/timed out/)
   })
 })

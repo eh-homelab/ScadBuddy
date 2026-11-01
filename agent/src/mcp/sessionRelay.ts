@@ -7,7 +7,7 @@ import { type Principal, TIERS } from '../auth/principal.js'
 // McpServer, its resource subscriptions and its replay log: live objects in
 // the process that opened it (mcp/http.ts), which no other replica can rebuild.
 // So a request that reaches another replica is relayed to the owner, the way
-// browser calls are (bridge/relay.ts, #1916):
+// browser calls were until #4780 (#1916; they go through Temporal now, bridge/relay.ts):
 //
 //   any replica (got the request)            owner (holds the session)
 //   look the session up in ai_mcp_sessions
