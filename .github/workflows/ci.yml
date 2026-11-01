@@ -359,6 +359,15 @@ jobs:
       - name: Test the base64 image check
         run: .github/scripts/lint-base64-images.test.sh
 
+      # One agent runtime (plan 2026-10-13 Step 6.6): every session is an AgentSession,
+      # so nothing in agent/src branches on a session mode, and only the harness
+      # (harness/run.ts, harness/testConnection.ts) calls the SDK's query().
+      - name: Check that the agent has one turn path
+        run: .github/scripts/lint-one-runtime.sh
+
+      - name: Test the one-runtime check
+        run: .github/scripts/lint-one-runtime.test.sh
+
       # The payload codec is kept in agent/, agent-durable/ and backend/; the
       # backend's tests run in an image without agent/, so they read copies of the
       # agent's vectors and key migration (plan 2026-10-09-durable-phase-6-flows.md
