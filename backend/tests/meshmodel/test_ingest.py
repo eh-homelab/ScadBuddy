@@ -12,6 +12,7 @@ import trimesh
 
 from scadbuddy.meshmodel.ingest import part_mesh_3mf, scene_from_objects
 from scadbuddy.meshmodel.scene import MAX_NAME, MAX_OBJECTS, MAX_PARTS, SceneSource, value
+from scadbuddy.meshmodel.shared import transform_matrix
 from scadbuddy.render.objects3mf import ReadObject, UnreadableObjectsError
 from scadbuddy.render.split import ColourPart, Paint
 
@@ -89,21 +90,40 @@ def test_a_painted_part_keeps_its_codes_beside_its_mesh() -> None:
     assert scene.objects[0].parts[0].painted
     written = json.loads(files["meshes/o1-p1.paint.json"])
     assert written["codes"][-1] == "4"
-    # Only what the readers take: a refused mirrored painting leaves `reversed` false (#4073).
+    # Only what the readers take: a mirrored painting is stored in its faces' order (#4976).
     assert set(written) == {"codes", "colours"}
     # The render carries the paint (meshmodel/paint.py), so no note says it does not.
     assert scene.notes == []
 
 
-def test_a_painted_mirrored_object_is_refused() -> None:
-    """Its codes follow the reverse of its faces' corner order, which the editor's carrying
-    of a painting does not (#4015, #4073)."""
-    mesh = trimesh.creation.box((1, 1, 1))
-    paint = Paint(("",) * len(mesh.faces), ("#F08A24",), reversed=True)
-    with pytest.raises(UnreadableObjectsError, match="Eye is painted and mirrored"):
-        scene_from_objects(
-            [ReadObject(name="Eye", count=1, parts=[part(0, "#F08A24", mesh, paint)])], SOURCE
-        )
+def test_a_painted_mirrored_object_opens_mirrored_by_its_transform() -> None:
+    """#4976: a mirrored painting's codes follow the reverse of its faces' corner order
+    (#4015). Its meshes are stored mirrored back, each face in its codes' order, and its
+    scene objects mirror them again: where it prints, facing out."""
+    eye = box(3.0)
+    codes = ("",) * (len(eye.faces) - 1) + ("881",)
+    paint = Paint(codes, ("#F08A24", "#3A7D2C"), reversed=True)
+    body = box(0, size=20.0)
+    read = ReadObject(
+        name="Cat", count=2, parts=[part(0, "#FFFFFF", body), part(1, "#F08A24", eye, paint)]
+    )
+    scene, files = scene_from_objects([read], SOURCE)
+
+    assert [o.transform.scale for o in scene.objects] == [(-1.0, 1.0, 1.0)] * 2
+    written = json.loads(files["meshes/o1-p2.paint.json"])
+    assert written == {"codes": list(codes), "colours": ["#F08A24", "#3A7D2C"]}
+    m, t = transform_matrix(scene.objects[0].transform)
+    shift = None
+    for scene_part, source in zip(scene.objects[0].parts, read.parts, strict=True):
+        stored = load(files[scene_part.mesh])
+        assert stored.volume > 0  # stored facing out, as every scene mesh is
+        placed = (np.asarray(stored.vertices) @ m.T + t)[np.asarray(stored.faces)]
+        # Placed, each face runs in its codes' order (against the read part's), on it.
+        expected = np.asarray(source.mesh.vertices)[np.asarray(source.mesh.faces)[:, ::-1]]
+        if shift is None:
+            shift = (placed - expected).reshape(-1, 3).mean(axis=0)
+        assert np.allclose(placed - shift, expected, atol=1e-6)
+    assert scene.notes == []
 
 
 def test_a_negative_part_is_kept_as_one() -> None:
