@@ -233,13 +233,14 @@ REUSE_TIMEOUT = SHORT + 2 * TRANSFER
 
 
 def _waiter_recheck() -> timedelta:
-    """How long a waiting job trusts a running piece before looking again: the piece's
-    worst case with every retry (`cached_piece`, `prepare`, `reuse_geometry`, the two
-    openscad activities and `finish_piece`, each at its bound), plus one `SHORT` of slack. A
-    live piece is then never re-checked, however many retries it needs, so a waiter
-    never restarts a render another job is still paying for. Not covered: time a task
-    sits queued for a busy worker, which no activity timeout bounds; a re-check then is
-    harmless (the re-signal is idempotent)."""
+    """The piece's worst case with every retry (`cached_piece`, `prepare`,
+    `reuse_geometry`, the two openscad activities and `finish_piece`, each at its bound),
+    plus one `SHORT` of slack. It is the wait between a waiting job's looks only for a
+    run started without `PIECE_TIMEOUT_PATCH`; otherwise it is a cap above
+    `PIECE_RECHECK` (`_waiter_wait`). A live piece is then looked at again every
+    `PIECE_RECHECK`, which is harmless: its start is refused, and the job signals
+    `wait_for_me` again, which the piece ignores for an id it holds. A look restarts a
+    piece only once it has closed."""
     return (
         _retried(CACHED_TIMEOUT)
         + _retried(_prepare_timeout())
@@ -259,7 +260,19 @@ def _piece_timeout() -> timedelta | None:
     drained, stayed open for ever: every later job of its key joined it, and waited out
     its own timeout. No job that could want a piece outlives this bound, as each job's
     own run is as long. None for a job with no timeout of its own, or one that started
-    without this (`PIECE_TIMEOUT_PATCH`)."""
+    without this (`PIECE_TIMEOUT_PATCH`).
+
+    A piece that times out in an activity leaves that activity running until its next
+    heartbeat finds the workflow gone (within `HEARTBEAT`); its cancellation then kills
+    openscad. A waiter's next look may already have started a new piece of the key. That
+    is the overlap an activity retry has with a zombie attempt, and it is as safe: both
+    render the same key from the same inputs, every publish is a compare-and-swap on the
+    sha its stage checked out (`publish_fresh`), so the stale one loses and the other
+    retries on fresh state, and `cached_piece` answers only from the `piece.json` marker
+    `finish_piece` writes last, atomically. The local store has no swap, so there the two
+    share the directory, as a zombie and its retry do; a waiter looks every
+    `PIECE_RECHECK`, which outlasts `HEARTBEAT`, so most new pieces start after the stale
+    activity has stopped."""
     if not workflow.patched(PIECE_TIMEOUT_PATCH):
         return None
     return workflow.info().execution_timeout

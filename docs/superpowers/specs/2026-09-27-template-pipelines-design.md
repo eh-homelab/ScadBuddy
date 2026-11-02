@@ -234,7 +234,10 @@ walls but not floors or corner posts. Children are started with
 `TemplatePipeline` never cancels a piece another job may be sharing (without the
 second, the SDK's default `WAIT_CANCELLATION_COMPLETED` requests cancellation of the
 awaited child when the parent is cancelled), and a Part nothing references is swept
-by the store's grace rule (§6.2).
+by the store's grace rule (§6.2). Since #5104 a `RenderPiece` also gets the job's own
+execution timeout (`pipeline_timeout`), counted from the piece's own start: with ABANDON
+twice nothing else ends it, and a piece pinned to a build no worker serves would stay
+open for ever, holding its `piece_key` from every later job.
 
 Sharing a piece is start-then-signal, not `USE_EXISTING`. The SDK's child start has no
 `id_conflict_policy` (verified against `temporalio` 1.33.0, §3.6), so a second job
@@ -243,10 +246,11 @@ cannot attach to a running child by starting it. Instead the job calls
 `RenderPiece.wait_for_me(<its own workflow id>)` and waits for the piece's
 `TemplatePipeline.piece_finished(PieceOutcome)` signal, which carries the `PieceResult`
 or the `Failure`. The piece signals every waiter when it finishes; a signal to a
-waiter that has since closed is ignored. The wait is bounded (a multiple of the
-piece's worst-case run): on timeout the job retries the start — success means the
-piece closed without signalling (terminated by an operator, a workflow task stuck
-failing) and this job now owns a fresh render; `WorkflowAlreadyStartedError` means it
+waiter that has since closed is ignored. The wait is bounded: the job looks again every
+2 minutes (`PIECE_RECHECK`, #5104; a run started before that patch waits the piece's
+worst-case run). On each look the job retries the start — success means the
+piece closed without signalling (terminated by an operator, timed out, a workflow task
+stuck failing) and this job now owns a fresh render; `WorkflowAlreadyStartedError` means it
 re-signals and waits again. `wait_for_me` ignores an id it already holds. A piece
 that closes between a job's failed start and its signal makes that job start the
 piece again: a re-render the render cache makes cheap.
