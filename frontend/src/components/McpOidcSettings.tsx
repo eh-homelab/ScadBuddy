@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
+import { Link } from 'react-router'
 import { USER_ONLY } from '../agent/dom'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -188,16 +189,14 @@ export function McpOidcSettings() {
         </>,
       )}
 
-      {field(
-        'oidc-client-id',
-        <>Client ID for ScadBuddy&rsquo;s own login (optional)</>,
-        <Input
-          id="oidc-client-id"
-          value={form.client_id ?? ''}
-          onChange={(event) => update({ client_id: blankToNull(event.target.value) })}
-          className="sb-num"
-        />,
-      )}
+      {/* #4975 D1: ScadBuddy's own login keeps its client ID with the backend's sign-in. */}
+      <p className="text-xs text-muted-foreground">
+        ScadBuddy&rsquo;s own sign-in, and its client ID, are set in{' '}
+        <Link to="/settings/system#sign-in" className="underline">
+          Settings → System → Sign-in
+        </Link>
+        .
+      </p>
 
       <fieldset>
         <legend className="text-sm">Scope for each tier</legend>

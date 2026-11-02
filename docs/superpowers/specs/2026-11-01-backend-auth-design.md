@@ -151,17 +151,21 @@ clients too ("For confidential clients, the use of PKCE is RECOMMENDED",
    cookie, and answers a small same-origin HTML page that navigates to `return_to`
    (so the next request is same-site and carries a `Strict` cookie) or, in a popup,
    tells its opener (§6.2).
-3. `POST /api/v1/auth/logout` deletes the row and the cookie; when the issuer publishes
-   an `end_session_endpoint` it answers its URL with `id_token_hint` for the page to
-   navigate to ([RP-Initiated Logout 1.0][oidc-logout]) (§13 D7).
+3. `POST /api/v1/auth/logout` deletes the row and the cookie; with RP-initiated logout
+   switched on (§13 D7) and an `end_session_endpoint` published, it answers that URL for
+   the page to navigate to ([RP-Initiated Logout 1.0][oidc-logout]). No ID token is kept,
+   so the URL names the RP by `client_id` with `post_logout_redirect_uri`, which §2 of
+   that spec allows in place of `id_token_hint` (phase 2, #5193).
 4. `GET /api/v1/auth/session` answers `{signed_in, user: {principal, name, email},
    mode, expires_at}` (or `signed_in: false`). It is the one route every mode serves
    to anyone, and the SPA's first call.
 
 The issuer metadata and JWKS are fetched as the agent fetches them for `/mcp`: https only
 (http for loopback), no redirects, bounded size and time, cached 10 minutes, an unknown
-`kid` refetching at most every 30 s (AI spec §8.3 "Fetching"). An IdP on the LAN is
-normal here, so the URL import's public-address rule does not apply.
+`kid` refetching at most every 30 s (AI spec §8.3 "Fetching"). Every fetch to the
+issuer (discovery, JWKS, token) goes to public addresses only, through the URL import's
+`PublicOnlyBackend`, unless `SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK=true`, which an IdP on
+the LAN needs (amended in #5208's review).
 
 No access or refresh token is kept: the backend calls nothing on the user's behalf, so
 the ID token's job ends at the callback. A session therefore outlives a change at the
@@ -510,7 +514,7 @@ It works with the IdP down or the login misconfigured. The other way back is
 | `CrossSiteGate`: no `Origin` passes | No `Origin` needs a service credential or token |
 | Sockets: no `Origin` is trusted | Needs a credential |
 | `agent/src/routes/guard.ts`: origin and transport | Plus the session |
-| `mcp_oidc.client_id` in the agent's `ai_settings` | Moves to the backend's login settings (§13 D1); the MCP section shows it read-only |
+| `mcp_oidc.client_id` in the agent's `ai_settings` | The login's client id is the deployment's `SCADBUDDY_AUTH_OIDC_CLIENT_ID` (§13 D1); the MCP section links to Settings → System → Sign-in |
 | `X-ScadBuddy-Transfer` | Unchanged |
 | README "LAN only … no authentication" | Rewritten at phase 8 |
 
@@ -574,7 +578,7 @@ Decided by the owner on 2026-11-01 (#4975).
 
 | # | Question | Options | Decision |
 |---|---|---|---|
-| D1 | Where the login configuration lives, and whether login shares `/mcp`'s issuer | (a) the backend's stored settings, issuer defaulting to `mcp_oidc.issuer`, the client id moved there; (b) keep it in the agent's `ai_settings.mcp_oidc` and have the backend read it; (c) environment | **(a)**: the backend owns the login and the client secret (sealed under the KEK, as #602 seals the Bambuddy key); one issuer for both by default, with a separate one allowed. The IdP the homelab uses is named when phase 2 configures it, so phase 7 can check its framing and logout behaviour |
+| D1 | Where the login configuration lives, and whether login shares `/mcp`'s issuer | (a) the backend's stored settings, issuer defaulting to `mcp_oidc.issuer`, the client id moved there; (b) keep it in the agent's `ai_settings.mcp_oidc` and have the backend read it; (c) environment | **(a)**: the backend owns the login and the client secret (sealed under the KEK, as #602 seals the Bambuddy key); one issuer for both by default, with a separate one allowed. Amended in #5208's review: the issuer and client id are the deployment's, `SCADBUDDY_AUTH_OIDC_ISSUER` and `SCADBUDDY_AUTH_OIDC_CLIENT_ID` (bootstrap fields, (c) for those two), because in mode `off` anyone can write `PUT /auth/config` and a stored issuer would let any caller point the login's redirect and its fetches anywhere; only the client secret, the sign-in rule and the switches are stored, in `auth_login_config`. The IdP the homelab uses is named when phase 2 configures it, so phase 7 can check its framing and logout behaviour |
 | D2 | Cross-site embedding | (a) support only same-site embedding and top-level tabs, link out otherwise; (b) also build the CHIPS handoff (§6.3) | **(a)**: the deployment is same-site (§6.1, measured); build (b) only if a cross-site install appears |
 | D3 | Who may sign in | (a) anyone the IdP authenticates for the client; (b) a required rule: a list of subjects and/or a group claim value; (c) roles (admin/user) | **(b)**, required before `enforce` starts, so an IdP shared with other apps cannot sign in its other users; roles later if there is ever a second person |
 | D4 | How services get credentials | (a) API-issued, rotated, hashed and sealed under the KEK, read from a per-role view (§7.2); (b) Kubernetes projected service-account tokens ([Kubernetes docs][k8s-sa]), verified by TokenReview; (c) static secrets in Kubernetes Secrets | **(a)**: no manifest secrets, automatic rotation, works under compose; costs the print worker the KEK. (b) is stronger in-cluster but ties the API to Kubernetes and needs a fallback for compose anyway |

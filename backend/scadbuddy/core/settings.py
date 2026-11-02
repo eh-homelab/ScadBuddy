@@ -258,6 +258,17 @@ class Settings(BaseSettings):
             )
         return value
 
+    # The login's identity provider (#4975, spec 2026-11-01 §9.2): the issuer the browser
+    # is sent to and whose tokens are believed, and ScadBuddy's client id there. The
+    # deployment's, never a stored setting: until the gate refuses anyone, a setting
+    # anyone could write would make `/auth/login` a redirect to wherever they chose.
+    auth_oidc_issuer: str = ""
+    auth_oidc_client_id: str = ""
+    # Whether the issuer's discovery, keys and token endpoint may be on a private address
+    # (an IdP inside the cluster or LAN). Off, they are fetched only from public
+    # addresses, as a URL import is (`library/url_import.py` `PublicOnlyBackend`).
+    auth_oidc_private_network: bool = False
+
     @field_validator("orders_currency")
     @classmethod
     def _currency_has_a_minor_unit(cls, code: str) -> str:
@@ -643,6 +654,15 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
         "auth_mode": (
             "Whether a request without a session is refused. It decides who may write"
             " Settings, so Settings cannot hold it (#4975)."
+        ),
+        "auth_oidc_issuer": (
+            "The identity provider the login sends the browser to and believes. Set in"
+            " Settings it would be anyone's to point anywhere while the gate is off (#4975)."
+        ),
+        "auth_oidc_client_id": "ScadBuddy's client id at the issuer above, which it belongs with.",
+        "auth_oidc_private_network": (
+            "Whether the issuer may be fetched from a private address; the deployment knows"
+            " where its identity provider runs (#4975)."
         ),
         "trusted_proxies": (
             "Which peers are believed about the client they forward for. Like the allowed"

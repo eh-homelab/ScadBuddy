@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable
 from typing import Protocol
 
@@ -27,6 +28,9 @@ logger = logging.getLogger(__name__)
 SESSION_COOKIE = "__Host-scadbuddy_session"
 #: Where the caller sits on the scope (an ASGI extension key of ours).
 CALLER_SCOPE_KEY = "scadbuddy.caller"
+#: A failed lookup is logged at most this often, so a Postgres outage does not write a
+#: line for every request that carries a cookie.
+FAILURE_LOG_INTERVAL = 60.0
 
 
 class SessionLookup(Protocol):
@@ -34,9 +38,18 @@ class SessionLookup(Protocol):
 
 
 class AuthGate:
-    def __init__(self, app: ASGIApp, *, sessions: Callable[[], SessionLookup]) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        sessions: Callable[[], SessionLookup],
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.app = app
         self.sessions = sessions
+        self._clock = clock
+        self._logged_at: float | None = None
+        self._unlogged = 0
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] in ("http", "websocket"):
@@ -51,13 +64,23 @@ class AuthGate:
         try:
             session = await asyncio.to_thread(self.sessions().resolve, token)
         except psycopg.Error as error:
-            # The type only: a driver's message can carry the connection's host and user.
-            logger.warning(
-                "session lookup failed (%s); serving the request as anonymous",
-                type(error).__name__,
-            )
+            self._log_failure(error)
             return ANONYMOUS
         return ANONYMOUS if session is None else Person(session)
+
+    def _log_failure(self, error: psycopg.Error) -> None:
+        now = self._clock()
+        if self._logged_at is not None and now - self._logged_at < FAILURE_LOG_INTERVAL:
+            self._unlogged += 1
+            return
+        # The type only: a driver's message can carry the connection's host and user.
+        logger.warning(
+            "session lookup failed (%s); serving the request as anonymous",
+            type(error).__name__,
+            extra={"failures_since_last_logged": self._unlogged},
+        )
+        self._logged_at = now
+        self._unlogged = 0
 
 
 def caller_of(scope: Scope) -> Caller:

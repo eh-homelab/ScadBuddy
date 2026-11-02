@@ -216,7 +216,7 @@ async def test_a_redirect_is_followed_without_reading_its_body(
         # A stream, not `text=`: a Response built from bytes reads itself at once.
         return httpx.Response(200, stream=_WatchedBody(SOURCE.encode()))
 
-    monkeypatch.setattr(url_import, "_transport", lambda: httpx.MockTransport(answer))
+    monkeypatch.setattr(url_import, "public_transport", lambda: httpx.MockTransport(answer))
 
     imported = await fetch_model("https://example.com/start.scad", limit=LIMIT)
 
@@ -278,7 +278,7 @@ async def test_a_compression_bomb_is_refused_without_being_inflated(
 
 
 def test_the_transport_connects_through_the_public_only_backend() -> None:
-    pool = url_import._transport()._pool
+    pool = url_import.public_transport()._pool
 
     assert isinstance(pool, httpcore.AsyncConnectionPool)
     assert isinstance(pool._network_backend, PublicOnlyBackend)
@@ -299,7 +299,7 @@ def test_a_transport_the_backend_cannot_be_fitted_to_fails_loudly(
     monkeypatch.setattr(httpx, "AsyncHTTPTransport", Moved)
 
     with pytest.raises(RuntimeError, match="PublicOnlyBackend"):
-        url_import._transport()
+        url_import.public_transport()
 
 
 @respx.mock

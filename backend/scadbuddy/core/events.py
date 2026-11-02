@@ -254,6 +254,17 @@ class OrderItemChanged(BaseEvent):
     attempt: int | None = None
 
 
+class AuthSessionRevoked(BaseEvent):
+    """A signed-in session was revoked (#4975, spec 2026-11-01 §5.2): signed out, revoked
+    from the person's list, or every one of theirs (``session_id`` ``None``). Every
+    replica's sockets and the agent drop it (§5.4, §5.6); it goes to no topic."""
+
+    kind: Literal["auth.session_revoked"] = "auth.session_revoked"
+    principal: str
+    #: The hex SHA-256 the row is keyed by, never the cookie.
+    session_id: str | None = None
+
+
 class AgentOperationEvent(BaseEvent):
     """The agent recorded or ended an ``ai_operations`` row; the agent publishes it
     itself (``agent/src/operations/store.ts``). The activity component ingests it; it
@@ -384,6 +395,7 @@ Event = Annotated[
     | OrderChanged
     | OrderItemChanged
     | AgentOperationEvent
+    | AuthSessionRevoked
     | LibraryChanged
     | LibraryRemoved
     | FontInstalled

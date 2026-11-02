@@ -39,6 +39,8 @@ dependencies = [
     "regex>=2024.11.6",
     "aiobotocore>=2.21,<4",
     "aiomqtt>=2.3,<3",
+    # The login's ID-token check (#4975 phase 2, spec 2026-11-01 §5.1): JWS over a JWKS.
+    "joserfc>=1.7,<2",
 ]
 
 [build-system]

@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = "==3.12.*"
 
 [[package]]
@@ -1854,6 +1854,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "httpcore" },
     { name = "httpx" },
+    { name = "joserfc" },
     { name = "jsonschema" },
     { name = "lxml" },
     { name = "networkx" },
@@ -1903,6 +1904,7 @@ requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "httpcore", specifier = ">=1.0" },
     { name = "httpx", specifier = ">=0.28" },
+    { name = "joserfc", specifier = ">=1.7,<2" },
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "lxml", specifier = ">=5.3" },
     { name = "networkx", specifier = ">=3.4" },
