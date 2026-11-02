@@ -85,7 +85,8 @@ def test_a_live_session_is_the_person() -> None:
     assert client.post("/api/v1/whoami").json() == SESSION.principal
 
 
-@pytest.mark.parametrize("token", [new_token(), "not-a-token"])
+# Literal, not new_token(): xdist workers must collect the same ids.
+@pytest.mark.parametrize("token", ["A" * 43, "not-a-token"], ids=["well-formed", "malformed"])
 def test_an_unknown_session_is_served_as_anonymous(token: str) -> None:
     client = _client(FakeSessions())
     client.cookies.set(SESSION_COOKIE, token)
