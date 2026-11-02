@@ -61,7 +61,6 @@ from scadbuddy.api.realtime import EventCursor
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
-from scadbuddy.auth import delegation
 from scadbuddy.auth.authorship_rule import AuthorshipRule
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
@@ -1059,7 +1058,7 @@ async def _sweep_auth_sessions_logged(state: AppState) -> None:
         logger.exception("could not rotate the service credentials")
         raise
     try:
-        await asyncio.to_thread(delegation.delete_spent, auth.pool)
+        await asyncio.to_thread(auth.delete_spent_delegations)
         await asyncio.to_thread(auth.tokens.delete_expired)
     except Exception:
         logger.exception("could not delete the spent delegation codes or old access tokens")
