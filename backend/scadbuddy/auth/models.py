@@ -66,10 +66,20 @@ class Service:
 
 
 @dataclass(frozen=True)
+class PersonalToken:
+    """A request carrying a person's access token (§7.5, `auth/personal_tokens.py`): the
+    person who minted it, on the ``api`` routes, writing only with scope ``write``."""
+
+    token_id: str
+    principal: str
+    scope: str
+
+
+@dataclass(frozen=True)
 class Anonymous:
     """A request with no live session or credential."""
 
 
 ANONYMOUS = Anonymous()
 
-Caller = Person | Service | Anonymous
+Caller = Person | Service | PersonalToken | Anonymous

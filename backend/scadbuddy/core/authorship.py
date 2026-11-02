@@ -90,7 +90,7 @@ _author: ContextVar[AgentAuthor | None] = ContextVar("scadbuddy_agent_author", d
 #: What the request's caller is (`auth/models.py`), as far as authorship cares: a person's
 #: own session, a delegated one (the agent's headless browser, spec §7.4), a service
 #: credential, or nobody.
-CallerKind = Literal["person", "delegated", "service", "anonymous"]
+CallerKind = Literal["person", "delegated", "token", "service", "anonymous"]
 #: Why ``enforce`` refuses a request's author headers (spec §7.3): sent by a caller that
 #: may not assert an author, or by the projects worker naming someone other than the
 #: run's starter.
@@ -119,7 +119,8 @@ def current_person() -> str | None:
     """The signed-in person a request without an agent author is from (spec §7.3), or None
     for an anonymous one (``SCADBUDDY_AUTH_MODE=off``) or a service's."""
     requester = _requester.get()
-    if _author.get() is not None or requester.kind != "person":
+    # A person's access token acts as the person who minted it (#4975 phase 6).
+    if _author.get() is not None or requester.kind not in ("person", "token"):
         return None
     return requester.principal
 

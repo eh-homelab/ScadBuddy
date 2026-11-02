@@ -67,6 +67,7 @@ class SessionStore:
         user_agent: str | None = None,
         lifetime: timedelta = ABSOLUTE_LIFETIME,
         now: datetime | None = None,
+        principal: str | None = None,
     ) -> tuple[str, AuthSession]:
         """A new session, and its token: the only time the token exists outside the
         browser. A ``lifetime`` shorter than the idle timeout caps the idle deadline
@@ -84,7 +85,8 @@ class SessionStore:
                 f" %(client_address)s, %(user_agent)s) RETURNING {_COLUMNS}",
                 {
                     "id_hash": token_hash(token),
-                    "principal": principal_for(issuer, subject),
+                    # A delegated session names the principal it acts for (§7.4).
+                    "principal": principal or principal_for(issuer, subject),
                     "issuer": issuer,
                     "subject": subject,
                     "name": name,

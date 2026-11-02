@@ -39,6 +39,7 @@ async def auth_check(connection: HTTPConnection) -> None:
         request_header=connection.headers.get(REQUEST_HEADER) == "1",
         # A browser cannot add a header to a socket's handshake; `Origin` covers it.
         header_needed=not websocket and not scriptless(route),
+        method=connection.scope.get("method", "GET"),
     )
     if reason is not None:
         state.components.get(AUTH).would_refuse.note(route_cls, reason, route.path)

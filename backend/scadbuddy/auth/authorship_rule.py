@@ -26,7 +26,7 @@ from starlette.datastructures import Headers
 from starlette.types import Scope
 
 from scadbuddy.auth.gate import caller_of
-from scadbuddy.auth.models import Person, Service
+from scadbuddy.auth.models import Person, PersonalToken, Service
 from scadbuddy.auth.run_tokens import RUN_TOKEN_HEADER, run_of_token
 from scadbuddy.auth.store import Pool
 from scadbuddy.core.authorship import (
@@ -45,6 +45,8 @@ def requester_of(scope: Scope) -> Requester:
         if caller.session.kind == "delegated":
             return Requester("delegated", caller.principal)
         return Requester("person", caller.principal)
+    if isinstance(caller, PersonalToken):
+        return Requester("token", caller.principal)
     if isinstance(caller, Service):
         return Requester("service")
     return Requester("anonymous")

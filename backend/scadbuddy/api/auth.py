@@ -16,7 +16,7 @@ import html
 import json
 import logging
 import secrets
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 from urllib.parse import urlencode, urlsplit
 
@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import EventsDep, SettingsStoreDep, StateDep
 from scadbuddy.auth import break_glass as break_glass_codes
+from scadbuddy.auth import delegation
 from scadbuddy.auth.component import AuthComponent, AuthDep, CallerDep
 from scadbuddy.auth.config import LoginConfig, seal
 from scadbuddy.auth.gate import SESSION_COOKIE
@@ -36,7 +37,7 @@ from scadbuddy.auth.login_state import (
     open_state,
     seal_state,
 )
-from scadbuddy.auth.models import ABSOLUTE_LIFETIME, AuthSession, Caller, Person
+from scadbuddy.auth.models import ABSOLUTE_LIFETIME, AuthSession, Caller, Person, Service
 from scadbuddy.auth.oidc import OidcError, check_url
 from scadbuddy.core.events import AuthSessionRevoked, emit
 from scadbuddy.core.problems import ApiError
@@ -385,6 +386,102 @@ async def break_glass(
     )
     lifetime = int(break_glass_codes.SESSION_LIFETIME.total_seconds())
     _cookie(page, SESSION_COOKIE, token, lifetime, "strict")
+    return page
+
+
+class DelegationRequest(BaseModel):
+    """The principal of the agent session a browser serves, and how long its session may
+    last (§7.4)."""
+
+    principal: str = Field(min_length=1, max_length=300, pattern=r"^[\x21-\x7e]+$")
+    ttl_seconds: int = Field(
+        default=int(delegation.MAX_TTL.total_seconds()),
+        ge=int(delegation.MIN_TTL.total_seconds()),
+        le=int(delegation.MAX_TTL.total_seconds()),
+    )
+
+
+class DelegationLink(BaseModel):
+    #: Opened once, within a minute, by the browser the session is for. A bearer secret.
+    url: str
+    expires_at: datetime
+
+
+@router.post(
+    "/auth/delegated-sessions",
+    response_model=DelegationLink,
+    status_code=201,
+    summary="A one-time sign-in link for a browser the agent drives",
+    responses={403: {"description": "Only the agent's service credential delegates"}},
+)
+async def create_delegated_session(
+    body: DelegationRequest,
+    caller: CallerDep,
+    auth: AuthDep,
+    settings_store: SettingsStoreDep,
+) -> DelegationLink:
+    """The agent's credential only, in every mode (§7.4): a ``delegated`` session as
+    ``principal`` for at most an hour, through a sign-in link that works once within a
+    minute. The session can do nothing only a person does."""
+    if not (isinstance(caller, Service) and caller.caller == "agent"):
+        raise _problem(403, "forbidden", "only the agent's service credential delegates a session")
+    origin = _public_origin(settings_store)
+    if origin is None:
+        raise _problem(
+            422, "no-public-url", "set ScadBuddy's public URL: the link is on its origin"
+        )
+    code = await asyncio.to_thread(
+        delegation.mint, auth.pool, body.principal, timedelta(seconds=body.ttl_seconds)
+    )
+    return DelegationLink(
+        url=f"{origin}{delegation.PATH}?code={code}",
+        expires_at=datetime.now(UTC) + delegation.CODE_LIFETIME,
+    )
+
+
+@router.get(
+    "/auth/delegated",
+    summary="Sign a browser the agent drives in with a delegation link",
+    response_class=HTMLResponse,
+)
+async def delegated_sign_in(
+    request: Request,
+    auth: AuthDep,
+    settings_store: SettingsStoreDep,
+    code: Annotated[str, Query(max_length=100)],
+) -> HTMLResponse:
+    """Spends a code ``POST /auth/delegated-sessions`` minted and starts the ``delegated``
+    session it names (§7.4)."""
+    origin = _public_origin(settings_store) or str(request.base_url).rstrip("/")
+    granted = await asyncio.to_thread(delegation.redeem, auth.pool, code)
+    if granted is None:
+        return _page(
+            status=400,
+            title="Sign-in failed",
+            message="This delegation link is used, expired or not one.",
+            origin=origin,
+            popup=False,
+        )
+    token, _ = await asyncio.to_thread(
+        auth.sessions.create,
+        issuer=delegation.ISSUER,
+        subject=granted.principal,
+        principal=granted.principal,
+        kind="delegated",
+        name="Assistant's browser",
+        user_agent=(request.headers.get("user-agent") or "")[:USER_AGENT_CHARS] or None,
+        lifetime=granted.ttl,
+    )
+    page = _page(
+        status=200,
+        title="Signed in",
+        message="Signed in for the assistant's browser.",
+        origin=origin,
+        popup=False,
+        return_to="/",
+        signed_in=True,
+    )
+    _cookie(page, SESSION_COOKIE, token, int(granted.ttl.total_seconds()), "strict")
     return page
 
 
