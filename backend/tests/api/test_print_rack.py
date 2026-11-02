@@ -56,12 +56,12 @@ pytestmark = pytest.mark.requires_postgres
 def test_the_rack_algorithm_is_remembered_per_printer_and_forgotten(client: TestClient) -> None:
     put = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": "newest_first"})
     assert put.status_code == 200, put.text
-    assert put.json() == {"printer_id": 1, "algorithm": "newest_first"}
+    assert put.json() == {"printer_id": 1, "printer": None, "algorithm": "newest_first"}
     remembered = client.get("/api/v1/settings/remembered").json()
     assert remembered["printer_rack_algorithms"] == {"1": "newest_first"}
 
     forgot = client.put("/api/v1/print/printers/1/rack-algorithm", json={"algorithm": None})
-    assert forgot.json() == {"printer_id": 1, "algorithm": "least_used"}
+    assert forgot.json() == {"printer_id": 1, "printer": None, "algorithm": "least_used"}
     assert client.get("/api/v1/settings/remembered").json().get("printer_rack_algorithms", {}) == {}
 
 
@@ -102,7 +102,7 @@ def test_a_rack_algorithm_save_that_failed_is_a_503_problem_naming_its_cause(
     """#1129 review: the bounded save's failures are expected, not a crash, and the 503
     says which one happened (#1283) rather than calling every one a timeout."""
 
-    def failed(*_: object) -> None:
+    def failed(*_: object, **__: object) -> None:
         raise error
 
     monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", failed)
@@ -118,7 +118,7 @@ def test_a_dropped_connection_does_not_claim_nothing_was_saved(
     """#1189 review: a connection lost mid-save may have committed, so the 503 must not
     say nothing was saved; a timeout that rolled back can."""
 
-    def dropped(*_: object) -> None:
+    def dropped(*_: object, **__: object) -> None:
         raise psycopg.OperationalError("server closed the connection unexpectedly")
 
     monkeypatch.setattr(SettingsStore, "set_printer_rack_algorithm", dropped)
@@ -274,7 +274,9 @@ class BrokenUsage(RackUsageStore):
     def __init__(self) -> None:
         pass
 
-    async def seen(self, printer_id: int, serials: Iterable[str]) -> None:
+    async def seen(
+        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
+    ) -> None:
         return None
 
     async def usage(self, serials: Iterable[str]) -> dict[str, Usage]:

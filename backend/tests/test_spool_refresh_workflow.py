@@ -25,6 +25,7 @@ from scadbuddy.spools.models import SpoolSnapshot
 from scadbuddy.spools.providers import SpoolProvider
 from scadbuddy.spools.store import SpoolStore
 from scadbuddy.workflows.spool_refresh import (
+    HELD_ACTIVITY,
     LIST_ACTIVITY,
     PROVIDER_ACTIVITY,
     RUN_TIMEOUT,
@@ -50,7 +51,11 @@ def _queue() -> str:
 
 
 def fakes(
-    outcomes: dict[str, str], *, failing: str | None = None, seen_fails: bool = False
+    outcomes: dict[str, str],
+    *,
+    failing: str | None = None,
+    seen_fails: bool = False,
+    held_fails: bool = False,
 ) -> tuple[list[object], list[str]]:
     calls: list[str] = []
 
@@ -72,7 +77,14 @@ def fakes(
         if seen_fails:
             raise RuntimeError("no reports")
 
-    return [names, refresh, seen], calls
+    @activity.defn(name=HELD_ACTIVITY)
+    async def held() -> str:
+        calls.append("held")
+        if held_fails:
+            raise RuntimeError("Bambuddy is down")
+        return "refreshed"
+
+    return [names, refresh, seen, held], calls
 
 
 async def test_a_run_refreshes_each_provider_then_the_trays(client: Client) -> None:
@@ -83,20 +95,23 @@ async def test_a_run_refreshes_each_provider_then_the_trays(client: Client) -> N
             SpoolRefresh.run, id=f"spools-{uuid.uuid4().hex}", task_queue=queue
         )
     assert outcome == {"a": "refreshed", "b": "skipped"}
-    assert calls == ["list", "a", "b", "seen"]
+    # Then Bambuddy's local presets are kept (#4645), last, behind its patch.
+    assert calls == ["list", "a", "b", "seen", "held"]
 
 
 async def test_one_providers_failure_never_stops_the_others(client: Client) -> None:
     """I3: each provider is its own activity, and the trays' step its own too. Nothing is
     retried within the run: the next tick is the retry, as it is for the sweeps."""
-    activities, calls = fakes({"a": "refreshed", "b": "refreshed"}, failing="a", seen_fails=True)
+    activities, calls = fakes(
+        {"a": "refreshed", "b": "refreshed"}, failing="a", seen_fails=True, held_fails=True
+    )
     queue = _queue()
     async with Worker(client, task_queue=queue, workflows=[SpoolRefresh], activities=activities):  # type: ignore[arg-type]
         outcome = await client.execute_workflow(
             SpoolRefresh.run, id=f"spools-{uuid.uuid4().hex}", task_queue=queue
         )
     assert outcome == {"a": "failed", "b": "refreshed"}
-    assert calls == ["list", "a", "b", "seen"]
+    assert calls == ["list", "a", "b", "seen", "held"]
 
 
 @pytest.mark.parametrize("breaks", ["records", "replace_records"])

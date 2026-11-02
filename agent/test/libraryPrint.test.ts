@@ -170,6 +170,7 @@ describe('the library routes', () => {
     expect(result.isError).toBeFalsy()
     expect(body).toEqual({
       printer_id: null,
+      printer: null,
       filament_plan: [],
       nozzles: [],
       tier: 'fine',
@@ -190,6 +191,7 @@ describe('the library routes', () => {
     expect(result.isError).toBeFalsy()
     expect(body).toEqual({
       printer_id: null,
+      printer: null,
       filament_plan: [],
       nozzles: [],
       tier: null,

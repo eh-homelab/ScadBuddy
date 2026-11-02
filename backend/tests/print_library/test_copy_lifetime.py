@@ -17,9 +17,15 @@ from scadbuddy.bambuddy.send import Printable, Target
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
 from scadbuddy.print_library.copies import ensure_native_copy, release_moved
 from scadbuddy.print_library.native import NativeLibrary
-from scadbuddy.print_library.sweep import COPY_ORPHAN_GRACE, CopySweep, sweep_print_copies
+from scadbuddy.print_library.sweep import (
+    COPY_ORPHAN_GRACE,
+    COPY_REUSE_GRACE,
+    CopySweep,
+    sweep_print_copies,
+)
 from scadbuddy.render.pg_store import MIGRATIONS_DIR
 from scadbuddy.render.plate import plate_for
+from scadbuddy.slicing.store import NativeSliceStore
 from scadbuddy.store.index import Pool
 
 pytestmark = pytest.mark.requires_postgres
@@ -28,6 +34,8 @@ KEY = "out-life-1"
 OTHER = "out-life-2"
 H2D = Target(plate_for("Bambu Lab H2D"), "0.4")
 X1C = Target(plate_for("Bambu Lab X1 Carbon"), "0.4")
+#: No grace for a superseded copy's last use: these copies were all used just now.
+NONE = timedelta(0)
 #: Past every grace the sweep gives a file nothing records.
 LATER = timedelta(days=2)
 
@@ -86,13 +94,26 @@ async def sweep(
     *,
     after: timedelta = timedelta(0),
     in_use: Iterable[str] = (),
+    slicing: NativeSliceStore | None = None,
+    reuse_grace: timedelta = timedelta(0),
 ) -> CopySweep:
     busy = set(in_use)
 
     async def subjects_in_use() -> set[str]:
         return busy
 
-    return await sweep_print_copies(native, uploads, subjects_in_use, now=datetime.now(UTC) + after)
+    return await sweep_print_copies(
+        native,
+        uploads,
+        subjects_in_use,
+        slicing.slicing if slicing is not None else no_slices,
+        now=datetime.now(UTC) + after,
+        reuse_grace=reuse_grace,
+    )
+
+
+async def no_slices(ids: list[int]) -> set[int]:
+    return set()
 
 
 def live(native: NativeLibrary, file_id: int) -> bool:
@@ -308,7 +329,9 @@ async def test_a_subject_a_run_takes_up_during_the_sweep_keeps_its_files(
     async def subjects_in_use() -> set[str]:
         return reads.pop(0)
 
-    done = await sweep_print_copies(native, uploads, subjects_in_use, now=datetime.now(UTC))
+    done = await sweep_print_copies(
+        native, uploads, subjects_in_use, no_slices, now=datetime.now(UTC), reuse_grace=NONE
+    )
 
     assert done.superseded == 0
     assert live(native, old)
@@ -433,7 +456,9 @@ async def test_a_copy_a_person_moves_during_the_sweep_is_never_trashed(
             await native.update_file(old, folder_id=elsewhere)
         return set()
 
-    done = await sweep_print_copies(native, uploads, subjects_in_use, now=datetime.now(UTC))
+    done = await sweep_print_copies(
+        native, uploads, subjects_in_use, no_slices, now=datetime.now(UTC), reuse_grace=NONE
+    )
 
     assert done.superseded == 0
     assert live(native, old)
@@ -471,6 +496,72 @@ async def test_the_folders_copy_lock_holds_the_superseded_copies_trash(
     assert trashed(native, old)
 
 
+async def test_a_copy_reused_without_a_run_during_the_sweep_is_never_trashed(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """#5189: the dialog's background slice and an order's quote reuse a copy with no
+    run, so its subject is never in use. A copy reused after the sweep read the order of
+    use, before it got the folder's lock, is the folder's newest: under the lock the order
+    is read again, and the copy is kept."""
+    old = await copy_of(native, uploads, payload)
+    later = await copy_of(native, uploads, payload, target=X1C)
+    reads = 0
+
+    async def subjects_in_use() -> set[str]:
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            assert await copy_of(native, uploads, payload) == old
+        return set()
+
+    done = await sweep_print_copies(
+        native, uploads, subjects_in_use, no_slices, now=datetime.now(UTC), reuse_grace=NONE
+    )
+
+    assert done.superseded == 0
+    assert live(native, old) and live(native, later)
+    assert (await sweep(native, uploads)).superseded == 1
+    assert live(native, old) and trashed(native, later)
+
+
+async def test_a_superseded_copy_a_slice_still_reads_is_kept(
+    native: NativeLibrary, uploads: BambuddyUploadStore, pool: Pool, payload: bytes
+) -> None:
+    """#5189: the dialog's background slice and an order's quote slice a copy with no
+    run. While a native slice of it runs, a newer copy in its folder never trashes it."""
+    slices = NativeSliceStore(pool)
+    old = await copy_of(native, uploads, payload)
+    await copy_of(native, uploads, payload, target=X1C)
+    running = await slices.start(
+        workflow_id="slice-5189", subject=KEY, library_file_id=old, plate_id=1, preset_key="k"
+    )
+
+    assert (await sweep(native, uploads, slicing=slices)).superseded == 0
+    assert live(native, old)
+
+    await slices.finish(
+        running.id, status="failed", sliced_blob_key=None, failure="stopped", warnings=[]
+    )
+    assert (await sweep(native, uploads, slicing=slices)).superseded == 1
+    assert trashed(native, old)
+
+
+async def test_a_superseded_copy_used_within_the_grace_is_kept(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """#5189: `ensure_native_copy` answers before the slice's row is written, so a copy
+    used within `COPY_REUSE_GRACE` is kept for the slice about to start on it."""
+    old = await copy_of(native, uploads, payload)
+    await copy_of(native, uploads, payload, target=X1C)
+
+    assert (await sweep(native, uploads, reuse_grace=COPY_REUSE_GRACE)).superseded == 0
+    assert live(native, old)
+
+    later = COPY_REUSE_GRACE + timedelta(minutes=1)
+    assert (await sweep(native, uploads, after=later, reuse_grace=COPY_REUSE_GRACE)).superseded == 1
+    assert trashed(native, old)
+
+
 async def test_a_run_that_takes_the_subject_up_under_the_lock_keeps_its_copies(
     native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
 ) -> None:
@@ -483,6 +574,8 @@ async def test_a_run_that_takes_the_subject_up_under_the_lock_keeps_its_copies(
     async def subjects_in_use() -> set[str]:
         return reads.pop(0)
 
-    done = await sweep_print_copies(native, uploads, subjects_in_use, now=datetime.now(UTC))
+    done = await sweep_print_copies(
+        native, uploads, subjects_in_use, no_slices, now=datetime.now(UTC), reuse_grace=NONE
+    )
 
     assert done.superseded == 0 and live(native, old)

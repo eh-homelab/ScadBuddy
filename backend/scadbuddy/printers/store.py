@@ -177,6 +177,46 @@ def _forget_run_activity(conn: Connection[DictRow], printer_id: str) -> None:
     )
 
 
+#: The per-printer settings maps whose keys may be a registry id (#4971): a LAN-only
+#: printer's entries, keyed by its row since it has no Bambuddy id.
+PRINTER_KEYED_SETTINGS = (
+    "printer_rack_algorithms",
+    "printer_rack_algorithm_versions",
+    "printer_print_options",
+)
+
+
+def _repoint_settings(conn: Connection[DictRow], merged: str, into: str) -> None:
+    # The default printer and the registry-keyed map entries are JSON values in
+    # `settings` (#4971), so no foreign key keeps them. A map entry ``into`` has of its
+    # own wins.
+    conn.execute(
+        "UPDATE settings SET value = to_jsonb(%s::text), updated_at = now()"
+        " WHERE name = 'default_printer' AND value = to_jsonb(%s::text)",
+        (into, merged),
+    )
+    conn.execute(
+        "UPDATE settings SET value = CASE WHEN value ? %(into)s THEN value - %(merged)s"
+        " ELSE (value - %(merged)s) || jsonb_build_object(%(into)s::text, value -> %(merged)s)"
+        " END, updated_at = now() WHERE name = ANY(%(names)s) AND value ? %(merged)s",
+        {"into": into, "merged": merged, "names": list(PRINTER_KEYED_SETTINGS)},
+    )
+
+
+def _forget_settings(conn: Connection[DictRow], printer_id: str) -> None:
+    # A deleted printer is no default: `_named_printer` would refuse every run that
+    # names no printer (#4971).
+    conn.execute(
+        "DELETE FROM settings WHERE name = 'default_printer' AND value = to_jsonb(%s::text)",
+        (printer_id,),
+    )
+    conn.execute(
+        "UPDATE settings SET value = value - %s, updated_at = now()"
+        " WHERE name = ANY(%s) AND value ? %s",
+        (printer_id, list(PRINTER_KEYED_SETTINGS), printer_id),
+    )
+
+
 #: Everything a merge repoints (I7 of the #4186 review). The extension point for every
 #: later table keyed by ``printers.id``.
 PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
@@ -188,7 +228,14 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("printers", "forwards_to"),
     # #4971: the plate remembered on a printer; the kept printer's own wins.
     PrinterReference("printer_bed_types", "printer", unique=True),
+    # #4971: the LAN-only printer a Bambuddy project last printed on.
+    PrinterReference("project_print_targets", "printer"),
+    # #4971: the printer a rack hotend was last seen on, and a pick's.
+    PrinterReference("rack_nozzle_seen", "printer"),
+    PrinterReference("rack_nozzle_picks", "printer"),
     _repoint_run_activity,
+    # #4971: the default printer and the registry-keyed settings map entries.
+    _repoint_settings,
 )
 
 
@@ -856,3 +903,4 @@ class PrinterStore:
             # activity facets follow in the same transaction, so the Printer filter never
             # offers a printer that is gone (#4442 M3).
             _forget_run_activity(conn, str(key))
+            _forget_settings(conn, str(key))

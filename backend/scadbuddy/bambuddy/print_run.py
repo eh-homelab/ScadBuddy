@@ -1022,7 +1022,10 @@ async def check_print(
     (``profiles``, D5), the report's trays (D1) and ``source``'s native library for the
     folder (D6). ``client`` is used only off that path."""
     named = request.printer is not None and printers is not None
-    if not named and (request.printer_id or settings.printer_id) is None:
+    if (
+        not named
+        and (request.printer_id or settings.printer_id or settings.default_printer) is None
+    ):
         return PrintCheck()
     route: RunRoute | None = None
     if printers is not None and native_backends(settings):
@@ -1118,6 +1121,7 @@ async def check_print(
         request,
         settings,
         printer_id=prepared.printer_id,
+        printer=prepared.printer or None,
         status=prepared.printer_status,
         rack=rack,
         laid_out=laid_out,
@@ -1264,6 +1268,7 @@ async def _native_check(
         request,
         settings,
         printer_id=prepared.printer_id,
+        printer=prepared.printer or None,
         status=prepared.printer_status,
         rack=rack,
         laid_out=laid_out,
@@ -1554,6 +1559,7 @@ async def rack_preview(
     settings: StoredSettings,
     *,
     printer_id: int,
+    printer: str | None = None,
     status: PrinterStatus | None,
     rack: RackUsage | None,
     laid_out: bool,
@@ -1600,7 +1606,7 @@ async def rack_preview(
             glow_unchecked=len(known) < len(chosen),
             label="the rack side",
         )
-        algorithm = request.rack_algorithm or settings.rack_algorithm(printer_id)
+        algorithm = request.rack_algorithm or settings.rack_algorithm(printer_id, printer)
         usage = await _usage_or_empty(rack, status, printer_id)
         manual = {0: request.rack_position} if request.rack_position is not None else {}
         picks = rank_rack([group], status.nozzle_rack, algorithm, usage, manual)
@@ -2307,6 +2313,10 @@ async def _named_printer(
     registry) falls back to the row for ``printer_id``; a row that links another
     Bambuddy printer, or none (a row only the LAN reaches, #4516), is refused, so a
     disagreeing pair never prints on the Bambuddy printer."""
+    if printer is None and sent is None and settings.printer_id is None:
+        # The default printer when it has no Bambuddy id (#4971); one that has one is
+        # ``printer_id``, as the previous build reads it.
+        printer = settings.default_printer
     if printers is None or printer is None:
         printer_id = sent or settings.printer_id
         if printer_id is None:
@@ -2831,7 +2841,11 @@ async def plan_run(
     # The picker's project is its own control (ProjectPicker, defaulting to the last
     # one), so a remembered project_id is dropped here rather than half-applied.
     print_options = resolve_print_options(
-        settings, source.options_scope, printer_id, request_scope(request.copies, request.options)
+        settings,
+        source.options_scope,
+        printer_id,
+        request_scope(request.copies, request.options),
+        printer=prepared.printer or None,
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
 
@@ -3005,7 +3019,8 @@ async def plan_run(
             for plate_id, options, _, plan, reused in planned
         ],
         warnings=warnings + hardware + support_warnings + tower_warnings + _reused_notes(planned),
-        rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
+        rack_algorithm=request.rack_algorithm
+        or settings.rack_algorithm(printer_id, prepared.printer or None),
         rack_position=request.rack_position,
         # A readable status with no rack (any printer but an H2C) has nothing to pick: no
         # extra read per plate, and no rack warning on a printer without one. An
@@ -3093,7 +3108,11 @@ async def _plan_sliced(
     )
     per_plate = [with_trays(options, prepared.printer_status, printer_id) for options in per_plate]
     print_options = resolve_print_options(
-        settings, source.options_scope, printer_id, request_scope(request.copies, request.options)
+        settings,
+        source.options_scope,
+        printer_id,
+        request_scope(request.copies, request.options),
+        printer=prepared.printer or None,
     ).model_copy(update={"project_id": None})
     if any(warning.kind in HELD_SLICED_KINDS for warning in prepared.warnings):
         print_options = print_options.model_copy(update={"manual_start": True})
@@ -3120,7 +3139,8 @@ async def _plan_sliced(
             [(options, []) for options in per_plate], request.filament_plan, copies
         )
         + not_resliced(request.prime_tower),
-        rack_algorithm=request.rack_algorithm or settings.rack_algorithm(printer_id),
+        rack_algorithm=request.rack_algorithm
+        or settings.rack_algorithm(printer_id, prepared.printer or None),
         has_rack=status is None or bool(rack_positions(status.nozzle_rack)),
         printer=prepared.printer,
         path=prepared.path,

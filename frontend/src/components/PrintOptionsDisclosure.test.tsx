@@ -25,13 +25,18 @@ async function pick(user: ReturnType<typeof userEvent.setup>, label: string, val
 
 const MODEL: OptionsSubject = { key: 'name-keychain', noun: 'model' }
 
-function Harness({ printerId, subject = MODEL }: { printerId?: number | null; subject?: OptionsSubject } = {}) {
+function Harness({
+  printerId,
+  registryPrinter,
+  subject = MODEL,
+}: { printerId?: number | null; registryPrinter?: string | null; subject?: OptionsSubject } = {}) {
   const [value, setValue] = useState<PrintOptions>({})
   return (
     <>
       <PrintOptionsDisclosure
         subject={subject}
         printerId={printerId}
+        registryPrinter={registryPrinter}
         value={value}
         onChange={setValue}
       />
@@ -228,6 +233,43 @@ describe('PrintOptionsDisclosure', () => {
     // Not just the one field the dialog touched: the PUT replaces the scope wholesale.
     expect(puts[0]).toMatchObject({ options: { bed_levelling: 'off', timelapse: true } })
     expect(within(row('Timelapse')).getByText(/On · from this printer/)).toBeInTheDocument()
+  })
+
+  it("keys a LAN-only printer's scope by its registry id, not the Settings printer (#4971)", async () => {
+    server.use(
+      http.get('/api/v1/settings/print-options', () =>
+        HttpResponse.json({
+          ...printOptionsFixture,
+          printer_id: 1,
+          printers: { '1': { timelapse: true }, 'lan-row': { bed_levelling: 'off' } },
+        }),
+      ),
+    )
+    const puts: { key?: string | null }[] = []
+    server.use(
+      http.put('/api/v1/settings/print-options', async ({ request }) => {
+        const body = (await request.json()) as { key?: string | null; options: PrintOptions }
+        puts.push(body)
+        return HttpResponse.json({
+          defaults: printOptionsFixture.defaults,
+          global_options: {},
+          printers: { '1': { timelapse: true }, 'lan-row': body.options },
+          models: {},
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<Harness printerId={null} registryPrinter="lan-row" />)
+    await open(user)
+
+    expect(within(row('Bed levelling')).getByText(/from this printer/)).toBeInTheDocument()
+    expect(within(row('Timelapse')).queryByText(/from this printer/)).toBeNull()
+
+    await pick(user, 'Timelapse', 'false')
+    await user.click(screen.getByRole('button', { name: 'Remember' }))
+
+    await waitFor(() => expect(puts).toHaveLength(1))
+    expect(puts[0]?.key).toBe('lan-row')
   })
 
   it('still knows the printer after a save, since the PUT does not report one', async () => {

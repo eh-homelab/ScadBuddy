@@ -61,6 +61,8 @@ from scadbuddy.api.realtime import EventCursor
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
+from scadbuddy.auth.component import AUTH
+from scadbuddy.auth.gate import AuthGate
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
@@ -116,6 +118,7 @@ from scadbuddy.render.previews import PreviewUnrunError
 from scadbuddy.render.runner import probe_openscad_version
 from scadbuddy.render.worker_role import grant_at_start
 from scadbuddy.slicing.component import SLICING
+from scadbuddy.slicing.held_presets import HeldPresetStore, held_presets_activity
 from scadbuddy.slicing.start import stop_lost_native_slices, sweep_native_slices
 from scadbuddy.spools.activities import spool_activities
 from scadbuddy.spools.component import SPOOLS
@@ -810,7 +813,11 @@ async def _sweep_native_copies_logged(state: AppState) -> None:
                 "could not check the LAN runs' sequences; their files are kept", exc_info=True
             )
         await sweep_print_copies(
-            native, state.uploads, state.print_runs.store.subjects_in_use, now=datetime.now(UTC)
+            native,
+            state.uploads,
+            state.print_runs.store.subjects_in_use,
+            state.components.get(SLICING).store.slicing,
+            now=datetime.now(UTC),
         )
     except Exception:
         logger.exception("could not sweep the native per-print copies")
@@ -1426,6 +1433,10 @@ async def _run_library_worker(state: AppState, stop: asyncio.Event) -> None:
         *_housekeeping_activities(state),
         *_preview_activities(state),
         *spool_activities(state.components.get(SPOOLS)),
+        # Bambuddy's local presets kept for native runs (#4645), on the spools' Schedule.
+        held_presets_activity(
+            lambda: HeldPresetStore(state.projection.pool), lambda: state.settings_store.load()
+        ),
         *operation_activities(ops.store, state.settings_store, _kinds_on(ops, "library")),
         *trigger_activities,
         migrate_activity(lambda: state.settings_store.pool, state.settings),
@@ -1868,6 +1879,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             internal_library.PUT_ROUTE_LIMIT,
         ],
     )
+    # Who the request is from (#4975), inside the cross-site gate (spec 2026-11-01 §8.1).
+    # In SCADBUDDY_AUTH_MODE=off it refuses nothing.
+    app.add_middleware(AuthGate, sessions=lambda: state.components.get(AUTH).sessions)
     # A write from a page on another origin is refused before its body is read (#962).
     app.add_middleware(
         CrossSiteGate,

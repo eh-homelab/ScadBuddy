@@ -348,10 +348,21 @@ three kinds of files:
   2026-10-13 is the authority on the override keys);
 - one filament JSON per slot, flattened.
 
-A native run offers only the image's presets (hot-path plan D5, `slicing/catalogue.py`
-for the lists and `slicing/values.py` for a process preset's values): Bambuddy's `local`
-(OrcaSlicer-import) and cloud user presets are not offered, and a remembered one is
-refused naming it, because reading them is a Bambuddy call on the hot path (#4645).
+A native run offers the image's presets (hot-path plan D5, `slicing/catalogue.py`
+for the lists and `slicing/values.py` for a process preset's values) and Bambuddy's
+`local` (OrcaSlicer-import) presets from a kept copy (#4645, `slicing/held_presets.py`,
+the table `held_local_presets`). The copy is refreshed off the hot path on the spool
+providers' Schedule (`SpoolRefresh`'s `held_presets_refresh`, behind its patch): a list
+of `/local-presets/`, then a read of each preset new or edited since (its `updated_at`).
+With the refresh off (`spool_overlay_refresh_seconds` 0) the API forgets the copy at its
+start, so a `local` preset is read from Bambuddy again and a native run offers none.
+A native run reads only the copy, and flattens a kept document over the image's tree
+as it does a preset read from Bambuddy (`Profiles.flatten_over`), so the Rust worker
+gets fully resolved files; the slice's key carries each built file's digest, so an edit,
+once kept, slices again. A kept copy rather than an import into ScadBuddy's own store:
+the presets stay Bambuddy's records (its spools name them by id), as the spool providers'
+cache keeps its inventory. Bambu Cloud user presets are still not offered on a native run,
+and a remembered one is refused naming it (#5113).
 
 Flattening reads Bambu Studio's profile tree, copied into the API image at build time
 from the Dockerfile's `slicer-dist` stage, the same checked download the slicer image

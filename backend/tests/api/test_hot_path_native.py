@@ -817,6 +817,41 @@ def test_a_lan_only_printer_opens_on_its_remembered_plate(
 
 
 @NO_BAMBUDDY
+def test_a_lan_only_printers_remembered_choices_open_its_dialog(
+    native_app: TestClient, model: str, fake_lan: FakeLan, spans: InMemorySpanExporter
+) -> None:
+    """#4971 part 2: the subject's remembered printer, the default printer and the rack
+    algorithm reach a LAN-only printer by its registry id, asking Bambuddy nothing."""
+    row = lan_row(native_app, fake_lan)
+    other = native_app.post("/api/v1/printers", json={"serial": "0938AB000000041", "name": "B"})
+    assert other.status_code == 201, other.text
+    output = make_output(native_app, model)
+    with forbid_bambuddy(spans, BASE):
+        assert (
+            native_app.put(
+                f"/api/v1/print/printers/{row}/rack-algorithm", json={"algorithm": "newest_first"}
+            ).status_code
+            == 200
+        )
+        assert (
+            native_app.put(
+                "/api/v1/settings", json={"default_printer": other.json()["id"]}
+            ).status_code
+            == 200
+        )
+        assert (
+            native_app.put(
+                f"/api/v1/print/models/{model}/choices", json={"printer": row}
+            ).status_code
+            == 200
+        )
+        choices = native_app.get(f"/api/v1/print/outputs/{output}/choices")
+    assert choices.status_code == 200, choices.text
+    assert choices.json()["model_choices"]["printer"] == row
+    assert choices.json()["rack_algorithm"] == "newest_first"
+
+
+@NO_BAMBUDDY
 def test_a_library_check_naming_no_printer_answers_without_bambuddy(
     native_app: TestClient, tmp_path: Path
 ) -> None:

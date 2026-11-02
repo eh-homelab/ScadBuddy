@@ -458,8 +458,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   plan's trays and `printers/nozzle_mapping.py` an H2C rack print's `nozzle_mapping`
   (measured values in the spec's §2); `printers/lan.py` is the FTPS upload and MQTT
   command. `slicing/catalogue.py` and `slicing/values.py` give a native run the image's
-  presets and a process preset's values in Bambuddy's shapes (`local` presets are not
-  offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
+  presets and a process preset's values in Bambuddy's shapes, with Bambuddy's `local`
+  presets from the kept copy `slicing/held_presets.py` (#4645: `held_local_presets`,
+  refreshed on the spool providers' Schedule, read through `Profiles.held`; cloud user
+  presets are not offered, D5). `print_library/copies.py` files the laid-out per-print copy in the
   native library, marked with its run's subject (`library_files.print_subject`, as is
   its slice); `print_library/sweep.py` `sweep_print_copies` (housekeeping
   `NATIVE_COPIES_SWEEP`, #4337) trashes a folder's superseded copies and what nothing
@@ -1227,7 +1229,15 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 - `claude-review` is a merge gate: the review runs after CI and sorts its findings into
   `## Blocking` and `## Non-blocking`; a classifier passes only when every Blocking
   finding in the review for *this* commit is fixed or tracked in an open `pr-feedback`
-  issue for the PR. Non-blocking findings never gate. A person adding the
+  issue for the PR. Non-blocking findings never gate. A comment or doc that **this diff
+  made false** (the PR changed a value and left text describing the old one) is Blocking
+  when the correct text is unambiguous, listed with every copy grep finds in one finding
+  and raised once; phrasing never blocks. Cosmetic details, phrasing nits, pre-existing
+  problems the diff neither causes nor exposes, and checks the review could not run are
+  left out of both sections (the last on one `Unverified:` line). Anything the diff
+  causes is in scope wherever it surfaces, unchanged code included. Ported from eh-homelab/clusters#2989 and #3055,
+  where those stale comments had been listed as Non-blocking on almost every PR and
+  never fixed after merge. A person adding the
   `claude-make-follow-up-issues` label to the PR files every outstanding finding as
   `pr-feedback` issues, Non-blocking ones in groups of their own titled `(non-blocking)`;
   the label the review applies itself to a PR merged with Blocking findings outstanding

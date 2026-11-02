@@ -12,10 +12,9 @@ const HOUSE_LABELS = {
   windows: 'Windows per storey',
 }
 
-// The app's stylesheet reaches this shadow root, but only the utility classes the app
-// itself uses exist in it, so the designer's layout and its own controls' look are its
-// own (#736 may give templates a shared base sheet). Colours are the app's theme tokens,
-// which cross the shadow boundary.
+// The host's base sheet (#736, spec §4.2 "Styles") gives the designer's inputs and
+// buttons their look, the pressed one included; the layout is the designer's own.
+// Colours are the app's theme tokens, which cross the shadow boundary.
 const CSS = `
 .house { display: grid; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); height: 100%; min-height: 0; }
 .side { min-height: 0; overflow-y: auto; border-right: 1px solid var(--sb-line); }
@@ -27,19 +26,10 @@ const CSS = `
 .total { padding: 8px 12px; font-size: 12px; color: var(--sb-muted); }
 .pieces { list-style: none; margin: 0; padding: 0; font-size: 13px; }
 .pieces li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 12px; border-top: 1px solid var(--sb-line); }
-/* #1739 — fields and buttons that look like them, 32 px tall (44 px for a finger). */
-.form input, .pieces button {
-  box-sizing: border-box; min-height: 32px; font: inherit; color: var(--sb-text);
-  background: var(--sb-surface-2); border: 1px solid var(--sb-line-strong); border-radius: 4px;
-}
-.form input { width: 5.5em; padding: 0 8px; }
-.pieces button { flex: none; min-width: 5.5em; padding: 0 12px; cursor: pointer; }
-.form input:hover, .pieces button:hover { background: var(--sb-surface-3); border-color: var(--sb-faint); }
-.pieces button[aria-pressed='true'] { background: var(--sb-accent); border-color: var(--sb-accent); color: var(--sb-accent-ink); font-weight: 600; }
+/* #1739 — fields and buttons that look like them, 32 px tall (44 px for a finger): the base sheet's. */
+.form input { width: 5.5em; }
+.pieces button { flex: none; min-width: 5.5em; }
 .pieces li:has(button[aria-pressed='true']) { background: var(--sb-surface-2); }
-@media (pointer: coarse) {
-  .form input, .pieces button { min-height: 44px; }
-}
 /* #362, #1737 — a phone has no room for the form beside the preview: one column the box
    scrolls, the preview first at a height of its own, then the pieces, then the form. */
 @media (max-width: 640px) {

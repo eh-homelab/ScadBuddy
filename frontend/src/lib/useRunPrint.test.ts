@@ -117,6 +117,27 @@ describe('useRunPrint', () => {
     await waitFor(() => expect(api.putPrinterBedType).toHaveBeenCalledWith('lan-row', 'Textured PEI Plate'))
   })
 
+  it("remembers a LAN-only printer by its registry id, a Bambuddy one by its own (#4971)", async () => {
+    const lan = renderHook(() => useRunPrint({ ...input(), printerId: null, registryPrinter: 'lan-row' }))
+    await act(() => lan.result.current.run())
+    await waitFor(() =>
+      expect(api.putModelChoices).toHaveBeenCalledWith(
+        'name-keychain',
+        expect.objectContaining({ printer_id: null, printer: 'lan-row' }),
+      ),
+    )
+
+    vi.mocked(api.putModelChoices).mockClear()
+    const linked = renderHook(() => useRunPrint({ ...input(), registryPrinter: 'linked-row' }))
+    await act(() => linked.result.current.run())
+    await waitFor(() =>
+      expect(api.putModelChoices).toHaveBeenCalledWith(
+        'name-keychain',
+        expect.objectContaining({ printer_id: 1, printer: null }),
+      ),
+    )
+  })
+
   it('a 422 refuses these choices until one of them changes', async () => {
     runPrint.mockRejectedValueOnce(new ApiError(422, 'No process for 0.2 mm.'))
     const { result, rerender } = renderHook((props) => useRunPrint(props), {

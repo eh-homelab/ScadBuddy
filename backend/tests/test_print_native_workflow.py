@@ -169,7 +169,8 @@ class Usage:
     def __init__(self, *, linked: bool = False) -> None:
         self.asked: list[list[str]] = []
         self.linked = linked
-        self.seen_by: list[int] = []
+        self.seen_by: list[int | None] = []
+        self.seen_on: list[str | None] = []
         #: Each `record_lan_picks` (#4543): the run, the start, the Bambuddy id, the picks.
         self.picks: list[tuple[str, str, int | None, list[PickedHotend]]] = []
 
@@ -178,15 +179,23 @@ class Usage:
         return {}
 
     async def record_lan_picks(
-        self, run_id: str, subtask_name: str, printer_id: int | None, picks: list[PickedHotend]
+        self,
+        run_id: str,
+        subtask_name: str,
+        printer_id: int | None,
+        picks: list[PickedHotend],
+        printer: str | None = None,
     ) -> int:
         self.picks.append((run_id, subtask_name, printer_id, list(picks)))
         return len(picks)
 
-    async def seen(self, printer_id: int, serials: Iterable[str]) -> None:
-        if not self.linked:
-            raise AssertionError("a LAN-only printer has no Bambuddy id to record it under")
+    async def seen(
+        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
+    ) -> None:
+        # #4971: a LAN-only printer is recorded under its registry id alone.
+        assert (printer_id is not None) == self.linked and printer is not None
         self.seen_by.append(printer_id)
+        self.seen_on.append(printer)
 
 
 class Library:
@@ -681,6 +690,18 @@ async def test_the_rack_is_recorded_seen_once_per_report_read(
     _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), rack=usage)
     assert run.status == "succeeded"
     assert usage.seen_by == [9] and usage.asked == []
+    assert usage.seen_on == [registry_native]
+
+
+async def test_a_lan_only_printers_rack_is_recorded_seen_by_its_registry_id(
+    client: Client, pg_pool: PgPool, fake_lan: FakeLan, registry_native: str
+) -> None:
+    """#4971: a printer with no Bambuddy id records its hotends under its registry id."""
+    as_the_h2c(fake_lan)
+    usage = Usage()
+    _, run = await _run(client, pg_pool, registry_native, blobs=Blobs(), rack=usage)
+    assert run.status == "succeeded"
+    assert (usage.seen_by, usage.seen_on) == ([None], [registry_native])
 
 
 async def test_copies_start_one_after_another(

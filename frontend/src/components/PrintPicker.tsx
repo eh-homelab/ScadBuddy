@@ -639,11 +639,13 @@ export function PrintPicker({
     const session = algorithmSession.current
     const save = ++algorithmSave.current
     const savedOn = printerId
-    if (savedOn === null) return
+    // #4971 — a LAN-only printer has no Bambuddy id, so its registry id names it.
+    const savedAt = printerId ?? registryPrinter
+    if (savedAt === null) return
     // Taken when chosen, not when sent, so the order is the user's (#1216).
     const version = nextRackAlgorithmVersion()
     const saving = algorithmSaves.current.then(() =>
-      api.putPrinterRackAlgorithm(savedOn, next, version, AbortSignal.timeout(rackAlgorithmSave.timeoutMs)),
+      api.putPrinterRackAlgorithm(savedAt, next, version, AbortSignal.timeout(rackAlgorithmSave.timeoutMs)),
     )
     algorithmSaves.current = saving.catch(() => undefined)
     void saving.then(
@@ -652,7 +654,7 @@ export function PrintPicker({
         // which a dialog that already read its choices does not know. Show it for that
         // printer without carrying it in as a choice, and without re-reading the
         // choices, which would reset the bed type and filament plan set since.
-        if (algorithmSession.current !== session)
+        if (algorithmSession.current !== session && savedOn !== null)
           setSavedAlgorithm((shown) =>
             shown && shown.printerId === savedOn && shown.save > save
               ? shown
@@ -1036,10 +1038,12 @@ export function PrintPicker({
     }
   }, [open, scopeKey])
 
+  // #4971 — a LAN-only printer's options are kept under its registry id.
+  const printerKey = printerId === null ? registryPrinter : String(printerId)
   const rememberedCopies =
     resolveOptions(
       remembered?.global_options,
-      printerId === null ? undefined : remembered?.printers?.[String(printerId)],
+      printerKey === null ? undefined : remembered?.printers?.[printerKey],
       scopeKey === undefined ? undefined : remembered?.models?.[scopeKey],
     ).quantity ?? null
   const effectiveCopies = copies ?? rememberedCopies ?? 1
@@ -1960,6 +1964,7 @@ export function PrintPicker({
                       known={remembered}
                       subject={subject}
                       printerId={printerId}
+                      registryPrinter={registryPrinter}
                       value={sentOptions}
                       toRemember={rememberOptions}
                       onChange={editOptions}
@@ -2057,6 +2062,7 @@ export function PrintPicker({
                           <PrintOptionsDisclosure
                             subject={subject}
                             printerId={printerId}
+                            registryPrinter={registryPrinter}
                             value={copies === null ? sentOptions : { ...sentOptions, quantity: copies }}
                             toRemember={copies === null ? rememberOptions : { ...rememberOptions, quantity: copies }}
                             onChange={({ quantity, ...rest }) => {

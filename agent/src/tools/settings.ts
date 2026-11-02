@@ -144,7 +144,9 @@ export const settingsTools: Tool[] = [
     label: 'Remember print options',
     description:
       'Remember print options for one scope (global, a printer, or what is printed: a model, or a Bambuddy ' +
-      'library file as scope "model" with key "library:<file id>"). A settings write, so it needs a human approval.',
+      'library file as scope "model" with key "library:<file id>"). A printer is named by its Bambuddy printer id, ' +
+      'or by its registry id when it has none; a printer the registry does not know is refused (404), except ' +
+      'to forget its options with empty ones. A settings write, so it needs a human approval.',
     input: z.object({
       scope: z.enum(['global', 'printer', 'model']),
       key: z
