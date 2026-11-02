@@ -111,9 +111,13 @@ PROJECTS_GRANTS: Grants = {
     "workflow_definitions": _READ,
     "workflow_run_decisions": ("SELECT", "INSERT", "DELETE"),
     "workflow_run_proposals": ("SELECT", "INSERT"),
-    # A standing grant is read FOR SHARE, which needs UPDATE.
+    # A run grant is read FOR SHARE, which needs UPDATE.
     "flow_grants": ("SELECT", "UPDATE"),
-    "flow_grant_uses": _READ,
+    # `FLOW_GRANT_CHECK` → `FlowStore.consume_grant` (`flows/store.py`): the use recorded
+    # (INSERT ... RETURNING) and, for a trigger-seeded run, its standing grant locked
+    # FOR UPDATE and its counters spent.
+    "flow_grant_uses": ("SELECT", "INSERT"),
+    "flow_trigger_grants": ("SELECT", "UPDATE"),
 }
 
 #: What the agent (`agent/`) touches of the backend's: it follows the event log, reads

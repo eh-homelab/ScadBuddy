@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +27,9 @@ from scadbuddy.auth.caller_grants import (
 )
 from scadbuddy.auth.service_credentials import ServiceCaller
 from scadbuddy.core.settings import Settings
+from scadbuddy.flow_triggers.store import TriggerStore
+from scadbuddy.flows.grants import GrantRule, GrantSpec, GrantUse
+from scadbuddy.flows.store import FlowStore
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.operations.store import OperationStore
 from scadbuddy.render.pg_store import Migration, migrate
@@ -37,6 +40,7 @@ from scadbuddy.render.worker_role import (
     owns_schema,
 )
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
+from tests.test_flow_trigger_store import approved, arrange_pick, make, seed
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -211,3 +215,29 @@ def test_a_worker_on_the_apis_own_role_still_migrates(pg_conninfo: str, tmp_path
 def test_print_and_projects_lists_differ_where_their_work_does() -> None:
     # The print worker rewrites settings in a printer merge; flow runs only read them.
     assert "UPDATE" in PRINT_GRANTS["settings"] and PROJECTS_GRANTS["settings"] == ("SELECT",)
+
+
+async def test_the_projects_role_spends_a_trigger_seeded_run_grant(
+    owner: Pool, role: str, pg_conninfo: str
+) -> None:
+    """#5215 review: `FLOW_GRANT_CHECK` records the use and spends the standing grant."""
+    triggers = TriggerStore(owner)
+    trigger = await make(triggers, overlap="allow_all")
+    spec = GrantSpec(
+        expires_at=datetime.now(UTC) + timedelta(days=1),
+        rules=[GrantRule(fn="arrange", max_calls=1)],
+    )
+    await approved(triggers, trigger, spec)
+    run_id = str(uuid.uuid4())
+    assert await seed(triggers, trigger, run_id)
+    _grant(owner, role, "projects")
+    pool = _pool(make_conninfo(pg_conninfo, user=role, password=role))
+    try:
+        flows = FlowStore(pool, events=None)
+        used = await flows.consume_grant(run_id, "req-1", arrange_pick(run_id, "req-1"))
+        assert isinstance(used, GrantUse)
+        # Spent: the next call finds the limit reached.
+        again = await flows.consume_grant(run_id, "req-2", arrange_pick(run_id, "req-2"))
+        assert not isinstance(again, GrantUse)
+    finally:
+        pool.close()
