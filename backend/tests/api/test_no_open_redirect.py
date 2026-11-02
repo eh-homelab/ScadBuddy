@@ -75,6 +75,12 @@ REVIEWED: dict[str, str] = {
         "the 202 `accepting` (#2340) names its follow route in Location; a 202 is not a"
         " redirect, and the URL is `url_for(...).path` under the app's own /api/v1 prefix"
     ),
+    "api/auth.py": (
+        "#4975: `GET /auth/login` sends the browser to the identity provider's"
+        " authorization endpoint, read from the issuer's discovery document (an issuer"
+        " only the owner configures, https or loopback, `auth/oidc.py` `check_url`); the"
+        " return path after sign-in is `login_state.safe_return_to`, a path on this origin"
+    ),
 }
 
 REDIRECT = re.compile(

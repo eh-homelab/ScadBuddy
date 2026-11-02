@@ -279,6 +279,8 @@ async def test_a_failing_sweep_fails_its_activity(
                 puts=SimpleNamespace(prune=_broken(OSError("the database is gone"))),
                 refs=object(),
                 push_all=_broken(OSError("the remote is gone")),
+                # #4975: the expired signed-in sessions.
+                sessions=SimpleNamespace(delete_expired=_broken(OSError("the database is gone"))),
             )
         ),
         settings_store=SimpleNamespace(load=StoredSettings),
@@ -420,6 +422,8 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             puts=SimpleNamespace(prune=lambda older_than: time.sleep(0.1)),
             # #4974: the git remote's push, a push or two over the network.
             push_all=slow_push,
+            # #4975: the expired signed-in sessions, one delete.
+            sessions=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),
             temporal=object,
             store=None,
             refs=None,
