@@ -608,6 +608,8 @@ export const TOUCHES_NOTHING: ReadonlySet<string> = new Set([
   'sessions_approve',
   'sessions_deny',
   'browser_pair',
+  // #4975 phase 6: a one-time sign-in link; a delegated session is no recorded resource kind.
+  'browser_sign_in_link',
   'confirm_action',
   // #2686: a library folder is no recorded resource kind.
   'create_library_folder',
