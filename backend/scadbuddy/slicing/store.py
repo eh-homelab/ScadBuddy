@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from typing import Literal
 
@@ -216,6 +217,24 @@ class NativeSliceStore:
                         (HOLDER, str(row.id)),
                     )
             return bool(stopped)
+
+        return await asyncio.to_thread(run)
+
+    async def slicing(self, library_file_ids: Iterable[int]) -> set[int]:
+        """Which of these library files a running slice reads (#5189): what the per-print
+        copies' sweep never trashes."""
+        ids = list(library_file_ids)
+
+        def run() -> set[int]:
+            if not ids:
+                return set()
+            with self._pool.connection() as conn:
+                rows = conn.execute(
+                    "SELECT DISTINCT library_file_id FROM native_slices"
+                    " WHERE status = 'running' AND library_file_id = ANY(%s)",
+                    (ids,),
+                ).fetchall()
+            return {row["library_file_id"] for row in rows}
 
         return await asyncio.to_thread(run)
 

@@ -228,6 +228,14 @@ class BambuddyUploadStore:
         (`touch`), else the upload (#4337)."""
         return await asyncio.to_thread(self._copies_by_use, list(output_ids))
 
+    async def used_since(
+        self, output_id: str, library_file_ids: Iterable[int], since: datetime
+    ) -> set[int]:
+        """Which of the output's native copies were last used (`touch`, else uploaded)
+        after ``since`` (#5189): what the per-print copies' sweep keeps for a slice that
+        has yet to start on one."""
+        return await asyncio.to_thread(self._used_since, output_id, list(library_file_ids), since)
+
     async def slices_on(self, library_file_ids: Iterable[int]) -> set[int]:
         """The sliced files any subject records on these copies (#4337): a moved copy's,
         which are the person's with it."""
@@ -785,6 +793,18 @@ class BambuddyUploadStore:
         for row in rows:
             found[row["output_id"]].append(row["library_file_id"])
         return found
+
+    def _used_since(self, output_id: str, ids: list[int], since: datetime) -> set[int]:
+        if not ids:
+            return set()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT library_file_id FROM output_bambuddy_uploads"
+                " WHERE output_id = %s AND library_file_id = ANY(%s)"
+                " AND COALESCE(used_at, created_at) > %s",
+                (output_id, ids, since),
+            ).fetchall()
+        return {row["library_file_id"] for row in rows}
 
     def _slices_on(self, ids: list[int]) -> set[int]:
         if not ids:

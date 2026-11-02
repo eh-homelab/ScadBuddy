@@ -95,6 +95,12 @@ async def sweep_library(
 COPY_ORPHAN_GRACE = timedelta(days=1)
 
 
+#: How long a superseded copy stays after its last use, for a slice about to start on it
+#: (`ensure_native_copy` returns before the slice's row is written): an order's quote
+#: gives up after `orders.lifecycle.QUOTE_TIMEOUT`, as long.
+COPY_REUSE_GRACE = timedelta(minutes=30)
+
+
 class CopySweep(BaseModel):
     #: Files trashed as a folder's older copies of a subject, with their slices.
     superseded: int
@@ -108,18 +114,24 @@ async def sweep_print_copies(
     native: NativeLibrary,
     uploads: BambuddyUploadStore,
     subjects_in_use: Callable[[], Awaitable[set[str]]],
+    slicing: Callable[[list[int]], Awaitable[set[int]]],
     *,
     now: datetime,
     grace: timedelta = COPY_ORPHAN_GRACE,
+    reuse_grace: timedelta = COPY_REUSE_GRACE,
 ) -> CopySweep:
     """Trash the per-print copies and slices nothing keeps (module docstring). The marked
     files are read before the subjects in use, so a run that started before the read is
     seen; the subjects in use are read again before anything is trashed, and a subject a
     run took up in between keeps all its files. A folder's superseded copies are trashed
-    under the copy's lock `ensure_native_copy` holds, after one more read: a run that
-    reuses one either went first, and its subject is then in use, or finds it trashed
-    and lays out another. A file uploaded after the first read waits for the next pass,
-    and only files still marked are trashed (a person's move or restore wins)."""
+    under the copy's lock `ensure_native_copy` holds, after one more read of the subjects
+    in use and of the order of use: a run, a dialog's slice or a quote that reuses one
+    either went first, and its subject is then in use or the copy no longer older than
+    the one kept, or finds it trashed and lays out another. A file uploaded after the
+    first read waits for the next pass, and only files still marked are trashed (a
+    person's move or restore wins). A superseded copy a slice still reads (``slicing``,
+    the running native slices' files) or last used within ``reuse_grace`` is kept too:
+    the dialog's background slice and an order's quote slice one with no run (#5189)."""
     files = {f.id: f for f in await asyncio.to_thread(native.rows.per_print)}
     busy = await subjects_in_use()
     recorded = await uploads.recorded_files(list(files))
@@ -131,11 +143,12 @@ async def sweep_print_copies(
     live = {f.id for f in await asyncio.to_thread(native.rows.files_by_ids, unmarked)}
     there = await asyncio.to_thread(native.rows.existing, unmarked)
     superseded: dict[tuple[str, int | None], list[LibraryCopy]] = {}
+    #: Each folder's copy kept, the newest by the first read's order of use.
+    kept: dict[tuple[str, int | None], LibraryCopy] = {}
     gone: list[tuple[str, int]] = []
     released: list[int] = []
     for subject in subjects:
         recorded_copies = {c.id: c for c in copies[subject]}
-        kept: dict[int | None, LibraryCopy] = {}
         for copy_id in by_use[subject]:  # least recently used first
             copy = recorded_copies.get(copy_id)
             if copy is None:
@@ -154,8 +167,8 @@ async def sweep_print_copies(
                 continue
             if row.print_subject != subject:
                 continue
-            older = kept.get(copy.folder_id)
-            kept[copy.folder_id] = copy
+            older = kept.get((subject, copy.folder_id))
+            kept[(subject, copy.folder_id)] = copy
             if older is not None:
                 superseded.setdefault((subject, copy.folder_id), []).append(older)
     await release_moved(native, uploads, released)
@@ -181,6 +194,21 @@ async def sweep_print_copies(
             continue
         async with uploads.copy_lock(f"{NATIVE_LOCK}{subject}:{folder_id}"):
             if subject in await subjects_in_use():
+                continue
+            # A copy reused since the first read is not superseded (#5189): the dialog's
+            # background slice and an order's quote reuse one with no run, so their
+            # subject is never in use. `ensure_native_copy` stamps a reuse under this
+            # lock, so the order read here holds until the trash.
+            order = (await uploads.copies_by_use([subject]))[subject]
+            newest = kept[(subject, folder_id)].id
+            if newest not in order:
+                continue
+            used_before = set(order[: order.index(newest)])
+            stale = [c for c in stale if c.id in used_before]
+            ids = [c.id for c in stale]
+            reading = await slicing(ids) | await uploads.used_since(subject, ids, now - reuse_grace)
+            stale = [c for c in stale if c.id not in reading]
+            if not stale:
                 continue
             ids = [i for c in stale for i in (c.id, *(s.id for s in c.sliced if s.id in files))]
             went = {f.id for f in await native.trash(ids, per_print=True)}
