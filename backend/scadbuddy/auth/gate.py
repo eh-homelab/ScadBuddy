@@ -20,7 +20,7 @@ from starlette.datastructures import Headers
 from starlette.requests import cookie_parser
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from scadbuddy.auth.models import ANONYMOUS, AuthSession, Caller, Person
+from scadbuddy.auth.models import ANONYMOUS, AuthSession, Caller, Person, Service
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +37,26 @@ class SessionLookup(Protocol):
     def resolve(self, token: str) -> AuthSession | None: ...
 
 
+class CredentialLookup(Protocol):
+    def resolve(self, token: str) -> Service | None: ...
+
+
+#: A service credential's prefix (`auth/service_credentials.py`), in the bearer header.
+SERVICE_PREFIX = "sbsvc_"
+
+
 class AuthGate:
     def __init__(
         self,
         app: ASGIApp,
         *,
         sessions: Callable[[], SessionLookup],
+        credentials: Callable[[], CredentialLookup] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.app = app
         self.sessions = sessions
+        self.credentials = credentials
         self._clock = clock
         self._logged_at: float | None = None
         self._unlogged = 0
@@ -57,7 +67,21 @@ class AuthGate:
         await self.app(scope, receive, send)
 
     async def _caller(self, scope: Scope) -> Caller:
-        header = Headers(scope=scope).get("cookie")
+        headers = Headers(scope=scope)
+        scheme, _, bearer = (headers.get("authorization") or "").partition(" ")
+        if (
+            self.credentials is not None
+            and scheme.lower() == "bearer"
+            and bearer.startswith(SERVICE_PREFIX)
+        ):
+            # A service credential (§7.1); a cookie beside it is not looked at.
+            try:
+                service = await asyncio.to_thread(self.credentials().resolve, bearer.strip())
+            except psycopg.Error as error:
+                self._log_failure(error)
+                return ANONYMOUS
+            return ANONYMOUS if service is None else service
+        header = headers.get("cookie")
         token = cookie_parser(header).get(SESSION_COOKIE) if header else None
         if not token:
             return ANONYMOUS

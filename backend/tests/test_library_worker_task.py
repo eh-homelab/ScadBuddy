@@ -424,6 +424,7 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
             push_all=slow_push,
             # #4975: the expired signed-in sessions, one delete.
             sessions=SimpleNamespace(delete_expired=lambda: time.sleep(0.1)),
+            kek=None,  # no service credentials to rotate without the KEK
             temporal=object,
             store=None,
             refs=None,

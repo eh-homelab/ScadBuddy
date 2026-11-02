@@ -51,6 +51,18 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "The login's configuration (#4975, spec 2026-11-01 §9.2): who may sign in to ScadBuddy is the owner's to set, never an agent's.",
   },
   {
+    operation: "GET /api/v1/auth/service-credentials",
+    reason: "The services' credentials (#4975, spec 2026-11-01 §7.2): an agent must never mint, rotate or revoke the credentials it and the workers present.",
+  },
+  {
+    operation: "POST /api/v1/auth/service-credentials/rotate",
+    reason: "The services' credentials (#4975, spec 2026-11-01 §7.2): an agent must never mint, rotate or revoke the credentials it and the workers present.",
+  },
+  {
+    operation: "DELETE /api/v1/auth/service-credentials/{credential_id}",
+    reason: "The services' credentials (#4975, spec 2026-11-01 §7.2): an agent must never mint, rotate or revoke the credentials it and the workers present.",
+  },
+  {
     operation: 'GET /api/v1/orders/{order_id}/events',
     reason:
       "The order page's audit line (#4249); order_get carries the status, and the agent's own calls are in " +

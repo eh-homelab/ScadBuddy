@@ -44,6 +44,7 @@ import { PluginOAuth } from './plugins/oauthStore.js'
 import { headerSecretVariants, loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
+import { ServiceCredential, serviceCredentialMiddleware } from './api/serviceCredential.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey, sweepErrorText } from './approvals/service.js'
@@ -270,7 +271,13 @@ await startCredentialGateway()
 // The database's clock the moment it is ready, before a turn can record a session: the pass at
 // start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
 const pluginSessionMark = database ? database.ready().then((ok) => (ok ? startMark(database.sql) : undefined)) : undefined
-const backend = createBackendClient(config.backendUrl)
+const backend = createBackendClient(
+  config.backendUrl,
+  globalThis.fetch,
+  database
+    ? serviceCredentialMiddleware(new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined))
+    : undefined,
+)
 
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
 // of its own, retried in the background, feeding MCP resource subscriptions.

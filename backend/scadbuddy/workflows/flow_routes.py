@@ -105,11 +105,12 @@ def retry_after_s(value: str, now: datetime | None = None) -> float:
     return max(0.0, (at - (now or datetime.now(UTC))).total_seconds())
 
 
-def api_client(base_url: str | None) -> httpx.AsyncClient | None:
-    """The client on `SCADBUDDY_API_INTERNAL_URL`, or None without one."""
+def api_client(base_url: str | None, auth: httpx.Auth | None = None) -> httpx.AsyncClient | None:
+    """The client on `SCADBUDDY_API_INTERNAL_URL`, or None without one. ``auth`` presents
+    the projects worker's service credential (#4975 phase 4)."""
     if base_url is None:
         return None
-    return httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=ROUTE_TIMEOUT)
+    return httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=ROUTE_TIMEOUT, auth=auth)
 
 
 async def _heartbeating[T](request: Awaitable[T]) -> T:

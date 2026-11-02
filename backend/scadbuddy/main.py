@@ -64,6 +64,7 @@ from scadbuddy.attachments.component import PRINT_ATTACHMENTS
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
+from scadbuddy.auth.service_credentials import grant_caller_views
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
@@ -1013,10 +1014,39 @@ async def _maintain_models_git_logged(state: AppState) -> None:
         logger.info("packed the models repository")
 
 
+def _rotate_service_credentials(state: AppState) -> None:
+    """#4975 phase 4 (spec 2026-11-01 §7.2): each caller's next credential when its
+    newest has under seven days left, and the long-dead ones forgotten. Without the KEK
+    none can be sealed, so none are issued."""
+    auth = state.components.get(AUTH)
+    kek = auth.kek
+    if kek is None:
+        return
+    minted = auth.credentials.rotate_due(kek)
+    if minted:
+        logger.info("issued service credentials", extra={"credentials": len(minted)})
+    auth.credentials.delete_expired()
+
+
+def _grant_and_rotate_at_start(state: AppState) -> None:
+    """At start, after the migrations: each caller's role its own view, and the
+    credentials due. A failure is logged, never fatal, as `grant_at_start`."""
+    try:
+        with state.settings_store.pool.connection() as conn:
+            granted = grant_caller_views(conn)
+        if granted:
+            logger.info("granted the callers' credential views", extra={"roles": granted})
+        _rotate_service_credentials(state)
+    except Exception:
+        logger.exception("could not issue the service credentials")
+
+
 async def _sweep_auth_sessions_logged(state: AppState) -> None:
-    """#4975: the signed-in sessions no request can use again."""
+    """#4975: the signed-in sessions no request can use again, and (phase 4, in the
+    activity, so the workflow's history is unchanged) the service credentials' rotation."""
     try:
         deleted = await asyncio.to_thread(state.components.get(AUTH).sessions.delete_expired)
+        await asyncio.to_thread(_rotate_service_credentials, state)
     except Exception:
         logger.exception("could not delete the expired sessions")
         raise
@@ -1632,6 +1662,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The render worker's own role, if the deployment made one, gets what this
     # build's worker touches (#601); the worker waits for it.
     await asyncio.to_thread(grant_at_start, state.settings_store.pool)
+    # #4975 phase 4: the service credentials, before any caller reads its own.
+    await asyncio.to_thread(_grant_and_rotate_at_start, state)
     # Then what the UI saved (#322), before anything below is sized or started from it.
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
     apply_runtime(state, snapshot.runtime, booting=True)
@@ -1900,7 +1932,11 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     )
     # Who the request is from (#4975), inside the cross-site gate (spec 2026-11-01 §8.1).
     # In SCADBUDDY_AUTH_MODE=off it refuses nothing.
-    app.add_middleware(AuthGate, sessions=lambda: state.components.get(AUTH).sessions)
+    app.add_middleware(
+        AuthGate,
+        sessions=lambda: state.components.get(AUTH).sessions,
+        credentials=lambda: state.components.get(AUTH).credentials,
+    )
     # A write from a page on another origin is refused before its body is read (#962).
     app.add_middleware(
         CrossSiteGate,

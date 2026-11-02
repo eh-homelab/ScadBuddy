@@ -33,6 +33,7 @@ from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.auth.service_credentials import ServiceAuth, TokenReader
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.follow import FollowActivities, Follower
@@ -1145,11 +1146,25 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
     pool = settings_store.pool
     uploads = BambuddyUploadStore(pool)
     links = PrintLinkStore(pool)
-    outputs = RemoteOutputs(settings.api_internal_url)
+    # #4975 phase 4: the print worker's service credential on the internal routes, read
+    # from its own view and unsealed with the KEK (none without one).
+    credential = ServiceAuth(
+        TokenReader("print", settings.database_url, settings_kek(settings.secret_key_file))
+    )
+    outputs = RemoteOutputs(
+        settings.api_internal_url,
+        client=httpx.AsyncClient(
+            base_url=settings.api_internal_url.rstrip("/"),
+            timeout=REMOTE_TIMEOUT,
+            auth=credential,
+        ),
+    )
     # Asked of the API whichever library serves: on ``bambuddy`` it answers every native
     # id with the 404 of a file not found. A native run's copy is written through it too
     # (#3818 tier A Task 4).
-    library = RemoteLibrary(settings.api_internal_url, httpx.AsyncClient(timeout=REMOTE_TIMEOUT))
+    library = RemoteLibrary(
+        settings.api_internal_url, httpx.AsyncClient(timeout=REMOTE_TIMEOUT, auth=credential)
+    )
     rack = RackUsageStore(settings.database_url)
     observer = ProgressObserver(events)
 
@@ -1388,6 +1403,10 @@ async def run_projects_worker(
     try:
         await events.start()
         runtime, sdk_port = _sdk_runtime(settings)
+        # #4975 phase 4: the projects worker's service credential on the API's routes.
+        credential = ServiceAuth(
+            TokenReader("projects", settings.database_url, settings_kek(settings.secret_key_file))
+        )
         client = await connect_flows(
             settings.temporal_address, settings.temporal_namespace, keys[0], runtime=runtime
         )
@@ -1402,11 +1421,11 @@ async def run_projects_worker(
                     store,
                     keys[0],
                     approval_key(settings),
-                    api=lambda: api_client(settings.api_internal_url),
+                    api=lambda: api_client(settings.api_internal_url, credential),
                 )
             },
         )
-        api = api_client(settings.api_internal_url)
+        api = api_client(settings.api_internal_url, credential)
         routes = FlowRoutes(api)
         grants = FlowGrants(store, api, approval_key(settings))
         build_id = settings.revision

@@ -172,6 +172,8 @@ import type {
   LoginConfigView,
   LoginConfigUpdate,
   LoginDiscoveryReport,
+  ServiceCaller,
+  ServiceCredentialView,
   LogoutResult,
   RevokedSessions,
   UpstreamMerge,
@@ -1449,6 +1451,14 @@ export const api = {
   putLoginConfig: (body: LoginConfigUpdate) =>
     request<LoginConfigView>('/auth/config', { method: 'PUT', body: JSON.stringify(body) }),
   testLoginConfig: () => request<LoginDiscoveryReport>('/auth/config/test', { method: 'POST' }),
+  listServiceCredentials: () => request<ServiceCredentialView[]>('/auth/service-credentials'),
+  rotateServiceCredential: (caller: ServiceCaller) =>
+    request<ServiceCredentialView[]>('/auth/service-credentials/rotate', {
+      method: 'POST',
+      body: JSON.stringify({ caller }),
+    }),
+  revokeServiceCredential: (id: string) =>
+    request<ServiceCredentialView[]>(`/auth/service-credentials/${seg(id)}`, { method: 'DELETE' }),
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
