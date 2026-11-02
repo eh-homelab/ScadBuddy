@@ -76,8 +76,10 @@ class SlicePlan(BaseModel):
     filament_colours: list[str]
     bed_type: str
     #: The template's ``print_settings`` (#770), written over the process preset.
-    #: Accepted analyzer fixes are not consumed by a print yet (``api/analyzers.py``);
-    #: when they are, an explicit fix goes over these.
+    #: Accepted analyzer fixes never land here yet: their process-level target
+    #: (``derived_process_preset``) is unverified (``analyzers/model.py``); the verified
+    #: ones change the run's request (``analyzers/apply.py``). Once one does, an explicit
+    #: fix goes over these.
     process_overrides: dict[str, ProcessValue] = Field(default_factory=dict)
     #: Filament settings by slot (from 1), written into that slot's filament file: a
     #: filament profile's nozzle temperature (#2799). Only the native slicer has the

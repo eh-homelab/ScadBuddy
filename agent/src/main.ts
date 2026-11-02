@@ -23,7 +23,7 @@ import { backgroundActivities, managerSender } from './background/activities.js'
 import { agentTimezone } from './background/schedule.js'
 import { BackgroundTasks } from './background/service.js'
 import { BackgroundTaskStore } from './background/store.js'
-import { temporalTaskRunner } from './background/temporal.js'
+import { runCronPasses, temporalTaskRunner } from './background/temporal.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
@@ -40,6 +40,7 @@ import { loadPackagesForRun, PackageInstaller, packageLoadCheck, verifiedReview,
 import { reviewsByHash } from './access/packageProvider.js'
 import { PackageStore } from './plugins/packages/store.js'
 import { BuiltInTools } from './plugins/builtInTools.js'
+import { PluginOAuth } from './plugins/oauthStore.js'
 import { headerSecretVariants, loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
@@ -52,6 +53,7 @@ import { TabHub } from './bridge/hub.js'
 import { TemporalTabRelay } from './bridge/relay.js'
 import { PostgresTabOwnerStore } from './bridge/tabOwners.js'
 import { PostgresSessionTabStore } from './bridge/sessionTabs.js'
+import { PostgresTabImageStore } from './bridge/tabImages.js'
 import { PgMcpSessionRelay } from './mcp/sessionRelay.js'
 import { PostgresPairingStore } from './bridge/pairings.js'
 import { CHAT_FRAME_MAX, startHeartbeat } from './routes/chat.js'
@@ -72,7 +74,7 @@ import { decidedCalls, gateActivities, PgApprovalRecords, PgSessionOwners, type 
 import { finishedToolCalls, toolCallResult, type ToolCallStarter, toolCallStarter } from './tools/activityProjection.js'
 import { TASK_QUEUE } from './temporal/names.js'
 import { sessionFinishActivities } from './temporal/session/finishActivity.js'
-import { sessionGateActivities } from './temporal/session/gateActivities.js'
+import { gateDb, sessionGateActivities } from './temporal/session/gateActivities.js'
 import { acquireActivities, liveHostQueues, releaseActivities } from './temporal/session/affinity.js'
 import { startHostWorkers } from './temporal/session/hostWorkers.js'
 import { SESSION_DEPLOYMENT, SESSION_SETTINGS_ACTIVITY, SESSION_QUEUE, sessionHostQueue } from './temporal/session/names.js'
@@ -211,6 +213,13 @@ const database = config.databaseUrl
               (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
           )
         }
+        const grants = await new PluginOAuth(sql).rewrapFrom(previousKek.kek, kek.kek)
+        if (grants.rewrapped || grants.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${grants.rewrapped} plugin sign-in(s)` +
+              (grants.failed ? `; ${grants.failed} could not be opened with the previous key` : ''),
+          )
+        }
       },
     })
   : undefined
@@ -244,7 +253,9 @@ const access = database ? new AccessStore(database.sql, audit) : undefined
 const listings = database ? new ToolListings(database.sql, database.locks) : undefined
 // Each item's effective access, read at each call (#2171): the turns' http_request and own-plugin switches.
 const accessResolver = new AccessResolver(access)
-const plugins = database ? new PluginStore(database.sql) : undefined
+// OAuth sign-in for remote plugins (#780): the forwarder asks it for each request's token.
+const pluginOAuth = database ? new PluginOAuth(database.sql) : undefined
+const plugins = database ? new PluginStore(database.sql, pluginOAuth ? { oauth: pluginOAuth } : {}) : undefined
 // ScadBuddy's own tool sets as plugins (#1953): their overrides, in ai_access (#2171).
 const builtInTools = new BuiltInTools(access)
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
@@ -316,6 +327,9 @@ const tabs = new TabHub({
   // A durable session's browser_* calls run on whichever replica took the
   // activity, so the tab its chat socket paired is read from Postgres (#2086).
   sessionTabs: database ? new PostgresSessionTabStore(database.sql) : undefined,
+  // A browser_screenshot's image, stored by the replica holding the tab for the one
+  // whose call asked (#254, bridge/tabImages.ts).
+  images: database ? new PostgresTabImageStore(database.sql) : undefined,
 })
 toolServices.browser = tabs
 // What each session touched (#931, sessions/touched.ts), from its tool calls.
@@ -436,18 +450,22 @@ const tokens =
 const sessionEvents = database ? new SessionEventPublisher(database.sql) : undefined
 
 // A session's background tasks (CronCreate, ScheduleWakeup, Monitor, TaskStop), in either mode:
-// each a `BackgroundTask` workflow on agent-tools that sends its prompt when due. Its
-// payloads are task ids only, so its client has no codec.
-const backgroundTasks =
+// a recurring cron job a Schedule, any other a `BackgroundTask` workflow, on agent-tools, that
+// sends its prompt when due. Their payloads are task ids only, so their client has no codec.
+const backgroundClient =
   config.temporalAddress && database
-    ? new BackgroundTasks({
-        store: new BackgroundTaskStore(database.sql),
-        runner: temporalTaskRunner(
-          new Client({ connection: Connection.lazy({ address: config.temporalAddress }), namespace: config.temporalNamespace }),
-          TASK_QUEUE,
-        ),
-      })
+    ? new Client({ connection: Connection.lazy({ address: config.temporalAddress }), namespace: config.temporalNamespace })
     : undefined
+const backgroundTasks =
+  backgroundClient && database
+    ? new BackgroundTasks({ store: new BackgroundTaskStore(database.sql), runner: temporalTaskRunner(backgroundClient, TASK_QUEUE) })
+    : undefined
+// Decision Q11 (plan 2026-10-13 Step 9.8): the recurring cron jobs made before Schedules become
+// Schedules now, not at their next occurrence; then, hourly, the jobs whose last occurrence was
+// missed are ended. Idempotent, so every replica may run it.
+if (backgroundClient && backgroundTasks) {
+  runCronPasses({ client: backgroundClient, store: backgroundTasks.store, taskQueue: TASK_QUEUE }, { info: console.log, error: console.error })
+}
 // Sessions (#300) and their approvals (#258): started from the assistant
 // panel's socket (routes/chat.ts), the session routes (routes/sessions.ts)
 // and the `sessions_*` tools (tools/sessions.ts).
@@ -473,7 +491,7 @@ if (role.http && database && dataKeys) {
 const memory: MemoryOptions | undefined = undefined
 
 // How a turn's ScadBuddy call runs as its ToolCall workflow (plan 2026-10-13 Step 9.2), once the
-// Temporal client below exists; read by each turn that has `tools_as_activities` on.
+// Temporal client below exists; read by each turn (until then, its calls run in-process).
 let toolCallStart: ToolCallStarter | undefined
 // And how its plugin and http tools are listed for their proxies (Step 9.3), once turnToolDeps exists.
 let turnToolList: NonNullable<SessionManagerDeps['turnTools']> | undefined
@@ -861,6 +879,13 @@ const background =
         workspace,
       })
     : undefined
+// The queues of `scadbuddy-agent` this process polls, each polled by this build before it is made
+// current (worker.ts): read from the workers that started, when the build is made current, so a
+// queue whose worker this process never starts stays out and the build is still made current on the other.
+const versionedQueues = (): string[] => [
+  ...(temporalWorker ? [TASK_QUEUE] : []),
+  ...(sessionWorker ? [SESSION_QUEUE] : []),
+]
 const temporalWorker =
   role.sharedWorkers && temporal && operationStore && turnToolDeps && durableToolDeps
     ? AgentWorker.start({
@@ -887,7 +912,9 @@ const temporalWorker =
             currentTiers: durableToolDeps.currentTiers,
           }),
           // AgentSession's gate (its writers and timers) and its turn end (unified runtime §5.1, flagged off until phase 6).
-          ...sessionGateActivities(temporal.sql),
+          // Its events through this replica's event log, so they wake its followers at once and
+          // go on the bus under its id (#3365); with no session manager, a log that only publishes.
+          ...sessionGateActivities(gateDb(temporal.sql, sessions?.events, sessionEvents?.onAppend)),
           ...(sessions ? sessionFinishActivities(temporal.sql, sessions.events) : {}),
           ...(sessionAcquire ?? {}),
           // A durable turn's plugin and http_request tools (#2320): listed per turn, and
@@ -900,6 +927,9 @@ const temporalWorker =
           ...(background ?? {}),
         },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
+        // The same Deployment and build as agent-sessions (plan Phase 11): Temporal then hands
+        // agent-tools' tasks, whoever schedules them, only to the current build's workers.
+        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: versionedQueues } } : {}),
         // Bundled by `pnpm build` (scripts/bundle-workflows.mjs).
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
@@ -908,7 +938,7 @@ const temporalWorker =
     : undefined
 // AgentSession (unified runtime spec 2026-10-13 §5.1): every new session runs here (plan Step 6.3).
 // Versioned as the Deployment `scadbuddy-agent` (D4) when the build has an id (config.buildId),
-// else unversioned like the agent's other workers. `session_settings` is a local activity, so it
+// as agent-tools is, else unversioned like the host queues. `session_settings` is a local activity, so it
 // is served here. `session_turn` is Task 5.2's, on the host worker.
 const sessionWorker =
   role.sharedWorkers && temporal && settings
@@ -920,13 +950,15 @@ const sessionWorker =
         identity: workerIdentity(replicaIdentity()),
         activities: { [SESSION_SETTINGS_ACTIVITY]: () => readRuntimeSettings(settings) },
         ...(workerDataConverter ? { dataConverter: workerDataConverter } : {}),
-        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId } } : {}),
+        ...(config.buildId ? { deployment: { name: SESSION_DEPLOYMENT, buildId: config.buildId, queues: versionedQueues } } : {}),
         workflows: {
           workflowBundle: { codePath: fileURLToPath(new URL('./temporal/workflow-bundle.js', import.meta.url)) },
         },
       })
     : undefined
-// This replica's own queues (temporal/session/hostWorkers.ts): a pinned turn tool's calls
+// This replica's own queues (temporal/session/hostWorkers.ts), unversioned (plan Phase 11): a queue
+// only one replica polls is no member of a newer build, so once that build is current Temporal
+// would hand a versioned one's tasks to no one while its replica still runs. A pinned turn tool's calls
 // (#2320) and a classic session's Monitor commands on HOST_QUEUE, and AgentSession's turns on SESSION_HOST_QUEUE, limited to the warm
 // cache's largest setting plus two for releases. Their work dies with the pod; a call scheduled after
 // that fails at its schedule-to-start (a turn) or schedule-to-close (a pinned call) timeout.
@@ -976,7 +1008,7 @@ if (tabRelay && hostWorkers) {
 }
 // A durable session's pending_input Query, respond and cancel_input Updates (spec §6.6), and
 // a recorded entry's decision in its row (R5, plan Step 9.7).
-if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { sql: database.sql } : {})
+if (sessions && temporalClient) sessions.durable = new DurableGate(temporalClient, database ? { db: { sql: database.sql, events: sessions.events } } : {})
 // The browser relay's calls go through Temporal only sealed, each under a key of its own
 // that is deleted once the caller has the answer (#4780): so only with the codec.
 if (tabRelay && temporalClient && dataConverter && payloadKeys && database) {
@@ -991,19 +1023,16 @@ if (sessions && temporalClient && payloadKeys && database) {
     sql: database.sql,
     events: sessions.events,
     audit,
-    ended: (id) => sessions.endClassicLeftovers(id),
     // A unified session is ready while some replica hosts its turns (§5.2), this one or a worker's (§14.3).
   })
 }
-// Every 30 s: sessions left `running` whose workflow has ended or never started (#2001), and a
-// classic turn's whose lease lapsed with no replica left to end it (plan Step 6.3: no reaper).
+// Every 30 s: sessions left `running` whose workflow has ended or never started (#2001).
 const stopDurableSweep =
   role.http && sessions && temporalClient && database
     ? new DurableRunningSweep({
         sql: database.sql,
         events: sessions.events,
         describe: durableDescriber(temporalClient),
-        ended: (id) => sessions.endClassicLeftovers(id),
       }).start(
         SESSION_REAP_MS,
         {
@@ -1068,6 +1097,7 @@ const app = !role.http
   credentials,
   access,
   plugins,
+  pluginOAuth,
   pluginForwarder,
   listings,
   pluginPackages,
@@ -1149,6 +1179,10 @@ const health = role.http
           { name: HOST_QUEUE, type: 2, started: hostWorkers?.pinned !== undefined },
           { name: SESSION_HOST_QUEUE, type: 2, started: hostWorkers?.sessions !== undefined },
         ]
+        // Ready once this build is current too (plan Phase 11): a rollout then stops an old
+        // replica only after Temporal hands the shared queues' tasks to this build.
+        const notCurrent = [sessionWorker, temporalWorker].some((worker) => worker !== undefined && !worker.current())
+        if (notCurrent) return Promise.resolve(`build ${config.buildId} is not yet current for ${SESSION_DEPLOYMENT}`)
         return queuesPolled(temporalClient, queues, workerIdentity(replicaIdentity()))
       },
     })

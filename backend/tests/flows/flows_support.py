@@ -45,9 +45,8 @@ class AgentTiers:
             name = str(args["tool"])
             self.asked.append(name)
             if name not in self.tiers:
-                raise ApplicationError(
-                    f"the agent has no tool {name}", type="ToolError", non_retryable=True
-                )
+                # Retryable since #2726 Phase 11: an old build may answer for a new one.
+                raise ApplicationError(f"the agent has no tool {name}", type="UnknownTool")
             answer: dict[str, Any] = {"tier": self.tiers[name], "disabled": name in self.disabled}
             if name not in self.declared_missing:
                 answer["declared"] = self.declared.get(name, self.tiers[name])

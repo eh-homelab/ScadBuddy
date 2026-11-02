@@ -47,12 +47,12 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     await t?.drop()
   })
 
-  async function session(opts: { mode?: string; owner?: [string, string] } = {}): Promise<string> {
+  async function session(opts: { owner?: [string, string] } = {}): Promise<string> {
     const id = randomUUID()
     const [kind, owner] = opts.owner ?? ['browser', 'browser']
     await t.db.sql`
-      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
-      VALUES (${id}, 'mcp', ${kind}, ${owner}, 'Someone', ${kind}, ${owner}, 'running', 10, 1, ${opts.mode ?? 'durable'})`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+      VALUES (${id}, 'mcp', ${kind}, ${owner}, 'Someone', ${kind}, ${owner}, 'running', 10, 1)`
     return id
   }
 
@@ -158,9 +158,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`flow session activities${TEST_DATABASE_URL 
     expect([err.type, err.nonRetryable, err.message]).toEqual([SESSION_REFUSED, true, `session ${sid} is gone; its turn t1 will not finish`])
   })
 
-  it("lets a flow talk only to a session its starter owns, a classic one an earlier release left included (plan Step 6.3)", async () => {
+  it("lets a flow talk only to a session its starter owns (plan Step 6.3)", async () => {
     expect(await check(await session())).toEqual({ session_id: expect.any(String), mode: 'durable' })
-    expect(await check(await session({ mode: 'classic' }))).toEqual({ session_id: expect.any(String), mode: 'durable' })
     for (const sid of [await session({ owner: ['bearer', 'token:9'] }), randomUUID()]) {
       const err = await failure(check(sid))
       expect([err.type, err.nonRetryable]).toEqual([SESSION_REFUSED, true])

@@ -19,6 +19,7 @@ import { type AssembledTurn, TurnAssemblyError, type TurnRunner } from './turnRu
 import { UnpricedSpend } from './unpricedSpend.js'
 import type { WarmEntry, WarmSessions, WarmTurn } from './warm.js'
 import { continuationMemory, warmAttempts, type WarmTurnRun } from './warmTurn.js'
+import type { Continuation } from '../temporal/session/models.js'
 
 // One classic turn on the session's warm Claude Code, whoever runs it (unified runtime spec
 // 2026-10-13 §5.2, §5.3): `SessionManager.runTurn` for a classic session, under its row lease,
@@ -67,6 +68,8 @@ export type CoreTurnArgs = {
   principal: TurnPrincipal
   /** The user's words without the page context: what memory is recalled against. */
   userText: string
+  /** The kind of continuation this placement is (an AgentSession's `parked` or `restarted`), for the turn's span. */
+  continuation?: Continuation['kind']
   /** The turn's own stop: an interrupt, a lost claim, a shutdown. */
   signal: AbortSignal
   /** What the process's `signalInterrupt` does (an attention request ending the turn). */
@@ -151,6 +154,7 @@ export class CoreTurn {
       tierOf: (name) => eventTierOf(name) ?? 'outward',
       // What tallyTurn subtracts for the audit row, so the span's cost is this turn's (#2376).
       before: { costUsd: args.session.ownCostUsd, turns: args.session.turns },
+      ...(args.continuation !== undefined ? { continuation: args.continuation } : {}),
     })
   }
 

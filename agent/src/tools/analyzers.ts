@@ -163,7 +163,8 @@ export const analyzerTools: Tool[] = [
       'Send exactly what preview_analyzer_fix was sent, with its `fingerprint`: a fingerprint that no longer ' +
       'matches (the diff, scope, print or base moved) is refused, so preview again. A fix with blockers cannot ' +
       'be applied. It sends nothing: it writes only ScadBuddy, reversible with remove_analyzer_decision; a ' +
-      'print that later uses the diff asks its own approval.',
+      "print applies it only when it names the answer's `id` in print_output's `accepted_fixes`, behind that " +
+      "print's own approval.",
     input: z
       .object({
         ...fixShape,

@@ -14,10 +14,14 @@ describe('capabilities mock (#2171)', () => {
       'builtin:browser',
       'builtin:http',
       'builtin:own-plugin',
+      'builtin:claude-code',
       'remote:hindsight',
     ])
     expect(sources[0]!.items).toHaveLength(10)
     expect(sources[1]).toMatchObject({ options_route: '/api/v1/ai/settings/browser-origins', items: [{ id: 'browser_click', default: 'write' }] })
+    // Claude Code's own built-ins by their own names; Bash is off by default (plan 2026-10-13 Step 9.6).
+    expect(sources[4]!.items.find((i) => i.id === 'Bash')).toMatchObject({ harness_name: 'Bash', default: 'off', access: 'off' })
+    expect(sources[4]!.items.find((i) => i.id === 'Read')).toMatchObject({ harness_name: 'Read', default: 'read' })
   })
 
   it('a migrated row at the tool\'s own tier is overridden, counted as a change, and Reset removes it (#4994)', async () => {

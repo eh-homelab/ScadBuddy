@@ -3,7 +3,8 @@ part), with no colour of its own (§3.3), recentred so the object's printed part
 z = 0 about their own x/y centre (a negative part does not set the bed); an object read
 with ``count`` copies becomes that many scene objects sharing its meshes; the objects
 start in a row along X, ``gap`` apart, centred on the origin. A painted part's codes are
-kept beside its mesh, and the render carries them (`paint.py`, spec §7)."""
+kept beside its mesh, and the render carries them (`paint.py`, spec §7); a painted object
+placed mirrored keeps its mirror in its transform (#4976)."""
 
 from __future__ import annotations
 
@@ -94,27 +95,38 @@ def scene_from_objects(
     for obj in read:
         # A read object's files are named by the id of its first scene object.
         stem = f"meshes/o{len(objects) + 1}"
+        meshes = [p.mesh for p in obj.parts]
+        # A painted object placed mirrored (#4015) has its codes in the reverse of its
+        # faces' corner order (`Paint.reversed`), and a code cannot be turned with its
+        # face. So its meshes are kept mirrored back in x, each face in its codes' order
+        # and facing out, and its scene objects mirror them again (#4976), as Bambu
+        # Studio keeps a mirror: the render carries such a painting (`paint.py`).
+        flipped = any(p.paint is not None and p.paint.reversed for p in obj.parts)
+        if flipped:
+            meshes = [
+                trimesh.Trimesh(
+                    vertices=np.asarray(mesh.vertices) * np.array([-1.0, 1.0, 1.0]),
+                    faces=np.asarray(mesh.faces)[:, ::-1],
+                    process=False,
+                )
+                for mesh in meshes
+            ]
         # The bed is set by what prints: a negative part may reach below it (#2146).
-        printed = [p for p in obj.parts if not p.negative] or obj.parts
-        vertices = np.concatenate([np.asarray(p.mesh.vertices) for p in printed])
+        printed = [m for m, p in zip(meshes, obj.parts, strict=True) if not p.negative] or meshes
+        vertices = np.concatenate([np.asarray(m.vertices) for m in printed])
         low, high = vertices.min(axis=0), vertices.max(axis=0)
         offset = -np.array([(low[0] + high[0]) / 2, (low[1] + high[1]) / 2, low[2]])
         parts: list[Part] = []
-        for number, colour_part in enumerate(obj.parts, start=1):
-            mesh = colour_part.mesh.copy()
+        for number, (colour_part, source_mesh) in enumerate(
+            zip(obj.parts, meshes, strict=True), start=1
+        ):
+            mesh = source_mesh.copy()
             mesh.apply_translation(offset)
             path = f"{stem}-p{number}.3mf"
             files[path] = part_mesh_3mf(mesh)
             painted = colour_part.paint is not None
-            if colour_part.paint is not None and colour_part.paint.reversed:
-                # Its codes are in the reverse of its faces' corner order, which the
-                # editor's carrying of a painting across an edit does not follow.
-                raise UnreadableObjectsError(
-                    f"{obj.name} is painted and mirrored, which a mesh model cannot open"
-                    " yet; Arrange can carry it to a printer"
-                )
             if colour_part.paint is not None:
-                # `reversed` is false here (refused above), and the readers default it.
+                # In its stored faces' order now, so `reversed` is never written.
                 files[f"{stem}-p{number}.paint.json"] = json.dumps(
                     {
                         "codes": list(colour_part.paint.codes),
@@ -131,9 +143,16 @@ def scene_from_objects(
                 )
             )
         notes += [f"{obj.name}: {note}" for note in obj.notes]
+        # Recentred about x = 0, so the mirror keeps the object's box.
+        mirror = Transform(scale=(-1.0, 1.0, 1.0)) if flipped else Transform()
         for _ in range(obj.count):
             objects.append(
-                SceneObject(id=f"o{len(objects) + 1}", name=named(obj.name), parts=parts)
+                SceneObject(
+                    id=f"o{len(objects) + 1}",
+                    name=named(obj.name),
+                    parts=parts,
+                    transform=mirror,
+                )
             )
             widths.append(float(high[0] - low[0]))
     total = sum(widths) + gap * (len(widths) - 1)
@@ -142,7 +161,11 @@ def scene_from_objects(
     for scene_object, width in zip(objects, widths, strict=True):
         placed.append(
             scene_object.model_copy(
-                update={"transform": Transform(translate=(x + width / 2, 0.0, 0.0))}
+                update={
+                    "transform": scene_object.transform.model_copy(
+                        update={"translate": (x + width / 2, 0.0, 0.0)}
+                    )
+                }
             )
         )
         x += width + gap

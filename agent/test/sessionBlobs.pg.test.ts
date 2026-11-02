@@ -298,9 +298,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`session ima
     it('stores nothing when the claim is refused: a busy session (#2479)', async () => {
       next = { reply: 'nothing to see' }
       const { session } = await m.start(browser, { origin: 'chat' })
+      // A turn in flight, as DurableTurns.send's claim leaves the row.
       await db.sql`
-        UPDATE ai_sessions SET status = 'running', turn_id = ${randomUUID()}, lease_until = now() + interval '1 hour'
-        WHERE id = ${session.id}`
+        UPDATE ai_sessions SET status = 'running', runtime = 'unified', durable_turn_id = ${randomUUID()} WHERE id = ${session.id}`
       await expect(m.send(session.id, browser, 'look', { images: [image] })).rejects.toMatchObject({ code: 'busy' })
       expect(await blobsOf(session.id)).toHaveLength(0)
     })

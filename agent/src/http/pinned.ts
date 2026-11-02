@@ -1,4 +1,4 @@
-import { request as httpRequest, type OutgoingHttpHeaders, type RequestOptions } from 'node:http'
+import { request as httpRequest, type IncomingHttpHeaders, type OutgoingHttpHeaders, type RequestOptions } from 'node:http'
 import { request as httpsRequest } from 'node:https'
 import { isIP, type LookupFunction } from 'node:net'
 import { plainAddress } from './origins.js'
@@ -37,7 +37,7 @@ export function requestFor(target: URL): typeof httpRequest {
   return target.protocol === 'https:' ? (httpsRequest as unknown as typeof httpRequest) : httpRequest
 }
 
-export type PinnedResponse = { status: number; body: string }
+export type PinnedResponse = { status: number; body: string; headers: IncomingHttpHeaders }
 
 export class PinnedRequestError extends Error {
   override name = 'PinnedRequestError'
@@ -83,7 +83,7 @@ export function pinnedFetch(
         }
         chunks.push(chunk)
       })
-      res.on('end', () => resolve({ status, body: Buffer.concat(chunks).toString('utf8') }))
+      res.on('end', () => resolve({ status, body: Buffer.concat(chunks).toString('utf8'), headers: res.headers }))
       res.on('error', reject)
     })
     req.end(body)

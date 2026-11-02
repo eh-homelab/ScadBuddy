@@ -798,6 +798,25 @@ def test_the_dialog_reads_answer_without_bambuddy(
 
 
 @NO_BAMBUDDY
+def test_a_lan_only_printer_opens_on_its_remembered_plate(
+    native_app: TestClient, model: str, fake_lan: FakeLan, spans: InMemorySpanExporter
+) -> None:
+    """#4971: the plate is remembered by the registry printer, so a LAN-only printer's
+    dialog opens on the plate it last printed on, and asks Bambuddy nothing."""
+    row = lan_row(native_app, fake_lan)
+    output = make_output(native_app, model)
+    with forbid_bambuddy(spans, BASE):
+        put = native_app.put(
+            f"/api/v1/print/printers/{row}/bed-type", json={"bed_type": "Textured PEI Plate"}
+        )
+        assert put.status_code == 200, put.text
+        choices = native_app.get(f"/api/v1/print/outputs/{output}/choices")
+    assert put.json() == {"printer_id": None, "printer": row, "bed_type": "Textured PEI Plate"}
+    assert choices.status_code == 200, choices.text
+    assert choices.json()["bed_type"] == "Textured PEI Plate"
+
+
+@NO_BAMBUDDY
 def test_a_library_check_naming_no_printer_answers_without_bambuddy(
     native_app: TestClient, tmp_path: Path
 ) -> None:

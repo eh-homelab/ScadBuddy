@@ -41,7 +41,7 @@ describe('Built-in (#2171)', () => {
     vi.restoreAllMocks()
   })
 
-  it("shows ScadBuddy's tools, the browser tab with its origin lists, HTTP requests and ScadBuddy's skills and subagents", async () => {
+  it("shows ScadBuddy's tools, the browser tab with its origin lists, HTTP requests, ScadBuddy's skills and subagents and Claude Code's built-ins", async () => {
     const { user } = renderSettingsSection(<BuiltIn />, { route })
     const regions = await screen.findAllByRole('region', { name: /^Source / })
     expect(regions.map((r) => r.getAttribute('aria-label'))).toEqual([
@@ -49,6 +49,7 @@ describe('Built-in (#2171)', () => {
       'Source Your browser tab',
       'Source HTTP requests',
       'Source ScadBuddy skills and subagents',
+      "Source Claude Code's built-in tools",
     ])
     // ScadBuddy's own tools have no switch (#4757).
     expect(within(await card('ScadBuddy tools')).queryByRole('switch')).toBeNull()

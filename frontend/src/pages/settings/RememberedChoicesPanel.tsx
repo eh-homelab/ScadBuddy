@@ -150,13 +150,25 @@ export function RememberedChoicesPanel({
         forget: () => (fileId === null ? api.putModelChoices(scope, {}) : api.putLibraryChoices(fileId, {})),
       })
     }
-    for (const [printerId, bed] of Object.entries(remembered.printer_bed_types ?? {})) {
+    // #4971: each plate with its registry printer, a LAN-only one's among them; an older
+    // server lists only the Bambuddy-keyed map.
+    const plates =
+      remembered.printer_plates ??
+      Object.entries(remembered.printer_bed_types ?? {}).map(([printerId, bed]) => ({
+        printer: null,
+        bambuddy_printer_id: Number(printerId),
+        name: null,
+        bed_type: bed,
+      }))
+    for (const plate of plates) {
+      const id = plate.bambuddy_printer_id ?? plate.printer
+      if (id === null || id === undefined) continue
       rows.push({
-        key: `bed:${printerId}`,
+        key: `bed:${id}`,
         kind: 'Plate',
-        subject: printerName(printerId),
-        value: bed,
-        forget: () => api.putPrinterBedType(Number(printerId), null),
+        subject: plate.name ?? printerName(id),
+        value: plate.bed_type,
+        forget: () => api.putPrinterBedType(id, null),
       })
     }
     for (const [printerId, algorithm] of Object.entries(remembered.printer_rack_algorithms ?? {})) {

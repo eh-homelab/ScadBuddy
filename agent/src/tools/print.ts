@@ -394,6 +394,16 @@ const PRINT_OUTPUT_INPUT = withSource({
       "The prime tower for this print (#3628), over what the template declares. Omit to keep the template's, " +
         'else the process (on whenever a plate uses more than one filament).',
     ),
+  accepted_fixes: z
+    .array(z.string().regex(/^[0-9a-f]{32}$/))
+    .max(32)
+    .optional()
+    .describe(
+      'Accepted analyzer fixes this print applies (#284), by the `decision_id` of run_analyzers\' ' +
+        '`accepted_changes` (the id apply_analyzer_fix answered). The backend checks each again against this ' +
+        "print first: one no longer accepted for it, or whose diff changed, refuses the print (409 " +
+        '`analyzer-fix-stale`); the rest go over its options and plate type. Omit to apply none.',
+    ),
 })
 type PrintOutputArgs = z.infer<typeof PRINT_OUTPUT_INPUT>
 
@@ -469,6 +479,7 @@ function printSummary(args: PrintOutputArgs, printerName?: string, lan = false):
     `${args.filament_profiles?.length ? `, with the ${args.filament_profiles.join(', ')} profile` : ''}` +
     `${supportsPhrase(args.supports)}` +
     `${towerPhrase(args.prime_tower)}` +
+    `${args.accepted_fixes?.length ? `, applying ${args.accepted_fixes.length} accepted analyzer fix${args.accepted_fixes.length === 1 ? '' : 'es'} (${args.accepted_fixes.join(', ')})` : ''}` +
     `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
   )
 }
@@ -1120,14 +1131,22 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'remember_printer_bed_type',
     label: "Remember a printer's bed type",
-    description: 'Remember which build plate type is on a printer (null to forget it).',
-    input: z.object({ printer_id: z.number().int(), bed_type: z.string().max(64).nullable() }),
+    description:
+      'Remember which build plate type is on a printer (null to forget it). The printer is its Bambuddy ' +
+      'printer id or its registry printer id (a LAN-only printer has only the latter).',
+    input: z.object({
+      printer_id: z.union([z.number().int(), z.string().max(64)]),
+      bed_type: z.string().max(64).nullable(),
+    }),
     risk: 'write',
     routes: ['PUT /api/v1/print/printers/{printer_id}/bed-type'],
     handler: async ({ printer_id, bed_type }, { backend }) =>
       json(
         await ok(
-          backend.PUT('/api/v1/print/printers/{printer_id}/bed-type', { params: { path: { printer_id } }, body: { bed_type } }),
+          backend.PUT('/api/v1/print/printers/{printer_id}/bed-type', {
+            params: { path: { printer_id: String(printer_id) } },
+            body: { bed_type },
+          }),
           `remember bed type of printer ${printer_id}`,
         ),
       ),
@@ -1375,6 +1394,7 @@ export const printTools: Tool[] = [
             }),
         // As given: the backend drops No sparse layers with the tower off (#3648 review).
         ...(args.prime_tower === undefined ? {} : { prime_tower: args.prime_tower }),
+        ...(args.accepted_fixes?.length ? { accepted_fixes: args.accepted_fixes } : {}),
         request_id: requestId,
       }
       // A run no worker has picked up yet is a 202 followed to the run, not a 503

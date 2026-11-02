@@ -10,6 +10,7 @@ import { harnessToolName, PluginError, type PluginRepo, type PluginSummary, tool
 import { describeTools, type PluginTest, type PluginToolView } from '../plugins/testConnection.js'
 import { type Access, CapabilityError, type CapabilityProvider, type ItemDetails, type ItemView, type SourceView } from './capabilities.js'
 import { skillItem, subagentItem } from './items.js'
+import { NATIVE_BUILTINS, type NativeBuiltin } from './nativeBuiltins.js'
 import type { ListedTool, ToolListings } from './listings.js'
 import { type AccessRow, BUILTIN_SOURCES, isToolAccess, registrySource, remoteSource, type ToolAccess } from './model.js'
 import { isRegistrySource, sourceEnabled, toolAccess } from './resolve.js'
@@ -26,6 +27,7 @@ const SPECS: readonly Spec[] = [
   { id: BUILTIN_SOURCES.browser, title: 'Your browser tab', switchable: true, options_route: BROWSER_ORIGINS_PATH },
   { id: BUILTIN_SOURCES.http, title: 'HTTP requests', switchable: true, options_route: null },
   { id: BUILTIN_SOURCES.ownPlugin, title: 'ScadBuddy skills and subagents', switchable: true, options_route: null },
+  { id: BUILTIN_SOURCES.claudeCode, title: "Claude Code's built-in tools", switchable: true, options_route: null },
 ]
 
 const SOURCE_IDS: readonly string[] = SPECS.map((s) => s.id)
@@ -83,6 +85,32 @@ function httpItem(rows: readonly AccessRow[]): ItemView {
     reason: null,
   }
 }
+
+/** One of Claude Code's own built-ins (nativeBuiltins.ts): its row, else its default; Bash and PowerShell say why they are off. */
+function nativeItem(builtin: NativeBuiltin, rows: readonly AccessRow[]): ItemView {
+  const row = rowOf(rows, BUILTIN_SOURCES.claudeCode, builtin.name)
+  const access = row !== undefined && isToolAccess(row.access) ? row.access : builtin.access
+  return {
+    id: builtin.name,
+    kind: 'tool',
+    name: builtin.name,
+    harness_name: builtin.name,
+    label: builtin.label,
+    description: builtin.description,
+    default: builtin.access,
+    default_note: builtin.access === 'off' ? NATIVE_OFF_NOTE : null,
+    suggested: null,
+    access,
+    own_access: access,
+    overridden: row !== undefined,
+    missing: false,
+    allowed: null,
+    fixed: null,
+    reason: null,
+  }
+}
+
+export const NATIVE_OFF_NOTE = 'off: it would run unsandboxed in the worker pod (#779); a plugin package that names it switches it on, asking first'
 
 const OWN_PLUGIN = BUILT_INS.find((b) => b.name === OWN_PLUGIN_NAME)!
 
@@ -146,6 +174,7 @@ export function builtInProviders(deps: { access: AccessReader & AccessWriter; to
     if (isRegistrySource(spec.id)) items = tools.filter((t) => registrySource(t.name) === spec.id).map((t) => registryItem(t, rows))
     else if (spec.id === BUILTIN_SOURCES.http) items = [httpItem(rows)]
     else if (spec.id === BUILTIN_SOURCES.ownPlugin) items = ownPluginItems(reviewOf(OWN_PLUGIN), rows)
+    else if (spec.id === BUILTIN_SOURCES.claudeCode) items = NATIVE_BUILTINS.map((b) => nativeItem(b, rows))
     return {
       id: spec.id,
       kind: 'builtin',

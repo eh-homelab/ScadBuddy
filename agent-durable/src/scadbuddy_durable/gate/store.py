@@ -10,9 +10,11 @@ and the audit, and the loser writes nothing, so a request never gets two
 
 The events are the agent's panel protocol (agent/src/sessions/protocol.ts), appended
 to ``ai_session_events`` exactly as its EventLog appends them, and announced on the
-``scadbuddy_events`` channel as its SessionEventPublisher announces a batch, so the
-agent's followers wake for them. A durable card's ``id`` is the entry's request id,
-which the panel sends back to the respond route as it is.
+``scadbuddy_events`` channel in the transaction, under the id ``agent-durable``, so the
+agent's followers wake for them. The agent's gate/store.ts no longer does that: it appends
+through its EventLog and publishes after commit under its own replica id (#3365). A
+durable card's ``id`` is the entry's request id, which the panel sends back to the respond
+route as it is.
 """
 
 from __future__ import annotations

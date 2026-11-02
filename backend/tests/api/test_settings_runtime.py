@@ -284,6 +284,7 @@ def test_forget_all_forgets_every_remembered_choice(client: TestClient) -> None:
     assert body == {
         "model_print_choices": {},
         "printer_bed_types": {},
+        "printer_plates": [],
         "print_options": {},
         "printer_print_options": {},
         "model_print_options": {},

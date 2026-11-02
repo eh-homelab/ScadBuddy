@@ -29,7 +29,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`session.finish_turn${TEST_DATABASE_URL ? ''
     const finish = sessionFinishActivities(db.sql, m.events)[SESSION_FINISH_ACTIVITY]
     const [t1, t2] = [randomUUID(), randomUUID()]
     // The next turn has claimed the row (DurableTurns.send) after t1's end was written.
-    await db.sql`UPDATE ai_sessions SET mode = 'durable', status = 'running', durable_turn_id = ${t2} WHERE id = ${session.id}`
+    await db.sql`UPDATE ai_sessions SET status = 'running', durable_turn_id = ${t2} WHERE id = ${session.id}`
     const before = (await m.events.read(session.id, 0, 1000)).length
     expect(await finish({ sessionId: session.id, turnId: t1, outcome: 'done' })).toBe(false)
     const [row] = await db.sql<{ status: string; durable_turn_id: string | null }[]>`SELECT status, durable_turn_id FROM ai_sessions WHERE id = ${session.id}`

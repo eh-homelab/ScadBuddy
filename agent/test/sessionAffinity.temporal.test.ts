@@ -382,7 +382,7 @@ describe.skipIf(skip !== '')(`session affinity${skip}`, { timeout: 180_000 }, ()
         [ACQUIRE_WORKER_ACTIVITY]: counted,
         ...sessionFinishActivities(pool.sql, r.m.events),
         // `gate.settings`, read as each turn starts, and the gate's writers (main.ts).
-        ...sessionGateActivities(pool.sql),
+        ...sessionGateActivities({ sql: pool.sql, events: r.m.events }),
       },
       shutdownGraceMs: 1_000,
       log: () => {},

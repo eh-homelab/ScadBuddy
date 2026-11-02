@@ -54,8 +54,13 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
   const started: string[] = []
   const cancelled: string[] = []
   const terminated: string[] = []
+  // What the stand-in runner answers a start: undefined, or a task with nothing to run.
+  let startEnd: { end: string } | undefined
   const runner: TaskRunner = {
-    start: async (t) => void started.push(t.id),
+    start: async (t) => {
+      started.push(t.id)
+      return startEnd
+    },
     cancel: async (t) => void cancelled.push(t.id),
     terminate: async (t) => void terminated.push(t.id),
   }
@@ -64,6 +69,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     started.length = 0
+    startEnd = undefined
     cancelled.length = 0
     terminated.length = 0
     store = new BackgroundTaskStore(db.sql)
@@ -116,6 +122,16 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
       text: "Invalid cron expression 'bad cron'. Expected 5 fields: M H DoM Mon DoW.",
       isError: true,
     })
+    // What a Temporal Schedule refuses or reads otherwise (background/schedule.ts).
+    for (const [cron, field] of [['0 0 L * *', "field 3 ('L')"], ['0 9 * * 5#3', "field 5 ('5#3')"], ['0 0 ? * MON', "field 3 ('?')"], ['0 0 15W * *', "field 3 ('15W')"]] as const) {
+      expect(await call('CronCreate', { cron, prompt: 'x' })).toMatchObject({ isError: true, text: expect.stringContaining(field) })
+    }
+    // A recurring job with no occurrence before its expiry is not kept, and says why.
+    startEnd = { end: 'expired after 7 days' }
+    const monthly = await call('CronCreate', { cron: '0 9 1 * *', prompt: 'monthly' })
+    expect(monthly).toMatchObject({ isError: true })
+    expect(monthly.text).toMatch(/^Recurring job [0-9a-f]{8} \(.*\) was not kept: expired after 7 days\. Times are in UTC\.$/)
+    expect(await store.get(idOf(monthly.text))).toMatchObject({ state: 'done', detail: 'expired after 7 days' })
   })
 
   it(`keeps at most ${MAX_ACTIVE} tasks running in a session`, async () => {
@@ -376,7 +392,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     await classic.send(session.id, browser, 'loop it')
     await expect.poll(() => scripted.runs.length).toBe(1)
     const run = scripted.runs[0]!
-    expect(run.builtinTools).toEqual(['Read'])
+    // Read is Claude Code's own in every session since Step 9.6, not the package's.
+    expect(run.builtinTools).toEqual([])
+    expect(run.nativeTools?.map((t) => t.name)).toContain('Read')
     expect(Object.keys(run.mcpServers ?? {})).toContain('builtin')
     expect(run.systemPromptAppend).toContain('CronCreate (mcp__builtin__CronCreate)')
     // The turn's Monitor runs its command on this replica's own queue, where the turn's Bash runs.
@@ -593,7 +611,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     // The row runs the turn as DurableTurns.send claims it; session_turn runs it here as TurnHost.
     const turnId = randomUUID()
     await db.sql`
-      UPDATE ai_sessions SET status = 'running', mode = 'durable', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
+      UPDATE ai_sessions SET status = 'running', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
       WHERE id = ${session.id}`
     const host = new TurnHost({ core: unified.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a' })
     const result = await host.run(

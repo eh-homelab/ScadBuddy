@@ -123,7 +123,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
       SELECT outcome, response, reason, responder FROM ai_input_responses WHERE request_id = ${requestId}`)[0]
 
   it('parks the turn in waiting_input as an attention card, and the user acknowledges it with a reply', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }) })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'render it in my tab' })
     const id = await parked(session.id)
     await expect.poll(async () => (await m.get(session.id, browser)).status).toBe('waiting_input')
@@ -154,7 +154,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   })
 
   it("is listed as pending for the badge while it waits, with its timer, and not once it is answered", async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ reason: 'blocked' }) }), approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ reason: 'blocked' }) }) })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const id = await parked(session.id)
     expect((await pendingInput(m, browser)).entries).toEqual([
@@ -169,7 +169,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   // its pending ones; a row that outlives an ownership change anyway (here the
   // owner is moved behind the manager's back) is still not listed for the user.
   it("lists only the requests of the principal's own sessions", async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }) })
     const mine = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const theirs = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const myId = await parked(mine.session.id)
@@ -185,7 +185,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   // #815 §4: the timer never answers for the user, and never approves.
   it("on_timeout 'proceed': the timer resolves it as timed_out, never answered, and the turn goes on", async () => {
     const audit = new AuditLog({ sql: db.sql })
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: SHORT_S }) }), approvalPollMs: 20, audit })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: SHORT_S }) }), audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const id = await parked(session.id)
     await turn!.done
@@ -208,7 +208,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   }, LONG_MS)
 
   it("on_timeout 'stop': the timer ends the turn as an interrupt does", async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ onTimeout: 'stop', timeoutS: SHORT_S }) }), approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ onTimeout: 'stop', timeoutS: SHORT_S }) }) })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const id = await parked(session.id)
     await turn!.done
@@ -228,13 +228,13 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   // #1352: the timer and the abort are armed before the reconnect check, so a check that hangs cannot stall the call.
   it('a reconnect check that never returns still times out, and an interrupt still ends the wait', async () => {
     const hangs = () => new Promise<void>(() => undefined)
-    const timed = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: SHORT_S, onParked: hangs }) }), approvalPollMs: 20 })
+    const timed = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: SHORT_S, onParked: hangs }) }) })
     const first = await timed.start(browser, { origin: 'chat', prompt: 'go' })
     await first.turn!.done
     expect(verdicts).toEqual([{ answered: false, timedOut: true, message: expect.stringMatching(/nobody replied/) }])
 
     verdicts = []
-    const stopped = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ onParked: hangs }) }), approvalPollMs: 20 })
+    const stopped = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ onParked: hangs }) }) })
     const second = await stopped.start(browser, { origin: 'chat', prompt: 'go' })
     await parked(second.session.id)
     expect(await stopped.interrupt(second.session.id, browser)).toBe(true)
@@ -249,7 +249,6 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
       sql: db.sql,
       paths: await tempPaths(),
       run: raising({ spec: spec({ onParked: hangs }) }, { spec: spec({ onParked: hangs }) }),
-      approvalPollMs: 5_000,
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const first = await parked(session.id, 'toolu_a0')
@@ -267,7 +266,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   })
 
   it('an interrupt cancels it like a question: nothing is answered and nothing times out', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }) })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const id = await parked(session.id)
     expect(await m.interrupt(session.id, browser)).toBe(true)
@@ -292,7 +291,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await first, await other, await second)
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: supersedes, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: supersedes })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
     expect(verdicts).toEqual([
@@ -334,7 +333,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await postDone(run))
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: working, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: working })
     const { session: earlier } = await m.start(browser, { origin: 'chat', title: 'earlier' })
     // Another session's touch is not this turn's.
     await touch(earlier.id, 'not-mine')
@@ -375,7 +374,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await postDone(run))
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: away, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: away })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
     expect(verdicts).toEqual([{ answered: false, timedOut: true, message: expect.any(String) }, { answered: false, posted: true, message: 'posted' }])
@@ -401,7 +400,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await postDone(run))
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: twice })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const b = await parked(session.id, 'toolu_b')
     await replyText(m, b, "I'm here")
@@ -424,7 +423,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await postDone(run))
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: working, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: working })
     // Started on the real clock: the check that a session worker polls reads Temporal's poller times by it.
     const { session } = await m.start(browser, { origin: 'chat', title: 'render it' })
     // The agent's clock runs an hour ahead of Postgres's: a touch Postgres stamps during the turn is still this turn's.
@@ -643,7 +642,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   })
 
   it('undismissed done summaries do not push a request a turn is parked on off the pending list', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ reason: 'blocked' }) }), approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ reason: 'blocked' }) }) })
     const { session: old } = await m.start(browser, { origin: 'chat', title: 'old' })
     await db.sql`
       INSERT INTO ai_questions (id, session_id, turn_id, tool, tool_use_id, questions, kind, attention_reason, summary, created_at)
@@ -689,7 +688,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await postDone(run, `toolu_done${n++}`))
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: turns, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: turns })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'one' })
     await turn!.done
     await (await m.send(session.id, browser, 'two')).done
@@ -710,7 +709,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         for (let i = 0; i < 3; i++) verdicts.push(await postDone(run, `toolu_done${i}`))
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: repeat, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: repeat })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
     expect(await db.sql`SELECT tool_use_id FROM ai_questions WHERE session_id = ${session.id} AND attention_reason = 'done' AND outcome IS NULL`).toEqual([
@@ -728,7 +727,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await postDone(run))
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
     const listed = async () => (await m.questions.listPending(browser)).questions.map((q) => q.attentionReason)
@@ -768,7 +767,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         await held
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: waiting, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: waiting })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const [row] = await db.sql<{ turn: string; at: string }[]>`
       SELECT durable_turn_id::text AS turn, to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS at
@@ -792,7 +791,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         yield result(run)
       })()
     const audit = new AuditLog({ sql: db.sql })
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: looping, approvalPollMs: 20, audit })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: looping, audit })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
     // #1205: the refused post is audited as the rate limit's refusal is.
@@ -830,7 +829,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await postDone(run, `toolu_done${n++}`))
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: turns, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: turns })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'one' })
     await turn!.done
     const [first] = await db.sql<{ summary: string; unattended: boolean }[]>`
@@ -848,7 +847,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await postDone(run, 'toolu_new'))
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting })
     const { session } = await m.start(browser, { origin: 'chat', title: 'q' })
     // One reads like an unattended record but is not flagged; the other is flagged under any heading.
     await db.sql`
@@ -880,7 +879,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await postDone(run))
         yield result(run)
       })()
-    const p = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const p = manager({ sql: db.sql, paths: await tempPaths(), run: posting })
     const { session, turn } = await p.start(browser, { origin: 'chat', prompt: 'go' })
     await turn!.done
     expect(verdicts).toEqual([{ answered: false, posted: true, message: 'posted' }])
@@ -895,7 +894,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await postDone(run, `toolu_done${n++}`))
         yield result(run)
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: posting })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'one' })
     await turn!.done
     const second = await m.send(session.id, browser, 'two')
@@ -948,7 +947,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
 
   it('refuses past the per-user rate limit without parking, and audits the refusal (#1205)', async () => {
     const audit = new AuditLog({ sql: db.sql })
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20, audit })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), audit })
     const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
     for (let i = 0; i < ATTENTION_RATE_LIMIT; i++) {
       await resolvedWait(other.id, `toolu_old${i}`)
@@ -963,7 +962,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   })
 
   it('holds the rate limit across sessions raising at once: one parks, the other is refused', async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: SHORT_S }) }), approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec({ timeoutS: SHORT_S }) }) })
     const { session: other } = await m.start(browser, { origin: 'chat', title: 'earlier' })
     for (let i = 0; i < ATTENTION_RATE_LIMIT - 1; i++) {
       await resolvedWait(other.id, `toolu_old${i}`)
@@ -1005,7 +1004,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         await approved
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: all, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: all })
     const app = createApp({
       database: { ping: () => Promise.resolve(true), ready: () => Promise.resolve(true) },
       backend: () => Promise.resolve(true),
@@ -1034,7 +1033,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         if (run.signal?.aborted) return
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
-    const m2 = manager({ sql: db.sql, paths: await tempPaths(), run: asker, approvalPollMs: 20 })
+    const m2 = manager({ sql: db.sql, paths: await tempPaths(), run: asker })
     const { session: s2, turn: t2 } = await m2.start(browser, { origin: 'chat', prompt: 'ask' })
     const qId = await parked(s2.id)
 
@@ -1076,7 +1075,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         verdicts.push(await tab, await blocked)
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: both, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: both })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     const tabId = await parked(session.id, 'toolu_tab')
     const blockedId = await parked(session.id, 'toolu_blk')
@@ -1098,7 +1097,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   // #1380: the hub ends tab waits on every attach and pairing, almost always with nothing waiting.
   it('a tab back with no open tab_disconnected request ends nothing and writes no event, audit row or status', async () => {
     const audit = new AuditLog({ sql: db.sql })
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising(), approvalPollMs: 20, audit })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising(), audit })
     const { session } = await m.start(browser, { origin: 'chat', title: 'idle' })
     // A resolved tab wait, and a status no pending row explains: a refreshStatus would move it to idle.
     await db.sql`
@@ -1120,7 +1119,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   // An AgentSession's workflow takes the reply and the reconnect one at a time (temporal/session/
   // gate.ts), so a reply that loses meets the entry as reconnected() left it.
   it("an \"I'm back\" answer that loses the race to reconnected() succeeds as a no-op; other replies do not", async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }, { spec: spec() }, { spec: spec() }), approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }, { spec: spec() }, { spec: spec() }) })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
 
     const first = await parked(session.id, 'toolu_a0')
@@ -1154,7 +1153,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
   }, LONG_MS)
 
   it("an \"I'm back\" answer to a tab wait reconnected() already ended succeeds as a no-op", async () => {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }), approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: raising({ spec: spec() }) })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     // The workflow takes the two Updates one at a time (temporal/session/gate.ts): a reply is
     // checked against the entry as reconnected() left it, never between its check and its write.
@@ -1184,7 +1183,6 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
       sql: db.sql,
       paths: await tempPaths(),
       run: calls,
-      approvalPollMs: 20,
       mcpServers: (_session, _turn, extras) => {
         wait = extras?.waitForTab
         return {}
@@ -1215,7 +1213,6 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
       sql: db.sql,
       paths: await tempPaths(),
       run: calls,
-      approvalPollMs: 20,
       mcpServers: (_session, _turn, extras) => {
         wait = extras?.waitForTab
         return {}
@@ -1257,7 +1254,6 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
       sql: db.sql,
       paths: await tempPaths(),
       run: both,
-      approvalPollMs: 20,
       mcpServers: (_session, _turn, extras) => {
         wait = extras?.waitForTab
         return {}
@@ -1307,7 +1303,6 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
       sql: db.sql,
       paths: await tempPaths(),
       run: both,
-      approvalPollMs: 20,
       mcpServers: (_session, _turn, extras) => {
         wait = extras?.waitForTab
         return {}
@@ -1358,7 +1353,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         results.push(await own)
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: both, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: both })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     await parkedBoth
     // Joined, before the tab wait's timer: still one entry.
@@ -1391,7 +1386,6 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
       sql: db.sql,
       paths: await tempPaths(),
       run,
-      approvalPollMs: 20,
       audit,
       mcpServers: (_session, _turn, extras) => {
         wait = extras?.waitForTab
@@ -1431,7 +1425,6 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
       sql: db.sql,
       paths: await tempPaths(),
       run,
-      approvalPollMs: 20,
       mcpServers: (_session, _turn, extras) => {
         wait = extras?.waitForTab
         return {}
@@ -1533,7 +1526,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
         await client.close()
         yield { type: 'result', subtype: 'success', is_error: false, num_turns: 1, total_cost_usd: 0.01, session_id: r.sessionId ?? r.resume } as unknown as SDKMessage
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run, approvalPollMs: 20, ...tools })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run, ...tools })
     resolveTabWaits(hub, m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'look at the page' })
     const id = await parked(session.id, `${TAB_WAIT_CALL}toolu_snap`)

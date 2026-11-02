@@ -54,6 +54,12 @@ interface RunInput {
   rackPosition: number | null
   /** #836 — the rack algorithm chosen in this dialog; `null` uses the printer's remembered one. */
   rackAlgorithm: RackAlgorithm | null
+  /**
+   * #284 — the accepted analyzer fixes this print applies, by decision id, as the panel's
+   * report names them (`accepted_changes[].decision_id`). The run checks each again and
+   * refuses a stale one (409 `analyzer-fix-stale`).
+   */
+  acceptedFixes?: readonly string[]
   onRan: (result: PrintRunResult) => void
 }
 
@@ -152,6 +158,7 @@ export function useRunPrint({
   filamentProfiles = NONE,
   rackPosition,
   rackAlgorithm,
+  acceptedFixes = NONE,
   onRan,
 }: RunInput) {
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
@@ -160,6 +167,7 @@ export function useRunPrint({
   const profilesKey = filamentProfiles.join(',')
   const supportsKey = JSON.stringify(supports)
   const towerKey = JSON.stringify(primeTower)
+  const fixesKey = acceptedFixes.join(',')
   const [running, setRunning] = useState(false)
   /** A refused run, shown above Print. */
   const [runError, setRunError] = useState<string | null>(null)
@@ -201,6 +209,7 @@ export function useRunPrint({
     rackAlgorithm,
     projectId,
     folderId,
+    fixesKey,
   ])
 
   /**
@@ -231,10 +240,14 @@ export function useRunPrint({
     if (source) void sourceApi(source).remember(next).catch(() => undefined)
   }
 
-  /** #83 — the plate this printer now has on it, the fallback when it has no archives. */
+  /**
+   * #83 — the plate this printer now has on it, the fallback when it has no archives. A
+   * LAN-only printer has no Bambuddy id, so its registry id names it (#4971).
+   */
   function rememberBedType() {
-    if (printerId === null || bedType === null) return
-    void api.putPrinterBedType(printerId, bedType).catch(() => undefined)
+    const printer = printerId ?? registryPrinter
+    if (printer === null || bedType === null) return
+    void api.putPrinterBedType(printer, bedType).catch(() => undefined)
   }
 
   async function run() {
@@ -266,6 +279,8 @@ export function useRunPrint({
           rackPosition,
           rackAlgorithm,
         }),
+        // Not in `printRunBody`: Queue all's batch run applies no fixes (#284).
+        ...(acceptedFixes.length > 0 ? { accepted_fixes: [...acceptedFixes] } : {}),
         // One per press: the same choices printed again are a new print, while
         // runPrint's own retries of this press re-attach to its run (#470).
         request_id: newRequestId(),

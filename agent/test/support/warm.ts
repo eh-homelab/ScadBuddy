@@ -81,6 +81,7 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
     toolsAsActivities: false,
     httpTier: null,
     builtinTools: [],
+    nativeTools: [],
     recallMaxQueryChars: null,
     transientRetries: null,
     servedBuiltins: [],

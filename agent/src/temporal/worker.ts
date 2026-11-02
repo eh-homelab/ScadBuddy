@@ -10,7 +10,8 @@ import { SESSION_TURN_ACTIVITY } from './session/names.js'
 // agent's commands (AgentOperation). Started with the service, it connects in the
 // background and keeps trying, as the database and the event listener do, so a
 // Temporal that is down at start-up delays the worker, never the pod; /healthz says
-// which. Unversioned: it pins nothing that a drain would wait for (plan ruling 9).
+// which. Versioned when it is given a deployment (plan 2026-10-13 Phase 11): every workflow
+// AUTO_UPGRADE, so it pins nothing that a drain would wait for (plan ruling 9).
 // `stop()` is the service's first shutdown step: the worker stops polling and its
 // running activities get `shutdownGraceMs` to finish before they are cancelled; one
 // that ignores the cancel is abandoned at `shutdownForceMs`, so stop() ends within the
@@ -68,11 +69,24 @@ export type AgentWorkerOptions = {
   workflows?: Pick<WorkerOptions, 'workflowBundle' | 'workflowsPath'>
   dataConverter?: DataConverter
   /**
-   * A Worker Deployment version (spec 2026-10-13 §5.1, D4): the worker is versioned, its
-   * workflows `AUTO_UPGRADE`, and once it polls its build is made the deployment's
-   * current version, which a versioned worker needs before it takes new workflows.
+   * A Worker Deployment version (spec 2026-10-13 §5.1, D4; plan Phase 11): the worker is
+   * versioned, its workflows `AUTO_UPGRADE`, and once it polls its build is made the
+   * deployment's current version, which a versioned worker needs before it takes any task.
+   * Made current once per process, never at a reconnect: a replica of an old build whose
+   * connection blips late in a rollout must not take the deployment back. (An old-build
+   * process that starts during a rollout still does; the clusters PostSync promote hook,
+   * `temporal-promote-workers.yaml`, puts the deployed build back once the rollout ends.)
+   * `queues` names the queues every worker of this build in the process polls
+   * (`agent-tools`, `agent-sessions`), asked when the build is made current: it is made
+   * current only once Temporal lists the version on each, since a queue the current build
+   * does not poll routes to unversioned pollers, which a versioned deployment has none of.
+   * Temporal's own check (`ignoreMissingTaskQueues` off) skips a queue with no recent tasks,
+   * so it cannot be relied on (docs/superpowers/plans/2026-10-13-unified-agent-runtime-phase-11.md).
+   * That check still refuses a build that stops polling a queue the current build polls with
+   * recent tasks: a release that retires one of these queues must pass
+   * `ignoreMissingTaskQueues` for it, or its rollout waits at /readyz.
    */
-  deployment?: { name: string; buildId: string }
+  deployment?: { name: string; buildId: string; queues?: () => readonly string[] }
   /** The most activities it runs at once; the SDK's default (100) when omitted. */
   maxConcurrentActivityTaskExecutions?: number
   /** How often each activity heartbeats (`heartbeatingActivities`); `ACTIVITY_HEARTBEAT_MS` when omitted. */
@@ -93,6 +107,11 @@ export type AgentWorkerOptions = {
 export class AgentWorker {
   #state: TemporalHealth = 'connecting'
   #stopping = false
+  /** Its build's make-current: started once per process, at the first poll. */
+  #makingCurrent: Promise<void> | undefined
+  #current = false
+  /** The connection the worker polls on now; undefined between connections. */
+  #connection: NativeConnection | undefined
   #worker: Worker | undefined
   readonly #loop: Promise<void>
   readonly #wake = new AbortController()
@@ -121,32 +140,59 @@ export class AgentWorker {
     }
   }
 
+  /**
+   * Whether the worker's build has been made its deployment's current version, which
+   * /readyz waits for (runtime/health.ts): true at once for an unversioned worker.
+   */
+  current(): boolean {
+    return this.#current
+  }
+
   async stop(): Promise<void> {
     this.#stopping = true
     this.#wake.abort()
     if (this.#worker?.getState() === 'RUNNING') this.#worker.shutdown()
     await this.#loop
+    await this.#makingCurrent
   }
 
-  /** Retried until it takes or the worker stops: the deployment may not know this version until its first poll. */
+  /**
+   * Retried until it takes or the worker stops, on whichever connection the worker has then: the
+   * deployment may not know this version until its first poll, nor take it until this build
+   * polls the current build's every queue.
+   */
   async #makeCurrent(
-    connection: NativeConnection,
     options: AgentWorkerOptions,
-    deployment: { name: string; buildId: string },
+    deployment: NonNullable<AgentWorkerOptions['deployment']>,
     log: (message: string) => void,
   ): Promise<void> {
     while (!this.#stopping) {
       try {
+        const connection = this.#connection
+        if (!connection) throw new Error('not connected')
+        const queues = deployment.queues?.() ?? []
+        if (queues.length) {
+          const { workerDeploymentVersionInfo: info } = await connection.workflowService.describeWorkerDeploymentVersion({
+            namespace: options.namespace,
+            deploymentVersion: { deploymentName: deployment.name, buildId: deployment.buildId },
+          })
+          const listed = new Set((info?.taskQueueInfos ?? []).map((q) => q.name))
+          const missing = queues.filter((q) => !listed.has(q))
+          if (missing.length) throw new Error(`this build does not poll ${missing.join(', ')} yet`)
+        }
         await connection.workflowService.setWorkerDeploymentCurrentVersion({
           namespace: options.namespace,
           deploymentName: deployment.name,
           buildId: deployment.buildId,
-          ignoreMissingTaskQueues: true,
           allowNoPollers: true,
         })
+        this.#current = true
+        log(`${options.taskQueue ?? TASK_QUEUE} worker: made build ${deployment.buildId} current for ${deployment.name}`)
         return
       } catch (err) {
-        log(`${options.taskQueue ?? TASK_QUEUE} worker: could not make build ${deployment.buildId} current yet (${(err as Error).message}); retrying`)
+        // Temporal's refusal names the queue: one this build should poll and does not (a worker
+        // this process never started is not asked for, main.ts `versionedQueues`).
+        log(`${options.taskQueue ?? TASK_QUEUE} worker: could not make build ${deployment.buildId} current for ${deployment.name} yet (${(err as Error).message}); retrying`)
         await sleep(options.retryMs ?? 5_000, undefined, { signal: this.#wake.signal }).catch(() => undefined)
       }
     }
@@ -193,10 +239,12 @@ export class AgentWorker {
           shutdownForceTime: options.shutdownForceMs ?? 15_000,
         })
         this.#worker = worker
+        this.#connection = connection
         if (this.#stopping) break
         const run = worker.run()
         this.#state = 'ok'
-        if (options.deployment) void this.#makeCurrent(connection, options, options.deployment, log)
+        if (!options.deployment) this.#current = true
+        else this.#makingCurrent ??= this.#makeCurrent(options, options.deployment, log)
         await run
       } catch (err) {
         // Past shutdownForceTime the SDK gives up on the activities still running
@@ -210,6 +258,7 @@ export class AgentWorker {
         log(`agent-tools worker: ${(err as Error).message}; retrying`)
       } finally {
         this.#worker = undefined
+        this.#connection = undefined
         await connection?.close().catch(() => undefined)
       }
       if (this.#stopping) break

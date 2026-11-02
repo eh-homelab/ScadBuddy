@@ -55,6 +55,7 @@ from scadbuddy.library.settings_store import (
     DisplayUnit,
     ModelPrintChoices,
     ModelProject,
+    PrinterPlate,
     SettingSource,
     SettingsPatch,
     SettingsSnapshot,
@@ -186,6 +187,12 @@ class SettingsView(BaseModel):
     worker_cache_max_bytes: int
     has_google_fonts_api_key: bool = False
     fonts_catalogue_ttl: float
+    #: The off-box copy of the history (#4974): where each commit is pushed, and as whom.
+    #: The token is reported only as ``has_git_remote_token``; how far behind the remote
+    #: is, is ``GET /settings/git-remote``.
+    git_remote_url: str | None = None
+    git_remote_username: str | None = None
+    has_git_remote_token: bool = False
     event_log_retention_seconds: float
     event_log_retention_rows: int
     flow_approval_timeout_seconds: int
@@ -290,6 +297,9 @@ class RememberedChoices(BaseModel):
     model_print_choices: dict[str, ModelPrintChoices] = Field(default_factory=dict)
     #: Stringified Bambuddy printer id -> the plate last printed on it.
     printer_bed_types: dict[str, str] = Field(default_factory=dict)
+    #: Every remembered plate with its registry printer and its Bambuddy one (#4971), a
+    #: LAN-only printer's among them; forgotten by either id.
+    printer_plates: list[PrinterPlate] = Field(default_factory=list)
     #: Stringified Bambuddy printer id -> its rack nozzle algorithm (#836).
     printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
     print_options: PrintOptions = Field(default_factory=PrintOptions)
@@ -393,6 +403,7 @@ def _view(snapshot: SettingsSnapshot, state: AppState) -> SettingsView:
         destination_sort=stored.destination_sort,
         asset_fetch_domains=list(stored.allowed_asset_domains()),
         has_google_fonts_api_key=bool(runtime.google_fonts_api_key),
+        has_git_remote_token=bool(runtime.git_remote_token),
         sources=snapshot.sources,
         applies=dict(APPLIES),
         restart_required=restart_required(state, runtime),
@@ -463,6 +474,14 @@ async def put_settings(
     ``settings.changed``) on every other replica."""
     if patch.operation_retention_seconds is not None:
         await _check_operation_retention(store, ops, patch.operation_retention_seconds)
+    if patch.git_remote_token and store.kek is None:
+        # #4974: the remote's credential is only ever stored sealed under the KEK.
+        msg = "A git remote's token is stored sealed: set SCADBUDDY_SECRET_KEY_FILE first."
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            msg,
+            errors=[{"loc": ["body", "git_remote_token"], "msg": msg}],
+        )
     try:
         await asyncio.to_thread(store.save, patch)
     except StoreNotReadyError as error:
@@ -524,6 +543,7 @@ def _remembered(
         project_print_targets={str(pid): target for pid, target in project_targets.items()},
         model_print_choices=settings.model_print_choices,
         printer_bed_types=settings.printer_bed_types,
+        printer_plates=settings.printer_plates,
         print_options=settings.print_options,
         printer_print_options=settings.printer_print_options,
         model_print_options=settings.model_print_options,

@@ -49,6 +49,8 @@ describe("a ToolCall's trace", () => {
     expect(span?.spanContext().traceId).toBe(TRACE_ID)
     expect(span?.parentSpanContext?.spanId).toBe(PARENT_SPAN_ID)
     expect(span?.attributes['scadbuddy.outcome']).toBe('ok')
+    // The queue it ran on, for the agent dashboard's tool activities by queue (Step 9.9).
+    expect(span?.attributes['scadbuddy.task_queue']).toBe('agent-tools')
     expect(headers[0]?.get('traceparent')).toContain(TRACE_ID)
   })
 })

@@ -113,7 +113,6 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`agent traci
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
-      approvalPollMs: 50,
       ...harnessTools(services, [LIST_MODELS, PING]),
     })
   }

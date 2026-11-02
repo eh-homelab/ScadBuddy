@@ -56,6 +56,15 @@ export const TOOLS = {
     scope: 'global',
     input: none,
   }),
+  screenshot: tool({
+    description:
+      "Fallback for what snapshot cannot say (a layout, a colour, the 3D preview): an image of the tab's " +
+      'viewport, at most 1568 px on its long side. Password fields, user-only controls and the assistant ' +
+      'panel are painted over.',
+    risk: 'read',
+    scope: 'global',
+    input: none,
+  }),
   click: tool({
     description:
       'Fallback for UI no other tool covers: click the visible element with this ARIA role and ' +

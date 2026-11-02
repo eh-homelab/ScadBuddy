@@ -129,7 +129,7 @@ export function agentSessions(): void {
       activities: {
         [ACQUIRE_WORKER_ACTIVITY]: acquire,
         ...routed((x) => sessionFinishActivities(x.sql, x.m.events) as never, finishNames),
-        ...routed((x) => sessionGateActivities(x.sql) as never, gateNames),
+        ...routed((x) => sessionGateActivities({ sql: x.sql, events: x.m.events }) as never, gateNames),
         ...routed((x) => gateActivities({ audit: x.audit, sessions: new PgSessionOwners(x.sql) }) as never, describeNames),
       },
       shutdownGraceMs: 1_000,
@@ -243,7 +243,7 @@ export function serveManager(m: SessionManager, deps: Pick<SessionManagerDeps, '
     }),
   }
   stack.served.push(served)
-  m.durable = new DurableGate(stack.env.client, { sql: deps.sql })
+  m.durable = new DurableGate(stack.env.client, { db: { sql: deps.sql, events: m.events } })
   m.durableTurns = new ServedTurns(
     { client: stack.env.client, sql: deps.sql, events: m.events, liveHosts: polledHosts(stack.env.client, stack.hostQueue) },
     (id) => stack.bySession.set(id, served),

@@ -1,6 +1,4 @@
-import { randomUUID } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import type { GateTrace } from '../src/approvals/service.js'
 import type { Database } from '../src/db.js'
 import { approvalView } from '../src/routes/approvals.js'
 import type { SessionManager } from '../src/sessions/manager.js'
@@ -24,7 +22,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approval tracing${TEST_DATABASE_URL ? '' : 
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     const { runner } = scriptedRunner(() => ({ reply: 'ok' }))
-    m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, approvalPollMs: 20 })
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: runner })
   })
   afterEach(async () => {
     m.abortAll()
@@ -145,59 +143,5 @@ describe.skipIf(!TEST_DATABASE_URL)(`approval tracing${TEST_DATABASE_URL ? '' : 
     await m.approvals.decide(browser, approval.id, false)
     const decision = await waitForSpan(spans, (s) => s.name === 'agent.approval')
     expect(decision.links).toEqual([])
-  })
-
-  it('the gate stores the park’s traceparent and hands the decision back to the turn’s trace', async () => {
-    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
-    const turnId = randomUUID()
-    // The turn is live on this session, so the decision is a parked call's, not an orphan's.
-    await db.sql`UPDATE ai_sessions SET turn_id = ${turnId}, lease_until = now() + interval '1 minute' WHERE id = ${session.id}`
-    const calls: string[] = []
-    let decidedWith: string | null = null
-    const trace: GateTrace = {
-      park: (toolUseId, toolName) => {
-        calls.push(`park ${toolUseId} ${toolName}`)
-        return {
-          traceparent: TRACEPARENT,
-          parked: (approvalId) => calls.push(`parked ${approvalId}`),
-          decided: (approval, runs) => {
-            calls.push(`decided ${approval.decision} ${runs}`)
-            decidedWith = approval.decisionTraceparent
-          },
-          abandoned: () => calls.push('abandoned'),
-        }
-      },
-    }
-    const stop = new AbortController()
-    const gate = m.approvals.gate({ sessionId: session.id, turnId, requestedBy: agentA, secrets: () => [], signal: stop.signal, trace })
-    const verdict = gate({ toolName: 'mcp__stub__print', input: { job: 'box' }, toolUseId: 'toolu_g', tier: 'outward', signal: stop.signal })
-    await expect.poll(async () => (await m.approvals.list(browser, { sessionId: session.id, pending: true })).length).toBe(1)
-    const [pending] = await m.approvals.list(browser, { sessionId: session.id, pending: true })
-    expect(pending!.traceparent).toBe(TRACEPARENT)
-    await m.approvals.decide(browser, pending!.id, true)
-    expect(await verdict).toMatchObject({ approved: true })
-    expect(calls).toEqual([`park toolu_g mcp__stub__print`, `parked ${pending!.id}`, 'decided approved true'])
-    const decision = await waitForSpan(spans, (s) => s.name === 'agent.approval')
-    expect(decidedWith).toBe(`00-${decision.spanContext().traceId}-${decision.spanContext().spanId}-01`)
-  })
-
-  it('a row that cannot be written abandons the park, so the turn’s count is undone', async () => {
-    const calls: string[] = []
-    const trace: GateTrace = {
-      park: (toolUseId) => {
-        calls.push(`park ${toolUseId}`)
-        return {
-          traceparent: TRACEPARENT,
-          parked: () => calls.push('parked'),
-          decided: () => calls.push('decided'),
-          abandoned: () => calls.push('abandoned'),
-        }
-      },
-    }
-    const stop = new AbortController()
-    // No such session: the insert breaks its foreign key.
-    const gate = m.approvals.gate({ sessionId: randomUUID(), turnId: randomUUID(), requestedBy: agentA, secrets: () => [], signal: stop.signal, trace })
-    await expect(gate({ toolName: 'mcp__stub__print', input: {}, toolUseId: 'toolu_g', tier: 'outward', signal: stop.signal })).rejects.toThrow()
-    expect(calls).toEqual(['park toolu_g', 'abandoned'])
   })
 })

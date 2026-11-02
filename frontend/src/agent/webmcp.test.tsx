@@ -45,7 +45,8 @@ function active(): string[] {
 describe('WebMCP', () => {
   it('registers nothing until the user opts in, and unregisters when they opt out', async () => {
     const bridge = new AgentBridge()
-    bridge.register({ search: () => [], open_print_dialog: () => null }, { label: 'page' })
+    // screenshot is the bridge's only: its image would be base64 in WebMCP's content (#2479).
+    bridge.register({ search: () => [], open_print_dialog: () => null, screenshot: () => null }, { label: 'page' })
     const disconnect = connectWebMcp(bridge)
 
     // Off by default: give any sync a chance to (wrongly) run.

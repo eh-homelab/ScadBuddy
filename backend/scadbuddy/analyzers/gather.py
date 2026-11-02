@@ -115,7 +115,8 @@ async def gather_context(
             )
         elif library_subject is not None:
             context.unavailable["geometry"] = "the native library is not serving"
-        _read_choices(context, settings, remembered, route.printer_id)
+        registry_printer = route.row.id if route.row is not None else None
+        _read_choices(context, settings, remembered, route.printer_id, registry_printer)
         await _read_trays(context, trays)
     elif not settings.bambuddy_url:
         for name in BAMBUDDY_INPUTS:
@@ -346,6 +347,7 @@ def _read_choices(
     settings: StoredSettings,
     remembered: ModelPrintChoices | None,
     printer_id: int | None,
+    registry_printer: str | None = None,
 ) -> None:
     """The request's choices, else the ones the dialog reopens with for this subject."""
     if context.request.choices is not None:
@@ -354,7 +356,7 @@ def _read_choices(
     if remembered is None or not remembered.nozzles:
         context.unavailable["choices"] = "no nozzle, quality or plate was chosen"
         return
-    bed = settings.printer_bed_types.get(str(printer_id)) if printer_id is not None else None
+    bed = settings.bed_type_of(printer=registry_printer, bambuddy_printer_id=printer_id)
     context.choices = PrintChoices(
         # One flow, as the dialog reopens on it (#4398 review): a pair remembered from
         # before #4272 would describe nozzles nothing prints with.

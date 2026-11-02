@@ -1,5 +1,5 @@
 import type { BackgroundTasks } from '../background/service.js'
-import { CRON_EXPIRY_MS, CronError, describeCron, nextFire, timeOfDay, WAKEUP_MAX_S, WAKEUP_MIN_S } from '../background/schedule.js'
+import { checkCron, CRON_EXPIRY_MS, CronError, describeCron, nextFire, timeOfDay, WAKEUP_MAX_S, WAKEUP_MIN_S } from '../background/schedule.js'
 import { checkSocketUrl, MONITOR_DEFAULT_MS, MONITOR_MAX_MS, shortDuration } from '../background/monitor.js'
 import { type BackgroundTask, MAX_ACTIVE } from '../background/store.js'
 import type { Owner } from '../sessions/protocol.js'
@@ -7,7 +7,7 @@ import type { SessionFiles } from '../workspace/store.js'
 import { workflowScriptPath, workspaceRelative } from '../background/activities.js'
 import { readScript } from '../background/workflowRunner.js'
 import { WORKFLOW_CONCURRENCY, WORKFLOW_MAX_AGENTS } from '../background/workflowScript.js'
-import type { BuiltinResult } from './files.js'
+import type { BuiltinResult } from './result.js'
 
 // Claude Code's background built-ins, as the session keeps them (src/background/):
 // CronCreate, CronDelete, CronList, ScheduleWakeup and TaskStop. Claude Code keeps its
@@ -47,6 +47,7 @@ export async function cronCreate(
   const now = ctx.now()
   let first: Date | undefined
   try {
+    checkCron(input.cron)
     first = nextFire(input.cron, now, ctx.tz)
   } catch (err) {
     if (err instanceof CronError) return error(err.message)
@@ -65,6 +66,8 @@ export async function cronCreate(
   if (!t) return full()
   const when = describeCron(input.cron)
   const zone = `Times are in ${ctx.tz}.`
+  // A recurring job whose first occurrence is past its 7 days (a monthly or yearly one) ends at once.
+  if (t.state !== 'active') return error(`Recurring job ${t.id} (${when}) was not kept: ${t.detail ?? 'it ended'}. ${zone}`)
   return {
     text: recurring
       ? `Scheduled recurring job ${t.id} (${when}). ${KEPT} Auto-expires after 7 days. Use CronDelete to cancel sooner. ${zone}`
@@ -147,7 +150,7 @@ export async function taskStop(ctx: BackgroundContext, input: { task_id?: string
   }
 }
 
-/** A subprotocol is an RFC 7230 token (RFC 6455 §4.1; schemas.json's Monitor `ws.protocols` pattern). */
+/** A subprotocol is an RFC 7230 token (RFC 6455 §4.1; Claude Code's Monitor `ws.protocols` pattern). */
 const SUBPROTOCOL = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
 
 export async function monitor(
@@ -157,7 +160,7 @@ export async function monitor(
   if ((input.command === undefined) === (input.ws === undefined)) return error('Give exactly one of command and ws.')
   if (input.command !== undefined && !ctx.commandQueue) return error('This session cannot run monitor commands; a ws source works.')
   if (input.ws) {
-    // schemas.json's token pattern: a bad one would otherwise fail only once `new WebSocket` throws.
+    // Claude Code's token pattern: a bad one would otherwise fail only once `new WebSocket` throws.
     const bad = input.ws.protocols?.find((p) => !SUBPROTOCOL.test(p))
     if (bad !== undefined) return error(`${JSON.stringify(bad)} is not a WebSocket subprotocol: use only token characters.`)
     const refused = await checkSocketUrl(input.ws.url)

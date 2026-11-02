@@ -134,10 +134,9 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     await drop()
   })
 
-  /** A session with an approval left pending by a turn that is gone (a restart). */
+  /** A session with a pending approval an earlier release's turn left (none parks on one now). */
   async function orphan(owner = agentA, input: Record<string, unknown> = { job: 'box.3mf' }) {
     const { session } = await m.start(owner, { origin: 'mcp', title: 't' })
-    await db.sql`UPDATE ai_sessions SET status = 'waiting_approval' WHERE id = ${session.id}`
     const approval = await m.approvals.create({
       sessionId: session.id,
       turnId: null,
@@ -294,20 +293,18 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     }
   })
 
-  it('expires an orphan that nobody decided, and the session goes back to idle', async () => {
+  it('expires an orphan that nobody decided', async () => {
     const { session, approval } = await orphan()
     expect(await m.approvals.expireDue()).toBe(0)
     await db.sql`UPDATE ai_approvals SET expires_at = now() - interval '1 second' WHERE id = ${approval.id}`
     expect(await m.approvals.expireDue()).toBe(1)
     expect(await m.approvals.get(approval.id, browser)).toMatchObject({ decision: 'expired', reason: 'no decision before it expired' })
-    expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle' })
     await expect(m.approvals.decide(browser, approval.id, true)).rejects.toMatchObject({ code: 'expired' })
     const events = (await m.events.read(session.id, 0, 1000)).map((e) => e.event)
     await expectPanelAccepts(events)
-    expect(events.filter((e) => !e.type.startsWith('input.')).slice(-2)).toEqual([
+    expect(events.filter((e) => !e.type.startsWith('input.')).slice(-1)).toEqual([
       // Says it expired, not just that it was not approved (#979).
       { v: 1, type: 'approval.resolved', sessionId: session.id, id: approval.id, approved: false, decision: 'expired', reason: 'no decision before it expired' },
-      { v: 1, type: 'session.status', sessionId: session.id, status: 'idle' },
     ])
   })
 
@@ -351,7 +348,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     expect((await m.approvals.get(approval.id, browser)).decision).toBe('expired')
   })
 
-  it('denying an orphan settles the session without a turn', async () => {
+  it('denying an orphan runs no turn', async () => {
     const { session, approval } = await orphan()
     expect(await m.approvals.decide(browser, approval.id, false)).toMatchObject({ decision: 'denied', decidedBy: browser })
     expect(await m.get(session.id, agentA)).toMatchObject({ status: 'idle', turns: 0 })
@@ -405,107 +402,6 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     expect(types.filter((t) => t.startsWith('approval.'))).toEqual(['approval.required', 'approval.resolved'])
   })
 
-  it('an approved orphan is used once, only by the turn it is bound to, with the same tool and input', async () => {
-    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
-    const turnA = '11111111-1111-4111-8111-111111111111'
-    const turnB = '22222222-2222-4222-8222-222222222222'
-    // A service whose resume only binds, to look at the row in between.
-    const service: ApprovalService = new ApprovalService({
-      sql: db.sql,
-      events: m.events,
-      hashKey: Buffer.alloc(32, 1),
-      resume: async (a) => ((await service.bindResume(a.id, turnA)) ? { resumed: true } : { resumed: false, reason: 'x' }),
-    })
-    const fresh = await service.create({
-      sessionId: session.id,
-      turnId: null,
-      toolUseId: 'toolu_2',
-      tool: 'mcp__stub__print',
-      input: { job: 'box.3mf' },
-      tier: 'outward',
-      requestedBy: agentA,
-    })
-    await service.decide(browser, fresh.id, true)
-    const decided = await service.get(fresh.id, browser)
-    expect(decided).toMatchObject({ decision: 'approved', resumeTurnId: turnA })
-    expect(Date.parse(decided.usableUntil!) - Date.parse(decided.decidedAt!)).toBeCloseTo(DEFAULT_APPROVAL_EXPIRY_SECONDS * 1000, -3)
-
-    const hash = service.hash('mcp__stub__print', { job: 'box.3mf' })
-    // Another turn (a new owner's, after a handoff; the next turn): never.
-    expect(await service.consume(session.id, turnB, 'mcp__stub__print', hash)).toBeUndefined()
-    expect(await service.consume(session.id, turnA, 'mcp__stub__print', service.hash('mcp__stub__print', { job: 'other' }))).toBeUndefined()
-    expect(await service.consume(session.id, turnA, 'mcp__other__print', hash)).toBeUndefined()
-    expect(await service.consume(session.id, turnA, 'mcp__stub__print', hash)).toMatchObject({ id: fresh.id })
-    expect(await service.consume(session.id, turnA, 'mcp__stub__print', hash)).toBeUndefined()
-    expect(await service.consumeById(fresh.id)).toBeUndefined()
-  })
-
-  it('a decision after turn A released the session resumes turn B, and A’s trailing clean-up leaves B’s approval alone', async () => {
-    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
-    const turnA = '55555555-5555-4555-8555-555555555555'
-    const turnB = '66666666-6666-4666-8666-666666666666'
-    const service: ApprovalService = new ApprovalService({
-      sql: db.sql,
-      events: m.events,
-      resume: async (a) => ((await service.bindResume(a.id, turnB)) ? { resumed: true } : { resumed: false, reason: 'x' }),
-    })
-    const input = { job: 'box.3mf' }
-    const parkedOnA = await service.create({
-      sessionId: session.id,
-      turnId: turnA,
-      toolUseId: 'toolu_a',
-      tool: 'mcp__stub__print',
-      input,
-      tier: 'outward',
-      requestedBy: agentA,
-    })
-    // Turn A has released the session (no claim): the decision is an orphan's and resumes turn B.
-    await service.decide(browser, parkedOnA.id, true)
-    expect(await service.get(parkedOnA.id, browser)).toMatchObject({ resumeTurnId: turnB, revokedAt: null })
-    // Then A's finish runs its post-release clean-up.
-    expect(await service.revokeUnused(session.id, 'it was decided as its turn ended', { turnId: turnA })).toBe(0)
-    expect(await service.consume(session.id, turnB, 'mcp__stub__print', service.hash('mcp__stub__print', input))).toMatchObject({
-      id: parkedOnA.id,
-    })
-
-    // F1/F3 intact: an unbound approval of turn A is still voided by the same clean-up.
-    const unbound = await service.create({
-      sessionId: session.id,
-      turnId: turnA,
-      toolUseId: 'toolu_a2',
-      tool: 'mcp__stub__print',
-      input,
-      tier: 'outward',
-      requestedBy: agentA,
-    })
-    await db.sql`UPDATE ai_approvals SET decision = 'approved', decided_at = now(), usable_until = now() + interval '1 hour'
-                 WHERE id = ${unbound.id}`
-    expect(await service.revokeUnused(session.id, 'it was decided as its turn ended', { turnId: turnA })).toBe(1)
-    expect((await service.get(unbound.id, browser)).revokedAt).not.toBeNull()
-  })
-
-  it('an approval stays usable only until the usable_until fixed at its decision', async () => {
-    const { session } = await orphan()
-    const turnA = '11111111-1111-4111-8111-111111111111'
-    const service: ApprovalService = new ApprovalService({
-      sql: db.sql,
-      events: m.events,
-      resume: async (a) => ((await service.bindResume(a.id, turnA)) ? { resumed: true } : { resumed: false, reason: 'x' }),
-    })
-    const [pending] = await service.list(browser, { sessionId: session.id, pending: true })
-    await service.decide(browser, pending!.id, true)
-    // Changing the setting afterwards does not move it; time passing does.
-    values.set(SETTING_APPROVAL_EXPIRY_SECONDS, 86_400)
-    await db.sql`UPDATE ai_approvals SET usable_until = now() - interval '1 second' WHERE id = ${pending!.id}`
-    expect(await service.consume(session.id, turnA, pending!.tool, pending!.inputHash)).toBeUndefined()
-  })
-
-  it('handing off a session cancels its pending approval', async () => {
-    const { session, approval } = await orphan()
-    await m.handoff(session.id, agentA, agentB).then(() => m.acceptHandoff(session.id, agentB))
-    expect(await m.approvals.get(approval.id, browser)).toMatchObject({ decision: 'cancelled', reason: 'the session was handed off to another MCP token' })
-  })
-
   it('lists by visibility: the browser sees all, an agent only its own sessions', async () => {
     const mine = await orphan(agentA)
     const theirs = await orphan(agentB)
@@ -521,7 +417,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     ).rejects.toMatchObject({ code: 'not_found' })
   })
 
-  it('a sessionless approval (#251 prepare/confirm) is visible to the browser and its requester, and consumed by id', async () => {
+  it('a sessionless approval (#251 prepare/confirm) is visible to the browser and its requester, and consumed once by its requester', async () => {
     const approval = await m.approvals.create({
       sessionId: null,
       turnId: null,
@@ -533,11 +429,11 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     })
     await expect(m.approvals.get(approval.id, agentB)).rejects.toMatchObject({ code: 'not_found' })
     await expect(m.approvals.decide(agentA, approval.id, true)).rejects.toMatchObject({ code: 'forbidden' })
-    const waiting = m.approvals.waitFor(approval.id, new AbortController().signal)
-    await m.approvals.decide(browser, approval.id, true)
-    expect(await waiting).toMatchObject({ decision: 'approved' })
-    expect(await m.approvals.consumeById(approval.id)).toMatchObject({ id: approval.id })
-    expect(await m.approvals.consumeById(approval.id)).toBeUndefined()
+    expect(await m.approvals.decide(browser, approval.id, true)).toMatchObject({ decision: 'approved' })
+    const hash = m.approvals.hash('mcp__scadbuddy__print_output', { output: 'o1' })
+    expect(await m.approvals.consumePrepared(approval.id, agentB, hash)).toBeUndefined()
+    expect(await m.approvals.consumePrepared(approval.id, agentA, hash)).toMatchObject({ id: approval.id })
+    expect(await m.approvals.consumePrepared(approval.id, agentA, hash)).toBeUndefined()
   })
 
   describe('HTTP routes', () => {

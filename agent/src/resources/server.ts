@@ -26,7 +26,7 @@ import {
   UNEXPECTED_ERROR_SOURCE,
 } from '../tools/registry.js'
 import { allPages, isPaged, MAX_PAGE_SIZE } from '../tools/pagination.js'
-import { expand, isTemplate, matchUri, RESOURCES, type ResourceDef, tierFor, variablesOf } from './catalog.js'
+import { expand, isTemplate, matchUri, PAIRED_TAB, RESOURCES, type ResourceDef, tierFor, variablesOf } from './catalog.js'
 import { type ResourceHub, SubscriptionLimitError } from './hub.js'
 
 // The resource half of the `/mcp` server (issue #264): `resources/list`,
@@ -334,6 +334,8 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
           : []
       case 'printer':
         return field(await readJson(byName.get('list_printers')!, {}, principal, extra), 'id')
+      case 'tab':
+        return [PAIRED_TAB]
       case 'output_id':
         return context.slug
           ? field(await readJson(byName.get('list_outputs')!, { slug: context.slug }, principal, extra), 'id')

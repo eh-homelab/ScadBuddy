@@ -186,6 +186,8 @@ PRINTER_REFERENCES: tuple[PrinterReference | RepointHook, ...] = (
     PrinterReference("print_runs", "printer"),
     # #4747: the printer a Bambuddy virtual printer forwards to.
     PrinterReference("printers", "forwards_to"),
+    # #4971: the plate remembered on a printer; the kept printer's own wins.
+    PrinterReference("printer_bed_types", "printer", unique=True),
     _repoint_run_activity,
 )
 

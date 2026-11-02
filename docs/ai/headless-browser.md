@@ -18,8 +18,9 @@ and Service, with its Streamable HTTP endpoint at
 `http://playwright-mcp.bambuddy:8931/mcp`. Then, as an admin, in **Settings → Tools & plugins →
 Add endpoint**:
 
-- **Name** `playwright`. Its tools reach a classic turn as `mcp__playwright__browser_*`
-  and a durable turn as `playwright__browser_*`.
+- **Name** `playwright`. Its tools reach a session's turn as `mcp__playwright__browser_*`
+  (an in-process proxy whose every call is a `turn:playwright__browser_*` activity, unified
+  runtime plan Step 9.3) and a flow run as `playwright__browser_*`.
 - **URL** `http://playwright-mcp.bambuddy:8931/mcp`. A plugin URL must be `https`,
   except to loopback or a private address (an in-cluster Service), where plain `http`
   is accepted.
@@ -61,7 +62,7 @@ Every navigation a session's browser is asked to make is judged by two lists the
 keeps in **Settings → Tools & plugins → AI headless browser** (`ai_settings` key
 `browser_origins`, routes `agent/src/routes/browserOrigins.ts`, the rules
 `agent/src/browser/origins.ts`). It applies to any remote plugin's `browser_*` call that
-names a `url` (Playwright MCP's `browser_navigate`), in classic and durable turns alike
+names a `url` (Playwright MCP's `browser_navigate`), in every turn and flow run
 (`agent/src/browser/guard.ts`):
 
 | The page's origin | What happens |
@@ -107,14 +108,15 @@ cannot be read unambiguously (a `](` or a parenthesis in it) withholds it too. A
 write into a tab it opened. A browser tool's error is screened the same way:
 the forwarder passes it to Claude Code as the tool's result, since Claude Code hands an
 MCP error to the model through `PostToolUseFailure`, which no hook can replace (measured,
-`agent/test/browserOrigins.e2e.test.ts`). Both turns screen the same text, the whole
+`agent/test/browserOrigins.e2e.test.ts`). Every path screens the same text, the whole
 result (`browser/origins.ts` `screenedText`). A check or screen that fails or takes longer than 20 s refuses the call or
 withholds the result; a deny rule that no longer parses refuses every page; a stored list
 that cannot be read leaves no allow list (everything asks) and the default deny list. The
 allow list lowers only `browser_navigate`'s tier: another browser tool that names a `url`
-can be refused or made to ask by it, never allowed. A classic turn does that with a `PostToolUse` hook's `updatedMCPToolOutput`
-(measured on Claude Code 2.1.296, `agent/test/browserOrigins.e2e.test.ts`), a durable
-turn in its call activity (`agent/src/temporal/turnTools.ts`). To read such a page the
+can be refused or made to ask by it, never allowed. A turn on Temporal does that in its call
+activity (`agent/src/temporal/turnTools.ts`); a turn without Temporal, whose plugins are its
+own, with a `PostToolUse` hook's `updatedMCPToolOutput` (measured on Claude Code 2.1.296,
+`agent/test/browserOrigins.e2e.test.ts`). To read such a page the
 agent navigates to it, which asks. A navigation approved once is recorded as `once`, so
 the pages of that origin stay readable in the chat while the next navigation there asks
 again. A flow run has no chat to remember it in: only the approved call's own result is
@@ -167,15 +169,12 @@ navigation and input reasonable.
 
 Playwright MCP with `--isolated` gives each MCP session a fresh browser context.
 
-- **Classic turn**: one Claude Code process per turn, which connects to each plugin once
-  and keeps that MCP session for the turn. A page opened by `browser_navigate` is
-  still there for the next call in the same turn, and gone in the next turn.
-- **Durable turn**: the session keeps one MCP session per plugin across its calls and
-  its turns (#2581), so a page opened by `browser_navigate` is still there for the
-  next call, and the next turn, as it would be for a person using Playwright MCP from
-  Claude Code.
+A session keeps one MCP session per plugin across its calls and its turns (#2581), so a
+page opened by `browser_navigate` is still there for the next call, and the next turn, as
+it would be for a person using Playwright MCP from Claude Code. Without Temporal (a dev
+run), the turn's own Claude Code connects instead, and the page lasts that turn only.
 
-How a session keeps it with `tools_as_activities` on (`agent/src/temporal/sessionClients.ts`):
+How a session keeps it (`agent/src/temporal/sessionClients.ts`):
 
 - The agent replica the turn runs on lists its tools in its own process and holds one
   connected MCP client per (session, plugin, plugin config). The turn's listing and every

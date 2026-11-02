@@ -1,5 +1,13 @@
 # Durable capability parity Implementation Plan
 
+> **Superseded** by `docs/superpowers/specs/2026-10-13-unified-agent-runtime-design.md` and its
+> plan `docs/superpowers/plans/2026-10-13-unified-agent-runtime.md` (epic #2726). There is one
+> session runtime, the TypeScript turn in an `AgentSession` workflow, so there is nothing left to
+> keep in parity: the Python turn this plan fed retired in Phase 8 (#5067, #5075). Read this plan
+> as history only. Its `turn_tools` listing became `listTurnTools` in the turn's own process
+> (plan Step 9.3), and its `builtin__<Name>` tools became Claude Code's own built-ins
+> (Step 9.6, #5166).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Whatever the user configured for the assistant (a plugin, plugin package, skill,

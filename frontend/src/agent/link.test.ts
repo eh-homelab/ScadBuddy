@@ -1,6 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { AgentBridge } from './bridge'
-import { createTabLink, MAX_RESULT_BYTES } from './link'
+import { createTabLink, IMAGE_CHUNK_BYTES, MAX_RESULT_BYTES } from './link'
 import { TAB_ID } from './tabId'
 
 /** Just enough of a browser WebSocket for the link. */
@@ -8,7 +8,7 @@ class FakeSocket {
   static instances: FakeSocket[] = []
   readonly OPEN = 1
   readyState = 0
-  sent: string[] = []
+  sent: (string | Uint8Array)[] = []
   onopen: (() => void) | null = null
   onmessage: ((event: { data: unknown }) => void) | null = null
   onclose: ((event: { code: number }) => void) | null = null
@@ -18,7 +18,7 @@ class FakeSocket {
     this.url = url
     FakeSocket.instances.push(this)
   }
-  send(data: string) {
+  send(data: string | Uint8Array) {
     this.sent.push(data)
   }
   close() {
@@ -33,7 +33,7 @@ class FakeSocket {
     this.onclose?.({ code })
   }
   frames() {
-    return this.sent.map((s) => JSON.parse(s) as Record<string, unknown>)
+    return this.sent.flatMap((s) => (typeof s === 'string' ? [JSON.parse(s) as Record<string, unknown>] : []))
   }
   deliver(frame: Record<string, unknown>) {
     this.onmessage?.({ data: JSON.stringify({ v: 1, ...frame }) })
@@ -124,6 +124,47 @@ describe('createTabLink', () => {
     const result = ws().frames().find((f) => f.type === 'result')!
     expect(result.outcome).toMatchObject({ ok: false, error: { code: 'failed', message: expect.stringMatching(/ask for less/) } })
     expect(ws().sent.at(-1)!.length).toBeLessThan(1000)
+  })
+
+  // #254, #2479: an image goes as binary frames after an `image` frame naming it, never as base64 in JSON.
+  // Without crypto.subtle, as on a plain-http origin: the agent names the image, not the tab.
+  it("sends an answer's image as binary frames after its type and size, with no WebCrypto", async () => {
+    vi.stubGlobal('crypto', { getRandomValues: crypto.getRandomValues.bind(crypto) })
+    onTestFinished(() => void vi.unstubAllGlobals())
+    expect(globalThis.crypto.subtle).toBeUndefined()
+    const bytes = new Uint8Array(IMAGE_CHUNK_BYTES * 2 + 10).map((_, i) => i % 251)
+    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    const bridge = new AgentBridge()
+    bridge.register(
+      { screenshot: () => ({ image: new Blob([bytes], { type: 'image/png' }), width: 4, height: 3, hidden: 2 }) },
+      { label: 'app' },
+    )
+    const { ws } = linked(bridge)
+    ws().open()
+    ws().deliver({ type: 'call', id: 'shot', tool: 'screenshot', args: {} })
+    await vi.waitFor(() => expect(ws().frames().some((f) => f.type === 'result')).toBe(true))
+    const sent = ws().sent.slice(1)
+    expect(JSON.parse(sent[0] as string)).toEqual({ v: 1, type: 'image', id: 'shot', mediaType: 'image/png', size: bytes.length })
+    const chunks = sent.slice(1, -1) as Uint8Array[]
+    expect(chunks.map((c) => c.byteLength)).toEqual([IMAGE_CHUNK_BYTES, IMAGE_CHUNK_BYTES, 10])
+    expect(new Uint8Array(chunks.flatMap((c) => [...c]))).toEqual(bytes)
+    expect(JSON.parse(sent.at(-1) as string)).toEqual({
+      v: 1,
+      type: 'result',
+      id: 'shot',
+      outcome: { ok: true, result: { image: { mediaType: 'image/png' }, width: 4, height: 3, hidden: 2 } },
+    })
+  })
+
+  it('answers an image of a type the agent does not take as a failure, sending no bytes', async () => {
+    const bridge = new AgentBridge()
+    bridge.register({ screenshot: () => ({ image: new Blob(['<svg/>'], { type: 'image/svg+xml' }) }) }, { label: 'app' })
+    const { ws } = linked(bridge)
+    ws().open()
+    ws().deliver({ type: 'call', id: 'svg', tool: 'screenshot', args: {} })
+    await vi.waitFor(() => expect(ws().frames().some((f) => f.type === 'result')).toBe(true))
+    expect(ws().sent.every((s) => typeof s === 'string')).toBe(true)
+    expect(ws().frames().at(-1)).toMatchObject({ outcome: { ok: false, error: { code: 'failed', message: expect.stringMatching(/image\/svg\+xml/) } } })
   })
 
   // #747: a call that throws (the catalogue chunk failing to load after a deploy) still gets its result frame.

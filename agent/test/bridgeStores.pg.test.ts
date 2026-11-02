@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { PostgresSessionTabStore } from '../src/bridge/sessionTabs.js'
+import { PostgresTabImageStore } from '../src/bridge/tabImages.js'
 import { PostgresTabOwnerStore } from '../src/bridge/tabOwners.js'
+import { sessionImage } from '../src/sessions/blobs.js'
 import type { Database } from '../src/db.js'
 import { SubjectForgotten, sweepBridgeKeys } from '../src/temporal/payloadCodec.js'
 import { testPayloadKeys } from './support/payloadKeys.js'
@@ -20,7 +22,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the bridge's stores${TEST_DATABASE_URL ? ''
     expect(await db.ready()).toBe(true)
   })
   beforeEach(async () => {
-    await db.sql`TRUNCATE ai_session_tabs, ai_tab_owners`
+    await db.sql`TRUNCATE ai_session_tabs, ai_tab_owners, ai_tab_images`
   })
   afterAll(async () => {
     await drop()
@@ -33,6 +35,33 @@ describe.skipIf(!TEST_DATABASE_URL)(`the bridge's stores${TEST_DATABASE_URL ? ''
       RETURNING id`
     return row!.id
   }
+
+  it("holds a tab's image by name until it is read, ten minutes at most, for a call on any replica (#254)", async () => {
+    const store = new PostgresTabImageStore(db.sql)
+    const image = sessionImage('image/png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]))
+    await store.put(image)
+    await store.put(image)
+    expect(await store.take(`${'0'.repeat(64)}.png`)).toBeUndefined()
+    expect(await store.take(image.name)).toEqual({ mediaType: 'image/png', bytes: image.bytes })
+    // The read took it.
+    expect(await db.sql`SELECT name FROM ai_tab_images`).toHaveLength(0)
+    // One never read: past its ten minutes it is not returned, and the next read or put drops it.
+    await store.put(image)
+    await db.sql`UPDATE ai_tab_images SET stored_at = now() - interval '11 minutes'`
+    expect(await store.take(image.name)).toBeUndefined()
+    expect(await db.sql`SELECT name FROM ai_tab_images`).toHaveLength(0)
+    const other = sessionImage('image/png', Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 4]))
+    await store.put(image)
+    await db.sql`UPDATE ai_tab_images SET stored_at = now() - interval '11 minutes'`
+    await store.put(other)
+    expect((await db.sql`SELECT name FROM ai_tab_images`).map((r) => r.name)).toEqual([other.name])
+    // Another image's read drops the expired rows too.
+    await db.sql`UPDATE ai_tab_images SET stored_at = now() - interval '11 minutes'`
+    expect(await store.take(image.name)).toBeUndefined()
+    expect(await db.sql`SELECT name FROM ai_tab_images`).toHaveLength(0)
+    // The table takes only a name that is a sha256 and an image type's extension.
+    await expect(db.sql`INSERT INTO ai_tab_images (name, media_type, bytes) VALUES ('../x', 'image/png', '\\x00')`).rejects.toThrow()
+  })
 
   it('writes a session tab only while it is still the one seen (#2271 review)', async () => {
     const store = new PostgresSessionTabStore(db.sql)

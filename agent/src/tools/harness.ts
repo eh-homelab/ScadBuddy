@@ -48,7 +48,7 @@ export type HarnessTools = {
       secrets?: () => readonly string[]
       /** The tier the seam applied to each of the turn's calls (#2171, harness/seamLedger.ts), over `builtIn`'s. */
       ledger?: Pick<SeamLedger, 'tierOf'>
-      /** The turn's calls as activities (plan 2026-10-13 Step 9.2, `tools_as_activities`): how each starts, and the entry it was approved on. */
+      /** The turn's calls as activities (plan 2026-10-13 Step 9.2): how each starts, and the entry it was approved on. */
       activities?: { start: ToolCallStarter; approvalOf: (toolUseId: string) => CallApproval | undefined }
     },
   ) => Record<string, McpSdkServerConfigWithInstance>

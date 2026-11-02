@@ -144,7 +144,11 @@ dependency of `agent/`.
 
     The e2e test measures that a redirecting plugin is not `connected` and that the
     redirect target and metadata URL are never contacted. That supersedes the `${VAR}`
-    header mechanism above.
+    header mechanism above. OAuth for a plugin (#780) is the agent's, never Claude
+    Code's: a person signs the plugin in from Settings, the agent runs the MCP
+    authorization flow itself with every URL egress-checked, and the forwarder adds the
+    access token per request (`agent/src/plugins/oauthStore.ts`; `docs/ai/operating.md`
+    §15).
 - "Unless previously approved, Anthropic does not allow third party developers to
   offer claude.ai login or rate limits for their products, including agents built on
   the Claude Agent SDK." The SDK "runs the Claude Code binary". [Overview][sdk-overview]

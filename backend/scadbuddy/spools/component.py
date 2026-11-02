@@ -12,6 +12,7 @@ from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.spools.providers import SpoolProvider, TraySource, discover_providers
 from scadbuddy.spools.seen import ReportTrays
+from scadbuddy.spools.spool_providers import native_use_hook
 from scadbuddy.spools.store import SpoolStore
 
 
@@ -29,11 +30,15 @@ SPOOLS: Key[Spools] = Key("spools")
 
 
 def _build(core: Core, components: Components) -> Spools:
-    return Spools(
+    spools = Spools(
         store=SpoolStore(core.projection.pool),
         providers=discover_providers(core, components),
         trays=ReportTrays(components.get(PRINTERS)),
     )
+    # What a native print used comes off ScadBuddy's own spools as the follow reads it
+    # settled (#4643); the follow is a core service and imports no feature.
+    core.print_follower.on_read.append(native_use_hook(spools))
+    return spools
 
 
 COMPONENT = Component(SPOOLS, build=_build)

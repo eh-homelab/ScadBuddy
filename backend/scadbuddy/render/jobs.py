@@ -51,7 +51,7 @@ from scadbuddy.library.libraries import (
     resolve_search_path,
     search_path,
 )
-from scadbuddy.meshmodel.paint import carry_paint, read_carried, turned, write_carried
+from scadbuddy.meshmodel.paint import carry_paint, read_carried, select, turned, write_carried
 from scadbuddy.meshmodel.scene import SCENE_NAME
 from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
 from scadbuddy.render.colours import colour_hex
@@ -661,6 +661,8 @@ def result_parts(layout: PlateLayout) -> list[PartInfo]:
 
 #: A painted part's carried painting beside the layout (spec 2026-10-11 §7): plate, part.
 PAINT_FILE = "paint-{plate}-{part}.json"
+#: A part carried as two paintings, one per way it is mirrored (`carry_paint`, #4976).
+PAINT_PIECE_FILE = "paint-{plate}-{part}-{piece}.json"
 PAINT_NOT_CARRIED = (
     "the mesh model's painting could not be read, so it is not carried: "
     "its parts print in their own colour"
@@ -695,24 +697,48 @@ def _painted(
 ) -> PlateLayout:
     plate, sources = layout.plates[0], layout.sources[0]
     carried, warnings = carry_paint(scad.parent, params, plate.parts)
-    if not any(found is not None for found in carried) and not warnings:
+    if not any(carried) and not warnings:
         return layout
-    parts, placed, colours = list(plate.parts), list(sources), list(layout.colours)
-    for index, found in enumerate(carried):
-        if found is None:
+    parts: list[ColourPart] = []
+    placed: list[PartSource] = []
+    extruders: list[int] = []
+    objects: list[int] = []
+    colours = list(layout.colours)
+    rows = zip(plate.parts, sources, plate.extruders, plate.objects, carried, strict=True)
+    for index, (part, source, extruder, number, found) in enumerate(rows):
+        if not found:
+            parts.append(part)
+            placed.append(source)
+            extruders.append(extruder)
+            objects.append(number)
             continue
-        name = PAINT_FILE.format(plate=1, part=index + 1)
-        write_carried(work / name, found)
-        parts[index] = replace(
-            parts[index], mesh=turned(parts[index].mesh, found.turns), paint=found.paint
-        )
-        placed[index] = replace(placed[index], paint=name)
-        for colour in found.paint.used():
-            if colour.upper() not in {c.upper() for c in colours}:
-                colours.append(colour.upper())
+        # A part painted both mirrored and not is two (`carry_paint`): one per way.
+        for piece, paint in enumerate(found, start=1):
+            name = PAINT_FILE.format(plate=1, part=index + 1)
+            if len(found) > 1:
+                name = PAINT_PIECE_FILE.format(plate=1, part=index + 1, piece=piece)
+            write_carried(work / name, paint, len(part.mesh.faces))
+            parts.append(
+                replace(
+                    part,
+                    name=f"{part.name} (mirrored)"
+                    if len(found) > 1 and paint.paint.reversed
+                    else part.name,
+                    mesh=turned(select(part.mesh, paint.faces), paint.turns),
+                    paint=paint.paint,
+                )
+            )
+            placed.append(replace(source, paint=name))
+            extruders.append(extruder)
+            objects.append(number)
+            for colour in paint.paint.used():
+                if colour.upper() not in {c.upper() for c in colours}:
+                    colours.append(colour.upper())
     return replace(
         layout,
-        plates=[replace(plate, parts=tuple(parts))],
+        plates=[
+            replace(plate, parts=tuple(parts), extruders=tuple(extruders), objects=tuple(objects))
+        ],
         colours=colours,
         warnings=[*layout.warnings, *warnings],
         sources=[tuple(placed)],

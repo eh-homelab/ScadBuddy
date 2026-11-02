@@ -1,5 +1,4 @@
 import { z } from 'zod'
-import { enterWorktree } from '../builtins/session.js'
 import { offCallItem, offItemReason } from '../access/items.js'
 import { BUILTIN_SOURCES } from '../access/model.js'
 import type { AccessResolver } from '../access/resolver.js'
@@ -81,6 +80,10 @@ export type WorkflowAgents = {
 const END_WAIT_MS = 2 * 60_000
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max']
+/** Claude Code's answer where there is no git repository (its EnterWorktree's, measured on 2.1.296). */
+const NO_WORKTREE =
+  'Cannot create a worktree: not in a git repository and no WorktreeCreate hooks are configured. ' +
+  'Configure WorktreeCreate/WorktreeRemove hooks in settings.json to use worktree isolation with other VCS systems.'
 const MODEL = /^[A-Za-z0-9._:[\]-]{1,100}$/
 
 /** The subagent definitions a chat can run as: the plugin's agents/*.md, by their `name:`. */
@@ -116,7 +119,7 @@ async function chatSettings(
   deps: TypeAccess = {},
 ): Promise<{ model?: string; effort?: string; type?: string } | string> {
   if (opts.isolation !== undefined && opts.isolation !== 'worktree') return `isolation must be 'worktree'; got ${JSON.stringify(opts.isolation)}`
-  if (opts.isolation === 'worktree') return enterWorktree().text
+  if (opts.isolation === 'worktree') return NO_WORKTREE
   if (opts.effort !== undefined && !EFFORTS.includes(opts.effort)) return `effort must be one of ${EFFORTS.join(', ')}; got ${JSON.stringify(opts.effort)}`
   if (opts.model !== undefined && !MODEL.test(opts.model)) return `model ${JSON.stringify(opts.model)} is not a model name`
   let type: string | undefined

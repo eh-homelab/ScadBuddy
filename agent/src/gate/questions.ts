@@ -445,7 +445,7 @@ export class QuestionService {
         const none = { asked: false, superseded: [] as Resolved[], limited: undefined as string | undefined }
         // Still this turn's, and still the user's: after a handoff mid-turn the new owner is not posted to.
         const [owner] = await tx<{ owner_kind: string }[]>`
-          SELECT owner_kind FROM ai_sessions WHERE id = ${sessionId} AND (turn_id = ${turnId} OR durable_turn_id = ${turnId}) FOR UPDATE`
+          SELECT owner_kind FROM ai_sessions WHERE id = ${sessionId} AND durable_turn_id = ${turnId} FOR UPDATE`
         if (owner?.owner_kind !== 'browser') return { value: none, events: [] }
         // Capped per turn (DONE_POSTS_PER_TURN), a count the session row locked above serialises.
         const [count] = await tx<{ n: number }[]>`

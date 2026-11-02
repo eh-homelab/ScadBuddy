@@ -6,9 +6,7 @@ import { event, type ServerEvent } from './protocol.js'
 
 // The sweep of sessions left `running` (#2001, plan 5c Ruling 16). A turn takes no lease
 // (plan Step 6.3: every session is an AgentSession); its end is finish_turn's, run by
-// `session-<id>`. A classic turn left by an earlier release, once its lease runs out, is
-// swept the same way: a row with a live lease (`turn_id`, `lease_until` ahead) is left to
-// the pod that holds it, and its next send then runs as an AgentSession. A claim is left with no turn behind it when the
+// `session-<id>`. A claim is left with no turn behind it when the
 // workflow ends (terminated, failed, reset) before finish_turn runs, or when a kept
 // claim's update-with-start never reached Temporal, so the workflow was never started.
 // Every later send is then refused `busy`. Each pass, a row `running`, or parked
@@ -17,9 +15,8 @@ import { event, type ServerEvent } from './protocol.js'
 // but holding no turn (its `turn` Query: the kept claim's Update never reached it,
 // #2078), the turn's end is written as finish_turn writes a failed turn (a
 // `turn_failed` error, then the status), but to `idle`: the next send either starts or
-// reaches the workflow, or is refused `closed`. A workflow not found for a row whose
-// `durable_offset` moved ran a turn and was removed by retention; the error says so,
-// and the send refuses it `closed` (plan 5c Ruling 18). The UPDATE is guarded on the
+// reaches the workflow (starting it again when it is not found: its transcript is in
+// ai_session_entries), or is refused `closed`. The UPDATE is guarded on the
 // claim read (still in TURN_STATUSES, same event_seq), so a turn that claimed the row
 // meanwhile is never ended here.
 
@@ -47,11 +44,10 @@ const DESCRIBE_DEADLINE_MS = 3_000
  */
 const BATCH = 10
 
-const LOST: Record<Exclude<SessionRunState, 'open'> | 'removed', string> = {
+const LOST: Record<Exclude<SessionRunState, 'open'>, string> = {
   closed: "the turn ended without a result: the session's workflow has ended",
   between_turns: "the turn never started: the message never reached the session's workflow; send it again",
   not_found: "the turn never started: the session's workflow could not be found; send the message again",
-  removed: "the turn never started: the session's workflow is gone (it ended and was removed); continue in a new chat",
 }
 
 /**
@@ -61,8 +57,8 @@ const LOST: Record<Exclude<SessionRunState, 'open'> | 'removed', string> = {
  */
 export const TURN_STATUSES: readonly string[] = ['running', 'waiting_approval', 'waiting_input']
 
-/** A row in TURN_STATUSES as read: its claim (`event_seq`) and how far its workflow's output got. */
-export type RunningRow = { id: string; event_seq: string; durable_offset: string }
+/** A row in TURN_STATUSES as read: its claim (`event_seq`). */
+export type RunningRow = { id: string; event_seq: string }
 
 /**
  * Writes the end of a turn whose workflow cannot end it (`state`, from DescribeSession),
@@ -76,15 +72,14 @@ export async function endLostTurn(
   row: RunningRow,
   state: Exclude<SessionRunState, 'open'>,
 ): Promise<boolean> {
-  const lost = state === 'not_found' && Number(row.durable_offset) > 0 ? 'removed' : state
   const tail: ServerEvent[] = [
-    event({ type: 'error', sessionId: row.id, code: 'turn_failed', message: LOST[lost] }),
+    event({ type: 'error', sessionId: row.id, code: 'turn_failed', message: LOST[state] }),
     event({ type: 'session.status', sessionId: row.id, status: 'idle' }),
   ]
   const done = await sql.begin(async (tx) => {
     const [claimed] = await tx`
-      UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, turn_id = NULL, lease_until = NULL, updated_at = now()
-      WHERE id = ${row.id} AND status IN ${tx(TURN_STATUSES)} AND (turn_id IS NULL OR lease_until IS NULL OR lease_until <= now())
+      UPDATE ai_sessions SET status = 'idle', durable_turn_id = NULL, updated_at = now()
+      WHERE id = ${row.id} AND status IN ${tx(TURN_STATUSES)}
         AND event_seq = ${row.event_seq}
       RETURNING id`
     return claimed ? await events.append(row.id, tail, tx) : undefined
@@ -104,8 +99,6 @@ export type DurableRunningSweepDeps = {
   batch?: number
   /** How long the sweep waits on one describe, whatever `describe` does (default DESCRIBE_DEADLINE_MS + 1 s). */
   describeTimeoutMs?: number
-  /** Run for each session a pass ended: what a lost classic turn left parked (SessionManager.endClassicLeftovers). */
-  ended?: (sessionId: string) => Promise<unknown>
 }
 
 export class DurableRunningSweep {
@@ -132,8 +125,8 @@ export class DurableRunningSweep {
   async sweep(): Promise<string[]> {
     const { sql, events } = this.#deps
     const page = (after: string) => sql<RunningRow[]>`
-      SELECT id, event_seq, durable_offset FROM ai_sessions
-      WHERE status IN ${sql(TURN_STATUSES)} AND (turn_id IS NULL OR lease_until IS NULL OR lease_until <= now()) AND id::text > ${after}
+      SELECT id, event_seq FROM ai_sessions
+      WHERE status IN ${sql(TURN_STATUSES)} AND id::text > ${after}
         AND updated_at < now() - make_interval(secs => ${this.#graceMs / 1000})
       ORDER BY id::text LIMIT ${this.#batch}`
     let rows = await page(this.#after)
@@ -151,9 +144,7 @@ export class DurableRunningSweep {
         continue
       }
       if (state === 'open') continue
-      if (!(await endLostTurn(sql, events, row, state))) continue
-      reset.push(row.id)
-      await this.#deps.ended?.(row.id).catch((err: unknown) => console.warn(`durable running sweep: ${row.id}'s parked calls were not ended:`, (err as Error).message))
+      if (await endLostTurn(sql, events, row, state)) reset.push(row.id)
     }
     // Once per pass and payload-free, so a describe that always fails (codec, permission) shows.
     if (undescribed) console.warn(`durable running sweep: ${undescribed} of ${rows.length} sessions' workflows could not be described`)

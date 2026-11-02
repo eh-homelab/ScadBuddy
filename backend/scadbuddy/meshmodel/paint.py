@@ -7,8 +7,13 @@ triangles carry only material indices. A painted part's codes (``<mesh stem>.pai
 1. An output triangle whose three vertices are a source triangle's, each within
    :data:`VERBATIM_MM`, takes that triangle's code verbatim, so painting finer than the
    triangle survives. Its vertices are turned to start where the source's do, since a
-   code splits its triangle by vertex position; a match wound the other way (a mirrored
-   object) is not verbatim.
+   code splits its triangle by vertex position. A mirrored object renders wound the
+   other way, and a code cannot be turned with its face (#4015), so its codes are
+   carried as a `Paint.reversed` painting, its corners read against its faces', which
+   the 3MF writer stores mirrored back as Arrange's are (#4976). A painting has one
+   corner order, so a rendered part whose colour is painted both mirrored and not is
+   carried as two, split by its shells (:func:`sides`); a shell joining both keeps the
+   other way's faces as rule 2 does, and the warnings say so.
 2. Any other triangle (a cut face, a retriangulated face, an added shape's) takes the
    colour of the nearest source triangle within :data:`NEAR_MM` when that triangle is
    one colour (`render/paint.py` `uniform_state`), and otherwise the part's own (``""``).
@@ -104,21 +109,11 @@ def with_params(scene: Scene, params: Mapping[str, ParamValue]) -> Scene:
     return Scene.model_validate(walk(scene.model_dump(mode="json")))
 
 
-def paint_warnings(scene: Scene) -> list[str]:
-    """Where an object's painting cannot be carried whole: a mirrored object's triangles
-    render wound the other way, so none is its source's verbatim (rule 1)."""
-    return [
-        f"{obj.id} ({obj.name}) is mirrored, so its painting is carried only where a whole "
-        "triangle is one colour; finer painting prints in the part's own colour"
-        for obj in scene.objects
-        if mirrored(obj) and any(p.painted and not p.negative for p in obj.parts)
-    ]
-
-
 def scene_notes(scene: Scene) -> list[str]:
     """The notes `get_scene` shows: the scene's own, less phases 1-2's "not carried until
-    phase 3", and the paint warnings."""
-    return [note for note in scene.notes if OLD_PAINT_NOTE not in note] + paint_warnings(scene)
+    phase 3". A mirrored object's painting is carried (#4976), so no note says otherwise;
+    what a render cannot carry, its warnings say."""
+    return [note for note in scene.notes if OLD_PAINT_NOTE not in note]
 
 
 @dataclass(frozen=True)
@@ -139,6 +134,40 @@ class CarriedPaint:
 
     paint: Paint
     turns: IntArray
+    #: The rendered part's faces it is of (:func:`select`), ascending; None for every
+    #: one. A part painted both mirrored and not is carried as two (:func:`sides`).
+    faces: IntArray | None = None
+
+
+def select(mesh: trimesh.Trimesh, faces: IntArray | None) -> trimesh.Trimesh:
+    """``mesh``'s ``faces`` (every face for None), in their order, with only the
+    vertices they use: the part a `CarriedPaint` paints."""
+    if faces is None:
+        return mesh
+    picked = np.asarray(mesh.faces, dtype=np.int64)[faces]
+    used, inverse = np.unique(picked, return_inverse=True)
+    return trimesh.Trimesh(
+        vertices=np.asarray(mesh.vertices)[used],
+        faces=inverse.reshape(picked.shape),
+        process=False,
+    )
+
+
+def sides(output: trimesh.Trimesh, mirrored_points: FloatArray, points: FloatArray) -> IntArray:
+    """Which of ``output``'s faces belong to a mirrored painting: each shell (a set of
+    faces joined by edges) is one way, the way most of its corners lie on, mirrored
+    members' ``mirrored_points`` or the others' ``points``, within :data:`VERBATIM_MM`
+    (ties not mirrored). Ascending face indices; `ValueError` from `match_points`."""
+    faces = np.asarray(output.faces, dtype=np.int64)
+    vertices = np.asarray(output.vertices, dtype=np.float64)
+    lean = (match_points(mirrored_points, vertices, VERBATIM_MM) >= 0).astype(np.int64) - (
+        match_points(points, vertices, VERBATIM_MM) >= 0
+    ).astype(np.int64)
+    shells = trimesh.graph.connected_components(
+        output.face_adjacency, nodes=np.arange(len(faces)), min_len=1
+    )
+    found = [shell for shell in shells if int(lean[faces[shell]].sum()) > 0]
+    return np.sort(np.concatenate(found)) if found else np.zeros(0, dtype=np.int64)
 
 
 def transfer(
@@ -148,9 +177,13 @@ def transfer(
     *,
     max_pairs: int = MAX_NEAR_PAIRS,
     label: str = "",
+    reverse: bool = False,
 ) -> tuple[list[str], IntArray, int]:
     """Each of ``output``'s faces' code and turn, by the module docstring's rules, and
-    how many faces were carried verbatim. Work past a bound never fails the render: a
+    how many faces were carried verbatim. With ``reverse`` (a mirrored source, whose
+    output faces are wound against it) a face is verbatim when its corners reversed are
+    its source triangle's, and its turn is such that they start where the source's do:
+    the painting is a `Paint.reversed` one. Work past a bound never fails the render: a
     source with too many distinct points in one cell carries nothing, and more than
     ``max_pairs`` candidate pairs leaves the non-verbatim faces in the part's own
     colour; each is appended to ``problems``, led by ``label`` (the scene parts) if given."""
@@ -184,6 +217,9 @@ def transfer(
         found[whole] = np.where(hit < len(known), hit, -1)
     matched = np.flatnonzero(found >= 0)
     own = source.faces[found[matched]]
+    if reverse:
+        # Its code reads its corners in the reverse of the output face's order.
+        own = own[:, ::-1]
     seen = ids[matched]
     turn = (seen == own[:, :1]).argmax(axis=1)
     same = seen[np.arange(len(matched)), (turn + 1) % 3] == own[:, 1]
@@ -191,16 +227,28 @@ def transfer(
     turns[verbatim] = turn[same]
     for row, face in zip(verbatim.tolist(), found[verbatim].tolist(), strict=True):
         codes[row] = source.codes[face]
-    rest = np.setdiff1d(np.arange(len(faces)), verbatim)
+    one_colour: dict[str, str] = {}
+
+    def whole_colour(code: str) -> str:
+        if code not in one_colour:
+            state = uniform_state(code)
+            one_colour[code] = "" if state is None else single_code(state)
+        return one_colour[code]
+
+    # A source triangle's own, wound against the painting's corner order: a shell that
+    # joins a mirrored painting to an unmirrored one (`sides`). Rule 2, from that triangle.
+    lost = 0
+    for row, face in zip(matched[~same].tolist(), found[matched[~same]].tolist(), strict=True):
+        code = source.codes[face]
+        codes[row] = whole_colour(code)
+        lost += bool(code) and not codes[row]
+    if lost:
+        problems.append(
+            f"{lead}{lost} painted faces are joined to a painting mirrored the other way, so "
+            "they print in the part's own colour"
+        )
+    rest = np.setdiff1d(np.arange(len(faces)), matched)
     if len(rest):
-        one_colour: dict[str, str] = {}
-
-        def whole_colour(code: str) -> str:
-            if code not in one_colour:
-                state = uniform_state(code)
-                one_colour[code] = "" if state is None else single_code(state)
-            return one_colour[code]
-
         centres = vertices[faces[rest]].mean(axis=1)
         try:
             nearest, _ = nearest_triangles(
@@ -269,12 +317,14 @@ def _source(
 
 def carry_paint(
     directory: Path, params: Mapping[str, ParamValue], parts: Sequence[ColourPart]
-) -> tuple[list[CarriedPaint | None], list[str]]:
+) -> tuple[list[tuple[CarriedPaint, ...]], list[str]]:
     """For each of ``parts`` (one render of the model in ``directory``, a part per
-    colour), the painting its colour's painted scene parts carry onto it, or None; and
-    the warnings the render gives. A directory with no scene, or a scene with no painted
-    part, gives nothing; one whose model.scad was edited by hand gives the warning."""
-    carried: list[CarriedPaint | None] = [None] * len(parts)
+    colour), the paintings its colour's painted scene parts carry onto it: none, one of
+    the whole part, or one per way a part painted both mirrored and not is split into
+    (each of its `CarriedPaint.faces`, together every face); and the warnings the render
+    gives. A directory with no scene, or a scene with no painted part, gives nothing; one
+    whose model.scad was edited by hand gives the warning."""
+    carried: list[tuple[CarriedPaint, ...]] = [()] * len(parts)
     path = directory / SCENE_NAME
     if not path.is_file():
         return carried, []
@@ -285,7 +335,7 @@ def carry_paint(
         return carried, [HAND_EDITED]
     scene = with_params(scene, params)
     mesh_of = mesh_loader(directory)
-    warnings = paint_warnings(scene)
+    warnings: list[str] = []
     for index, part in enumerate(parts):
         if part.negative:
             continue
@@ -301,10 +351,49 @@ def carry_paint(
         source, problems = _source(directory, members, mesh_of)
         warnings += problems
         label = ", ".join(f"{obj.id} {p.id}" for obj, p in members if p.painted)
-        codes, turns, _ = transfer(part.mesh, source, warnings, label=label)
-        if any(codes):
-            carried[index] = CarriedPaint(Paint(tuple(codes), source.palette), turns)
+        ways = {mirrored(obj) for obj, p in members if p.painted}
+        split: list[tuple[IntArray | None, bool]] = [(None, ways == {True})]
+        if len(ways) == 2:
+            split = _split(part.mesh, members, mesh_of, warnings, label)
+        found = []
+        for faces, reverse in split:
+            codes, turns, _ = transfer(
+                select(part.mesh, faces), source, warnings, label=label, reverse=reverse
+            )
+            found.append(
+                CarriedPaint(Paint(tuple(codes), source.palette, reversed=reverse), turns, faces)
+            )
+        if any(code for paint in found for code in paint.paint.codes):
+            carried[index] = tuple(found)
     return carried, warnings
+
+
+def _split(
+    output: trimesh.Trimesh,
+    members: Sequence[tuple[SceneObject, Part]],
+    mesh_of: MeshOf,
+    warnings: list[str],
+    label: str,
+) -> list[tuple[IntArray | None, bool]]:
+    """The faces of ``output`` (a colour painted both mirrored and not) each way, by
+    :func:`sides`: the whole of it one way when the other has no shell, and unmirrored
+    when the points cannot be matched (said in ``warnings``)."""
+    placed: dict[bool, list[FloatArray]] = {True: [], False: []}
+    for obj, part in members:
+        m, t = placement(obj)
+        placed[mirrored(obj)].append(np.asarray(mesh_of(part.mesh).vertices) @ m.T + t)
+    try:
+        flipped = sides(output, np.concatenate(placed[True]), np.concatenate(placed[False]))
+    except ValueError as error:
+        warnings.append(
+            f"{label}: its mirrored and unmirrored paintings cannot be told apart ({error}), "
+            "so the mirrored ones keep only the triangles that are one colour"
+        )
+        return [(None, False)]
+    rest = np.setdiff1d(np.arange(len(output.faces)), flipped)
+    if not len(flipped) or not len(rest):
+        return [(None, bool(len(flipped)))]
+    return [(rest, False), (flipped, True)]
 
 
 def turned(mesh: trimesh.Trimesh, turns: IntArray) -> trimesh.Trimesh:
@@ -317,22 +406,37 @@ def turned(mesh: trimesh.Trimesh, turns: IntArray) -> trimesh.Trimesh:
     )
 
 
-def write_carried(path: Path, carried: CarriedPaint) -> None:
-    """The carried painting beside a render's layout (`render/jobs.py` `PartSource.paint`)."""
-    document = {
+def write_carried(path: Path, carried: CarriedPaint, faces: int) -> None:
+    """The carried painting beside a render's layout (`render/jobs.py` `PartSource.paint`),
+    of a rendered part of ``faces`` faces: a split one's faces as a mask over them."""
+    document: dict[str, Any] = {
         "codes": list(carried.paint.codes),
         "colours": list(carried.paint.colours),
         "turns": "".join(str(turn) for turn in carried.turns.tolist()),
     }
+    if carried.paint.reversed:
+        document["reversed"] = True
+    if carried.faces is not None:
+        mask = np.zeros(faces, dtype=np.uint8)
+        mask[carried.faces] = 1
+        document["faces"] = "".join(map(str, mask.tolist()))
     path.write_text(json.dumps(document), encoding="utf-8")
 
 
 def read_carried(path: Path, mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, Paint]:
     """What :func:`write_carried` wrote, applied to the part's ``mesh`` as it was re-read
-    from the render: its faces turned, and its painting."""
+    from the render: its faces (a split part's own) turned, and its painting."""
     document = json.loads(path.read_text(encoding="utf-8"))
     codes = tuple(str(code) for code in document["codes"])
     turns = np.array([int(turn) for turn in document["turns"]], dtype=np.int64)
+    if "faces" in document:
+        mask = str(document["faces"])
+        if len(mask) != len(mesh.faces):
+            raise ValueError(f"{path.name} is the painting of another mesh")
+        mesh = select(
+            mesh, np.flatnonzero(np.frombuffer(mask.encode(), dtype=np.uint8) == ord("1"))
+        )
     if len(codes) != len(mesh.faces) or len(turns) != len(mesh.faces):
         raise ValueError(f"{path.name} is the painting of another mesh")
-    return turned(mesh, turns), Paint(codes, tuple(document["colours"]))
+    paint = Paint(codes, tuple(document["colours"]), bool(document.get("reversed", False)))
+    return turned(mesh, turns), paint

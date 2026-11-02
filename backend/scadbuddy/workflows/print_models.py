@@ -290,6 +290,10 @@ class LanUploaded(BaseModel):
     #: The run it was uploaded for (#4543), from ``lan_upload``'s input: ``lan_print``
     #: keys the rack pick it sends by it. ``None`` in a history from before it.
     run_id: str | None = None
+    #: The plate's grams per slot, read from the sliced 3MF (`slice_info.plate_grams`):
+    #: what ``lan_print`` saves the start's use of the native spools by (#4643). Empty
+    #: in a history from before it, or for a file that does not say.
+    grams_by_slot: dict[int, float] = Field(default_factory=dict)
 
 
 class LanPrintInput(BaseModel):

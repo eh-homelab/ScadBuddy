@@ -92,7 +92,6 @@ describe.skipIf(skip !== undefined || AGENT_SESSIONS_SKIP !== '')(`approvals aga
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
       tierOf: (name) => tiers[name],
       mcpServers: () => ({ stub: stubServer() }),
-      approvalPollMs: 50,
       approvalHashKey: HASH_KEY,
       ...extra,
     })

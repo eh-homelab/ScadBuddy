@@ -16,8 +16,11 @@ export const area: AreaId = 'tools'
 export const title = 'Built-in'
 export const order = 10
 
-/** The built-in sources this section shows, in order: ScadBuddy's own plugin's skills and subagents last (#4757). */
-const SHOWN = ['builtin:scadbuddy', 'builtin:browser', 'builtin:http', 'builtin:own-plugin'] as const
+/**
+ * The built-in sources this section shows, in order: ScadBuddy's own plugin's skills and
+ * subagents after its tools (#4757), and Claude Code's own built-ins last (plan 2026-10-13 Step 9.6).
+ */
+const SHOWN = ['builtin:scadbuddy', 'builtin:browser', 'builtin:http', 'builtin:own-plugin', 'builtin:claude-code'] as const
 const shown = (source: SourceView) => (SHOWN as readonly string[]).includes(source.id)
 const rank = (source: SourceView) => (SHOWN as readonly string[]).indexOf(source.id)
 

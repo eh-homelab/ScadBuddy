@@ -34,7 +34,11 @@ describe.skipIf(skip !== '')(`the column-drop migration${skip}`, () => {
   it('drops enabled, tool_tiers and disabled_tools and keeps the rest', async () => {
     expect(await columns()).toEqual(expect.arrayContaining(['enabled', 'tool_tiers', 'disabled_tools']))
     await db.sql`INSERT INTO ai_plugins (name, kind, url) VALUES ('hs', 'remote_mcp', 'https://example.test/mcp')`
+    await db.sql`INSERT INTO ai_access (source, item, access, updated_by) VALUES ('remote:hs', '*', 'on', 'test')`
+    const accessBefore = await db.sql`SELECT source, item, access FROM ai_access ORDER BY source, item`
+    expect(accessBefore).toContainEqual(expect.objectContaining({ source: 'remote:hs', item: '*' }))
     await migrate(db.sql, MIGRATIONS)
+    expect(await db.sql`SELECT source, item, access FROM ai_access ORDER BY source, item`).toEqual(accessBefore)
     const after = await columns()
     expect(after).not.toContain('enabled')
     expect(after).not.toContain('tool_tiers')

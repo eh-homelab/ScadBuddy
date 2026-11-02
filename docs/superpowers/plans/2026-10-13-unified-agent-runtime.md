@@ -1389,6 +1389,22 @@ Decisions Q2, Q3 and Q4.
 operating notes say so.
 **Depends on:** Steps 9.4 and 9.5; Q2, Q3 and Q4. **Closes:** none.
 
+**As built (2026-11-01, #5163).**
+- Q4's measurement came first. In the prod `scadbuddy-agent-worker` pod, `unshare --user
+  --map-root-user --pid --fork` works, but `--mount` is refused under AppArmor, and the image
+  has no `bwrap`. So `Bash` and `PowerShell` are `off` by default, and #779 follows.
+- The task list is kept neither in the transcript nor in the directory. Claude Code keeps it
+  in `$CLAUDE_CONFIG_DIR/tasks/<session id>/` (SDK 0.3.310). That path is linked to the
+  session directory's `_claude/tasks/`, so the files are workspace files. The test moves it
+  between two pods' roots.
+- Durable turns were already gone (Step 8.2), so `turnServers.ts` had no `builtin__` file
+  tools left to drop. `builtinServer` keeps only `WebFetch`, `WebSearch` and the background
+  tools; its input schemas now come from its zod shapes, not `schemas.json`.
+- The `Bash` test does not cover the sandbox's KEK denial, because there is no sandbox.
+  It checks that `Bash` parks as outward once a package switches it on.
+- The evals replay in `pnpm test` (`test/evals.test.ts`). The live run (`pnpm evals`) needs a
+  credential and was not run for this step.
+
 ### Step 9.7: `ai_pending_input` is the record of an open request (R5) (PR, `feat(agent): the gate's record is ai_pending_input`)
 
 Decision Q7.
@@ -1455,6 +1471,17 @@ The old Tasks 9.3 and 9.4.
 **Tests:** `lint-dashboard.sh`, `link-check` on the touched docs, and the agent suite.
 **Rollout:** docs. **Depends on:** Steps 9.2–9.8. **Closes:** none.
 
+**As built (#5177).** The dashboard's "Session runtime" row needed spans the code did not
+emit yet, so the PR adds them: `agent.turn.release` (`RELEASE_SPAN`, `TurnTrace.released`,
+from `sessions/turnHost.ts` when a turn is released), `scadbuddy.continuation` on a
+continued placement's `agent.turn`, and `scadbuddy.task_queue` on each ToolCall activity's
+`agent.tool/<name>`. The warm hit ratio is `rate() by (span.warm.outcome)` stacked to 100%,
+since a TraceQL target cannot divide and the lint admits no expression target. The flag was
+already on in prod (2026-11-01); its removal also takes away the off switch, and rolling
+back means reverting the PR (#5155 tracks the first real call through the path).
+`docs/ai/headless-browser.md` and the Settings → Assistant → Runtime help text named the
+flag or the old runtime too, and are updated with the listed docs.
+
 ---
 
 ## Phase 10: Drop retired columns and tables (PR 10, `chore(agent): drop the durable-era columns`)
@@ -1502,6 +1529,13 @@ container polls only its own `agent-tools.<identity>`, for `bridge.tab` (#4806).
 that Deployment is `RollingUpdate` from Step 6.2 on.
 
 ### Task 11.1: Design check (gate)
+
+**Result (2026-11-01):** the gate as written fails: for seconds after a switch an unversioned or
+another deployment's caller can still reach the old build (measured in CI). The user chose to
+version anyway and have a flow ask again for a name the replica that answered lacks; see
+[`2026-10-13-unified-agent-runtime-phase-11.md`](2026-10-13-unified-agent-runtime-phase-11.md).
+It also changes three things below: the host queues stay unversioned (its finding 3), Task 11.3
+was already done by #4090, and Task 11.4 keeps `maxSurge: 1, maxUnavailable: 0`.
 
 - [ ] **Write the check.** Write `docs/superpowers/plans/2026-10-13-unified-agent-runtime-phase-11.md`. It records how Worker Deployment versioning routes activity tasks on a queue that both of these schedule onto:
   - a versioned workflow (`AgentSession`, `AgentOperation` once versioned);

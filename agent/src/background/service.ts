@@ -1,20 +1,46 @@
+import { schedulable } from './schedule.js'
 import { type BackgroundTask, type BackgroundTaskStore, type NewTask } from './store.js'
 
 // A session's background tasks as the tools and the panel use them: a task is a row
-// (store.ts) and a Temporal workflow `bgtask-<session id>-<id>` that fires it
-// (temporal/backgroundTask.ts). Creating starts the workflow; cancelling cancels it,
-// and the workflow ends the row.
+// (store.ts) and what fires it on Temporal: a recurring cron job is a Schedule
+// `bgtask-<session id>-<id>` whose every fire is a short `BackgroundFire` workflow
+// (plan 2026-10-13 Step 9.8); any other task is a workflow `bgtask-<session id>-<id>`
+// (temporal/backgroundTask.ts). Creating starts it; cancelling ends it, and the fire or the
+// workflow ends the row.
 
 export const BACKGROUND_WORKFLOW = 'BackgroundTask'
 /** Names the session, so the payload codec seals the task's payloads under its key. */
 export const backgroundWorkflowId = (sessionId: string, taskId: string) => `bgtask-${sessionId}-${taskId}`
 
+/** One fire of a recurring cron job's Schedule. */
+export const BACKGROUND_FIRE_WORKFLOW = 'BackgroundFire'
+/**
+ * The Schedule's action's workflow id; Temporal adds each fire's time (`-<RFC 3339>`), which
+ * the fire reads its session and task from (temporal/backgroundTask.ts `fireTask`). It
+ * carries no arguments, so nothing of the task is in a fire's input. Its payloads are left
+ * unsealed on purpose (payloadCodec.ts `subjectOf` names no subject for it): they are the
+ * task's id and the fire's outcome, never the prompt, which each activity reads from the row.
+ */
+export const backgroundFireId = (sessionId: string, taskId: string) => `bgfire-${sessionId}-${taskId}`
+
+/**
+ * Whether a task is fired by a Schedule: a recurring cron job whose cron a Schedule can
+ * express. One stored with `L`, `W`, `#` or `?` before CronCreate refused them keeps its
+ * `BackgroundTask` workflow until it expires.
+ */
+export const isScheduled = (task: Pick<BackgroundTask, 'kind' | 'spec'>): boolean =>
+  task.kind === 'cron' && task.spec.recurring !== false && schedulable(String(task.spec.cron))
+
+/** What a runner needs of a task to start it. */
+export type StartedTask = Pick<BackgroundTask, 'id' | 'kind' | 'sessionId' | 'spec' | 'expiresAt'>
+
 /** What runs the tasks: Temporal in the service (temporal.ts), a stand-in in tests. */
 export type TaskRunner = {
-  start(task: Pick<BackgroundTask, 'id' | 'kind' | 'sessionId'>): Promise<void>
-  /** Cancels a task's workflow; one that is not running is left as it is. */
+  /** `end`: the task has nothing to run (a recurring job with no occurrence before its expiry), so its row ends `done` with that detail. */
+  start(task: StartedTask): Promise<void | { end: string }>
+  /** Cancels a task's workflow, or deletes its Schedule; one that is not running is left as it is. */
   cancel(task: Pick<BackgroundTask, 'id' | 'sessionId'>): Promise<void>
-  /** Ends a task's workflow at once, running nothing more (the session is being forgotten). */
+  /** Ends a task's workflow, or its Schedule and its running fire, at once, running nothing more (the session is being forgotten). */
   terminate(task: Pick<BackgroundTask, 'id' | 'sessionId'>, reason: string): Promise<void>
 }
 
@@ -30,11 +56,16 @@ export class BackgroundTasks {
   async create(t: NewTask): Promise<BackgroundTask | undefined> {
     const row = await this.store.create(t)
     if (!row) return undefined
+    let started: void | { end: string }
     try {
-      await this.#runner.start(row)
+      started = await this.#runner.start(row)
     } catch (err) {
       await this.store.finish(row.id, 'failed', `it could not be started: ${(err as Error).message}`)
       throw err
+    }
+    if (started) {
+      await this.store.finish(row.id, 'done', started.end)
+      return { ...row, state: 'done', detail: started.end }
     }
     return row
   }

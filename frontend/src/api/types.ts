@@ -28,6 +28,8 @@ export type Asset = Schemas['AssetMeta']
 /** #296 — how much the upload store holds, against its caps (0 is no limit). */
 export type AssetUsage = Schemas['AssetUsage']
 export type StoreUsage = Schemas['StoreUsage']
+export type GitRemoteStatus = Schemas['GitRemoteStatus']
+export type RepositoryLag = Schemas['RepositoryLag']
 
 export type ModelSummary = Schemas['ModelRecord']
 /** #274 — one image or video of a template, in its order; the first is the cover. */
@@ -376,13 +378,22 @@ export type QuoteLine = Schemas['QuoteLine']
 export type Filament = Schemas['Filament']
 export type FilamentInput = Defaulted<Schemas['FilamentInput'], 'subtype' | 'brand' | 'colour_name' | 'density_g_cm3'>
 export type FilamentPatch = Partial<Schemas['FilamentPatch']>
+/** ScadBuddy's own spools (#4643), the native spool provider's records; not Bambuddy's inventory. */
+export type NativeSpool = Schemas['NativeSpool']
+export type NativeSpoolCreate = Schemas['NativeSpoolCreate']
+export type NativeSpoolPatch = Schemas['NativeSpoolPatch']
 export type PricingPolicy = Schemas['PricingPolicy']
 /** `PUT /orders/price-book`: the whole policy, and the estimate's factor when sent. */
 export type PolicyUpdate = Defaulted<Schemas['PolicyUpdate'], 'rough_estimate_factor'>
 export type PriceBook = Schemas['PriceBook']
+export type SpoolImport = Schemas['SpoolImport']
+export type SpoolImportRow = Schemas['SpoolImportRow']
 /** `POST …/items/{item}/quote`: the print dialog's choices, and a price-book filament per
  * colour slot (`colours[].slot`, from 0). */
 export type SliceQuoteRequest = Schemas['SliceQuoteRequest']
+/** #4719 — `POST …/items/{item}/print`: the print dialog's printer, spools and choices; the
+ * item's copies, plates and request id are the server's. */
+export type OrderItemPrintRequest = Pick<RegistryRunRequest, 'printer' | 'printer_id' | 'filament_plan' | 'choices'>
 export type OrderEstimate = Schemas['OrderEstimate']
 
 /** The API's `ActivityItem`: the backend's `ActivityRow` as answered (advanced fields only with `?advanced=1`). */

@@ -205,6 +205,15 @@ function ancestors(element: Element): Element[] {
 }
 
 export function isUserOnly(element: Element): boolean {
+  return isWithin(element, `[${USER_ONLY_ATTRIBUTE}]`)
+}
+
+/**
+ * Whether `element` is inside one matching `selector`, as `isUserOnly` counts "inside":
+ * its DOM ancestors, the elements React rendered it inside (through a portal too), and
+ * the elements whose `aria-controls` name any of those.
+ */
+export function isWithin(element: Element, selector: string): boolean {
   const controllers = new Map<string, Element[]>()
   for (const controller of element.ownerDocument.querySelectorAll('[aria-controls]')) {
     for (const id of (controller.getAttribute('aria-controls') ?? '').split(/\s+/)) {
@@ -216,7 +225,7 @@ export function isUserOnly(element: Element): boolean {
     for (const node of ancestors(start)) {
       if (seen.has(node)) continue
       seen.add(node)
-      if (node.hasAttribute(USER_ONLY_ATTRIBUTE)) return true
+      if (node.matches(selector)) return true
       if (node.id && (controllers.get(node.id) ?? []).some(check)) return true
     }
     return false

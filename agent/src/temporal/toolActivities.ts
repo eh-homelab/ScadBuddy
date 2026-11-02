@@ -770,10 +770,14 @@ export function toolCallActivities(tools: readonly Tool[], deps: ToolActivityDep
         }
         let run: ToolRun
         try {
-          // Under the call's span in the turn's trace, as an in-process call's backend requests are (spec 2026-10-01 §5.4).
+          // Under the call's span in the turn's trace, as an in-process call's backend requests are (spec 2026-10-01 §5.4),
+          // with the queue it ran on (the agent dashboard's tool activities by queue, plan 2026-10-13 Step 9.9).
           run = await withSpan(
             `agent.tool/${tool.name}`,
-            { parent: contextFrom(args.traceparent, otelContext.active()), attributes: { 'scadbuddy.tool': tool.name, 'scadbuddy.tier': tool.risk } },
+            {
+              parent: contextFrom(args.traceparent, otelContext.active()),
+              attributes: { 'scadbuddy.tool': tool.name, 'scadbuddy.tier': tool.risk, 'scadbuddy.task_queue': context.info.taskQueue },
+            },
             async (span) => {
               const done = await runGated(tool, args.input, { ...quiet, services }, lookup, caller, {
                 toolUseId,
