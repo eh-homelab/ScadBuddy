@@ -25,8 +25,25 @@ describe('adoptAppStyles', () => {
     document.head.append(style)
     const root = shadowRoot()
     adoptAppStyles(root)
-    expect(root.adoptedStyleSheets).toHaveLength(2)
+    expect(root.adoptedStyleSheets).toHaveLength(3)
     expect(rulesOf(root)).toContain('.probe-rule')
+  })
+
+  // #736 — the template base sheet comes last and never outranks a template's own rule.
+  it('adopts the template base sheet last, every selector of it zero specificity', () => {
+    const root = shadowRoot()
+    adoptAppStyles(root)
+    const base = root.adoptedStyleSheets[2]
+    expect(Array.from(base?.cssRules ?? [], (rule) => rule.cssText).join('\n')).toContain(':where(.sb-stack)')
+    const selectors = Array.from(base?.cssRules ?? []).flatMap((rule) =>
+      rule instanceof CSSMediaRule ? Array.from(rule.cssRules) : [rule],
+    )
+    expect(selectors.length).toBeGreaterThan(0)
+    for (const rule of selectors) {
+      expect(rule).toBeInstanceOf(CSSStyleRule)
+      // `:where(…)` alone, or `:where(…):not(:where(…) *)`: both are (0, 0, 0).
+      expect((rule as CSSStyleRule).selectorText).toMatch(/^:where\([^]*\)(:not\(:where\([^]*\) \*\))?$/)
+    }
   })
 
   // #1738 — a template's preview keeps the page's own bound on a short window.
