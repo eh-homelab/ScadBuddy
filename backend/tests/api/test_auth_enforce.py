@@ -21,9 +21,11 @@ from scadbuddy.auth.check import FORBIDDEN, SIGNED_OUT
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import SESSION_COOKIE
 from scadbuddy.auth.oidc import OidcClient
+from scadbuddy.auth.service_credentials import ServiceCaller, TokenReader
 from scadbuddy.auth.start_check import LoginNotUsableError
 from scadbuddy.core.settings import AuthMode, Settings
 from scadbuddy.main import create_app
+from tests.api.test_customers import ADA
 from tests.auth.fake_oidc import CLIENT_ID, CLIENT_SECRET, ISSUER, FakeIssuer
 
 PUBLIC = "https://scadbuddy.test"
@@ -221,3 +223,34 @@ def test_a_revoked_session_closes_its_socket_with_4401(
             for _ in range(5):
                 socket.receive_json()
     assert closed.value.code == 4401
+
+
+# Author headers (§7.3): in `enforce` a refused author is refused, never recorded.
+
+
+def _bearer(client: TestClient, settings: Settings, caller: ServiceCaller) -> dict[str, str]:
+    app = client.app
+    assert isinstance(app, FastAPI)
+    kek = getattr(app.state, STATE_ATTR).settings_store.kek
+    token = TokenReader(caller, settings.database_url, kek).token()
+    assert token is not None
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.parametrize(("caller", "refused"), [("projects", True), ("agent", False)])
+def test_a_refused_author_is_refused_and_records_nothing(
+    enforced: TestClient, settings: Settings, caller: ServiceCaller, refused: bool
+) -> None:
+    """The projects worker may name only its run's starter (a run token proves which);
+    the agent's credential is believed, the control that keeps this from being vacuous."""
+    headers = {"X-ScadBuddy-Agent-Author": "token:forged", **_bearer(enforced, settings, caller)}
+    response = enforced.post("/api/v1/customers", json=ADA, headers=headers)
+    if refused:
+        assert response.status_code == 403, response.text
+    else:
+        assert response.status_code == 201, response.text
+    _sign_in(enforced)
+    listed = enforced.get("/api/v1/customers", headers=HEADER)
+    assert listed.status_code == 200
+    names = [customer["display_name"] for customer in listed.json()]
+    assert names == ([] if refused else [ADA["display_name"]])
