@@ -359,11 +359,14 @@ jobs:
                  style, table delimiter spacing). Linters own those.
                - Phrasing and clarity: a sentence that "reads oddly", repeats
                  itself, or could be shorter. If it is true, it is not a finding.
-               - Problems in files or lines this diff does not change. They are
-                 outside the PR's scope. Do not list them with a disclaimer such
-                 as "pre-existing" or "outside this diff" — leave them out. The
-                 one exception is a claim this diff made false, which is Blocking
-                 wherever its copies live (above).
+               - Pre-existing problems that this diff neither causes, exposes
+                 nor worsens. Do not list them with a disclaimer such as
+                 "pre-existing" or "outside this diff" — leave them out. This
+                 does NOT exempt unchanged code: anything this diff causes is in
+                 scope wherever it surfaces, and is classified by the rules
+                 above — a caller, importer or consumer it breaks, an unchanged
+                 path or sink it makes reachable or exposes, a weakened check
+                 elsewhere, and a claim it made false.
                - Things you could not check (a network call denied, a 403 on
                  check runs), and checks to run after merge (watch the deploy,
                  confirm a status). These are not findings. List them on one

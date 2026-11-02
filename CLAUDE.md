@@ -1230,9 +1230,10 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   issue for the PR. Non-blocking findings never gate. A comment or doc that **this diff
   made false** (the PR changed a value and left text describing the old one) is Blocking
   when the correct text is unambiguous, listed with every copy grep finds in one finding
-  and raised once; phrasing never blocks. Cosmetic details, phrasing nits, lines the diff
-  does not change, and checks the review could not run are left out of both sections
-  (the last on one `Unverified:` line). Ported from eh-homelab/clusters#2989 and #3055,
+  and raised once; phrasing never blocks. Cosmetic details, phrasing nits, pre-existing
+  problems the diff neither causes nor exposes, and checks the review could not run are
+  left out of both sections (the last on one `Unverified:` line). Anything the diff
+  causes is in scope wherever it surfaces, unchanged code included. Ported from eh-homelab/clusters#2989 and #3055,
   where those stale comments had been listed as Non-blocking on almost every PR and
   never fixed after merge. A person adding the
   `claude-make-follow-up-issues` label to the PR files every outstanding finding as
