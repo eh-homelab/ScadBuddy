@@ -3,7 +3,8 @@
 # The login against a real stack in three browsers (#4975 phase 7, spec 2026-11-01 §11):
 # `run.sh --auth [--keep] [--no-build]` runs this. ScadBuddy in `observe` with its login
 # on, behind an https edge, signing in through the fake issuer (compose.auth.yaml), and
-# frontend/e2e/real-auth.spec.ts in the Playwright image's Chromium, Firefox and WebKit.
+# frontend/e2e/real-auth.spec.ts in the Playwright image's Chromium, Firefox and WebKit;
+# then the same app restarted in `enforce` and the spec's enforce tests (#4975 phase 8).
 #
 # It builds `runtime` as SB_HOTPATH_APP_IMAGE and `test` as SB_HOTPATH_TOOLS_IMAGE (unless
 # --no-build), as run.sh does, and needs docker with compose v2, curl, python3 and the
@@ -79,8 +80,9 @@ done
 up=1
 "${compose[@]}" up -d --wait --wait-timeout 300 postgres temporal s3 oidc edge app
 
-# The login on, for the fake issuer's one user (`off` and `observe` let anyone write the
-# config; phase 8's `enforce` will need the break-glass session for it).
+# The login on, for the fake issuer's one user, in `observe`, which lets anyone write the
+# config: the README's order (configure the login before `enforce`, which then needs a
+# person's session for it).
 api="http://127.0.0.1:${SB_AUTH_APP_PORT:-18090}/api/v1"
 body="$(python3 -c 'import json, os; print(json.dumps({"enabled": True, "client_secret": os.environ["SB_AUTH_CLIENT_SECRET"], "allowed_subjects": ["alice"], "rp_logout": True}))')"
 curl --fail --silent --show-error --output /dev/null -X PUT -H 'Content-Type: application/json' \
@@ -108,6 +110,14 @@ umask 022
 # The Playwright container runs as this user and reads it through the mount.
 chmod 0600 "$state/agent-token"
 
+engines=(--project=auth-chromium --project=auth-firefox --project=auth-webkit --workers=1)
+export SB_AUTH_MODE=observe
 "${compose[@]}" run --rm --user "$(id -u):$(id -g)" playwright \
-  ./node_modules/.bin/playwright test e2e/real-auth.spec.ts --project=auth-chromium \
-  --project=auth-firefox --project=auth-webkit --workers=1 --output test-results/auth
+  ./node_modules/.bin/playwright test e2e/real-auth.spec.ts "${engines[@]}" --output test-results/auth
+
+# #4975 phase 8: the same app in `enforce`, the login saved above. Its start checks the
+# login (spec 2026-11-01 §9.1), so `--wait` failing here is that check refusing.
+export SB_AUTH_MODE=enforce
+"${compose[@]}" up -d --wait --wait-timeout 300 app
+"${compose[@]}" run --rm --user "$(id -u):$(id -g)" playwright \
+  ./node_modules/.bin/playwright test e2e/real-auth.spec.ts "${engines[@]}" --output test-results/auth-enforce

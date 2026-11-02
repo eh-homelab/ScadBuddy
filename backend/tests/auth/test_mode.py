@@ -1,5 +1,5 @@
-"""``SCADBUDDY_AUTH_MODE`` (#4975, spec 2026-11-01 §9.1): `off` by default, and the
-modes no gate implements yet stop the start."""
+"""``SCADBUDDY_AUTH_MODE`` (#4975, spec 2026-11-01 §9.1): `off` by default, and
+an unknown mode stops the start."""
 
 from __future__ import annotations
 
@@ -29,10 +29,10 @@ def test_observe(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _settings().auth_mode == "observe"
 
 
-def test_enforce_stops_the_start_until_it_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_enforce(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#4975 phase 8: taken here; the start check is the app's (`auth/start_check.py`)."""
     monkeypatch.setenv("SCADBUDDY_AUTH_MODE", "enforce")
-    with pytest.raises(ValidationError, match="SCADBUDDY_AUTH_MODE=enforce is not available"):
-        _settings()
+    assert _settings().auth_mode == "enforce"
 
 
 def test_an_unknown_mode_stops_the_start(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { clientMessage } from './protocol'
-import { createSocketTransport, MAX_QUEUED, REFUSED_AFTER, REFUSED_MESSAGE } from './socketTransport'
+import { clearSignedOut, isSignedOut, setEnforced } from '../../lib/signedOut'
+import { createSocketTransport, MAX_QUEUED, REFUSED_AFTER, REFUSED_MESSAGE, SIGNED_OUT_MESSAGE } from './socketTransport'
 
 /** Just enough of a browser WebSocket for the transport. */
 class FakeSocket {
@@ -220,5 +221,32 @@ describe('createSocketTransport', () => {
     answer(true)
     await vi.advanceTimersByTimeAsync(0)
     expect(onClose).not.toHaveBeenCalledWith(REFUSED_MESSAGE)
+  })
+})
+
+describe('createSocketTransport signed out (#4975 phase 8)', () => {
+  beforeEach(() => {
+    FakeSocket.instances = []
+    vi.useFakeTimers()
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('says so after a 4401 under enforce and reconnects only once signed in', () => {
+    setEnforced(true)
+    const t = createSocketTransport({ WebSocketImpl: Impl, baseMs: 10 })
+    const closes: string[] = []
+    t.connect({ onFrame: () => {}, onClose: (m?: string) => void closes.push(m ?? '') })
+    FakeSocket.instances[0]!.open()
+    FakeSocket.instances[0]!.drop(4401)
+    expect(isSignedOut()).toBe(true)
+    expect(closes).toEqual([SIGNED_OUT_MESSAGE])
+    expect(t.send(attach)).toBe('queued')
+    vi.advanceTimersByTime(60_000)
+    expect(FakeSocket.instances).toHaveLength(1)
+    clearSignedOut()
+    expect(FakeSocket.instances).toHaveLength(2)
+    FakeSocket.instances[1]!.open()
+    expect(FakeSocket.instances[1]!.sent).toEqual([JSON.stringify(attach)])
+    t.close()
   })
 })

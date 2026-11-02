@@ -242,6 +242,7 @@ import type {
 } from './aiCredential'
 import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
 import { REQUEST_HEADER } from '../lib/requestHeader'
+import { isSignedOutResponse, noteSignedOut, SIGNED_OUT_PROBLEM } from '../lib/signedOut'
 import { ordersApiParams, type OrdersQuery } from '../lib/ordersQuery'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
@@ -450,7 +451,10 @@ function xhrProblem(xhr: XMLHttpRequest): Problem {
   } catch {
     return withRetryAfter(unansweredProblem(xhr.status, xhr.statusText), xhr.getResponseHeader('Retry-After'))
   }
-  return withRetryAfter(parsedProblem(body, xhr.status, xhr.statusText), xhr.getResponseHeader('Retry-After'))
+  const problem = parsedProblem(body, xhr.status, xhr.statusText)
+  // #4975 phase 8: as `send` notes a fetch's.
+  if (xhr.status === 401 && problem.type === SIGNED_OUT_PROBLEM) noteSignedOut()
+  return withRetryAfter(problem, xhr.getResponseHeader('Retry-After'))
 }
 
 /** `fetch`, with a request that got no answer as an `ApiError`. An abort is passed through. */
@@ -463,6 +467,12 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
   try {
     const response = await fetch(url, init)
     answered(response.headers)
+    // #4975 phase 8: the gate's "sign in" (SCADBUDDY_AUTH_MODE=enforce), noted for the shell.
+    if (response.status === 401) {
+      void isSignedOutResponse(response).then((signedOut) => {
+        if (signedOut) noteSignedOut()
+      })
+    }
     return response
   } catch (cause) {
     answered(undefined)

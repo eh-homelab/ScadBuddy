@@ -7,6 +7,7 @@ import {
   CACHE_MS,
   personSessions,
   SESSION_COOKIE,
+  SIGNED_OUT_PROBLEM,
   sessionIdHash,
 } from '../src/auth/browserSession.js'
 import type { BusEvent, EventListener } from '../src/events/bus.js'
@@ -26,10 +27,11 @@ function fakeSql(rows: () => unknown[]): { sql: Sql; reads: () => number; params
   return { sql, reads: () => params.length, params }
 }
 
-function app(sessions: BrowserSessions | undefined, mode: 'off' | 'observe' = 'off', log: (m: string) => void = () => {}) {
+function app(sessions: BrowserSessions | undefined, mode: 'off' | 'observe' | 'enforce' = 'off', log: (m: string) => void = () => {}) {
   const hono = new Hono()
   hono.use('/api/v1/ai/*', personSessions(sessions, mode, log))
   hono.get('/api/v1/ai/who', (c) => c.json(browserUser(c)))
+  hono.get('/api/v1/ai/plugin-oauth/callback', (c) => c.text('ok'))
   return hono
 }
 
@@ -98,6 +100,33 @@ describe('personSessions', () => {
     const off: string[] = []
     await app(undefined, 'off', (m) => off.push(m)).request('/api/v1/ai/who')
     expect(off).toHaveLength(0)
+  })
+})
+
+describe('personSessions in enforce (#4975 phase 8)', () => {
+  it("refuses a request with no live session with the backend's 401 problem", async () => {
+    const lines: string[] = []
+    const refused = await app(new BrowserSessions(fakeSql(() => []).sql), 'enforce', (m) => lines.push(m)).request(
+      '/api/v1/ai/who',
+      withCookie,
+    )
+    expect(refused.status).toBe(401)
+    expect(refused.headers.get('content-type')).toContain('application/problem+json')
+    expect(((await refused.json()) as { type: string }).type).toBe(SIGNED_OUT_PROBLEM)
+    expect((await app(undefined, 'enforce').request('/api/v1/ai/who')).status).toBe(401)
+    expect(lines).toHaveLength(0)
+  })
+
+  it('serves a signed-in person and a delegated session', async () => {
+    const person = fakeSql(() => [{ principal: PERSON, name: 'Alice', kind: 'login' }])
+    const served = await app(new BrowserSessions(person.sql), 'enforce').request('/api/v1/ai/who', withCookie)
+    expect(((await served.json()) as { id: string }).id).toBe(PERSON)
+    const delegated = fakeSql(() => [{ principal: PERSON, name: null, kind: 'delegated' }])
+    expect((await app(new BrowserSessions(delegated.sql), 'enforce').request('/api/v1/ai/who', withCookie)).status).toBe(200)
+  })
+
+  it('serves the plugin OAuth callback, a cross-site redirect with no session cookie', async () => {
+    expect((await app(undefined, 'enforce').request('/api/v1/ai/plugin-oauth/callback?code=c&state=s')).status).toBe(200)
   })
 })
 

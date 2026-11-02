@@ -6,8 +6,8 @@ route is ``api``. ``tests/auth/test_routes.py`` fails for a name here that match
 route, and for an endpoint that refuses agents (``_browser_only``) that is not
 ``person``.
 
-:func:`would_refuse` says why ``enforce`` would refuse a request, or ``None``. In
-``observe`` that is only counted (``auth/check.py``); nothing here refuses.
+:func:`would_refuse` says why ``enforce`` refuses a request, or ``None``.
+``auth/check.py`` refuses it in ``enforce`` and counts it in ``observe``.
 """
 
 from __future__ import annotations

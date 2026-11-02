@@ -51,6 +51,7 @@ import { panelWasOpen, reloaded, rememberPanelOpen, rememberSession } from './as
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { ActivityBell } from './activity/ActivityBell'
 import { AccountMenu } from './auth/AccountMenu'
+import { SignInRequired } from './auth/SignInRequired'
 import { useApprovalToasts } from '../agent/pendingApprovals'
 import { Toasts } from './ui/Toasts'
 import { Badge } from '@/components/ui/badge'
@@ -352,6 +353,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                 <LiveUpdatesIndicator />
                 <ActivityBell />
                 <AccountMenu />
+                <SignInRequired />
                 {shown && (
                   // Announces the badge (#815): it appears while focus is elsewhere, so the
                   // button's own name changing is not enough. A bare live region, not

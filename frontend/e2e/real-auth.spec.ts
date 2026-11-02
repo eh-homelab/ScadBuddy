@@ -12,27 +12,36 @@ import { expect, test, type APIRequestContext, type BrowserContext, type Frame, 
  * site `https://e2e.test`; `test` is not on the Public Suffix List) and
  * `bambuddy.elsewhere.test` is not. Those two are where spec §6.1's and §6.3's assumptions
  * are measured.
+ *
+ * #4975 phase 8: `run.sh --auth` then restarts the app in `enforce` (E2E_AUTH_MODE) and runs
+ * the second describe here: an unauthenticated request refused, a signed-out page sent to
+ * the sign-in and back, and a revoked session's socket closed with 4401.
  */
 
 const enabled = !!process.env.E2E_AUTH
+const mode = process.env.E2E_AUTH_MODE ?? 'observe'
 const state = process.env.E2E_AUTH_STATE ?? ''
 const ISSUER = 'https://idp.e2e.test'
 const ALICE = `user:${ISSUER}#alice`
 const SANDBOX = 'allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox'
 
+async function session(target: Page | Frame): Promise<{ signed_in: boolean; kind?: string }> {
+  return target.evaluate(async () => (await (await fetch('/api/v1/auth/session')).json()) as { signed_in: boolean; kind?: string })
+}
+
+/** The session as the browser's own cookies make it, without the page (which may be navigating). */
+async function cookieSession(page: Page): Promise<{ signed_in: boolean; kind?: string; mode?: string }> {
+  return (await (await page.context().request.get('/api/v1/auth/session')).json()) as {
+    signed_in: boolean
+    kind?: string
+    mode?: string
+  }
+}
+
 test.describe('the login on a real stack', () => {
-  test.skip(!enabled, 'needs the stack e2e-stack/run.sh --auth brings up')
+  test.skip(!enabled || mode !== 'observe', 'needs the stack e2e-stack/run.sh --auth brings up, in observe')
   // Each test signs in through the issuer at least once, some twice.
   test.describe.configure({ timeout: 90_000 })
-
-  async function session(target: Page | Frame): Promise<{ signed_in: boolean; kind?: string }> {
-    return target.evaluate(async () => (await (await fetch('/api/v1/auth/session')).json()) as { signed_in: boolean; kind?: string })
-  }
-
-  /** The session as the browser's own cookies make it, without the page (which may be navigating). */
-  async function cookieSession(page: Page): Promise<{ signed_in: boolean; kind?: string }> {
-    return (await (await page.context().request.get('/api/v1/auth/session')).json()) as { signed_in: boolean; kind?: string }
-  }
 
   async function signInTopLevel(page: Page) {
     await page.goto('/')
@@ -149,6 +158,72 @@ test.describe('the login on a real stack', () => {
     // Once only.
     const again = await page.context().request.get(url, { maxRedirects: 0 })
     expect(again.status()).toBe(400)
+  })
+})
+
+test.describe('enforce on a real stack (#4975 phase 8)', () => {
+  test.skip(!enabled || mode !== 'enforce', 'needs the stack e2e-stack/run.sh --auth brings up, in enforce')
+  test.describe.configure({ timeout: 90_000 })
+
+  /** Signed out, the page goes to the sign-in itself; the fake issuer signs Alice in. */
+  async function signIn(page: Page, path = '/') {
+    await page.goto(path)
+    await expect(page.getByRole('button', { name: 'Account: Alice' })).toBeVisible({ timeout: 30_000 })
+  }
+
+  test('refuses an unauthenticated request', async ({ playwright, baseURL }) => {
+    const anonymous = await playwright.request.newContext({ baseURL, ignoreHTTPSErrors: true })
+    try {
+      const models = await anonymous.get('/api/v1/models')
+      expect(models.status()).toBe(401)
+      expect(await models.json()).toMatchObject({ type: 'https://scadbuddy.dev/problems/auth/signed-out' })
+      const internal = await anonymous.get('/api/v1/internal/outputs/nope/model.3mf')
+      expect(internal.status()).toBe(401)
+      expect(internal.headers()['www-authenticate']).toBe('Bearer realm="scadbuddy"')
+      // What signs a person in stays open.
+      expect((await anonymous.get('/healthz')).status()).toBe(200)
+      expect(await (await anonymous.get('/api/v1/auth/session')).json()).toMatchObject({ signed_in: false, mode: 'enforce' })
+    } finally {
+      await anonymous.dispose()
+    }
+  })
+
+  test('sends a signed-out page to the sign-in and back to where it was', async ({ page }) => {
+    await signIn(page, '/settings/system')
+    expect(new URL(page.url()).pathname).toBe('/settings/system')
+    expect(await cookieSession(page)).toMatchObject({ signed_in: true, mode: 'enforce' })
+  })
+
+  test('a revoked session closes its socket with 4401 and the page asks to sign in again', async ({ page, browser }) => {
+    await signIn(page)
+    // A socket of the page's own, to read the close code the server sends.
+    const url = `wss://${new URL(page.url()).host}/api/v1/ws`
+    await page.evaluate(
+      (target) =>
+        new Promise<void>((resolve, reject) => {
+          const socket = new WebSocket(target)
+          const record = globalThis as unknown as { closeCode?: number }
+          socket.onopen = () => resolve()
+          socket.onclose = (event) => {
+            record.closeCode = event.code
+            reject(new Error(`closed ${event.code} before it opened`))
+          }
+        }),
+      url,
+    )
+    const other = await browser.newContext({ ignoreHTTPSErrors: true })
+    try {
+      const second = await other.newPage()
+      await signIn(second, '/settings/system#signed-in-sessions')
+      await second.getByRole('button', { name: 'Sign out everywhere' }).click()
+      await expect
+        .poll(() => page.evaluate(() => (globalThis as unknown as { closeCode?: number }).closeCode), { timeout: 15_000 })
+        .toBe(4401)
+      // The page is kept under the sign-in dialog rather than reconnecting signed out.
+      await expect(page.getByRole('alertdialog', { name: 'Sign in to continue' })).toBeVisible({ timeout: 15_000 })
+    } finally {
+      await other.close()
+    }
   })
 })
 
