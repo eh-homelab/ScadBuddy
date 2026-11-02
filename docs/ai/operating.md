@@ -98,8 +98,9 @@ covers the same ground more briefly.
   A new replica's tab has no row until its host worker polls, so for those first seconds
   of its start a call from another replica answers "not connected" (an old replica could
   reach it through the Postgres relay before).
-  `ai_bridge_messages` stays until #5109, because a replica of the build before #4868
-  still writes it for a tab it finds no live owner for. `agent-tools` was unversioned
+  `ai_bridge_messages` stayed for one release, because a replica of the build before #4868
+  still wrote it for a tab it found no live owner for; #5109 drops it, once every replica
+  runs #4868's build. `agent-tools` was unversioned
   then, so while an old replica still polled it, it could take a `BridgeCall` workflow task. It
   has no such workflow, so it fails the task, and Temporal gives the task again to a
   replica that may be another old one. The workflow's execution timeout leaves 15 s
