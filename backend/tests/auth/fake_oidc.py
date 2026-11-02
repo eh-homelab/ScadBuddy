@@ -5,7 +5,10 @@ so no port is opened. ``misbehave`` makes the next ID tokens wrong in one way ea
 
 The browser's leg (the authorize page) is :meth:`FakeIssuer.authorize`: a test reads the
 query ``/auth/login`` redirected to and asks for a code, as a signed-in user's browser
-would get one.
+would get one. A real browser gets the same at ``GET /authorize`` (signed in as ``user``
+with no form, redirected back with the code), and ``GET /logout`` ends at the
+``post_logout_redirect_uri``: the e2e stack serves this app as its IdP container
+(``e2e-stack/fake-oidc/``), where ``POST /__misbehave`` sets :attr:`misbehave`.
 """
 
 from __future__ import annotations
@@ -17,14 +20,14 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import httpx
 from joserfc import jwt
 from joserfc.jwk import KeySet, OctKey, RSAKey
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 ISSUER = "https://idp.test"
@@ -70,6 +73,9 @@ class FakeIssuer:
                 Route("/.well-known/openid-configuration", self._discovery),
                 Route("/jwks", self._jwks),
                 Route("/token", self._token, methods=["POST"]),
+                Route("/authorize", self._authorize_page),
+                Route("/logout", self._logout),
+                Route("/__misbehave", self._set_misbehaviour, methods=["POST"]),
             ]
         )
 
@@ -92,6 +98,26 @@ class FakeIssuer:
             claims=dict(self.user),
         )
         return {"code": code, "state": query["state"]}
+
+    async def _authorize_page(self, request: Request) -> Response:
+        try:
+            answer = self.authorize(str(request.url))
+        except (AssertionError, KeyError):
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
+        redirect_uri = request.query_params["redirect_uri"]
+        separator = "&" if "?" in redirect_uri else "?"
+        return RedirectResponse(f"{redirect_uri}{separator}{urlencode(answer)}", status_code=302)
+
+    async def _logout(self, request: Request) -> Response:
+        after = request.query_params.get("post_logout_redirect_uri")
+        if after:
+            return RedirectResponse(after, status_code=302)
+        return Response("signed out", media_type="text/plain")
+
+    async def _set_misbehaviour(self, request: Request) -> Response:
+        body = await request.json()
+        self.misbehave = body.get("misbehave") if isinstance(body, dict) else None
+        return JSONResponse({"misbehave": self.misbehave})
 
     async def _discovery(self, request: Request) -> Response:
         doc: dict[str, Any] = {

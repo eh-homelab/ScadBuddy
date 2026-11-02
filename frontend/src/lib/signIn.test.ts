@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mockLoginEnabled, mockSignedIn } from '../mocks/features/auth'
-import { SIGNED_IN, SIGN_IN_FAILED, SignInBlockedError, refreshAuthSession, signIn } from './signIn'
+import { CrossSiteFrameError, SIGNED_IN, SIGN_IN_FAILED, SignInBlockedError, refreshAuthSession, signIn } from './signIn'
 
 // #4975 — signing in from inside Bambuddy's frame (spec 2026-11-01 §6.2).
 
@@ -35,6 +35,14 @@ describe('signIn from a frame', () => {
     post(popup, { type: SIGNED_IN })
     const session = await pending
     expect(session?.signed_in).toBe(true)
+  })
+
+  it('says to open a tab when the popup signed in but this cross-site frame still is not (§6.3)', async () => {
+    const popup = fakePopup()
+    vi.spyOn(window, 'open').mockReturnValue(popup)
+    const pending = signIn(true)
+    post(popup, { type: SIGNED_IN })
+    await expect(pending).rejects.toBeInstanceOf(CrossSiteFrameError)
   })
 
   it('ignores a message from another window or origin', async () => {

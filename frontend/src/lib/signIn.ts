@@ -21,6 +21,20 @@ export class SignInBlockedError extends Error {
   }
 }
 
+/**
+ * Spec 2026-11-01 §6.3: the popup signed in, yet this frame still is not, because it sits
+ * on another site than its top-level page and the browser sends the `SameSite` cookie
+ * only to a same-site frame. The way out is ScadBuddy in a tab of its own.
+ */
+export class CrossSiteFrameError extends Error {
+  constructor() {
+    super(
+      'Signed in, but this page is embedded from another site, so the browser does not send the sign-in here. Open ScadBuddy in its own tab.',
+    )
+    this.name = 'CrossSiteFrameError'
+  }
+}
+
 let current: AuthSessionView | null = null
 const listeners = new Set<() => void>()
 
@@ -83,7 +97,7 @@ export function signIn(embedded = isEmbedded()): Promise<AuthSessionView | null>
   if (!popup) return Promise.reject(new SignInBlockedError())
   return new Promise((resolve, reject) => {
     let done = false
-    const finish = (error?: Error) => {
+    const finish = (error?: Error, signedInThere = false) => {
       if (done) return
       done = true
       window.removeEventListener('message', onMessage)
@@ -92,13 +106,17 @@ export function signIn(embedded = isEmbedded()): Promise<AuthSessionView | null>
         reject(error)
         return
       }
-      void refreshAuthSession().then(resolve, reject)
+      void refreshAuthSession().then((session) => {
+        // The callback said signed in; a frame that still reads signed out is cross-site.
+        if (signedInThere && session && !session.signed_in) reject(new CrossSiteFrameError())
+        else resolve(session)
+      }, reject)
     }
     const onMessage = (event: MessageEvent) => {
       // Only the callback page, at this origin, in the window this click opened (§6.2).
       if (event.origin !== window.location.origin || event.source !== popup) return
       const data = event.data as { type?: unknown; detail?: unknown } | null
-      if (data?.type === SIGNED_IN) finish()
+      if (data?.type === SIGNED_IN) finish(undefined, true)
       else if (data?.type === SIGN_IN_FAILED)
         finish(new Error(typeof data.detail === 'string' ? data.detail : 'Sign-in failed.'))
     }

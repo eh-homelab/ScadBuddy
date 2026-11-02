@@ -108,7 +108,9 @@ CI runs the lint, typecheck, unit tests and build in the `frontend` job, and Pla
 in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
 `frontend-e2e-split` checks that the three selections add up to the whole `--list` and
 that each shard ran what it selected, as `backend-pytest-split` does.
-`e2e-stack/run.sh [--mode recorder|unset|both] [--keep] [--no-build]` is the real-stack
+`e2e-stack/run.sh --auth [--keep] [--no-build]` is the login's (#5198: `auth.sh`,
+`compose.auth.yaml`, `e2e/real-auth.spec.ts` in the Playwright image's three engines on
+the stack's network; same job). `e2e-stack/run.sh [--mode recorder|unset|both] [--keep] [--no-build]` is the real-stack
 e2e of the native hot path (docker with compose v2; it builds the runtime, slicer and test
 images; weekly and on dispatch in `hot-path-e2e.yml`'s `stack` job, never on PRs);
 `e2e/real-hot-path.spec.ts` skips without what it sets.

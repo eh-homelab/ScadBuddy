@@ -236,6 +236,26 @@ Spec §11. `e2e-stack/run.sh --auth` and `e2e/real-auth.spec.ts` in Chromium, Fi
 WebKit, including the replica of Bambuddy's sandboxed frame on same-site and cross-site
 hosts. The PR amends the spec's **(assumption)** marks with what was measured.
 
+As built (#5198): `e2e-stack/run.sh --auth` runs `e2e-stack/auth.sh`, project `sb-auth` over
+`compose.yaml` plus `compose.auth.yaml`: the app in `observe` with `SCADBUDDY_PUBLIC_URL`
+`https://scadbuddy.e2e.test` and its login on for the fake issuer's one user (seeded through
+`PUT /auth/config` on host port 18090, `SB_AUTH_APP_PORT`); `oidc`, the backend's own
+`tests/auth/fake_oidc.py` `FakeIssuer` served by `e2e-stack/fake-oidc/server.py` (it gained
+`GET /authorize`, `GET /logout` and `POST /__misbehave` for a browser); `edge`
+(`e2e-stack/edge/edge.py`), https for both names with a CA made per run, which the app
+trusts through `SSL_CERT_FILE`; and the `playwright` service, the Playwright image pinned by
+digest, on the stack's network, so no host browser or name resolution is needed. The spec
+runs in three projects (`auth-chromium`, `-firefox`, `-webkit`, `playwright.config.ts`, only
+with `E2E_AUTH`, certificate errors ignored), one worker: top-level sign-in and out, the
+same-site and cross-site Bambuddy replicas (Playwright-served pages framing the app), "Sign
+out everywhere" ending another browser's session, `observe` serving and counting, and a
+delegated link opened in a fresh browser (the agent's credential read from its view into
+a 0600 file, never printed). All 18 pass (2026-11-02). The cross-site frame's way out of
+§6.3 (way 1) was not built in phase 3; it is here: `lib/signIn.ts` `CrossSiteFrameError`
+when the popup says signed in and the frame still is not, shown by the account menu with
+"Open in a new tab". The socket's 4401 close and `enforce`'s `curl` refusal wait for
+phase 8. `hot-path-e2e.yml`'s weekly `stack` job runs `--auth` after the hot path.
+
 ## Phase 8: `enforce` on the deployment
 
 Spec §9.1 (`enforce`), §10; D10.

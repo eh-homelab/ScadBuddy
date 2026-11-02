@@ -19,6 +19,10 @@
 # (`SCADBUDDY_TEST_MQTT`) and the two fakes from e2e-stack/. This workflow's `native` job,
 # which ran them on a runner of its own before that, is gone. `fakes` stays for the lint
 # of e2e-stack/, which no other job runs.
+#
+# #4975 phase 7: the `stack` job also runs `run.sh --auth` on the same two images: the
+# login, behind an https edge and the fake issuer (e2e-stack/compose.auth.yaml), in the
+# Playwright image's Chromium, Firefox and WebKit (frontend/e2e/real-auth.spec.ts).
 name: Hot path e2e
 
 on:
@@ -70,6 +74,7 @@ jobs:
         run: >-
           uv run --frozen mypy --strict --ignore-missing-imports
           ../e2e-stack/fake-printer/printer.py ../e2e-stack/bambuddy-recorder/recorder.py
+          ../e2e-stack/edge/edge.py
 
       # Both files skip when what they need is missing; here nothing may.
       - name: The fakes' tests
@@ -160,6 +165,11 @@ jobs:
 
       - name: run.sh --mode both
         run: e2e-stack/run.sh --mode both --no-build
+
+      # After the hot path, whatever it came to: its own stack, project sb-auth.
+      - name: run.sh --auth
+        if: ${{ !cancelled() }}
+        run: e2e-stack/run.sh --auth --no-build
 
       - name: Upload the Playwright report
         if: ${{ failure() }}

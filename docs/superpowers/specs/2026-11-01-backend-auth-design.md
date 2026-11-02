@@ -12,7 +12,9 @@ Every fact about the code was read from the tree at `773574ee3` on 2026-11-01. F
 about browsers and standards are cited; the one thing measured is the Public Suffix List
 check in §6.1. Nothing here was exercised inside a live Bambuddy or against a live IdP:
 what this design assumes about them is marked **(assumption)** and is what phase 7's
-e2e (§11) checks.
+e2e (§11) checks. Amended in phase 7 (#5198): each mark now says what that e2e measured,
+in three engines against the real app and a fake IdP; still nothing ran inside a live
+Bambuddy or against a live IdP.
 
 ## 1. Why
 
@@ -281,14 +283,18 @@ the site for cookies is the top-level origin only while every ancestor is same-s
 and no third-party-cookie blocking applies: Chrome does not block third-party cookies by
 default, Firefox's Total Cookie Protection keys a jar per top-level site, and Safari's
 tracking prevention blocks cross-site ones ([MDN][mdn-3pc]); none of them treats a
-same-site frame as third-party. **(Assumption, to be checked by phase 7's e2e in all three
-engines: that each engine sends the `Strict` cookie in this sandboxed same-site frame.)**
+same-site frame as third-party. **Measured** 2026-11-02 by `frontend/e2e/real-auth.spec.ts` through `e2e-stack/run.sh --auth`, in the Chromium, Firefox and WebKit of Playwright 1.64.1 (image `mcr.microsoft.com/playwright:v1.64.1-noble`), with the app on `https://scadbuddy.e2e.test` behind the stack's TLS edge: in each engine a page on
+`https://bambuddy.e2e.test` framing the app with Bambuddy's exact sandbox signs in through the
+popup of §6.2, and the frame's own `fetch('/api/v1/auth/session')` then answers signed in,
+so the `Strict` cookie is sent in the sandboxed same-site frame. (`test` is not on the Public
+Suffix List, so both hosts are the site `https://e2e.test`, as both deployed hosts are
+`https://nullreference.io`.)
 
 ### 6.2 Signing in from inside the frame
 
 The login itself cannot happen in the frame. An IdP's login page commonly refuses to be
 framed (`X-Frame-Options` or CSP `frame-ancestors`) **(assumption; it depends on the IdP,
-§13 D1)**, and its own session cookie would be third-party there whenever the IdP is on
+§13 D1; phase 7's fake IdP does not refuse framing, so its e2e cannot measure it)**, and its own session cookie would be third-party there whenever the IdP is on
 another site. So:
 
 - **In a top-level tab** the SPA navigates to `/api/v1/auth/login?return_to=…`.
@@ -326,7 +332,14 @@ others unbuilt (§13 D2):
    ([MDN, CHIPS][mdn-chips]); MDN lists CHIPS as Baseline 2025. With `SameSite=None` the
    cookie no longer helps against CSRF, so §5.3's layers 2 and 3 carry it alone, which the
    BFF draft accepts ([§6.1.3.3.2][bba]). **(Assumption: that Safari and Firefox accept
-   the `Partitioned` cookie in a sandboxed frame with `allow-same-origin`. Unmeasured.)**
+   the `Partitioned` cookie in a sandboxed frame with `allow-same-origin`. Unmeasured: this
+   way is not built, D2, so phase 7 had nothing to run.)**
+
+**Measured** 2026-11-02 by `frontend/e2e/real-auth.spec.ts` through `e2e-stack/run.sh --auth`, in the Chromium, Firefox and WebKit of Playwright 1.64.1 (image `mcr.microsoft.com/playwright:v1.64.1-noble`), with the app on `https://scadbuddy.e2e.test` behind the stack's TLS edge: in each engine a page on `https://bambuddy.elsewhere.test` framing the app
+signs in through the popup, the popup's top-level session stands (a new tab of the same
+browser is signed in), and the frame still reads signed out, so neither `Strict` cookie
+reaches a cross-site frame; the frame then shows way 1, "Open ScadBuddy in its own tab"
+(`lib/signIn.ts` `CrossSiteFrameError`, a toast with "Open in a new tab").
 3. **The Storage Access API.** Ruled out for Bambuddy: a sandboxed frame needs
    `allow-storage-access-by-user-activation` for `requestStorageAccess()` to succeed
    ([MDN, Using the Storage Access API][mdn-saa]), which Bambuddy's sandbox does not
@@ -561,6 +574,11 @@ It works with the IdP down or the login misconfigured. The other way back is
   measured); the same on two cross-site hosts showing the open-in-a-tab path; a socket
   closed by revocation; `observe` serving and counting; `enforce` refusing an
   unauthenticated `curl`; the headless browser rendering with a delegated session.
+  As built (#5198): all of these but two, in each engine; the delegated session is a fresh
+  browser opening `POST /auth/delegated-sessions`'s link (§7.4, as amended), and revocation is
+  "Sign out everywhere" in one browser ending another's session. The socket's 4401 close
+  and `enforce`'s refusal are phase 8's (`enforce` stops the start until then), so their
+  checks join this spec there.
 
 ## 12. Phases (one PR each)
 

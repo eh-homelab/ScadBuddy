@@ -11,7 +11,8 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { signIn, signOut, useAuthSession } from '../../lib/signIn'
+import { openExternal } from '../../lib/embed'
+import { CrossSiteFrameError, signIn, signOut, useAuthSession } from '../../lib/signIn'
 import { toast } from '../../lib/toast'
 
 /**
@@ -35,7 +36,16 @@ export function AccountMenu() {
           // No await before signIn: the popup must open inside the click.
           setBusy(true)
           signIn()
-            .catch((error: Error) => toast({ title: error.message }))
+            .catch((error: Error) =>
+              toast(
+                error instanceof CrossSiteFrameError
+                  ? {
+                      title: error.message,
+                      actions: [{ label: 'Open in a new tab', onClick: () => openExternal(window.location.href) }],
+                    }
+                  : { title: error.message },
+              ),
+            )
             .finally(() => setBusy(false))
         }}
         {...USER_ONLY}
