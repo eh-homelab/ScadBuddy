@@ -37,9 +37,62 @@ function shadow(container: HTMLElement): ShadowRoot {
   return root
 }
 
+/**
+ * A property's value for `el` from its root's adopted sheets, outside any `@media`: jsdom's
+ * `getComputedStyle` reads no adopted sheet. The base sheet's rules are all zero
+ * specificity (styles.test.ts), so the last matching rule wins, as in a browser.
+ */
+function adoptedValue(el: Element, property: string): string {
+  const root = el.getRootNode() as ShadowRoot
+  let value = ''
+  for (const sheet of root.adoptedStyleSheets) {
+    for (const rule of Array.from(sheet.cssRules)) {
+      if (rule instanceof CSSStyleRule && el.matches(rule.selectorText)) {
+        value = rule.style.getPropertyValue(property) || value
+      }
+    }
+  }
+  return value
+}
+
 afterEach(() => setUiModuleLoader(null))
 
 describe('TemplateUi', () => {
+  // #736 — the shared base sheet: a template's markup using it is styled with no CSS of its own.
+  it("adopts the shared base sheet, styling the template's controls and not the host's widgets", async () => {
+    withModule((root) => {
+      const view = document.createElement('div')
+      view.className = 'sb-stack sb-pad'
+      const label = document.createElement('label')
+      label.className = 'sb-label'
+      label.append('Width', document.createElement('input'))
+      const show = document.createElement('button')
+      show.className = 'sb-button'
+      show.setAttribute('aria-pressed', 'true')
+      const plain = document.createElement('button')
+      const param = document.createElement('sb-param')
+      param.setAttribute('name', 'name')
+      view.append(label, show, plain, param)
+      root.append(view)
+    })
+    const { container } = render(
+      <TemplateUi slug="name-keychain" ui={UI} version="abc1234" deps={deps()} inputs={{ params: {} }} onFailure={vi.fn()} />,
+    )
+    const root = shadow(container)
+    await waitFor(() => expect(root.querySelector('.sb-stack')).not.toBeNull())
+    const view = root.querySelector('.sb-stack') as HTMLElement
+    expect(adoptedValue(view, 'flex-direction')).toBe('column')
+    expect(adoptedValue(view, 'padding')).toBe('12px')
+    expect(adoptedValue(root.querySelector('.sb-label') as Element, 'justify-content')).toBe('space-between')
+    expect(adoptedValue(root.querySelector('input') as Element, 'min-height')).toBe('32px')
+    expect(adoptedValue(root.querySelector('.sb-button') as Element, 'background')).toBe('var(--sb-accent)')
+    expect(adoptedValue(root.querySelector('button:not(.sb-button)') as Element, 'background')).toBe('var(--sb-surface-2)')
+    // The host's own widget renders inside <sb-param>; the base sheet leaves its markup alone.
+    const widget = document.createElement('button')
+    root.querySelector('sb-param')?.append(widget)
+    expect(adoptedValue(widget, 'min-height')).toBe('')
+  })
+
   it('loads the module from the pinned revision and mounts it into a shadow root', async () => {
     const urls = withModule((root, host, ctx) => {
       const p = document.createElement('p')

@@ -402,6 +402,34 @@ and a module that loads after it is never mounted. A cleanup that arrives after 
 deadline, or after the page unmounted the UI, runs at once. A cleanup that throws is
 logged to the console, never reported as the UI failing.
 
+**Styles (#736).** A shadow root inherits no stylesheet, and Tailwind never scans
+`models/`, so the page's utility classes do not exist for a template's markup (an
+`@source` for `models/` would ship every template's classes in the page bundle). The host
+adopts three constructed sheets into every template's shadow root
+(`frontend/src/template-ui/styles.ts` `adoptAppStyles`): the host elements' defaults, a
+copy of the page's rules (so the host's widgets keep the app's look), and last the
+template base sheet `TEMPLATE_BASE_CSS`, the one set of styles a template can rely on:
+
+- A template's own `button`, `select`, `textarea` and text-like `input` (not a checkbox,
+  radio, range, colour or file input) get the page's field look: 32 px tall (44 px on a
+  coarse pointer), `--sb-surface-2` with a `--sb-line-strong` border, a hover, a disabled
+  look, and the accent for `aria-pressed="true"`. `.sb-button` and `.sb-input` give the
+  same look to another element; `.sb-primary` is the accent button.
+- Layout and text: `.sb-stack` (a column) and `.sb-row` (a wrapping, centred row), both
+  spaced by `--sb-gap` (default 8 px); `.sb-pad` (12 px padding); `.sb-label` (a label
+  with its control at the end); `.sb-heading` (a small uppercase group heading);
+  `.sb-muted` (secondary text); `.sb-list` (a bare list, its items ruled).
+
+Font and text colour inherit from the page, and every colour is a `--sb-*` token, so a
+template UI follows the page's light and dark. Every selector is zero specificity
+(`:where()`), so any rule in the template's own CSS (a `<style>` element or a stylesheet
+under `ui/`) layers over it, and its element rules never reach the markup of the host's
+widgets inside `<sb-param>`, `<sb-generate>` or `<sb-preview>`. The set is fixed and
+small; a class is added here, with the skill's list, never renamed. Constructed sheets
+are CSSOM, not inline style, so the page CSP (`backend/scadbuddy/api/static.py`
+`PAGE_CSP`) needs nothing for them. `models/dollhouse-kit/ui/index.js` uses the base
+sheet's controls.
+
 `ctx.version` names the last commit to the template's `ui/`, not the template's own
 revision (#846): a commit that leaves `ui/` alone does not remount the UI. Use it, or
 `host.files.url`, for the UI's own files; it is not the revision the template renders.
