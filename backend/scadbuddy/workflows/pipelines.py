@@ -117,6 +117,15 @@ LOCAL_ROW_RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=1), backoff_coefficient=2.0
 )
 PIECE_LOOKUP_PATCH = "piece-lookup-4199"
+#: #5104: a `RenderPiece` child gets the job's own execution timeout, counted from the
+#: piece's start, and a job waiting on another job's piece looks again every
+#: `PIECE_RECHECK`. A piece pinned to a build no worker serves then ends, and its waiters
+#: start it again soon after.
+PIECE_TIMEOUT_PATCH = "piece-timeout-5104"
+#: How often a job waiting on another job's piece looks again: a piece that closed
+#: without telling it (timed out, terminated) is started again by the next look. A look
+#: at a live piece is harmless: its start is refused and the re-signal is idempotent.
+PIECE_RECHECK = timedelta(minutes=2)
 #: The parent's own lookup of a finished piece (`TemplatePipeline._cached`), a local
 #: activity: two attempts, then the child's lookup with `RETRY`. Bounded, as
 #: `LOCAL_ROW_RETRY` is, so a failing store never holds the worker's shutdown.
@@ -242,6 +251,29 @@ def _waiter_recheck() -> timedelta:
         + _retried(FINISH_TIMEOUT)
         + SHORT
     )
+
+
+def _piece_timeout() -> timedelta | None:
+    """A `RenderPiece` child's execution timeout: the job's own (`pipeline_timeout`), from
+    the piece's start (#5104). A piece started with none, and pinned to a build that has
+    drained, stayed open for ever: every later job of its key joined it, and waited out
+    its own timeout. No job that could want a piece outlives this bound, as each job's
+    own run is as long. None for a job with no timeout of its own, or one that started
+    without this (`PIECE_TIMEOUT_PATCH`)."""
+    if not workflow.patched(PIECE_TIMEOUT_PATCH):
+        return None
+    return workflow.info().execution_timeout
+
+
+def _waiter_wait() -> timedelta:
+    """How long a job waiting on another job's piece waits before it looks again:
+    `PIECE_RECHECK`, or `_waiter_recheck` if shorter. `_waiter_recheck` alone outlasts
+    `pipeline_timeout` at the defaults, so a waiter whose piece closed without telling it
+    never looked again (#5104). A run that started without `PIECE_TIMEOUT_PATCH` keeps
+    `_waiter_recheck`."""
+    if not workflow.patched(PIECE_TIMEOUT_PATCH):
+        return _waiter_recheck()
+    return min(_waiter_recheck(), PIECE_RECHECK)
 
 
 def _raise_if_cancelled() -> None:
@@ -1064,8 +1096,9 @@ class TemplatePipeline:
 
     async def _piece(self, req: PieceRequest) -> PieceOutcome:
         """Run the piece as this job's child, or wait on the one another job started.
-        Neither a cancelled job nor its closing touches the piece (ABANDON twice). A
-        piece a closed run already finished is answered here, with no child."""
+        Neither a cancelled job nor its closing touches the piece (ABANDON twice), so the
+        piece's own execution timeout ends it (#5104). A piece a closed run already
+        finished is answered here, with no child."""
         key = req.piece_key
         cached = await self._cached(req)
         if cached is not None:
@@ -1082,6 +1115,7 @@ class TemplatePipeline:
                     memo={"activity_timeout": _openscad_timeout().total_seconds()},
                     cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
                     parent_close_policy=workflow.ParentClosePolicy.ABANDON,
+                    execution_timeout=_piece_timeout(),
                 )
             except WorkflowAlreadyStartedError:
                 piece: workflow.ExternalWorkflowHandle[RenderPiece] = (
@@ -1099,7 +1133,7 @@ class TemplatePipeline:
                     self._raise_if_released()
                     try:
                         await workflow.wait_condition(
-                            lambda: key in self._outcomes, timeout=_waiter_recheck()
+                            lambda: key in self._outcomes, timeout=_waiter_wait()
                         )
                     except TimeoutError:
                         continue  # it may have closed without telling us (terminated, timed out)

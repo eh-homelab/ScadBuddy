@@ -11,7 +11,7 @@ from typing import cast
 
 import pytest
 from temporalio import activity
-from temporalio.client import Client, WorkflowFailureError
+from temporalio.client import Client, WorkflowExecutionStatus, WorkflowFailureError
 from temporalio.exceptions import ApplicationError
 from temporalio.exceptions import TimeoutError as WorkflowTimeoutError
 from temporalio.worker import UnsandboxedWorkflowRunner, Worker
@@ -410,6 +410,100 @@ async def test_a_piece_from_an_older_build_answers_its_waiter() -> None:
     assert final.state == "done"
     assert final.log_tail == ["an older build"]
     assert world.pieces == []  # nothing rendered it again
+
+
+async def test_a_piece_that_outlives_its_jobs_limit_closes() -> None:
+    """#5104: the piece is started ABANDON, so its job's timeout never ended it, and one
+    pinned to a drained build stayed open for ever. It now has the job's own limit."""
+    world, job = FakeWorld(), a_job(params={"w": 12})
+
+    async def hangs(req: PieceRequest) -> PieceResult | None:
+        await asyncio.Event().wait()  # a piece whose worker never comes back
+        return None
+
+    world.cached_piece = activity_named("cached_piece", hangs)  # type: ignore[method-assign]
+    key = piece_key("demo", f"job:{job.id}", "model.scad", {"w": 12})
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[TemplatePipeline, RenderPiece],
+            activities=world.activities(),
+        ):
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(
+                    client.execute_workflow(
+                        TemplatePipeline.run,
+                        job,
+                        id=workflow_id_for(job.id),
+                        task_queue=queue,
+                        execution_timeout=timedelta(seconds=4),
+                    ),
+                    timeout=30,
+                )
+            piece = client.get_workflow_handle(f"piece-{key}")
+            async with asyncio.timeout(30):
+                while (await piece.describe()).status == WorkflowExecutionStatus.RUNNING:
+                    await asyncio.sleep(0.2)
+            assert (await piece.describe()).status == WorkflowExecutionStatus.TIMED_OUT
+
+
+@pytest.mark.parametrize("closed", ["timed_out", "terminated"])
+async def test_a_job_waiting_on_a_piece_that_closed_without_a_result_starts_it_again(
+    closed: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5104: the piece is on a queue no worker polls, as one pinned to a drained build
+    is. It closes without telling its waiter; the waiter looked again only after
+    `_waiter_recheck`, longer than its own timeout, and so never rendered it. It now looks
+    again every `PIECE_RECHECK` (scaled down; unsandboxed, so the workflow reads it)."""
+    monkeypatch.setattr(pipelines, "PIECE_RECHECK", timedelta(seconds=1))
+    world, job = FakeWorld(), a_job(params={"w": 12})
+    key = piece_key("demo", f"job:{job.id}", "model.scad", {"w": 12})
+    req = PieceRequest(
+        slug="demo",
+        revision=None,
+        scope=f"job:{job.id}",
+        file="model.scad",
+        params={"w": 12},
+        piece_key=key,
+    )
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        stranded = await client.start_workflow(
+            "RenderPiece",
+            req,
+            id=f"piece-{key}",
+            task_queue=f"drained-{uuid.uuid4().hex[:8]}",
+            execution_timeout=timedelta(seconds=3) if closed == "timed_out" else None,
+        )
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[TemplatePipeline, RenderPiece],
+            activities=world.activities(),
+            workflow_runner=UnsandboxedWorkflowRunner(),
+        ):
+            handle = await client.start_workflow(
+                TemplatePipeline.run,
+                job,
+                id=workflow_id_for(job.id),
+                task_queue=queue,
+                execution_timeout=timedelta(seconds=60),
+            )
+            async with asyncio.timeout(30):  # the job has joined the stranded piece
+                while not [
+                    e
+                    async for e in stranded.fetch_history_events()
+                    if e.HasField("workflow_execution_signaled_event_attributes")
+                ]:
+                    await asyncio.sleep(0.05)
+            if closed == "terminated":
+                await stranded.terminate("stranded on a drained build")
+            await asyncio.wait_for(handle.result(), 30)
+    final = world.final()
+    assert final.state == "done", final.failure
+    assert len(world.pieces) == 1  # the waiter rendered it itself
 
 
 TWO = """\
