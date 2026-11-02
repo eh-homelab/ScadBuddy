@@ -1227,7 +1227,15 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 - `claude-review` is a merge gate: the review runs after CI and sorts its findings into
   `## Blocking` and `## Non-blocking`; a classifier passes only when every Blocking
   finding in the review for *this* commit is fixed or tracked in an open `pr-feedback`
-  issue for the PR. Non-blocking findings never gate. A person adding the
+  issue for the PR. Non-blocking findings never gate. A comment or doc that **this diff
+  made false** (the PR changed a value and left text describing the old one) is Blocking
+  when the correct text is unambiguous, listed with every copy grep finds in one finding
+  and raised once; phrasing never blocks. Cosmetic details, phrasing nits, pre-existing
+  problems the diff neither causes nor exposes, and checks the review could not run are
+  left out of both sections (the last on one `Unverified:` line). Anything the diff
+  causes is in scope wherever it surfaces, unchanged code included. Ported from eh-homelab/clusters#2989 and #3055,
+  where those stale comments had been listed as Non-blocking on almost every PR and
+  never fixed after merge. A person adding the
   `claude-make-follow-up-issues` label to the PR files every outstanding finding as
   `pr-feedback` issues, Non-blocking ones in groups of their own titled `(non-blocking)`;
   the label the review applies itself to a PR merged with Blocking findings outstanding
