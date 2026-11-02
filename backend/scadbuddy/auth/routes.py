@@ -130,12 +130,22 @@ def route_class(route: Route) -> RouteClass:
     return INTERNAL_MODULES.get(module, "api")
 
 
+#: The prefix every listed path sits under once mounted (`main.API_PREFIX`).
+API_PREFIX = "/api/v1"
+
+
 def scriptless(route: Route) -> bool:
-    return (
-        isinstance(route, APIRoute)
-        and "GET" in (route.methods or ())
-        and (route.endpoint.__module__, route.path) in SCRIPTLESS_GETS
+    """Whether ``route`` is a listed GET. The matched route's path is its own router's
+    (FastAPI >= 0.140 keeps included routers nested, as `core/metrics.py` notes), but a
+    path with the prefix is taken too, so a FastAPI that flattens again changes nothing."""
+    if not isinstance(route, APIRoute) or "GET" not in (route.methods or ()):
+        return False
+    path = (
+        route.path.removeprefix(API_PREFIX)
+        if route.path.startswith(API_PREFIX + "/")
+        else route.path
     )
+    return (route.endpoint.__module__, path) in SCRIPTLESS_GETS
 
 
 def would_refuse(

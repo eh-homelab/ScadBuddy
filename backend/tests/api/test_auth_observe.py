@@ -77,9 +77,32 @@ def test_a_signed_in_request_needs_the_header(client: TestClient, app: FastAPI) 
 
 
 def test_a_scriptless_get_needs_no_header(client: TestClient, app: FastAPI) -> None:
+    """Review of #5209: against the matched (mounted) route, not the module's router."""
     _sign_in(client, app)
     client.get("/api/v1/models/nope/thumbnail")
+    client.get("/api/v1/outputs/nope/model.3mf")
     assert _count(app, "api", "no_request_header") == 0
+    # The same request to a GET that is not listed is counted, so the above is not vacuous.
+    client.get("/api/v1/models/nope")
+    assert _count(app, "api", "no_request_header") == 1
+
+
+def test_scriptless_takes_the_prefixed_path_too() -> None:
+    from fastapi.routing import APIRoute
+
+    from scadbuddy.api.models import router
+    from scadbuddy.auth.routes import scriptless
+
+    thumbnail = next(
+        r
+        for r in router.routes
+        if isinstance(r, APIRoute)
+        and r.path == "/models/{slug}/thumbnail"
+        and "GET" in (r.methods or ())
+    )
+    assert isinstance(thumbnail, APIRoute)
+    prefixed = APIRoute("/api/v1" + thumbnail.path, thumbnail.endpoint, methods=["GET"])
+    assert scriptless(thumbnail) and scriptless(prefixed)
 
 
 def test_the_internal_routes_need_a_credential(client: TestClient, app: FastAPI) -> None:
