@@ -216,7 +216,8 @@ cookie in. `POST /auth/delegated-sessions` (the `agent` credential only, in ever
 answers a one-time sign-in link on the public origin (`auth_delegation_codes`, SHA-256, a
 minute, once; `auth/delegation.py`), and `GET /auth/delegated?code=` (public) sets a
 `delegated` session of at most an hour as the named principal. The agent's tool
-`sign_in_link` (`write`) mints it for the call's own principal, for the model to
+`browser_sign_in_link` (`outward`, in the turn, and `browser_` so that no flow may call
+it and the operator's browser switch governs it) mints it for the call's own principal, for the model to
 open in the plugin's browser. The plugin loads the public URL over https, so the
 localhost-only rule of spec §7.4 has nothing to guard and is not built. A delegated
 session counts `not_a_person` on `person` routes and fails `by_a_person()`. Personal

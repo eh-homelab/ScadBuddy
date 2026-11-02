@@ -4,6 +4,8 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { harnessTools } from '../src/tools/harness.js'
+import { BUILTIN_SOURCES, registrySource } from '../src/access/model.js'
+import { forFlows } from '../src/temporal/flowTools.js'
 import { makeCanUseTool } from '../src/harness/permissions.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
@@ -276,7 +278,7 @@ describe('settings tools pass every answer through redact (#322)', () => {
   })
 })
 
-describe('sign_in_link', () => {
+describe('browser_sign_in_link', () => {
   it("asks for a link for the call's own principal (#4975 phase 6)", async () => {
     let body: unknown
     server.use(
@@ -286,9 +288,24 @@ describe('sign_in_link', () => {
       }),
     )
     const principal = { id: 'user:https://idp.test#alice', kind: 'browser' as const, tiers: tiersUpTo('outward') }
-    const answer = firstText(await runTool(tool('sign_in_link'), { ttl_seconds: 600 }, ctx({ principal })))
+    const answer = firstText(await tool('browser_sign_in_link').execute({ ttl_seconds: 600 }, ctx({ principal })))
     expect(body).toEqual({ principal: 'user:https://idp.test#alice', ttl_seconds: 600 })
     expect(answer).toMatchObject({ url: 'https://scadbuddy.test/api/v1/auth/delegated?code=c' })
+  })
+
+  it('is outward, stays in the turn, is no flow\'s, and answers to the browser switch', () => {
+    const t = tool('browser_sign_in_link')
+    expect(t.risk).toBe('outward')
+    expect(t.inTurn).toBe(true)
+    expect(forFlows(t)).toBe(false)
+    expect(registrySource(t.name)).toBe(BUILTIN_SOURCES.browser)
+  })
+
+  it('parks outside an approved call: a session-less caller is told it needs approval', async () => {
+    let called = false
+    server.use(http.post(`${BACKEND}/api/v1/auth/delegated-sessions`, () => ((called = true), HttpResponse.json({}))))
+    await runTool(tool('browser_sign_in_link'), { ttl_seconds: 600 }, ctx())
+    expect(called).toBe(false)
   })
 })
 

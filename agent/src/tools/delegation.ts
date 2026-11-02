@@ -9,10 +9,18 @@ import { defineTool, json, type Tool } from './registry.js'
 // the agent's service credential, for a one-time sign-in link for the principal this call
 // runs as: opened within a minute, once, it gives that browser a `delegated` session of at
 // most an hour, which can never answer, approve or grant what only a person does.
+//
+// Named `browser_*` on purpose: every gate that keeps the browser tools to a person's
+// session keys on the prefix (flowTools.ts `forFlows`, toolActivities.ts `flowCaller`, the
+// `builtin:browser` source in access/model.ts `registrySource`), so a flow can never mint
+// a link and the operator's browser switch turns it off with the rest. `outward`: it hands
+// a credential across a boundary, so a session's call parks for a person's approval.
+// `inTurn` as the other browser tools: it runs in the turn's process, never as a ToolCall
+// activity.
 
 export const delegationTools: readonly Tool[] = [
   defineTool({
-    name: 'sign_in_link',
+    name: 'browser_sign_in_link',
     label: "Sign the assistant's browser in",
     description:
       "A one-time link that signs a browser the assistant drives (a Playwright browser plugin) into ScadBuddy as " +
@@ -22,7 +30,8 @@ export const delegationTools: readonly Tool[] = [
     input: z.object({
       ttl_seconds: z.number().int().min(60).max(3600).default(3600).describe('How long the browser stays signed in.'),
     }),
-    risk: 'write',
+    risk: 'outward',
+    inTurn: true,
     routes: ['POST /api/v1/auth/delegated-sessions'],
     handler: async (args, { backend, principal }) =>
       json(
