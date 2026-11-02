@@ -24,10 +24,14 @@ def test_off_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _settings().auth_mode == "off"
 
 
-@pytest.mark.parametrize("mode", ["observe", "enforce"])
-def test_a_mode_without_a_gate_stops_the_start(monkeypatch: pytest.MonkeyPatch, mode: str) -> None:
-    monkeypatch.setenv("SCADBUDDY_AUTH_MODE", mode)
-    with pytest.raises(ValidationError, match=f"SCADBUDDY_AUTH_MODE={mode} is not available"):
+def test_observe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCADBUDDY_AUTH_MODE", "observe")
+    assert _settings().auth_mode == "observe"
+
+
+def test_enforce_stops_the_start_until_it_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SCADBUDDY_AUTH_MODE", "enforce")
+    with pytest.raises(ValidationError, match="SCADBUDDY_AUTH_MODE=enforce is not available"):
         _settings()
 
 

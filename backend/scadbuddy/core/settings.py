@@ -241,20 +241,20 @@ class Settings(BaseSettings):
     trusted_proxies: str = ""
 
     # SCADBUDDY_AUTH_MODE (#4975, spec 2026-11-01 §9.1): whether a request with no
-    # session or credential is served (`off`), served and counted (`observe`) or refused
-    # (`enforce`). Only `off` exists until the gate does (plan 2026-11-01 phases 3 and
-    # 8), so any other value stops the start rather than promising a gate that is not
-    # there. Not a stored setting: it decides who may write Settings.
+    # session or credential is served (`off`), served and counted (`observe`, the would-
+    # refuse counter) or refused (`enforce`). `enforce` stops the start until it exists
+    # (plan 2026-11-01 phase 8) rather than promising a gate that is not there. Not a
+    # stored setting: it decides who may write Settings.
     auth_mode: AuthMode = "off"
 
     @field_validator("auth_mode")
     @classmethod
     def _auth_mode_implemented(cls, value: AuthMode) -> AuthMode:
-        if value != "off":
+        if value == "enforce":
             raise ValueError(
-                f"SCADBUDDY_AUTH_MODE={value} is not available yet: this build has no"
-                " gate that refuses or counts a request (#4975, plan 2026-11-01). Set it"
-                " to off"
+                "SCADBUDDY_AUTH_MODE=enforce is not available yet: this build counts what"
+                " it would refuse but refuses nothing (#4975, plan 2026-11-01 phase 8). Set"
+                " it to observe or off"
             )
         return value
 

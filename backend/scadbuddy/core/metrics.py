@@ -421,6 +421,15 @@ class Metrics:
             registry=r,
         )
 
+        # #4975 (spec 2026-11-01 §9.1): what SCADBUDDY_AUTH_MODE=enforce would refuse,
+        # served in `observe`. Both labels are closed sets (`auth/routes.py`).
+        self.auth_would_refuse = Counter(
+            "scadbuddy_auth_would_refuse",
+            "Requests enforce would refuse, served in observe, by route class and reason.",
+            ["class", "reason"],
+            registry=r,
+        )
+
         self.http_requests = Counter(
             "scadbuddy_http_requests",
             "HTTP requests served, by method, route template and status.",

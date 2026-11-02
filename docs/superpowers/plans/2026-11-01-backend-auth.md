@@ -121,6 +121,19 @@ Spec §5.3–§5.5, §8, §9.1 (`observe`), §9.3; D9, D11.
   in `observe`; the 4401 close on revocation.
 - `python -m scadbuddy.auth.break_glass` (spec §9.3).
 
+As built (#5194): the classes are `auth/routes.py`, by endpoint (the public and person
+ones named, the internal modules by module, every other route `api`), and
+`auth/check.py` `auth_check` is an app-wide dependency beside `note_preference`, so it
+sees the matched route for HTTP and socket alike; `auth/observe.py` counts and logs once
+per class and reason a minute (the route template, never the path). The header is one
+wrapper round `window.fetch` (`frontend/src/lib/requestHeader.ts`, installed first in
+`main.tsx`), so the client, the loaders, template UIs and the relay all carry it, plus the
+client's one XHR upload; a socket needs none (its `Origin` is checked). Break-glass codes
+are `auth_break_glass_codes` (SHA-256, ten minutes, single use), redeemed at
+`GET /auth/break-glass?code=`; the session view's `kind` drives the account menu's
+"Break-glass session". The 4401 close waits for `enforce` (phase 8), since `observe`
+refuses nothing.
+
 ## Phase 4: service credentials
 
 Spec §7.1, §7.2; D4.

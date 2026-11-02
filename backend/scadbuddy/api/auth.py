@@ -25,6 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import EventsDep, SettingsStoreDep, StateDep
+from scadbuddy.auth import break_glass as break_glass_codes
 from scadbuddy.auth.component import AuthComponent, AuthDep, CallerDep
 from scadbuddy.auth.config import LoginConfig, seal
 from scadbuddy.auth.gate import SESSION_COOKIE
@@ -84,6 +85,8 @@ class AuthSessionView(BaseModel):
     #: Whether the sign-in button is offered.
     login_enabled: bool
     expires_at: datetime | None = None
+    #: How the session was made: a ``break_glass`` one is shown with a banner.
+    kind: Literal["login", "delegated", "break_glass"] | None = None
 
 
 def _person(caller: Caller) -> AuthSession | None:
@@ -106,6 +109,7 @@ async def get_session(caller: CallerDep, auth: AuthDep, state: StateDep) -> Auth
         expires_at=None
         if session is None
         else min(session.idle_expires_at, session.absolute_expires_at),
+        kind=None if session is None else session.kind,
     )
 
 
@@ -327,6 +331,60 @@ async def callback(
     )
     _clear(page, LOGIN_COOKIE, "lax")
     _cookie(page, SESSION_COOKIE, token, int(ABSOLUTE_LIFETIME.total_seconds()), "strict")
+    return page
+
+
+@router.get(
+    "/auth/break-glass",
+    summary="Sign in with a break-glass code",
+    response_class=HTMLResponse,
+)
+async def break_glass(
+    request: Request,
+    auth: AuthDep,
+    settings_store: SettingsStoreDep,
+    state: StateDep,
+    code: Annotated[str, Query(max_length=100)],
+) -> HTMLResponse:
+    """Spends a code ``python -m scadbuddy.auth.break_glass`` printed and starts a
+    ``break_glass`` session for an hour (§9.3), with the IdP down or the login
+    misconfigured. Every use is logged."""
+    origin = _public_origin(settings_store) or str(request.base_url).rstrip("/")
+    if not await asyncio.to_thread(break_glass_codes.redeem, auth.pool, code):
+        return _page(
+            status=400,
+            title="Sign-in failed",
+            message="This break-glass link is used, expired or not one. Mint another in the pod.",
+            origin=origin,
+            popup=False,
+        )
+    peer = request.client.host if request.client else None
+    address = client_address(
+        peer, request.headers.get("x-forwarded-for"), state.settings.trusted_proxy_networks
+    )
+    token, _ = await asyncio.to_thread(
+        auth.sessions.create,
+        issuer=break_glass_codes.ISSUER,
+        subject=break_glass_codes.SUBJECT,
+        kind="break_glass",
+        name="Break-glass",
+        client_address=address,
+        user_agent=(request.headers.get("user-agent") or "")[:USER_AGENT_CHARS] or None,
+        lifetime=break_glass_codes.SESSION_LIFETIME,
+    )
+    # The audit: who used one, from where. Never the code.
+    logger.warning("a break-glass sign-in was used", extra={"client_address": address})
+    page = _page(
+        status=200,
+        title="Signed in",
+        message="Signed in with a break-glass link, for an hour.",
+        origin=origin,
+        popup=False,
+        return_to="/",
+        signed_in=True,
+    )
+    lifetime = int(break_glass_codes.SESSION_LIFETIME.total_seconds())
+    _cookie(page, SESSION_COOKIE, token, lifetime, "strict")
     return page
 
 
