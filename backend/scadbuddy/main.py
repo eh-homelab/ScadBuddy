@@ -810,7 +810,11 @@ async def _sweep_native_copies_logged(state: AppState) -> None:
                 "could not check the LAN runs' sequences; their files are kept", exc_info=True
             )
         await sweep_print_copies(
-            native, state.uploads, state.print_runs.store.subjects_in_use, now=datetime.now(UTC)
+            native,
+            state.uploads,
+            state.print_runs.store.subjects_in_use,
+            state.components.get(SLICING).store.slicing,
+            now=datetime.now(UTC),
         )
     except Exception:
         logger.exception("could not sweep the native per-print copies")

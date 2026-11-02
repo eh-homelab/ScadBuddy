@@ -95,6 +95,12 @@ async def sweep_library(
 COPY_ORPHAN_GRACE = timedelta(days=1)
 
 
+#: How long a superseded copy stays after its last use, for a slice about to start on it
+#: (`ensure_native_copy` returns before the slice's row is written): an order's quote
+#: gives up after `orders.lifecycle.QUOTE_TIMEOUT`, as long.
+COPY_REUSE_GRACE = timedelta(minutes=30)
+
+
 class CopySweep(BaseModel):
     #: Files trashed as a folder's older copies of a subject, with their slices.
     superseded: int
@@ -108,9 +114,11 @@ async def sweep_print_copies(
     native: NativeLibrary,
     uploads: BambuddyUploadStore,
     subjects_in_use: Callable[[], Awaitable[set[str]]],
+    slicing: Callable[[list[int]], Awaitable[set[int]]],
     *,
     now: datetime,
     grace: timedelta = COPY_ORPHAN_GRACE,
+    reuse_grace: timedelta = COPY_REUSE_GRACE,
 ) -> CopySweep:
     """Trash the per-print copies and slices nothing keeps (module docstring). The marked
     files are read before the subjects in use, so a run that started before the read is
@@ -121,7 +129,9 @@ async def sweep_print_copies(
     either went first, and its subject is then in use or the copy no longer older than
     the one kept, or finds it trashed and lays out another. A file uploaded after the
     first read waits for the next pass, and only files still marked are trashed (a
-    person's move or restore wins)."""
+    person's move or restore wins). A superseded copy a slice still reads (``slicing``,
+    the running native slices' files) or last used within ``reuse_grace`` is kept too:
+    the dialog's background slice and an order's quote slice one with no run (#5189)."""
     files = {f.id: f for f in await asyncio.to_thread(native.rows.per_print)}
     busy = await subjects_in_use()
     recorded = await uploads.recorded_files(list(files))
@@ -195,6 +205,9 @@ async def sweep_print_copies(
                 continue
             used_before = set(order[: order.index(newest)])
             stale = [c for c in stale if c.id in used_before]
+            ids = [c.id for c in stale]
+            reading = await slicing(ids) | await uploads.used_since(subject, ids, now - reuse_grace)
+            stale = [c for c in stale if c.id not in reading]
             if not stale:
                 continue
             ids = [i for c in stale for i in (c.id, *(s.id for s in c.sliced if s.id in files))]
