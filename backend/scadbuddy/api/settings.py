@@ -227,7 +227,8 @@ class PrintOptionsView(BaseModel):
 
     defaults: PrintOptions
     global_options: PrintOptions
-    #: Keyed by stringified Bambuddy printer id.
+    #: Keyed by a stringified Bambuddy printer id, or the registry id of a printer with
+    #: none (#4971).
     printers: dict[str, PrintOptions] = Field(default_factory=dict)
     #: Keyed by ScadBuddy model slug.
     models: dict[str, PrintOptions] = Field(default_factory=dict)
@@ -308,7 +309,8 @@ class RememberedChoices(BaseModel):
     #: Registry printer id -> its name (#4971), for the entries keyed by a registry id:
     #: a printer with no Bambuddy id.
     printer_names: dict[str, str] = Field(default_factory=dict)
-    #: Stringified Bambuddy printer id -> its rack nozzle algorithm (#836).
+    #: A stringified Bambuddy printer id, or the registry id of a printer with none
+    #: (#4971), -> its rack nozzle algorithm (#836).
     printer_rack_algorithms: dict[str, RackAlgorithm] = Field(default_factory=dict)
     print_options: PrintOptions = Field(default_factory=PrintOptions)
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)

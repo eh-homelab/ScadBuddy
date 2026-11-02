@@ -428,7 +428,8 @@ class StoredSettings(BambuddyIds):
     # #88 — remembered print options, least to most specific. All three start empty, so
     # a ScadBuddy that has never been told otherwise queues with Bambuddy's own
     # defaults. The dict keys are strings because JSON has no integer keys: the printer
-    # map is keyed by a stringified Bambuddy printer id, the model map by the print's
+    # map is keyed by a stringified Bambuddy printer id, or the registry id of a
+    # printer with none (#4971), the model map by the print's
     # options scope: ScadBuddy's own model slug, or a library file's ``library:<file
     # id>`` (#1754, ``options.options_scope``).
     print_options: PrintOptions = Field(default_factory=PrintOptions)

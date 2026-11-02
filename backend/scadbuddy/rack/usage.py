@@ -252,12 +252,18 @@ class RackUsageStore:
                 "INSERT INTO rack_nozzle_seen (serial, printer_id, printer)"
                 " SELECT serial, %s, %s FROM unnest(%s::text[]) AS serial"
                 " ON CONFLICT (serial) DO UPDATE"
-                " SET printer_id = excluded.printer_id, printer = excluded.printer"
+                # A caller naming only the Bambuddy printer (the Bambuddy path) keeps
+                # the registry id already recorded for that same printer (#4971).
+                " SET printer_id = excluded.printer_id, printer = CASE"
+                " WHEN excluded.printer IS NULL"
+                " AND excluded.printer_id IS NOT DISTINCT FROM rack_nozzle_seen.printer_id"
+                " THEN rack_nozzle_seen.printer ELSE excluded.printer END"
                 # Rewrite only a hotend that moved: /check re-records the rack on every
                 # debounced re-check (#1082). A row this skips makes no new version, but
                 # is still locked, so a re-check is cheap rather than free.
-                " WHERE (rack_nozzle_seen.printer_id, rack_nozzle_seen.printer)"
-                " IS DISTINCT FROM (excluded.printer_id, excluded.printer)",
+                " WHERE rack_nozzle_seen.printer_id IS DISTINCT FROM excluded.printer_id"
+                " OR (excluded.printer IS NOT NULL"
+                " AND rack_nozzle_seen.printer IS DISTINCT FROM excluded.printer)",
                 (printer_id, printer, unique),
             )
 

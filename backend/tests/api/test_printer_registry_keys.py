@@ -56,6 +56,26 @@ def test_the_rack_algorithm_is_kept_by_registry_id_only_without_a_bambuddy_one(
     assert missing.status_code == 404, missing.text
 
 
+def test_print_options_for_an_unknown_printer_are_refused_but_may_be_forgotten(
+    client: TestClient,
+) -> None:
+    """A save names a printer the registry has (a stringified Bambuddy id, or a
+    registry id): anything else is 404, so no entry nothing reads is written. A forget
+    of one is removed as given, for an entry written before its printer went."""
+    for key in ("nope", "00000000-0000-4000-8000-0000000000ff"):
+        refused = client.put(
+            "/api/v1/settings/print-options",
+            json={"scope": "printer", "key": key, "options": {"timelapse": True}},
+        )
+        assert refused.status_code == 404, refused.text
+        forgot = client.put(
+            "/api/v1/settings/print-options",
+            json={"scope": "printer", "key": key, "options": {}},
+        )
+        assert forgot.status_code == 200, forgot.text
+    assert client.get("/api/v1/settings/print-options").json()["printers"] == {}
+
+
 def test_a_printers_print_options_are_kept_by_registry_id_only_without_a_bambuddy_one(
     client: TestClient,
 ) -> None:

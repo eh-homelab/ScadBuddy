@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from scadbuddy.api.printing import names_no_printer
 from scadbuddy.bambuddy.options import PrintOptions
@@ -154,3 +155,108 @@ def test_the_rack_migration_backfills_the_registry_printer(pg_conninfo: str) -> 
         picks = conn.execute("SELECT printer::text FROM rack_nozzle_picks").fetchall()
     assert seen == [("A", linked[0]), ("B", None)]
     assert picks == [(linked[0],)]
+
+
+async def test_a_bambuddy_only_record_keeps_the_seen_registry_printer(
+    pg_conninfo: str, printers: PrinterStore
+) -> None:
+    """The Bambuddy path records a hotend by its Bambuddy printer only: the registry id
+    already backfilled for that same printer stays, and the row is not rewritten
+    (#1082); a move to another printer clears it."""
+    row = printers.create(PrinterCreate(serial="0938AB000000025", name="H2C"))
+    store = RackUsageStore(pg_conninfo)
+
+    def seen() -> tuple[int | None, str | None, str]:
+        with psycopg.connect(pg_conninfo) as conn:
+            got = conn.execute(
+                "SELECT printer_id, printer::text, xmin::text FROM rack_nozzle_seen"
+            ).fetchone()
+        assert got is not None
+        return got
+
+    try:
+        await store.seen(4, ["HOTEND"], row.id)
+        before = seen()
+        await store.seen(4, ["HOTEND"])
+        assert seen() == before
+        await store.seen(5, ["HOTEND"])
+        assert seen()[:2] == (5, None)
+    finally:
+        store.close()
+
+
+def _settings(pg_pool: PgPool) -> dict[str, object]:
+    with pg_pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT name, value FROM settings WHERE name = ANY(%s)",
+            (
+                [
+                    "default_printer",
+                    "printer_rack_algorithms",
+                    "printer_rack_algorithm_versions",
+                    "printer_print_options",
+                ],
+            ),
+        ).fetchall()
+    return {row["name"]: row["value"] for row in rows}
+
+
+def _put(pg_pool: PgPool, values: dict[str, object]) -> None:
+    with pg_pool.connection() as conn:
+        for name, value in values.items():
+            conn.execute(
+                "INSERT INTO settings (name, value) VALUES (%s, %s)"
+                " ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value",
+                (name, Jsonb(value)),
+            )
+
+
+def test_a_merge_moves_the_default_printer_and_its_registry_keyed_entries(
+    printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """The default printer and a map entry keyed by the gone row follow it to the kept
+    row, as a column would; an entry the kept row has of its own wins."""
+    synthetic = printers.ensure_bambuddy(4, serial=None, name="H2C", model="H2C")
+    mine = printers.create(PrinterCreate(serial="0938AB000000026", name="Mine"))
+    _put(
+        pg_pool,
+        {
+            "default_printer": synthetic.id,
+            "printer_rack_algorithms": {synthetic.id: "minimize_swaps", "7": "x"},
+            "printer_rack_algorithm_versions": {synthetic.id: 2},
+            "printer_print_options": {synthetic.id: {"a": 1}, mine.id: {"b": 2}},
+        },
+    )
+
+    printers.ensure_bambuddy(4, serial="0938AB000000026", name="H2C", model="H2C")
+
+    assert printers.get(synthetic.id) is None
+    assert _settings(pg_pool) == {
+        "default_printer": mine.id,
+        "printer_rack_algorithms": {mine.id: "minimize_swaps", "7": "x"},
+        "printer_rack_algorithm_versions": {mine.id: 2},
+        "printer_print_options": {mine.id: {"b": 2}},
+    }
+
+
+def test_deleting_a_printer_forgets_it_as_the_default_and_in_the_maps(
+    printers: PrinterStore, pg_pool: PgPool
+) -> None:
+    """A deleted default would refuse every run naming no printer (`_named_printer`)."""
+    row = printers.create(PrinterCreate(serial="0938AB000000027", name="LAN"))
+    other = printers.create(PrinterCreate(serial="0938AB000000028", name="Other"))
+    _put(
+        pg_pool,
+        {
+            "default_printer": row.id,
+            "printer_rack_algorithms": {row.id: "minimize_swaps", other.id: "x"},
+            "printer_print_options": {row.id: {"a": 1}},
+        },
+    )
+
+    printers.delete(row.id)
+
+    assert _settings(pg_pool) == {
+        "printer_rack_algorithms": {other.id: "x"},
+        "printer_print_options": {},
+    }
