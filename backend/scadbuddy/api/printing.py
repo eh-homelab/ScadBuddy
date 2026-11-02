@@ -264,22 +264,6 @@ PrinterIdPath = Annotated[
 ]
 
 
-def printer_ids(store: PrinterStore, printer_id: str) -> tuple[int | None, str | None]:
-    """A per-printer route's path as ``(Bambuddy id, registry id)`` (#4971): a Bambuddy
-    integer as itself, with no registry id looked up; a registry id with its row's
-    Bambuddy link. 404 for an integer past Bambuddy's range or a registry id the registry
-    does not hold."""
-    if printer_id.isascii() and printer_id.isdecimal():
-        bambuddy_id = int(printer_id)
-        if bambuddy_id > _BAMBUDDY_ID_MAX:
-            raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
-        return bambuddy_id, None
-    row = store.get(printer_id)
-    if row is None:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"no printer {printer_id}")
-    return row.bambuddy_printer_id, row.id
-
-
 @dataclass(frozen=True)
 class PrinterKeys:
     """Where a per-printer settings map write lands (#4971): ``key``, and the ``stale``
@@ -500,10 +484,8 @@ def put_printer_bed_type(
     printer by its integer id, as before; the plate is kept under both where the registry
     links them. 404 for a registry id the registry does not hold.
     """
-    bambuddy_id, printer = printer_ids(registry.store, printer_id)
-    if bambuddy_id is not None and printer is None:
-        linked = registry.store.by_bambuddy_id(bambuddy_id)
-        printer = linked.id if linked is not None else None
+    keys = printer_keys(registry.store, printer_id, forget=False)
+    bambuddy_id, printer = keys.bambuddy_id, keys.printer
     settings = store.set_printer_bed_type(bambuddy_id, body.bed_type, printer=printer)
     return PrinterBedType(
         printer_id=bambuddy_id,
@@ -584,7 +566,7 @@ def put_printer_rack_algorithm(
         ) from None
     return PrinterRackAlgorithm(
         printer_id=bambuddy_id,
-        printer=None if bambuddy_id is not None else printer,
+        printer=printer,
         algorithm=algorithm,
     )
 

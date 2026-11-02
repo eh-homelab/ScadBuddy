@@ -150,7 +150,14 @@ export function PrintOptionsDisclosure({
   // The per-printer scope only applies once the printer is known; with none chosen and
   // none in Settings, saving there would go nowhere — hence the disabled option and the note below.
   const resolvedPrinterId = printerId ?? serverPrinterId
-  const printerKey = resolvedPrinterId == null ? registryPrinter : String(resolvedPrinterId)
+  // #4971 — a chosen LAN-only printer (no Bambuddy id) is keyed by its registry id, before
+  // the Settings printer: that one is another printer.
+  const printerKey =
+    printerId == null && registryPrinter
+      ? registryPrinter
+      : resolvedPrinterId == null
+        ? null
+        : String(resolvedPrinterId)
   // The scope state can still say "This printer" when no printer is known (it opens on
   // it). Falling back here means a click always does
   // something visible, rather than hitting a guard and changing nothing on screen.

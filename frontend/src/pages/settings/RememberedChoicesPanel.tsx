@@ -137,7 +137,10 @@ export function RememberedChoicesPanel({
     targets?.printers?.find((printer) => String(printer.id) === String(id))?.name ??
     state.data?.printer_names?.[String(id)] ??
     `Printer ${id}`
-  /** A per-printer map's key as the routes take it: a Bambuddy id, or a registry id. */
+  /**
+   * A per-printer map's key as the routes take it: a Bambuddy id, or a registry id. A
+   * registry id is a UUID, so it is never all digits.
+   */
   const printerRef = (key: string): number | string => (/^\d+$/.test(key) ? Number(key) : key)
 
   const projectName = (id: string) =>
