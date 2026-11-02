@@ -471,6 +471,32 @@ async def test_the_folders_copy_lock_holds_the_superseded_copies_trash(
     assert trashed(native, old)
 
 
+async def test_a_copy_reused_without_a_run_during_the_sweep_is_never_trashed(
+    native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
+) -> None:
+    """#5189: the dialog's background slice and an order's quote reuse a copy with no
+    run, so its subject is never in use. A copy reused after the sweep read the order of
+    use, before it got the folder's lock, is the folder's newest: under the lock the order
+    is read again, and the copy is kept."""
+    old = await copy_of(native, uploads, payload)
+    later = await copy_of(native, uploads, payload, target=X1C)
+    reads = 0
+
+    async def subjects_in_use() -> set[str]:
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            assert await copy_of(native, uploads, payload) == old
+        return set()
+
+    done = await sweep_print_copies(native, uploads, subjects_in_use, now=datetime.now(UTC))
+
+    assert done.superseded == 0
+    assert live(native, old) and live(native, later)
+    assert (await sweep(native, uploads)).superseded == 1
+    assert live(native, old) and trashed(native, later)
+
+
 async def test_a_run_that_takes_the_subject_up_under_the_lock_keeps_its_copies(
     native: NativeLibrary, uploads: BambuddyUploadStore, payload: bytes
 ) -> None:
