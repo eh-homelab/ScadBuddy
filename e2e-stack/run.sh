@@ -6,12 +6,15 @@
 # frontend/e2e/real-hot-path.spec.ts.
 #
 #   run.sh [--mode recorder|unset|both] [--keep] [--no-build]
+#   run.sh --auth [--keep] [--no-build]
 #
 #   --mode recorder   bambuddy_url is the recorder; the spec asserts it saw nothing (AC1)
 #   --mode unset      no bambuddy_url (AC2)
 #   --mode both       one, then the other, each on a fresh stack (the default)
 #   --keep            leave the (last) stack up afterwards, for a look or a rerun
 #   --no-build        use the images already built
+#   --auth            instead: the login in Chromium, Firefox and WebKit (#4975 phase 7;
+#                     e2e-stack/auth.sh, compose.auth.yaml, e2e/real-auth.spec.ts)
 #
 # It builds three images from the Dockerfile (unless --no-build): `runtime` as
 # SB_HOTPATH_APP_IMAGE, `slicer` as SB_HOTPATH_SLICER_IMAGE and `test` as
@@ -27,6 +30,16 @@
 #
 #   SB_HOTPATH_KEK_FILE=/dev/null docker compose -p sb-hotpath -f e2e-stack/compose.yaml down -v
 set -euo pipefail
+
+for arg in "$@"; do
+  if [ "$arg" = --auth ]; then
+    rest=()
+    for other in "$@"; do
+      [ "$other" = --auth ] || rest+=("$other")
+    done
+    exec "$(dirname "${BASH_SOURCE[0]}")/auth.sh" "${rest[@]}"
+  fi
+done
 
 mode=both
 keep=0
@@ -46,7 +59,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     *)
-      echo "usage: $0 [--mode recorder|unset|both] [--keep] [--no-build]" >&2
+      echo "usage: $0 [--mode recorder|unset|both] [--keep] [--no-build] | --auth [--keep] [--no-build]" >&2
       exit 2
       ;;
   esac

@@ -14,6 +14,18 @@ const realBackend = process.env.E2E_BASE_URL
 // Overridable because several worktrees of this repo get checked out side by side, and
 // `reuseExistingServer` will happily hand the run another worktree's preview server.
 const previewPort = process.env.E2E_PREVIEW_PORT ?? '4173'
+// #4975 phase 7: e2e-stack/auth.sh runs e2e/real-auth.spec.ts in all three engines, inside
+// the Playwright image on the stack's network. Its https edge is signed by a CA made for the
+// run, which no browser trusts: the certificate error is the only thing ignored.
+const authEngines = process.env.E2E_AUTH
+  ? (
+      [
+        ['auth-chromium', devices['Desktop Chrome']],
+        ['auth-firefox', devices['Desktop Firefox']],
+        ['auth-webkit', devices['Desktop Safari']],
+      ] as const
+    ).map(([name, device]) => ({ name, testMatch: /real-auth\.spec\.ts/, use: { ...device, ignoreHTTPSErrors: true } }))
+  : []
 
 export default defineConfig({
   testDir: './e2e',
@@ -27,7 +39,7 @@ export default defineConfig({
     trace: 'on-first-retry',
     colorScheme: 'dark',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }, ...authEngines],
   ...(realBackend
     ? {}
     : {

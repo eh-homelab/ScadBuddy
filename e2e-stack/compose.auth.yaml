@@ -1,0 +1,97 @@
+# The auth e2e (#4975 phase 7, spec 2026-11-01 §11), over compose.yaml: `run.sh --auth`
+# brings up postgres, temporal, s3, app, oidc and edge from both files as project
+# `sb-auth`, signs the login on, and runs frontend/e2e/real-auth.spec.ts in the
+# `playwright` service's Chromium, Firefox and WebKit. Read run.sh before running this alone.
+#
+# Names: the browsers and the app reach `scadbuddy.e2e.test` and `idp.e2e.test` on this
+# network as aliases of `edge`, which serves https for both (edge/edge.py). `test` is not on
+# the Public Suffix List, so every `*.e2e.test` host is the site `https://e2e.test`: the
+# spec's Bambuddy replica on `bambuddy.e2e.test` is same-site with the app and one on
+# `bambuddy.elsewhere.test` is cross-site, as spec §6.1 and §6.3 need. Those two pages are
+# served by Playwright's own routing, so neither needs a name here.
+#
+# `oidc` and `edge` run the repository's files (mounted read-only at /repo) on the test
+# image's venv, as compose.yaml runs moto: no image of their own to pin. The Playwright
+# image is pinned by its index digest to the version frontend/pnpm-lock.yaml resolves
+# (1.64.1), whose browsers it carries with their system libraries.
+
+services:
+  app:
+    depends_on:
+      edge:
+        condition: service_healthy
+      oidc:
+        condition: service_healthy
+    environment:
+      SCADBUDDY_PUBLIC_URL: https://scadbuddy.e2e.test
+      SCADBUDDY_AUTH_MODE: observe
+      SCADBUDDY_AUTH_OIDC_ISSUER: https://idp.e2e.test
+      SCADBUDDY_AUTH_OIDC_CLIENT_ID: scadbuddy
+      # The issuer is on this network, not a public address.
+      SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK: "true"
+      # httpx trusts the edge's CA for the issuer's https (trust_env).
+      SSL_CERT_FILE: /run/edge-ca/ca.pem
+    volumes:
+      - edge-ca:/run/edge-ca:ro
+    # Its own host port (auth.sh seeds the login through it), so a hot-path stack or
+    # anything else on 18080 can stay up.
+    ports: !override
+      - "127.0.0.1:${SB_AUTH_APP_PORT:-18090}:8080"
+
+  oidc:
+    image: ${SB_HOTPATH_TOOLS_IMAGE:-scadbuddy:hot-path-test}
+    pull_policy: never
+    working_dir: /app/backend
+    command: ["/opt/venv/bin/python", "/repo/e2e-stack/fake-oidc/server.py"]
+    environment:
+      PYTHONPATH: /repo/backend
+      FAKE_OIDC_ISSUER: https://idp.e2e.test
+      FAKE_OIDC_CLIENT_SECRET: ${SB_AUTH_CLIENT_SECRET:?run.sh sets the client secret}
+    volumes:
+      - ..:/repo:ro
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:9000/.well-known/openid-configuration"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  edge:
+    image: ${SB_HOTPATH_TOOLS_IMAGE:-scadbuddy:hot-path-test}
+    pull_policy: never
+    # 443 inside the network, which the image's own user cannot bind.
+    user: "0:0"
+    command: ["/opt/venv/bin/python", "/repo/e2e-stack/edge/edge.py"]
+    environment:
+      EDGE_ROUTES: scadbuddy.e2e.test=app:8080,idp.e2e.test=oidc:9000
+      EDGE_CA_FILE: /run/edge-ca/ca.pem
+    volumes:
+      - ..:/repo:ro
+      - edge-ca:/run/edge-ca
+    networks:
+      default:
+        aliases:
+          - scadbuddy.e2e.test
+          - idp.e2e.test
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--output", "/dev/null", "--cacert", "/run/edge-ca/ca.pem", "--resolve", "idp.e2e.test:443:127.0.0.1", "https://idp.e2e.test/"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.64.1-noble@sha256:2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f
+    profiles: ["playwright"]
+    working_dir: /work
+    environment:
+      HOME: /tmp
+      CI: ${CI:-}
+      E2E_BASE_URL: https://scadbuddy.e2e.test
+      E2E_AUTH: "1"
+      E2E_AUTH_STATE: /run/e2e
+    volumes:
+      - ../frontend:/work
+      - ${SB_AUTH_STATE_DIR:?run.sh sets the state directory}:/run/e2e:ro
+    ipc: host
+
+volumes:
+  edge-ca:
