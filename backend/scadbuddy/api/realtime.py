@@ -113,6 +113,7 @@ from scadbuddy.core.events import (
     ActivityEvent,
     AgentOperationEvent,
     AnalyzerDecisionEvent,
+    AuthSessionRevoked,
     BusResync,
     Event,
     FlowRunEvent,
@@ -255,6 +256,9 @@ def topics_of(event: Event) -> list[str]:
         case OrderChanged() | OrderItemChanged():
             return ["orders", f"order:{event.order_id}"]
         case AgentOperationEvent():
+            return []
+        case AuthSessionRevoked():
+            # The sockets close on it themselves (spec 2026-11-01 §5.4); news for no page.
             return []
         case OperationEvent():
             # Followed by `GET /operations/{id}` (#1053); the event log keeps it.

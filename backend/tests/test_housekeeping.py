@@ -26,6 +26,8 @@ from scadbuddy.workflows.housekeeping import (
     ACTIVITY_TIMEOUT,
     ATTACHMENTS_SWEEP,
     ATTACHMENTS_TIMEOUT,
+    AUTH_SESSIONS_SWEEP,
+    AUTH_SESSIONS_TIMEOUT,
     CLAIMS_TIMEOUT,
     GIT_REMOTE_SWEEP,
     GIT_REMOTE_TIMEOUT,
@@ -143,6 +145,7 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         PRINTER_SYNC_SWEEP: PRINTER_SYNC_TIMEOUT,
         NATIVE_COPIES_SWEEP: NATIVE_COPIES_TIMEOUT,
         GIT_REMOTE_SWEEP: GIT_REMOTE_TIMEOUT,
+        AUTH_SESSIONS_SWEEP: AUTH_SESSIONS_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
@@ -291,6 +294,8 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         "housekeeping_reap_quote_holds",
         # #4974: a commit whose own push failed reaches the git remote within the interval.
         "housekeeping_push_git_remote",
+        # #4975: expired and revoked signed-in sessions go with the sweeps off too.
+        "housekeeping_sweep_auth_sessions",
     ]
     # #4439, #4747: the Bambuddy printer sync calls Bambuddy, so it obeys the switch.
     assert PRINTER_SYNC_SWEEP not in sweeps

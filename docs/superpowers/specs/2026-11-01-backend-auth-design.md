@@ -151,9 +151,11 @@ clients too ("For confidential clients, the use of PKCE is RECOMMENDED",
    cookie, and answers a small same-origin HTML page that navigates to `return_to`
    (so the next request is same-site and carries a `Strict` cookie) or, in a popup,
    tells its opener (§6.2).
-3. `POST /api/v1/auth/logout` deletes the row and the cookie; when the issuer publishes
-   an `end_session_endpoint` it answers its URL with `id_token_hint` for the page to
-   navigate to ([RP-Initiated Logout 1.0][oidc-logout]) (§13 D7).
+3. `POST /api/v1/auth/logout` deletes the row and the cookie; with RP-initiated logout
+   switched on (§13 D7) and an `end_session_endpoint` published, it answers that URL for
+   the page to navigate to ([RP-Initiated Logout 1.0][oidc-logout]). No ID token is kept,
+   so the URL names the RP by `client_id` with `post_logout_redirect_uri`, which §2 of
+   that spec allows in place of `id_token_hint` (phase 2, #5193).
 4. `GET /api/v1/auth/session` answers `{signed_in, user: {principal, name, email},
    mode, expires_at}` (or `signed_in: false`). It is the one route every mode serves
    to anyone, and the SPA's first call.

@@ -50,6 +50,7 @@ import { retryFailedPages } from '../lib/lazyRetry'
 import { panelWasOpen, reloaded, rememberPanelOpen, rememberSession } from './assistant/panelMemory'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { ActivityBell } from './activity/ActivityBell'
+import { AccountMenu } from './auth/AccountMenu'
 import { useApprovalToasts } from '../agent/pendingApprovals'
 import { Toasts } from './ui/Toasts'
 import { Badge } from '@/components/ui/badge'
@@ -350,6 +351,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
               <div className="ml-auto flex items-center gap-1.5">
                 <LiveUpdatesIndicator />
                 <ActivityBell />
+                <AccountMenu />
                 {shown && (
                   // Announces the badge (#815): it appears while focus is elsewhere, so the
                   // button's own name changing is not enough. A bare live region, not

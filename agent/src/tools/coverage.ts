@@ -7,6 +7,46 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: "GET /api/v1/auth/session",
+    reason: "The page's first read: whether this browser is signed in (#4975, spec 2026-11-01 §5.1). The agent acts for its turn's owner, not a browser.",
+  },
+  {
+    operation: "GET /api/v1/auth/login",
+    reason: "A person's own sign-in through the identity provider (#4975, spec 2026-11-01 §5.1); a browser navigation, never an agent's call.",
+  },
+  {
+    operation: "GET /api/v1/auth/callback",
+    reason: "A person's own sign-in through the identity provider (#4975, spec 2026-11-01 §5.1); a browser navigation, never an agent's call.",
+  },
+  {
+    operation: "POST /api/v1/auth/logout",
+    reason: "A person's own signed-in sessions (#4975, spec 2026-11-01 §5.2); the agent has no session of its own and must not sign a person out.",
+  },
+  {
+    operation: "GET /api/v1/auth/sessions",
+    reason: "A person's own signed-in sessions (#4975, spec 2026-11-01 §5.2); the agent has no session of its own and must not sign a person out.",
+  },
+  {
+    operation: "DELETE /api/v1/auth/sessions/{session_id}",
+    reason: "A person's own signed-in sessions (#4975, spec 2026-11-01 §5.2); the agent has no session of its own and must not sign a person out.",
+  },
+  {
+    operation: "POST /api/v1/auth/sessions/revoke-all",
+    reason: "A person's own signed-in sessions (#4975, spec 2026-11-01 §5.2); the agent has no session of its own and must not sign a person out.",
+  },
+  {
+    operation: "GET /api/v1/auth/config",
+    reason: "The login's configuration (#4975, spec 2026-11-01 §9.2): who may sign in to ScadBuddy is the owner's to set, never an agent's.",
+  },
+  {
+    operation: "PUT /api/v1/auth/config",
+    reason: "The login's configuration (#4975, spec 2026-11-01 §9.2): who may sign in to ScadBuddy is the owner's to set, never an agent's.",
+  },
+  {
+    operation: "POST /api/v1/auth/config/test",
+    reason: "The login's configuration (#4975, spec 2026-11-01 §9.2): who may sign in to ScadBuddy is the owner's to set, never an agent's.",
+  },
+  {
     operation: 'GET /api/v1/orders/{order_id}/events',
     reason:
       "The order page's audit line (#4249); order_get carries the status, and the agent's own calls are in " +

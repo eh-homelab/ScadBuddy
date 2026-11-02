@@ -24,7 +24,7 @@ Pool = ConnectionPool[Connection[DictRow]]
 
 _COLUMNS = (
     "id_hash, principal, issuer, subject, name, email, kind, created_at, last_seen_at,"
-    " idle_expires_at, absolute_expires_at"
+    " idle_expires_at, absolute_expires_at, client_address, user_agent"
 )
 _LIVE = "revoked_at IS NULL AND idle_expires_at > %(now)s AND absolute_expires_at > %(now)s"
 
@@ -42,6 +42,8 @@ def _session(row: dict[str, Any]) -> AuthSession:
         last_seen_at=row["last_seen_at"],
         idle_expires_at=row["idle_expires_at"],
         absolute_expires_at=row["absolute_expires_at"],
+        client_address=row["client_address"],
+        user_agent=row["user_agent"],
     )
 
 
@@ -122,15 +124,28 @@ class SessionStore:
             ).fetchone()
         return None if row is None else _session(row)
 
-    def revoke(self, id_hash: bytes, *, now: datetime | None = None) -> bool:
-        """Whether a live session was revoked."""
+    def revoke(
+        self, id_hash: bytes, *, principal: str | None = None, now: datetime | None = None
+    ) -> bool:
+        """Whether a live session was revoked; with ``principal``, only one of theirs."""
         with self._pool.connection() as conn:
             cur = conn.execute(
                 "UPDATE auth_sessions SET revoked_at = %(now)s"
-                " WHERE id_hash = %(id_hash)s AND revoked_at IS NULL",
-                {"id_hash": id_hash, "now": _now(now)},
+                " WHERE id_hash = %(id_hash)s AND revoked_at IS NULL"
+                " AND (%(principal)s::text IS NULL OR principal = %(principal)s)",
+                {"id_hash": id_hash, "principal": principal, "now": _now(now)},
             )
             return cur.rowcount == 1
+
+    def list_live(self, principal: str, *, now: datetime | None = None) -> list[AuthSession]:
+        """A person's live sessions, the most recently used first."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT {_COLUMNS} FROM auth_sessions WHERE principal = %(principal)s"
+                f" AND {_LIVE} ORDER BY last_seen_at DESC",
+                {"principal": principal, "now": _now(now)},
+            ).fetchall()
+        return [_session(row) for row in rows]
 
     def revoke_all(self, principal: str, *, now: datetime | None = None) -> int:
         """ "Sign out everywhere": how many sessions were revoked."""

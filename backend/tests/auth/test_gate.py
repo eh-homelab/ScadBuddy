@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.cross_site import CrossSiteGate
 from scadbuddy.auth.component import CallerDep
-from scadbuddy.auth.gate import SESSION_COOKIE, AuthGate
+from scadbuddy.auth.gate import FAILURE_LOG_INTERVAL, SESSION_COOKIE, AuthGate
 from scadbuddy.auth.models import AuthSession, Caller, Person
 from scadbuddy.auth.tokens import new_token
 from scadbuddy.core.settings import Settings
@@ -121,3 +121,26 @@ def test_the_app_installs_it_inside_the_cross_site_gate() -> None:
     # Outermost first: the cross-site gate refuses a foreign write before any lookup.
     order = [cast(object, m.cls) for m in app.user_middleware]
     assert order.index(CrossSiteGate) < order.index(AuthGate)
+
+
+def test_a_failed_lookup_is_logged_at_most_once_a_minute(caplog: pytest.LogCaptureFixture) -> None:
+    sessions = FakeSessions(error=psycopg.OperationalError("down"))
+    now = [0.0]
+    app = FastAPI()
+
+    @app.get("/api/v1/whoami")
+    def whoami(caller: CallerDep) -> str:
+        return _describe(caller)
+
+    app.add_middleware(AuthGate, sessions=lambda: sessions, clock=lambda: now[0])
+    client = TestClient(app)
+    client.cookies.set(SESSION_COOKIE, LIVE)
+    with caplog.at_level("WARNING", logger="scadbuddy.auth.gate"):
+        for _ in range(5):
+            client.get("/api/v1/whoami")
+        now[0] = FAILURE_LOG_INTERVAL + 1
+        client.get("/api/v1/whoami")
+    lines = [r for r in caplog.records if "session lookup failed" in r.getMessage()]
+    assert len(lines) == 2
+    assert "down" not in lines[0].getMessage()
+    assert lines[1].__dict__["failures_since_last_logged"] == 4

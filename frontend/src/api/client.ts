@@ -167,6 +167,13 @@ import type {
   SourceFile,
   StoreUsage,
   GitRemoteStatus,
+  AuthSessionView,
+  AuthSessionInfo,
+  LoginConfigView,
+  LoginConfigUpdate,
+  LoginDiscoveryReport,
+  LogoutResult,
+  RevokedSessions,
   UpstreamMerge,
   UpstreamStatus,
   UrlImport,
@@ -1429,6 +1436,17 @@ export const api = {
   getStoreUsage: () => request<StoreUsage>('/store/usage'),
   /** #4974 — how far the off-box git remote is behind the model and flow history. */
   getGitRemote: () => request<GitRemoteStatus>('/settings/git-remote'),
+  /** #4975 — whether this browser is signed in, and whether it can be (spec 2026-11-01 §5.1). */
+  getAuthSession: () => request<AuthSessionView>('/auth/session'),
+  logout: () => request<LogoutResult>('/auth/logout', { method: 'POST' }),
+  listAuthSessions: () => request<AuthSessionInfo[]>('/auth/sessions'),
+  revokeAuthSession: (id: string) => request<void>(`/auth/sessions/${seg(id)}`, { method: 'DELETE' }),
+  revokeAllAuthSessions: () => request<RevokedSessions>('/auth/sessions/revoke-all', { method: 'POST' }),
+  getLoginConfig: () => request<LoginConfigView>('/auth/config'),
+  putLoginConfig: (body: LoginConfigUpdate) =>
+    request<LoginConfigView>('/auth/config', { method: 'PUT', body: JSON.stringify(body) }),
+  testLoginConfig: (issuer: string) =>
+    request<LoginDiscoveryReport>('/auth/config/test', { method: 'POST', body: JSON.stringify({ issuer }) }),
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,

@@ -63,7 +63,10 @@ behaviour change is a cookie lookup that no browser can trigger.
 
 Spec §5.1, §5.2 (sweep, revocation list), §6.2, §9.2; D1, D3, D5, D7.
 
-- Login settings in the stored settings (D1; `settings_store`, a new migration):
+- Login settings in the backend's stored settings (D1). As built (#5193): a row of
+  their own, `auth_login_config`, behind `GET`/`PUT /auth/config`, not fields of the
+  generic `PATCH /settings`, since a save runs discovery first and the secret's AAD binds
+  the issuer and client id it was saved for. The configuration:
   issuer (defaulting to the agent's `mcp_oidc.issuer`), client id (moved from
   `ai_settings.mcp_oidc.client_id`, which the MCP section then shows read-only), the
   client secret sealed under the KEK as #602 seals the Bambuddy key, the sign-in rule
@@ -79,12 +82,16 @@ Spec §5.1, §5.2 (sweep, revocation list), §6.2, §9.2; D1, D3, D5, D7.
   `GET /auth/session`, `GET`/`DELETE /auth/sessions` (the person's own list, revoke,
   "sign out everywhere"). Sessions are 14 days idle, 30 days absolute (D5). Revocation
   publishes `auth.session_revoked`.
-- The sweep `housekeeping_auth_sessions` on the prune Schedule, behind its
+- The sweep `housekeeping_sweep_auth_sessions` on the prune Schedule, behind its
   `workflow.patched`.
 - Frontend: the sign-in screen, the popup flow from a frame with the `event.origin` and
   `event.source` checks (spec §6.2), the signed-in name in the header, Settings' "Signed-in
-  sessions" and the login section. msw answers `/auth/session` signed in by default.
-- `e2e-stack/fake-oidc/` (spec §11) and the backend tests of every callback refusal.
+  sessions" and the login section. msw answers `/auth/session` with the login off and
+  signed out by default, so the header shows nothing and every other suite is unchanged
+  (as built; phase 3's sign-in screen revisits it).
+- The fake issuer and the backend tests of every callback refusal. As built (#5193), the
+  issuer is in-process (`backend/tests/auth/fake_oidc.py`, over `httpx.ASGITransport`);
+  phase 7 serves it as the `e2e-stack/fake-oidc/` container.
 
 In `off` a signed-in person is recorded but nothing is refused, so a broken
 configuration costs nothing.

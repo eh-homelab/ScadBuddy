@@ -161,6 +161,7 @@ from scadbuddy.workflows.flow_triggers import VersionedFlowTriggerFire
 from scadbuddy.workflows.housekeeping import (
     ACTIVITY_SWEEP,
     ATTACHMENTS_SWEEP,
+    AUTH_SESSIONS_SWEEP,
     BACKFILL_SWEEP,
     FLOWS_SWEEP,
     GIT_REMOTE_SWEEP,
@@ -669,6 +670,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def push_git_remote() -> None:
         await _heartbeating(_push_git_remote_logged(state))
 
+    @activity.defn(name=AUTH_SESSIONS_SWEEP)
+    async def sweep_auth_sessions() -> None:
+        await _heartbeating(_sweep_auth_sessions_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -692,6 +697,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sync_bambuddy_printers,
         sweep_native_copies,
         push_git_remote,
+        sweep_auth_sessions,
     ]
 
 
@@ -1000,6 +1006,17 @@ async def _maintain_models_git_logged(state: AppState) -> None:
         raise
     if packed:
         logger.info("packed the models repository")
+
+
+async def _sweep_auth_sessions_logged(state: AppState) -> None:
+    """#4975: the signed-in sessions no request can use again."""
+    try:
+        deleted = await asyncio.to_thread(state.components.get(AUTH).sessions.delete_expired)
+    except Exception:
+        logger.exception("could not delete the expired sessions")
+        raise
+    if deleted:
+        logger.info("deleted expired sessions", extra={"sessions": deleted})
 
 
 async def _push_git_remote_logged(state: AppState) -> None:

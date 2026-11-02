@@ -40,6 +40,9 @@ class AuthSession:
     last_seen_at: datetime
     idle_expires_at: datetime
     absolute_expires_at: datetime
+    #: For the person's own list of their sessions only, never a check.
+    client_address: str | None = None
+    user_agent: str | None = None
 
 
 @dataclass(frozen=True)

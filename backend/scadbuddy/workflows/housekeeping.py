@@ -167,6 +167,11 @@ NATIVE_COPIES_PATCH = "housekeeping-sweep-native-copies"
 #: once it is reachable, with the sweeps off as well.
 GIT_REMOTE_SWEEP = "housekeeping_push_git_remote"
 GIT_REMOTE_PATCH = "housekeeping-push-git-remote"
+#: #4975 phase 2: delete the signed-in sessions no request can use again, revoked or past
+#: a deadline (`auth.store.SessionStore.delete_expired`). Last, behind its own patch; on
+#: the prune Schedule too, so expired rows go with the sweeps off as well.
+AUTH_SESSIONS_SWEEP = "housekeeping_sweep_auth_sessions"
+AUTH_SESSIONS_PATCH = "housekeeping-sweep-auth-sessions"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -191,6 +196,7 @@ SWEEPS = (
     PRINTER_SYNC_SWEEP,
     NATIVE_COPIES_SWEEP,
     GIT_REMOTE_SWEEP,
+    AUTH_SESSIONS_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -212,7 +218,8 @@ SWEEPS = (
 #: Bambuddy printer sync (#4439, #4747): it calls Bambuddy, so it obeys the sweeps'
 #: switch, and the import button, a passing connection test and each virtual printer's
 #: write run it besides. And the git remote's push (#4974), behind `GIT_REMOTE_PATCH`:
-#: a commit whose own push failed reaches the remote within the interval.
+#: a commit whose own push failed reaches the remote within the interval. And the expired
+#: signed-in sessions (#4975), behind `AUTH_SESSIONS_PATCH`.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
@@ -224,6 +231,7 @@ PRUNE_SWEEPS = (
     PRINTER_WATCHES_SWEEP,
     QUOTE_HOLDS_SWEEP,
     GIT_REMOTE_SWEEP,
+    AUTH_SESSIONS_SWEEP,
 )
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
@@ -272,6 +280,8 @@ NATIVE_COPIES_TIMEOUT = timedelta(minutes=5)
 #: A push per repository, each bounded by `gitrepo.PUSH_TIMEOUT` (2 min), and a margin.
 #: Not imported, as `GIT_TIMEOUT`'s is not.
 GIT_REMOTE_TIMEOUT = timedelta(minutes=5)
+#: One delete.
+AUTH_SESSIONS_TIMEOUT = timedelta(minutes=2)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -308,6 +318,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return NATIVE_COPIES_TIMEOUT
     if sweep == GIT_REMOTE_SWEEP:
         return GIT_REMOTE_TIMEOUT
+    if sweep == AUTH_SESSIONS_SWEEP:
+        return AUTH_SESSIONS_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -356,6 +368,8 @@ class Housekeeping:
             if sweep == NATIVE_COPIES_SWEEP and not workflow.patched(NATIVE_COPIES_PATCH):
                 continue
             if sweep == GIT_REMOTE_SWEEP and not workflow.patched(GIT_REMOTE_PATCH):
+                continue
+            if sweep == AUTH_SESSIONS_SWEEP and not workflow.patched(AUTH_SESSIONS_PATCH):
                 continue
             try:
                 await workflow.execute_activity(
