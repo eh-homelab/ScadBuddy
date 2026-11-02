@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-#: How a session was made: the OIDC login, a delegation to the agent's headless browser
+#: How a session was made: the OIDC login, a delegation to a browser the agent drives
 #: (§7.4), or the break-glass link (§9.3).
 SessionKind = Literal["login", "delegated", "break_glass"]
 
