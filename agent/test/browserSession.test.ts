@@ -83,10 +83,10 @@ describe('personSessions', () => {
     const sessions = new BrowserSessions(sql)
     expect(await (await app(sessions).request('/api/v1/ai/who')).json()).toEqual({ kind: 'browser', id: 'browser', label: 'You' })
     expect(reads()).toBe(0)
-    expect((await (await app(sessions).request('/api/v1/ai/who', withCookie)).json()).id).toBe('browser')
+    expect(((await (await app(sessions).request('/api/v1/ai/who', withCookie)).json()) as { id: string }).id).toBe('browser')
     const delegated = fakeSql(() => [{ principal: PERSON, name: null, kind: 'delegated' }])
     const answer = await app(new BrowserSessions(delegated.sql)).request('/api/v1/ai/who', withCookie)
-    expect((await answer.json()).id).toBe('browser')
+    expect(((await answer.json()) as { id: string }).id).toBe('browser')
   })
 
   it('logs, once a minute, what enforce would refuse in observe', async () => {

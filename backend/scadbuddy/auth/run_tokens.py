@@ -6,12 +6,11 @@ The API mints it when it starts the run and carries it in the run's sealed start
 :data:`RUN_TOKEN_HEADER`, and the API believes the call's author header only when the token
 is the run's and the author is the run's `started_by`. A MAC of the run id under a key
 derived from the KEK, as `slicing/transfer_token.py` derives its own. The format:
-``<run id>.<urlsafe_b64(HMAC-SHA256)>``. A token is a bearer secret: never log one.
+``<run id>.<hex HMAC-SHA256>``. A token is a bearer secret: never log one.
 """
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import hmac
 
@@ -33,8 +32,7 @@ def run_token_key(kek: Kek) -> bytes:
 
 
 def _mac(key: bytes, run_id: str) -> str:
-    digest = hmac.new(key, b"flow-run\n" + run_id.encode("ascii"), hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(digest).decode("ascii")
+    return hmac.new(key, b"flow-run\n" + run_id.encode("ascii"), hashlib.sha256).hexdigest()
 
 
 def mint_run_token(key: bytes, run_id: str) -> str:
