@@ -331,21 +331,50 @@ jobs:
                  repo rules enumerated above.
                - A missing test ONLY when this PR adds or changes behaviour and
                  NO test exercises that behaviour at all.
+               - Accuracy this diff broke: a comment, docstring, doc, README or
+                 CLAUDE.md statement that is now false *because of this diff* —
+                 the PR changed a value or what the code does and left text that
+                 still describes the old one. Blocking only when the correct text
+                 is unambiguous. This is about a false claim, never phrasing:
+                 wording, tone and style stay out of Blocking. The claim is the
+                 unit, not the line: before you raise one, grep the repo for
+                 every copy of it (other comments, other files, docs, CLAUDE.md),
+                 including in lines this diff does not change, and list every
+                 copy in that one finding. A copy found only on a later push
+                 costs the author another full round. Raise each such claim once;
+                 when the author has fixed it, do not grade the wording of the
+                 fix on a later push.
 
-               **Non-blocking** — everything else, including: extra edge-case
-               tests for branches beyond the change's core behaviour,
-               comment/docstring/wording, naming, style, refactors, small
-               performance gains, and speculative hardening against cases
+               **Non-blocking** — judgment calls only: extra edge-case tests for
+               branches beyond the change's core behaviour, naming, refactors,
+               small performance gains, and speculative hardening against cases
                nothing currently produces.
                - One line each. At most ~5; drop the least useful beyond that.
                - Do not re-litigate the same area on every push: if an earlier
                  review on this PR already raised it and the author declined or
                  deferred it, do not repeat it.
 
+               **Leave out entirely**:
+               - Cosmetic details in added lines (punctuation, arrow or dash
+                 style, table delimiter spacing). Linters own those.
+               - Phrasing and clarity: a sentence that "reads oddly", repeats
+                 itself, or could be shorter. If it is true, it is not a finding.
+               - Problems in files or lines this diff does not change. They are
+                 outside the PR's scope. Do not list them with a disclaimer such
+                 as "pre-existing" or "outside this diff" — leave them out. The
+                 one exception is a claim this diff made false, which is Blocking
+                 wherever its copies live (above).
+               - Things you could not check (a network call denied, a 403 on
+                 check runs), and checks to run after merge (watch the deploy,
+                 confirm a status). These are not findings. List them on one
+                 `Unverified:` line after the `## Non-blocking` section, and only
+                 when a failure there would be Blocking.
+
                Every finding, in either section, must be clearly actionable.
                When unsure whether something is Blocking, ask whether merging
-               as-is would let a user, the data, or the gate actually be hurt;
-               if not, it is Non-blocking.
+               as-is would let a user, the data, or the gate actually be hurt,
+               or leave a statement this diff made false; if not, it is
+               Non-blocking.
 
             ## Output
 
@@ -358,7 +387,8 @@ jobs:
 
             Under `## Blocking`, give each finding a short title, the file and
             line, the problem and the fix. Under `## Non-blocking`, one line per
-            finding. Do not put findings anywhere else in the document.
+            finding. Do not put findings anywhere else in the document. The
+            optional `Unverified:` line goes directly after `## Non-blocking`.
             **The last line of that document MUST be exactly this HTML comment,
             copied verbatim:**
 
