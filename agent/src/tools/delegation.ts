@@ -12,7 +12,7 @@ import { defineTool, json, type Tool } from './registry.js'
 
 export const delegationTools: readonly Tool[] = [
   defineTool({
-    name: 'browser_sign_in_link',
+    name: 'sign_in_link',
     label: "Sign the assistant's browser in",
     description:
       "A one-time link that signs a browser the assistant drives (a Playwright browser plugin) into ScadBuddy as " +

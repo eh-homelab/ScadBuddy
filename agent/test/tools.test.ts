@@ -276,7 +276,7 @@ describe('settings tools pass every answer through redact (#322)', () => {
   })
 })
 
-describe('browser_sign_in_link', () => {
+describe('sign_in_link', () => {
   it("asks for a link for the call's own principal (#4975 phase 6)", async () => {
     let body: unknown
     server.use(
@@ -286,7 +286,7 @@ describe('browser_sign_in_link', () => {
       }),
     )
     const principal = { id: 'user:https://idp.test#alice', kind: 'browser' as const, tiers: tiersUpTo('outward') }
-    const answer = firstText(await runTool(tool('browser_sign_in_link'), { ttl_seconds: 600 }, ctx({ principal })))
+    const answer = firstText(await runTool(tool('sign_in_link'), { ttl_seconds: 600 }, ctx({ principal })))
     expect(body).toEqual({ principal: 'user:https://idp.test#alice', ttl_seconds: 600 })
     expect(answer).toMatchObject({ url: 'https://scadbuddy.test/api/v1/auth/delegated?code=c' })
   })

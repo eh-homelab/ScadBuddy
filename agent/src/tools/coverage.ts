@@ -8,7 +8,7 @@ import type { Operation } from './registry.js'
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
     operation: "GET /api/v1/auth/delegated",
-    reason: "A delegation link's sign-in (#4975, spec 2026-11-01 §7.4): opened by the browser the agent drives, the link browser_sign_in_link mints; never a call.",
+    reason: "A delegation link's sign-in (#4975, spec 2026-11-01 §7.4): opened by the browser the agent drives, the link sign_in_link mints; never a call.",
   },
   {
     operation: "GET /api/v1/auth/access-tokens",
