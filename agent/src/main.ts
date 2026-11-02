@@ -45,6 +45,7 @@ import { headerSecretVariants, loadEnabledPlugins, PluginStore } from './plugins
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { ServiceCredential, serviceCredentialMiddleware, withServiceCredential } from './api/serviceCredential.js'
+import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey, sweepErrorText } from './approvals/service.js'
@@ -301,6 +302,10 @@ void tabRelay?.releaseAll()
 // /mcp requests for a session another replica holds (#2086, mcp/sessionRelay.ts), on
 // the listener's connection: made before start(), so its first LISTEN covers it.
 const mcpRelay = role.http && database && events ? new PgMcpSessionRelay(database.sql, { listen: (c, f) => events.listenAlso(c, f) }) : undefined
+// #4975 phase 5 (spec 2026-11-01 §5.6): the signed-in person on /api/v1/ai/*, from the
+// backend's `auth_sessions_agent`; a revocation the backend publishes drops its cache.
+const browserSessions = role.http && database ? new BrowserSessions(database.sql) : undefined
+if (browserSessions && events) browserSessions.follow(events)
 events?.start()
 const resources = new ResourceHub(events)
 // A session's working directory is under SCADBUDDY_SESSION_DIR when it is set (the worker's own emptyDir, plan Step 9.5).
@@ -1134,6 +1139,9 @@ const app = !role.http
   ...(audit ? { audit } : {}),
   upgradeWebSocket,
   tabs,
+  // A person's session on /api/v1/ai/* (#4975 phase 5), dropped when the backend revokes it.
+  ...(browserSessions ? { browserSessions } : {}),
+  authMode: config.authMode,
   // The shared agent-tools worker's state; an `api` process has its own host queue's instead.
   ...(temporalWorker ? { temporal: () => temporalWorker.state() } : hostWorkers ? { temporal: () => hostWorkers.pinned.state() } : {}),
   commands,

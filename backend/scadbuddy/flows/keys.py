@@ -10,6 +10,7 @@ from typing import Any
 
 import psycopg
 
+from scadbuddy.auth.run_tokens import run_token_key
 from scadbuddy.core.secrets import SecretKeyError, load_kek
 from scadbuddy.core.settings import Settings
 from scadbuddy.flows.approval_hash import approval_hash_key
@@ -36,6 +37,17 @@ def payload_keys(settings: Settings) -> tuple[PgPayloadKeys, Connect] | None:
             yield conn
 
     return PgPayloadKeys(connect, kek), connect
+
+
+def run_key(settings: Settings) -> bytes | None:
+    """The key a run's token is MACed under (#4975 phase 5, `auth/run_tokens.py`), from
+    the KEK; None without a usable one."""
+    if settings.secret_key_file is None:
+        return None
+    try:
+        return run_token_key(load_kek(settings.secret_key_file))
+    except SecretKeyError:
+        return None
 
 
 def approval_key(settings: Settings) -> bytes | None:

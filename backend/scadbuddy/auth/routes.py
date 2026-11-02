@@ -27,7 +27,16 @@ RouteClass = Literal[
     "internal.workspace",
     "transfer",
 ]
-Reason = Literal["signed_out", "not_a_person", "no_credential", "no_request_header"]
+Reason = Literal[
+    "signed_out",
+    "not_a_person",
+    "no_credential",
+    "out_of_scope",
+    "no_request_header",
+    # The author headers' refusals (#4975 phase 5, `core/authorship.py` `AuthorRefusal`).
+    "author_header",
+    "wrong_author",
+]
 
 #: The header every cookie-authenticated request carries (§5.3 layer 3).
 REQUEST_HEADER = "x-scadbuddy-request"
@@ -169,6 +178,9 @@ def would_refuse(
         return "no_credential"
     if isinstance(caller, Anonymous):
         return "signed_out"
+    # A credential whose scopes leave out the public routes (the print worker's).
+    if route_cls == "api" and isinstance(caller, Service) and "api" not in caller.scopes:
+        return "out_of_scope"
     if route_cls == "person" and not (
         isinstance(caller, Person) and caller.session.kind in ("login", "break_glass")
     ):

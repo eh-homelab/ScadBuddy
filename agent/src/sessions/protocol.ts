@@ -288,8 +288,14 @@ export function event(body: DistributiveOmit<ServerEvent, 'v'>): ServerEvent {
   return { v: PROTOCOL_VERSION, ...body } as ServerEvent
 }
 
+/**
+ * Whether `a` and `b` are one principal. Every browser-kind one is the browser user (#4975
+ * phase 5, D8, spec 2026-11-01 §8.3): the anonymous `browser` of the rows from before sign-in
+ * and each signed-in person (`user:<issuer>#<sub>`) act on each other's rows, as there is one
+ * person who may use ScadBuddy (D3).
+ */
 export function sameOwner(a: Pick<Owner, 'kind' | 'id'>, b: Pick<Owner, 'kind' | 'id'>): boolean {
-  return a.kind === b.kind && a.id === b.id
+  return a.kind === b.kind && (a.id === b.id || a.kind === 'browser')
 }
 
 /**

@@ -110,10 +110,12 @@ class OperationStore:
         retention: timedelta | None,
         idempotency_key: str | None = None,
         author: OperationAuthor | None = None,
+        person: str | None = None,
     ) -> Operation:
         """Record an accepted operation; the execution's row if it has one already (a
         retried activity), announced only when inserted. Prunes operations that finished
-        more than ``retention`` ago; ``None`` keeps every one."""
+        more than ``retention`` ago; ``None`` keeps every one. ``person`` is the signed-in
+        person a request no agent authored came from (#4975 phase 5), else the browser."""
         return await asyncio.to_thread(
             self._insert,
             op_id,
@@ -126,6 +128,7 @@ class OperationStore:
             retention,
             idempotency_key,
             author,
+            person,
         )
 
     async def finish(
@@ -208,6 +211,7 @@ class OperationStore:
         retention: timedelta | None,
         idempotency_key: str | None,
         author: OperationAuthor | None,
+        person: str | None = None,
     ) -> Operation:
         with self._pool.connection() as conn, conn.transaction():
             if retention is not None:
@@ -233,7 +237,7 @@ class OperationStore:
                 op = Operation.model_validate(row)
                 # A session with no principal is not the browser: it is left unattributed.
                 attribution = (
-                    Attribution("browser", None, None)
+                    Attribution(person or "browser", None, None)
                     if author is None
                     else Attribution(author.principal, author.session, author.tool)
                     if author.principal is not None

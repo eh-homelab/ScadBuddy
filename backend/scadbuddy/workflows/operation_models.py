@@ -79,6 +79,9 @@ class OperationInput(BaseModel):
     search_attributes: bool = False
     #: The request's agent author, when an agent made it.
     author: OperationAuthor | None = None
+    #: The signed-in person a request no agent authored came from (#4975 phase 5), for
+    #: its activity row; None for the anonymous browser user.
+    person: str | None = None
     #: The kind's prelude, when the request needs it (``OperationKind.prelude``).
     prelude: PreludeStep | None = None
     #: The client's ``Idempotency-Key``, when it sent one (review #1126 1.3).

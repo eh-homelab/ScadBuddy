@@ -27,6 +27,7 @@ from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Caller
 from scadbuddy.auth.observe import WouldRefuse
 from scadbuddy.auth.oidc import OidcClient
+from scadbuddy.auth.run_tokens import run_token_key
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.auth.store import Pool, SessionStore
 from scadbuddy.core.components import Component, Components, Core, Key
@@ -69,6 +70,7 @@ class AuthComponent:
         self._sessions = SessionStore(self._pool)
         self._config = LoginConfigStore(self._pool)
         self._credentials = ServiceCredentialStore(self._pool)
+        self._run_key: tuple[str, bytes] | None = None
 
     def _open(self) -> None:
         with self._lock:
@@ -116,6 +118,18 @@ class AuthComponent:
         """The KEK the settings are sealed under: the login needs it, for the client
         secret and the login cookie."""
         return self.core.settings_store.kek
+
+    def run_token_key(self) -> bytes | None:
+        """The key a flow run's token is MACed under (`auth/run_tokens.py`), derived once
+        per KEK; None without one."""
+        kek = self.kek
+        if kek is None:
+            return None
+        cached = self._run_key
+        if cached is None or cached[0] != kek.id:
+            cached = (kek.id, run_token_key(kek))
+            self._run_key = cached
+        return cached[1]
 
     def close(self) -> None:
         self._pool.close()

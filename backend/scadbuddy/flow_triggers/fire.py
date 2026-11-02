@@ -52,6 +52,10 @@ def runs_as(created_by: dict[str, Any]) -> dict[str, Any]:
     if created_by.get("kind") == "agent" and isinstance(created_by.get("principal"), str):
         return {"kind": "agent", "principal": created_by["principal"]}
     if created_by.get("kind") == "browser":
+        # The signed-in person who made it, when one did (#4975 phase 5).
+        principal = created_by.get("principal")
+        if isinstance(principal, str) and principal:
+            return {"kind": "browser", "principal": principal}
         return {"kind": "browser"}
     raise ValueError("the trigger's creator is not one a run can act as")
 

@@ -56,7 +56,7 @@ function decoded(header: string): string {
 
 /** An author's principal id as an owner, mapped as approvals/mcp.ts maps a principal. */
 function ownerOfPrincipal(id: string): Owner | undefined {
-  if (id === 'browser') return { kind: 'browser', id, label: 'You' }
+  if (id === 'browser' || id.startsWith('user:')) return { kind: 'browser', id, label: 'You' }
   if (id.startsWith('token:')) return { kind: 'bearer', id, label: `MCP ${id}` }
   if (id.startsWith('oidc:')) return { kind: 'oidc', id, label: `MCP OIDC ${id}` }
   if (id.startsWith('anonymous:')) return { kind: 'anonymous', id, label: `MCP ${id}` }
@@ -97,7 +97,10 @@ export class PgFlowRuns implements FlowRuns {
     }
     if (!row?.open) return undefined
     const by = row.started_by
-    if (by.kind === 'browser') return { kind: 'browser', id: 'browser', label: 'You' }
+    // The signed-in person who started it, when one did (#4975 phase 5).
+    if (by.kind === 'browser') {
+      return { kind: 'browser', id: typeof by.principal === 'string' ? decoded(by.principal) : 'browser', label: 'You' }
+    }
     if (by.kind !== 'agent' || typeof by.principal !== 'string') return undefined
     // Started from a session: its owner, as that session's own turns run.
     if (typeof by.session === 'string') {

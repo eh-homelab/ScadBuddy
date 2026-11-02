@@ -15,6 +15,8 @@ import type { TemporalHealth } from './temporal/worker.js'
 import type { TabHub } from './bridge/hub.js'
 import type { KekStatus } from './secrets.js'
 import type { SessionManager } from './sessions/manager.js'
+import { type BrowserSessions, personSessions } from './auth/browserSession.js'
+import type { AuthMode } from './config.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
 // direct streaming. /healthz and /mcp (when `mcp` is given; #251, mcp/http.ts) are
@@ -91,6 +93,13 @@ export interface AppDeps {
    * exactly when `sessions` is.
    */
   attachments?: AttachmentStore | undefined
+  /**
+   * The signed-in sessions (#4975 phase 5, auth/browserSession.ts), read from the backend's
+   * `auth_sessions_agent`; without it every request is the anonymous browser user.
+   */
+  browserSessions?: BrowserSessions | undefined
+  /** SCADBUDDY_AUTH_MODE (config.ts); `off` when left out. */
+  authMode?: AuthMode | undefined
 }
 
 /** Which credential requests are writes, by method (audit/writes.ts). */
@@ -212,6 +221,11 @@ export function createApp(deps: AppDeps): AgentApp {
     // Refused or failed forks, renames and dones (#792).
     app.use('/api/v1/ai/sessions/*', auditWrites({ ...writes, kind: 'resource', verb: sessionWriteVerb, failuresOnly: true }))
   }
+
+  // Who each `/api/v1/ai/*` request is from (#4975 phase 5, auth/browserSession.ts): the
+  // signed-in person whose session cookie it carries, else the anonymous browser user.
+  // Before the route groups, so every one of them reads it through `browserUser(c)`.
+  app.use('/api/v1/ai/*', personSessions(deps.browserSessions, deps.authMode ?? 'off'))
 
   const shutdown = new AbortController()
   for (const { route } of ROUTES) route.register(app, deps, shutdown.signal)

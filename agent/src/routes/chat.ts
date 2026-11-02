@@ -13,6 +13,7 @@ import { checkedImages } from '../sessions/images.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
+import { browserUser } from '../auth/browserSession.js'
 import { type RemoteAddress, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -562,6 +563,8 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
     upgrade((c) => {
       let connection: ChatConnection | undefined
       const clientIp = deps.remoteAddress(c)
+      // The signed-in person on the handshake (#4975 phase 5), else the browser user.
+      const principal = browserUser(c)
       return {
         onOpen: (_evt: Event, ws: WSContext) => {
           const sessions = deps.sessions
@@ -570,6 +573,7 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
           connection = new ChatConnection(sessions, (e) => ws.send(JSON.stringify(e)), {
             log,
             clientIp,
+            principal,
             ...(deps.snapshotMs === undefined ? {} : { snapshotMs: deps.snapshotMs }),
             ...(deps.tabs ? { tabs: deps.tabs } : {}),
             ...(deps.attachments ? { attachments: deps.attachments } : {}),

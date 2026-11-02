@@ -10,6 +10,8 @@ import { type Kek, openSecret } from '../secrets.js'
 // or a credential it sends none, which `SCADBUDDY_AUTH_MODE=off` still serves.
 
 export const REREAD_MS = 60 * 60 * 1000
+/** How soon it reads again while it has no token (review of #5211): started before the API minted one, or a failed read. */
+export const RETRY_MS = 60 * 1000
 
 /** The AAD binding a sealed token to its row (`backend/scadbuddy/auth/service_credentials.py` `aad`). */
 export function credentialAad(id: string, caller: string, scopes: readonly string[]): string {
@@ -49,7 +51,8 @@ export class ServiceCredential {
 
   async current(): Promise<string | undefined> {
     if (this.kek === undefined) return undefined
-    if (this.readAt !== undefined && this.now() - this.readAt < REREAD_MS) return this.token
+    const wait = this.token === undefined ? RETRY_MS : REREAD_MS
+    if (this.readAt !== undefined && this.now() - this.readAt < wait) return this.token
     this.reading ??= this.read(this.kek).finally(() => {
       this.reading = undefined
     })

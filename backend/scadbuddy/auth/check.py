@@ -21,6 +21,7 @@ from scadbuddy.auth.routes import (
     scriptless,
     would_refuse,
 )
+from scadbuddy.core.authorship import AUTHOR_REFUSAL_KEY
 
 
 async def auth_check(connection: HTTPConnection) -> None:
@@ -41,3 +42,8 @@ async def auth_check(connection: HTTPConnection) -> None:
     )
     if reason is not None:
         state.components.get(AUTH).would_refuse.note(route_cls, reason, route.path)
+    # What `AgentAuthorship` made of the author headers (#4975 phase 5), counted here
+    # where the route's class and template are known.
+    refusal = connection.scope.get(AUTHOR_REFUSAL_KEY)
+    if refusal is not None:
+        state.components.get(AUTH).would_refuse.note(route_cls, refusal, route.path)

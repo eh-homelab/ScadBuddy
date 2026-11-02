@@ -5,6 +5,7 @@ import type { OriginPolicy } from '../http/origins.js'
 import type { Owner } from '../sessions/protocol.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
+import { browserUser } from '../auth/browserSession.js'
 
 // /api/v1/ai/approvals (#258): the tests' and HTTP clients' way to see and decide
 // approvals of outward tool calls; the panel decides over #266's socket instead
@@ -96,7 +97,7 @@ export function registerApprovalRoutes(app: Hono, deps: ApprovalRouteDeps): void
     const session = c.req.query('session')
     const pending = c.req.query('pending') === 'true'
     try {
-      const list = await approvals.list(BROWSER_USER, { ...(session ? { sessionId: session } : {}), pending })
+      const list = await approvals.list(browserUser(c), { ...(session ? { sessionId: session } : {}), pending })
       return c.json({ approvals: list.map(approvalView) })
     } catch (err) {
       if (err instanceof ApprovalError) return c.json({ detail: err.message }, err.status)
@@ -127,7 +128,7 @@ export function registerApprovalRoutes(app: Hono, deps: ApprovalRouteDeps): void
       }
     }
     try {
-      const decided = await approvals.decide(BROWSER_USER, c.req.param('id'), c.req.param('verb') === 'approve', {
+      const decided = await approvals.decide(browserUser(c), c.req.param('id'), c.req.param('verb') === 'approve', {
         ...(body.input_hash === undefined ? {} : { inputHash: body.input_hash }),
         clientIp: deps.remoteAddress(c),
       })

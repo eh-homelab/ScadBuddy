@@ -61,6 +61,7 @@ from scadbuddy.api.realtime import EventCursor
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
+from scadbuddy.auth.authorship_rule import AuthorshipRule
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
@@ -1876,8 +1877,16 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     install_accepting_handler(app)
     libraries.install_library_handlers(app)
     models.install_model_handlers(app)
-    # A commit made for the agent is authored as the agent (#252).
-    app.add_middleware(AgentAuthorship)
+    # A commit made for the agent is authored as the agent (#252), and only the agent's
+    # and the projects worker's credentials name an author (#4975 phase 5).
+    app.add_middleware(
+        AgentAuthorship,
+        rule=AuthorshipRule(
+            mode=lambda: state.settings.auth_mode,
+            run_key=lambda: state.components.get(AUTH).run_token_key(),
+            pool=lambda: state.components.get(AUTH).pool,
+        ),
+    )
     # What each read saw of the event bus, so the UI need not read twice (#1039).
     app.add_middleware(EventCursor, events=lambda: state.events)
     # Outside everything that reads a body, so an oversized one is refused on its

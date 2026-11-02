@@ -175,6 +175,29 @@ Spec §5.6, §7.3, §8.3; D8.
   `routes/guard.ts` and on its sockets, the browser user's `id` as the principal, the
   author headers set from the turn's owner.
 
+As built (#5196): `core/authorship.py` `AgentAuthorship` asks `auth/authorship_rule.py`
+(given by `main.create_app`) what the caller (from `AuthGate`) makes of the headers, and
+keeps the requester in a context variable: `current_person()`, `browser_principal()`,
+`requester_record()` (a run's `started_by`, a trigger's `created_by`: `{"kind":
+"browser", "principal": …}` for a person) and `by_a_person()` (`_browser_only`, the delete
+of a run, and whether a grant is approved or only requested: no author, and neither a
+service nor a delegated session). Activity rows, an operation's (`OperationInput.person`)
+and an order's `created_by` record the person. In `off` every header is still believed and
+nothing is looked up; `observe` counts `author_header` and `wrong_author` (and
+`out_of_scope`, a credential without `api` on an `api` route) beside phase 3's reasons;
+`enforce` would answer 400 or 403. The run's token is `auth/run_tokens.py`, minted by
+`flows/launch.py` into `FlowStart.run_token` (""; a run from before names nobody, as
+before) and sent by `flow_routes.py` with the starter's headers (`RouteSend.author`). The
+in-process projects worker, the flow kinds' and a grant release's reads present the
+projects credential too (`Flows.api_auth`). The agent: the view `auth_sessions_agent`
+(granted to `scadbuddy_agent` with its credentials' view), `auth/browserSession.ts`
+(`personSessions` on `/api/v1/ai/*`, `browserUser(c)` in every route group and the chat
+socket, the cache dropped on `auth.session_revoked`), `SCADBUDDY_AUTH_MODE` read
+(`enforce` refused), and `sameOwner` taking every browser-kind principal as one (D8), as
+the session SQL does. Author headers follow from the turn's owner, whose id is the person.
+Approval and grant labels (`approved_by`, `decided_by`, the audit's `UI_ACTOR`) still say
+`browser`.
+
 ## Phase 6: delegated sessions and personal access tokens
 
 Spec §7.4, §7.5; D6.

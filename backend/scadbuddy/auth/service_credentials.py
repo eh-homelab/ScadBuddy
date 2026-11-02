@@ -52,6 +52,14 @@ ROLES: Mapping[ServiceCaller, str] = {
     "projects": "scadbuddy_projects",
 }
 
+#: The views a caller reads besides its own credentials': the agent checks a person's
+#: session on its own routes (#4975 phase 5, spec §5.6).
+VIEWS: Mapping[ServiceCaller, tuple[str, ...]] = {
+    "agent": ("service_credentials_agent", "auth_sessions_agent"),
+    "print": ("service_credentials_print",),
+    "projects": ("service_credentials_projects",),
+}
+
 PREFIX = "sbsvc_"
 LIFETIME = timedelta(days=30)
 ROTATE_BEFORE = timedelta(days=7)
@@ -197,8 +205,9 @@ class ServiceCredentialStore:
 
 
 def grant_caller_views(conn: Connection[Any]) -> list[str]:
-    """Grants each caller's role, where the deployment made it, its own view only;
-    the roles granted. Idempotent and never revokes, as `render/worker_role.py`."""
+    """Grants each caller's role, where the deployment made it, its own views only
+    (:data:`VIEWS`); the roles granted. Idempotent and never revokes, as
+    `render/worker_role.py`."""
     granted = []
     for caller, role in ROLES.items():
         if conn.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)).fetchone() is None:
@@ -210,17 +219,21 @@ def grant_caller_views(conn: Connection[Any]) -> list[str]:
                 sql.Identifier(str(schema[0])), sql.Identifier(role)
             )
         )
-        conn.execute(
-            sql.SQL("GRANT SELECT ON {} TO {}").format(
-                sql.Identifier(f"service_credentials_{caller}"), sql.Identifier(role)
+        for view in VIEWS[caller]:
+            conn.execute(
+                sql.SQL("GRANT SELECT ON {} TO {}").format(
+                    sql.Identifier(view), sql.Identifier(role)
+                )
             )
-        )
         granted.append(role)
     return granted
 
 
 #: How often a caller reads its view again (§7.2: at start and every hour).
 REREAD_SECONDS = 3600.0
+#: How soon it reads again while it has no token: one started before the API minted
+#: its credential, or whose read failed (review of #5211).
+RETRY_SECONDS = 60.0
 
 
 class TokenReader:
@@ -248,7 +261,8 @@ class TokenReader:
             return None
         with self._lock:
             now = self._clock()
-            if self._read_at is not None and now - self._read_at < REREAD_SECONDS:
+            wait = REREAD_SECONDS if self._token is not None else RETRY_SECONDS
+            if self._read_at is not None and now - self._read_at < wait:
                 return self._token
             try:
                 self._token = self._read(self._kek)

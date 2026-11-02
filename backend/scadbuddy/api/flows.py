@@ -35,7 +35,7 @@ from scadbuddy.api.operations import (
     run_operation,
     still_accepting,
 )
-from scadbuddy.core.authorship import current_author
+from scadbuddy.core.authorship import by_a_person, current_author, requester_record
 from scadbuddy.core.gitrepo import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import check_approval_timeout
@@ -268,11 +268,9 @@ class RunView(BaseModel):
 
 
 def _started_by() -> dict[str, Any]:
-    """Who started it (Ruling 6): the agent a request is authored as, else the browser."""
-    author = current_author()
-    if author is None:
-        return {"kind": "browser"}
-    return {"kind": "agent", "principal": author.principal, "session": author.session}
+    """Who started it (Ruling 6): the agent a request is authored as, else the browser,
+    with the signed-in person's principal when there is one (#4975 phase 5)."""
+    return requester_record()
 
 
 def _unavailable() -> ApiError:
@@ -572,7 +570,7 @@ async def start_flow_run(
                 await flows.store.insert_grant(
                     run_id,
                     options.grant,
-                    status="approved" if current_author() is None else "requested",
+                    status="approved" if by_a_person() else "requested",
                     requested_by=_started_by(),
                 )
             await start_execution(
@@ -761,7 +759,7 @@ async def get_flow_run_image(run_id: str, name: str, flows: FlowsDep) -> Respons
 async def delete_flow_run(run_id: str, flows: FlowsDep) -> Response:
     """Its key is deleted first, so every copy of its history is unreadable from then on;
     then its workflow (terminated if open) and its row. A person's decision only."""
-    if current_author() is not None:
+    if not by_a_person():
         raise ApiError(
             status.HTTP_403_FORBIDDEN, "Only a person can delete a flow run.", type_=BROWSER_ONLY
         )
@@ -868,8 +866,9 @@ def _browser_only(
     type_: str = ENTRY_BROWSER_ONLY,
 ) -> None:
     # Spec §6.6, plan 6 Ruling 6: a flow's entries are answered on the Workflows page,
-    # never by an agent, whatever grant it holds.
-    if current_author() is not None:
+    # never by an agent, whatever grant it holds; nor by a service credential or the
+    # agent's headless browser (#4975 phase 5, spec 2026-11-01 §7.3).
+    if not by_a_person():
         raise ApiError(status.HTTP_403_FORBIDDEN, detail, type_=type_)
 
 
@@ -1117,7 +1116,7 @@ async def _release(flows: Flows, run_id: str) -> list[str]:
     run = await flows.store.get_run(run_id)
     if flows.client is None or run is None or run.status in TERMINAL:
         return []
-    api = api_client(flows.settings.api_internal_url)
+    api = api_client(flows.settings.api_internal_url, flows.api_auth)
     try:
         grants = FlowGrants(flows.store, api, approval_key(flows.settings))
         return await grants.release(flows.client, run)

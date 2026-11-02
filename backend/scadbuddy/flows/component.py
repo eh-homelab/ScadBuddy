@@ -15,15 +15,17 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Annotated, Any
 
+import httpx
 from temporalio.client import Client
 
 from scadbuddy.api.components import component_dep
 from scadbuddy.api.deps import transactional_events
+from scadbuddy.auth.service_credentials import ServiceAuth, TokenReader
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.settings import Settings
 from scadbuddy.flows.agent_tools import AgentTools
 from scadbuddy.flows.definitions import FlowDefinitions
-from scadbuddy.flows.keys import approval_key, payload_keys
+from scadbuddy.flows.keys import approval_key, payload_keys, run_key
 from scadbuddy.flows.repository import FlowHistory
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
@@ -58,6 +60,11 @@ class Flows:
     #: The `projects` queue's operation activities (the flow decisions), built when the
     #: in-process worker starts: the operations component reads this one's kinds.
     operation_activities: Callable[[], list[Callable[..., Any]]] = field(default=lambda: [])
+    #: The key a run's token is MACed under (`auth/run_tokens.py`); None without a KEK.
+    run_key: bytes | None = None
+    #: The projects credential (#4975 phase 5), which this process's own calls on the
+    #: API's routes present: the in-process worker's host calls and a grant's reads.
+    api_auth: httpx.Auth | None = None
 
     @property
     def queue(self) -> str:
@@ -96,6 +103,10 @@ def _build(core: Core, components: Components) -> Flows:
         agent_tools=AgentTools(core.settings.agent_internal_url),
         connect=keys[1] if keys is not None else None,
         operation_activities=projects_operations,
+        run_key=run_key(core.settings),
+        api_auth=ServiceAuth(TokenReader("projects", core.settings.database_url, kek))
+        if (kek := core.settings_store.kek) is not None
+        else None,
     )
 
 
@@ -123,7 +134,7 @@ async def _run(flows: Flows) -> AsyncIterator[None]:
         return
     # Without SCADBUDDY_API_INTERNAL_URL a flow's render, print and arrange fail,
     # naming it; the rest of a flow runs.
-    api = api_client(settings.api_internal_url)
+    api = api_client(settings.api_internal_url, flows.api_auth)
     routes = FlowRoutes(api)
     grants = FlowGrants(flows.store, api, approval_key(settings))
     worker = projects_worker(

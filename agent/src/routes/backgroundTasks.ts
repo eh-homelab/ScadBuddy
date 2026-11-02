@@ -7,7 +7,7 @@ import { describeCron } from '../background/schedule.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { sameOwner } from '../sessions/protocol.js'
-import { BROWSER_USER } from './approvals.js'
+import { browserUser } from '../auth/browserSession.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -108,7 +108,7 @@ export function registerBackgroundTaskRoutes(
     const got = await available(c)
     if (got instanceof Response) return got
     try {
-      const session = await got.sessions.get(c.req.param('id'), BROWSER_USER)
+      const session = await got.sessions.get(c.req.param('id'), browserUser(c))
       const all = await got.tasks.store.list(session.id, { all: true })
       const active = all.filter((t) => t.state === 'active')
       const ended = all.filter((t) => t.state !== 'active').slice(0, ENDED_SHOWN)
@@ -125,8 +125,8 @@ export function registerBackgroundTaskRoutes(
     const got = await available(c)
     if (got instanceof Response) return got
     try {
-      const session = await got.sessions.get(c.req.param('id'), BROWSER_USER)
-      if (!sameOwner(BROWSER_USER, session.owner)) {
+      const session = await got.sessions.get(c.req.param('id'), browserUser(c))
+      if (!sameOwner(browserUser(c), session.owner)) {
         throw new SessionError('forbidden', `session ${session.id} is controlled by ${session.owner.label}; take it over first`)
       }
       const taskId = c.req.param('taskId')

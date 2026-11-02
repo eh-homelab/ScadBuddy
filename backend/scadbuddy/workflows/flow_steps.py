@@ -22,6 +22,7 @@ from scadbuddy.workflows.flow_models import (
     ProjectionWrite,
     StepPolicy,
 )
+from scadbuddy.workflows.flow_routes import RouteAuthor
 
 FLOW_PROJECT = "flow_project"
 
@@ -50,6 +51,9 @@ class StepOwner(Protocol):
     def agent_heartbeat_s(self) -> int: ...
 
     def tool_tier(self, name: str) -> str | None: ...
+
+    @property
+    def route_author(self) -> RouteAuthor | None: ...
 
     def mark_started(self, call_id: str) -> None: ...
 
