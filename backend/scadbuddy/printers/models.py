@@ -16,6 +16,11 @@ PrintPath = Literal["bambuddy", "native", "auto"]
 
 #: What a registry row is (#4747): a printer, or one of Bambuddy's virtual printers,
 #: which is never counted as hardware (not in the strip, the dialog or the hot path).
+#: A virtual printer is never a print target either (#4747's decision, #4972): a queue
+#: VP is Bambuddy's queue, which ScadBuddy already drives with tracking, and a proxy VP
+#: is its target. VPs show in Settings and agent reads only; `run_path` puts one on
+#: Bambuddy's path, so `hot_path_native` ignores it, and a run naming one is refused
+#: with a 422 (`print_run.RunRefusalError`).
 PrinterKind = Literal["physical", "bambuddy_virtual"]
 
 #: A virtual printer's mode, Bambuddy's canonical values (``VP_MODE_VALUES`` in
