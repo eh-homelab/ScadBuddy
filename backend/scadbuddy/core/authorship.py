@@ -88,8 +88,8 @@ class AgentAuthor:
 _author: ContextVar[AgentAuthor | None] = ContextVar("scadbuddy_agent_author", default=None)
 
 #: What the request's caller is (`auth/models.py`), as far as authorship cares: a person's
-#: own session, a delegated one (the agent's headless browser, spec §7.4), a service
-#: credential, or nobody.
+#: own session, a delegated one (a browser the agent drives, spec §7.4), a person's
+#: access token (`auth/personal_tokens.py`), a service credential, or nobody.
 CallerKind = Literal["person", "delegated", "token", "service", "anonymous"]
 #: Why ``enforce`` refuses a request's author headers (spec §7.3): sent by a caller that
 #: may not assert an author, or by the projects worker naming someone other than the
@@ -102,7 +102,8 @@ AUTHOR_REFUSAL_KEY = "scadbuddy.author_refusal"
 @dataclass(frozen=True)
 class Requester:
     kind: CallerKind
-    #: The session's principal (`user:<issuer>#<sub>`), for a person or a delegated session.
+    #: The principal (`user:<issuer>#<sub>`), for a person, a delegated session or a
+    #: personal access token.
     principal: str | None = None
 
 
