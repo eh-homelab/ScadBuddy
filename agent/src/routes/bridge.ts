@@ -1,7 +1,10 @@
 import type { Hono, MiddlewareHandler } from 'hono'
 import type { UpgradeWebSocket, WSContext } from 'hono/ws'
+import { type BrowserSessions, requestSession } from '../auth/browserSession.js'
 import type { TabConnection, TabHub } from '../bridge/hub.js'
+import type { AuthMode } from '../config.js'
 import type { OriginPolicy } from '../http/origins.js'
+import { SIGNED_OUT } from './chat.js'
 import { type RemoteAddress, uiRequestProblem } from './guard.js'
 import type { RouteModule } from './module.js'
 
@@ -21,6 +24,12 @@ import type { RouteModule } from './module.js'
 // §8.4). A socket that passes is the browser user's tab; what it can do is
 // answer calls and accept or refuse pairings, which only the user can do in
 // that tab.
+//
+// Opened under a signed-in session (#4975 phase 5), the socket lives only as long
+// as the session (#5217): `auth.session_revoked` on the bus (every replica hears
+// it) closes it with 4401 at once, and it re-reads the session every
+// `SESSION_CHECK_MS` (plus browserSession.ts CACHE_MS), which catches a missed
+// event or an expiry. Never with SCADBUDDY_AUTH_MODE=off.
 
 export const BRIDGE_PATH = '/api/v1/ai/bridge'
 
@@ -33,12 +42,21 @@ export const BRIDGE_PATH = '/api/v1/ai/bridge'
  */
 export const BRIDGE_FRAME_MAX = 256 * 1024
 
+/** How often an open tab socket re-reads the session it was opened under (#5217). */
+export const SESSION_CHECK_MS = 5_000
+
 export type BridgeRouteDeps = {
   tabs: TabHub
   remoteAddress: RemoteAddress
   origins: OriginPolicy
   upgradeWebSocket: UpgradeWebSocket | undefined
   log?: (message: string) => void
+  /** The signed-in sessions (#4975 phase 5): a socket opened under one closes when it ends (#5217). */
+  browserSessions?: BrowserSessions | undefined
+  /** With `off`, a socket never re-checks its session, as before #5217. */
+  authMode?: AuthMode | undefined
+  /** SESSION_CHECK_MS when omitted. */
+  sessionCheckMs?: number
 }
 
 export function registerBridgeRoute(app: Hono, deps: BridgeRouteDeps): void {
@@ -58,8 +76,18 @@ export function registerBridgeRoute(app: Hono, deps: BridgeRouteDeps): void {
   app.get(
     BRIDGE_PATH,
     gate,
-    upgrade(() => {
+    upgrade((c) => {
       let connection: TabConnection | undefined
+      const sessions = deps.authMode !== undefined && deps.authMode !== 'off' ? deps.browserSessions : undefined
+      const person = sessions ? requestSession(c) : undefined
+      let unwatch: (() => void) | undefined
+      let timer: NodeJS.Timeout | undefined
+      let checking = false
+      const stop = () => {
+        unwatch?.()
+        clearInterval(timer)
+        connection?.close()
+      }
       return {
         onOpen: (_evt: Event, ws: WSContext) => {
           connection = deps.tabs.open(
@@ -67,6 +95,28 @@ export function registerBridgeRoute(app: Hono, deps: BridgeRouteDeps): void {
             // 4000: this tab connected again on another socket; the old one goes.
             () => ws.close(4000, 'the tab connected again'),
           )
+          if (!sessions || !person) return
+          const signOut = () => {
+            if (connection?.closed) return
+            stop()
+            ws.close(SIGNED_OUT, 'signed out')
+          }
+          // A read that fails keeps the socket; the next tick reads again.
+          const recheck = () => {
+            if (checking) return
+            checking = true
+            void sessions
+              .live(person.id, person.principal)
+              .then((live) => {
+                if (live === false) signOut()
+              })
+              .finally(() => {
+                checking = false
+              })
+          }
+          unwatch = sessions.watch(person.id, person.principal, { revoked: signOut, recheck })
+          timer = setInterval(recheck, deps.sessionCheckMs ?? SESSION_CHECK_MS)
+          timer.unref()
         },
         onMessage: (evt: MessageEvent, ws: WSContext) => {
           const data: unknown = evt.data
@@ -75,10 +125,10 @@ export function registerBridgeRoute(app: Hono, deps: BridgeRouteDeps): void {
           if (size > BRIDGE_FRAME_MAX) return ws.close(1009, 'frame too large')
           void connection?.receive(evt.data)
         },
-        onClose: () => connection?.close(),
+        onClose: stop,
         onError: (evt: Event) => {
           log(`bridge: socket error: ${evt.type}`)
-          connection?.close()
+          stop()
         },
       }
     }),
@@ -94,6 +144,8 @@ export const route: RouteModule = {
       remoteAddress: deps.remoteAddress,
       origins: deps.origins,
       upgradeWebSocket: deps.upgradeWebSocket,
+      ...(deps.browserSessions ? { browserSessions: deps.browserSessions } : {}),
+      ...(deps.authMode ? { authMode: deps.authMode } : {}),
     })
   },
 }
