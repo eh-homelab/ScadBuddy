@@ -47,6 +47,8 @@ Confirmed by the user, 2026-10-18; the 3a plan's Tasks 6 and 8 are edited to mat
 
 The catalogue is the image's BBL tree (Task 2). Bambuddy's `local` presets (OrcaSlicer imports, `/local-presets/`, `bambuddy/catalogue.py:109-114`) and cloud *user* presets are not offered on a native run, and a remembered one is refused with a message naming it. The native slicer already refuses a `local` printer or filament preset and reads a `local` process preset's values only from Bambuddy (`slicing/presets.py` docstring on branch `feat/native-slicer-caller`, measured 2026-10-18), which would be a Bambuddy call on the hot path.
 
+Revised by #4645 for `local` presets: a native run offers and slices them from a kept copy (`slicing/held_presets.py`), refreshed off the hot path on the spool providers' Schedule, never from Bambuddy. Cloud user presets stay as above (#5113).
+
 ### D6. The destination is a native folder; projects are the Bambuddy path's
 
 Confirmed by the user, 2026-10-18. A native run files its laid-out copy in the native library: in the request's `folder_id` when it names a native folder, else in the output's `<Template title>/` folder the filing already uses (`print_library/filing.py:16`, `folder_name(title)`), else at the top level for a library file. `project_id` is refused on a native run (422 naming the Bambuddy path), and `last_project_id` is ignored there. This revises LIB Ruling 7 (`docs/superpowers/plans/2026-10-17-native-print-library.md`, "Print destinations stay Bambuddy's folders") for native runs only; the Bambuddy path is unchanged.
