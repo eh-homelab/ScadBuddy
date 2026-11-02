@@ -6,8 +6,9 @@ run left open across a deploy replays on the new code. A change to the commands
 
 ``refreshed`` was recorded with two providers that answered, ``failed`` with a provider
 whose activity raised and a trays step that raised (``SCADBUDDY_RECORD_HISTORIES=1`` runs
-the recording below). Never re-record them: a
-later change adds a history recorded on the changed code beside them.
+the recording below), both before the kept local presets' step (#4645); ``held`` with
+that step, behind its patch. Never re-record them: a later change adds a history
+recorded on the changed code beside them.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from temporalio.client import Client, WorkflowHistory
 from temporalio.worker import Replayer, Worker
 
 from scadbuddy.workflows.spool_refresh import (
+    HELD_ACTIVITY,
     LIST_ACTIVITY,
     PROVIDER_ACTIVITY,
     SEEN_ACTIVITY,
@@ -33,7 +35,7 @@ from tests.support.temporal import temporal_server
 HISTORIES = Path(__file__).parent / "fixtures" / "spool_refresh_histories"
 
 
-@pytest.mark.parametrize("name", ["refreshed", "failed"])
+@pytest.mark.parametrize("name", ["refreshed", "failed", "held"])
 async def test_spool_refresh_replays_its_recorded_history(name: str) -> None:
     history = WorkflowHistory.from_json(
         f"spool-refresh-{name}", (HISTORIES / f"{name}.json").read_text()
@@ -49,7 +51,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-@pytest.mark.parametrize("name", ["refreshed", "failed"])
+@pytest.mark.parametrize("name", ["held"])
 async def test_record(recording_temporal: str, name: str) -> None:
     @activity.defn(name=LIST_ACTIVITY)
     async def names() -> list[str]:
@@ -66,10 +68,17 @@ async def test_record(recording_temporal: str, name: str) -> None:
         if name == "failed":
             raise RuntimeError("no reports")
 
+    @activity.defn(name=HELD_ACTIVITY)
+    async def held() -> str:
+        return "refreshed"
+
     client = await Client.connect(recording_temporal)
     queue = f"spools-{uuid.uuid4().hex[:8]}"
     async with Worker(
-        client, task_queue=queue, workflows=[SpoolRefresh], activities=[names, refresh, seen]
+        client,
+        task_queue=queue,
+        workflows=[SpoolRefresh],
+        activities=[names, refresh, seen, held],
     ):
         handle = await client.start_workflow(
             SpoolRefresh.run, id=f"spool-providers-{queue}", task_queue=queue

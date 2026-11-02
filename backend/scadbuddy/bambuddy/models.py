@@ -96,6 +96,11 @@ class LocalPreset(BambuddyModel):
     default_filament_colour: str | None = None
     compatible_printers: str | None = None
     inherits: str | None = None
+    #: When Bambuddy last wrote the row, as it sends it: its model's ``updated_at`` is
+    #: ``onupdate=func.now()`` (``backend/app/models/local_preset.py`` at
+    #: maziggy/bambuddy@98ecaf50, read 2026-11-01), so an edit moves it. What the kept
+    #: copy's refresh reads a preset again by (#4645).
+    updated_at: str | None = None
 
     def ref(self) -> PresetRef:
         return PresetRef(source="local", id=str(self.id))
