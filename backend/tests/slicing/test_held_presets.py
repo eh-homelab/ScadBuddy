@@ -322,6 +322,16 @@ async def test_a_providers_record_naming_a_kept_preset_for_any_printer_resolves(
     assert resolved.filament_presets == [PresetRef(source="local", id="7")]
 
 
+async def test_a_renamed_kept_preset_is_flattened_again(held: MemoryHeld, kept: Profiles) -> None:
+    """`flatten_over` reads the row's name beside its document (#4645 review): a rename
+    with the same document is checked again, not answered from before."""
+    await catalogue_for(None, native=kept)
+    held.asked.clear()
+    held.docs[7] = PLA.model_copy(update={"name": "Inland PLA Renamed @H2C"})
+    await catalogue_for(None, native=kept)
+    assert held.asked == [[7]]
+
+
 async def test_an_edit_replaces_the_flatten_answer_it_had(held: MemoryHeld, kept: Profiles) -> None:
     """One answer per kept preset, the latest edit's (#4645 review): an edit never adds
     an entry that lives for the process's life."""

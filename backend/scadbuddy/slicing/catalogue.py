@@ -64,6 +64,7 @@ from scadbuddy.slicing.profiles import (
 
 if TYPE_CHECKING:
     from scadbuddy.library.settings_store import SettingsStore
+    from scadbuddy.slicing.held_presets import HeldRow
 
 logger = logging.getLogger(__name__)
 
@@ -220,9 +221,16 @@ async def catalogue_for(client: BambuddyClient | None, *, native: Profiles | Non
 
 
 #: Whether each kept preset flattens over a tree, by the tree's root and version and the
-#: preset's id: the document digest it was answered for, and the answer. Only the latest
-#: digest per preset is kept, so an edit replaces its entry rather than adding one.
-_flattens: dict[tuple[Path, str, int], tuple[str, bool]] = {}
+#: preset's id: what it was answered for (the document's digest, and the row's name and
+#: kind, which `flatten_over` reads beside it), and the answer. Only the latest is kept
+#: per preset, so an edit replaces its entry rather than adding one.
+_flattens: dict[tuple[Path, str, int], tuple[tuple[str, str, str], bool]] = {}
+
+
+def _answered_for(row: HeldRow) -> tuple[str, str, str]:
+    return (row.sha256, row.preset.name, row.preset.preset_type)
+
+
 _SLOTS: dict[str, Kind] = {"printer": "machine", "process": "process", "filament": "filament"}
 
 
@@ -242,17 +250,18 @@ async def with_held(image: Catalogue, profiles: Profiles) -> Catalogue:
     unknown = [
         row
         for row in rows
-        if _flattens.get((root, version, row.preset.id), ("", False))[0] != row.sha256
+        if (found := _flattens.get((root, version, row.preset.id))) is None
+        or found[0] != _answered_for(row)
     ]
     if unknown:
         docs = await held.documents([row.preset.id for row in unknown])
         for row in unknown:
             doc = docs.get(row.preset.id)
             ok = doc is not None and await asyncio.to_thread(_flattens_over, profiles, doc)
-            _flattens[(root, version, row.preset.id)] = (row.sha256, ok)
+            _flattens[(root, version, row.preset.id)] = (_answered_for(row), ok)
     offered: dict[str, list[PresetChoice]] = {slot: [] for slot in _SLOTS}
     for row in rows:
-        if _flattens.get((root, version, row.preset.id)) != (row.sha256, True):
+        if _flattens.get((root, version, row.preset.id)) != (_answered_for(row), True):
             continue
         if is_slot_preset(row.preset.name):
             continue

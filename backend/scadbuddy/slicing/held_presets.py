@@ -176,7 +176,11 @@ async def refresh_held_presets(store: HeldPresetStore, client: BambuddyClient) -
     stamps = await store.stamps()
     read = 0
     for row in listed:
-        if row.id in stamps and row.updated_at is not None and stamps[row.id] == row.updated_at:
+        if row.updated_at is None:
+            # Read on every refresh: there is nothing to tell an edit by without the
+            # document. Said, so a refresh that never settles is not a mystery.
+            logger.info("a local preset has no updated_at", extra={"preset_id": row.id})
+        elif row.id in stamps and stamps[row.id] == row.updated_at:
             continue
         try:
             detail = await client.local_preset(row.id)
