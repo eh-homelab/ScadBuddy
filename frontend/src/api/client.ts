@@ -174,6 +174,9 @@ import type {
   LoginDiscoveryReport,
   ServiceCaller,
   ServiceCredentialView,
+  AccessTokenCreate,
+  AccessTokenCreated,
+  AccessTokenView,
   LogoutResult,
   RevokedSessions,
   UpstreamMerge,
@@ -1459,6 +1462,10 @@ export const api = {
     }),
   revokeServiceCredential: (id: string) =>
     request<ServiceCredentialView[]>(`/auth/service-credentials/${seg(id)}`, { method: 'DELETE' }),
+  listAccessTokens: () => request<AccessTokenView[]>('/auth/access-tokens'),
+  createAccessToken: (body: AccessTokenCreate) =>
+    request<AccessTokenCreated>('/auth/access-tokens', { method: 'POST', body: JSON.stringify(body) }),
+  revokeAccessToken: (id: string) => request<void>(`/auth/access-tokens/${seg(id)}`, { method: 'DELETE' }),
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,

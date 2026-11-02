@@ -16,7 +16,7 @@ from typing import Literal
 
 from fastapi.routing import APIRoute, APIWebSocketRoute
 
-from scadbuddy.auth.models import Anonymous, Caller, Person, Service
+from scadbuddy.auth.models import Anonymous, Caller, Person, PersonalToken, Service
 
 RouteClass = Literal[
     "public",
@@ -38,6 +38,8 @@ Reason = Literal[
     "wrong_author",
 ]
 
+#: What a ``read`` access token may send (RFC 9110 §9.2.1's safe methods).
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 #: The header every cookie-authenticated request carries (§5.3 layer 3).
 REQUEST_HEADER = "x-scadbuddy-request"
 
@@ -49,6 +51,8 @@ PUBLIC_ENDPOINTS = frozenset(
         "scadbuddy.api.auth.login",
         "scadbuddy.api.auth.callback",
         "scadbuddy.api.auth.break_glass",
+        # A delegation link's sign-in (#4975 phase 6): the one-time code is the credential.
+        "scadbuddy.api.auth.delegated_sign_in",
     }
 )
 #: A person's own session only (§8.1): what an agent must never do for them.
@@ -70,6 +74,10 @@ PERSON_ENDPOINTS = frozenset(
         "scadbuddy.api.auth.get_login_config",
         "scadbuddy.api.auth.put_login_config",
         "scadbuddy.api.auth.test_login_config",
+        # A person's access tokens (#4975 phase 6): minted, listed and revoked by them.
+        "scadbuddy.api.access_tokens.list_access_tokens",
+        "scadbuddy.api.access_tokens.create_access_token",
+        "scadbuddy.api.access_tokens.revoke_access_token",
         # The services' credentials (#4975 phase 4).
         "scadbuddy.api.service_credentials.list_service_credentials",
         "scadbuddy.api.service_credentials.rotate_service_credential",
@@ -167,6 +175,7 @@ def would_refuse(
     *,
     request_header: bool,
     header_needed: bool,
+    method: str = "GET",
 ) -> Reason | None:
     """Why ``enforce`` would refuse this request, or ``None`` (§8.1, §5.3).
     ``header_needed`` is false for a socket and for a scriptless GET."""
@@ -181,6 +190,13 @@ def would_refuse(
     # A credential whose scopes leave out the public routes (the print worker's).
     if route_cls == "api" and isinstance(caller, Service) and "api" not in caller.scopes:
         return "out_of_scope"
+    # A person's access token (§7.5): the api routes only, and writes with `write` only.
+    if isinstance(caller, PersonalToken):
+        if route_cls == "person":
+            return "not_a_person"
+        if caller.scope != "write" and method.upper() not in SAFE_METHODS:
+            return "out_of_scope"
+        return None
     if route_cls == "person" and not (
         isinstance(caller, Person) and caller.session.kind in ("login", "break_glass")
     ):

@@ -1047,13 +1047,25 @@ def _grant_and_rotate_at_start(state: AppState) -> None:
 
 
 async def _sweep_auth_sessions_logged(state: AppState) -> None:
-    """#4975: the signed-in sessions no request can use again, and (phase 4, in the
-    activity, so the workflow's history is unchanged) the service credentials' rotation."""
+    """#4975: the signed-in sessions no request can use again, and (in the activity, so
+    the workflow's history is unchanged) the service credentials' rotation (phase 4) and
+    the spent delegation codes and long-dead access tokens (phase 6)."""
+    auth = state.components.get(AUTH)
     try:
-        deleted = await asyncio.to_thread(state.components.get(AUTH).sessions.delete_expired)
-        await asyncio.to_thread(_rotate_service_credentials, state)
+        deleted = await asyncio.to_thread(auth.sessions.delete_expired)
     except Exception:
         logger.exception("could not delete the expired sessions")
+        raise
+    try:
+        await asyncio.to_thread(_rotate_service_credentials, state)
+    except Exception:
+        logger.exception("could not rotate the service credentials")
+        raise
+    try:
+        await asyncio.to_thread(auth.delete_spent_delegations)
+        await asyncio.to_thread(auth.tokens.delete_expired)
+    except Exception:
+        logger.exception("could not delete the spent delegation codes or old access tokens")
         raise
     if deleted:
         logger.info("deleted expired sessions", extra={"sessions": deleted})
@@ -1949,6 +1961,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         AuthGate,
         sessions=lambda: state.components.get(AUTH).sessions,
         credentials=lambda: state.components.get(AUTH).credentials,
+        tokens=lambda: state.components.get(AUTH).tokens,
     )
     # A write from a page on another origin is refused before its body is read (#962).
     app.add_middleware(

@@ -43,6 +43,8 @@ type config struct {
 	StateDir     string
 	Mountpoint   string
 	Telemetry    telemetry.Config
+	// TokenFile holds a personal access token (ScadBuddy Settings → Access tokens), or "".
+	TokenFile string
 }
 
 // DefaultAPI is the deployed ScadBuddy's API root, the default of --api.
@@ -70,6 +72,7 @@ func newFlagSet(cfg *config) *flag.FlagSet {
 	set := flag.NewFlagSet("mount", flag.ContinueOnError)
 	set.SetOutput(io.Discard)
 	set.StringVar(&cfg.API, "api", defaultAPI(), "ScadBuddy's API root, like http://host/api/v1 (default $BAMBUDDY_FS_API, else the deployed ScadBuddy)")
+	set.StringVar(&cfg.TokenFile, "token-file", os.Getenv("BAMBUDDY_FS_TOKEN_FILE"), "a file holding a personal access token from ScadBuddy's Settings → Access tokens, sent on every call (default $BAMBUDDY_FS_TOKEN_FILE; none when unset)")
 	set.BoolVar(&cfg.ReadOnly, "ro", false, "refuse every write with EROFS")
 	set.BoolVar(&cfg.All, "all", false, "list every file, not only unsliced 3MFs")
 	set.BoolVar(&cfg.AllowOther, "allow-other", false, "fail unless other users and processes may see the mount (FUSE allow_other; on by default whenever "+fuseConf+" has user_allow_other)")
@@ -302,8 +305,29 @@ func printDefaults(w io.Writer) {
 	fl.PrintDefaults()
 }
 
+// readToken is the token in path, trimmed; "" without a path.
+func readToken(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("reading the token file: %w", err)
+	}
+	token := strings.TrimSpace(string(data))
+	if token == "" {
+		return "", fmt.Errorf("the token file %s is empty", path)
+	}
+	return token, nil
+}
+
 func run(cfg config) int {
-	lib, err := api.New(cfg.API, nil)
+	token, err := readToken(cfg.TokenFile)
+	if err != nil {
+		log.Printf("bambuddy-fs: %v", err)
+		return 2
+	}
+	lib, err := api.New(cfg.API, nil, api.WithToken(token))
 	if err != nil {
 		log.Printf("bambuddy-fs: %v", err)
 		return 2

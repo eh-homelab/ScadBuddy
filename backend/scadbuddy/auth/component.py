@@ -22,11 +22,13 @@ from psycopg_pool import ConnectionPool
 from starlette.requests import HTTPConnection
 
 from scadbuddy.api.components import component_dep
+from scadbuddy.auth import delegation
 from scadbuddy.auth.config import LoginConfig, LoginConfigStore
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Caller
 from scadbuddy.auth.observe import WouldRefuse
 from scadbuddy.auth.oidc import OidcClient
+from scadbuddy.auth.personal_tokens import PersonalTokenStore
 from scadbuddy.auth.run_tokens import run_token_key
 from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.auth.store import Pool, SessionStore
@@ -70,6 +72,7 @@ class AuthComponent:
         self._sessions = SessionStore(self._pool)
         self._config = LoginConfigStore(self._pool)
         self._credentials = ServiceCredentialStore(self._pool)
+        self._tokens = PersonalTokenStore(self._pool)
         self._run_key: tuple[str, bytes] | None = None
 
     def _open(self) -> None:
@@ -92,6 +95,15 @@ class AuthComponent:
     def credentials(self) -> ServiceCredentialStore:
         self._open()
         return self._credentials
+
+    @property
+    def tokens(self) -> PersonalTokenStore:
+        self._open()
+        return self._tokens
+
+    def delete_spent_delegations(self) -> int:
+        """The sweep's: delegation codes past use (`auth/delegation.py` `delete_spent`)."""
+        return delegation.delete_spent(self.pool)
 
     @property
     def config(self) -> LoginConfigStore:

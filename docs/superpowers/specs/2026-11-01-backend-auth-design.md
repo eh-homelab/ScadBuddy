@@ -433,6 +433,14 @@ delegated session is refused on the routes `_browser_only` guards and on the aut
 service-credential routes, so the headless browser can never approve what its own
 session asked for (the AI spec §8.6 row on the headless browser).
 
+Amended in phase 6 (#5197): the built-in headless browser was removed before this phase
+(agent migration `20261012T0454Z_drop_headless_browser.sql`); a Playwright MCP plugin
+drives a browser instead, which loads the public URL over https. So the answer is not a
+cookie but a one-time sign-in link on the public origin (a minute, once, kept hashed),
+which the agent's `browser_sign_in_link` tool hands the model to open in that browser,
+and `GET /api/v1/auth/delegated?code=` sets the session. The localhost rule above guards
+nothing over https and is not built.
+
 ### 7.5 Personal tokens for `bambuddy-fs` and the Go client
 
 `bambuddy-fs` runs on a person's workstation and reaches the API through the ingress (C7).

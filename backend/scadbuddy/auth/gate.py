@@ -2,8 +2,9 @@
 the ASGI scope, where ``CallerDep`` reads it.
 
 It refuses nothing, in any mode this build has: a request with neither a session cookie
-nor a service credential (``Authorization: Bearer sbsvc_…``, plan phase 4) costs no
-lookup, and one whose lookup fails (the database unreachable) is served as anonymous.
+nor a bearer (a service credential ``sbsvc_…``, plan phase 4, or a personal access token
+``sbpat_…``, phase 6) costs no lookup, and one whose lookup fails (the database
+unreachable) is served as anonymous.
 ``observe`` counts what ``enforce`` would refuse (``auth/check.py``, plan phase 3).
 """
 
@@ -20,7 +21,14 @@ from starlette.datastructures import Headers
 from starlette.requests import cookie_parser
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from scadbuddy.auth.models import ANONYMOUS, AuthSession, Caller, Person, Service
+from scadbuddy.auth.models import (
+    ANONYMOUS,
+    AuthSession,
+    Caller,
+    Person,
+    PersonalToken,
+    Service,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +49,14 @@ class CredentialLookup(Protocol):
     def resolve(self, token: str) -> Service | None: ...
 
 
+class TokenLookup(Protocol):
+    def resolve(self, token: str) -> PersonalToken | None: ...
+
+
 #: A service credential's prefix (`auth/service_credentials.py`), in the bearer header.
 SERVICE_PREFIX = "sbsvc_"
+#: A personal access token's (`auth/personal_tokens.py`, #4975 phase 6).
+TOKEN_PREFIX = "sbpat_"
 
 
 class AuthGate:
@@ -52,11 +66,13 @@ class AuthGate:
         *,
         sessions: Callable[[], SessionLookup],
         credentials: Callable[[], CredentialLookup] | None = None,
+        tokens: Callable[[], TokenLookup] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.app = app
         self.sessions = sessions
         self.credentials = credentials
+        self.tokens = tokens
         self._clock = clock
         self._logged_at: float | None = None
         self._unlogged = 0
@@ -81,6 +97,18 @@ class AuthGate:
                 self._log_failure(error)
                 return ANONYMOUS
             return ANONYMOUS if service is None else service
+        if (
+            self.tokens is not None
+            and scheme.lower() == "bearer"
+            and bearer.startswith(TOKEN_PREFIX)
+        ):
+            # A person's access token (§7.5); a cookie beside it is not looked at.
+            try:
+                personal = await asyncio.to_thread(self.tokens().resolve, bearer.strip())
+            except psycopg.Error as error:
+                self._log_failure(error)
+                return ANONYMOUS
+            return ANONYMOUS if personal is None else personal
         header = headers.get("cookie")
         token = cookie_parser(header).get(SESSION_COOKIE) if header else None
         if not token:
