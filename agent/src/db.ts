@@ -1,4 +1,5 @@
 import postgres, { type ReservedSql, type Sql } from 'postgres'
+import { grantBackendRoles } from './db/grants.js'
 import { type MigrateOptions, migrate, MIGRATIONS } from './db/migrations.js'
 
 // The database is optional. With SCADBUDDY_DATABASE_URL unset the service still
@@ -200,6 +201,11 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
     ping,
     ready: makeReady(async () => {
       await migrate(sql, MIGRATIONS, options.migrate)
+      // #5210: the backend's roles their `ai_*` tables. Never fatal: a role left ungranted
+      // waits or fails its own calls, and says which.
+      await grantBackendRoles(sql).catch((error: unknown) => {
+        console.error(`could not grant the backend's roles the ai_* tables: ${error instanceof Error ? error.message : String(error)}`)
+      })
       await options.afterMigrate?.(sql)
     }, options.onMigrationError),
     locks,

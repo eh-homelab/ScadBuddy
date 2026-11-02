@@ -376,6 +376,17 @@ The API issues and rotates them; nobody pastes a secret into a manifest (§13 D4
   caller's Postgres role is the root of its identity, which it already is, since each of
   these callers holds a database URL that could write the rows the routes guard. This
   costs the print worker the KEK, which it has only optionally today (`worker.py:1237`).
+  As built (#5210, the in-repo half): `auth/caller_grants.py` holds `PRINT_GRANTS`,
+  `PROJECTS_GRANTS` and `AGENT_GRANTS` (and the print worker's sequences), granted by the
+  API at every start to each role that exists (`grant_callers`, through `worker_role.py`
+  `grant_role`), and each tested as a role holding exactly that list
+  (`tests/auth/test_caller_grants.py`). A print or projects worker on a role of its own
+  never migrates: `open_for_caller` waits for the API's migrations and grants, as the
+  render worker does, while one on the API's own role (`owns_schema`) migrates as before.
+  Decided: the agent's role owns its `ai_*` tables, since it creates and migrates them,
+  and the agent grants, after its migrations, what the API's role and `scadbuddy_projects`
+  use of them (`agent/src/db/grants.ts`); the lists in the backend hold the backend's
+  relations only. The roles, their passwords and each caller's URL are the deployment's.
 - Settings shows each caller's credentials (created, expires, last used) with revoke and
   "rotate now"; revoking the live one mints a replacement at once. #891 (rotate the
   render worker's key) is answered by the same page.
