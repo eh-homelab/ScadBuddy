@@ -35,7 +35,7 @@ from scadbuddy.api.accepting import (
     respond_async_request,
 )
 from scadbuddy.api.deps import OperationIdPath
-from scadbuddy.core.authorship import current_author
+from scadbuddy.core.authorship import current_author, current_person
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE, ApiError, Problem
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationCommands, OperationsDep
@@ -447,6 +447,7 @@ async def _run_operation(
         run_timeout_s=kind.run_timeout.total_seconds() if kind.run_timeout else None,
         search_attributes=ops.search_attributes,
         author=_author(),
+        person=current_person(),
         prelude=prelude,
         idempotency_key=idempotency_key,
         answer_running=kind.answers_running,

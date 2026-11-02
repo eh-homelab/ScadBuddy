@@ -15,6 +15,7 @@ from temporal_agent_harness.harness.agent_protocol import AgentConfig
 from temporalio.client import Client, WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.auth.run_tokens import mint_run_token
 from scadbuddy.flows.component import Flows
 from scadbuddy.flows.models import Definition
 from scadbuddy.workflows.flow_tools import HOST_FUNCTION_NAMES
@@ -87,6 +88,7 @@ async def start_execution(
             search_attributes=flows.search_attributes,
             commit=definition.commit or "",
             host_functions=sorted(HOST_FUNCTION_NAMES),
+            run_token="" if flows.run_key is None else mint_run_token(flows.run_key, run_id),
         ),
         update_id=update_id,
     )

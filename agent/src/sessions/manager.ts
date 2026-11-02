@@ -1703,7 +1703,7 @@ export class SessionManager {
     const [hit] = await this.deps.sql.unsafe<{ id: string; budget_usd: number }[]>(
       `UPDATE ai_sessions r SET budget_usd = round((r.budget_usd + $2)::numeric, 2)::double precision, updated_at = now()
          FROM ai_sessions s
-        WHERE s.id = $1 AND s.owner_kind = $3 AND s.owner_id = $4 AND r.id = coalesce(s.budget_root_id, s.id)
+        WHERE s.id = $1 AND s.owner_kind = $3 AND (s.owner_id = $4 OR s.owner_kind = 'browser') AND r.id = coalesce(s.budget_root_id, s.id)
           AND round((r.budget_usd + $2)::numeric, 2) <= $5
        RETURNING s.id, r.budget_usd`,
       [id, add, principal.kind, principal.id, MAX_SESSION_BUDGET_USD],

@@ -20,7 +20,7 @@ from psycopg.rows import DictRow
 from psycopg_pool import ConnectionPool
 
 from scadbuddy.activity.models import FINISHED, ActivityRow, ActivityStatus
-from scadbuddy.core.authorship import current_author
+from scadbuddy.core.authorship import browser_principal, current_author
 from scadbuddy.core.events import ActivityEvent
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.pg_events import hold_event_log
@@ -634,7 +634,8 @@ class ActivityIndex:
 
 
 async def attribute_request(index: ActivityIndex, activity_id: str) -> None:
-    """Who started ``activity_id``: the agent author, or the browser user (spec §3).
+    """Who started ``activity_id``: the agent author, or the browser user (spec §3), who
+    is the signed-in person's principal once there is one (#4975 phase 5, D8).
     Never raises: the start it follows is already accepted, so a failure here is logged
     and counted, not a 500."""
     try:
@@ -652,4 +653,6 @@ async def _attribute_request(index: ActivityIndex, activity_id: str) -> None:
             activity_id, principal=author.principal, session=author.session, via_tool=author.tool
         )
     else:
-        await index.attribute(activity_id, principal="browser", session=None, via_tool=None)
+        await index.attribute(
+            activity_id, principal=browser_principal(), session=None, via_tool=None
+        )

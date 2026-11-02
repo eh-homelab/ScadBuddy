@@ -12,7 +12,7 @@ import {
 import { type Owner, ownerSeenBy, SESSION_MODES, SESSION_STATUSES, sameOwner, type SeenOwner } from '../sessions/protocol.js'
 import { MESSAGE_ID_MAX } from '../sessions/forkPoint.js'
 import { ID_MAX, LOOKUP_TYPES, type LookupType, type ResourceRef } from '../sessions/touched.js'
-import { BROWSER_USER } from './approvals.js'
+import { browserUser } from '../auth/browserSession.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -267,13 +267,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (rawArchived !== undefined && !Object.hasOwn(ARCHIVED_QUERY, rawArchived)) {
       return c.json({ detail: `archived must be one of ${Object.keys(ARCHIVED_QUERY).join(', ')}` }, 400)
     }
-    const list = await sessions.list(BROWSER_USER, {
+    const list = await sessions.list(browserUser(c), {
       ...(rawArchived ? { archived: ARCHIVED_QUERY[rawArchived as keyof typeof ARCHIVED_QUERY] } : {}),
       ...(status ? { status: status as SessionRecord['status'] } : {}),
       ...(limit ? { limit } : {}),
       ...(resource ? { resource } : {}),
     })
-    return c.json({ sessions: list.map((one) => sessionView(one, BROWSER_USER)) })
+    return c.json({ sessions: list.map((one) => sessionView(one, browserUser(c))) })
   }
 
   app.get(
@@ -309,14 +309,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, StartBody, {})
       if (!body.ok) return body.response
-      const { session, turn } = await sessions.start(BROWSER_USER, {
+      const { session, turn } = await sessions.start(browserUser(c), {
         origin: 'chat',
         ...(body.value.title ? { title: body.value.title } : {}),
         ...(body.value.prompt ? { prompt: body.value.prompt } : {}),
       })
       return c.json(
         {
-          session: sessionView(session, BROWSER_USER),
+          session: sessionView(session, browserUser(c)),
           ...(turn ? { turn_id: turn.turnId } : {}),
         },
         201,
@@ -326,18 +326,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get(
     `${base}/:id`,
-    route('read', async (c, sessions) => c.json(sessionView(await sessions.get(idOf(c), BROWSER_USER), BROWSER_USER))),
+    route('read', async (c, sessions) => c.json(sessionView(await sessions.get(idOf(c), browserUser(c)), browserUser(c)))),
   )
 
   app.get(
     `${base}/:id/resources`,
-    route('read', async (c, sessions) => c.json({ resources: await sessions.resources(idOf(c), BROWSER_USER) })),
+    route('read', async (c, sessions) => c.json({ resources: await sessions.resources(idOf(c), browserUser(c)) })),
   )
 
   app.get(
     `${base}/:id/blobs/:name`,
     route('read', async (c, sessions) => {
-      const blob = await sessions.blob(idOf(c), c.req.param('name') ?? '', BROWSER_USER)
+      const blob = await sessions.blob(idOf(c), c.req.param('name') ?? '', browserUser(c))
       return c.body(new Uint8Array(blob.bytes), 200, {
         'Content-Type': blob.mediaType,
         'X-Content-Type-Options': 'nosniff',
@@ -355,7 +355,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.get(
     `${base}/:id/http/:saved`,
     route('read', async (c, sessions) => {
-      const { id: saved, meta, bytes } = await sessions.httpBody(idOf(c), c.req.param('saved') ?? '', BROWSER_USER)
+      const { id: saved, meta, bytes } = await sessions.httpBody(idOf(c), c.req.param('saved') ?? '', browserUser(c))
       // Untrusted bytes from whatever server answered (#1292). Plain text and JSON
       // are shown as text; everything else, HTML and SVG included, only downloads.
       // Nothing in either may run, and no other site may embed it.
@@ -377,7 +377,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, SendBody, undefined)
       if (!body.ok) return body.response
-      const turn = await sessions.send(idOf(c), BROWSER_USER, body.value.text)
+      const turn = await sessions.send(idOf(c), browserUser(c), body.value.text)
       return c.json({ turn_id: turn.turnId }, 202)
     }),
   )
@@ -386,7 +386,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     `${base}/:id/interrupt`,
     limit,
     route('write', async (c, sessions) =>
-      c.json({ interrupted: await sessions.interrupt(idOf(c), BROWSER_USER) }),
+      c.json({ interrupted: await sessions.interrupt(idOf(c), browserUser(c)) }),
     ),
   )
 
@@ -394,7 +394,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     `${base}/:id/handoff`,
     limit,
     route('write', async (c, sessions) =>
-      c.json(sessionView(await sessions.handoff(idOf(c), BROWSER_USER, BROWSER_USER), BROWSER_USER)),
+      c.json(sessionView(await sessions.handoff(idOf(c), browserUser(c), browserUser(c)), browserUser(c))),
     ),
   )
 
@@ -402,8 +402,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     `${base}/:id/handoff`,
     limit,
     route('write', async (c, sessions) => {
-      const cancelled = await sessions.cancelHandoff(idOf(c), BROWSER_USER)
-      return c.json({ cancelled, session: sessionView(await sessions.get(idOf(c), BROWSER_USER), BROWSER_USER) })
+      const cancelled = await sessions.cancelHandoff(idOf(c), browserUser(c))
+      return c.json({ cancelled, session: sessionView(await sessions.get(idOf(c), browserUser(c)), browserUser(c)) })
     }),
   )
 
@@ -413,7 +413,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, ForkBody, {})
       if (!body.ok) return body.response
-      const child = await sessions.fork(idOf(c), BROWSER_USER, {
+      const child = await sessions.fork(idOf(c), browserUser(c), {
         ...(body.value.title ? { title: body.value.title } : {}),
         ...(body.value.up_to === undefined ? {} : { upTo: body.value.up_to }),
         audit: { surface: 'http', clientIp: deps.remoteAddress(c) },
@@ -421,7 +421,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         // A budget of its own is the user's to give, like a raise (#823).
         freshBudget: true,
       })
-      return c.json({ session: sessionView(child, BROWSER_USER) }, 201)
+      return c.json({ session: sessionView(child, browserUser(c)) }, 201)
     }),
   )
 
@@ -431,12 +431,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, UpdateBody, undefined)
       if (!body.ok) return body.response
-      const session = await sessions.edits.update(idOf(c), BROWSER_USER, {
+      const session = await sessions.edits.update(idOf(c), browserUser(c), {
         ...(body.value.title === undefined ? {} : { title: body.value.title }),
         ...(body.value.done ? { done: true as const } : {}),
         ...(body.value.archived === undefined ? {} : { archived: body.value.archived }),
       }, { surface: 'http', clientIp: deps.remoteAddress(c) })
-      return c.json({ session: sessionView(session, BROWSER_USER) })
+      return c.json({ session: sessionView(session, browserUser(c)) })
     }),
   )
 
@@ -446,11 +446,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, BudgetBody, undefined)
       if (!body.ok) return body.response
-      const session = await sessions.raiseBudget(idOf(c), BROWSER_USER, body.value.add_usd, {
+      const session = await sessions.raiseBudget(idOf(c), browserUser(c), body.value.add_usd, {
         surface: 'http',
         clientIp: deps.remoteAddress(c),
       })
-      return c.json({ session: sessionView(session, BROWSER_USER) })
+      return c.json({ session: sessionView(session, browserUser(c)) })
     }),
   )
 
@@ -473,7 +473,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         break
       }
       // Checks visibility before the stream starts, so an unknown id is a 404, not an empty stream.
-      await sessions.get(id, BROWSER_USER)
+      await sessions.get(id, browserUser(c))
       // No proxy in the path may buffer this (spec §8.4); X-Accel-Buffering
       // asks nginx-based ingresses not to.
       c.header('X-Accel-Buffering', 'no')
@@ -488,7 +488,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           void stream.write(': keepalive\n\n').catch(() => controller.abort())
         }, SSE_KEEPALIVE_MS)
         try {
-          const events = await sessions.attach(id, BROWSER_USER, { afterSeq: after, signal: controller.signal })
+          const events = await sessions.attach(id, browserUser(c), { afterSeq: after, signal: controller.signal })
           for await (const { seq, event } of events) {
             await stream.writeSSE({ id: String(seq), data: JSON.stringify(event) })
           }

@@ -7,7 +7,7 @@ import type { ApprovedOrigin, BrowserOrigins } from '../browser/store.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { archivedError, type SessionManager, SessionError } from '../sessions/manager.js'
 import { sameOwner } from '../sessions/protocol.js'
-import { BROWSER_USER } from './approvals.js'
+import { browserUser } from '../auth/browserSession.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -90,8 +90,8 @@ export function registerBrowserOriginsRoutes(app: Hono, deps: BrowserOriginsRout
   async function refusedSession(c: Context, id: string): Promise<Response | undefined> {
     if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
     try {
-      const session = await deps.sessions.get(id, BROWSER_USER)
-      if (!sameOwner(BROWSER_USER, session.owner)) {
+      const session = await deps.sessions.get(id, browserUser(c))
+      if (!sameOwner(browserUser(c), session.owner)) {
         throw new SessionError('forbidden', `session ${session.id} is controlled by ${session.owner.label}; take it over first`)
       }
       if (session.archivedAt !== null) throw archivedError(session.id)

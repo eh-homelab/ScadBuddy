@@ -674,6 +674,21 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
     expect(page.entries).toHaveLength(PENDING_CAP)
   })
 
+  it("a signed-in person sees the done summary of a session the anonymous browser user owns (D8)", async () => {
+    const turns = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+      (async function* () {
+        await Promise.resolve()
+        verdicts.push(await postDone(run, 'toolu_done'))
+        yield result(run)
+      })()
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: turns })
+    const { turn } = await m.start(browser, { origin: 'chat', prompt: 'one' })
+    await turn!.done
+    const person: Owner = { kind: 'browser', id: 'user:https://idp.test#alice', label: 'Alice' }
+    const done = (await m.questions.listPending(person)).questions.filter((q) => q.attentionReason === 'done')
+    expect(done.map((q) => q.toolUseId)).toEqual(['toolu_done'])
+  }, LONG_MS)
+
   it("a later turn's done summary does not replace one that recorded unattended actions", async () => {
     let n = 0
     const turns = (run: HarnessRun): AsyncIterable<SDKMessage> =>

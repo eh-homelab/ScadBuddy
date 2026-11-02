@@ -211,7 +211,8 @@ export class QuestionService {
       SELECT q.id, q.session_id, q.kind, q.tool, q.tool_use_id, q.questions, q.attention_reason, q.on_timeout, q.summary,
              q.created_at, q.expires_at
       FROM ai_questions q JOIN ai_sessions s ON s.id = q.session_id
-      WHERE s.owner_kind = ${principal.kind} AND s.owner_id = ${principal.id}
+      -- D8 (#4975 phase 5): a person acts on the rows that say \`browser\`, as edits.ts does.
+      WHERE s.owner_kind = ${principal.kind} AND (s.owner_id = ${principal.id} OR s.owner_kind = 'browser')
         AND q.outcome IS NULL AND ${isDoneSummary(this.deps.sql, 'q')}
       ORDER BY q.created_at DESC, q.id DESC LIMIT ${PENDING_CAP + 1}`
     const questions = done.slice(0, PENDING_CAP).map((r) => ({

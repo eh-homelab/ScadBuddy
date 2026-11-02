@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { AttachmentError, type AttachmentStore } from '../attachments/store.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { IMAGE_BYTES_MAX, PREVIEW_BYTES_MAX, type UserImage, UserImageSchema } from '../sessions/images.js'
-import { BROWSER_USER } from './approvals.js'
+import { browserUser } from '../auth/browserSession.js'
 import { jsonBodyLimit, type RemoteAddress, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -82,7 +82,7 @@ export function registerAttachmentRoutes(app: Hono, deps: AttachmentRouteDeps): 
     const image = await uploaded(body)
     if (typeof image === 'string') return c.json({ detail: image }, 400)
     try {
-      return c.json(await attachments.put(BROWSER_USER, image), 201)
+      return c.json(await attachments.put(browserUser(c), image), 201)
     } catch (err) {
       if (err instanceof AttachmentError && err.code === 'quota') return c.json({ detail: err.message }, 429)
       throw err
@@ -95,7 +95,7 @@ export function registerAttachmentRoutes(app: Hono, deps: AttachmentRouteDeps): 
     const attachments = await store()
     if (typeof attachments === 'string') return c.json({ detail: attachments }, 503)
     const id = c.req.param('id')
-    if (!z.uuid().safeParse(id).success || !(await attachments.remove(BROWSER_USER, id))) {
+    if (!z.uuid().safeParse(id).success || !(await attachments.remove(browserUser(c), id))) {
       return c.json({ detail: 'no such attachment' }, 404)
     }
     return c.body(null, 204)

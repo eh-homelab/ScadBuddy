@@ -33,6 +33,7 @@ with workflow.unsafe.imports_passed_through():
     from scadbuddy.flows.models import RESULT_MAX
     from scadbuddy.workflows.flow_activities import FLOW_CLOSE, FLOW_RECORD
     from scadbuddy.workflows.flow_models import FlowRecord, ProjectionWrite
+    from scadbuddy.workflows.flow_routes import RouteAuthor, route_author_of
     from scadbuddy.workflows.flow_steps import project
     from scadbuddy.workflows.flow_tools import run_flow_tool
     from scadbuddy.workflows.registered import REGISTERED_HOST_FUNCTIONS
@@ -90,6 +91,10 @@ class FlowStart(BaseModel):
     #: The host functions the starting API's build offers (#4146), what its type check
     #: passed the script against; empty from an API from before, which checks nothing.
     host_functions: list[str] = []
+    #: The run's token (#4975 phase 5, `auth/run_tokens.py`), which its host calls send so
+    #: that the projects worker's credential may name `started_by` as their author; ""
+    #: from an API from before, whose runs' calls name no author, as they never did.
+    run_token: str = ""
 
 
 class UnregisteredHostFunctionError(Exception):
@@ -165,6 +170,12 @@ class ProjectWorkflow:
 
     def tool_tier(self, name: str) -> str | None:
         return self._start.tool_tiers.get(name)
+
+    @property
+    def route_author(self) -> RouteAuthor | None:
+        """Who the run's host calls are authored as (#4975 phase 5): its starter, with
+        the run's token; None for a run started before the token, or by nobody named."""
+        return route_author_of(self._start.started_by, self._start.run_token)
 
     def mark_started(self, call_id: str) -> None:
         """A gated call was approved and its body runs: its timer is over."""

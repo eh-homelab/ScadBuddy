@@ -263,7 +263,7 @@ export class DurableTurns {
        UPDATE ai_sessions SET status = 'running', turn_tiers = $4, durable_turn_id = $5, updated_at = now(), turn_started_at = now(),
          interrupt_requested = false, runtime = coalesce(runtime, 'unified')
        FROM prior
-       WHERE id = $1 AND owner_kind = $2 AND owner_id = $3
+       WHERE id = $1 AND owner_kind = $2 AND (owner_id = $3 OR owner_kind = 'browser')
          AND status NOT IN ('running', 'waiting_approval', 'waiting_input', 'done')
          AND archived_at IS NULL AND ${POOL_COST} < ${POOL_BUDGET}
        RETURNING prior.prior_status, ai_sessions.runtime`,

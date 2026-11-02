@@ -13,7 +13,7 @@ import {
   type WorkspaceRef,
   workspacePath,
 } from '../workspace/store.js'
-import { BROWSER_USER } from './approvals.js'
+import { browserUser } from '../auth/browserSession.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -164,10 +164,10 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
       if (typeof got === 'string') return c.json({ detail: got }, 503)
       const id = c.req.param('id') ?? ''
       try {
-        const session = await got.sessions.get(id, BROWSER_USER)
+        const session = await got.sessions.get(id, browserUser(c))
         if (kind === 'write') {
           try {
-            writable(session)
+            writable(c, session)
           } catch (err) {
             if (action && err instanceof SessionError) await auditRefused(c, action, session.id, `${err.code}: ${err.message}`)
             throw err
@@ -183,8 +183,8 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
   }
 
   /** As routes/sessions.ts's PATCH: the owner's only, and never an archived session's. */
-  function writable(session: SessionRecord): void {
-    if (!sameOwner(BROWSER_USER, session.owner)) {
+  function writable(c: Context, session: SessionRecord): void {
+    if (!sameOwner(browserUser(c), session.owner)) {
       throw new SessionError('forbidden', `session ${session.id} is controlled by ${session.owner.label}; take it over first`)
     }
     if (session.archivedAt !== null) throw archivedError(session.id)
@@ -300,7 +300,7 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
                 sessionId,
                 path: file.path,
                 change: 'uploaded',
-                by: BROWSER_USER,
+                by: browserUser(c),
                 size: file.size,
                 mediaType: file.mediaType,
                 sha256: file.sha256,
@@ -332,7 +332,7 @@ export function registerSessionFileRoutes(app: Hono, deps: SessionFileRouteDeps)
         name = workspacePath(name)
         const checked = name
         const alongside = async (tx: TransactionSql) => {
-          const events = [event({ type: 'workspace.file', sessionId, path: checked, change: 'deleted', by: BROWSER_USER })]
+          const events = [event({ type: 'workspace.file', sessionId, path: checked, change: 'deleted', by: browserUser(c) })]
           logged = { events, seqs: await sessions.events.append(sessionId, events, tx) }
         }
         if (!(await files.delete(ws, name, expected === undefined ? { alongside } : { expectedSha256: expected, alongside }))) {

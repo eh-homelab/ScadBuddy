@@ -10,6 +10,7 @@ route answers with is final: `RouteRefused`, carrying only the problem's `detail
 
 import asyncio
 import hashlib
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -42,11 +43,51 @@ def route_key(run_id: str, workflow_run_id: str, call_id: str) -> str:
     return hashlib.sha256(f"flow:{run_id}:{workflow_run_id}:{call_id}".encode()).hexdigest()[:32]
 
 
+#: `auth/run_tokens.py`'s, not imported: this module is also the workflow's.
+RUN_TOKEN_HEADER = "X-ScadBuddy-Run-Token"
+#: `core/authorship.py`'s, which the API reads.
+AUTHOR_HEADER = "X-ScadBuddy-Agent-Author"
+AUTHOR_SESSION_HEADER = "X-ScadBuddy-Agent-Author-Session"
+_PRINCIPAL = re.compile(r"[\x21-\x7e]{1,300}")
+_SESSION = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+class RouteAuthor(BaseModel):
+    """Whom a run's host call is made for (#4975 phase 5, spec 2026-11-01 §7.3): the run's
+    starter, which the API believes from the projects worker's credential only with the
+    run's token, minted when the run started."""
+
+    run_token: str
+    principal: str
+    session: str | None = None
+
+    def headers(self) -> dict[str, str]:
+        return {
+            RUN_TOKEN_HEADER: self.run_token,
+            AUTHOR_HEADER: self.principal,
+            **({AUTHOR_SESSION_HEADER: self.session} if self.session else {}),
+        }
+
+
+def route_author_of(started_by: dict[str, Any], run_token: str) -> RouteAuthor | None:
+    """The run's starter as its host calls name it: an agent principal (and its session),
+    or the signed-in person; None without a token or a principal the API would take."""
+    principal = started_by.get("principal")
+    if not run_token or not isinstance(principal, str) or not _PRINCIPAL.fullmatch(principal):
+        return None
+    session = started_by.get("session") if started_by.get("kind") == "agent" else None
+    if session is not None and (not isinstance(session, str) or not _SESSION.fullmatch(session)):
+        return None
+    return RouteAuthor(run_token=run_token, principal=principal, session=session)
+
+
 class RouteSend(BaseModel):
     method: Literal["POST"] = "POST"
     path: str
     body: dict[str, Any]
     key: str
+    #: Whom the call is made for; None from a run that names nobody (#4975 phase 5).
+    author: RouteAuthor | None = None
 
 
 class RouteAnswer(BaseModel):
@@ -154,7 +195,10 @@ class FlowRoutes:
                         call.method,
                         call.path,
                         json=call.body,
-                        headers={"Idempotency-Key": call.key},
+                        headers={
+                            "Idempotency-Key": call.key,
+                            **(call.author.headers() if call.author is not None else {}),
+                        },
                     )
                 )
             except httpx.TransportError:

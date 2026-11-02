@@ -76,7 +76,16 @@ export type Config = {
    * default, as before): both. What each starts is `runtime/role.ts` `roleParts`.
    */
   agentRole: AgentRole
+  /**
+   * SCADBUDDY_AUTH_MODE, the backend's own variable (spec 2026-11-01 §9.1): whether a
+   * request to `/api/v1/ai/*` without a signed-in session is only logged (`observe`) or
+   * not looked at (`off`, the default). `enforce` is refused until it exists (plan phase 8).
+   */
+  authMode: AuthMode
 }
+
+export const AUTH_MODES = ['off', 'observe', 'enforce'] as const
+export type AuthMode = (typeof AUTH_MODES)[number]
 
 export const AGENT_ROLES = ['all', 'api', 'worker'] as const
 export type AgentRole = (typeof AGENT_ROLES)[number]
@@ -102,6 +111,7 @@ export const ENV_VARS = [
   'SCADBUDDY_BUILD_ID',
   'SCADBUDDY_VERSION',
   'SCADBUDDY_AGENT_ROLE',
+  'SCADBUDDY_AUTH_MODE',
 ] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
@@ -136,6 +146,16 @@ function agentRole(value: string | undefined): AgentRole {
   const role = AGENT_ROLES.find((r) => r === value)
   if (!role) throw new ConfigError(`SCADBUDDY_AGENT_ROLE must be all, api or worker, not ${JSON.stringify(value)}`)
   return role
+}
+
+function authMode(value: string | undefined): AuthMode {
+  if (value === undefined) return 'off'
+  const mode = AUTH_MODES.find((m) => m === value)
+  if (!mode) throw new ConfigError(`SCADBUDDY_AUTH_MODE must be off, observe or enforce, not ${JSON.stringify(value)}`)
+  if (mode === 'enforce') {
+    throw new ConfigError('SCADBUDDY_AUTH_MODE=enforce is not available yet (#4975 phase 8); use off or observe')
+  }
+  return mode
 }
 
 /** A directory the service writes under: absolute, so no working directory decides where. */
@@ -208,5 +228,6 @@ export function loadConfig(env: Env = process.env): Config {
     sessionDir: absoluteDir('SCADBUDDY_SESSION_DIR', present(env.SCADBUDDY_SESSION_DIR)),
     buildId: temporalValue('SCADBUDDY_BUILD_ID', present(env.SCADBUDDY_BUILD_ID)) ?? imageTag(env.SCADBUDDY_VERSION),
     agentRole: agentRole(present(env.SCADBUDDY_AGENT_ROLE)),
+    authMode: authMode(present(env.SCADBUDDY_AUTH_MODE)),
   }
 }

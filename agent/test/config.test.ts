@@ -16,6 +16,7 @@ describe('loadConfig', () => {
       temporalSearchAttributes: false,
       payloadDir: undefined,
       agentRole: 'all',
+      authMode: 'off',
     })
   })
 
@@ -35,6 +36,7 @@ describe('loadConfig', () => {
         SCADBUDDY_PAYLOAD_DIR: '/data/payloads',
         SCADBUDDY_SESSION_DIR: '/var/lib/scadbuddy-sessions/',
         SCADBUDDY_AGENT_ROLE: 'worker',
+        SCADBUDDY_AUTH_MODE: 'observe',
       }),
     ).toEqual({
       databaseUrl: 'postgresql://u:p@db:5432/scadbuddy',
@@ -50,7 +52,13 @@ describe('loadConfig', () => {
       payloadDir: '/data/payloads',
       sessionDir: '/var/lib/scadbuddy-sessions',
       agentRole: 'worker',
+      authMode: 'observe',
     })
+  })
+
+  it('refuses SCADBUDDY_AUTH_MODE=enforce until it exists, and an unknown mode', () => {
+    expect(() => loadConfig({ SCADBUDDY_AUTH_MODE: 'enforce' })).toThrow(/phase 8/)
+    expect(() => loadConfig({ SCADBUDDY_AUTH_MODE: 'strict' })).toThrow(ConfigError)
   })
 
   it('reads the Temporal switch as the backend does, and refuses whitespace inside a Temporal value', () => {

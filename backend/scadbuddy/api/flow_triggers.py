@@ -30,7 +30,7 @@ from scadbuddy.api.flows import (
     GRANT_STATE,
     agent_tool_tiers,
 )
-from scadbuddy.core.authorship import current_author
+from scadbuddy.core.authorship import by_a_person, current_author, requester_record
 from scadbuddy.core.problems import ApiError
 from scadbuddy.flow_triggers.component import Triggers, TriggersDep
 from scadbuddy.flow_triggers.models import (
@@ -125,11 +125,9 @@ class AttachStandingGrant(BaseModel):
 
 
 def _who() -> dict[str, Any]:
-    """Who the request is: the agent it is authored as, else the browser."""
-    author = current_author()
-    if author is None:
-        return {"kind": "browser"}
-    return {"kind": "agent", "principal": author.principal, "session": author.session}
+    """Who the request is: the agent it is authored as, else the browser (with the
+    signed-in person's principal when there is one)."""
+    return requester_record()
 
 
 def _actor() -> str:
@@ -160,7 +158,7 @@ def _creator_only(trigger: Trigger) -> None:
 
 
 def _browser_only() -> None:
-    if current_author() is not None:
+    if not by_a_person():
         raise ApiError(
             status.HTTP_403_FORBIDDEN,
             "Only a person approves or declines a trigger's grant.",
@@ -464,7 +462,7 @@ async def attach_flow_trigger_grant(
     days. 409 while the trigger has a live one, or when it changed since it was shown."""
     trigger = await _load(triggers, trigger_id)
     _creator_only(trigger)
-    browser = current_author() is None
+    browser = by_a_person()
     if browser and body.seen is None:
         raise _unseen()
     await _check_grant(triggers, body.spec)

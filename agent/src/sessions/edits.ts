@@ -86,7 +86,8 @@ export class SessionEdits {
                            AND NOT ${isDoneSummary(tx, 'q')})
                 OR EXISTS (SELECT 1 FROM ai_pending_input WHERE session_id = ${id})) AS parked
           FROM ai_sessions
-         WHERE id = ${id} AND owner_kind = ${principal.kind} AND owner_id = ${principal.id}
+         -- Any browser-kind principal is the browser user's (#4975 phase 5, D8; protocol.ts sameOwner).
+         WHERE id = ${id} AND owner_kind = ${principal.kind} AND (owner_id = ${principal.id} OR owner_kind = 'browser')
          FOR UPDATE`
       if (!before) throw await this.changedOwner(id)
       if (done && before.busy) {

@@ -70,6 +70,7 @@ def operation_activities(
             retention=timedelta(seconds=retention) if retention is not None else None,
             idempotency_key=op.idempotency_key,
             author=op.author,
+            person=op.person,
         )
 
     @activity.defn(name=FINISH_ACTIVITY)

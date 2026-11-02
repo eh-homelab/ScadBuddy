@@ -769,7 +769,7 @@ def _kinds(core: Core, components: Components) -> list[OperationKind]:
         flows.store,
         flows.keys,
         approval_key(core.settings),
-        api=lambda: api_client(core.settings.api_internal_url),
+        api=lambda: api_client(core.settings.api_internal_url, flows.api_auth),
     )
 
 

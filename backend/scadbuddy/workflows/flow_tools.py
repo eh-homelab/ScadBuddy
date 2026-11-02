@@ -327,7 +327,7 @@ async def _post(
     try:
         answer: RouteAnswer = await workflow.execute_activity(
             FLOW_ROUTE_SEND,
-            RouteSend(path=path, body=body, key=key),
+            RouteSend(path=path, body=body, key=key, author=owner.route_author),
             activity_id=None if outward is None else outward_activity_id(outward, call_id),
             result_type=RouteAnswer,
             start_to_close_timeout=_SEND,

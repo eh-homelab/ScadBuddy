@@ -21,7 +21,7 @@ import {
 import { DEFAULT_PLUGIN_TEST_TIMEOUT_MS, type PluginTest, testPlugin } from '../plugins/testConnection.js'
 import { type KekStatus, SealError } from '../secrets.js'
 import { type RemoteAddress, requestFacts, uiReadProblem, uiRequestProblem } from './guard.js'
-import { BROWSER_USER } from './approvals.js'
+import { browserUser } from '../auth/browserSession.js'
 import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/plugins (issue #297): the admin surface of the plugin registry
@@ -304,7 +304,7 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
           ...(body.client_id === undefined ? {} : { clientId: body.client_id }),
           ...(body.client_secret === undefined ? {} : { clientSecret: body.client_secret }),
           ...(body.scope === undefined ? {} : { scope: body.scope }),
-          by: BROWSER_USER.id,
+          by: browserUser(c).id,
         },
         kek(),
       )

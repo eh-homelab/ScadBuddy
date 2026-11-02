@@ -18,6 +18,7 @@ import type { PendingInputEntry } from '../gate/projection.js'
 import { roleOf } from '../gate/role.js'
 import { isUuid } from '../harness/stateDirs.js'
 import { BROWSER_USER } from './approvals.js'
+import { browserUser } from '../auth/browserSession.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 import { linkTo, recordFailure, traceparentOf, tracer } from '../telemetry/trace.js'
@@ -493,7 +494,7 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
     if (problem) return c.json({ detail: problem }, 403)
     if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
-    return c.json(await pendingInput(deps.sessions, BROWSER_USER, { runs: true }))
+    return c.json(await pendingInput(deps.sessions, browserUser(c), { runs: true }))
   })
 
   app.get('/api/v1/ai/sessions/:id/pending-input', async (c) => {
@@ -502,7 +503,7 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
     if (!deps.sessions) return c.json({ detail: NO_DATABASE }, 503)
     if (!(await deps.ready())) return c.json({ detail: NOT_READY }, 503)
     try {
-      const page = await sessionPendingInput(deps.sessions, BROWSER_USER, c.req.param('id'))
+      const page = await sessionPendingInput(deps.sessions, browserUser(c), c.req.param('id'))
       return page ? c.json(page) : c.json({ detail: `no session ${c.req.param('id')}` }, 404)
     } catch (err) {
       if (err instanceof DurableUnavailable) return c.json({ detail: err.message, retry: true }, 503)
@@ -530,7 +531,7 @@ export function registerPendingInputRoutes(app: Hono, deps: PendingInputRouteDep
       return c.json({ detail }, 400)
     }
     try {
-      return c.json(await respond(deps.sessions, BROWSER_USER, c.req.param('id'), body, { clientIp: deps.remoteAddress(c) }))
+      return c.json(await respond(deps.sessions, browserUser(c), c.req.param('id'), body, { clientIp: deps.remoteAddress(c) }))
     } catch (err) {
       if (err instanceof RespondError) {
         // `stale` marks the agent's own 404, so the panel can tell it from one a proxy or
