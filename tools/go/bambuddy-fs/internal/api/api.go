@@ -12,6 +12,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -61,6 +62,17 @@ type Client struct {
 	adapter *kiotahttp.NetHttpRequestAdapter
 	kiota   *client.ApiClient
 	http    *http.Client
+	// token is the personal access token (ScadBuddy #4975, spec 2026-11-01 §7.5), or "".
+	token string
+}
+
+// Option configures a Client.
+type Option func(*Client)
+
+// WithToken presents a personal access token, minted in ScadBuddy's Settings → Access
+// tokens, as Authorization: Bearer on every call to the API's host and no other.
+func WithToken(token string) Option {
+	return func(c *Client) { c.token = strings.TrimSpace(token) }
 }
 
 const (
@@ -71,7 +83,11 @@ const (
 
 // New takes ScadBuddy's API root, like http://host/api/v1. A nil httpClient is
 // http.DefaultClient. Requests go through telemetry.Transport, on a copy of the client.
-func New(baseURL string, httpClient *http.Client) (*Client, error) {
+func New(baseURL string, httpClient *http.Client, opts ...Option) (*Client, error) {
+	c := &Client{}
+	for _, opt := range opts {
+		opt(c)
+	}
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
@@ -84,13 +100,39 @@ func New(baseURL string, httpClient *http.Client) (*Client, error) {
 	if !ok {
 		return nil, fmt.Errorf("API URL %q does not end in /api/v1", baseURL)
 	}
+	var provider authentication.AuthenticationProvider = &authentication.AnonymousAuthenticationProvider{}
+	if c.token != "" {
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Host == "" {
+			return nil, fmt.Errorf("API URL %q has no host", baseURL)
+		}
+		// Kiota's provider refuses to send a key in the clear, and so does Download.
+		if !strings.EqualFold(parsed.Scheme, "https") {
+			return nil, fmt.Errorf("a token is sent over https only, not to %q", baseURL)
+		}
+		// Kiota's API-key provider, as a bearer header, for the API's own host only.
+		key, err := authentication.NewApiKeyAuthenticationProviderWithValidHosts(
+			"Bearer "+c.token, "Authorization", authentication.HEADER_KEYLOCATION, []string{parsed.Hostname()})
+		if err != nil {
+			return nil, err
+		}
+		provider = key
+	}
 	adapter, err := kiotahttp.NewNetHttpRequestAdapterWithParseNodeFactoryAndSerializationWriterFactoryAndHttpClient(
-		&authentication.AnonymousAuthenticationProvider{}, nil, nil, httpClient)
+		provider, nil, nil, httpClient)
 	if err != nil {
 		return nil, err
 	}
 	adapter.SetBaseUrl(origin)
-	return &Client{base: base, adapter: adapter, kiota: client.NewApiClient(adapter), http: httpClient}, nil
+	c.base, c.adapter, c.kiota, c.http = base, adapter, client.NewApiClient(adapter), httpClient
+	return c, nil
+}
+
+// authorize adds the token to a request built without the generated builders.
+func (c *Client) authorize(req *http.Request) {
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
 }
 
 func (c *Client) library() *api.V1PrintLibraryRequestBuilder {
@@ -144,6 +186,7 @@ func (c *Client) Download(ctx context.Context, fileID int, w io.Writer) error {
 	if err != nil {
 		return err
 	}
+	c.authorize(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return fmt.Errorf("download: %w", err)
@@ -202,6 +245,7 @@ func (c *Client) upload(ctx context.Context, folderID int, name, key string, r i
 	}
 	req.Header.Set("Content-Type", form.FormDataContentType())
 	req.Header.Set("Idempotency-Key", key)
+	c.authorize(req)
 	sent := make(chan int64, 1)
 	go func() {
 		n, err := writeForm(form, folderID, name, r)

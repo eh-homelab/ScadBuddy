@@ -7,6 +7,22 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: "GET /api/v1/auth/delegated",
+    reason: "A delegation link's sign-in (#4975, spec 2026-11-01 §7.4): opened by the browser the agent drives, the link browser_sign_in_link mints; never a call.",
+  },
+  {
+    operation: "GET /api/v1/auth/access-tokens",
+    reason: "A person's access tokens (#4975, spec 2026-11-01 §7.5): only the person who mints them lists, mints or revokes them; never an agent.",
+  },
+  {
+    operation: "POST /api/v1/auth/access-tokens",
+    reason: "A person's access tokens (#4975, spec 2026-11-01 §7.5): only the person who mints them lists, mints or revokes them; never an agent.",
+  },
+  {
+    operation: "DELETE /api/v1/auth/access-tokens/{token_id}",
+    reason: "A person's access tokens (#4975, spec 2026-11-01 §7.5): only the person who mints them lists, mints or revokes them; never an agent.",
+  },
+  {
     operation: "GET /api/v1/auth/session",
     reason: "The page's first read: whether this browser is signed in (#4975, spec 2026-11-01 §5.1). The agent acts for its turn's owner, not a browser.",
   },

@@ -25,6 +25,7 @@ import type { Tier } from '../auth/principal.js'
 import type { Tool } from './registry.js'
 import { sessionTools } from './sessions.js'
 import { settingsTools } from './settings.js'
+import { delegationTools } from './delegation.js'
 import { sourceFileTools } from './sourceFiles.js'
 import { storeTools } from './store.js'
 import { templateTools } from './templates.js'
@@ -65,6 +66,7 @@ export const ALL_TOOLS: readonly Tool[] = [
   ...nativeSpoolTools,
   ...printerTools,
   ...browserTools,
+  ...delegationTools,
   ...approvalTools,
   ...sessionTools,
   ...toolCallTools,

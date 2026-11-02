@@ -101,7 +101,7 @@ paths above. With no arguments the image prints `mount --help`.
 ## Flags
 
 ```
-bambuddy-fs mount [--api <url>] [--background] [--ro] [--all] [--allow-other | --no-allow-other] [--attr-ttl 5s] [--cache-dir <dir>] [--cache-max 2G] [--state-dir <dir>] [--otel-endpoint <url>] [--no-telemetry] [<mountpoint>]
+bambuddy-fs mount [--api <url>] [--token-file <file>] [--background] [--ro] [--all] [--allow-other | --no-allow-other] [--attr-ttl 5s] [--cache-dir <dir>] [--cache-max 2G] [--state-dir <dir>] [--otel-endpoint <url>] [--no-telemetry] [<mountpoint>]
 bambuddy-fs umount [--state-dir <dir>] [<mountpoint>]
 bambuddy-fs status [--state-dir <dir>] [<mountpoint>]
 bambuddy-fs unsent [--state-dir <dir>]
@@ -111,6 +111,7 @@ bambuddy-fs allow-other
 | Flag | Meaning |
 |---|---|
 | `--api` | ScadBuddy's API root, like `http://host/api/v1`. Default `$BAMBUDDY_FS_API`, else the deployed ScadBuddy. |
+| `--token-file` | A file holding a personal access token, minted in ScadBuddy's Settings → System → Access tokens (ScadBuddy #4975), sent as `Authorization: Bearer` on every call. A `read` token mounts read-only in effect; writes need `write`. Sent over https only. Default `$BAMBUDDY_FS_TOKEN_FILE`; none when unset, which a ScadBuddy that enforces sign-in refuses. |
 | `--background` | Run detached and return once mounted (see "Build and run"). |
 | `--ro` | Every write fails with `EROFS`. |
 | `--all` | List every file. Without it the mount lists what the library dialog lists by default (unsliced 3MFs). |
