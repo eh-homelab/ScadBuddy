@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import type { Sql } from 'postgres'
 import { describe, expect, it } from 'vitest'
-import { credentialAad, REREAD_MS, ServiceCredential, serviceCredentialMiddleware } from '../src/api/serviceCredential.js'
+import { credentialAad, REREAD_MS, ServiceCredential, serviceCredentialMiddleware, withServiceCredential } from '../src/api/serviceCredential.js'
 import { kekFromBase64, sealSecret } from '../src/secrets.js'
 
 // #4975 phase 4: the agent's service credential, read from its view and unsealed.
@@ -64,6 +64,19 @@ describe('ServiceCredential', () => {
     fail = true
     now = REREAD_MS
     expect(await credential.current()).toBe(TOKEN)
+  })
+
+  it('puts it on the workspace blob routes, and on nothing outside the backend', async () => {
+    const seen: (string | null)[] = []
+    const inner = (async (_input: string | URL | Request, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers).get('authorization'))
+      return new Response('{}')
+    }) as typeof fetch
+    const credential = new ServiceCredential(fakeSql(() => [row()]).sql, kek)
+    const wrapped = withServiceCredential(inner, credential, 'http://backend:8080/')
+    await wrapped('http://backend:8080/api/v1/internal/workspace-blobs/uploads', { method: 'POST' })
+    await wrapped('https://bucket.s3.example/blob?X-Amz-Signature=x', { method: 'PUT' })
+    expect(seen).toEqual([`Bearer ${TOKEN}`, null])
   })
 
   it('puts it on the request', async () => {

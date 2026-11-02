@@ -155,7 +155,8 @@ API issues and grants at start (`main._grant_and_rotate_at_start`) and rotates i
 existing `housekeeping_sweep_auth_sessions` activity, so the workflow's history and patches
 are unchanged; a newest credential sealed under another KEK is replaced at once. The print
 and projects workers present theirs on every internal call (`worker.py`), the agent on
-every backend call (`agent/src/api/serviceCredential.ts`, the same AAD). Settings → System
+every backend call, the client and the workspace blob routes alike
+(`agent/src/api/serviceCredential.ts`, the same AAD). Settings → System
 → Service credentials lists them, with revoke and "Rotate now"; the routes are `person`.
 Each role named in `ROLES` (`scadbuddy_agent`, `scadbuddy_print`, `scadbuddy_projects`) is
 granted its own view when the deployment made it; the full table grants of those roles,

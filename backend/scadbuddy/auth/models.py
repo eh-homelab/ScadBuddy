@@ -58,8 +58,8 @@ class Person:
 
 @dataclass(frozen=True)
 class Service:
-    """A request carrying a service credential (§7). Nothing resolves one until the
-    credentials exist (plan phase 4)."""
+    """A request carrying a service credential (§7), as `AuthGate` resolves
+    ``Authorization: Bearer sbsvc_…`` (`auth/service_credentials.py`)."""
 
     caller: str
     scopes: frozenset[str]

@@ -3,7 +3,8 @@ import type { Middleware } from 'openapi-fetch'
 import { type Kek, openSecret } from '../secrets.js'
 
 // #4975 phase 4 (spec 2026-11-01 §7.1, §7.2): the agent's service credential on every call
-// to the backend. The backend issues and rotates it; the agent reads the newest live one
+// to the backend: the openapi-fetch client (`serviceCredentialMiddleware`) and the workspace
+// blob routes' plain fetches (`withServiceCredential`). The backend issues and rotates it; the agent reads the newest live one
 // from `service_credentials_agent` (the view its own Postgres role alone is granted, when the
 // deployment made one), unseals it under the KEK, and reads again every hour. Without the KEK
 // or a credential it sends none, which `SCADBUDDY_AUTH_MODE=off` still serves.
@@ -75,6 +76,23 @@ export class ServiceCredential {
     }
     this.readAt = this.now()
     return this.token
+  }
+}
+
+/**
+ * `fetchImpl` with the bearer added to requests under `baseUrl` (the backend) only, so a
+ * presigned transfer URL elsewhere never sees it.
+ */
+export function withServiceCredential(fetchImpl: typeof fetch, credential: ServiceCredential, baseUrl: string): typeof fetch {
+  const base = baseUrl.replace(/\/+$/, '') + '/'
+  return async (input, init) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    if (!url.startsWith(base)) return fetchImpl(input, init)
+    const token = await credential.current()
+    if (token === undefined) return fetchImpl(input, init)
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined))
+    if (!headers.has('authorization')) headers.set('authorization', `Bearer ${token}`)
+    return fetchImpl(input, { ...init, headers })
   }
 }
 
