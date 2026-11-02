@@ -164,6 +164,7 @@ export function resetAiPluginMocks(): void {
     problem: null,
     tool_tiers: { recall: 'read' },
     disabled_tools: [],
+    oauth: null,
     created_at: now(),
     updated_at: now(),
   })
@@ -298,6 +299,19 @@ export function setRemotePluginProblem(name: string, problem: string | null): vo
   if (plugin) state.remote.set(name, { ...plugin, problem })
 }
 
+/** A remote plugin's sign-in (#780; `features/pluginOAuth.ts` drives it), or its header removed by one. */
+export function setRemotePluginOAuth(name: string, oauth: RemotePlugin['oauth']): RemotePlugin | undefined {
+  const plugin = state.remote.get(name)
+  if (!plugin) return undefined
+  const next = { ...plugin, oauth, updated_at: now() }
+  state.remote.set(name, next)
+  return next
+}
+
+export function remotePlugin(name: string): RemotePlugin | undefined {
+  return state.remote.get(name)
+}
+
 export function remotePluginList(): RemotePlugin[] {
   return [...state.remote.values()]
 }
@@ -380,6 +394,7 @@ export const aiPluginHandlers = [
       problem: null,
       tool_tiers: {},
       disabled_tools: [],
+      oauth: null,
       created_at: now(),
       updated_at: now(),
     }

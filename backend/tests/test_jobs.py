@@ -63,7 +63,15 @@ from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.render.solids import STAGED_ASSET_PREFIX, SolidRender, solid_file, solid_mesh
 from scadbuddy.render.split import ColourPart, Paint, split_by_material
 from tests.conftest import PgPool, write_openscad_3mf
-from tests.meshmodel.test_paint import GREEN, ORANGE, painted_box, rendered, written
+from tests.meshmodel.test_paint import (
+    GREEN,
+    ORANGE,
+    flip,
+    painted_box,
+    rendered,
+    save,
+    written,
+)
 
 CONFIG = Config(data_dir=Path("/unused"), render_concurrency=2, job_ttl=3600.0)
 
@@ -1646,17 +1654,21 @@ async def test_a_layouts_objects_survive_saving_it(tmp_path: Path) -> None:
 
 
 async def _render_painted(
-    paths: DataPaths, sabotage: Callable[[Path], None] | None = None
+    paths: DataPaths, sabotage: Callable[[Path], None] | None = None, *, mirror_second: bool = False
 ) -> tuple[JobResult, tuple[str, ...]]:
-    """A one-box mesh model with a painted part, rendered through `render_job` with the
-    OpenSCAD calls faked; ``sabotage`` damages the model's directory first."""
+    """A one-box mesh model with a painted part (two, the second mirrored, with
+    ``mirror_second``), rendered through `render_job` with the OpenSCAD calls faked;
+    ``sabotage`` damages the model's directory first."""
     model_dir = paths.model_dir("demo")
     model_dir.mkdir(parents=True)
     mesh, codes = painted_box()
+    paint = Paint(codes, (ORANGE, GREEN))
     read = [
-        ReadObject("Box", 1, [ColourPart(0, "Body", ORANGE, mesh, Paint(codes, (ORANGE, GREEN)))])
+        ReadObject("Box", 2 if mirror_second else 1, [ColourPart(0, "Body", ORANGE, mesh, paint)])
     ]
     scene = written(model_dir, read)
+    if mirror_second:
+        scene = save(model_dir, flip(scene, 1))
     world = rendered(model_dir, scene, ORANGE)
     if sabotage is not None:
         sabotage(model_dir)
@@ -1715,6 +1727,30 @@ async def test_a_mesh_models_painting_reaches_its_3mf(paths: DataPaths) -> None:
     [loaded] = layout.plates[0].parts
     assert loaded.paint == Paint(codes, (ORANGE, GREEN))
     assert layout.sources[0][0].paint == "paint-1-1.json"
+
+
+async def test_a_mesh_model_painted_mirrored_and_not_reaches_its_3mf_as_two_parts(
+    paths: DataPaths,
+) -> None:
+    """#4976: one colour painted on a box and on its mirror image is carried as two
+    parts of the one filament, the mirrored one `Paint.reversed` (written mirrored back,
+    as Arrange writes one, #4015), each with every code, through the layout."""
+    result, codes = await _render_painted(paths, mirror_second=True)
+    assert result.colors == [ORANGE, GREEN]
+    layout = PlateLayout.load(paths.cache / "render-job" / "p" / LAYOUT_NAME)
+    plate = layout.plates[0]
+    assert [(p.colour, p.paint is not None and p.paint.reversed) for p in plate.parts] == [
+        (ORANGE, False),
+        (ORANGE, True),
+    ]
+    assert plate.extruders == (1, 1)
+    assert [s.paint for s in layout.sources[0]] == ["paint-1-1-1.json", "paint-1-1-2.json"]
+    assert all(p.paint is not None and p.paint.codes == codes for p in plate.parts)
+    [obj] = read_objects((paths.root / result.model_3mf).read_bytes(), ReadBudget())
+    assert sorted(
+        (p.paint is not None and p.paint.reversed, p.paint is not None and p.paint.codes == codes)
+        for p in obj.parts
+    ) == [(False, True), (True, True)]
 
 
 def _delete_meshes(model_dir: Path) -> None:

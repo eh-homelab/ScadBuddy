@@ -84,6 +84,8 @@ describe.skipIf(skip !== '')(`the mirror-drop migration${skip}`, () => {
       INSERT INTO ai_plugins (name, kind, url, enabled, tool_tiers, disabled_tools)
       VALUES ('hs', 'remote_mcp', 'https://example.test/mcp', true, '{"a":"read"}', '{b}')`
     expect(await db.sql`SELECT * FROM ai_access`).toHaveLength(0)
+    // The rest, so today's store can read the row (#780's tables are later files).
+    await migrate(db.sql, MIGRATIONS)
     expect((await new PluginStore(db.sql).enabled(undefined)).plugins).toEqual([])
   })
 })

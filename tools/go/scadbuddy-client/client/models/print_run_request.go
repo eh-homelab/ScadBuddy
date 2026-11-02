@@ -9,6 +9,8 @@ import (
 
 // PrintRunRequest the print dialog's choices (spec 2026-09-27 §2, §4): spools, nozzles, quality and plate. Every slicer preset is derived from them by the resolver; there is no pipeline to name, and the run always slices then queues.
 type PrintRunRequest struct {
+	// The accepted_fixes property
+	accepted_fixes []string
 	// Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 	additionalData map[string]any
 	// The all_plates property
@@ -1012,6 +1014,12 @@ func CreatePrintRunRequestFromDiscriminatorValue(parseNode i878a80d2330e89d26896
 	return NewPrintRunRequest(), nil
 }
 
+// GetAcceptedFixes gets the accepted_fixes property value. The accepted_fixes property
+// returns a []string when successful
+func (m *PrintRunRequest) GetAcceptedFixes() []string {
+	return m.accepted_fixes
+}
+
 // GetAdditionalData gets the AdditionalData property value. Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 // returns a map[string]any when successful
 func (m *PrintRunRequest) GetAdditionalData() map[string]any {
@@ -1040,6 +1048,22 @@ func (m *PrintRunRequest) GetCopies() PrintRunRequest_PrintRunRequest_copiesable
 // returns a map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error when successful
 func (m *PrintRunRequest) GetFieldDeserializers() map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 	res := make(map[string]func(i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error)
+	res["accepted_fixes"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
+		val, err := n.GetCollectionOfPrimitiveValues("string")
+		if err != nil {
+			return err
+		}
+		if val != nil {
+			res := make([]string, len(val))
+			for i, v := range val {
+				if v != nil {
+					res[i] = *(v.(*string))
+				}
+			}
+			m.SetAcceptedFixes(res)
+		}
+		return nil
+	}
 	res["all_plates"] = func(n i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.ParseNode) error {
 		val, err := n.GetBoolValue()
 		if err != nil {
@@ -1321,6 +1345,12 @@ func (m *PrintRunRequest) GetSupports() SupportsChoiceable {
 
 // Serialize serializes information the current object
 func (m *PrintRunRequest) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.SerializationWriter) error {
+	if m.GetAcceptedFixes() != nil {
+		err := writer.WriteCollectionOfStringValues("accepted_fixes", m.GetAcceptedFixes())
+		if err != nil {
+			return err
+		}
+	}
 	{
 		err := writer.WriteBoolValue("all_plates", m.GetAllPlates())
 		if err != nil {
@@ -1438,6 +1468,11 @@ func (m *PrintRunRequest) Serialize(writer i878a80d2330e89d26896388a3f487eef27b0
 	return nil
 }
 
+// SetAcceptedFixes sets the accepted_fixes property value. The accepted_fixes property
+func (m *PrintRunRequest) SetAcceptedFixes(value []string) {
+	m.accepted_fixes = value
+}
+
 // SetAdditionalData sets the AdditionalData property value. Stores additional data not described in the OpenAPI description found when deserializing. Can be used for serialization as well.
 func (m *PrintRunRequest) SetAdditionalData(value map[string]any) {
 	m.additionalData = value
@@ -1536,6 +1571,7 @@ func (m *PrintRunRequest) SetSupports(value SupportsChoiceable) {
 type PrintRunRequestable interface {
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.AdditionalDataHolder
 	i878a80d2330e89d26896388a3f487eef27b0a0e6c010c493bf80be1452208f91.Parsable
+	GetAcceptedFixes() []string
 	GetAllPlates() *bool
 	GetChoices() PrintChoicesable
 	GetCopies() PrintRunRequest_PrintRunRequest_copiesable
@@ -1554,6 +1590,7 @@ type PrintRunRequestable interface {
 	GetRackPosition() PrintRunRequest_PrintRunRequest_rack_positionable
 	GetRequestId() PrintRunRequest_PrintRunRequest_request_idable
 	GetSupports() SupportsChoiceable
+	SetAcceptedFixes(value []string)
 	SetAllPlates(value *bool)
 	SetChoices(value PrintChoicesable)
 	SetCopies(value PrintRunRequest_PrintRunRequest_copiesable)

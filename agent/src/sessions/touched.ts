@@ -306,6 +306,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_item_quote: () => [],
   order_item_accept_quote: () => [],
   order_accept: () => [],
+  order_item_print: () => [],
   order_item_fulfil: () => [],
   order_item_unfulfil: () => [],
   order_ship: () => [],
@@ -317,6 +318,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   order_attachment_delete: () => [],
   // The price book (#4250) is a record of its own, edited on the Settings page.
   price_book_set: () => [],
+  price_book_import_spools: () => [],
   // Analyzer decisions (#4966) are a print's checks, not a resource: the print dialog's
   // analyzer panel and list_analyzer_decisions show them, and an apply sends nothing.
   apply_analyzer_fix: () => [],

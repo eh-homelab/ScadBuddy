@@ -245,7 +245,7 @@ describe('useCapabilities', () => {
     const { result } = renderHook(() => useCapabilities(BUILTIN))
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(result.current.error).toBeNull()
-    expect(result.current.sources.map((s) => s.id)).toEqual(['builtin:scadbuddy', 'builtin:browser', 'builtin:http', 'builtin:own-plugin'])
+    expect(result.current.sources.map((s) => s.id)).toEqual(['builtin:scadbuddy', 'builtin:browser', 'builtin:http', 'builtin:own-plugin', 'builtin:claude-code'])
     const replaced = { ...result.current.sources[2]!, enabled: false }
     result.current.replace(replaced)
     await waitFor(() => expect(result.current.sources[2]!.enabled).toBe(false))

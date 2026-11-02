@@ -255,7 +255,6 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
       settings: { get: <T>() => Promise.resolve(undefined as T) },
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
       ...harnessTools(services, TURN_TOOLS),
-      approvalPollMs: 50,
       approvalHashKey: Buffer.alloc(32, 7),
     })
     services.sessions = sessions
@@ -300,8 +299,8 @@ describe.skipIf(skip !== undefined)(`a flow's agent() and ask_session() end to e
     expect(run.steps).toHaveLength(1)
     expect(step).toMatchObject({ fn: 'agent', status: 'succeeded', outward: false })
     const sessionId = step!.session_id!
-    const [row] = await db.sql<{ mode: string; owner_id: string }[]>`SELECT mode, owner_id FROM ai_sessions WHERE id = ${sessionId}`
-    expect(row).toEqual({ mode: 'durable', owner_id: 'browser' })
+    const [row] = await db.sql<{ runtime: string; owner_id: string }[]>`SELECT runtime, owner_id FROM ai_sessions WHERE id = ${sessionId}`
+    expect(row).toEqual({ runtime: 'unified', owner_id: 'browser' })
 
     // The model was asked for that JSON, in the session the flow started.
     const asked = fake.messageCalls().find((r) => JSON.stringify(r.body?.messages ?? []).includes(SIZE_PROMPT))

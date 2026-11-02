@@ -83,8 +83,31 @@ describe('useRunPrint', () => {
     expect(body).toMatchObject({ printer_id: 1, plate_id: 1, all_plates: true })
     expect(body?.choices).toMatchObject({ tier: 'standard', bed_type: 'Textured PEI Plate' })
     expect(body).not.toHaveProperty('copies')
+    expect(body).not.toHaveProperty('accepted_fixes')
     expect(result.current.result).toEqual(queuedResult)
     expect(props.onRan).toHaveBeenCalledWith(queuedResult)
+  })
+
+  it('sends the accepted analyzer fixes the panel holds (#284), never in the batch body', async () => {
+    const fixes = ['b'.repeat(32)]
+    const { result } = renderHook(() => useRunPrint({ ...input(), acceptedFixes: fixes }))
+    await act(() => result.current.run())
+
+    expect(runPrint.mock.calls[0]?.[1]).toMatchObject({ accepted_fixes: fixes })
+    expect(
+      printRunBody({
+        printerId: 1,
+        plan: PLAN,
+        printChoices: { nozzles: DEFAULT_NOZZLES, tier: 'standard', process_name: null, bed_type: 'x' },
+        copies: null,
+        plate: 'all',
+        projectId: null,
+        options: {},
+        printSequence: null,
+        rackPosition: null,
+        rackAlgorithm: null,
+      }),
+    ).not.toHaveProperty('accepted_fixes')
   })
 
   it("remembers a LAN-only printer's plate by its registry id (#4971)", async () => {

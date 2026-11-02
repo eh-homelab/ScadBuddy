@@ -392,7 +392,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     await classic.send(session.id, browser, 'loop it')
     await expect.poll(() => scripted.runs.length).toBe(1)
     const run = scripted.runs[0]!
-    expect(run.builtinTools).toEqual(['Read'])
+    // Read is Claude Code's own in every session since Step 9.6, not the package's.
+    expect(run.builtinTools).toEqual([])
+    expect(run.nativeTools?.map((t) => t.name)).toContain('Read')
     expect(Object.keys(run.mcpServers ?? {})).toContain('builtin')
     expect(run.systemPromptAppend).toContain('CronCreate (mcp__builtin__CronCreate)')
     // The turn's Monitor runs its command on this replica's own queue, where the turn's Bash runs.
@@ -609,7 +611,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     // The row runs the turn as DurableTurns.send claims it; session_turn runs it here as TurnHost.
     const turnId = randomUUID()
     await db.sql`
-      UPDATE ai_sessions SET status = 'running', mode = 'durable', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
+      UPDATE ai_sessions SET status = 'running', runtime = 'unified', durable_turn_id = ${turnId}, updated_at = now()
       WHERE id = ${session.id}`
     const host = new TurnHost({ core: unified.turnCore, sql: db.sql, images: new SessionBlobs(db.sql), hostQueue: 'agent-sessions.pod-a' })
     const result = await host.run(

@@ -168,8 +168,8 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
       m.durable = new DurableGate(env.client, { timeoutMs })
       const sessionId = randomUUID()
       await db.sql`
-        INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
-        VALUES (${sessionId}, 'mcp', ${owner.kind}, ${owner.id}, ${owner.label}, ${owner.kind}, ${owner.id}, 'running', 10, 1, 'durable')`
+        INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+        VALUES (${sessionId}, 'mcp', ${owner.kind}, ${owner.id}, ${owner.label}, ${owner.kind}, ${owner.id}, 'running', 10, 1)`
       const { requestId } = await park(sessionId, QUEUE, false, kind)
       return { m, sessionId, requestId }
     }
@@ -238,8 +238,8 @@ describe.skipIf(!TEMPORAL_CLI)(`a durable session's gate${TEMPORAL_SKIP}`, () =>
       const { m, sessionId } = await durableSession()
       const live = await park()
       await db.sql`
-        INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
-        VALUES (${live.sessionId}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'running', 10, 1, 'durable')`
+        INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+        VALUES (${live.sessionId}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'running', 10, 1)`
       const runOf = async (id: string) => (await env.client.workflow.getHandle(sessionWorkflowId(id)).describe()).runId
       for (const [id, run] of [
         [sessionId, await runOf(sessionId)],

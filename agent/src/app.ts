@@ -128,6 +128,9 @@ function sessionWriteVerb(method: string, path: string): string | undefined {
 /** Which plugin requests are writes; connection tests are not. */
 function pluginVerb(method: string, path: string): string | undefined {
   if (path.endsWith('/test')) return undefined
+  // An OAuth sign-in's start and sign-out (#780) are not the plugin's create or delete.
+  if (method === 'POST' && path.endsWith('/oauth/start')) return 'sign_in'
+  if (method === 'DELETE' && path.endsWith('/oauth')) return 'sign_out'
   const one = path.startsWith('/api/v1/ai/plugins/')
   if (method === 'POST' && !one) return 'create'
   if (method === 'PATCH' && one) return 'update'

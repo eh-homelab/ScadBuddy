@@ -36,6 +36,7 @@ function assembly(): AssembledTurn {
       toolsAsActivities: false,
       httpTier: null,
       builtinTools: [],
+      nativeTools: [],
       recallMaxQueryChars: null,
       transientRetries: null,
       servedBuiltins: [],

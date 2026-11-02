@@ -539,11 +539,11 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
   /**
    * A classic session as an earlier release left one: its turns in ai_session_entries and its
    * events in the log, no runtime and no workflow. A fork's copy of `parentId` is exactly that,
-   * once its row says classic.
+   * once its row has no runtime.
    */
   async function classicSession(m: SessionManager, parentId: string): Promise<string> {
     const copy = await m.fork(parentId, agentA)
-    await db.sql`UPDATE ai_sessions SET mode = 'classic', runtime = NULL WHERE id = ${copy.id}`
+    await db.sql`UPDATE ai_sessions SET runtime = NULL WHERE id = ${copy.id}`
     await expect(sessionWorkflow(copy.id)).rejects.toThrow()
     return copy.id
   }

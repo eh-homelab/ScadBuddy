@@ -5,7 +5,7 @@ import { BudgetSpentError } from './nested.js'
 import { exchange, requestProblem } from '../harness/httpRequest.js'
 import { assertHttpUrl, type Resolver } from '../http/egress.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
-import type { BuiltinResult } from './files.js'
+import type { BuiltinResult } from './result.js'
 
 // Claude Code's WebFetch and WebSearch for a durable turn (#2393); WebFetch for a classic turn too (#2684).
 //

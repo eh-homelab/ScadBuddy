@@ -1,9 +1,20 @@
 import { randomUUID } from 'node:crypto'
 import type { Principal } from '../auth/principal.js'
 import { type PairingRequest, PairingError, type PairingStore, type PairingView } from './pairings.js'
-import { agentFrame, type AgentFrame, type CallOutcome, type PairingEntry, parseTabFrame, type TabFrame } from './protocol.js'
+import {
+  agentFrame,
+  type AgentFrame,
+  type CallOutcome,
+  IMAGE_CHUNK_MAX,
+  type PairingEntry,
+  parseTabFrame,
+  type TabFrame,
+} from './protocol.js'
 import type { RelayAnswer, RelayRequest, TabRelay } from './relay.js'
 import type { SessionTabStore } from './sessionTabs.js'
+import { MemoryTabImageStore, type StoredTabImage, type TabImageStore } from './tabImages.js'
+import { sniff } from '../sessions/images.js'
+import { type SessionImage, sessionImage } from '../sessions/blobs.js'
 
 // The agent's side of the browser bridge (#254, spec §5.2): the tabs connected
 // to this process over `GET /api/v1/ai/bridge` (routes/bridge.ts), and the
@@ -42,7 +53,7 @@ export const MAX_CALLS_PER_TAB = 8
 export const MAX_SESSION_TABS = 1_000
 
 /** Codes the hub answers with itself, beside the tab's own (frontend src/agent/types.ts `ErrorCode`). */
-export type HubErrorCode = 'no_browser' | 'no_answer' | 'disconnected' | 'busy'
+export type HubErrorCode = 'no_browser' | 'no_answer' | 'disconnected' | 'busy' | 'not_stored'
 
 /** Who a browser_* call acts for: the caller, and the session when it comes from a turn. */
 export type BrowserTarget = { principal: Principal; sessionId?: string | undefined }
@@ -64,9 +75,32 @@ export interface BrowserTabs {
   pair(principal: Principal): Promise<PairingRequest>
   /** The same tabs, with every call's target naming `sessionId` (tools/harness.ts binds each turn's). */
   forSession(sessionId: string): BrowserTabs
+  /** An image a call's answer names (`browser_screenshot`), stored by any replica and taken by this read (tabImages.ts). */
+  image(name: string, options?: { signal?: AbortSignal }): Promise<StoredTabImage | undefined>
 }
 
-type PendingCall = { resolve: (outcome: CallOutcome) => void; timer: NodeJS.Timeout; cleanup: () => void }
+type PendingCall = {
+  resolve: (outcome: CallOutcome, image?: SessionImage) => void
+  timer: NodeJS.Timeout
+  cleanup: () => void
+}
+
+/** An image whose binary frames are still arriving (protocol.ts `image`). */
+type IncomingImage = { id: string; mediaType: SessionImage['mediaType']; size: number; chunks: Buffer[]; received: number }
+
+/** Whether an answer holds an image (`{ image: { mediaType } }`, frontend link.ts), whose bytes came before it. */
+function hasImage(result: unknown): result is Record<string, unknown> & { image: object } {
+  if (typeof result !== 'object' || result === null) return false
+  const image = (result as { image?: unknown }).image
+  return typeof image === 'object' && image !== null
+}
+
+/** A binary frame's bytes: an ArrayBuffer from the socket (@hono/node-server), or a view of one. */
+function bytesOf(raw: unknown): Buffer | undefined {
+  if (raw instanceof ArrayBuffer) return Buffer.from(raw)
+  if (ArrayBuffer.isView(raw)) return Buffer.from(new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength))
+  return undefined
+}
 
 function failure(code: HubErrorCode, message: string): CallOutcome {
   return { ok: false, error: { code, message } }
@@ -96,6 +130,8 @@ export type TabHubOptions = {
    * Undefined without a database: a session's tab is known only where it paired.
    */
   sessionTabs?: SessionTabStore | undefined
+  /** Where a tab's images wait for the call that asked; this process's memory by default. */
+  images?: TabImageStore | undefined
   callTimeoutMs?: number
   pollMs?: number
   log?: (message: string) => void
@@ -110,6 +146,9 @@ export class TabConnection {
   readonly #send: (frame: AgentFrame) => void
   readonly #onReplaced: () => void
   readonly calls = new Map<string, PendingCall>()
+  /** Images whose bytes have all arrived, by the call whose `result` will name them. */
+  readonly #images = new Map<string, SessionImage>()
+  #incoming: IncomingImage | undefined
   #closed = false
   /** The last `pairings` frame sent, as JSON, so an unchanged one is not sent again. */
   lastPairings = ''
@@ -128,10 +167,10 @@ export class TabConnection {
     if (!this.#closed) this.#send(frame)
   }
 
-  /** One text frame from the tab (or whatever else arrived, which is refused). */
+  /** One frame from the tab: JSON text, or the bytes of an image it announced. */
   async receive(raw: unknown): Promise<void> {
     if (this.#closed) return
-    if (typeof raw !== 'string') return this.send(agentFrame({ type: 'error', message: 'frames must be JSON text' }))
+    if (typeof raw !== 'string') return this.#receiveBytes(raw)
     const parsed = parseTabFrame(raw)
     if (!parsed.ok) return this.send(agentFrame({ type: 'error', message: `ignored a malformed frame: ${parsed.error}` }))
     try {
@@ -158,11 +197,23 @@ export class TabConnection {
         this.route = frame.route
         this.live = frame.live
         return
+      case 'image': {
+        if (this.#incoming) {
+          this.#incoming = undefined
+          return this.send(agentFrame({ type: 'error', message: 'an image began before the last one ended; both dropped' }))
+        }
+        if (!this.calls.has(frame.id)) return this.send(agentFrame({ type: 'error', message: `no call ${frame.id} is waiting` }))
+        this.#incoming = { id: frame.id, mediaType: frame.mediaType, size: frame.size, chunks: [], received: 0 }
+        return
+      }
       case 'result': {
         const call = this.calls.get(frame.id)
+        const image = this.#images.get(frame.id)
+        this.#images.delete(frame.id)
+        if (this.#incoming?.id === frame.id) this.#incoming = undefined
         if (!call) return // late: timed out or cancelled already
         call.cleanup()
-        call.resolve(frame.outcome)
+        call.resolve(frame.outcome, image)
         return
       }
       case 'pairing.accept':
@@ -174,6 +225,40 @@ export class TabConnection {
     }
   }
 
+  /**
+   * A binary frame: the next bytes of the image the last `image` frame announced. Once all
+   * have arrived they are checked against its type (their signature), named here by their
+   * sha256 (the tab needs no WebCrypto, which a plain-http origin lacks), and kept for that
+   * call's `result`; anything else is dropped and refused.
+   */
+  #receiveBytes(raw: unknown): void {
+    const incoming = this.#incoming
+    const chunk = bytesOf(raw)
+    if (!chunk) return this.send(agentFrame({ type: 'error', message: 'frames must be JSON text or image bytes' }))
+    if (this.tabId === undefined) return this.send(agentFrame({ type: 'error', message: 'send hello first' }))
+    if (!incoming) return this.send(agentFrame({ type: 'error', message: 'image bytes arrived with no image frame before them' }))
+    if (chunk.byteLength > IMAGE_CHUNK_MAX || incoming.received + chunk.byteLength > incoming.size) {
+      this.#incoming = undefined
+      return this.send(agentFrame({ type: 'error', message: 'the image is larger than its image frame said; dropped' }))
+    }
+    incoming.chunks.push(chunk)
+    incoming.received += chunk.byteLength
+    if (incoming.received < incoming.size) return
+    this.#incoming = undefined
+    const bytes = Buffer.concat(incoming.chunks)
+    if (sniff(bytes) !== incoming.mediaType) {
+      return this.send(agentFrame({ type: 'error', message: 'the image is not of the type its image frame said; dropped' }))
+    }
+    // Only for a call still waiting: a late image is not kept.
+    if (this.calls.has(incoming.id)) this.#images.set(incoming.id, sessionImage(incoming.mediaType, bytes))
+  }
+
+  /** The call's image, dropped with it when it ends without a `result` (a timeout, an abort). */
+  forget(id: string): void {
+    this.#images.delete(id)
+    if (this.#incoming?.id === id) this.#incoming = undefined
+  }
+
   /** Another connection took this tab id over (a reconnect overtook this one). */
   replaced(): void {
     this.close('the tab connected again')
@@ -183,6 +268,8 @@ export class TabConnection {
   close(why = 'the tab disconnected before answering'): void {
     if (this.#closed) return
     this.#closed = true
+    this.#images.clear()
+    this.#incoming = undefined
     for (const call of [...this.calls.values()]) {
       call.cleanup()
       call.resolve(failure('disconnected', `the call did not finish: ${why}`))
@@ -205,6 +292,7 @@ export class TabHub implements BrowserTabs {
   readonly #pairings: PairingStore | undefined
   readonly #relay: TabRelay | undefined
   readonly #sessionTabStore: SessionTabStore | undefined
+  readonly #images: TabImageStore
   #sessionTabWrites: Promise<void> = Promise.resolve()
   /**
    * Sessions whose latest pairing here failed to reach the store: the row still
@@ -228,6 +316,7 @@ export class TabHub implements BrowserTabs {
     this.#pairings = options.pairings
     this.#relay = options.relay
     this.#sessionTabStore = options.sessionTabs
+    this.#images = options.images ?? new MemoryTabImageStore()
     this.#relay?.serve({
       tabs: () => this.connected(),
       run: (tabId, request) => this.#runHere(tabId, request),
@@ -422,7 +511,30 @@ export class TabHub implements BrowserTabs {
       status: (target, options) => this.status({ ...target, sessionId }, options),
       pair: (principal) => this.pair(principal),
       forSession: (other) => this.forSession(other),
+      image: (name, options) => this.image(name, options),
     }
+  }
+
+  image(name: string, { signal }: { signal?: AbortSignal } = {}): Promise<StoredTabImage | undefined> {
+    return this.#images.take(name, signal)
+  }
+
+  /**
+   * A call's answer with its image stored first and named in it (`image: {name, mediaType}`),
+   * so the caller (on any replica) can read it by name. An image the answer does not hold is
+   * not stored; an answer holding one whose bytes did not arrive, or could not be stored, is
+   * a failure.
+   */
+  async #withImage(tool: string, outcome: CallOutcome, image: SessionImage | undefined): Promise<CallOutcome> {
+    if (!outcome.ok || !hasImage(outcome.result)) return outcome
+    if (!image) return failure('not_stored', `the tab's answer to ${tool} holds an image whose bytes did not arrive; try again`)
+    try {
+      await this.#images.put(image)
+    } catch (err) {
+      this.logError(err)
+      return failure('not_stored', `the image the tab answered ${tool} with could not be stored; try again`)
+    }
+    return { ok: true, result: { ...outcome.result, image: { name: image.name, mediaType: image.mediaType } } }
   }
 
   async #resolve(
@@ -515,6 +627,7 @@ export class TabHub implements BrowserTabs {
         clearTimeout(timer)
         signal.removeEventListener('abort', onAbort)
         tab.calls.delete(id)
+        tab.forget(id)
       }
       const timer = setTimeout(() => {
         cleanup()
@@ -527,7 +640,7 @@ export class TabHub implements BrowserTabs {
         )
       }, timeoutMs)
       signal.addEventListener('abort', onAbort, { once: true })
-      tab.calls.set(id, { resolve, timer, cleanup })
+      tab.calls.set(id, { resolve: (outcome, image) => resolve(this.#withImage(tool, outcome, image)), timer, cleanup })
       tab.send(agentFrame({ type: 'call', id, tool, args }))
     })
   }

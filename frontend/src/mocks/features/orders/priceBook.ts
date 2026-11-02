@@ -1,6 +1,7 @@
 import { http, HttpResponse } from 'msw'
-import type { Filament, FilamentInput, FilamentPatch, OrderEstimate, PolicyUpdate, PriceBook, PricingPolicy, Quote, QuoteLine, SliceQuoteRequest } from '../../../api/types'
+import type { Filament, FilamentInput, FilamentPatch, OrderEstimate, PolicyUpdate, PriceBook, PricingPolicy, Quote, QuoteLine, SliceQuoteRequest, SpoolImportRow } from '../../../api/types'
 import { mockSettings, setMockSettings } from '../../handlers'
+import { SPOOL_INVENTORY } from '../spoolInventory'
 import { acceptOperation } from '../operations'
 import { FilamentsRefused, event, itemOf, lock, notEnded, OPEN_FOR_EDITS, quotesOf, rederive, refused, SETTLED, withFilaments } from './orders'
 import { BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state } from './state'
@@ -37,7 +38,62 @@ function book(includeArchived = false): PriceBook {
     policy: policy(),
     rough_estimate_factor: mockSettings().rough_estimate_factor,
     filaments: state.filaments.filter((f) => includeArchived || !f.archived_at),
+    spool_import: Boolean(mockSettings().bambuddy_url),
   }
+}
+
+/** `orders/spool_import.py` over the spool inventory's mock (#4253 §8.3). */
+function importSpools(): SpoolImportRow[] {
+  const groups = new Map<string, typeof SPOOL_INVENTORY>()
+  for (const spool of SPOOL_INVENTORY) {
+    if (spool.archived) continue
+    const key = [spool.material, spool.subtype ?? '', spool.brand ?? '', spool.rgba ? spool.rgba.slice(0, 6) : `name:${spool.color_name ?? ''}`].map((p) => p.trim().toUpperCase()).join('|')
+    groups.set(key, [...(groups.get(key) ?? []), spool])
+  }
+  return [...groups.keys()].sort().flatMap((key): SpoolImportRow[] => {
+    const spools = [...(groups.get(key) ?? [])].sort((a, b) => a.id - b.id)
+    const latest = spools.at(-1)
+    if (!latest) return []
+    const colour = latest.rgba && /^[0-9a-fA-F]{6}([0-9a-fA-F]{2})?$/.test(latest.rgba) ? `#${latest.rgba.slice(0, 6).toUpperCase()}` : null
+    const priced = spools.filter((s) => s.cost_per_kg != null)
+    const prices = [...new Set(priced.map((s) => s.cost_per_kg as number))]
+    const row: SpoolImportRow = {
+      action: 'skipped',
+      material: latest.material,
+      subtype: latest.subtype ?? null,
+      brand: latest.brand ?? null,
+      colour_name: latest.color_name ?? null,
+      colour,
+      spool_ids: spools.map((s) => s.id),
+      min_cost_per_kg: prices.length > 1 ? String(Math.min(...prices)) : null,
+      max_cost_per_kg: prices.length > 1 ? String(Math.max(...prices)) : null,
+    }
+    if (!colour) return [{ ...row, reason: 'no_colour' }]
+    if (priced.length === 0) return [{ ...row, reason: 'no_price' }]
+    const cost = String(priced.at(-1)?.cost_per_kg)
+    const found = state.filaments.find((f) => !f.archived_at && identity(f) === identity({ material: row.material, subtype: row.subtype ?? null, brand: row.brand ?? null, colour }))
+    if (!found) {
+      const made: Filament = {
+        id: newId('f'),
+        material: row.material,
+        subtype: row.subtype ?? null,
+        brand: row.brand ?? null,
+        colour_name: row.colour_name ?? null,
+        colour,
+        cost_per_kg: cost,
+        density_g_cm3: null,
+        archived_at: null,
+        created_at: now(),
+        updated_at: now(),
+      }
+      state.filaments.push(made)
+      return [{ ...row, action: 'created', filament_id: made.id, cost_per_kg: cost }]
+    }
+    const previous = found.cost_per_kg
+    const action = Number(previous) === Number(cost) ? 'unchanged' : 'updated'
+    if (action === 'updated') Object.assign(found, { cost_per_kg: cost, updated_at: now() })
+    return [{ ...row, action, filament_id: found.id, cost_per_kg: cost, previous_cost_per_kg: previous }]
+  })
 }
 
 /** Half up, once, at the line (§3.6). */
@@ -130,6 +186,12 @@ export const handlers = [
       ...(factor ? { rough_estimate_factor: factor } : {}),
     })
     return HttpResponse.json(book())
+  }),
+  http.post(`${base}/price-book/import-spools`, ({ request }) => {
+    if (!mockSettings().bambuddy_url) {
+      return problem(request, 409, 'Bambuddy is not linked: set its URL in Settings to import spools', PROBLEMS + 'not_linked')
+    }
+    return HttpResponse.json({ rows: importSpools() })
   }),
   http.post(`${base}/price-book/filaments`, async ({ request }) => {
     const body = (await request.json()) as FilamentInput

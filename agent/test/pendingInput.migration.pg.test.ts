@@ -21,8 +21,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`the pending-input tables${TEST_DATABASE_URL
   async function session(): Promise<string> {
     const id = randomUUID()
     await db.sql`
-      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
-      VALUES (${id}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'running', 10, 1, 'durable')`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+      VALUES (${id}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'running', 10, 1)`
     return id
   }
 

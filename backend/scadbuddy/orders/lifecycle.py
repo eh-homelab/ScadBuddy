@@ -14,11 +14,11 @@ and the offending ids, with no HTTP shape: ``api/orders.py`` maps each to a 409 
 404 for a missing row), and ``orders/`` never imports from ``api/``.
 
 On hold (§7.2 as plan Ruling 14 narrows it): every transition that advances the order
-(``accept_order``, ``accept_quote``, ``record_fulfilment``, ``update_fulfilment``,
-``accept_fulfilment``, ``unfulfil_item``, ``add_shipment``, ``update_shipment``,
-``close_order``) is
-refused with ``order_on_hold``; ``release``, the cancels, a payment and the plain edits
-go through, so a person can fix what the hold was for.
+(``accept_order``, ``accept_quote``, ``record_fulfilment``, ``claim_print``,
+``update_fulfilment``, ``accept_fulfilment``, ``unfulfil_item``, ``add_shipment``,
+``update_shipment``, ``close_order``) is refused with ``order_on_hold``; ``release``, the
+cancels, a payment and the plain edits go through, so a person can fix what the hold was
+for. The print follow (``follow_print``) records what a printer did, on hold too.
 """
 
 from __future__ import annotations
@@ -78,8 +78,18 @@ ENDED: frozenset[OrderStatus] = frozenset({"closed", "cancelled"})
 DERIVED: frozenset[OrderStatus] = frozenset({"accepted", "in_production", "ready", "shipped"})
 #: An item nothing more happens to.
 SETTLED: frozenset[ItemStatus] = frozenset({"fulfilled", "cancelled"})
-#: The item states a fulfilment attempt may be recorded in (phase 1, Ruling 4).
+#: The item states a fulfilment attempt may be recorded in (phase 1, Ruling 4), and a
+#: print started in (§5.4).
 FULFILLABLE: frozenset[ItemStatus] = frozenset({"approved", "failed"})
+#: The print path's states (§5.4, #4719): its run's attempt is open, and the item follows
+#: the run. An attempt is edited and accepted by hand in them too, which is how a print
+#: whose end the follow could not read is settled.
+PRINTING: frozenset[ItemStatus] = frozenset({"queued", "printing", "printed"})
+
+#: The ``blob_refs`` holder kind of a print attempt's sliced file (§6.1's
+#: ``order_item_fulfilment:<id>``); the holder id is the attempt's id. Never released:
+#: the file is the attempt's provenance.
+FULFILMENT_HOLDER = "order_item_fulfilment"
 
 #: The ``blob_refs`` holder kind of a slice quote's sliced files (#4250 Ruling 3, §3.4's
 #: ``order_item_quote:<id>``); the holder id is the quote's id.
@@ -113,6 +123,17 @@ class LifecycleError(Exception):
         #: The body names something that cannot be (a slot the item lacks, a filament
         #: not in the book): a 422 on the field ``slug`` names, rather than a 409.
         self.unprocessable = unprocessable
+
+
+class ClaimRefusedError(LifecycleError):
+    """A retry's claim, with no run attached, that may no longer start its print
+    (``Lifecycle.claim_print``). Nothing is written: whether a print of its request
+    already exists decides between attaching it and releasing the claim
+    (``orders/printing.py`` ``print_item``)."""
+
+    def __init__(self, claim: Fulfilment, refusal: LifecycleError) -> None:
+        super().__init__(refusal.slug, str(refusal), items=refusal.items)
+        self.claim = claim
 
 
 # -- what a person sends (the routes' bodies, Ruling 12: no author, no status) ------------
@@ -240,11 +261,10 @@ def derive(
 
     Before `accepted` and once ended, the status is what was written. Past it:
     `ready` when every item is settled and at least one is fulfilled, `shipped` when
-    the shipments cover every fulfilled item, `in_production` when any item has a
-    fulfilment attempt (``attempted``: the ids with one) and not every item is
-    settled, which is §3.5's "any item past `approved`" restricted to phase 1's states
-    (plan Ruling 4; phase 3's `queued` writer must widen it to "any item `queued` or
-    beyond, or with an attempt"); else `accepted`.
+    the shipments cover every fulfilled item, `in_production` when any item is
+    `queued` or beyond or has a fulfilment attempt (``attempted``: the ids with one)
+    and not every item is settled, which is §3.5's "any item past `approved`" (plan
+    Ruling 4, widened by the print path, #4719); else `accepted`.
     """
     if order.status not in DERIVED:
         return order.status
@@ -252,7 +272,7 @@ def derive(
     fulfilled = [item for item in items if item.status == "fulfilled"]
     if settled and fulfilled:
         return "ready" if _covered(fulfilled, shipments) else "shipped"
-    if any(item.id in attempted for item in items):
+    if any(item.id in attempted or item.status in PRINTING for item in items):
         return "in_production"
     return "accepted"
 
@@ -1223,6 +1243,21 @@ class Lifecycle:
     def _after_attempt(outcome: Outcome) -> ItemStatus:
         return "failed" if outcome == "failed" else "approved"
 
+    @staticmethod
+    def _after(latest: Fulfilment, current: ItemStatus) -> ItemStatus:
+        """The status the item's latest attempt gives it: `failed` when it failed; for a
+        print's attempt (§5.4) `printed` once it made something, else the print state the
+        item is in (`queued` if it is in none); for one by hand `approved`. A claim whose
+        run is not attached yet is a print's: it keeps the item in its print state, so a
+        second print stays refused."""
+        if latest.outcome == "failed":
+            return "failed"
+        if latest.print_run_id is None and latest.print_request_id is None:
+            return "approved"
+        if latest.outcome in ("succeeded", "partial"):
+            return "printed"
+        return current if current in PRINTING else "queued"
+
     def record_fulfilment(
         self, order_id: str, item_id: str, body: FulfilmentInput, by: Actor
     ) -> Fulfilment:
@@ -1285,8 +1320,18 @@ class Lifecycle:
                 raise LifecycleError(
                     "fulfilment_accepted", f"attempt {attempt.attempt} is accepted"
                 )
-            if item.status not in FULFILLABLE:
+            if item.status not in FULFILLABLE | PRINTING:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            if (
+                attempt.print_request_id is not None
+                and attempt.print_run_id is None
+                and self.store.print_starting(item.id, conn=conn)
+            ):
+                raise LifecycleError(
+                    "print_starting",
+                    f"attempt {attempt.attempt}'s print is still starting",
+                    items=[item.id],
+                )
             attempt = self.store.update_fulfilment(
                 conn,
                 attempt.id,
@@ -1298,7 +1343,7 @@ class Lifecycle:
                 notes=body.notes,
             )
             latest = self.store.fulfilments(item.id, conn=conn)[-1]
-            status = self._after_attempt(latest.outcome)
+            status = self._after(latest, item.status)
             changed: list[tuple[OrderItem, int | None]] = []
             if status != item.status:
                 item = self.store.update_item(conn, item.id, status=status)
@@ -1329,7 +1374,7 @@ class Lifecycle:
                 raise LifecycleError(
                     "fulfilment_accepted", f"attempt {attempt.attempt} is already accepted"
                 )
-            if item.status not in FULFILLABLE:
+            if item.status not in FULFILLABLE | {"printed"}:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             if attempt.outcome == "failed":
                 raise LifecycleError(
@@ -1344,6 +1389,9 @@ class Lifecycle:
             changed: list[tuple[OrderItem, int | None]] = []
             if made >= item.quantity:
                 item = self.store.update_item(conn, item.id, status="fulfilled")
+            elif item.status == "printed":
+                # Some are still to make: the next print is for the rest (§5.4 `copies`).
+                item = self.store.update_item(conn, item.id, status="approved")
             changed.append((item, attempt.attempt))
             self._event(
                 conn,
@@ -1399,7 +1447,7 @@ class Lifecycle:
                 (a.accepted_at, a.attempt, a) for a in attempts if a.accepted_at is not None
             )
             attempt = self.store.unaccept_fulfilment(conn, accepted.id)
-            status = self._after_attempt(attempts[-1].outcome)
+            status = self._after(attempts[-1], item.status)
             item = self.store.update_item(conn, item.id, status=status)
             self._event(
                 conn,
@@ -1414,6 +1462,286 @@ class Lifecycle:
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, attempt.attempt)]))
         return item
+
+    # -- the print path (§5.4, #4719) -----------------------------------------------------
+
+    def claim_print(
+        self,
+        order_id: str,
+        item_id: str,
+        by: Actor,
+        *,
+        request_id: str,
+        sliced_sha256: str | None,
+        sliced_blob_key: str | None,
+    ) -> Fulfilment:
+        """Claim the item for one print before it starts (§5.4, #4719): under the order's
+        lock, its next attempt, made nothing yet (``quantity`` 0, outcome `unknown`, no
+        run yet), keyed by the run's ``request_id``, ``copies`` the quantity its attempts
+        have still to make, the quote's sliced file held by
+        ``(order_item_fulfilment, <id>)``, and the item `queued` (from `failed` too).
+        Only then does the print start, so of two prints of one item (two tabs, the
+        browser and the agent) one claims and the other is refused here, before anything
+        prints. A claim this ``request_id`` made already (a retried or re-sent
+        operation) is that claim, and nothing is written, once its run is attached;
+        before that, only while it may still print (the order not ended or on hold, the
+        item still `queued`, the attempt still open), else ``ClaimRefusedError``, writing
+        nothing. A ``request_id`` another item claimed is
+        ``print_request_conflict``. Refused as a hand-recorded attempt is: the order
+        accepted, not ended, not on hold, the item `approved` or `failed`; and
+        ``item_made`` when its attempts made its quantity."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            existing = self.store.print_claim(request_id, conn=conn)
+            if existing is not None:
+                if existing.order_item_id != item_id:
+                    raise LifecycleError(
+                        "print_request_conflict",
+                        f"request {request_id} is another item's print",
+                        items=[item_id],
+                    )
+                if existing.print_run_id is not None:
+                    return existing
+                # A claim whose start may not have run: it starts only if it still may.
+                item = self._item_of(conn, order, item_id)
+                refusal = self._claim_refusal(order, item, existing)
+                if refusal is None:
+                    return existing
+                raise ClaimRefusedError(existing, refusal)
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            if order.status not in DERIVED:
+                raise LifecycleError(
+                    "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
+                )
+            self._not_on_hold(order)
+            item = self._item_of(conn, order, item_id)
+            if item.status not in FULFILLABLE:
+                raise LifecycleError(
+                    "item_not_open" if item.status in SETTLED else "item_not_approved",
+                    f"item {item_id} is {item.status}",
+                    items=[item.id],
+                )
+            attempts = self.store.fulfilments(item.id, conn=conn)
+            copies = item.quantity - sum(
+                a.quantity for a in attempts if a.outcome in ("succeeded", "partial")
+            )
+            if copies < 1:
+                raise LifecycleError(
+                    "item_made",
+                    f"item {item_id}'s attempts made its {item.quantity} already: accept them",
+                    items=[item.id],
+                )
+            attempt = self.store.insert_fulfilment(
+                conn,
+                item.id,
+                quantity=0,
+                outcome="unknown",
+                created_by=by,
+                started_at=datetime.now(UTC),
+                print_request_id=request_id,
+                copies=copies,
+                sliced_sha256=sliced_sha256,
+                sliced_blob_key=sliced_blob_key,
+            )
+            if sliced_blob_key is not None:
+                self.store.hold_attempt_file(conn, FULFILMENT_HOLDER, sliced_blob_key, attempt.id)
+            item = self.store.update_item(conn, item.id, status="queued")
+            self._event(
+                conn,
+                order,
+                by,
+                "print.claimed",
+                item_id=item.id,
+                fulfilment_id=attempt.id,
+                attempt=attempt.attempt,
+                copies=copies,
+            )
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, attempt.attempt)]))
+        return attempt
+
+    def attach_print(self, claim: Fulfilment, run_id: str, printer: str | None) -> Fulfilment:
+        """The run a claim's print started (`print.started` on the audit line); again
+        with the same run, nothing is written. Allowed on hold and on an ended order: the
+        print is the printer's now, and the record must name it."""
+        if claim.print_run_id == run_id:
+            return claim
+        owner = self.store.item(claim.order_item_id)
+        assert owner is not None
+        with self.store.transaction() as conn:
+            order = self._lock(conn, owner.order_id)
+            attempt = self.store.attach_print_run(conn, claim.id, run_id, printer)
+            if attempt is None:
+                raise LifecycleError(
+                    "print_request_conflict",
+                    f"attempt {claim.attempt} is gone or is another run's",
+                    items=[owner.id],
+                )
+            self._event(
+                conn,
+                order,
+                attempt.created_by,
+                "print.started",
+                item_id=owner.id,
+                fulfilment_id=attempt.id,
+                attempt=attempt.attempt,
+                print_run_id=run_id,
+                copies=attempt.copies,
+            )
+        return attempt
+
+    def release_print(self, claim: Fulfilment, reason: str) -> None:
+        """A claim whose print was refused before it started: the attempt and its hold
+        go, the item takes back the status its other attempts give it (`approved`, or
+        `failed` after a failed one), and the audit line says why. Only a claim with no
+        run yet and still open (a person's settled attempt stays), and the item only
+        while it is still the `queued` the claim made it."""
+        owner = self.store.item(claim.order_item_id)
+        if owner is None:
+            return
+        with self.store.transaction() as conn:
+            order = self._lock(conn, owner.order_id)
+            row = self.store.fulfilment(claim.id, conn=conn)
+            if row is None or row.print_run_id is not None:
+                return
+            if row.outcome != "unknown" or row.finished_at is not None:
+                # A person settled it: their record, not a claim, and it stays.
+                return
+            changed = self._release_claim(conn, order, row, reason)
+            order = self._rederive(conn, order, row.created_by)
+        self._told(_Change(order, changed))
+
+    def _claim_refusal(
+        self, order: Order, item: OrderItem, claim: Fulfilment
+    ) -> LifecycleError | None:
+        """Why a claim with no run may no longer start its print: the order ended or on
+        hold since, the item moved off the `queued` the claim made it (a cancel), or the
+        attempt settled by hand."""
+        try:
+            self._not_ended(order)
+            self._not_on_hold(order)
+        except LifecycleError as error:
+            return error
+        if item.status != "queued":
+            return LifecycleError(
+                "item_not_open" if item.status in SETTLED else "item_not_approved",
+                f"item {item.id} is {item.status}",
+                items=[item.id],
+            )
+        if claim.outcome != "unknown" or claim.finished_at is not None:
+            return LifecycleError(
+                "item_not_approved",
+                f"attempt {claim.attempt} is settled: {claim.outcome}",
+                items=[item.id],
+            )
+        return None
+
+    def _release_claim(
+        self, conn: Conn, order: Order, row: Fulfilment, reason: str
+    ) -> list[tuple[OrderItem, int | None]]:
+        """A claim with no run released in ``conn``: its row and hold, the item back to
+        what its other attempts give it while it is still `queued`, `print.refused`."""
+        self.store.release_print_claim(conn, FULFILMENT_HOLDER, row.id)
+        item = self.store.item(row.order_item_id, conn=conn)
+        assert item is not None
+        changed: list[tuple[OrderItem, int | None]] = []
+        if item.status == "queued":
+            rest = self.store.fulfilments(item.id, conn=conn)
+            back: ItemStatus = "failed" if rest and rest[-1].outcome == "failed" else "approved"
+            item = self.store.update_item(conn, item.id, status=back)
+            changed.append((item, None))
+        self._event(
+            conn,
+            order,
+            row.created_by,
+            "print.refused",
+            item_id=item.id,
+            fulfilment_id=row.id,
+            reason=reason,
+        )
+        return changed
+
+    def follow_print(self, run_id: str, *, progressed: bool = False) -> Fulfilment | None:
+        """The item follows its print (§5.4), from what the print path recorded of the
+        run (``OrderStore.print_state``), so a repeat, a late event or a reconcile
+        writes the same: the print's outcome (``print_outcomes``) settles the attempt,
+        `succeeded` with ``copies`` made and the item `printed`, or `failed` (a failed
+        or cancelled print) with the item `failed`; one whose end the follow could not
+        read (`unknown`) gets its end and stays for a person to settle (``PATCH``). With
+        no outcome, a run that failed fails the attempt with its refusal; one that
+        succeeded and whose print moved (``progressed``, a ``print.progress``) makes a
+        `queued` item `printing`, when the run is still its output's newest (a later dialog
+        print's progress is that print's). Only an attempt still open (outcome `unknown`, no end)
+        moves, so a person's edit stands; the item moves only while it is in a print
+        state, so a cancel stands. Allowed on hold: it records what the printer did.
+        Its audit rows are written as the person who started the print. The attempt
+        as it now is, or None when nothing moved."""
+        attempt = self.store.print_attempt(run_id)
+        if attempt is None or attempt.outcome != "unknown" or attempt.finished_at is not None:
+            return None
+        status, detail, outcome = self.store.print_state(run_id)
+        now = datetime.now(UTC)
+        settle: tuple[Outcome, int, str | None, ItemStatus | None] | None = None
+        if outcome == "finished":
+            settle = ("succeeded", attempt.copies or 0, None, "printed")
+        elif outcome in ("failed", "cancelled"):
+            settle = ("failed", 0, f"the print was {outcome}", "failed")
+        elif outcome == "unknown":
+            settle = ("unknown", 0, "the print ended, but how could not be read", None)
+        elif status == "failed":
+            settle = ("failed", 0, detail or "the print run failed", "failed")
+        elif not (status == "succeeded" and progressed and self.store.runs_newest(run_id)):
+            # A print of the same output the dialog queued since is that run's, whose
+            # progress is not this attempt's (`bambuddy/outcomes.py` reads the same way).
+            return None
+        owner = self.store.item(attempt.order_item_id)
+        if owner is None:
+            return None
+        with self.store.transaction() as conn:
+            # Read again under the order's lock: another replica may have moved it.
+            order = self._lock(conn, owner.order_id)
+            row = self.store.print_attempt(run_id, conn=conn)
+            item = self.store.item(row.order_item_id, conn=conn) if row is not None else None
+            if row is None or item is None or row.outcome != "unknown" or row.finished_at:
+                return None
+            by = row.created_by
+            changed: list[tuple[OrderItem, int | None]] = []
+            if settle is None:
+                if item.status != "queued":
+                    return None
+                item = self.store.update_item(conn, item.id, status="printing")
+                self._event(
+                    conn, order, by, "print.printing", item_id=item.id, fulfilment_id=row.id
+                )
+                changed.append((item, row.attempt))
+            else:
+                result, made, reason, item_status = settle
+                row = self.store.update_fulfilment(
+                    conn,
+                    row.id,
+                    quantity=made,
+                    outcome=result,
+                    failure_reason=reason,
+                    finished_at=now,
+                )
+                if item_status is not None and item.status in PRINTING:
+                    item = self.store.update_item(conn, item.id, status=item_status)
+                changed.append((item, row.attempt))
+                self._event(
+                    conn,
+                    order,
+                    by,
+                    "print.settled",
+                    item_id=item.id,
+                    fulfilment_id=row.id,
+                    attempt=row.attempt,
+                    outcome=result,
+                )
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, changed))
+        return row
 
     # -- shipments (§6.3) -----------------------------------------------------------------
 

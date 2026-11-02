@@ -21,6 +21,9 @@ from fastapi.testclient import TestClient
 from temporalio.api.enums.v1 import EventType
 from temporalio.client import WorkflowHistory
 
+from scadbuddy.analyzers import builtin
+from scadbuddy.analyzers.context import AnalysisContext
+from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic, Fix, change
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
@@ -30,6 +33,7 @@ from scadbuddy.workflows.print_models import FAILED, SliceRunInput
 from scadbuddy.workflows.printing import HEARTBEAT, PLAN_TIMEOUT
 from scadbuddy.workflows.slicing_activities import WAITING, RunActivities
 from tests.api.conftest import follow_operation
+from tests.api.test_analyzers import TIMELAPSE_SOURCE
 from tests.api.test_print_filaments import prepared
 from tests.api.test_print_preview_native import (
     COPY,
@@ -70,6 +74,8 @@ class FakeLibrary:
         #: Answer the next ``POST /queue/`` as Bambuddy does a deleted library file.
         self.refuse_next_queue = False
         self.queued: list[int] = []
+        #: Each queue item as it was sent.
+        self.queue_bodies: list[dict[str, Any]] = []
         #: Each sliced upload stored: its id, name, size and sha256.
         self.stored: dict[int, tuple[str, int, str]] = {}
         #: Store the next sliced upload, then drop its answer (review I1).
@@ -172,6 +178,7 @@ class FakeLibrary:
             self.gone.add(sent["library_file_id"])
             return httpx.Response(400, json={"detail": "Library file not found"})
         self.queued.append(sent["library_file_id"])
+        self.queue_bodies.append(sent)
         return httpx.Response(
             200,
             json={
@@ -565,3 +572,73 @@ def test_native_library_run(
         assert fake.calls == 1
         assert library.queued == [SLICED]
         assert _state(client) is not None
+
+
+def _plate_and_timelapse(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDiagnostic]:
+    fix = Fix(
+        id="plate",
+        title="High Temp Plate, with a timelapse",
+        description="",
+        changes=[
+            change("print_options", "timelapse", True, sources=[TIMELAPSE_SOURCE]),
+            change(
+                "print_request", "choices.bed_type", "High Temp Plate", sources=[TIMELAPSE_SOURCE]
+            ),
+        ],
+    )
+    return [analyzer.diagnose(message="Print this one on the smooth plate.", fixes=[fix])]
+
+
+#: A test rule whose fix lands in both verified targets (#284).
+PLATE_RULE = Analyzer(
+    id="SB9002",
+    name="plate",
+    title="Plate",
+    severity="info",
+    category="plate",
+    description="A test rule whose fix sets the options and the request's bed type.",
+    sources=(TIMELAPSE_SOURCE,),
+    check=_plate_and_timelapse,
+    needs=frozenset({"output"}),
+)
+
+
+def test_a_native_run_applies_the_accepted_fixes_it_names(
+    native_client: TestClient,
+    model: str,
+    slicer: FakeSlicer,
+    library: FakeLibrary,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#284: on the native slicer, a named fix's bed type is what the slice is planned
+    on, and its option is on the queue item, as on Bambuddy's slicer."""
+    monkeypatch.setattr(builtin, "BUILTIN", (*builtin.BUILTIN, PLATE_RULE))
+    output_id = prepared(native_client, model)
+    request = body()
+    fix = {
+        "target": {"output_id": output_id},
+        "request": {key: request[key] for key in ("printer_id", "filament_plan", "choices")},
+        "diagnostic_key": "SB9002",
+        "fix_id": "plate",
+    }
+    preview = native_client.post("/api/v1/analyzers/fixes/preview", json=fix)
+    assert preview.status_code == 200, preview.text
+    applied = native_client.post(
+        "/api/v1/analyzers/fixes/apply",
+        json={**fix, "fingerprint": preview.json()["fingerprint"], "confirm": True},
+    )
+    assert applied.status_code == 200, applied.text
+
+    started = native_client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json={**request, "accepted_fixes": [applied.json()["id"]]},
+    )
+    assert started.status_code in (200, 202), started.text
+    run_id = started.json()["id"]
+    run = follow_run(native_client, run_id, timeout=120)
+
+    assert run["status"] == "succeeded", run
+    (sliced,) = _inputs(_history(native_client, run_id), "slice_run")
+    assert sliced["plan"]["bed_type"] == "High Temp Plate"
+    (item,) = library.queue_bodies
+    assert item["timelapse"] is True

@@ -259,7 +259,8 @@ Phase 1 (#4249) reaches `draft`, `quoted`, `approved`, `fulfilled`, `cancelled` 
 every item is settled", the "any item past `approved`" above restricted to the states it
 has (an attempt is the only way past `approved` there); phase 3's `queued` writer must widen
 `orders/lifecycle.py` `derive` to "any item `queued` or beyond, or with an attempt", so the
-derivation keeps meaning "any item past `approved`" (Ruling 4 of the phase 1 plan).
+derivation keeps meaning "any item past `approved`" (Ruling 4 of the phase 1 plan). It
+does, since #4719 (§5.4).
 
 **Undo.** A close and a cancel can be taken back, since a person can press either by
 mistake. Each one is recorded on the audit line, and the rows decide the result, never
@@ -470,6 +471,50 @@ printed), `printing` on the first `print.progress` for its send, `printed` or `f
 when the print settles. On the Bambuddy path the settle is the archive's (F8); on the
 native path it is the native follow #3823 plans, and until that lands a native print
 settles only by hand (`PATCH` the fulfilment attempt, §6.1).
+
+**As built, first part (#4719).** `orders/printing.py` and the `order_item_print` kind
+(`orders/operations.py`, on the `library` queue). The check refuses from the rows and the
+quote's file: `order_not_accepted`, `order_on_hold`, `item_custom`, `item_not_approved`
+(an item already printing among them), `item_made` (its attempts made its quantity), and
+`requote_needed` (no accepted quote, the item's output gone or no longer its reference's,
+or a slice quote whose `quote-<sha256>/sliced.3mf` is gone or reads to another digest).
+The run starts the print as `POST /print/outputs/{id}/run` does (`api/printing.py`
+`accept_run`, `PrintRunWorkflow` on the item's output), with the body's printer, spools and
+choices, every plate, `copies` the quantity still to print and a `request_id` made from the
+operation's key, so a retry or a re-send repeats the run. The item is claimed before
+the print starts (`Lifecycle.claim_print`, under the order's lock): the attempt, keyed by
+that `request_id` (`print_request_id`, unique), with `copies`, the quote's `sliced_sha256`
+and `sliced_blob_key` held by `(order_item_fulfilment, <attempt id>)`, nothing made yet
+(`quantity` 0, outcome `unknown`), and the item `queued`. Two prints of one item (two
+tabs, the browser and the agent) claim once, and a hold or cancel after the check refuses
+the claim, so only one print starts. The run is then attached (`attach_print`:
+`print_run_id`, the registry `printer`); a start the print path refuses (a 4xx) releases
+the claim (`release_print`, the item back to `approved` or `failed`), and one that may
+still start (a 5xx) keeps it for the operation's retry, which repeats the same run. The
+`request_id` is made from the item and the key, and a claim found under it on another item
+is `print_request_conflict`; a claim's run, once attached, is never replaced. A retry whose
+claim has no run yet starts only while the claim still may print (the order not ended or on
+hold, the item still `queued`, the attempt still open). Otherwise its earlier start may
+have made the run all the same (a 5xx after the workflow started), so the retry looks for
+it by the run's key (`print_runs`, then the `print-<key>` workflow): a run there is
+attached and followed, the hold or cancel applying to what comes next; a workflow still
+accepting is a 503 for the retry; only with neither is the open claim released and the
+retry refused. A claim with no run keeps the item `queued` (it is a
+print's attempt, not one by hand), and its `PATCH` is refused (`print_starting`) while its
+`order_item_print` operation still runs. The item follows the run from what the print path
+records (`Lifecycle.follow_print`, heard on `print.run`, `print.progress` and
+`print.outcome` and reconciled at start and on `bus.resync`): a failed run fails the
+attempt with its refusal, the first `print.progress` after the run succeeded makes the item
+`printing`, and `print_outcomes` (#2665) settles it, `printed` with `copies` made or
+`failed`. That outcome is written by the follow of every path, the native LAN print's too
+(#3823's follow, #4540), so **a native print settles by itself**; only an `unknown` end, or
+an outcome recorded against a newer run of the same output, is settled by hand. An attempt
+is edited in `queued`, `printing` and `printed`, and accepted in `printed` (an accepted
+part leaves the item `approved` for the rest). Not yet: the run slices the item's output
+with the request's choices rather than printing the quote's file itself (with the quote's
+own choices the dialog's slice reuse queues that slice), an accepted `manual` quote's
+attempt records no file, and the per-slot spool fill (`needs_spool_choice`,
+`spool_not_filament`) waits on §8.3's spool-to-filament match.
 
 ## 6. Fulfilment and provenance
 

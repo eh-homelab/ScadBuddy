@@ -26,7 +26,7 @@ export class AccessError extends Error {
   readonly status = 400
 }
 
-const SOURCE_RE = /^(builtin:(scadbuddy|browser|http|own-plugin)|remote:[a-z][a-z0-9-]*|package:.+)$/
+const SOURCE_RE = /^(builtin:(scadbuddy|browser|http|own-plugin|claude-code)|remote:[a-z][a-z0-9-]*|package:.+)$/
 
 function checkSource(source: string): void {
   if (!SOURCE_RE.test(source)) throw new AccessError(`unknown access source ${JSON.stringify(source)}`)

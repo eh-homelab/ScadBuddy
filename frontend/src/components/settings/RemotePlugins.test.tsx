@@ -5,6 +5,7 @@ import { isUserOnly } from '../../agent/dom'
 import { aiPlugins, type RemotePlugin } from '../../api/aiPlugins'
 import { aiCapabilities, type RefreshResult } from '../../api/capabilities'
 import { setListedToolNames, setRemotePluginAccess, setRemotePluginProblem } from '../../mocks/aiPlugins'
+import { failSignIn, signInRefused } from '../../mocks/features/pluginOAuth'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { RemotePluginsPanel } from './RemotePlugins'
@@ -323,5 +324,91 @@ describe('RemotePluginsPanel', () => {
     expect(selects).toHaveLength(5)
     for (const select of selects) expect(isUserOnly(select)).toBe(false)
     expect(isUserOnly(within(card).getByRole('button', { name: 'Reset recall' }))).toBe(false)
+  })
+
+  describe('OAuth sign-in (#780)', () => {
+    async function github(): Promise<void> {
+      await aiPlugins.createRemote({ name: 'github', url: 'https://api.githubcopilot.com/mcp/' })
+    }
+    /** A stand-in for the window the click opens. */
+    function popup() {
+      const win = { opener: {} as unknown, location: { href: '' }, close: vi.fn() }
+      const open = vi.spyOn(window, 'open').mockReturnValue(win as unknown as Window)
+      return { win, open }
+    }
+
+    it('offers no sign-in to a plugin with a header', async () => {
+      renderPage(<RemotePluginsPanel />)
+      const card = await endpoint()
+      expect(within(card).queryByRole('button', { name: 'Sign in' })).toBeNull()
+    })
+
+    it('opens the one-use link in a new window, cut off from this page, and shows the sign-in once it lands', async () => {
+      await github()
+      const { win, open } = popup()
+      const { user } = renderPage(<RemotePluginsPanel />)
+      const card = await endpoint('github')
+      expect(within(card).getByText('None')).toBeInTheDocument()
+      const button = within(card).getByRole('button', { name: 'Sign in' })
+      expect(isUserOnly(button)).toBe(true)
+      await user.click(button)
+      expect(open).toHaveBeenCalledWith('', '_blank')
+      await waitFor(() => expect(win.location.href).toBe('/api/v1/ai/plugin-oauth/authorize?ticket=mock-github'))
+      expect(win.opener).toBeNull()
+      expect(within(card).getByRole('status')).toHaveTextContent(/Finish signing in/)
+      expect(await within(card).findByText('Signed in with https://github.com/login/oauth', {}, { timeout: 5000 })).toBeInTheDocument()
+      expect(within(card).getByRole('button', { name: 'Sign out' })).toBeInTheDocument()
+      open.mockRestore()
+    })
+
+    it('sends the own OAuth app, and shows the callback URL to register', async () => {
+      await github()
+      const { open } = popup()
+      const sent: unknown[] = []
+      server.events.on('request:start', ({ request }) => {
+        if (request.url.endsWith('/oauth/start')) void request.clone().json().then((b: unknown) => sent.push(b))
+      })
+      const { user } = renderPage(<RemotePluginsPanel />)
+      const card = await endpoint('github')
+      await user.click(within(card).getByRole('button', { name: 'Use my own OAuth app' }))
+      expect(within(card).getByText(`${window.location.origin}/api/v1/ai/plugin-oauth/callback`)).toBeInTheDocument()
+      await user.type(within(card).getByLabelText('Client ID'), 'Iv1.abc')
+      await user.type(within(card).getByLabelText('Client secret'), 'shh')
+      await user.click(within(card).getByRole('button', { name: 'Sign in' }))
+      await waitFor(() => expect(sent).toEqual([{ client_id: 'Iv1.abc', client_secret: 'shh' }]))
+      server.events.removeAllListeners()
+      open.mockRestore()
+    })
+
+    it('closes the window and says why when the start is refused', async () => {
+      await github()
+      failSignIn(409, 'authorization server https://github.com/login/oauth offers no dynamic client registration')
+      const { win, open } = popup()
+      const { user } = renderPage(<RemotePluginsPanel />)
+      const card = await endpoint('github')
+      await user.click(within(card).getByRole('button', { name: 'Sign in' }))
+      expect(await within(card).findByText(/offers no dynamic client registration/)).toBeInTheDocument()
+      expect(win.close).toHaveBeenCalled()
+      open.mockRestore()
+    })
+
+    it('says a refused grant needs signing in again', async () => {
+      await github()
+      signInRefused('github')
+      renderPage(<RemotePluginsPanel />)
+      const card = await endpoint('github')
+      expect(within(card).getByRole('alert')).toHaveTextContent(/Sign-in needs renewing: .*bad_refresh_token/)
+      expect(within(card).getByRole('button', { name: 'Sign in again' })).toBeInTheDocument()
+    })
+
+    it('signs out', async () => {
+      await github()
+      signInRefused('github')
+      const { user } = renderPage(<RemotePluginsPanel />)
+      const card = await endpoint('github')
+      await user.click(within(card).getByRole('button', { name: 'Sign out' }))
+      expect(await within(card).findByRole('button', { name: 'Sign in' })).toBeInTheDocument()
+      expect(within(card).getByText('None')).toBeInTheDocument()
+    })
   })
 })

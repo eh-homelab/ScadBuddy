@@ -166,6 +166,7 @@ import type {
   SourceCheck,
   SourceFile,
   StoreUsage,
+  GitRemoteStatus,
   UpstreamMerge,
   UpstreamStatus,
   UrlImport,
@@ -177,6 +178,9 @@ import type {
   Filament,
   FilamentInput,
   FilamentPatch,
+  NativeSpool,
+  NativeSpoolCreate,
+  NativeSpoolPatch,
   Fulfilment,
   FulfilmentInput,
   OrderAttachment,
@@ -198,7 +202,9 @@ import type {
   PolicyUpdate,
   PriceBook,
   Quote,
+  OrderItemPrintRequest,
   SliceQuoteRequest,
+  SpoolImport,
   Shipment,
   ShipmentEdit,
   ShipmentInput,
@@ -1421,6 +1427,8 @@ export const api = {
   /** #296 — the upload store's size against its caps, for Settings. */
   getAssetUsage: () => request<AssetUsage>('/assets/usage'),
   getStoreUsage: () => request<StoreUsage>('/store/usage'),
+  /** #4974 — how far the off-box git remote is behind the model and flow history. */
+  getGitRemote: () => request<GitRemoteStatus>('/settings/git-remote'),
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
@@ -1768,6 +1776,14 @@ export const api = {
   /** #2351 — Bambuddy's spool inventory, each spool with where it is loaded. */
   getSpoolInventory: (includeArchived = false) =>
     request<InventoryView>(`/farm/inventory${includeArchived ? '?include_archived=true' : ''}`),
+  /** #4643 — ScadBuddy's own spools, the native spool provider's records. */
+  nativeSpools: (includeArchived = false) =>
+    request<NativeSpool[]>(`/native-spools${includeArchived ? '?include_archived=true' : ''}`),
+  createNativeSpool: (body: NativeSpoolCreate) =>
+    request<NativeSpool>('/native-spools', { method: 'POST', body: JSON.stringify(body) }),
+  updateNativeSpool: (id: string, body: NativeSpoolPatch) =>
+    request<NativeSpool>(`/native-spools/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteNativeSpool: (id: string) => request<void>(`/native-spools/${seg(id)}`, { method: 'DELETE' }),
 
   /**
    * spec 2026-09-27 §3 — one read for the whole spool-first print dialog: printers,
@@ -2167,6 +2183,11 @@ export const api = {
       undefined,
       onAccepted,
     ),
+  /** #4719 — the `order_item_print` operation: a print run of the item's output with the
+   * dialog's choices, every plate, the quantity still to print; followed to the attempt
+   * it recorded, the item `queued`. */
+  printItem: (orderId: string, itemId: string, body: OrderItemPrintRequest) =>
+    command<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/print`, { method: 'POST', body: JSON.stringify(body) }),
   /**
    * #4736 — the slice quotes still running, as the activity index lists them: each row's
    * `subject` is `order_item:<id>`, its `id` `operation:<operation id>`. Running quotes are
@@ -2193,6 +2214,8 @@ export const api = {
     request<Filament>(`/orders/price-book/filaments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   archiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/archive`, { method: 'POST' }),
   unarchiveFilament: (id: string) => request<Filament>(`/orders/price-book/filaments/${seg(id)}/unarchive`, { method: 'POST' }),
+  /** #4253 §8.3: the filament records made or updated from Bambuddy's spools, on click only. */
+  importSpools: () => request<SpoolImport>('/orders/price-book/import-spools', { method: 'POST' }),
   /** A rough estimate (§5.3), never a quote: nothing is recorded. */
   orderEstimate: (outputId: string, filamentId: string) =>
     request<OrderEstimate>(`/orders/estimate?${new URLSearchParams({ output_id: outputId, filament_id: filamentId })}`),

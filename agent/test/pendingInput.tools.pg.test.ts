@@ -35,8 +35,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`the pending-input read tools${TEST_DATABASE
     // A durable session agentB owns, with an approval and a question parked.
     const durable = randomUUID()
     await db.sql`
-      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
-      VALUES (${durable}, 'mcp', 'bearer', ${agentB.id}, ${agentB.label}, 'bearer', ${agentB.id}, 'waiting_approval', 10, 1, 'durable')`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+      VALUES (${durable}, 'mcp', 'bearer', ${agentB.id}, ${agentB.label}, 'bearer', ${agentB.id}, 'waiting_approval', 10, 1)`
     const ids = { approval: `durable:${durable}:run-1:t1`, answer: `durable:${durable}:run-1:t2` }
     await db.sql`
       INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, prompt, requested_by, responders, expires_at)

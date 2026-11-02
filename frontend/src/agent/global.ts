@@ -14,6 +14,7 @@ import {
 import { resolveLocation, sectionsLoaded } from '../pages/settings/areas'
 import { fillableOf, type Fillable } from './fillable'
 import { touch, waitFor } from './highlight'
+import { takeScreenshot } from './screenshot'
 import { AgentToolError } from './types'
 import { useAgentBridge, useAgentHandlers, useLatest } from './useAgentHandlers'
 
@@ -102,7 +103,7 @@ function historyRoute(navigator: object, fallback: string): string {
 
 /**
  * The tools every route has — `navigate`, `snapshot`, `highlight` and the fallbacks
- * `click` and `fill` — registered by the app shell, which is mounted under the router
+ * `screenshot`, `click` and `fill` — registered by the app shell, which is mounted under the router
  * for as long as the app is. It also tells the bridge where the router is.
  */
 export function useGlobalAgentTools() {
@@ -164,6 +165,9 @@ export function useGlobalAgentTools() {
     },
 
     snapshot: () => bridge.snapshot(),
+
+    // Its image is a Blob, whose bytes link.ts sends as binary frames (#2479).
+    screenshot: () => takeScreenshot(),
 
     click: ({ role, name, index }) => {
       const element = findOne(role, name, index)

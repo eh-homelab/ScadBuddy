@@ -2,36 +2,21 @@ import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool } from '@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { CallToolRequestSchema, type CallToolResult, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import { edit, type BuiltinResult, type FileToolContext, glob, grep, notebookEdit, read, WORKSPACE_ROOT, write } from './files.js'
-import {
-  enterWorktree,
-  exitWorktree,
-  reportFindings,
-  sendMessage,
-  taskCreate,
-  taskGet,
-  taskList,
-  taskUpdate,
-} from './session.js'
-import SCHEMAS from './schemas.json' with { type: 'json' }
+import type { BuiltinResult } from './result.js'
 import { type WebContext, webFetch, webSearch } from './web.js'
 import { type BackgroundContext, cronCreate, cronDelete, cronList, monitor, scheduleWakeup, taskStop, workflow } from './background.js'
 import { MAX_ACTIVE } from '../background/store.js'
 import { CALL_ID_META } from './callId.js'
 
-// A durable turn's Claude Code built-ins (#2393): the ones an allowed plugin package
-// names, as one MCP server the agent offers as turn tools (turnServers.ts), named
-// `builtin__<Name>`. The Temporal plugin runs only Bash and PowerShell of Claude Code's
-// own tools as activities, so a call of any other could not wait for a human; each of
-// these is outward, as every package built-in is in a classic turn, and parks first.
-//
-// Each tool takes Claude Code's own input (schemas.json, the bundled Claude Code's,
-// checked by test/builtins.sdk.test.ts) and answers in its words.
+// The built-ins the session provides in place of Claude Code's (#2393): WebFetch,
+// WebSearch and the background ones, as one MCP server named `builtin`. Each takes
+// Claude Code's own input and answers in its words. Since Step 9.6 Claude Code's file
+// tools and task list run in its own process (access/nativeBuiltins.ts), so a package
+// that named `builtin__Read` and the like gets the native tool instead.
 
 export const BUILTIN_SERVER = 'builtin'
 
 export type BuiltinContext = {
-  files: FileToolContext
   web: WebContext
   /** The session's background tasks (CronCreate and the rest); absent where there are none (a flow). */
   background?: BackgroundContext | undefined
@@ -50,65 +35,12 @@ const withTasks =
 
 type Builtin = { description: string; input: z.ZodType; run: (ctx: BuiltinContext, input: never) => Promise<BuiltinResult> | BuiltinResult }
 
-const path = `an absolute path under ${WORKSPACE_ROOT}, the session's workspace`
-const status = z.enum(['pending', 'in_progress', 'completed'])
-
-/** The built-ins a durable turn provides, by Claude Code's name. */
+/**
+ * The built-ins the session provides in place of Claude Code's, by its name: WebFetch and
+ * WebSearch (egress-checked, decision Q2) and the background ones. Claude Code's own file
+ * tools and task list run in its process since Step 9.6 (access/nativeBuiltins.ts).
+ */
 export const BUILTINS: Record<string, Builtin> = {
-  Read: {
-    description: `Claude Code's Read: reads a file of the session workspace (${path}) as numbered lines, or an image.`,
-    input: z.object({ file_path: z.string(), offset: z.number().int().optional(), limit: z.number().int().optional() }).loose(),
-    run: (ctx, input: Parameters<typeof read>[1]) => read(ctx.files, input),
-  },
-  Write: {
-    description: `Claude Code's Write: writes a file of the session workspace (${path}), replacing it if it exists.`,
-    input: z.object({ file_path: z.string(), content: z.string() }),
-    run: (ctx, input: Parameters<typeof write>[1]) => write(ctx.files, input),
-  },
-  Edit: {
-    description: `Claude Code's Edit: replaces exact text in a file of the session workspace (${path}).`,
-    input: z.object({ file_path: z.string(), old_string: z.string(), new_string: z.string(), replace_all: z.boolean().optional() }),
-    run: (ctx, input: Parameters<typeof edit>[1]) => edit(ctx.files, input, ctx.callId),
-  },
-  Glob: {
-    description: `Claude Code's Glob: lists the session workspace's files (under ${WORKSPACE_ROOT}) matching a glob pattern.`,
-    input: z.object({ pattern: z.string(), path: z.string().optional() }),
-    run: (ctx, input: Parameters<typeof glob>[1]) => glob(ctx.files, input),
-  },
-  Grep: {
-    description: `Claude Code's Grep: searches the session workspace's files (under ${WORKSPACE_ROOT}) with a regular expression.`,
-    input: z
-      .object({
-        pattern: z.string(),
-        path: z.string().optional(),
-        glob: z.string().optional(),
-        output_mode: z.enum(['content', 'files_with_matches', 'count']).optional(),
-        '-B': z.number().int().optional(),
-        '-A': z.number().int().optional(),
-        '-C': z.number().int().optional(),
-        context: z.number().int().optional(),
-        '-n': z.boolean().optional(),
-        '-i': z.boolean().optional(),
-        '-o': z.boolean().optional(),
-        type: z.string().optional(),
-        head_limit: z.number().int().optional(),
-        offset: z.number().int().optional(),
-        multiline: z.boolean().optional(),
-      })
-      .loose(),
-    run: (ctx, input: Parameters<typeof grep>[1]) => grep(ctx.files, input),
-  },
-  NotebookEdit: {
-    description: `Claude Code's NotebookEdit: replaces, inserts or deletes a cell of a Jupyter notebook in the session workspace (${path}).`,
-    input: z.object({
-      notebook_path: z.string(),
-      cell_id: z.string().optional(),
-      new_source: z.string(),
-      cell_type: z.enum(['code', 'markdown']).optional(),
-      edit_mode: z.enum(['replace', 'insert', 'delete']).optional(),
-    }),
-    run: (ctx, input: Parameters<typeof notebookEdit>[1]) => notebookEdit(ctx.files, input),
-  },
   WebFetch: {
     description:
       "Claude Code's WebFetch: fetches a URL, converts the page to markdown, and answers `prompt` against it using a small fast model. " +
@@ -122,61 +54,6 @@ export const BUILTINS: Record<string, Builtin> = {
       'with a "Sources:" list of the URLs you used as markdown links.',
     input: z.object({ query: z.string().min(2), allowed_domains: z.array(z.string()).optional(), blocked_domains: z.array(z.string()).optional() }),
     run: (ctx, input: Parameters<typeof webSearch>[1]) => webSearch(ctx.web, input),
-  },
-  TaskCreate: {
-    description: "Claude Code's TaskCreate: adds a task to the session's task list.",
-    input: z.object({
-      subject: z.string(),
-      description: z.string(),
-      activeForm: z.string().optional(),
-      metadata: z.record(z.string(), z.unknown()).optional(),
-    }),
-    run: (ctx, input: Parameters<typeof taskCreate>[1]) => taskCreate(ctx.files, input, ctx.callId),
-  },
-  TaskGet: {
-    description: "Claude Code's TaskGet: one task of the session's task list.",
-    input: z.object({ taskId: z.string() }),
-    run: (ctx, input: Parameters<typeof taskGet>[1]) => taskGet(ctx.files, input),
-  },
-  TaskList: {
-    description: "Claude Code's TaskList: the session's task list.",
-    input: z.object({}).loose(),
-    run: (ctx) => taskList(ctx.files),
-  },
-  TaskUpdate: {
-    description: "Claude Code's TaskUpdate: changes a task of the session's task list (status `deleted` removes it).",
-    input: z.object({
-      taskId: z.string(),
-      subject: z.string().optional(),
-      description: z.string().optional(),
-      activeForm: z.string().optional(),
-      status: z.union([status, z.literal('deleted')]).optional(),
-      addBlocks: z.array(z.string()).optional(),
-      addBlockedBy: z.array(z.string()).optional(),
-      owner: z.string().optional(),
-      metadata: z.record(z.string(), z.unknown()).optional(),
-    }),
-    run: (ctx, input: Parameters<typeof taskUpdate>[1]) => taskUpdate(ctx.files, input),
-  },
-  ReportFindings: {
-    description: "Claude Code's ReportFindings: reports a review's findings.",
-    input: z.object({ findings: z.array(z.unknown()) }).loose(),
-    run: (_ctx, input: Parameters<typeof reportFindings>[0]) => reportFindings(input),
-  },
-  EnterWorktree: {
-    description: "Claude Code's EnterWorktree: the session workspace is not a git repository, so there is no worktree to enter.",
-    input: z.object({}).loose(),
-    run: () => enterWorktree(),
-  },
-  ExitWorktree: {
-    description: "Claude Code's ExitWorktree.",
-    input: z.object({}).loose(),
-    run: () => exitWorktree(),
-  },
-  SendMessage: {
-    description: "Claude Code's SendMessage: a session runs no other agents to message.",
-    input: z.object({ to: z.string().optional() }).loose(),
-    run: (_ctx, input: Parameters<typeof sendMessage>[0]) => sendMessage(input),
   },
   CronCreate: {
     description:
@@ -277,9 +154,12 @@ function stoppable(context: BuiltinContext, signal: AbortSignal): BuiltinContext
 export function builtinServer(names: readonly string[], context: () => BuiltinContext): Server {
   const offered = names.filter((n) => PROVIDED.has(n))
   const server = new Server({ name: BUILTIN_SERVER, version: '1' }, { capabilities: { tools: {} } })
-  const schemas = SCHEMAS as Record<string, Record<string, unknown>>
   server.setRequestHandler(ListToolsRequestSchema, () => ({
-    tools: offered.map((name) => ({ name, description: BUILTINS[name]!.description, inputSchema: schemas[name] as { type: 'object' } })),
+    tools: offered.map((name) => ({
+      name,
+      description: BUILTINS[name]!.description,
+      inputSchema: z.toJSONSchema(BUILTINS[name]!.input) as { type: 'object' },
+    })),
   }))
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const name = request.params.name

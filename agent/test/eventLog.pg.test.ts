@@ -24,8 +24,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`EventLog.userTurnText${TEST_DATABASE_URL ? 
   async function session(): Promise<string> {
     const id = randomUUID()
     await t.db.sql`
-      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
-      VALUES (${id}, 'mcp', 'browser', 'browser', 'Someone', 'browser', 'browser', 'running', 10, 1, 'durable')`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+      VALUES (${id}, 'mcp', 'browser', 'browser', 'Someone', 'browser', 'browser', 'running', 10, 1)`
     return id
   }
 

@@ -85,11 +85,11 @@ request), and the manager's rules apply unchanged (spec §6):
   (`SendOptions.tiers` in `manager.ts`, `turnPrincipal()` in
   [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)). Without them a
   non-browser owner's session would be `read` only (`harnessPrincipal()`). Outward calls
-  still park for a human approval in the UI. The approval records the turn's tiers
-  (`ai_approvals.requested_tiers`), so if it is approved after a restart the turn that
-  resumes it (`resumeApproved()` in `manager.ts`) is offered the approved tool again:
-  only while the requester still owns the session, and cut down to what a bearer token
-  holds then (`liveTokenTiers()` in `auth/tokens.ts`; a revoked token leaves `read`).
+  still park for a human approval in the UI, as entries of the session's gate
+  (`ai_pending_input`), and the turn's tool activities run with the sender's tiers
+  (`ai_sessions.turn_tiers`): only while the sender still owns the session, and cut down
+  to what a bearer token holds then (`liveTokenTiers()` in `auth/tokens.ts`; a revoked
+  token leaves `read`).
 - **Inside a session** the same tools run as the session's owner, but a model may not
   decide approvals, or hand a session off, accept or decline one (`notInHarness()` in
   `sessions.ts`): those are the owner's decisions, and a model running as the browser

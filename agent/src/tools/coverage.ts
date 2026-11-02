@@ -153,6 +153,13 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "One-time setup that edits Bambuddy's own sidebar; an operator action in Settings, not an agent task.",
   },
   {
+    operation: 'GET /api/v1/settings/git-remote',
+    reason:
+      "Settings' view of how far the off-box git remote is behind the model and flow history (#4974): an " +
+      'operator concern whose remote and credential are set in Settings only. Each push is automatic, so an ' +
+      'agent has nothing to act on; the remote URL itself is in get_settings.',
+  },
+  {
     operation: 'GET /api/v1/outputs/{output_id}/files/{name}',
     reason: 'binary download; the agent reads `bom` and `files` from GET /outputs/{id}',
   },

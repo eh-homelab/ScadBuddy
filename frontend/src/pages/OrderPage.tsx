@@ -12,6 +12,7 @@ import { CUSTOM_ITEM_TITLE, itemAnchor } from '../components/orders/itemLink'
 import { OrderItemsTable } from '../components/orders/OrderItemsTable'
 import { itemPrice, parseUnitPrice, UNIT_PRICE_HINT, unitPrice } from '../components/orders/price'
 import { QUANTITY_HINT, parseQuantity } from '../components/orders/quantity'
+import { PrintItem } from '../components/orders/PrintItem'
 import { QuoteEditor } from '../components/orders/QuoteEditor'
 import { refusalItems, refusalText } from '../components/orders/refusal'
 import { ShipmentForm } from '../components/orders/ShipmentForm'
@@ -651,6 +652,7 @@ function ItemDrawer({
       ) : (
         <QuoteEditor orderId={order.id} itemId={item.id} currency={order.currency} exponent={order.minor_exponent} quotes={item.quotes} editable={editable && !settled} onChanged={onChanged} item={item} slice={{ run: slices.runs.get(item.id), start: (body) => slices.start(item.id, body, item.quotes.map((q) => q.id)), dismiss: () => slices.dismiss(item.id) }} />
       )}
+      <PrintItem order={order} item={item} onChanged={onChanged} />
       <FulfilmentForm orderId={order.id} itemId={item.id} quantity={item.quantity} attempts={item.fulfilments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold && !settled} onChanged={onChanged} markDone={custom && !item.requires_printing} />
       <OrderAttachments
         orderId={order.id}

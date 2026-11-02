@@ -39,8 +39,13 @@ import {
 //     still verified against the hostname (SNI and certificate);
 //   - follows no redirect: a 30x becomes a 502;
 //   - turns a 401/407 into a 502 without its `WWW-Authenticate`, so no OAuth
-//     discovery starts;
-//   - adds the plugin's auth header itself, and passes on only the MCP
+//     discovery starts (a sign-in starts only from Settings, plugins/oauthStore.ts);
+//   - adds the plugin's auth header itself: the static one, or for a plugin
+//     signed in with OAuth (#780) a fresh access token per request from its
+//     token source, which refreshes it; a 401 to a signed-in request is retried
+//     once with a renewed token, and when none can be had the grant is marked
+//     for the person to sign in again and the call fails with that reason;
+//   - passes on only the MCP
 //     transport headers (content-type, accept, mcp-session-id,
 //     mcp-protocol-version, last-event-id) in, and content-type,
 //     mcp-session-id and cache-control out;
@@ -331,20 +336,22 @@ export function rewriteSseEvent(block: string, ids: Rewrites, route: Pick<Route,
  * (2xx, 404, or 405 for a server with no explicit end); a failure is logged and is false.
  */
 export async function deleteUpstreamSession(
-  plugin: Pick<RemotePlugin, 'name' | 'url' | 'header'>,
+  plugin: Pick<RemotePlugin, 'name' | 'url' | 'header' | 'oauth'>,
   address: string,
   id: string,
   log: (message: string) => void = () => {},
 ): Promise<boolean> {
+  let header = plugin.header
   try {
+    if (plugin.oauth) header = await plugin.oauth.header().catch(() => plugin.header)
     const { status } = await pinnedFetch(plugin.url, address, {
       method: 'DELETE',
-      headers: { 'mcp-session-id': id, ...(plugin.header ? { [plugin.header.name]: plugin.header.value } : {}) },
+      headers: { 'mcp-session-id': id, ...(header ? { [header.name]: header.value } : {}) },
       signal: AbortSignal.timeout(SESSION_DELETE_MS),
     })
     return status < 300 || status === 404 || status === 405
   } catch (err) {
-    const secrets = plugin.header ? headerSecretVariants(plugin.header.value) : []
+    const secrets = header ? headerSecretVariants(header.value) : []
     let message = err instanceof Error ? err.message : String(err)
     for (const s of secrets) message = message.split(s).join('[redacted]')
     log(`plugins: ending ${plugin.name}'s MCP session failed: ${message}`)
@@ -509,21 +516,41 @@ export class PluginForwarder {
     }
 
     const target = new URL(route.plugin.url)
-    const headers: OutgoingHttpHeaders = { ...pick(req.headers, REQUEST_HEADERS), host: target.host }
-    if (route.plugin.header) headers[route.plugin.header.name] = route.plugin.header.value
-    if (body) headers['content-length'] = body.length
-
-    const upstream = requestFor(target)({ ...pinnedRequestOptions(target, route.address), method, headers })
+    const { oauth } = route.plugin
+    /** The auth header for this request: the static one, or a signed-in plugin's token now (#780). */
+    let auth = route.plugin.header
+    const signedOut = (err: unknown) =>
+      fail(
+        res,
+        502,
+        `plugin ${route.plugin.name} cannot be reached as signed in: ${err instanceof Error ? err.message : String(err)}`,
+      )
+    if (oauth) {
+      try {
+        auth = await oauth.header()
+      } catch (err) {
+        return signedOut(err)
+      }
+    }
+    let upstream: ReturnType<ReturnType<typeof requestFor>> | undefined
     res.on('close', () => {
-      if (!res.writableFinished) upstream.destroy()
+      if (!res.writableFinished) upstream?.destroy()
     })
-    upstream.on('error', (err) => {
-      const secrets = route.plugin.header ? headerSecretVariants(route.plugin.header.value) : []
-      let message = err.message
-      for (const s of secrets) message = message.split(s).join('[redacted]')
-      fail(res, 502, `plugin endpoint unreachable: ${message}`)
-    })
-    upstream.on('response', (up) => {
+    const send = (retried: boolean): void => {
+      const headers: OutgoingHttpHeaders = { ...pick(req.headers, REQUEST_HEADERS), host: target.host }
+      if (auth) headers[auth.name] = auth.value
+      if (body) headers['content-length'] = body.length
+      upstream = requestFor(target)({ ...pinnedRequestOptions(target, route.address), method, headers })
+      upstream.on('error', (err) => {
+        const secrets = auth ? headerSecretVariants(auth.value) : []
+        let message = err.message
+        for (const s of secrets) message = message.split(s).join('[redacted]')
+        fail(res, 502, `plugin endpoint unreachable: ${message}`)
+      })
+      upstream.on('response', (up) => respond(up, retried))
+      upstream.end(body)
+    }
+    const respond = (up: IncomingMessage, retried: boolean): void => {
       const status = up.statusCode ?? 502
       const sessionId = up.headers['mcp-session-id']
       if (method === 'DELETE') {
@@ -533,6 +560,26 @@ export class PluginForwarder {
       if (status >= 300 && status < 400) {
         up.resume()
         return fail(res, 502, `plugin endpoint answered HTTP ${status} (a redirect); redirects are not followed`)
+      }
+      if (status === 401 && oauth && auth) {
+        up.resume()
+        if (retried) {
+          const reason = 'the plugin refused a renewed token (HTTP 401): sign in again in Settings'
+          oauth.reject(reason).catch(() => {})
+          return signedOut(new Error(reason))
+        }
+        // Once, with a renewed token: the stored one may have been revoked or rotated elsewhere.
+        const refused = auth.value
+        oauth.header(refused).then(
+          (next) => {
+            // The client may have gone while the token was renewed.
+            if (res.destroyed) return
+            auth = next
+            send(true)
+          },
+          signedOut,
+        )
+        return
       }
       if (status === 401 || status === 407) {
         up.resume()
@@ -647,8 +694,8 @@ export class PluginForwarder {
       }
       res.writeHead(status, out)
       pass()
-    })
-    upstream.end(body)
+    }
+    send(false)
   }
 }
 
@@ -681,13 +728,16 @@ export type PluginEndpoint = {
   disabledTools: string[]
 }
 
-export function pluginEndpoint(plugin: Pick<RemotePlugin, 'name' | 'url' | 'header' | 'toolTiers' | 'disabledTools'>): PluginEndpoint {
-  const { header } = plugin
+export function pluginEndpoint(
+  plugin: Pick<RemotePlugin, 'name' | 'url' | 'header' | 'oauth' | 'toolTiers' | 'disabledTools'>,
+): PluginEndpoint {
+  // A signed-in plugin's token changes at each refresh; its grant changes only at a sign-in (#780).
+  const version = plugin.oauth ? ['oauth', plugin.oauth.grant] : plugin.header ? [plugin.header.name, plugin.header.value] : undefined
   return {
     id: plugin.name,
     url: plugin.url,
-    headerVersion: header
-      ? createHmac('sha256', HEADER_VERSION_KEY).update(JSON.stringify([header.name, header.value])).digest('base64url')
+    headerVersion: version
+      ? createHmac('sha256', HEADER_VERSION_KEY).update(JSON.stringify(version)).digest('base64url')
       : '',
     toolTiers: Object.entries(plugin.toolTiers).map(([tool, tier]) => `${tool}=${tier}`).sort(),
     disabledTools: [...plugin.disabledTools].sort(),
@@ -721,9 +771,10 @@ export type PluginsForRun = {
 
 /** What a plugin's route depends on, hashed: equal fingerprints forward the same way. */
 export function pluginFingerprint({ plugin, address }: CheckedPlugin): string {
-  const { url, header, toolTiers, disabledTools } = plugin
+  const { url, header, oauth, toolTiers, disabledTools } = plugin
+  const auth = oauth ? ['oauth', oauth.grant] : [header?.name ?? null, header?.value ?? null]
   return createHash('sha256')
-    .update(JSON.stringify([url, header?.name ?? null, header?.value ?? null, address, toolTiers, disabledTools]))
+    .update(JSON.stringify([url, ...auth, address, toolTiers, disabledTools]))
     .digest('base64url')
 }
 

@@ -118,7 +118,8 @@ describe("a flow's tool tiers (#2704)", () => {
     const tier = toolActivities(TOOLS, { services: svc, sessions: { ownerOf: async () => undefined } })[FLOW_TOOL_TIER_ACTIVITY]!
     const flow = env(`flow-${RUN}`)
     const unknown = await failure(flow.run(tier, { tool: 'no_such_tool' }))
-    expect([unknown.type, unknown.nonRetryable]).toEqual(['ToolError', true])
+    // Retryable (Phase 11): an old replica handed the tier just after a new build went current says so too.
+    expect([unknown.type, unknown.nonRetryable]).toEqual(['UnknownTool', false])
     expect((await failure(flow.run(tier, { tool: 'browser_click' }))).type).toBe('NotForFlows')
     expect((await failure(flow.run(tier, {}))).type).toBe('ToolError')
     expect((await failure(env(`session-${RUN}`).run(tier, { tool: 'look' }))).type).toBe('UnknownFlow')

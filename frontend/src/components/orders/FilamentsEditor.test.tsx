@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { api } from '../../api/client'
-import { resetMockState } from '../../mocks/handlers'
+import { mockSettings, resetMockState, setMockSettings } from '../../mocks/handlers'
 import { FILAMENT_PLA } from '../../mocks/features/orders/state'
 import { renderPage } from '../../test/utils'
 import { FilamentsEditor } from './FilamentsEditor'
@@ -71,5 +71,26 @@ describe('FilamentsEditor (#4250)', () => {
     await user.type(within(form).getByLabelText('Cost per kg'), 'cheap')
     await user.click(within(form).getByRole('button', { name: 'Add filament' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('cost per kilogram')
+  })
+
+  // #4253 §8.3 — on click only, and only with Bambuddy linked.
+  it('imports the filaments from Bambuddy spools', async () => {
+    const { user } = renderPage(<FilamentsEditor />)
+    await screen.findByRole('table', { name: 'Filaments' })
+    await user.click(await screen.findByRole('button', { name: 'Import from spools' }))
+    const status = await screen.findByRole('status', { name: 'Spool import' })
+    expect(status).toHaveTextContent('Bambu Lab PLA Basic Hot Pink: added at 15.91 per kg')
+    expect(status).toHaveTextContent('Mistletoe Green: skipped, none of its spools has a price')
+    expect(status).not.toHaveTextContent('Inland')
+    await within(screen.getByRole('table', { name: 'Filaments' })).findByText(/Hot Pink/)
+    expect((await api.priceBook()).filaments.find((f) => f.colour_name === 'Hot Pink')?.colour).toBe('#F5547C')
+  })
+
+  it('offers no import without Bambuddy', async () => {
+    setMockSettings({ ...mockSettings(), bambuddy_url: null })
+    renderPage(<FilamentsEditor />)
+    await within(await screen.findByRole('table', { name: 'Filaments' })).findByText(/Sunflower Yellow/)
+    expect(screen.queryByRole('button', { name: 'Import from spools' })).toBeNull()
+    await expect(api.importSpools()).rejects.toThrow(/not linked/)
   })
 })

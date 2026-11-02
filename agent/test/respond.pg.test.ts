@@ -104,7 +104,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     (await db.sql<{ outcome: string; reason: string | null }[]>`SELECT outcome, reason FROM ai_input_responses WHERE request_id = ${requestId}`)[0]
 
   async function setUp() {
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: parks, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: parks })
     const post = respondTo(m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'go' })
     let rows: Pending[] = []
@@ -309,7 +309,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
         )
         yield { ...result, session_id: run.sessionId ?? run.resume } as unknown as SDKMessage
       })()
-    const m = manager({ sql: db.sql, paths: await tempPaths(), run: done, approvalPollMs: 20 })
+    const m = manager({ sql: db.sql, paths: await tempPaths(), run: done })
     const post = respondTo(m)
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'render it' })
     await turn!.done
@@ -348,7 +348,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     const { m, session, turn } = await setUp()
     // A classic approval an earlier release left, on a session of its own.
     const { session: old } = await m.start(browser, { origin: 'chat', title: 'old' })
-    await db.sql`UPDATE ai_sessions SET mode = 'classic', runtime = NULL, status = 'waiting_approval' WHERE id = ${old.id}`
+    await db.sql`UPDATE ai_sessions SET runtime = NULL, status = 'waiting_approval' WHERE id = ${old.id}`
     const classic = await m.approvals.create({
       sessionId: old.id,
       turnId: null,
@@ -360,8 +360,8 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`the respond r
     })
     const durable = randomUUID()
     await db.sql`
-      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd, mode)
-      VALUES (${durable}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'waiting_approval', 10, 1, 'durable')`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, max_turns, budget_usd)
+      VALUES (${durable}, 'chat', 'browser', 'browser', 'You', 'browser', 'browser', 'waiting_approval', 10, 1)`
     await db.sql`
       INSERT INTO ai_pending_input (request_id, session_id, workflow_id, workflow_run_id, kind, tool, summary, input_hash, requested_by, responders, expires_at)
       VALUES (${`durable:${durable}:run-1:toolu_live`}, ${durable}, ${`session-${durable}`}, 'run-1', 'approval', 'print_output', '{"output":"box"}',

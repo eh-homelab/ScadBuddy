@@ -27,8 +27,40 @@ export interface RemotePlugin {
   problem: string | null
   tool_tiers: Record<string, RiskTier>
   disabled_tools: string[]
+  /** Its OAuth sign-in (#780, agent `plugins/oauthStore.ts`): state only, never a token; null without one. */
+  oauth: PluginOAuth | null
   created_at: string
   updated_at: string
+}
+
+export interface PluginOAuth {
+  /** `error`: a refresh or the server refused it; the person signs in again. */
+  status: 'connected' | 'error'
+  error: string | null
+  issuer: string
+  scope: string | null
+  /** `dynamic`: RFC 7591 registration; `configured`: the person's own OAuth app. */
+  registration: 'dynamic' | 'configured'
+  /** The agent holds a refresh token and renews the access token itself. */
+  refreshes: boolean
+  expires_at: string | null
+  connected_at: string
+}
+
+/** `POST /plugins/{name}/oauth/start`: a client id (and secret) of the person's own OAuth app, or none. */
+export interface SignInStart {
+  client_id?: string
+  client_secret?: string
+  scope?: string
+}
+
+export interface SignInStarted {
+  /** A one-use link on this origin that opens the sign-in; open it in a new window. */
+  authorize_url: string
+  redirect_uri: string
+  issuer: string
+  registration: PluginOAuth['registration']
+  scope: string | null
 }
 
 /** One tool of a built-in set, with the tier ScadBuddy's code gives it (its default). */
@@ -271,6 +303,10 @@ export const aiPlugins = {
   listPlugins: () => request<ListedPlugin[]>('/plugins'),
   createRemote: (body: RemotePluginCreate) => request<RemotePlugin>('/plugins', json('POST', body)),
   deleteRemote: (name: string) => request<void>(`/plugins/${seg(name)}`, { method: 'DELETE' }),
+  getRemote: (name: string) => request<RemotePlugin>(`/plugins/${seg(name)}`),
+  startSignIn: (name: string, body: SignInStart) =>
+    request<SignInStarted>(`/plugins/${seg(name)}/oauth/start`, json('POST', body)),
+  signOut: (name: string) => request<void>(`/plugins/${seg(name)}/oauth`, { method: 'DELETE' }),
 
   listPackages: () => request<ListedPackage[]>('/plugin-packages'),
   // The two fetches are the agent's commands (#1055): an Idempotency-Key per press, a

@@ -62,7 +62,7 @@ describe('AnalyzerPanel · fixes', () => {
     expect(within(preview).getByTestId('fix-blockers')).toHaveTextContent(
       "Whether Bambuddy's /local-presets/ can create a process preset",
     )
-    expect(preview).toHaveTextContent('nothing sends it yet')
+    expect(preview).toHaveTextContent('it sends nothing')
     expect(within(preview).getByRole('button', { name: 'Apply' })).toBeDisabled()
   })
 
@@ -90,9 +90,30 @@ describe('AnalyzerPanel · fixes', () => {
       confirm: true,
     })
     expect(applies[0]!.fingerprint).toMatch(/^[0-9a-f]{64}$/)
-    expect(screen.getByTestId('accepted-changes')).toHaveTextContent(
-      '1 accepted change is recorded; nothing sends it to Bambuddy yet.',
+    expect(screen.getByTestId('accepted-changes')).toHaveTextContent('1 accepted change goes with this print.')
+  })
+
+  it('hands the dialog the accepted fixes by decision id (#284), and none once it unmounts', async () => {
+    setMockAnalyzerDiagnostics([verifiedFixDiagnostic])
+    const reported: string[][] = []
+    const { user, unmount } = renderPage(
+      <AnalyzerPanel
+        target={{ output_id: output.id }}
+        request={request()}
+        onAcceptedFixes={(ids) => reported.push(ids)}
+      />,
     )
+    const row = await screen.findByTestId('diagnostic-SB9901')
+    await user.click(within(row).getByRole('button', { name: 'Preview fix: Record a timelapse' }))
+    const preview = await within(row).findByTestId('fix-preview-timelapse-on')
+    await waitFor(() => expect(within(preview).getByRole('button', { name: 'Apply' })).toBeEnabled())
+    await user.click(within(preview).getByRole('button', { name: 'Apply' }))
+    await screen.findByTestId('fix-accepted-SB9901')
+
+    await waitFor(() => expect(reported.at(-1)).toHaveLength(1))
+    expect(reported.at(-1)![0]).toMatch(/^[0-9a-f]{32}$/)
+    unmount()
+    expect(reported.at(-1)).toEqual([])
   })
 
   it("applies a library file's fix (#1753) against that file", async () => {

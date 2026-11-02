@@ -111,8 +111,8 @@ interface Props {
  * The apply sends the dialog's current request, so a choice changed since the preview
  * is refused as stale; the card says so as soon as the request moves, before a click.
  * Clicking Apply on the diff shown is the confirmation. Applying records a decision and
- * sends nothing (`route_note`); the outward approval of AI spec §8.2 belongs to the send
- * that will one day consume it.
+ * sends nothing (`route_note`); the outward approval of AI spec §8.2 is the Print that
+ * sends it (`accepted_fixes`, #284).
  *
  * "Accept for" lists only the scopes the backend resolves this finding at
  * (`scopesForFinding`), and the chosen one is checked against them on every render, as

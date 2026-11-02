@@ -6,5 +6,7 @@ numbers, ``lifecycle.py`` every transition, ``component.py`` ``ORDERS``. The pri
 ``pricebook.py`` and ``currency.py``, the arithmetic ``pricing.py``; a slice quote is the
 ``order_item_quote`` operation (``operations.py``), whose steps are ``quote.py``: the only
 part that renders and slices, through the render service and the print dialog's own
-background slice. Nothing here prints, and nothing imports from ``api/``.
+background slice. An item prints through the ``order_item_print`` operation, whose check
+and follow are ``printing.py``: its run starts the print as the print route does
+(``api/printing.py`` ``accept_run``, imported where it runs), the one import from ``api/``.
 """

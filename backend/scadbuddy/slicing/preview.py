@@ -114,7 +114,7 @@ async def _summary(slicing: Slicing, row: NativeSlice) -> slice_info.NativeSlice
 
 async def read_native_preview(slicing: Slicing, slice_id: int, subject: str) -> SlicePreview:
     """How native slice ``slice_id`` for ``subject`` stands, and once completed, what it
-    came to. ``side`` is unknown on native (a follow-up). A running row older than
+    came to; each slot's ``side`` is the sliced file's (#4232). A running row older than
     `LOST_AFTER` that no execution writes is stopped here as the prune's pass would
     (review M1), so the dialog never polls a lost slice for good."""
     row = await _row(slicing, slice_id, subject)
@@ -139,7 +139,7 @@ async def read_native_preview(slicing: Slicing, slice_id: int, subject: str) -> 
     read = await _summary(slicing, row)
     answer.print_time_seconds = read.print_time_seconds
     answer.slots = [
-        PreviewSlot(slot_id=slot_id, grams=grams or None, side=None)
+        PreviewSlot(slot_id=slot_id, grams=grams or None, side=read.side_by_slot.get(slot_id))
         for slot_id, grams in sorted(read.grams_by_slot.items())
     ]
     answer.filament_used_g = read.filament_used_g

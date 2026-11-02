@@ -4,6 +4,7 @@ import { SERVER_NAME } from '../tools/projections.js'
 import type { Tool } from '../tools/registry.js'
 import { type CallPlugin, namesItem, offCallItem, offItemReason } from './items.js'
 import { BUILTIN_SOURCES, packageServerSource, registrySource, remoteSource, type ToolAccess } from './model.js'
+import { NATIVE_BUILTINS } from './nativeBuiltins.js'
 import type { AccessResolver } from './resolver.js'
 
 /**
@@ -30,6 +31,8 @@ export type LiveTurn = {
   plugins: readonly CallPlugin[]
   /** Each built-in the turn's allowed packages name, with the packages that name it (#4757). */
   builtins: readonly { name: string; packages: readonly string[] }[]
+  /** Whether the turn offers Claude Code's own built-ins (nativeBuiltins.ts, Step 9.6): each call reads `builtin:claude-code`. */
+  native?: boolean
 }
 
 /** The prefix of the built-ins a classic turn serves itself (builtins/server.ts `BUILTIN_SERVER`, `mcp__builtin__<Name>`). */
@@ -46,7 +49,11 @@ const SERVED_PREFIX = 'mcp__builtin__'
  * (resolver.ts `builtin` over the packages that name it, by its own name or the name the
  * session serves it under). Anything else is undefined.
  */
-export function liveAccess(resolver: Pick<AccessResolver, 'item' | 'entry' | 'switchedItem' | 'builtin' | 'rows'>, turn: LiveTurn): LiveAccess {
+export function liveAccess(
+  resolver: Pick<AccessResolver, 'item' | 'entry' | 'switchedItem' | 'builtin' | 'native' | 'rows'>,
+  turn: LiveTurn,
+): LiveAccess {
+  const native = new Map(turn.native ? NATIVE_BUILTINS.map((b) => [b.name, b.access]) : [])
   const own = new Map(turn.tools.map((t) => [`${toolPrefix(SERVER_NAME)}${t.name}`, t]))
   const sources: { prefix: string; source: string }[] = [
     ...turn.remote.map((name) => ({ prefix: toolPrefix(name), source: remoteSource(name) })),
@@ -61,6 +68,9 @@ export function liveAccess(resolver: Pick<AccessResolver, 'item' | 'entry' | 'sw
     }
     // A package built-in by its access, Skill, Agent and Task too when a package names them (#4757 review M4).
     const builtin = harnessName.startsWith(SERVED_PREFIX) ? harnessName.slice(SERVED_PREFIX.length) : harnessName
+    // Claude Code's own: its item, which a package that names it can only switch on.
+    const declared = native.get(harnessName)
+    if (declared !== undefined) return resolver.native(harnessName, declared, builtins.get(harnessName) ?? [])
     const packages = builtins.get(builtin)
     if (packages) return resolver.builtin(builtin, packages)
     if (namesItem(harnessName)) return undefined

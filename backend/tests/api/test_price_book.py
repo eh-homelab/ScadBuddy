@@ -43,6 +43,7 @@ def test_the_book_answers_the_policy_and_the_filaments(client: TestClient) -> No
         },
         "rough_estimate_factor": "1.15",
         "filaments": [],
+        "spool_import": False,
     }
     made = add_filament(client)
     assert (made["cost_per_kg"], made["density_g_cm3"]) == ("25.5", "1.24")

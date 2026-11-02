@@ -2,7 +2,17 @@ import { z } from 'zod'
 import { PairingError } from '../bridge/pairings.js'
 import { type BrowserStatus, type BrowserTarget, CALL_TIMEOUT_MS, type HubErrorCode } from '../bridge/hub.js'
 import { TAB_WAIT_S } from '../sessions/manager.js'
-import { type BambuddyScope, defineTool, json, type Risk, type Tool, type ToolContext, ToolError } from './registry.js'
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import {
+  type BambuddyScope,
+  defineTool,
+  image,
+  json,
+  type Risk,
+  type Tool,
+  type ToolContext,
+  ToolError,
+} from './registry.js'
 import { errorName } from '../telemetry/scrub.js'
 
 // The browser_* tools (#254, spec §5.2 and §8.5): the user's own open
@@ -26,9 +36,14 @@ import { errorName } from '../telemetry/scrub.js'
 // it only opens the dialog: the Print and Send confirmations are user-only
 // (frontend dom.ts `USER_ONLY`), so a human presses them, exactly as in the UI.
 //
-// Not here: the `screenshot()` fallback of #254, which PR #339 left out of the
-// tab on purpose. And not a browser plugin's tools (Playwright MCP, added in
-// Settings → Tools & plugins): a separate browser that never sees the user's tab.
+// `browser_screenshot` is the fallback of #254 for what a snapshot cannot say: the
+// tab draws its own viewport (frontend agent/screenshot.ts) and sends the bytes as
+// binary frames on its socket, which the replica holding it names and stores (bridge/tabImages.ts)
+// before the answer, which names the image only (#2479), comes back; the tool reads the
+// bytes by that name and returns them as MCP image content.
+//
+// Not here: a browser plugin's tools (Playwright MCP, added in Settings → Tools &
+// plugins), a separate browser that never sees the user's tab.
 
 /** Where a tab's answer comes from, for the untrusted-data envelope (#258). */
 const SOURCE =
@@ -42,6 +57,7 @@ export const ROUND_TRIP_MARGIN_MS = 10_000
 export type TabTool =
   | 'navigate'
   | 'snapshot'
+  | 'screenshot'
   | 'click'
   | 'highlight'
   | 'fill'
@@ -84,6 +100,8 @@ type Forwarded<S extends z.ZodRawShape> = {
   bambuddyScope?: readonly BambuddyScope[]
   summarize?: (args: z.infer<z.ZodObject<S>>) => string
   label: string
+  /** The tool's result from the tab's answer; JSON of it by default. */
+  answer?: (result: unknown, ctx: ToolContext) => Promise<CallToolResult>
 }
 
 function target(ctx: ToolContext): BrowserTarget {
@@ -149,7 +167,7 @@ function forwarded<S extends z.ZodRawShape>(spec: Forwarded<S>): Tool {
           throw new ToolError(`${outcome.error.message} ${WHY_STILL_GONE[waited.why]}`)
         }
       }
-      if (outcome.ok) return json(outcome.result ?? null)
+      if (outcome.ok) return spec.answer ? spec.answer(outcome.result, ctx) : json(outcome.result ?? null)
       const { code, message, issues } = outcome.error
       // The tab's answers can quote the page, so they go in the untrusted envelope (#258).
       if (HUB_CODES.has(code)) throw new ToolError(message)
@@ -200,7 +218,21 @@ const WHY_STILL_GONE: Record<'reconnected' | 'user_back', string> = {
 }
 
 /** bridge/hub.ts `HubErrorCode`: the hub's own answers, in ScadBuddy's words. */
-const HUB_CODES: ReadonlySet<string> = new Set<HubErrorCode>(['no_browser', 'no_answer', 'disconnected', 'busy'])
+const HUB_CODES: ReadonlySet<string> = new Set<HubErrorCode>(['no_browser', 'no_answer', 'disconnected', 'busy', 'not_stored'])
+
+/**
+ * `screenshot`'s answer, `{ image: { name, mediaType }, width, height, hidden }`, as the
+ * image itself (read by name from wherever the tab's replica stored it) and the rest as JSON.
+ */
+async function screenshotAnswer(result: unknown, ctx: ToolContext): Promise<CallToolResult> {
+  const { image: pointer, ...rest } = (typeof result === 'object' && result !== null ? result : {}) as {
+    image?: { name?: unknown }
+  }
+  if (typeof pointer?.name !== 'string') throw new ToolError('the tab answered screenshot without an image')
+  const stored = await tabs(ctx).image(pointer.name, { signal: ctx.signal })
+  if (!stored) throw new ToolError('the screenshot is no longer held; take it again')
+  return { content: [...image(stored.bytes, stored.mediaType).content, ...json(rest).content] }
+}
 
 /**
  * The tab is running an older ScadBuddy build than the server's (#4884): it is reloading
@@ -308,6 +340,19 @@ export const browserTools: Tool[] = [
       'state, and a compact list of the interactive elements (role and name). Passwords are never read back.',
     input: z.object({}),
     risk: 'read',
+  }),
+  forwarded({
+    tool: 'screenshot',
+    label: "Take a screenshot of your tab",
+    description:
+      PREFIX +
+      'fallback for what browser_snapshot cannot say (a layout, a colour, the 3D preview, something drawn): an ' +
+      "image of the tab's viewport as the user sees it, at most 1568 px on its long side. Fields that hold a " +
+      'password or a code only the user may type, user-only confirmations and the assistant panel are painted ' +
+      'over (`hidden` counts them). Prefer browser_snapshot for reading text, values and controls.',
+    input: z.object({}),
+    risk: 'read',
+    answer: screenshotAnswer,
   }),
   forwarded({
     tool: 'click',

@@ -14,13 +14,14 @@ import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
-from scadbuddy.bambuddy.filaments import FilamentPlan
+from scadbuddy.bambuddy.filaments import FilamentPlan, SpoolOption
 from scadbuddy.bambuddy.models import SlotChoice
 from scadbuddy.bambuddy.trays import tray_spool_id
 from scadbuddy.library.settings_store import SettingsStore
@@ -30,6 +31,8 @@ from scadbuddy.printers.models import LanLink, PrinterCreate
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.progress import from_lan_report
 from scadbuddy.printers.store import PrinterStore
+from scadbuddy.spools.models import SpoolSnapshot
+from scadbuddy.spools.native import NativeSpoolCreate, NativeSpoolStore
 from scadbuddy.workflows.print_models import LAN_UNSURE, LanPrintInput, LanUploaded
 from tests.conftest import PgPool
 from tests.printers.conftest import KEK
@@ -201,3 +204,43 @@ async def test_a_retry_that_finds_its_print_running_is_that_start(
     lan = Scripted(state(gcode_state=moved, subtask_name=NAME), [])
     started = await _start(pg_pool, lan)
     assert lan.commands == [] and started.started_at == T0
+
+
+async def test_a_start_saves_what_it_uses_of_the_native_spools_once(pg_pool: PgPool) -> None:
+    """#4643: the slot's tray holds a native spool the overlay knows; the start saves its
+    grams against it, and an attempt that finds its print running saves nothing new."""
+    native = NativeSpoolStore(pg_pool)
+    spool = native.create(NativeSpoolCreate(material="PLA", remaining_g=500))
+    option = SpoolOption(
+        spool_id=tray_spool_id(0, 1),
+        material="PLA",
+        tray_only=True,
+        records={"native": SpoolSnapshot(record_id=str(spool.id))},
+    )
+    printers = PrinterStore(pg_pool, KEK)
+    row = printers.create(PrinterCreate(serial=SERIAL, name="H2C"))
+    printers.link_lan(
+        row.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256="ab" * 32
+    )
+    base = _input()
+    uploaded = base.uploaded.model_copy(
+        update={"run_id": "run-1", "grams_by_slot": {1: 12.5, 2: 4.0}}
+    )
+    input = base.model_copy(update={"printer": row.id, "spools": {1: option}, "uploaded": uploaded})
+    store = cast(SettingsStore, SimpleNamespace(pool=pg_pool))
+    running = state(gcode_state="RUNNING", subtask_name=NAME)
+    for lan in (Scripted(state(gcode_state="FINISH", **LAST), [running]), Scripted(running, [])):
+        deps = LanDeps(
+            printers=printers,
+            settings_store=store,
+            connect=lambda *_, lan=lan: cast(LanPrinter, lan),
+            start_wait=2,
+        )
+        await ActivityEnvironment().run(LanActivities(deps).lan_print, input)
+    with pg_pool.connection() as conn:
+        uses = conn.execute(
+            "SELECT run_id, subtask_name, slot_id, spool_id, grams FROM native_spool_uses"
+        ).fetchall()
+    assert uses == [
+        {"run_id": "run-1", "subtask_name": NAME, "slot_id": 1, "spool_id": spool.id, "grams": 12.5}
+    ]

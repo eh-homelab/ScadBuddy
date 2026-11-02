@@ -7,9 +7,11 @@ are ``agent/src/tools/analyzers.ts`` (#4966).
 
 **Applying records a decision; it sends nothing.** Apply stores an ``accept`` row in
 ScadBuddy's own database, which is the ``write`` tier (AI spec §8.1): reversible by
-deleting it. Nothing reads ``accepted_changes`` into a print yet. The send path that
-eventually does must put the diff through §8.2's outward approval (a pending action
-and a human approval in the UI); ``confirm`` here is not that approval. What apply
+deleting it. A print applies an accepted fix only when it names it
+(``PrintRunRequest.accepted_fixes``, by the decision id), and the print is the outward
+action §8.2 approves (the dialog's Print, the agent's approval); ``confirm`` here is not
+that approval. ``analyzers/apply.py`` checks each named fix again against that print and
+lays only the verified targets over what it sends. What apply
 does guarantee is that it lands exactly what was previewed: the preview returns a
 fingerprint of the diff, the scope it will be stored at, the subject (output or
 configuration) and the base it was judged against, and the apply must carry that
@@ -31,6 +33,7 @@ from fastapi import APIRouter, Depends, Path, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from scadbuddy.analyzers import builtin
+from scadbuddy.analyzers.apply import STALE_PROBLEM, UNVERIFIED_PROBLEM
 from scadbuddy.analyzers.component import DecisionsDep
 from scadbuddy.analyzers.context import AnalysisContext, AnalysisRequest
 from scadbuddy.analyzers.decisions import DecisionStore, new_decision_id, valid_scope
@@ -99,8 +102,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/analyzers", tags=["analyzers"])
 
 #: Problem ``type`` URIs, as ``bambuddy/errors.py`` spells its own.
-UNVERIFIED_PROBLEM = "https://scadbuddy.dev/problems/analyzer-fix-unverified"
-STALE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-fix-stale"
 CONFIRMATION_PROBLEM = "https://scadbuddy.dev/problems/confirmation-required"
 SCOPE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-scope"
 UNKNOWN_RULE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-unknown-rule"
@@ -108,9 +109,9 @@ UNKNOWN_RULE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-unknown-rule"
 DIAGNOSTIC_ID_PATTERN = r"^SB[0-9]{4}$"
 #: Where an applied diff would land, and what applying does today.
 ROUTE_NOTE = (
-    "Applying records this diff as a decision at its scope; nothing sends it yet. A "
-    "print that uses it will slice and queue with the diff, and will go through the "
-    "outward approval of AI spec §8.2 before it does."
+    "Applying records this diff as a decision at its scope; it sends nothing. A print "
+    "that names the accepted fix is checked against it again and slices and queues with "
+    "the diff; that print is the outward action AI spec §8.2 approves."
 )
 
 
@@ -173,7 +174,8 @@ class FixPreview(BaseModel):
     scope: ScopeRef
     #: Binds the diff, the scope, the subject and the base; the apply carries it back.
     fingerprint: str
-    #: Some change would reach Bambuddy once a send consumes accepted diffs.
+    #: Some change reaches the printer (through Bambuddy or the LAN) on a print that
+    #: names the accepted fix.
     outward: bool
     #: False while any change waits on an AI spec §3.2 item; ``blockers`` names them.
     applicable: bool
@@ -368,7 +370,7 @@ def _remembered(
     return settings.model_print_choices.get(scope) if scope is not None else None
 
 
-async def _context(
+async def analysis_context(
     target: AnalysisTarget,
     request: AnalysisRequest,
     outputs: OutputStore,
@@ -584,7 +586,7 @@ async def post_run(
     """
     schema = await check(body.target)
     budget = budget_of(state.settings, body.request.read_budget)
-    context = await _context(
+    context = await analysis_context(
         body.target,
         body.request,
         outputs,
@@ -634,7 +636,7 @@ async def post_preview(
     Changes nothing."""
     schema = await check(body.target)
     budget = budget_of(state.settings, body.request.read_budget)
-    context = await _context(
+    context = await analysis_context(
         body.target,
         body.request,
         outputs,
@@ -697,7 +699,7 @@ async def post_apply(
     """
     schema = await check(body.target)
     budget = budget_of(state.settings, body.request.read_budget)
-    context = await _context(
+    context = await analysis_context(
         body.target,
         body.request,
         outputs,

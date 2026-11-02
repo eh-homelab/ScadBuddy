@@ -557,7 +557,21 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(
         await dropEmpty()
       })
 
-      it('a plugin switched on before the migration stays on', async () => {
+      it('a plugin switched on before the access migration stays on (the copy)', async () => {
+        // Up to just before the copy: the old columns are the only record of the plugin.
+        await migrate(
+          empty.sql,
+          MIGRATIONS.filter((m) => m.id < '20261026T2201Z_access_copy'),
+        )
+        await empty.sql`
+          INSERT INTO ai_plugins (name, kind, url, enabled, tool_tiers, disabled_tools)
+          VALUES ('mem', 'remote_mcp', 'https://hs.example/mcp', true, '{"a":"read"}', ${['b']})`
+        await migrate(empty.sql, MIGRATIONS)
+        const { plugins } = await new PluginStore(empty.sql).enabled(kek)
+        expect(plugins.map((p) => [p.name, p.toolTiers, p.disabledTools])).toEqual([['mem', { a: 'read' }, ['b']]])
+      })
+
+      it("a plugin written with the old columns after the copy is mirrored into ai_access (the mirror trigger)", async () => {
         // Through the copy, whose mirror trigger carries the old columns into ai_access.
         await migrate(
           empty.sql,

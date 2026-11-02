@@ -60,7 +60,6 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`questions a
       paths,
       credentials: fixedCredentials({ kind: 'gateway', baseUrl: fake.url, secret: TOKEN }),
       settings: { get: <T>(key: string) => Promise.resolve((key === 'model' ? 'claude-sonnet-4-5' : undefined) as T) },
-      approvalPollMs: 50,
       ...(audit ? { audit } : {}),
     })
   }

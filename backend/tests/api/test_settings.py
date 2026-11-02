@@ -57,6 +57,9 @@ DEFAULTS: dict[str, object] = {
     "rough_estimate_factor": "1.15",
     "orders_allow_unfulfil": True,
     "lan_require_plate_clear": False,
+    "git_remote_url": None,
+    "git_remote_username": None,
+    "has_git_remote_token": False,
 }
 PRINTERS_BODY = [{"id": 1, "name": "3DP-31B-598", "model": "H2C", "access_code": "xxxx"}]
 

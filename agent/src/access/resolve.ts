@@ -93,6 +93,9 @@ export const DEFAULT_ACCESS = {
   enabled: (source: string): Promise<boolean> => Promise.resolve(enabledByDefault(source)),
   entry: (source: string): Promise<{ enabled: boolean; access: ToolAccess | undefined }> =>
     Promise.resolve({ enabled: enabledByDefault(source), access: undefined }),
+  /** resolver.ts `native` with no rows: the default, and `outward` for an off one a package names. */
+  native: (_name: string, declared: ToolAccess, packages: readonly string[]): Promise<ToolAccess> =>
+    Promise.resolve(declared !== 'off' || packages.length === 0 ? declared : 'outward'),
 }
 
 export function isRegistrySource(source: string): boolean {

@@ -180,7 +180,7 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
   returns `undefined`) is treated as `outward`. `read` and `write` are allowed.
   `outward` gets `needs_approval`.
 - **Approvals** (#258): in a session, `needs_approval` parks the call until a human
-  decides it in the UI (`approvalGate`, [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
+  decides it in the UI (`approvalGate`, [`agent/src/sessions/turnHost.ts`](../../agent/src/sessions/turnHost.ts), an entry of the session's gate);
   with no gate (outside a session) it is answered with a **deny**, whose message tells
   the model to explain rather than retry. An outward tool therefore never runs
   unattended. External MCP clients use prepare/confirm instead (below).

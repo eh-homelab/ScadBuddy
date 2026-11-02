@@ -27,8 +27,8 @@ Money = int
 OrderStatus = Literal[
     "draft", "quoted", "accepted", "in_production", "ready", "shipped", "closed", "cancelled"
 ]
-#: Every §3.5 state: `queued`, `printing` and `printed` wait for the print path (phase
-#: 3, plan Ruling 4); phase 1 reaches the others.
+#: Every §3.5 state: `queued`, `printing` and `printed` are the print path's
+#: (``order_item_print``, #4719), which the item follows from its run.
 ItemStatus = Literal[
     "draft",
     "quoted",
@@ -344,6 +344,20 @@ class Fulfilment(BaseModel):
     accepted_at: datetime | None
     created_by: Actor
     created_at: datetime
+    #: The print run that queued or started it (§5.4, #4719); None for an attempt
+    #: recorded by hand. The item follows the run while ``finished_at`` is unset.
+    print_run_id: str | None = None
+    #: The accepted quote's sliced file the run printed from (§6.1), held by
+    #: ``(order_item_fulfilment, <id>)``; None for a ``manual`` quote, which names no file.
+    sliced_sha256: str | None = None
+    sliced_blob_key: str | None = None
+    #: The registry printer the run named, when it named one.
+    printer: str | None = None
+    #: How many the run was sent; ``quantity`` is what it made, set when it settles.
+    copies: int | None = None
+    #: The print run's ``request_id`` this attempt was claimed under before its print
+    #: started (#4719); a retried operation finds its claim by it.
+    print_request_id: str | None = None
 
 
 class ShipmentItem(BaseModel):
@@ -532,3 +546,41 @@ class PriceBook(BaseModel):
     rough_estimate_factor: str
     #: The records not archived, by material, brand and colour.
     filaments: list[Filament]
+    #: Whether a Bambuddy is linked, so ``POST …/import-spools`` can run (§8.3, #4253).
+    spool_import: bool = False
+
+
+SpoolImportAction = Literal["created", "updated", "unchanged", "skipped"]
+
+
+class SpoolImportRow(BaseModel):
+    """One filament of the spool inventory and what the import did with it (§8.3)."""
+
+    action: SpoolImportAction
+    #: Why a group was skipped: ``no_colour`` (its spools carry only a colour's name,
+    #: and a record's colour is ``#RRGGBB``), ``no_price`` (no spool has a price) or
+    #: ``too_long`` (a name past a record's 100 characters).
+    reason: Literal["no_colour", "no_price", "too_long"] | None = None
+    #: The newest spool's names. A matched record keeps its own: only its price changes.
+    material: str
+    subtype: str | None = None
+    brand: str | None = None
+    colour_name: str | None = None
+    colour: str | None = None
+    #: The record made, updated or matched.
+    filament_id: str | None = None
+    #: The most recent priced spool's (the highest id), as the record now has it.
+    cost_per_kg: str | None = None
+    #: What a matched record had before.
+    previous_cost_per_kg: str | None = None
+    #: The spread of the group's prices, only when its spools' prices differ.
+    min_cost_per_kg: str | None = None
+    max_cost_per_kg: str | None = None
+    spool_ids: list[int]
+
+
+class SpoolImport(BaseModel):
+    """`POST /orders/price-book/import-spools`: one row per filament the inventory
+    holds, in ``_filament_key`` order."""
+
+    rows: list[SpoolImportRow]

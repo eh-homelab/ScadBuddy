@@ -67,6 +67,21 @@ describe('TurnTrace', () => {
     expect(park.traceparent).toBe(`00-${tool.spanContext().traceId}-${tool.spanContext().spanId}-01`)
   })
 
+  // Plan 2026-10-13 Step 9.9: the agent dashboard counts continued turns by kind and releases.
+  it('records a continued placement’s kind on its first segment, and a release as its own span', async () => {
+    const t = new TurnTrace({ sessionId: 's-1', turnId: 't-1', parent: ROOT_CONTEXT, tierOf: () => 'outward', before: { costUsd: 0, turns: 0 }, continuation: 'parked' })
+    t.finish(success)
+    t.released(2)
+    turn().finish(success)
+    await flushTracing()
+    const [continued, fresh] = named('agent.turn')
+    expect(continued!.attributes['scadbuddy.continuation']).toBe('parked')
+    expect(fresh!.attributes['scadbuddy.continuation']).toBeUndefined()
+    const release = one('agent.turn.release')
+    expect(release.attributes).toMatchObject({ 'scadbuddy.session_id': 's-1', 'scadbuddy.turn_id': 't-1', 'scadbuddy.parked_calls': 2 })
+    expect(release.parentSpanContext?.spanId).toBe(continued!.spanContext().spanId)
+  })
+
   it('is the browser’s child when started under its context', async () => {
     const parent = trace.setSpanContext(ROOT_CONTEXT, { traceId: TRACE_ID, spanId: PARENT_SPAN_ID, traceFlags: TraceFlags.SAMPLED, isRemote: true })
     turn(parent).finish(success)
