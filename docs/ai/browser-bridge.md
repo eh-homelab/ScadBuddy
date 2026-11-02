@@ -426,9 +426,9 @@ sequenceDiagram
   of #4780. No replica of this build sends or answers it. While a replica of the build before
   #4868 still runs, a call it sends that way finds nobody to take it and answers "not
   connected" after 3 s; the tabs of both builds have `ai_tab_owners` rows, so that is
-  only a tab that no replica holds. The table stays for one more release,
-  because a replica of the build before #4868 still writes it for a tab it finds no live
-  owner for; #5109 drops it.
+  only a tab that no replica holds. The table stayed for one more release, because a
+  replica of the build before #4868 still wrote it; #5109 drops it
+  ([`20261102T0038Z_drop_bridge_messages.sql`](../../agent/src/db/migrations/20261102T0038Z_drop_bridge_messages.sql)).
 - **Not covered:** a cancelled call cancels its workflow, but is not withdrawn from the
   tab, as with a local call. Without a database there is no relay, and only tabs on the
   same process can be reached.
