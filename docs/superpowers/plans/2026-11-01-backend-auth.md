@@ -147,6 +147,22 @@ Spec §7.1, §7.2; D4.
 - The print worker, projects worker and agent read and present their tokens; the print
   worker now needs the KEK. In `observe` a missed caller shows on the counter.
 
+As built (#5195): `service_credentials` and its three views
+(`20261102T0645Z_service_credentials.sql`), `auth/service_credentials.py` (the store,
+`TokenReader`, the httpx `ServiceAuth`, `grant_caller_views`) and the gate's bearer lookup
+(`Authorization: Bearer sbsvc_…` resolves to a `Service` with its caller's scopes). The
+API issues and grants at start (`main._grant_and_rotate_at_start`) and rotates in the
+existing `housekeeping_sweep_auth_sessions` activity, so the workflow's history and patches
+are unchanged; a newest credential sealed under another KEK is replaced at once. The print
+and projects workers present theirs on every internal call (`worker.py`), the agent on
+every backend call, the client and the workspace blob routes alike
+(`agent/src/api/serviceCredential.ts`, the same AAD). Settings → System
+→ Service credentials lists them, with revoke and "Rotate now"; the routes are `person`.
+Each role named in `ROLES` (`scadbuddy_agent`, `scadbuddy_print`, `scadbuddy_projects`) is
+granted its own view when the deployment made it; the full table grants of those roles,
+and the deployment giving each caller its own database URL, are the follow-up this PR
+files. Until then a caller on the shared URL can read every view (spec §7.2 says so).
+
 ## Phase 5: authorship from the session
 
 Spec §5.6, §7.3, §8.3; D8.

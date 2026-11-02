@@ -44,6 +44,7 @@ import { PluginOAuth } from './plugins/oauthStore.js'
 import { headerSecretVariants, loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
+import { ServiceCredential, serviceCredentialMiddleware, withServiceCredential } from './api/serviceCredential.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey, sweepErrorText } from './approvals/service.js'
@@ -270,7 +271,13 @@ await startCredentialGateway()
 // The database's clock the moment it is ready, before a turn can record a session: the pass at
 // start ends only this replica's rows older than it (plugins/pluginSessions.ts `endOwnSessions`).
 const pluginSessionMark = database ? database.ready().then((ok) => (ok ? startMark(database.sql) : undefined)) : undefined
-const backend = createBackendClient(config.backendUrl)
+// #4975 phase 4: the agent's service credential, on the client and the workspace blob routes.
+const serviceCredential = database ? new ServiceCredential(database.sql, kek.ok ? kek.kek : undefined) : undefined
+const backend = createBackendClient(
+  config.backendUrl,
+  globalThis.fetch,
+  serviceCredential ? serviceCredentialMiddleware(serviceCredential) : undefined,
+)
 
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
 // of its own, retried in the background, feeding MCP resource subscriptions.
@@ -353,7 +360,10 @@ const workspace = database
   ? new SessionFiles(database.sql, {
       settings,
       blobs: {
-        store: new BackendWorkspaceBlobs(config.backendUrl),
+        store: new BackendWorkspaceBlobs(
+          config.backendUrl,
+          serviceCredential ? { fetch: withServiceCredential(globalThis.fetch, serviceCredential, config.backendUrl) } : {},
+        ),
         ...(dataKeys && kek.ok ? { sealing: new WorkspaceSealing(dataKeys, kek.kek, { previous: previousKek?.ok ? previousKek.kek : undefined }) } : {}),
       },
     })

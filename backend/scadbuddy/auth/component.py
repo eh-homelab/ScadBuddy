@@ -27,6 +27,7 @@ from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Caller
 from scadbuddy.auth.observe import WouldRefuse
 from scadbuddy.auth.oidc import OidcClient
+from scadbuddy.auth.service_credentials import ServiceCredentialStore
 from scadbuddy.auth.store import Pool, SessionStore
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
@@ -67,6 +68,7 @@ class AuthComponent:
         )
         self._sessions = SessionStore(self._pool)
         self._config = LoginConfigStore(self._pool)
+        self._credentials = ServiceCredentialStore(self._pool)
 
     def _open(self) -> None:
         with self._lock:
@@ -83,6 +85,11 @@ class AuthComponent:
     def pool(self) -> Pool:
         self._open()
         return self._pool
+
+    @property
+    def credentials(self) -> ServiceCredentialStore:
+        self._open()
+        return self._credentials
 
     @property
     def config(self) -> LoginConfigStore:

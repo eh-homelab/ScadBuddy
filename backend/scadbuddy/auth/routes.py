@@ -61,6 +61,10 @@ PERSON_ENDPOINTS = frozenset(
         "scadbuddy.api.auth.get_login_config",
         "scadbuddy.api.auth.put_login_config",
         "scadbuddy.api.auth.test_login_config",
+        # The services' credentials (#4975 phase 4).
+        "scadbuddy.api.service_credentials.list_service_credentials",
+        "scadbuddy.api.service_credentials.rotate_service_credential",
+        "scadbuddy.api.service_credentials.revoke_service_credential",
     }
 )
 #: The hidden internal routes, each the scope of one service credential (§7.1).

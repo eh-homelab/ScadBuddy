@@ -63,9 +63,12 @@ export function tracingMiddleware(): Middleware {
 export function createBackendClient(
   baseUrl: string,
   fetchImpl: typeof fetch = globalThis.fetch,
+  credential?: Middleware,
 ): BackendClient {
   const client = createClient<paths>({ baseUrl, fetch: (request) => fetchImpl(request) })
   client.use(tracingMiddleware())
+  // #4975 phase 4: the agent's service credential (`api/serviceCredential.ts`).
+  if (credential) client.use(credential)
   return client
 }
 
