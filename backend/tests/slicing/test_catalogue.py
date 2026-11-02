@@ -409,7 +409,10 @@ async def test_the_api_start_does_not_wait_on_the_build(
     stored = SimpleNamespace(slicer_backend="native")
     slicing = SimpleNamespace(
         profiles=Profiles(_tree(tmp_path)),
-        core=SimpleNamespace(settings_store=SimpleNamespace(load=lambda: stored)),
+        core=SimpleNamespace(
+            settings_store=SimpleNamespace(load=lambda: stored),
+            settings=SimpleNamespace(spool_overlay_refresh_seconds=300),
+        ),
     )
     run = SLICING_COMPONENT.run
     assert run is not None
