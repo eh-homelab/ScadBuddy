@@ -4,6 +4,7 @@ import { api } from '../../api/client'
 import type { AccessTokenScope, AccessTokenView } from '../../api/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { timeAgo } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 
@@ -83,17 +84,18 @@ export function AccessTokens() {
           Name
           <Input value={name} maxLength={100} onChange={(event) => setName(event.target.value)} />
         </label>
-        <label className="grid gap-1 text-xs">
-          Scope
-          <select
-            className="h-9 rounded-md border bg-background px-2 text-sm"
-            value={scope}
-            onChange={(event) => setScope(event.target.value as AccessTokenScope)}
-          >
-            <option value="read">Read</option>
-            <option value="write">Read and write</option>
-          </select>
-        </label>
+        <div className="grid gap-1 text-xs">
+          <span id="access-token-scope">Scope</span>
+          <Select value={scope} onValueChange={(value) => setScope(value as AccessTokenScope)}>
+            <SelectTrigger size="sm" aria-labelledby="access-token-scope">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="read">Read</SelectItem>
+              <SelectItem value="write">Read and write</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
         <label className="grid gap-1 text-xs">
           Expires in days
           <Input
