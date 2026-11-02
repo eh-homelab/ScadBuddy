@@ -170,6 +170,23 @@ describe('a chat socket whose session is revoked (#5217)', () => {
     expect(socket.sent.at(-1)).toMatchObject({ type: 'error', code: 'unavailable' })
   })
 
+  it('keeps its snapshot timer re-checking after a failed read', async () => {
+    const socket = await openSocket('observe')
+    socket.fail(true)
+    socket.advance(CACHE_MS)
+    // Several ticks whose check could not read the session.
+    await settle(80)
+    socket.fail(false)
+    const before = socket.actedAs.length
+    await settle(80)
+    expect(socket.actedAs.slice(before).some(([what]) => what === 'snapshot')).toBe(true)
+    // And a revocation it never heard, made after the failed reads, still closes it.
+    socket.revokeUnheard()
+    socket.advance(CACHE_MS)
+    await settle(80)
+    expect(socket.closed()?.[0]).toBe(SIGNED_OUT)
+  })
+
   it('changes nothing with SCADBUDDY_AUTH_MODE=off', async () => {
     const socket = await openSocket('off')
     socket.revoke({ session_id: sessionIdHash(TOKEN) })

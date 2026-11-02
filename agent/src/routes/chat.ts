@@ -70,7 +70,8 @@ import { ready, type RouteModule } from './module.js'
 // never holds a Claude credential: every model call is the agent's own.
 // Opened under a signed-in session (#4975 phase 5), it acts as that person only
 // while the session lives (#5217): revoked or expired, it closes with 4401
-// (`SIGNED_OUT`), unless SCADBUDDY_AUTH_MODE is `off`.
+// (`SIGNED_OUT`), unless SCADBUDDY_AUTH_MODE is `off`. A turn already started
+// from a frame taken before then runs to its end; nothing new starts.
 
 export const CHAT_PATH = '/api/v1/ai/chat'
 
@@ -219,6 +220,8 @@ export class ChatConnection {
   private snapshotTimer: NodeJS.Timeout | undefined
   /** A timer re-read of the session list is queued or running. */
   private snapshotPending = false
+  /** A bus resync's re-check of the session is queued or running (#5217). */
+  private recheckPending = false
   /** The last session list sent, as JSON, so an unchanged list is not sent again. */
   private lastSnapshot = ''
   private readonly buffered: () => number
@@ -294,18 +297,13 @@ export class ChatConnection {
       // not counted against the frame cap, and never more than one at a time: a
       // slow database must not fill the queue with stale re-reads and turn the
       // panel's frames away as `busy`. A failed re-read is skipped quietly; the
-      // next tick tries again.
+      // next tick tries again. The flag clears once the queued run ends, whether
+      // or not the session check let the snapshot run (#5217).
       if (this.snapshotPending) return
       this.snapshotPending = true
-      void this.enqueue(
-        () =>
-          this.sendSnapshot(false)
-            .catch(() => {})
-            .finally(() => {
-              this.snapshotPending = false
-            }),
-        { counted: false },
-      )
+      void this.enqueue(() => this.sendSnapshot(false).catch(() => {}), { counted: false }).finally(() => {
+        this.snapshotPending = false
+      })
     }, this.snapshotMs)
     this.snapshotTimer.unref()
     return first
@@ -370,7 +368,12 @@ export class ChatConnection {
 
   /** Re-checks the session after events may have been missed: behind what is queued, like a frame. */
   recheck(): Promise<void> {
-    return this.enqueue(() => Promise.resolve(), { counted: false })
+    // One at a time, so a flapping bus does not pile re-checks up behind a slow frame.
+    if (this.recheckPending) return Promise.resolve()
+    this.recheckPending = true
+    return this.enqueue(() => Promise.resolve(), { counted: false }).finally(() => {
+      this.recheckPending = false
+    })
   }
 
   /**
