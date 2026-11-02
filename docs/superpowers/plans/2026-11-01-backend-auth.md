@@ -47,7 +47,7 @@ Spec §5.2, §8.1 (the gate's shape only), §9.1 (`off`).
     gate did not run).
   - `component.py`: `AUTH` (`AuthComponent`: the mode, the `SessionStore` over the
     settings pool).
-- Migration `<ts>_auth_sessions.sql`: `auth_sessions` (spec §5.2 columns: `token_hash`
+- Migration `<ts>_auth_sessions.sql`: `auth_sessions` (spec §5.2 columns: `id_hash`
   primary key, `principal`, `issuer`, `subject`, `name`, `email`, `kind` with a check,
   `created_at`, `last_seen_at`, `idle_expires_at`, `absolute_expires_at`, `revoked_at`,
   `client_address`, `user_agent`) and an index on `principal`.
