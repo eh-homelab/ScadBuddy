@@ -4,8 +4,10 @@ code redemption and the ID token's check.
 Fetched as the agent fetches for ``/mcp`` (AI spec §8.3 "Fetching",
 ``agent/src/auth/oidc.ts``): https only (http for a loopback host), no redirects, a
 bounded body and time, the metadata and keys cached ten minutes, an unknown ``kid``
-refetching the keys at most every 30 s. An IdP on the LAN is normal here, so no
-public-address rule applies. Every error's message is safe to show the person signing
+refetching the keys at most every 30 s. Every fetch (discovery, keys, token) goes to
+public addresses only, through ``library/url_import.py`` ``PublicOnlyBackend``, unless
+``SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK=true``, which an IdP on the LAN needs
+(``auth/component.py``). Every error's message is safe to show the person signing
 in: it names what failed, never a token or the client secret.
 """
 
