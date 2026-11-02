@@ -56,7 +56,7 @@ export function ServiceCredentials() {
         return (
           <section key={caller} aria-label={label} className="space-y-2">
             <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm">{label}</h3>
+              <h4 className="text-sm">{label}</h4>
               <Button
                 variant="outline"
                 size="sm"
