@@ -799,9 +799,16 @@ class SettingsStore:
         """The key the secret settings are sealed with; ``None`` when they are kept plain."""
         return self._kek
 
-    def open(self) -> None:
-        """Connect and bring the schema up to date. Fails the start when it cannot."""
+    def open(self, *, migrate_schema: bool = True) -> None:
+        """Connect and bring the schema up to date. Fails the start when it cannot.
+        ``migrate_schema=False`` only connects: a worker on a role of its own never
+        migrates (`render/worker_role.py` `open_for_caller`)."""
         self._pool.open(wait=True, timeout=self.connect_timeout)
+        if migrate_schema:
+            self.migrate_and_seal()
+
+    def migrate_and_seal(self) -> None:
+        """Apply this build's migrations and seal any plaintext secret setting."""
         with self._pool.connection() as conn:
             applied = migrate(conn)
             if applied:

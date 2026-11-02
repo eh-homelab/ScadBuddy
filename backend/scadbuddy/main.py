@@ -62,6 +62,7 @@ from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
 from scadbuddy.auth.authorship_rule import AuthorshipRule
+from scadbuddy.auth.caller_grants import grant_callers
 from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
@@ -1035,8 +1036,11 @@ def _grant_and_rotate_at_start(state: AppState) -> None:
     try:
         with state.settings_store.pool.connection() as conn:
             granted = grant_caller_views(conn)
+            tables = grant_callers(conn)
         if granted:
             logger.info("granted the callers' credential views", extra={"roles": granted})
+        if tables:
+            logger.info("granted the callers' tables", extra={"roles": tables})
         _rotate_service_credentials(state)
     except Exception:
         logger.exception("could not issue the service credentials")

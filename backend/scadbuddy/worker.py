@@ -33,6 +33,7 @@ from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 from scadbuddy.activity.index import ActivityIndex
+from scadbuddy.auth.caller_grants import open_for_caller
 from scadbuddy.auth.service_credentials import ServiceAuth, TokenReader
 from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.client import client_for
@@ -1142,7 +1143,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
     )
     settings_store = SettingsStore(settings, events=events)
-    settings_store.open()
+    # #5210: on a role of its own, wait for the API's migrations and grants.
+    open_for_caller(settings_store, "print")
     pool = settings_store.pool
     uploads = BambuddyUploadStore(pool)
     links = PrintLinkStore(pool)
@@ -1399,7 +1401,8 @@ async def run_projects_worker(
         settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
     )
     settings_store = SettingsStore(settings, events=events)
-    await asyncio.to_thread(settings_store.open)
+    # #5210: on a role of its own, wait for the API's migrations and grants.
+    await asyncio.to_thread(open_for_caller, settings_store, "projects", stopping=stop.is_set)
     try:
         await events.start()
         runtime, sdk_port = _sdk_runtime(settings)

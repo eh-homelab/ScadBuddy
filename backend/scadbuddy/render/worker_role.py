@@ -90,7 +90,20 @@ def grant_render_role(conn: Connection[Any], role: str | None = None) -> bool:
     """Grant ``role`` (`RENDER_ROLE`) `RENDER_GRANTS` in the current schema, if it
     exists; whether it did. Idempotent, and never revokes: a grant this list no longer
     names stays until someone revokes it by hand."""
-    role = role or RENDER_ROLE
+    return grant_role(conn, role or RENDER_ROLE, RENDER_GRANTS, rows=RENDER_ROWS)
+
+
+def grant_role(
+    conn: Connection[Any],
+    role: str,
+    grants: Mapping[str, tuple[str, ...]],
+    *,
+    rows: Mapping[str, str] | None = None,
+    sequences: tuple[str, ...] = (),
+) -> bool:
+    """Grant ``role`` ``grants`` (relation to privileges) and USAGE on ``sequences`` in
+    the current schema, if the role exists; whether it did. Idempotent, never revokes.
+    Every caller's list goes through here (#5210: `auth/caller_grants.py`)."""
     if not _role_exists(conn, role):
         return False
     with conn.transaction():
@@ -100,7 +113,7 @@ def grant_render_role(conn: Connection[Any], role: str | None = None) -> bool:
                 sql.Identifier(_current_schema(conn)), sql.Identifier(role)
             )
         )
-        for table, privileges in RENDER_GRANTS.items():
+        for table, privileges in grants.items():
             conn.execute(
                 sql.SQL("GRANT {} ON {} TO {}").format(
                     sql.SQL(", ").join(sql.SQL(p) for p in privileges),
@@ -108,9 +121,32 @@ def grant_render_role(conn: Connection[Any], role: str | None = None) -> bool:
                     sql.Identifier(role),
                 )
             )
-        for table, rows in RENDER_ROWS.items():
-            _hold_to_rows(conn, role, table, rows)
+        for sequence in sequences:
+            conn.execute(
+                sql.SQL("GRANT USAGE ON SEQUENCE {} TO {}").format(
+                    sql.Identifier(sequence), sql.Identifier(role)
+                )
+            )
+        for table, predicate in (rows or {}).items():
+            _hold_to_rows(conn, role, table, predicate)
     return True
+
+
+def owns_schema(conn: Connection[Any]) -> bool:
+    """Whether this connection's role may migrate: the ledger is missing (a new schema,
+    which whoever connects first creates) or its owner is a role this one belongs to.
+    A role of the deployment's own making (`scadbuddy_print`, `scadbuddy_projects`) is
+    neither, and waits for the API instead."""
+    cur = conn.cursor(row_factory=tuple_row)
+    schema = cur.execute("SELECT current_schema()").fetchone()
+    if schema is None or schema[0] is None:
+        # No schema on the search path this role may use: nothing to migrate into.
+        return False
+    row = cur.execute(
+        "SELECT pg_has_role(current_user, tableowner, 'MEMBER') FROM pg_tables"
+        " WHERE schemaname = current_schema() AND tablename = 'scadbuddy_migrations'"
+    ).fetchone()
+    return row is None or bool(row[0])
 
 
 def _hold_to_rows(conn: Connection[Any], role: str, table: str, rows: str) -> None:
@@ -187,11 +223,14 @@ def pending_migrations(
     return sorted(m.id for m in migrations if m.id not in done)
 
 
-def missing_privileges(conn: Connection[Any]) -> list[str]:
-    """The `RENDER_GRANTS` this connection's role lacks, as ``table: PRIVILEGE``."""
+def missing_privileges(
+    conn: Connection[Any], grants: Mapping[str, tuple[str, ...]] = RENDER_GRANTS
+) -> list[str]:
+    """The ``grants`` (`RENDER_GRANTS`) this connection's role lacks, as
+    ``table: PRIVILEGE``."""
     cur = conn.cursor(row_factory=tuple_row)
     missing: list[str] = []
-    for table, privileges in RENDER_GRANTS.items():
+    for table, privileges in grants.items():
         exists = cur.execute("SELECT to_regclass(%s)", (table,)).fetchone()
         if exists is None or exists[0] is None:
             missing.extend(f"{table}: {p}" for p in privileges)
@@ -212,6 +251,8 @@ def wait_until_ready(
     *,
     stopping: Callable[[], bool] = lambda: False,
     poll: float = READY_POLL,
+    grants: Mapping[str, tuple[str, ...]] = RENDER_GRANTS,
+    role: str = RENDER_ROLE,
 ) -> None:
     """Return once the API has applied every migration this build has and this role
     holds `RENDER_GRANTS`; until then log what is missing and look again every
@@ -222,7 +263,7 @@ def wait_until_ready(
     while True:
         with pool.connection() as conn:
             pending = pending_migrations(conn)
-            missing = [] if pending else missing_privileges(conn)
+            missing = [] if pending else missing_privileges(conn, grants)
         if not pending and not missing:
             return
         if (pending, missing) != last:
@@ -234,7 +275,7 @@ def wait_until_ready(
             else:
                 logger.warning(
                     "waiting for the API to grant this worker's database role what it"
-                    f" needs; the API grants role {RENDER_ROLE!r} at start",
+                    f" needs; the API grants role {role!r} at start",
                     extra={"missing": missing},
                 )
             last = (pending, missing)
