@@ -114,8 +114,11 @@ export const handlers = [
     const body = (await request.json()) as { algorithm: RackAlgorithm | null }
     if (body.algorithm === null) delete state.algorithms[id]
     else state.algorithms[id] = body.algorithm
+    // #4971 — a registry id names a LAN-only printer.
+    const bambuddy = /^\d+$/.test(id)
     return HttpResponse.json({
-      printer_id: Number(id),
+      printer_id: bambuddy ? Number(id) : null,
+      printer: bambuddy ? null : id,
       algorithm: state.algorithms[id] ?? 'least_used',
     } satisfies PrinterRackAlgorithm)
   }),

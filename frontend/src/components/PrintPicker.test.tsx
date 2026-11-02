@@ -3389,6 +3389,7 @@ describe('PrintPicker · Remembered choices', () => {
 
     expect(bodies[0]).toEqual({
       printer_id: 2,
+      printer: null,
       filament_plan: expect.arrayContaining([
         { slot_id: 1, spool_id: 21 },
         { slot_id: 2, spool_id: 22 },

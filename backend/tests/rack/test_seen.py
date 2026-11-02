@@ -14,10 +14,12 @@ from tests.rack.helpers import mounted, serial, slot, status
 
 class Seen:
     def __init__(self, error: Exception | None = None) -> None:
-        self.calls: list[tuple[int, list[str]]] = []
+        self.calls: list[tuple[int | None, list[str]]] = []
         self.error = error
 
-    async def seen(self, printer_id: int, serials: Iterable[str]) -> None:
+    async def seen(
+        self, printer_id: int | None, serials: Iterable[str], printer: str | None = None
+    ) -> None:
         if self.error is not None:
             raise self.error
         self.calls.append((printer_id, sorted(serials)))

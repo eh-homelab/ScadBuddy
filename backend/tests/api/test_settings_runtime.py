@@ -285,6 +285,7 @@ def test_forget_all_forgets_every_remembered_choice(client: TestClient) -> None:
         "model_print_choices": {},
         "printer_bed_types": {},
         "printer_plates": [],
+        "printer_names": {},
         "print_options": {},
         "printer_print_options": {},
         "model_print_options": {},

@@ -222,6 +222,8 @@ export function useRunPrint({
     const last = choices?.model_choices
     const next = {
       printer_id: printerId,
+      // #4971 — a LAN-only printer is remembered by its registry id.
+      printer: printerId === null ? registryPrinter : null,
       filament_plan: planChanged ? plan : [],
       nozzles,
       tier,
@@ -230,6 +232,7 @@ export function useRunPrint({
     }
     const before = {
       printer_id: last?.printer_id ?? null,
+      printer: last?.printer ?? null,
       filament_plan: last?.filament_plan ?? [],
       nozzles: last?.nozzles ?? [],
       tier: last?.tier ?? null,
