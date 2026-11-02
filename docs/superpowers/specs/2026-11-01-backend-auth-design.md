@@ -1,11 +1,12 @@
 # Backend authentication: ScadBuddy's own OIDC login, service credentials, and a rollout that cannot lock anyone out
 
-Status: draft for review (#4975). Design only; no code. Builds on the main design spec
+Status: decided (#4975). The owner decided every question of §13 on 2026-11-01;
+the implementation plan is `docs/superpowers/plans/2026-11-01-backend-auth.md`. Builds on the main design spec
 (`2026-09-22-scadbuddy-design.md`, §4 and §9), the AI spec
 (`2026-09-27-ai-integration-design.md`, "the AI spec": §4.3 "Agent → backend", §8 auth,
 §9 the KEK), the durable spec (`2026-10-01-durable-printing-agents-flows-design.md`, §5.2
 on proxies) and the flow-grants spec (`2026-10-11-flow-grants-and-git-design.md`, §4.2 on
-`started_by`). The open choices are collected in §13, each with a recommendation.
+`started_by`). The decisions are recorded in §13.
 
 Every fact about the code was read from the tree at `773574ee3` on 2026-11-01. Facts
 about browsers and standards are cited; the one thing measured is the Public Suffix List
@@ -124,7 +125,10 @@ clients too ("For confidential clients, the use of PKCE is RECOMMENDED",
 [RFC 9700 §2.1.1][rfc9700]):
 
 1. `GET /api/v1/auth/login?return_to=<path>` (a same-origin path only; anything else is
-   `/`). The backend reads the issuer's metadata ([OIDC Discovery][oidc-discovery]),
+   `/`). `return_to` must start with a single `/` followed by neither `/` nor `\`, and
+   carry no scheme or authority once percent-decoded (so `//host`, `/\host`, `/%2F%2Fhost`
+   and `https:…` are all `/`); the redirect after the callback is that path joined to the
+   public URL's origin, never the value as given. The backend reads the issuer's metadata ([OIDC Discovery][oidc-discovery]),
    makes `state`, `nonce` and a PKCE verifier, seals the three with `return_to` under a
    key derived from the KEK (HKDF, as `transfer_key` derives its own), sets them as the
    login cookie `__Host-scadbuddy_login` (`HttpOnly; Secure; Path=/; SameSite=Lax;
@@ -292,7 +296,8 @@ another site. So:
   click handler, before any `await`, as the download popup is. It is a top-level browsing
   context at ScadBuddy's origin, so the flow of §5.1 runs there first-party; the
   callback page posts `{type: "scadbuddy:signed-in"}` to `window.opener`, targeted at the
-  public origin, and closes. The frame then calls `GET /auth/session`, which now finds
+  public origin, and closes. The frame's `message` listener acts only on a message whose
+  `event.origin` is the public origin and whose `event.source` is the popup it opened. The frame then calls `GET /auth/session`, which now finds
   the cookie, because the frame is same-site (§6.1). If the message never comes (the
   opener was lost), the frame polls `/auth/session` while the popup is open and once
   `popup.closed`. A blocked popup is an error the user sees, never a fallback, as with
@@ -304,7 +309,7 @@ A deployment where Bambuddy and ScadBuddy are on different sites (an IP address,
 domains) gets none of §6.1. A `Strict` or `Lax` cookie is not sent in a cross-site frame,
 and a `SameSite=None` one is blocked or partitioned by Safari and Firefox
 ([MDN][mdn-3pc]). Three ways out, of which this design ships the first and leaves the
-others to §13 D2:
+others unbuilt (§13 D2):
 
 1. **Open ScadBuddy in its own tab.** The sign-in screen in a cross-site frame says why
    and links out (`window.open`, as deep links already do). Always available.
@@ -349,17 +354,24 @@ and need no caller identity.
 
 The API issues and rotates them; nobody pastes a secret into a manifest (§13 D4).
 
-- At start, and on the prune Schedule, the API makes sure each caller has a live
-  credential with more than 7 days left, minting the next one 30 days ahead. Two are live
-  in the overlap, so a rotation never cuts a caller off mid-call; one past `expires_at`
-  is refused.
+- At start, and on the prune Schedule, the API checks each caller's newest live
+  credential; when it has fewer than 7 days left, the API mints the next one, valid for
+  30 days. The overlap is those 7 days: both are live, so a rotation never cuts a caller
+  off mid-call; one past `expires_at` is refused.
 - A caller reads its current token at start and every hour from a view that its own
   Postgres role alone may select (`service_credentials_<caller>`, granted as
   `worker_role.py` grants `RENDER_GRANTS` to `scadbuddy_render`, #601), and unseals it
-  with the KEK. The caller's Postgres role is therefore the root of its identity: which
-  it already is, since each of these callers holds a database URL that could write the
-  rows the routes guard. This costs the print worker the KEK, which it has only
-  optionally today (`worker.py:1237`).
+  with the KEK. Today only the render worker has a role of its own: the print and
+  projects workers connect with `SCADBUDDY_DATABASE_URL` (`worker.py`), and the agent
+  shares the backend's role. So the phase that adds service credentials also adds a role
+  per caller (`scadbuddy_print`, `scadbuddy_projects`, `scadbuddy_agent`, each granted
+  what it reads and writes as `RENDER_GRANTS` is), and the deployment gives each its own
+  database URL. Until a caller runs as its own role, the per-caller scoping holds only
+  against a caller without database access: one holding the shared URL can read every
+  caller's view, including the `agent` credential that may assert any author. The
+  caller's Postgres role is the root of its identity, which it already is, since each of
+  these callers holds a database URL that could write the rows the routes guard. This
+  costs the print worker the KEK, which it has only optionally today (`worker.py:1237`).
 - Settings shows each caller's credentials (created, expires, last used) with revoke and
   "rotate now"; revoking the live one mints a replacement at once. #891 (rotate the
   render worker's key) is answered by the same page.
@@ -380,7 +392,11 @@ Today `core/authorship.py` believes `X-ScadBuddy-Agent-Author`, `-Author-Session
   or the `/mcp` token or OIDC subject), never a value a client sent it.
 - **From the `projects` credential** the asserted principal must be the run's
   `started_by` (read from `workflow_runs` by the run id the host call names), or the
-  call is refused.
+  call is refused. The run id alone would let a compromised projects worker name any
+  run and act as its starter, so each call also carries a per-run token the API mints
+  when the run starts (a MAC of the run id under a key derived from the KEK, as the
+  transfer token's is, carried in the run's sealed start payload), and the run id the
+  call names must be the token's.
 - **From any other caller** an author header is refused.
 
 `_browser_only` (`api/flows.py:866`) changes from "no author header" to "the caller is a
@@ -392,7 +408,12 @@ approvals and grants) become unreachable by any service credential.
 The agent's headless Chromium (C3) loads the SPA, so it needs a cookie. The `agent`
 credential may call `POST /api/v1/auth/delegated-sessions` with `{principal,
 ttl_seconds ≤ 3600}`, naming the principal of the agent session the browser serves; the
-answer is a `kind: delegated` session the agent sets in that Playwright context. A
+answer is a `kind: delegated` session the agent sets in that Playwright context. The
+cookie is `__Host-`, so `Secure`, and the headless browser loads the SPA over plain http
+from `SCADBUDDY_BACKEND_URL`: that works only while that URL's host is `localhost` (or
+`127.0.0.1`), which browsers treat as a secure context and on which they accept a
+`Secure` cookie ([MDN, secure contexts][mdn-secure]); the agent refuses to mint a
+delegated session for any other backend URL. A
 delegated session is refused on the routes `_browser_only` guards and on the auth and
 service-credential routes, so the headless browser can never approve what its own
 session asked for (the AI spec §8.6 row on the headless browser).
@@ -448,7 +469,7 @@ new rows record the person (§13 D8). Git trailers and history are never rewritt
 environment variable, not a stored setting: like `SCADBUDDY_TRUSTED_PROXIES` and the KEK
 (AI spec §9), it decides who may write Settings, so Settings cannot hold it.
 
-- **`off`** (the default until phase 8): today's behaviour. Sign-in works if configured
+- **`off`** (the default, and for a new install it stays so, D10): today's behaviour. Sign-in works if configured
   and records the person as author; nothing is refused for lacking a credential.
 - **`observe`**: every request is classed and its caller resolved; what `enforce` would
   refuse is served, logged once per caller and reason a minute, and counted as
@@ -520,32 +541,41 @@ It works with the IdP down or the login misconfigured. The other way back is
 
 ## 12. Phases (one PR each)
 
-1. **This spec.**
-2. **Sessions and login, mode `off`.** Backend `auth/` feature (component, migration for
-   `auth_sessions`, login settings with the client secret sealed under the KEK), the four
-   `/auth` routes, `GET /auth/session`, the SPA's sign-in screen and popup, the fake issuer
-   and backend tests. Nothing refused yet; a signed-in person is recorded as author.
-3. **The gate in `observe`.** `AuthGate`, route classes and their completeness test, the
-   counter, the request header in the SPA, socket checks logging.
-4. **Service credentials.** `service_credentials`, issue and rotation, the per-role views,
-   the agent, print and projects callers presenting them; Settings page.
+The plan (`docs/superpowers/plans/2026-11-01-backend-auth.md`) has the detail. Every
+phase merges with the mode at `off`, so each is safe on its own:
+
+1. **Foundation.** `SCADBUDDY_AUTH_MODE` (default `off`), the `auth/` feature, the
+   `auth_sessions` migration and store, the caller model, and `AuthGate` as a no-op in
+   `off`.
+2. **Login, mode `off`.** The login settings (D1) with the client secret sealed under the
+   KEK, the sign-in rule (D3), the four `/auth` routes, the sessions sweep, the SPA's
+   sign-in screen and popup, the fake issuer and its tests. Nothing refused yet.
+3. **The gate in `observe`.** Route classes and their completeness test, the counter, the
+   request header in the SPA (D11), socket and relay checks logging, break-glass.
+4. **Service credentials.** `service_credentials`, issue and rotation, a Postgres role
+   and view per caller, the agent, print and projects callers presenting them; Settings
+   page.
 5. **Authorship from the session.** §7.3 and §8.3, `_browser_only`, the agent's browser
    user as the person, the agent's session lookup and `guard.ts`.
-6. **Delegated sessions and personal tokens.** §7.4, §7.5, `bambuddy-fs` and the Go client
-   (regenerated by the `freshness` job).
+6. **Delegated sessions and personal tokens.** §7.4, §7.5 (D6), `bambuddy-fs` and the Go
+   client (regenerated by the `freshness` job).
 7. **Real-stack e2e** of §11 in three engines; records what §6 assumed, and amends this
    spec with the results.
 8. **`enforce` on the deployment.** README "Deploying" and "Running it" rewritten,
-   clusters' manifests set the mode, the break-glass command documented. Then the default
-   for a new install becomes `enforce` with a first-run screen, or stays `off` (§13 D10).
-9. *(Only if §13 D2 asks for it.)* The CHIPS handoff for cross-site embedding.
+   clusters' manifests set the mode, the break-glass command documented. The default for
+   a new install stays `off` (D10).
 
-## 13. Decisions for the owner
+The CHIPS handoff of §6.3 is not planned (D2); it becomes a phase only if a cross-site
+install appears.
 
-| # | Decision | Options | Recommendation |
+## 13. Decisions
+
+Decided by the owner on 2026-11-01 (#4975).
+
+| # | Question | Options | Decision |
 |---|---|---|---|
-| D1 | Where the login configuration lives, and whether login shares `/mcp`'s issuer | (a) the backend's stored settings, issuer defaulting to `mcp_oidc.issuer`, the client id moved there; (b) keep it in the agent's `ai_settings.mcp_oidc` and have the backend read it; (c) environment | **(a)**: the backend owns the login and the client secret (sealed under the KEK, as #602 seals the Bambuddy key); one issuer for both by default, with a separate one allowed. Also name the IdP the homelab uses, so phase 7 can check its framing and logout behaviour |
-| D2 | Cross-site embedding | (a) support only same-site embedding and top-level tabs, link out otherwise; (b) also build the CHIPS handoff (phase 9) | **(a)**: the deployment is same-site (§6.1, measured); build (b) only if a cross-site install appears |
+| D1 | Where the login configuration lives, and whether login shares `/mcp`'s issuer | (a) the backend's stored settings, issuer defaulting to `mcp_oidc.issuer`, the client id moved there; (b) keep it in the agent's `ai_settings.mcp_oidc` and have the backend read it; (c) environment | **(a)**: the backend owns the login and the client secret (sealed under the KEK, as #602 seals the Bambuddy key); one issuer for both by default, with a separate one allowed. The IdP the homelab uses is named when phase 2 configures it, so phase 7 can check its framing and logout behaviour |
+| D2 | Cross-site embedding | (a) support only same-site embedding and top-level tabs, link out otherwise; (b) also build the CHIPS handoff (§6.3) | **(a)**: the deployment is same-site (§6.1, measured); build (b) only if a cross-site install appears |
 | D3 | Who may sign in | (a) anyone the IdP authenticates for the client; (b) a required rule: a list of subjects and/or a group claim value; (c) roles (admin/user) | **(b)**, required before `enforce` starts, so an IdP shared with other apps cannot sign in its other users; roles later if there is ever a second person |
 | D4 | How services get credentials | (a) API-issued, rotated, hashed and sealed under the KEK, read from a per-role view (§7.2); (b) Kubernetes projected service-account tokens ([Kubernetes docs][k8s-sa]), verified by TokenReview; (c) static secrets in Kubernetes Secrets | **(a)**: no manifest secrets, automatic rotation, works under compose; costs the print worker the KEK. (b) is stronger in-cluster but ties the API to Kubernetes and needs a fallback for compose anyway |
 | D5 | Session lifetime | idle / absolute; keep a refresh token to re-check the account | **14 days idle, 30 days absolute, no refresh token**: a homelab owner should not sign in daily; revocation in Settings covers a lost device. Shorter if ScadBuddy is ever reachable off the LAN |
@@ -553,7 +583,7 @@ It works with the IdP down or the login misconfigured. The other way back is
 | D7 | Logout | (a) ScadBuddy's session only; (b) also RP-initiated logout at the IdP | **(a)** by default with (b) as a setting: signing out of ScadBuddy should not sign the owner out of every other app on the IdP |
 | D8 | Rows that say `browser` today | (a) every signed-in person may act on them (§8.3); (b) assign them to the first person who signs in | **(a)**: there is one person today, and (b) guesses |
 | D9 | `/metrics` | (a) stays open, as now; (b) behind a service credential for the scraper | **(a)**, outside `/api/v1`, reachable only in-cluster through the Service; it carries no parameter values (`core/tracing.py` rules apply to metrics labels too) |
-| D10 | The default mode for a new install after phase 8 | (a) stays `off`; (b) `enforce` with a first-run screen that configures the login | **(a)** until the first-run screen exists, so `docker run` keeps working on a laptop; the README then says to set `enforce` |
+| D10 | The default mode for a new install after phase 8 | (a) stays `off`; (b) `enforce` with a first-run screen that configures the login | **(a)** until the first-run screen exists, so `docker run` keeps working on a laptop; the README says to set `enforce` |
 | D11 | The CSRF request header on safe methods | (a) required on every cookie GET except the listed scriptless ones (§5.3); (b) only on unsafe methods | **(a)**: the list is short, and it closes cross-site GETs whose timing or side effects (a render's cache, a preview) leak |
 
 [oidc-core]: https://openid.net/specs/openid-connect-core-1_0.html
@@ -572,3 +602,4 @@ It works with the IdP down or the login misconfigured. The other way back is
 [mdn-chips]: https://developer.mozilla.org/en-US/docs/Web/Privacy/Guides/Privacy_sandbox/Partitioned_cookies
 [mdn-saa]: https://developer.mozilla.org/en-US/docs/Web/API/Storage_Access_API/Using
 [k8s-sa]: https://kubernetes.io/docs/concepts/security/service-accounts/
+[mdn-secure]: https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts
