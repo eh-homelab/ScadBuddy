@@ -13,6 +13,9 @@ the same job recorded after it: the marker, the local lookup that finds the piec
 no child. Each was recorded against the dev server with ``FakeWorld``'s activities
 (``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below; ``before_lookup`` only on
 a build without ``PIECE_LOOKUP_PATCH``, and neither over its file). Never re-record them.
+``waiting`` (below) is recorded the same way, on a build without ``PIECE_TIMEOUT_PATCH``.
+The recording tests skip on every build once their files exist: they stay only as the
+recipe that recorded them.
 """
 
 from __future__ import annotations
@@ -168,6 +171,9 @@ async def test_a_waiter_from_before_the_piece_timeout_keeps_its_old_wait(
 @pytest.mark.skipif(TIMEOUT_BUILD, reason="waiting is recorded on a build before #5191")
 @pytest.mark.skipif((HISTORIES / "waiting.json").exists(), reason="never re-record it")
 async def test_record_waiting(recording_temporal: str) -> None:
+    """Skipped on every build now, as `test_record` is: kept only as the recipe that
+    recorded ``waiting.json``, run on cb40179db's ``pipelines.py`` with
+    ``SCADBUDDY_RECORD_HISTORIES=1``. Never re-record it."""
     world, job = FakeWorld(), a_job(params={"w": 12})
     key = piece_key("demo", f"job:{job.id}", "model.scad", {"w": 12})
     req = PieceRequest(

@@ -449,6 +449,76 @@ async def test_a_piece_that_outlives_its_jobs_limit_closes() -> None:
             assert (await piece.describe()).status == WorkflowExecutionStatus.TIMED_OUT
 
 
+async def test_a_waiter_renders_again_a_piece_that_timed_out_while_rendering_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#5191 review: job B joined job A's piece, so B's deadline is after the piece's. A
+    times out, and its piece, mid-render, times out with it: B starts the piece again
+    and renders it once more (`PIECE_RECHECK` scaled down; unsandboxed)."""
+    monkeypatch.setattr(pipelines, "PIECE_RECHECK", timedelta(seconds=1))
+    world = FakeWorld()
+    original = world.cached_piece
+    attempts: list[str | None] = []
+
+    async def first_hangs(req: PieceRequest) -> PieceResult | None:
+        if activity.info().is_local:
+            return None  # the job's own lookup (#4199): a miss, so a child renders it
+        attempts.append(activity.info().workflow_run_id)
+        if len(attempts) == 1:
+            await asyncio.Event().wait()  # A's piece, still rendering when it times out
+        return await original(req)
+
+    world.cached_piece = activity_named("cached_piece", first_hangs)  # type: ignore[method-assign]
+    a, b = a_job(params={"w": 12}), a_job(params={"w": 12})
+    a.model_version = b.model_version = "abc1234"
+    key = piece_key("demo", "abc1234", "model.scad", {"w": 12})
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        async with Worker(
+            client,
+            task_queue=queue,
+            workflows=[TemplatePipeline, RenderPiece],
+            activities=world.activities(),
+            workflow_runner=UnsandboxedWorkflowRunner(),
+        ):
+            ha = await client.start_workflow(
+                TemplatePipeline.run,
+                a,
+                id=workflow_id_for(a.id),
+                task_queue=queue,
+                execution_timeout=timedelta(seconds=5),
+            )
+            piece = client.get_workflow_handle(f"piece-{key}")
+            async with asyncio.timeout(30):
+                while not attempts:
+                    await asyncio.sleep(0.05)
+                hb = await client.start_workflow(
+                    TemplatePipeline.run,
+                    b,
+                    id=workflow_id_for(b.id),
+                    task_queue=queue,
+                    execution_timeout=timedelta(seconds=60),
+                )
+                while (
+                    not [  # B waits on A's piece
+                        e
+                        async for e in piece.fetch_history_events()
+                        if e.HasField("workflow_execution_signaled_event_attributes")
+                    ]
+                ):
+                    await asyncio.sleep(0.05)
+            first_run = attempts[0]
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(ha.result(), 30)  # the starter has gone
+            await asyncio.wait_for(hb.result(), 30)
+            first = client.get_workflow_handle(f"piece-{key}", run_id=first_run)
+            assert (await first.describe()).status == WorkflowExecutionStatus.TIMED_OUT
+    assert len(attempts) == 2 and attempts[1] != first_run  # a new piece, rendered again
+    assert len(world.pieces) == 1
+    finals = [p for p in world.projections if p.job_id == b.id and p.state is not None]
+    assert finals[-1].state == "done", finals[-1].failure
+
+
 @pytest.mark.parametrize("closed", ["timed_out", "terminated"])
 async def test_a_job_waiting_on_a_piece_that_closed_without_a_result_starts_it_again(
     closed: str, monkeypatch: pytest.MonkeyPatch

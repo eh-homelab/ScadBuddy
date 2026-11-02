@@ -258,9 +258,13 @@ def _piece_timeout() -> timedelta | None:
     """A `RenderPiece` child's execution timeout: the job's own (`pipeline_timeout`), from
     the piece's start (#5104). A piece started with none, and pinned to a build that has
     drained, stayed open for ever: every later job of its key joined it, and waited out
-    its own timeout. No job that could want a piece outlives this bound, as each job's
-    own run is as long. None for a job with no timeout of its own, or one that started
-    without this (`PIECE_TIMEOUT_PATCH`).
+    its own timeout. The job that started the piece never outlives this bound, but a job
+    that joined later can: its own deadline is its start plus `pipeline_timeout`, after
+    the piece's. A piece that times out while it still renders for such a job is started
+    again by that job within `PIECE_RECHECK`, and renders from the start. That re-render
+    is the one cost this bound adds; it needs a piece slower than `pipeline_timeout`,
+    which a job alone could not have waited for. None for a job with no timeout of its
+    own, or one that started without this (`PIECE_TIMEOUT_PATCH`).
 
     A piece that times out in an activity leaves that activity running until its next
     heartbeat finds the workflow gone (within `HEARTBEAT`); its cancellation then kills
