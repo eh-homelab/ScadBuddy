@@ -13,7 +13,8 @@ import { checkedImages } from '../sessions/images.js'
 import { type SessionManager, SessionError } from '../sessions/manager.js'
 import { event, type Owner, type ServerEvent } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
-import { browserUser } from '../auth/browserSession.js'
+import { type BrowserSessions, browserUser, requestSession } from '../auth/browserSession.js'
+import type { AuthMode } from '../config.js'
 import { type RemoteAddress, uiRequestProblem } from './guard.js'
 import { ready, type RouteModule } from './module.js'
 
@@ -67,6 +68,9 @@ import { ready, type RouteModule } from './module.js'
 // prevents DNS rebinding"). A connection that passes acts as the browser user,
 // as the approval routes do (routes/approvals.ts BROWSER_USER). The browser
 // never holds a Claude credential: every model call is the agent's own.
+// Opened under a signed-in session (#4975 phase 5), it acts as that person only
+// while the session lives (#5217): revoked or expired, it closes with 4401
+// (`SIGNED_OUT`), unless SCADBUDDY_AUTH_MODE is `off`.
 
 export const CHAT_PATH = '/api/v1/ai/chat'
 
@@ -126,7 +130,18 @@ export type ChatConnectionOptions = {
   clientIp?: string | undefined
   /** The panel's uploaded images (#1941), which a `user.message` names by id; without it such a message is refused. */
   attachments?: AttachmentStore | undefined
+  /**
+   * Whether the signed-in session the socket was opened under is still live (#5217):
+   * asked before every frame and every snapshot; undefined when it could not be read.
+   * Omitted when the socket acts for no signed-in session.
+   */
+  signedIn?: (() => Promise<boolean | undefined>) | undefined
+  /** Called once when that session is gone; the route closes the socket with `SIGNED_OUT`. */
+  signedOut?: () => void
 }
+
+/** The close code for a socket whose session was revoked or expired (spec 2026-11-01 §5.4). */
+export const SIGNED_OUT = 4401
 
 export type ChatRouteDeps = {
   /** Undefined without a database (spec §9); the upgrade then answers 503. */
@@ -143,6 +158,10 @@ export type ChatRouteDeps = {
   tabs?: Pick<TabHub, 'pairSession' | 'sessionTab' | 'pairSessionIfStill'> | undefined
   /** The panel's uploaded images (#1941, attachments/store.ts). */
   attachments?: AttachmentStore | undefined
+  /** The signed-in sessions (#4975 phase 5): a socket opened under one closes when it ends (#5217). */
+  browserSessions?: BrowserSessions | undefined
+  /** With `off`, a socket never re-checks its session, as before #5217. */
+  authMode?: AuthMode | undefined
 }
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
@@ -210,6 +229,8 @@ export class ChatConnection {
   private tabId: string | undefined
   private readonly clientIp: string | undefined
   private readonly attachments: AttachmentStore | undefined
+  private readonly signedIn: (() => Promise<boolean | undefined>) | undefined
+  private readonly signedOut: () => void
 
   constructor(sessions: SessionManager, out: (e: ServerEvent) => void, options: ChatConnectionOptions = {}) {
     this.sessions = sessions
@@ -222,6 +243,8 @@ export class ChatConnection {
     this.tabs = options.tabs
     this.clientIp = options.clientIp
     this.attachments = options.attachments
+    this.signedIn = options.signedIn
+    this.signedOut = options.signedOut ?? (() => {})
     this.limits = {
       highWater: SEND_HIGH_WATER,
       bufferMax: SEND_BUFFER_MAX,
@@ -338,6 +361,37 @@ export class ChatConnection {
     return this.enqueue(() => this.handle(message))
   }
 
+  /** The session this socket acts under was revoked: stop acting as its person, at once. */
+  signOut(): void {
+    if (this.closed) return
+    this.close()
+    this.signedOut()
+  }
+
+  /** Re-checks the session after events may have been missed: behind what is queued, like a frame. */
+  recheck(): Promise<void> {
+    return this.enqueue(() => Promise.resolve(), { counted: false })
+  }
+
+  /**
+   * Whether the socket's session still allows acting (#5217). A session that is gone signs
+   * the socket out; one that could not be read refuses this frame only (`counted`) and
+   * skips a timer's re-read quietly.
+   */
+  private async stillSignedIn(counted: boolean): Promise<boolean> {
+    if (!this.signedIn) return true
+    const live = await this.signedIn()
+    if (live === true) return !this.closed
+    if (live === false) {
+      this.signOut()
+      return false
+    }
+    if (counted) {
+      this.emit(event({ type: 'error', code: 'unavailable', message: 'Could not check that you are still signed in, so this was not done. Send it again.' }))
+    }
+    return false
+  }
+
   close(): void {
     this.closed = true
     clearInterval(this.snapshotTimer)
@@ -356,6 +410,9 @@ export class ChatConnection {
     const run = this.queue.then(async () => {
       try {
         if (this.closed) return
+        // Every frame and snapshot re-checks the session first (#5217), so the
+        // snapshot timer is also the bound on a missed revocation.
+        if (!(await this.stillSignedIn(counted))) return
         await task()
       } catch (err) {
         this.emit(errorEvent(err, undefined, this.log))
@@ -565,6 +622,17 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
       const clientIp = deps.remoteAddress(c)
       // The signed-in person on the handshake (#4975 phase 5), else the browser user.
       const principal = browserUser(c)
+      // The session that person acts under, re-checked while the socket is open (#5217):
+      // `auth.session_revoked` (every replica hears it on the bus) closes it at once, and
+      // every frame and snapshot re-reads it, so a missed event is caught within
+      // SNAPSHOT_MS plus browserSession.ts CACHE_MS. Never with SCADBUDDY_AUTH_MODE=off.
+      const browserSessions = deps.authMode !== undefined && deps.authMode !== 'off' ? deps.browserSessions : undefined
+      const person = browserSessions ? requestSession(c) : undefined
+      let unwatch: (() => void) | undefined
+      const stop = () => {
+        unwatch?.()
+        connection?.close()
+      }
       return {
         onOpen: (_evt: Event, ws: WSContext) => {
           const sessions = deps.sessions
@@ -574,6 +642,15 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
             log,
             clientIp,
             principal,
+            ...(browserSessions && person
+              ? {
+                  signedIn: () => browserSessions.live(person.id, person.principal),
+                  signedOut: () => {
+                    unwatch?.()
+                    ws.close(SIGNED_OUT, 'signed out')
+                  },
+                }
+              : {}),
             ...(deps.snapshotMs === undefined ? {} : { snapshotMs: deps.snapshotMs }),
             ...(deps.tabs ? { tabs: deps.tabs } : {}),
             ...(deps.attachments ? { attachments: deps.attachments } : {}),
@@ -581,16 +658,23 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
             // 1013 Try Again Later: the client is not reading what it is sent.
             overflow: () => ws.close(1013, 'client too slow'),
           })
+          if (browserSessions && person) {
+            const opened = connection
+            unwatch = browserSessions.watch(person.id, person.principal, {
+              revoked: () => opened.signOut(),
+              recheck: () => void opened.recheck(),
+            })
+          }
           void connection.open()
         },
         // Every frame, binary ones included, goes through the connection, so
         // the queue cap and its `busy` answer apply to all of them.
         onMessage: (evt: MessageEvent) => void connection?.receive(evt.data),
-        onClose: () => connection?.close(),
+        onClose: stop,
         onError: (evt: Event) => {
           // A transport error is ours to know about, like every other failure here.
           log(`chat: socket error: ${socketError(evt)}`)
-          connection?.close()
+          stop()
         },
       }
     }),
@@ -659,6 +743,8 @@ export const route: RouteModule = {
       ...(deps.chatSnapshotMs === undefined ? {} : { snapshotMs: deps.chatSnapshotMs }),
       ...(deps.tabs ? { tabs: deps.tabs } : {}),
       ...(deps.attachments ? { attachments: deps.attachments } : {}),
+      ...(deps.browserSessions ? { browserSessions: deps.browserSessions } : {}),
+      ...(deps.authMode ? { authMode: deps.authMode } : {}),
     })
   },
 }
