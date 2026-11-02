@@ -28,12 +28,15 @@ export type PersonSession = { principal: string; name: string | null; kind: 'log
 
 type Cached = { session: PersonSession | undefined; at: number }
 
+type Watcher = { id: string; principal: string; revoked: () => void; recheck: () => void }
+
 export function sessionIdHash(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex')
 }
 
 export class BrowserSessions {
   private readonly cache = new Map<string, Cached>()
+  private readonly watchers = new Set<Watcher>()
   private readonly sql: Sql
   private readonly now: () => number
 
@@ -44,7 +47,39 @@ export class BrowserSessions {
 
   /** The live session `token` names, or undefined (none, expired, revoked or unreadable). */
   async resolve(token: string): Promise<PersonSession | undefined> {
-    const id = sessionIdHash(token)
+    try {
+      return await this.lookup(sessionIdHash(token))
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Whether the session `id` (its hex SHA-256) is still live and still `principal`'s, for a
+   * socket opened under it (#5217); undefined when it could not be read.
+   */
+  async live(id: string, principal: string): Promise<boolean | undefined> {
+    try {
+      return (await this.lookup(id))?.principal === principal
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Tells `watcher` when the session `id` of `principal` is revoked (`revoked`), or when
+   * revocations may have been missed (`recheck`). Returns the function that stops it.
+   */
+  watch(id: string, principal: string, watcher: Pick<Watcher, 'revoked' | 'recheck'>): () => void {
+    const entry: Watcher = { id, principal, ...watcher }
+    this.watchers.add(entry)
+    return () => {
+      this.watchers.delete(entry)
+    }
+  }
+
+  /** The session row `id` names; throws when it cannot be read. */
+  private async lookup(id: string): Promise<PersonSession | undefined> {
     const cached = this.cache.get(id)
     const now = this.now()
     if (cached && now - cached.at < CACHE_MS) return cached.session
@@ -57,7 +92,7 @@ export class BrowserSessions {
     } catch (error) {
       // The type only: a driver's message can carry the connection's host and user.
       console.error(`could not read a signed-in session (${(error as Error).name})`)
-      return undefined
+      throw error
     }
     if (this.cache.size > 1_000) this.cache.clear()
     this.cache.set(id, { session, at: now })
@@ -75,15 +110,25 @@ export class BrowserSessions {
     }
   }
 
-  /** Drops what `auth.session_revoked` names, and everything when events may have been missed. */
+  /**
+   * Drops what `auth.session_revoked` names and tells its watchers; when events may have been
+   * missed, drops everything and has every watcher re-check.
+   */
   follow(source: EventSource): () => void {
     return source.follow({
       onEvent: (event: BusEvent) => {
         if (event.kind !== 'auth.session_revoked') return
         const principal = typeof event.principal === 'string' ? event.principal : undefined
-        this.drop(typeof event.session_id === 'string' ? event.session_id : undefined, principal)
+        const sessionId = typeof event.session_id === 'string' ? event.session_id : undefined
+        this.drop(sessionId, principal)
+        for (const watcher of [...this.watchers]) {
+          if (sessionId !== undefined ? watcher.id === sessionId : watcher.principal === principal) watcher.revoked()
+        }
       },
-      onResync: () => this.cache.clear(),
+      onResync: () => {
+        this.cache.clear()
+        for (const watcher of [...this.watchers]) watcher.recheck()
+      },
     })
   }
 }
@@ -94,10 +139,19 @@ export function personOwner(session: PersonSession): Owner {
 }
 
 const people = new WeakMap<Request, Owner>()
+const handshakes = new WeakMap<Request, { id: string; principal: string }>()
 
 /** Who the request is from: the signed-in person `personSessions` found, else the browser user. */
 export function browserUser(c: Context): Owner {
   return people.get(c.req.raw) ?? BROWSER_USER
+}
+
+/**
+ * The signed-in session a request acts under (its hex SHA-256 and principal) when
+ * `browserUser` is that person: what a socket re-checks while it stays open (#5217).
+ */
+export function requestSession(c: Context): { id: string; principal: string } | undefined {
+  return handshakes.get(c.req.raw)
 }
 
 /** Rate-limited, so a page without a session does not log every request. */
@@ -118,7 +172,10 @@ export function personSessions(
   return async (c, next) => {
     const token = sessions ? getCookie(c, SESSION_COOKIE) : undefined
     const session = token && sessions ? await sessions.resolve(token) : undefined
-    if (session && session.kind !== 'delegated') people.set(c.req.raw, personOwner(session))
+    if (token && session && session.kind !== 'delegated') {
+      people.set(c.req.raw, personOwner(session))
+      handshakes.set(c.req.raw, { id: sessionIdHash(token), principal: session.principal })
+    }
     if (!session && mode === 'observe' && (loggedAt === undefined || now() - loggedAt >= LOG_INTERVAL_MS)) {
       loggedAt = now()
       log("enforce would refuse an /api/v1/ai request with no signed-in session; served, as SCADBUDDY_AUTH_MODE=observe")
