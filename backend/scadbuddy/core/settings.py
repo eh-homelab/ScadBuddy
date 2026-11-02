@@ -57,6 +57,9 @@ from scadbuddy.core.config import (
 from scadbuddy.core.proxies import Network, parse_cidr_list
 from scadbuddy.orders.currency import NO_MINOR_UNIT
 
+#: SCADBUDDY_AUTH_MODE's values (spec 2026-11-01 §9.1).
+AuthMode = Literal["off", "observe", "enforce"]
+
 CONTAINER_SEED_MODELS_DIR = Path("/app/models")
 # The curated libraries the image bakes in (#169); no dev equivalent.
 CONTAINER_SEED_LIBRARIES_DIR = Path("/app/libraries")
@@ -236,6 +239,24 @@ class Settings(BaseSettings):
     # runs with --no-proxy-headers in the image, so it believes none either). Not a
     # stored setting: it decides who the server believes about who it is talking to.
     trusted_proxies: str = ""
+
+    # SCADBUDDY_AUTH_MODE (#4975, spec 2026-11-01 §9.1): whether a request with no
+    # session or credential is served (`off`), served and counted (`observe`) or refused
+    # (`enforce`). Only `off` exists until the gate does (plan 2026-11-01 phases 3 and
+    # 8), so any other value stops the start rather than promising a gate that is not
+    # there. Not a stored setting: it decides who may write Settings.
+    auth_mode: AuthMode = "off"
+
+    @field_validator("auth_mode")
+    @classmethod
+    def _auth_mode_implemented(cls, value: AuthMode) -> AuthMode:
+        if value != "off":
+            raise ValueError(
+                f"SCADBUDDY_AUTH_MODE={value} is not available yet: this build has no"
+                " gate that refuses or counts a request (#4975, plan 2026-11-01). Set it"
+                " to off"
+            )
+        return value
 
     @field_validator("orders_currency")
     @classmethod
@@ -618,6 +639,10 @@ BOOTSTRAP_FIELDS: Final[Mapping[str, str]] = MappingProxyType(
             "Which pages may open the realtime socket and make writes. Like the agent's"
             " trusted proxies, it"
             " decides who can reach the server, so it belongs to the deployment."
+        ),
+        "auth_mode": (
+            "Whether a request without a session is refused. It decides who may write"
+            " Settings, so Settings cannot hold it (#4975)."
         ),
         "trusted_proxies": (
             "Which peers are believed about the client they forward for. Like the allowed"

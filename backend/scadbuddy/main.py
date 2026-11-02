@@ -61,6 +61,8 @@ from scadbuddy.api.realtime import EventCursor
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
+from scadbuddy.auth.component import AUTH
+from scadbuddy.auth.gate import AuthGate
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
@@ -1873,6 +1875,9 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
             internal_library.PUT_ROUTE_LIMIT,
         ],
     )
+    # Who the request is from (#4975), inside the cross-site gate (spec 2026-11-01 §8.1).
+    # In SCADBUDDY_AUTH_MODE=off it refuses nothing.
+    app.add_middleware(AuthGate, sessions=lambda: state.components.get(AUTH).sessions)
     # A write from a page on another origin is refused before its body is read (#962).
     app.add_middleware(
         CrossSiteGate,
