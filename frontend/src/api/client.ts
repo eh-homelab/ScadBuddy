@@ -236,6 +236,7 @@ import type {
   AiCredentialSave,
 } from './aiCredential'
 import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
+import { REQUEST_HEADER } from '../lib/requestHeader'
 import { ordersApiParams, type OrdersQuery } from '../lib/ordersQuery'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
@@ -821,6 +822,8 @@ function uploadForm<T>(path: string, form: () => FormData, onProgress?: (fractio
       xhr.open('POST', `${API_BASE}${path}`)
       xhr.setRequestHeader('Accept', 'application/json')
       xhr.setRequestHeader('Idempotency-Key', key)
+      // #4975: the CSRF header `lib/requestHeader.ts` adds to every fetch; an XHR is not a fetch.
+      xhr.setRequestHeader(REQUEST_HEADER, '1')
       xhr.upload.addEventListener('progress', (event) => {
         if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
       })

@@ -25,15 +25,17 @@ let config: LoginConfig = { ...BLANK }
 let hasSecret = false
 let signedIn = false
 let sessions: AuthSessionInfo[] = []
+let kind: 'login' | 'break_glass' = 'login'
 
 export function mockLoginEnabled(): void {
   config = { ...BLANK, enabled: true, allowed_subjects: ['alice'] }
   hasSecret = true
 }
 
-export function mockSignedIn(): void {
+export function mockSignedIn(as: 'login' | 'break_glass' = 'login'): void {
   mockLoginEnabled()
   signedIn = true
+  kind = as
   sessions = [
     {
       id: 'a'.repeat(64),
@@ -65,6 +67,7 @@ export function reset(): void {
   hasSecret = false
   signedIn = false
   sessions = []
+  kind = 'login'
 }
 
 function session(): AuthSessionView {
@@ -74,6 +77,7 @@ function session(): AuthSessionView {
     mode: 'off',
     login_enabled: config.enabled ?? false,
     expires_at: signedIn ? '2026-11-15T12:00:00Z' : null,
+    kind: signedIn ? kind : null,
   }
 }
 

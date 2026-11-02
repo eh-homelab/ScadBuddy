@@ -4,10 +4,13 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'
 import { installAgentBridge } from './agent'
 import { App } from './App'
+import { installRequestHeader } from './lib/requestHeader'
 import { installStaleChunkReload, loadOptionalChunk } from './lib/staleChunks'
 import './index.css'
 
 async function start() {
+  // Before anything fetches: every request to the API carries the CSRF header (#4975).
+  installRequestHeader()
   installStaleChunkReload()
   if (import.meta.env.VITE_MOCK_API === '1') {
     const { worker } = await import('./mocks/browser')

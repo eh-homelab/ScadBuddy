@@ -25,8 +25,9 @@ from scadbuddy.api.components import component_dep
 from scadbuddy.auth.config import LoginConfig, LoginConfigStore
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Caller
+from scadbuddy.auth.observe import WouldRefuse
 from scadbuddy.auth.oidc import OidcClient
-from scadbuddy.auth.store import SessionStore
+from scadbuddy.auth.store import Pool, SessionStore
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
 from scadbuddy.core.secrets import Envelope, Kek
@@ -46,6 +47,7 @@ class AuthComponent:
         self.oidc = OidcClient(
             transport=None if settings.auth_oidc_private_network else public_transport()
         )
+        self.would_refuse = WouldRefuse(core.metrics)
         self._lock = threading.Lock()
         self._opened = False
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
@@ -76,6 +78,11 @@ class AuthComponent:
     def sessions(self) -> SessionStore:
         self._open()
         return self._sessions
+
+    @property
+    def pool(self) -> Pool:
+        self._open()
+        return self._pool
 
     @property
     def config(self) -> LoginConfigStore:

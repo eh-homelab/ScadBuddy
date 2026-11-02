@@ -100,6 +100,7 @@ def test_signed_out_by_default(client: TestClient) -> None:
         "mode": "off",
         "login_enabled": False,
         "expires_at": None,
+        "kind": None,
     }
 
 

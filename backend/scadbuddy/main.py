@@ -61,6 +61,7 @@ from scadbuddy.api.realtime import EventCursor
 from scadbuddy.api.runtime import apply_runtime, follow_changes
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.attachments.component import PRINT_ATTACHMENTS
+from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
@@ -1834,7 +1835,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         # (`core/tracing.py`), and every log line. Only `core/tracing.py` exports.
         telemetry={"auto_configure": False},
         # #2794: whether a request follows a 202 itself, for `run_operation`.
-        dependencies=[Depends(note_preference)],
+        # #4975: what SCADBUDDY_AUTH_MODE=enforce would refuse, counted in observe.
+        dependencies=[Depends(note_preference), Depends(auth_check)],
     )
     state = build_state(app_settings)
     setattr(app.state, STATE_ATTR, state)

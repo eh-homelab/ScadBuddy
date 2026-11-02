@@ -48,12 +48,19 @@ export function AccountMenu() {
 
   const user = session.user
   const label = user?.name ?? user?.email ?? 'Signed in'
+  // Spec §9.3: a break-glass session is shown as one, for as long as it lasts.
+  const breakGlass = session.kind === 'break_glass'
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="sm" aria-label={`Account: ${label}`}>
+        <Button
+          variant="ghost"
+          size="sm"
+          aria-label={breakGlass ? 'Account: break-glass session' : `Account: ${label}`}
+          className={breakGlass ? 'text-warn' : undefined}
+        >
           <UserIcon aria-hidden="true" />
-          <span className="max-w-32 truncate">{label}</span>
+          <span className="max-w-32 truncate">{breakGlass ? 'Break-glass session' : label}</span>
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">

@@ -19,6 +19,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason: "A person's own sign-in through the identity provider (#4975, spec 2026-11-01 §5.1); a browser navigation, never an agent's call.",
   },
   {
+    operation: "GET /api/v1/auth/break-glass",
+    reason: "Break-glass sign-in (#4975, spec 2026-11-01 §9.3): a one-time link minted in the pod and opened by a person; never an agent's call.",
+  },
+  {
     operation: "POST /api/v1/auth/logout",
     reason: "A person's own signed-in sessions (#4975, spec 2026-11-01 §5.2); the agent has no session of its own and must not sign a person out.",
   },
