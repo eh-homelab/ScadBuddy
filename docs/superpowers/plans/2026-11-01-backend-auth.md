@@ -73,6 +73,14 @@ Spec §5.1, §5.2 (sweep, revocation list), §6.2, §9.2; D1, D3, D5, D7.
   (D3: subjects and/or one group claim and value), and the RP-initiated logout switch
   (D7, off by default). A save with sign-in on runs discovery first and saves nothing
   if it fails (spec §9.2). The homelab's IdP is named in the PR, for phase 7.
+  Changed in review (#5208): the issuer and client id are the deployment's,
+  `SCADBUDDY_AUTH_OIDC_ISSUER` and `SCADBUDDY_AUTH_OIDC_CLIENT_ID` (bootstrap fields),
+  not stored: until the gate refuses anyone (phase 3 classes `PUT /auth/config` as
+  `person`, phase 8 enforces it), any caller could have pointed `/auth/login`'s redirect,
+  and `POST /auth/config/test`'s fetch, wherever it chose. Settings shows them read-only
+  and keeps the secret, the rule and the switches. Every fetch to the issuer (discovery,
+  JWKS, token) goes through `library/url_import.py` `PublicOnlyBackend`, public addresses
+  only, unless `SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK=true` for an IdP on the LAN.
 - `auth/oidc.py`: discovery and JWKS fetch with the agent's rules (https except
   loopback, no redirects, bounded, cached 10 minutes, unknown `kid` refetch at most every
   30 s), ID-token validation (the `/mcp` alg allowlist, `iss`, `aud`, `azp`, `exp`/`iat`

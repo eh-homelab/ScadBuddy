@@ -26,6 +26,8 @@ from joserfc import errors as jose_errors
 from joserfc import jwt
 from joserfc.jwk import KeySet
 
+from scadbuddy.library.url_import import ImportRefusedError, ResolverUnavailableError
+
 #: The agent's ``SUPPORTED_ALGORITHMS``: asymmetric only, so never ``none`` or HMAC.
 SUPPORTED_ALGORITHMS = (
     "RS256",
@@ -68,6 +70,14 @@ def _loopback(host: str) -> bool:
         return ipaddress.ip_address(host.strip("[]")).is_loopback
     except ValueError:
         return False
+
+
+#: What the public-only transport (``library/url_import.py`` ``PublicOnlyBackend``, the
+#: login's unless ``SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK``) refused, said once.
+NOT_PUBLIC = (
+    "did not answer, or is not at a public address (an identity provider on a private"
+    " network needs SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK=true)"
+)
 
 
 def check_url(url: str, what: str) -> str:
@@ -127,6 +137,8 @@ class OidcClient:
                 return await self._json(response, what)
         except httpx.HTTPError as error:
             raise OidcError(f"the {what} could not be read ({type(error).__name__})") from None
+        except (ImportRefusedError, ResolverUnavailableError):
+            raise OidcError(f"the {what} {NOT_PUBLIC}") from None
 
     async def provider(self, issuer: str, *, fresh: bool = False) -> Provider:
         """The issuer's metadata (OIDC Discovery 1.0 §4), whose ``issuer`` must be
@@ -208,6 +220,8 @@ class OidcClient:
             raise OidcError(
                 f"the token endpoint could not be reached ({type(error).__name__})"
             ) from None
+        except (ImportRefusedError, ResolverUnavailableError):
+            raise OidcError(f"the token endpoint {NOT_PUBLIC}") from None
         token = data.get("id_token")
         if not isinstance(token, str):
             raise OidcError("the token endpoint answered no ID token")

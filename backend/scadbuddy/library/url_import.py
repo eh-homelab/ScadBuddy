@@ -228,7 +228,7 @@ class PublicOnlyBackend(httpcore.AsyncNetworkBackend):
         await self._inner.sleep(seconds)
 
 
-def _transport() -> httpx.AsyncHTTPTransport:
+def public_transport() -> httpx.AsyncHTTPTransport:
     """httpx's transport over a pool that connects through `PublicOnlyBackend`.
 
     httpx takes no network backend, but httpcore's pool does, publicly -- so the
@@ -435,6 +435,6 @@ def public_client(vet_hop: Callable[[httpx.Request], Awaitable[None]]) -> httpx.
         headers={"Accept-Encoding": "identity"},
         # Its own transport, which also means no proxy from the environment:
         # a proxy would make the connection, and the vetting with it.
-        transport=_transport(),
+        transport=public_transport(),
         trust_env=False,
     )

@@ -94,7 +94,7 @@ def _person(caller: Caller) -> AuthSession | None:
     "/auth/session", response_model=AuthSessionView, summary="Who this browser is signed in as"
 )
 async def get_session(caller: CallerDep, auth: AuthDep, state: StateDep) -> AuthSessionView:
-    config, _ = await asyncio.to_thread(auth.config.load)
+    config, _ = await asyncio.to_thread(auth.load_config)
     session = _person(caller)
     return AuthSessionView(
         signed_in=session is not None,
@@ -141,7 +141,7 @@ async def login(
     """Redirects to the issuer's authorization endpoint with PKCE ``S256`` and a sealed
     login cookie holding ``state``, ``nonce`` and the verifier (§5.1 step 1).
     ``return_to`` is a same-origin path; anything else becomes ``/``."""
-    config, envelope = await asyncio.to_thread(auth.config.load)
+    config, envelope = await asyncio.to_thread(auth.load_config)
     origin = _public_origin(settings_store)
     kek = auth.kek
     if not config.enabled or envelope is None or kek is None or origin is None:
@@ -272,7 +272,7 @@ async def callback(
         return refuse(400, f"The identity provider refused the sign-in ({error}).")
     if code is None:
         return refuse(400, "The identity provider sent no code.")
-    config, envelope = await asyncio.to_thread(auth.config.load)
+    config, envelope = await asyncio.to_thread(auth.load_config)
     if not config.enabled or envelope is None or kek is None or origin is None:
         return refuse(409, "Sign-in is not switched on in Settings.")
     try:
@@ -356,7 +356,7 @@ async def logout(
         return LogoutResult()
     if await asyncio.to_thread(auth.sessions.revoke, session.id_hash):
         _revoked(events, session)
-    config, _ = await asyncio.to_thread(auth.config.load)
+    config, _ = await asyncio.to_thread(auth.load_config)
     origin = _public_origin(settings_store)
     if not (config.rp_logout and config.enabled and origin):
         return LogoutResult()
@@ -458,6 +458,7 @@ async def revoke_all_sessions(
 
 
 class LoginConfigView(BaseModel):
+    #: ``issuer`` and ``client_id`` are the deployment's (``SCADBUDDY_AUTH_OIDC_*``).
     config: LoginConfig
     #: Whether a client secret is saved for this issuer and client id; never the secret.
     has_client_secret: bool
@@ -467,7 +468,15 @@ class LoginConfigView(BaseModel):
     cannot_enable_reason: str | None
 
 
-class LoginConfigUpdate(LoginConfig):
+class LoginConfigUpdate(BaseModel):
+    """What Settings may change. The issuer and client id are not among it: they are the
+    deployment's, so no caller can point the login at an issuer of its choosing."""
+
+    enabled: bool = False
+    allowed_subjects: list[str] = Field(default_factory=list, max_length=100)
+    group_claim: str | None = Field(default=None, max_length=200)
+    group_value: str | None = Field(default=None, max_length=200)
+    rp_logout: bool = False
     #: A new client secret; ``None`` keeps the saved one (while the issuer and client id
     #: stay the same, since it is sealed for them).
     client_secret: str | None = Field(default=None, max_length=1000, repr=False)
@@ -490,7 +499,7 @@ def _blocker(auth: AuthComponent, origin: str | None) -> str | None:
 
 
 async def _view(auth: AuthComponent, settings_store: SettingsStoreDep) -> LoginConfigView:
-    config, envelope = await asyncio.to_thread(auth.config.load)
+    config, envelope = await asyncio.to_thread(auth.load_config)
     origin = _public_origin(settings_store)
     return LoginConfigView(
         config=config,
@@ -517,11 +526,15 @@ async def put_login_config(
     """Saves the configuration (D1, D3, D7). Switched on, it runs discovery against the
     issuer first and saves nothing if that fails, so a typo cannot lock the login out
     (§9.2)."""
-    config = LoginConfig.model_validate(body.model_dump(exclude={"client_secret"}))
-    old, envelope = await asyncio.to_thread(auth.config.load)
+    current, envelope = await asyncio.to_thread(auth.load_config)
+    config = LoginConfig.model_validate(
+        {
+            **body.model_dump(exclude={"client_secret"}),
+            "issuer": current.issuer,
+            "client_id": current.client_id,
+        }
+    )
     kek = auth.kek
-    if (old.issuer, old.client_id) != (config.issuer, config.client_id):
-        envelope = None  # sealed for the old issuer and client id
     if body.client_secret:
         if kek is None:
             raise _problem(422, "no-key", _blocker(auth, None) or "")
@@ -533,8 +546,8 @@ async def put_login_config(
         missing = [
             what
             for what, ok in (
-                ("an issuer", config.issuer),
-                ("a client id", config.client_id),
+                ("SCADBUDDY_AUTH_OIDC_ISSUER", config.issuer),
+                ("SCADBUDDY_AUTH_OIDC_CLIENT_ID", config.client_id),
                 ("a client secret", envelope is not None),
                 ("a sign-in rule (subjects, or a group claim and value)", config.has_rule()),
             )
@@ -552,19 +565,20 @@ async def put_login_config(
     return await _view(auth, settings_store)
 
 
-class LoginDiscoveryRequest(BaseModel):
-    issuer: str = Field(max_length=2000)
-
-
 @router.post(
     "/auth/config/test",
     response_model=LoginDiscoveryReport,
-    summary="Check an issuer's discovery and keys",
+    summary="Check the issuer's discovery and keys",
     responses={422: {"description": "Discovery failed"}},
 )
-async def test_login_config(body: LoginDiscoveryRequest, auth: AuthDep) -> LoginDiscoveryReport:
+async def test_login_config(auth: AuthDep) -> LoginDiscoveryReport:
+    """Fetches the deployment's issuer (``SCADBUDDY_AUTH_OIDC_ISSUER``), never one a
+    caller names."""
+    config, _ = await asyncio.to_thread(auth.load_config)
+    if not config.issuer:
+        raise _problem(422, "discovery-failed", "SCADBUDDY_AUTH_OIDC_ISSUER is not set")
     try:
-        issuer = check_url(body.issuer.strip(), "issuer")
+        issuer = check_url(config.issuer, "issuer")
         provider = await auth.oidc.provider(issuer, fresh=True)
         keys = await auth.oidc.keys(provider)
     except OidcError as error:

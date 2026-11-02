@@ -11,9 +11,12 @@ import { SignedInSessions } from './SignedInSessions'
 // #4975 — Settings → System → Sign-in and Signed-in sessions, against src/mocks/features/auth.ts.
 
 describe('LoginSettings', () => {
-  it('starts from the MCP section’s issuer and client id (D1)', async () => {
+  it('shows the deployment’s issuer and client id, read-only', async () => {
     renderPage(<LoginSettings />)
-    expect(await screen.findByLabelText('Issuer URL')).toHaveValue('https://idp.example.com/')
+    const issuer = await screen.findByLabelText('Issuer URL')
+    expect(issuer).toHaveValue('https://idp.example')
+    expect(issuer).toHaveAttribute('readonly')
+    expect(screen.getByLabelText('Client ID')).toHaveAttribute('readonly')
     expect(screen.getByText(/http:\/\/localhost\/api\/v1\/auth\/callback/)).toBeInTheDocument()
   })
 
@@ -21,7 +24,6 @@ describe('LoginSettings', () => {
     const user = userEvent.setup()
     renderPage(<LoginSettings />)
     await user.click(await screen.findByRole('switch', { name: /Let people sign in/ }))
-    await user.type(screen.getByLabelText('Client ID'), 'scadbuddy')
     await user.type(screen.getByLabelText('Client secret'), 'shh')
     await user.click(screen.getByRole('button', { name: 'Save sign-in settings' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('sign-in rule')

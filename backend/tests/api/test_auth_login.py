@@ -10,6 +10,7 @@ from collections.abc import Iterator
 from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 from fastapi import FastAPI
@@ -27,8 +28,6 @@ from tests.auth.fake_oidc import CLIENT_ID, CLIENT_SECRET, ISSUER, FakeIssuer
 PUBLIC = "https://scadbuddy.test"
 ENABLED: dict[str, Any] = {
     "enabled": True,
-    "issuer": ISSUER,
-    "client_id": CLIENT_ID,
     "client_secret": CLIENT_SECRET,
     "allowed_subjects": ["alice"],
 }
@@ -38,7 +37,14 @@ ENABLED: dict[str, Any] = {
 def settings(settings: Settings, tmp_path: Path) -> Settings:
     key = tmp_path / "kek"
     key.write_text(base64.b64encode(os.urandom(32)).decode())
-    return settings.model_copy(update={"secret_key_file": key, "public_url": PUBLIC})
+    return settings.model_copy(
+        update={
+            "secret_key_file": key,
+            "public_url": PUBLIC,
+            "auth_oidc_issuer": ISSUER,
+            "auth_oidc_client_id": CLIENT_ID,
+        }
+    )
 
 
 @pytest.fixture
@@ -129,13 +135,38 @@ def test_the_secret_is_kept_and_never_answered(client: TestClient) -> None:
     assert kept["has_client_secret"] is True and kept["config"]["rp_logout"] is True
 
 
-def test_a_new_client_id_needs_the_secret_again(client: TestClient) -> None:
+def test_the_issuer_and_client_id_are_the_deployments(client: TestClient) -> None:
+    """Security review of #5208: in mode off anyone may write the config, so it must not
+    be able to point `/auth/login` (a redirect) or the discovery fetch anywhere."""
+    view = _enable(client, issuer="https://evil.test", client_id="evil")
+    assert view["config"]["issuer"] == ISSUER
+    assert view["config"]["client_id"] == CLIENT_ID
+
+
+def test_the_login_redirects_only_to_the_issuers_authorization_endpoint(
+    client: TestClient, issuer: FakeIssuer
+) -> None:
     _enable(client)
-    response = client.put(
-        "/api/v1/auth/config", json={**ENABLED, "client_id": "other", "client_secret": None}
+    client.put("/api/v1/auth/config", json={**ENABLED, "issuer": "https://evil.test"})
+    login = client.get("/api/v1/auth/login", follow_redirects=False)
+    assert login.status_code == 302
+    location = urlsplit(login.headers["location"])
+    authorize = urlsplit(f"{ISSUER}/authorize")  # what the fake's discovery names
+    assert (location.scheme, location.netloc, location.path) == (
+        authorize.scheme,
+        authorize.netloc,
+        authorize.path,
     )
-    assert response.status_code == 422
-    assert "client secret" in response.json()["detail"]
+
+
+def test_a_new_client_id_needs_the_secret_again(client: TestClient, settings: Settings) -> None:
+    _enable(client)
+    # A redeploy with another client id: the secret sealed for the old one is gone.
+    redeployed = create_app(settings.model_copy(update={"auth_oidc_client_id": "other"}))
+    with TestClient(redeployed, base_url=PUBLIC) as again:
+        view = again.get("/api/v1/auth/config").json()
+    assert view["config"]["client_id"] == "other"
+    assert view["has_client_secret"] is False
 
 
 def test_sign_in(client: TestClient, issuer: FakeIssuer) -> None:
@@ -293,12 +324,26 @@ def test_the_persons_sessions(client: TestClient, issuer: FakeIssuer, app: FastA
     assert client.get("/api/v1/auth/session").json()["signed_in"] is False
 
 
-def test_the_test_button(client: TestClient) -> None:
-    report = client.post("/api/v1/auth/config/test", json={"issuer": ISSUER}).json()
+def test_the_test_button(client: TestClient, settings: Settings) -> None:
+    # A body naming another issuer is ignored: only the deployment's is fetched.
+    report = client.post("/api/v1/auth/config/test", json={"issuer": "http://10.0.0.1"}).json()
     assert report == {"issuer": ISSUER, "keys": 1, "end_session": True}
-    refused = client.post("/api/v1/auth/config/test", json={"issuer": "http://idp.test"})
+    for issuer, says in (("http://idp.test", "https"), ("", "SCADBUDDY_AUTH_OIDC_ISSUER")):
+        app = create_app(settings.model_copy(update={"auth_oidc_issuer": issuer}))
+        with TestClient(app, base_url=PUBLIC) as other:
+            refused = other.post("/api/v1/auth/config/test")
+        assert refused.status_code == 422
+        assert says in refused.json()["detail"]
+
+
+def test_the_issuer_is_fetched_from_public_addresses_only(settings: Settings) -> None:
+    """Security review of #5208: the discovery, keys and token fetches go through the
+    same public-only egress as a URL import, unless the deployment says otherwise."""
+    app = create_app(settings.model_copy(update={"auth_oidc_issuer": "https://127.0.0.1:9"}))
+    with TestClient(app, base_url=PUBLIC) as client:
+        refused = client.post("/api/v1/auth/config/test")
     assert refused.status_code == 422
-    assert "https" in refused.json()["detail"]
+    assert "not at a public address" in refused.json()["detail"]
 
 
 def test_without_a_key_the_login_cannot_be_switched_on(settings: Settings) -> None:

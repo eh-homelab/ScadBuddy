@@ -7,7 +7,6 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { refreshAuthSession } from '../../lib/signIn'
-import { OIDC_API, type OidcView } from '../McpOidcSettings'
 import { LoadingLines, SwitchField } from '../settings/form'
 import { Spinner } from '../ui/spinner'
 
@@ -24,15 +23,15 @@ function subjectsOf(text: string): string[] {
     .filter(Boolean)
 }
 
-/** D1: a first configuration starts from the MCP section's issuer and client id. */
-async function mcpDefaults(): Promise<{ issuer: string; client_id: string } | null> {
-  try {
-    const response = await fetch(OIDC_API)
-    if (!response.ok) return null
-    const view = (await response.json()) as OidcView
-    return { issuer: view.config.issuer ?? '', client_id: view.config.client_id ?? '' }
-  } catch {
-    return null
+/** What Settings may change: the issuer and client id are the deployment's. */
+function editable(config: LoginConfigView['config']): LoginConfigUpdate {
+  return {
+    enabled: config.enabled,
+    allowed_subjects: config.allowed_subjects,
+    group_claim: config.group_claim,
+    group_value: config.group_value,
+    rp_logout: config.rp_logout,
+    client_secret: null,
   }
 }
 
@@ -49,11 +48,7 @@ export function LoginSettings() {
     void (async () => {
       try {
         const loaded = await api.getLoginConfig()
-        let config = { ...loaded.config, client_secret: null }
-        if (!config.issuer) {
-          const defaults = await mcpDefaults()
-          if (defaults) config = { ...config, ...defaults }
-        }
+        const config = editable(loaded.config)
         if (!live) return
         setView(loaded)
         setForm(config)
@@ -78,15 +73,15 @@ export function LoginSettings() {
   }
 
   const update = (change: Partial<LoginConfigUpdate>) => setForm({ ...form, ...change })
-  const sameClient = form.issuer === view.config.issuer && form.client_id === view.config.client_id
-  const secretSaved = view.has_client_secret && sameClient
+  const secretSaved = view.has_client_secret
+  const { issuer, client_id: clientId } = view.config
 
   async function test() {
     setBusy('test')
     setError(null)
     setStatus(null)
     try {
-      const report = await api.testLoginConfig(form!.issuer ?? '')
+      const report = await api.testLoginConfig()
       setStatus(
         `Found ${report.issuer}: ${report.keys} signing key${report.keys === 1 ? '' : 's'}` +
           (report.end_session ? '; it can end its own session on sign-out.' : '.'),
@@ -105,7 +100,7 @@ export function LoginSettings() {
     try {
       const saved = await api.putLoginConfig({ ...form!, allowed_subjects: subjectsOf(subjects) })
       setView(saved)
-      setForm({ ...saved.config, client_secret: null })
+      setForm(editable(saved.config))
       setSubjects((saved.config.allowed_subjects ?? []).join('\n'))
       setStatus(saved.config.enabled ? 'Saved. The header now offers Sign in.' : 'Saved.')
       await refreshAuthSession()
@@ -147,25 +142,17 @@ export function LoginSettings() {
       {field(
         'login-issuer',
         'Issuer URL',
-        <Input
-          id="login-issuer"
-          type="url"
-          value={form.issuer ?? ''}
-          onChange={(event) => update({ issuer: event.target.value })}
-          className="sb-num"
-        />,
-        'Exactly as the IdP writes it, trailing slash included.',
+        <Input id="login-issuer" value={issuer || 'Not set'} readOnly className="sb-num" />,
+        <>
+          Set by the deployment, <span className="sb-num">SCADBUDDY_AUTH_OIDC_ISSUER</span>, so nobody can point the
+          sign-in elsewhere.
+        </>,
       )}
 
       {field(
         'login-client-id',
         'Client ID',
-        <Input
-          id="login-client-id"
-          value={form.client_id ?? ''}
-          onChange={(event) => update({ client_id: event.target.value })}
-          className="sb-num"
-        />,
+        <Input id="login-client-id" value={clientId || 'Not set'} readOnly className="sb-num" />,
         view.redirect_uri && (
           <>
             Register a confidential client with the redirect URI <span className="sb-num">{view.redirect_uri}</span>
@@ -186,9 +173,7 @@ export function LoginSettings() {
           onChange={(event) => update({ client_secret: blank(event.target.value) })}
           className="sb-num"
         />,
-        view.has_client_secret && !sameClient
-          ? 'The saved secret was for another issuer or client ID; enter it again.'
-          : 'Kept encrypted; never shown again.',
+        'Kept encrypted; never shown again. Saved for this issuer and client ID only.',
       )}
 
       <fieldset className="space-y-3">

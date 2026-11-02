@@ -22,14 +22,15 @@ from psycopg_pool import ConnectionPool
 from starlette.requests import HTTPConnection
 
 from scadbuddy.api.components import component_dep
-from scadbuddy.auth.config import LoginConfigStore
+from scadbuddy.auth.config import LoginConfig, LoginConfigStore
 from scadbuddy.auth.gate import caller_of
 from scadbuddy.auth.models import Caller
 from scadbuddy.auth.oidc import OidcClient
 from scadbuddy.auth.store import SessionStore
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
-from scadbuddy.core.secrets import Kek
+from scadbuddy.core.secrets import Envelope, Kek
+from scadbuddy.library.url_import import public_transport
 
 #: One short statement per request that carries a cookie.
 POOL_SIZE = 2
@@ -40,7 +41,11 @@ CONNECT_TIMEOUT = 5.0
 class AuthComponent:
     def __init__(self, core: Core) -> None:
         self.core = core
-        self.oidc = OidcClient()
+        settings = core.settings
+        # Off a private network, every fetch goes to a vetted public address only.
+        self.oidc = OidcClient(
+            transport=None if settings.auth_oidc_private_network else public_transport()
+        )
         self._lock = threading.Lock()
         self._opened = False
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
@@ -76,6 +81,21 @@ class AuthComponent:
     def config(self) -> LoginConfigStore:
         self._open()
         return self._config
+
+    def load_config(self) -> tuple[LoginConfig, Envelope | None]:
+        """The stored configuration under the deployment's issuer and client id
+        (``SCADBUDDY_AUTH_OIDC_*``). A secret sealed for another pair is no secret."""
+        stored, envelope = self.config.load()
+        settings = self.core.settings
+        config = stored.model_copy(
+            update={
+                "issuer": settings.auth_oidc_issuer.strip(),
+                "client_id": settings.auth_oidc_client_id.strip(),
+            }
+        )
+        if (stored.issuer, stored.client_id) != (config.issuer, config.client_id):
+            envelope = None
+        return config, envelope
 
     @property
     def kek(self) -> Kek | None:

@@ -1445,8 +1445,7 @@ export const api = {
   getLoginConfig: () => request<LoginConfigView>('/auth/config'),
   putLoginConfig: (body: LoginConfigUpdate) =>
     request<LoginConfigView>('/auth/config', { method: 'PUT', body: JSON.stringify(body) }),
-  testLoginConfig: (issuer: string) =>
-    request<LoginDiscoveryReport>('/auth/config/test', { method: 'POST', body: JSON.stringify({ issuer }) }),
+  testLoginConfig: () => request<LoginDiscoveryReport>('/auth/config/test', { method: 'POST' }),
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,

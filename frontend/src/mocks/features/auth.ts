@@ -8,10 +8,11 @@ import type { AuthSessionInfo, AuthSessionView, LoginConfig, LoginConfigUpdate, 
  * `mockSignedIn()` or switches the login on with `mockLoginEnabled()`.
  */
 
+// The issuer and client id are the deployment's (SCADBUDDY_AUTH_OIDC_*), never saved here.
 const BLANK: LoginConfig = {
   enabled: false,
-  issuer: '',
-  client_id: '',
+  issuer: 'https://idp.example',
+  client_id: 'scadbuddy',
   allowed_subjects: [],
   group_claim: null,
   group_value: null,
@@ -26,7 +27,7 @@ let signedIn = false
 let sessions: AuthSessionInfo[] = []
 
 export function mockLoginEnabled(): void {
-  config = { ...BLANK, enabled: true, issuer: 'https://idp.example', client_id: 'scadbuddy', allowed_subjects: ['alice'] }
+  config = { ...BLANK, enabled: true, allowed_subjects: ['alice'] }
   hasSecret = true
 }
 
@@ -131,8 +132,7 @@ export const handlers = [
     if (secret) hasSecret = true
     return HttpResponse.json(view())
   }),
-  http.post('/api/v1/auth/config/test', async ({ request }) => {
-    const { issuer } = (await request.json()) as { issuer: string }
-    return HttpResponse.json({ issuer, keys: 2, end_session: true })
-  }),
+  http.post('/api/v1/auth/config/test', () =>
+    HttpResponse.json({ issuer: config.issuer, keys: 2, end_session: true }),
+  ),
 ]

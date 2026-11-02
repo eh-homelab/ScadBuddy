@@ -14,6 +14,7 @@ its origin. Two checks:
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
@@ -76,10 +77,13 @@ REVIEWED: dict[str, str] = {
         " redirect, and the URL is `url_for(...).path` under the app's own /api/v1 prefix"
     ),
     "api/auth.py": (
-        "#4975: `GET /auth/login` sends the browser to the identity provider's"
-        " authorization endpoint, read from the issuer's discovery document (an issuer"
-        " only the owner configures, https or loopback, `auth/oidc.py` `check_url`); the"
-        " return path after sign-in is `login_state.safe_return_to`, a path on this origin"
+        "#4975: only `GET /auth/login` (`login`, held to that by"
+        " `test_only_the_login_redirects_in_auth`) redirects, to the authorization endpoint"
+        " of the deployment's issuer: `SCADBUDDY_AUTH_OIDC_ISSUER`, an environment variable"
+        " no API caller can set (`auth/component.py` `load_config`), fetched https-only and"
+        " from public addresses unless `SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK`. The return path"
+        " after sign-in is `login_state.safe_return_to`, a path on this origin."
+        " `test_auth_login.py` checks the Location's host at run time"
     ),
 }
 
@@ -99,6 +103,24 @@ def test_no_module_builds_a_redirect_without_review() -> None:
         "a module builds an HTTP redirect; a browser the agent drives follows redirects off "
         "the origin (#349), so review it and add it to REVIEWED"
     )
+
+
+def test_only_the_login_redirects_in_auth() -> None:
+    """`api/auth.py`'s exemption covers one route: no other function there names a redirect."""
+    path = Path(__file__).resolve().parents[2] / "scadbuddy" / "api" / "auth.py"
+    source = path.read_text(encoding="utf-8")
+    redirecting = {
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and REDIRECT.search(ast.get_source_segment(source, node) or "")
+    }
+    assert redirecting == {"login"}
+    for node in ast.parse(source).body:
+        if not isinstance(
+            node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Import | ast.ImportFrom
+        ):
+            assert not REDIRECT.search(ast.get_source_segment(source, node) or ""), node.lineno
 
 
 def test_the_probes_do_reach_the_redirecting_code(spa_client: TestClient) -> None:
