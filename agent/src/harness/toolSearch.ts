@@ -10,14 +10,16 @@
 // Measured on Claude Code 2.1.310 against test/support/fakeAnthropic.ts with the whole
 // registry in-process (test/toolSearch.sdk.test.ts): with `tools: []` (harness/options.ts)
 // there is no ToolSearch, so nothing is deferred and the first request was 334,793 bytes
-// with 283 tool definitions. With ToolSearch offered it was 42,516 bytes: ToolSearch, a
-// `DeferredToolPlaceholder` with `defer_loading`, the `advanced-tool-use-2025-11-20` beta,
-// and every other tool by name only. A search's result is a `tool_reference` block, and the
-// tool found goes into `tools` with `defer_loading` from then on. The credential gateway
+// with 283 tool definitions. With ToolSearch offered and nothing upfront it was 42,516
+// bytes: ToolSearch, a `DeferredToolPlaceholder` with `defer_loading`, the
+// `advanced-tool-use-2025-11-20` beta, and every other tool by name only. With the
+// `UPFRONT_TOOLS` below in full as well (what a session turn sends by default), 47,990.
+// A search's result is a `tool_reference` block, and the tool found goes into `tools`
+// with `defer_loading` from then on. The credential gateway
 // passes the beta header and the body as they are (gateway/server.ts). A deferred tool the
 // model calls by name without a search still runs: Claude Code holds its schema.
 
-/** Settings → Assistant → Runtime `tool_search` (sessions/runtimeSettings.ts). */
+/** Settings → Assistant → Runtime `tool_search` (sessions/turnSettings.ts). */
 export type ToolSearchMode = 'off' | 'auto' | 'always'
 
 export const TOOL_SEARCH_MODES: readonly ToolSearchMode[] = ['off', 'auto', 'always']

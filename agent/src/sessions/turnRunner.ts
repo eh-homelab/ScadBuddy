@@ -802,7 +802,8 @@ export class TurnRunner {
         owner: `${session.owner.kind}:${session.owner.id}`,
         systemAppend: run.systemPromptAppend ?? '',
         systemPromptBase: run.systemPromptBase ?? 'claude_code',
-        toolSearch: run.toolSearch ?? 'off',
+        // `unset`: ENABLE_TOOL_SEARCH left out and no ToolSearch (a run that names no mode).
+        toolSearch: run.toolSearch ?? 'unset',
         // Settings → Tools & plugins' disabled built-ins; each plugin's own are in its `plugins` entry.
         // And each local package server's tools set off (#4757).
         disabledTools: [...(builtIn?.disallowed ?? []), ...localOff],

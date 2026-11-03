@@ -276,12 +276,16 @@ main on 2026-11-01:
     ScadBuddy's text after it (2,400 bytes).
   - `system_prompt_append` (up to 20,000 characters, default empty): the user's own text. It
     goes after ScadBuddy's fixed part, which always goes in: the untrusted-data notice
-    ([`agent/src/safety/untrusted.ts`](../../agent/src/safety/untrusted.ts)), the browser
-    tools guide and the note on served built-ins. `GET` returns that part as
-    `system_prompt_fixed`, and the section shows it. The preset is sent with
-    `excludeDynamicSections`, the minimal base before `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, both
-    with `snapshot: false`, so the prompt is static and its cache is shared across sessions
+    ([`agent/src/safety/untrusted.ts`](../../agent/src/safety/untrusted.ts)) and the browser
+    tools guide. `GET` returns that part as `system_prompt_fixed`, and the section shows it.
+    A session whose plugin package names Claude Code built-ins that the session serves also
+    gets the note on those, after the fixed part; it is per turn, so not in
+    `system_prompt_fixed`. The preset is sent with `excludeDynamicSections`, the minimal base
+    before `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, both with `snapshot: false`, so the prompt is
+    static and its cache is shared across sessions
     ([modifying system prompts](https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts.md)).
+    On the default base the text is what it was before, but the working directory now
+    reaches the model in the first user message rather than in the system prompt.
 - **Tool calls.** Each tool call of a turn is a `ToolCall` workflow of its own,
   `session-<id>-call-<tool_use_id>`, whose one activity runs the tool on whichever worker
   takes it ([`agent/src/temporal/toolCall.ts`](../../agent/src/temporal/toolCall.ts),

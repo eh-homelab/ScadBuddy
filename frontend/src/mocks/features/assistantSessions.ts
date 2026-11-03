@@ -27,6 +27,7 @@
  * by default), as the header's working indicator reads them; any other status lists none.
  */
 import { HttpResponse, http } from 'msw'
+import { SYSTEM_PROMPT_APPEND_MAX, SYSTEM_PROMPT_BASES, TOOL_SEARCH_MODES } from '../../api/sessionTurn'
 import type { AiSessionView, ResourceRef, SessionLimits, SessionResource, SessionRuntime } from '../../api/types'
 import { EXTERNAL_SESSION_ID, mockAgentSessions } from '../agent'
 import { versionIds } from '../fixtures'
@@ -59,12 +60,10 @@ export const RUNTIME_BOUNDS: Record<NumericRuntimeKey, { min: number; max: numbe
 
 /** agent `sessions/turnSettings.ts`: each string setting's allowed values (`null`: any text up to the cap). */
 const TURN_CHOICES: Record<string, readonly string[] | null> = {
-  tool_search: ['off', 'auto', 'always'],
-  system_prompt_base: ['claude_code', 'minimal'],
+  tool_search: TOOL_SEARCH_MODES,
+  system_prompt_base: SYSTEM_PROMPT_BASES,
   system_prompt_append: null,
 }
-/** agent `sessions/turnSettings.ts` SYSTEM_PROMPT_APPEND_MAX. */
-const SYSTEM_PROMPT_APPEND_MAX = 20_000
 
 /** What the desktop agent's scripted session (`../agent.ts`) changed. */
 const EXTERNAL_RESOURCES: readonly SessionResource[] = [

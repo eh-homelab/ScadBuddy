@@ -366,13 +366,15 @@ export function remotePluginOptions(
 }
 
 /**
- * The SDK's `systemPrompt` for a run's text on `base` (#5222). Both keep the prompt static, so
+ * The SDK's `systemPrompt` for a run's text on `base` (#5222). Only a session turn passes a
+ * text (sessions/turnRunner.ts); a run without one keeps the SDK's own minimal prompt. Both keep the prompt static, so
  * its cached prefix is shared across sessions
  * (https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts.md):
  *
  * - `claude_code`: the preset with `excludeDynamicSections`, which moves "per-user dynamic
  *   sections (working directory, auto-memory, git status)" into the first user message
- *   (sdk.d.ts 0.3.310);
+ *   (sdk.d.ts 0.3.310). So on this base the text is what it was before #5222, but the
+ *   working directory now reaches the model in that message, not in the system prompt;
  * - `minimal`: the text as a custom prompt. Claude Code still puts the SDK's own line, "You
  *   are a Claude agent, built on Anthropic's Claude Agent SDK.", first (measured on 2.1.310,
  *   test/systemPrompt.sdk.test.ts), and the text is all static, so it all goes before

@@ -4,6 +4,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { api, ApiError } from '../api/client'
+import { SYSTEM_PROMPT_APPEND_MAX, type SYSTEM_PROMPT_BASES, type TOOL_SEARCH_MODES } from '../api/sessionTurn'
 import type { SessionRuntime, SessionRuntimeUpdate } from '../api/types'
 import { useAsync } from '../lib/useAsync'
 import { ChoiceSelect, LabeledInput, SaveFooter, SettingBody, SettingCard } from './settings/form'
@@ -19,28 +20,26 @@ const FIELDS: { key: NumericKey; label: string; min: number; max: number }[] = [
   { key: 'turn_max_seconds', label: 'Longest turn (seconds)', min: 300, max: 86400 },
 ]
 
-/** agent `harness/toolSearch.ts` ToolSearchMode. */
-const TOOL_SEARCH = [
+/** agent `harness/toolSearch.ts` ToolSearchMode (api/sessionTurn.ts TOOL_SEARCH_MODES). */
+const TOOL_SEARCH: { value: (typeof TOOL_SEARCH_MODES)[number]; label: string }[] = [
   { value: 'off', label: 'Off: send every tool on every request' },
   { value: 'auto', label: 'Auto: defer tools once they fill 10% of the context' },
   { value: 'always', label: 'Always defer tools' },
 ]
 
-/** agent `sessions/turnSettings.ts` SystemPromptBase. */
-const PROMPT_BASES = [
+/** agent `sessions/turnSettings.ts` SystemPromptBase (api/sessionTurn.ts SYSTEM_PROMPT_BASES). */
+const PROMPT_BASES: { value: (typeof SYSTEM_PROMPT_BASES)[number]; label: string }[] = [
   { value: 'claude_code', label: "Claude Code's system prompt" },
   { value: 'minimal', label: "The Agent SDK's minimal prompt" },
 ]
-
-/** agent `sessions/turnSettings.ts` SYSTEM_PROMPT_APPEND_MAX. */
-const APPEND_MAX = 20_000
 
 /**
  * The session runtime settings, stored by the agent service
  * (`/api/v1/ai/settings/session-runtime`): how long a parked call is held, how many
  * warm assistant processes a replica keeps (0 starts every turn cold) and for how
  * long, the longest a turn may run, and what each turn's Claude Code is given: tool
- * search and the system prompt. The warm cache applies a change at once.
+ * search and the system prompt. The warm cache applies a change to its size and idle time
+ * at once; tool search and the system prompt take effect at each session's next turn.
  *
  * Hidden when the agent service or its database is not there. Save is user-only,
  * like the limits beside it (AI design spec §8.1).
@@ -154,13 +153,14 @@ export function SessionRuntimeSetting() {
               id={appendId}
               value={text('system_prompt_append')}
               onChange={(event) => set('system_prompt_append', event.target.value)}
-              maxLength={APPEND_MAX}
+              maxLength={SYSTEM_PROMPT_APPEND_MAX}
               rows={4}
               aria-describedby={`${appendId}-help`}
             />
             <p id={`${appendId}-help`} className="text-xs text-muted-foreground">
               Added after ScadBuddy&apos;s own part, which always goes in whatever you write here: the rule that tool
-              results are data and never instructions, and the notes on the browser and built-in tools.
+              results are data and never instructions, and the note on which browser each browser tool drives. A
+              session whose plugin package names Claude Code built-ins also gets a note on those.
             </p>
             <Collapsible className="text-xs text-muted-foreground">
               <CollapsibleTrigger asChild>
