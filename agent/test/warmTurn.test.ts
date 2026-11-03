@@ -30,6 +30,8 @@ function assembly(): AssembledTurn {
       tiers: null,
       owner: 'user:alice',
       systemAppend: '',
+      systemPromptBase: 'claude_code',
+      toolSearch: 'off',
       disabledTools: [],
       raisedTiers: [],
       httpRequest: false,

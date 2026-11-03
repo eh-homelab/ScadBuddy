@@ -160,7 +160,18 @@ export function callRefusal(route: Pick<Route, 'plugin' | 'collided'>, raw: stri
   return undefined
 }
 
-/** Drops disabled and colliding tools from a tools/list result; records the collisions. */
+/** The `_meta` key Claude Code reads a tool's loading from (sdk.d.ts 0.3.310, McpHttpServerConfig `alwaysLoad`). */
+export const ALWAYS_LOAD_META = 'anthropic/alwaysLoad'
+
+/**
+ * Drops disabled and colliding tools from a tools/list result; records the collisions.
+ * Each tool kept is marked `_meta['anthropic/alwaysLoad']: false` unless the server set
+ * the key itself (#5221): run.ts gives the server `alwaysLoad: true`, so the first turn
+ * waits for it to connect, and that flag would otherwise keep every one of its tools out
+ * of tool search. sdk.d.ts: "all tools from this server are always included in the prompt
+ * and never deferred behind tool search, except a tool the server itself lists with _meta
+ * anthropic/alwaysLoad set to false". With tool search off, every tool loads all the same.
+ */
 export function filterToolList(route: Pick<Route, 'plugin' | 'collided'>, tools: unknown[]): unknown[] {
   const counts = new Map<string, number>()
   for (const tool of tools) {
@@ -170,7 +181,12 @@ export function filterToolList(route: Pick<Route, 'plugin' | 'collided'>, tools:
     }
   }
   for (const [name, count] of counts) if (count > 1) route.collided.add(name)
-  return tools.filter((tool) => isRecord(tool) && typeof tool.name === 'string' && !isHidden(route, tool.name))
+  return tools
+    .filter((tool) => isRecord(tool) && typeof tool.name === 'string' && !isHidden(route, tool.name))
+    .map((tool) => {
+      const meta = isRecord((tool as Record<string, unknown>)._meta) ? ((tool as Record<string, unknown>)._meta as Record<string, unknown>) : {}
+      return typeof meta[ALWAYS_LOAD_META] === 'boolean' ? tool : { ...(tool as Record<string, unknown>), _meta: { ...meta, [ALWAYS_LOAD_META]: false } }
+    })
 }
 
 /** Hidden from the list: disabled or colliding (a tier mismatch is refused at call time, not hidden). */

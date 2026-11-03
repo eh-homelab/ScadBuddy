@@ -255,6 +255,33 @@ main on 2026-11-01:
   8, 0 to 32; 0 makes every turn cold), Warm process idle time (default 600 s) and Longest
   turn (`turn_max_seconds`, default 7200 s). A turn past its longest time ends there; it is
   not placed again, since that could triple its spend.
+- **What a turn's Claude Code is given.** The same section and route set three more values,
+  read as each turn is assembled
+  ([`agent/src/sessions/turnSettings.ts`](../../agent/src/sessions/turnSettings.ts)). Each is
+  part of the warm process's fingerprint, so a change recycles a session's process at its
+  next turn, and a write tells every replica to evict:
+  - `tool_search` (`off`, `auto`, `always`; default `auto`, #5221): `ENABLE_TOOL_SEARCH`
+    (`false`, `auto`, `true`) and Claude Code's `ToolSearch` built-in, at `read`
+    ([`agent/src/harness/toolSearch.ts`](../../agent/src/harness/toolSearch.ts)). With it on,
+    a turn gets a few tools in full (`UPFRONT_TOOLS`, the question tools and Claude Code's
+    core built-ins) and the rest by name, and loads one with ToolSearch. `auto` defers once
+    the deferrable definitions reach 10% of the context, which ScadBuddy's own registry
+    passes alone ([tool search](https://code.claude.com/docs/en/agent-sdk/tool-search.md)).
+    Measured on Claude Code 2.1.310 against the fake endpoint, the first request of a turn
+    with the whole registry went from 334,793 bytes (283 tool definitions) to 47,990. A remote
+    plugin's tools are deferred too: the forwarder marks each `_meta['anthropic/alwaysLoad']:
+    false`, while the server keeps `alwaysLoad: true` so the first turn waits for it.
+  - `system_prompt_base` (`claude_code` or `minimal`; default `claude_code`, #5222): Claude
+    Code's preset (29,033 bytes of `system` on 2.1.310), or the SDK's one-line default with
+    ScadBuddy's text after it (2,400 bytes).
+  - `system_prompt_append` (up to 20,000 characters, default empty): the user's own text. It
+    goes after ScadBuddy's fixed part, which always goes in: the untrusted-data notice
+    ([`agent/src/safety/untrusted.ts`](../../agent/src/safety/untrusted.ts)), the browser
+    tools guide and the note on served built-ins. `GET` returns that part as
+    `system_prompt_fixed`, and the section shows it. The preset is sent with
+    `excludeDynamicSections`, the minimal base before `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, both
+    with `snapshot: false`, so the prompt is static and its cache is shared across sessions
+    ([modifying system prompts](https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts.md)).
 - **Tool calls.** Each tool call of a turn is a `ToolCall` workflow of its own,
   `session-<id>-call-<tool_use_id>`, whose one activity runs the tool on whichever worker
   takes it ([`agent/src/temporal/toolCall.ts`](../../agent/src/temporal/toolCall.ts),

@@ -195,7 +195,9 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
       }
       if (req.method === 'POST' && path === '/v1/messages/count_tokens') {
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ input_tokens: 10 }))
+        // About four bytes a token, so a count is as large as the request: Claude Code's tool
+        // search `auto` defers once the tools it counts this way reach 10% of the context (#5221).
+        res.end(JSON.stringify({ input_tokens: Math.ceil(raw.length / 4) }))
         return
       }
       if (req.method === 'POST' && path === '/v1/messages') {

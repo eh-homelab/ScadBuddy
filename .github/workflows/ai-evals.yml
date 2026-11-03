@@ -29,6 +29,14 @@ on:
         description: "Claude model id or alias (blank: the Agent SDK's default)"
         required: false
         type: string
+      tool_search:
+        description: "Tool search: off, auto or always (blank: the default)"
+        required: false
+        type: string
+      system_prompt_base:
+        description: "System prompt base: claude_code or minimal (blank: the default)"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -173,12 +181,15 @@ jobs:
           docker cp "$id:/usr/local/bin/temporal" "$RUNNER_TEMP/temporal"
           "$RUNNER_TEMP/temporal" --version
 
-      # `inputs.model` reaches the run as an environment variable,
+      # `inputs.model`, `inputs.tool_search` and `inputs.system_prompt_base` reach the run as
+      # environment variables,
       # never interpolated into the script.
       - name: Run the live evals
         env:
           SCADBUDDY_EVAL_ANTHROPIC_API_KEY: ${{ secrets.SCADBUDDY_EVAL_ANTHROPIC_API_KEY }}
           SCADBUDDY_EVAL_MODEL: ${{ inputs.model }}
+          SCADBUDDY_EVAL_TOOL_SEARCH: ${{ inputs.tool_search }}
+          SCADBUDDY_EVAL_SYSTEM_PROMPT_BASE: ${{ inputs.system_prompt_base }}
           SCADBUDDY_EVAL_REPORT: ${{ runner.temp }}/eval-report.json
           SCADBUDDY_EVAL_BACKEND_URL: ${{ steps.key.outputs.present == 'true' && 'http://127.0.0.1:18080' || '' }}
           # The eval stack's own throwaway database (it copies a migrated

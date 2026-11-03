@@ -3,6 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
 import { mockSessionRuntimeWrites } from '../mocks/features/assistantSessions'
 import { server } from '../mocks/server'
+import { choose } from '../test/select'
 import { renderPage } from '../test/utils'
 import { SessionRuntimeSetting } from './SessionRuntimeSetting'
 
@@ -26,6 +27,25 @@ describe('SessionRuntimeSetting', () => {
     expect(mockSessionRuntimeWrites()).toEqual([{ warm_max_per_replica: 0, warm_idle_seconds: 120 }])
     expect(warm).toHaveValue(0)
     expect(hold).toHaveValue(300)
+  })
+
+  it('saves tool search, the system prompt base and the user text, and shows the part that always goes in', async () => {
+    const { user } = renderPage(<SessionRuntimeSetting />)
+    const search = await screen.findByRole('combobox', { name: 'Tool search' })
+    expect(search).toHaveTextContent('Auto')
+    expect(screen.getByRole('combobox', { name: 'System prompt' })).toHaveTextContent("Claude Code's system prompt")
+    expect(screen.getByText(/which always goes in whatever you write here/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: "ScadBuddy's part (always included)" }))
+    expect(screen.getByText(/untrusted_content_policy/)).toBeInTheDocument()
+
+    await choose(user, search, 'Always defer tools')
+    await choose(user, screen.getByRole('combobox', { name: 'System prompt' }), "The Agent SDK's minimal prompt")
+    await user.type(screen.getByRole('textbox', { name: 'Your instructions' }), 'Use metric units.')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Saved.')
+    expect(mockSessionRuntimeWrites()).toEqual([
+      { tool_search: 'always', system_prompt_base: 'minimal', system_prompt_append: 'Use metric units.' },
+    ])
   })
 
   it('is for the user only', async () => {

@@ -7,6 +7,7 @@ import type { AuditLog } from '../audit/log.js'
 import { TOOL_USE_META, toolContextFor, withSpan } from '../telemetry/trace.js'
 import { MCP_UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
 import type { CallApproval } from '../harness/seamLedger.js'
+import { UPFRONT_TOOLS } from '../harness/toolSearch.js'
 import type { ToolCallStarter } from './activityProjection.js'
 import { errorResult, parsedOrRaw, type Progress, type Risk, runTool, runToolWithOutcome, type Tool, type ToolRun, type ToolServices } from './registry.js'
 
@@ -157,7 +158,8 @@ export function createHarnessServer(
               seamTier: seamTierOf(t, toolUseId),
             })
           }),
-        { annotations: t.annotations },
+        // The few every turn needs stay out of tool search (harness/toolSearch.ts, #5221).
+        { annotations: t.annotations, ...(UPFRONT_TOOLS.has(t.name) ? { alwaysLoad: true } : {}) },
       ),
     ),
   })
