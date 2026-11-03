@@ -24,7 +24,12 @@ import { sha256, type SessionFiles, WORKSPACE_PATH_MAX, WorkspaceError, type Wor
 //     each file whose sha256 is not its base is written to the record, and each base file gone
 //     from the directory is deleted there, both only while the record still holds the base
 //     (`expectedSha256`); the base then moves on. A record changed meanwhile (a panel upload,
-//     a `workspace_*` write during the turn) wins: the next placement brings it in.
+//     a `workspace_*` write during the turn) wins: the next placement brings it in. A running
+//     turn's write-back on its timer (`newFiles: false`) syncs only the files the base holds, so a
+//     scratch tree the turn builds and removes again never reaches the record (#5140); its new
+//     files are offered at the next park or at the turn's end. No write-back offers a new file
+//     under a scratch directory (`SCRATCH`, such as `node_modules`); the record's own files there
+//     still sync, and the rest is removed with the strays.
 //   - `evict`, once the session's warm process here has closed (warm.ts `onClosed`): what changed
 //     since the last sync is written back, then the copy goes, so the pod's disk holds at most its
 //     warm sessions' directories. Not while a turn is placed in it or a Monitor command runs there
@@ -54,6 +59,19 @@ import { sha256, type SessionFiles, WORKSPACE_PATH_MAX, WorkspaceError, type Wor
 const SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$/
 /** How deep a workspace path goes (store.ts WORKSPACE_PATH: four segments). */
 const MAX_SEGMENTS = 4
+/**
+ * Directory names whose new files no write-back offers to the record (#5140): a package manager's
+ * or an interpreter's scratch tree, which a turn rebuilds and the user never asked to keep. Dot
+ * names (`.cache`, `.venv`, `.git`) are never workspace segments anyway. `dist`, `build` and
+ * `target` are left out: a turn's deliverable can live there.
+ */
+export const SCRATCH: ReadonlySet<string> = new Set(['node_modules', '__pycache__'])
+/** The path of `rel`'s first scratch directory (`SCRATCH`), if it is under one. */
+function scratchRoot(rel: string): string | undefined {
+  const parts = rel.split('/')
+  const at = parts.slice(0, -1).findIndex((part) => SCRATCH.has(part))
+  return at < 0 ? undefined : parts.slice(0, at + 1).join('/')
+}
 /** What a write-back records as a file's source. */
 const SOURCE = { kind: 'session_dir' } as const
 /** A directory no turn was placed in for this long is removed by the sweep, a backstop for a missed eviction. */
@@ -178,9 +196,14 @@ export type WriteBack = {
   skipped: { path: string; why: string; code: WorkspaceErrorCode }[]
   /** How many entries that cannot be synced (links, dot-files, past four levels) were removed. */
   strays: number
+  /** How many new files under a scratch directory (`SCRATCH`) were not offered; a pruning write-back removed them. */
+  scratch: number
   /** The bytes the directory held when it was walked, every entry counted (a link as itself). */
   bytes: number
 }
+
+/** How a write-back runs: `prune: false` removes nothing (a running turn's), `newFiles: false` offers no new file (its timer's). */
+export type WriteBackOptions = { prune?: boolean; newFiles?: boolean }
 
 /** What a walk found: the regular files at workspace paths, by path, and every other entry (absolute). */
 type Walked = { files: Map<string, string>; strays: string[]; bytes: number }
@@ -533,17 +556,32 @@ export class SessionDirectory {
   /**
    * Writes the directory's changes since the placement's base to the session's workspace (the
    * header), and moves the base on to what it synced: a turn writes back at each park and again
-   * at its end.
+   * at its end. `newFiles: false` (a running turn's timer) syncs only the files the base holds.
    */
-  writeBack(placement: Placement, options: { prune?: boolean } = {}): Promise<WriteBack> {
+  writeBack(placement: Placement, options: WriteBackOptions = {}): Promise<WriteBack> {
     return this.#serial(placement.sessionId, () => this.#writeBack(placement, options))
   }
 
-  async #writeBack(placement: Placement, options: { prune?: boolean } = {}): Promise<WriteBack> {
+  async #writeBack(placement: Placement, options: WriteBackOptions = {}): Promise<WriteBack> {
     const { sessionId, dir, base } = placement
     const { fileMaxBytes } = await this.#files.limits()
-    const found = await walk(dir)
-    const out: WriteBack = { written: [], deleted: [], skipped: [], strays: 0, bytes: found.bytes }
+    const walked = await walk(dir)
+    const out: WriteBack = { written: [], deleted: [], skipped: [], strays: 0, scratch: 0, bytes: walked.bytes }
+    // A new file under a scratch directory is never offered (SCRATCH): left out here, so it is
+    // neither written nor counted against the file quota; a pruning write-back removes its tree.
+    const scratch = new Set<string>()
+    const files = new Map<string, string>()
+    for (const [rel, abs] of walked.files) {
+      const root = base.has(rel) ? undefined : scratchRoot(rel)
+      if (root === undefined) files.set(rel, abs)
+      else {
+        scratch.add(root)
+        out.scratch += 1
+      }
+    }
+    // Not yet offered on the timer (`newFiles: false`): the next park or the turn's end offers them.
+    if (options.newFiles === false) for (const rel of [...files.keys()]) if (!base.has(rel)) files.delete(rel)
+    const found = { ...walked, files }
     // Only offers, no removal: a write-back during a turn (`prune: false`, at a park or on the
     // timer) leaves what the turn still uses (a .git, a fifth level, a large intermediate file),
     // and so does one while a Monitor command runs (removing a file would leave it writing to an
@@ -599,6 +637,12 @@ export class SessionDirectory {
     if (!keepAll) {
       for (const stray of found.strays) await rm(stray, { recursive: true, force: true })
       out.strays = found.strays.length
+      // A scratch tree that holds a file of the record's keeps that file: only its new files go.
+      for (const root of scratch) {
+        if ([...base.keys()].some((rel) => rel.startsWith(root + '/'))) {
+          for (const [rel, abs] of walked.files) if (rel.startsWith(root + '/') && !base.has(rel)) await rm(abs, { force: true })
+        } else await rm(path.join(dir, root), { recursive: true, force: true })
+      }
     }
     return out
   }
