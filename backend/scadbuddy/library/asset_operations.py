@@ -50,13 +50,14 @@ def asset_kinds(state: AppState) -> list[OperationKind]:
 
     async def fetch_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         url = (await _claimed(request["url"])).decode()
-        # A request recorded before #959 has no licence.
+        # A request recorded before #959 has no licence and no host allowed once.
         licence = request.get("licence")
         fetched = await assets_api.fetch_run(
             request["slug"],
             url,
             state,
             licence=None if licence is None else AssetLicence.model_validate(licence),
+            allow_host=request.get("allow_host"),
         )
         dumped: dict[str, Any] = fetched.model_dump(mode="json")
         return dumped

@@ -649,6 +649,30 @@ class AssetStore:
                 (*_meta_values(meta), now, now),
             )
 
+    def spend_fetch_grant(
+        self, nonce: str, idempotency_key: str | None, expires_at: datetime
+    ) -> bool:
+        """Spend a one-off host grant's nonce (#959, `library/fetch_grants.py`): whether
+        this fetch may use it, the first time, or again under the Idempotency-Key that
+        first spent it (a re-send of the same fetch). Expired rows go as it runs."""
+        with self._require().connection() as conn, conn.transaction():
+            conn.execute("DELETE FROM asset_fetch_grants WHERE expires_at < now()")
+            spent = conn.execute(
+                "INSERT INTO asset_fetch_grants (nonce, idempotency_key, expires_at)"
+                " VALUES (%s, %s, %s) ON CONFLICT (nonce) DO NOTHING RETURNING nonce",
+                (nonce, idempotency_key, expires_at),
+            ).fetchone()
+            if spent is not None:
+                return True
+            row = conn.execute(
+                "SELECT idempotency_key FROM asset_fetch_grants WHERE nonce = %s", (nonce,)
+            ).fetchone()
+        return (
+            row is not None
+            and idempotency_key is not None
+            and row["idempotency_key"] == idempotency_key
+        )
+
     def ids(self) -> list[str]:
         """Every blob this root holds, by id."""
         return sorted(self._blobs())

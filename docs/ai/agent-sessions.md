@@ -51,7 +51,8 @@ Because the call's input holds only the references, the event log's `tool.call`,
 `/mcp` audit row and an approval summary record no image bytes, and the request stays far
 under `/mcp`'s 4 MiB body cap. A URL is not a kind: fetching one the caller chose is
 outward (spec §8.2). Bring a web image in with `fetch_asset` (approved, held to the
-Settings allowlist), then send it as an `asset`. The `user.turn` preview is the backend's
+Settings allowlist, or to one host off it that a person approves for that one fetch, #959),
+then send it as an `asset`. The `user.turn` preview is the backend's
 own small copy (a view drawn at 128 px, a media item's thumbnail), or the image itself
 when it is a still of at most 48 KiB, or else a one-pixel grey placeholder. The turn names
 the image and its preview, each stored with the session, never their bytes (#2479).

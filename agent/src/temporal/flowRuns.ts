@@ -40,6 +40,8 @@ export interface FlowRuns {
    * now revoked or expired: `approved` is false for it, and it is refused GrantRevoked.
    */
   lapsed?(requestId: string, inputHash?: string): Promise<boolean>
+  /** Whether a person approved the call (responder `browser`), not the run's grant (#959). */
+  byPerson?(requestId: string, inputHash?: string): Promise<boolean>
 }
 
 /** `started_by` as the backend writes it (core/authorship.py `current_author()`). */
@@ -122,6 +124,15 @@ export class PgFlowRuns implements FlowRuns {
           SELECT 1 FROM flow_grants g
           WHERE 'grant:' || g.id = d.responder AND g.status = 'approved'
             AND g.revoked_at IS NULL AND now() < g.expires_at))`
+    return rows.length > 0
+  }
+
+  async byPerson(requestId: string, inputHash?: string): Promise<boolean> {
+    if (inputHash === undefined) return false
+    const rows = await this.#sql`
+      SELECT 1 FROM workflow_run_decisions d
+      WHERE d.request_id = ${requestId} AND d.kind = 'approval' AND d.outcome = 'approved'
+        AND d.input_hash = ${inputHash} AND d.responder = 'browser'`
     return rows.length > 0
   }
 
