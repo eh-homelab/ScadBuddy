@@ -1,5 +1,5 @@
 import { type Client, WithStartWorkflowOperation, WorkflowNotFoundError } from '@temporalio/client'
-import { historyToJSON } from '@temporalio/common/lib/proto-utils.js'
+import { historyToJSON } from '@temporalio/common/proto-utils'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { bundleWorkflowCode, Worker, type WorkflowBundle } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'

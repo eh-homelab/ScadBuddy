@@ -1,5 +1,5 @@
 import { Client } from '@temporalio/client'
-import { historyToJSON } from '@temporalio/common/lib/proto-utils.js'
+import { historyToJSON } from '@temporalio/common/proto-utils'
 import type { TestWorkflowEnvironment } from '@temporalio/testing'
 import { Worker } from '@temporalio/worker'
 import { randomUUID } from 'node:crypto'

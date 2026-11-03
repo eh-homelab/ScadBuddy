@@ -306,15 +306,17 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'make a box' })
     expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
-    // A's 429 is sent once. B's 400 is sent twice, the second time without the
-    // display beta: Claude Code's own re-send, on the same credential, which the
-    // fallback never sees (credentialErrors.ts). It reaches no third credential.
+    // A's 429 is sent once. B's 400 is sent three times, the second without the
+    // token-count beta and the third without the display beta too: Claude Code's
+    // own re-sends, on the same credential, which the fallback never sees
+    // (credentialErrors.ts). It reaches no third credential.
     expect(fake.messageCalls().map((c) => [c.headers.authorization, displayUpdates(c)])).toEqual([
       [`Bearer ${TOKEN_A}`, true],
       [`Bearer ${TOKEN_B}`, true],
+      [`Bearer ${TOKEN_B}`, true],
       [`Bearer ${TOKEN_B}`, false],
     ])
-    // None of the three is a turn, and a refused request carries no usage to price.
+    // None of the four is a turn, and a refused request carries no usage to price.
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'failed', turns: 0, costUsd: 0 })
     const events = (await allEvents(m, session.id)).map((e) => e.event)
     await expectPanelAccepts(events)
@@ -368,8 +370,9 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
 
   /**
    * #1101: a gateway that refuses `thinking.display`, and a replica with two
-   * credentials on it, after the first turn: Claude Code's re-send without the
-   * display beta was answered on the same credential, and nothing fell back.
+   * credentials on it, after the first turn: Claude Code's re-sends (without the
+   * token-count beta, refused again, then without the display beta) were answered
+   * on the same credential, and nothing fell back.
    * The second turn makes two tool calls, so it has more than one request after
    * a refused one.
    */
@@ -413,6 +416,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     const asked = (calls: RecordedRequest[]) => calls.map((c) => [c.headers.authorization, displayUpdates(c)])
     expect(asked(fake.messageCalls())).toEqual([
       [`Bearer ${TOKEN_A}`, true],
+      [`Bearer ${TOKEN_A}`, true],
       [`Bearer ${TOKEN_A}`, false],
     ])
     expect(reports).toEqual(['a: ok'])
@@ -420,30 +424,32 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     return { m, session, asked, TOKEN_A }
   }
 
-  it('a gateway that refuses thinking.display costs one refused request a process, and no fallback (#1101)', async () => {
+  it('a gateway that refuses thinking.display costs two refused requests a process, and no fallback (#1101)', async () => {
     const { m, session, asked, TOKEN_A } = await strictGateway()
     // The next turn runs on the same, warm Claude Code (spec 2026-10-13 §5.3),
     // which dropped the field for the rest of its life after the refusal: the
     // turn's three requests, the two tool calls' follow-ups among them, all go
     // without it, and none is refused.
     expect(await (await m.send(session.id, browser, 'and a lid')).done).toMatchObject({ kind: 'result', subtype: 'success' })
-    expect(asked(fake.messageCalls().slice(2))).toEqual([
+    expect(asked(fake.messageCalls().slice(3))).toEqual([
       [`Bearer ${TOKEN_A}`, false],
       [`Bearer ${TOKEN_A}`, false],
       [`Bearer ${TOKEN_A}`, false],
     ])
-    // Three answered round trips this time, and the refused request is none of them.
+    // Three answered round trips this time, and the refused requests are none of them.
     expect(await m.get(session.id, browser)).toMatchObject({ status: 'idle', turns: 4 })
   }, 60_000)
 
-  it('a fresh process after the refusal sends the field once more, and is refused once more (#1101)', async () => {
+  it('a fresh process after the refusal sends the field again, and is refused again (#1101)', async () => {
     const { m, session, asked, TOKEN_A } = await strictGateway()
     // The process is gone (an eviction: a plugin changed, say): the next turn's
-    // is new, and sends the field again, once. After its refusal it drops it for
-    // the rest of the process, so the two tool calls' follow-ups go without it.
+    // is new, and sends the field again, twice (with and without the token-count
+    // beta). After its refusals it drops it for the rest of the process, so the two
+    // tool calls' follow-ups go without it.
     await m.warm.evict(session.id, 'the test')
     expect(await (await m.send(session.id, browser, 'and a lid')).done).toMatchObject({ kind: 'result', subtype: 'success' })
-    expect(asked(fake.messageCalls().slice(2))).toEqual([
+    expect(asked(fake.messageCalls().slice(3))).toEqual([
+      [`Bearer ${TOKEN_A}`, true],
       [`Bearer ${TOKEN_A}`, true],
       [`Bearer ${TOKEN_A}`, false],
       [`Bearer ${TOKEN_A}`, false],
@@ -466,13 +472,14 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`sessions ag
     })
     const { session, turn } = await m.start(browser, { origin: 'chat', prompt: 'find a box' })
     expect(await turn!.done).toMatchObject({ kind: 'failed', message: expect.stringMatching(/refused the request \(HTTP 400\)/) })
-    // Three model requests: the tool call, which counts; the refused one; and
-    // Claude Code's re-send of it without the display beta (credentialErrors.ts),
-    // refused too. Neither refusal counts, or costs anything: the turn spent one
-    // priced round trip, as before.
+    // Four model requests: the tool call, which counts; the refused one; and
+    // Claude Code's two re-sends of it, without the token-count beta and then
+    // without the display beta too (credentialErrors.ts), refused too. No refusal
+    // counts, or costs anything: the turn spent one priced round trip, as before.
     const calls = fake.messageCalls()
-    expect(calls.map(displayUpdates)).toEqual([true, true, false])
+    expect(calls.map(displayUpdates)).toEqual([true, true, true, false])
     expect(calls[2]?.body?.messages).toEqual(calls[1]?.body?.messages)
+    expect(calls[3]?.body?.messages).toEqual(calls[1]?.body?.messages)
     const row = await m.get(session.id, browser)
     expect(row).toMatchObject({ status: 'failed', turns: 1 })
     expect(row.costUsd).toBeCloseTo(REPLY_COST_USD, 12)

@@ -14,13 +14,14 @@ import { assertGatewayHostAllowed, type Resolver, systemResolver } from '../http
 //     not retried with an `api_retry`: this is the only sign of them.
 //   - the `result`, with `is_error` and `api_error_status`.
 //
-// New in 2.1.287 (#1540): a 400 that is not a billing refusal is sent once
-// more, on the same credential, without the `thinking-display-updates` beta
-// that version adds, in case the beta was what the endpoint refused (its
-// bundle: "retry:thinking-display-updates-unclaimed"). Measured through a
-// gateway, as the fake is configured: at most once per query, and the
-// messages above are exactly as before, so nothing here sees it. A refused
-// request is not billed, so it costs one more request, not money.
+// A 400 that is not a billing refusal is sent twice more (2.1.314), on the
+// same credential, in case a beta was what the endpoint refused: first without
+// the `thinking-token-count` beta, then without the `thinking-display-updates`
+// beta too (its bundle: "retry:thinking-token-count-unclaimed",
+// "retry:thinking-display-unclaimed"). Measured through a gateway, as the fake
+// is configured: at most twice per query, and the messages above are exactly
+// as before, so nothing here sees it. A refused request is not billed, so it
+// costs two more requests, not money. 2.1.287 (#1540) made only the second.
 //
 // Neither carries the response headers. A 429 with `retry-after: 60` is
 // reported as `api_retry` with `retry_delay_ms: 60000`, but one with
@@ -183,7 +184,8 @@ function utc(year: number, month: number, day: number, hour: number, minute: num
  * Claude Code's, the same as a durable segment's result, so it names the reset an
  * OAuth key's probe cannot ask for (`probeCredential`): measured on Claude Code 2.1.296,
  * an OAuth key's 429 with `anthropic-ratelimit-unified-status: rejected` ends in
- * "You've hit your session limit · resets 6:35pm (UTC)" (test/fallback.e2e.test.ts), in
+ * "You've hit your session limit · resets 6:35pm (UTC)" (2.1.314: "your 5-hour limit";
+ * test/fallback.e2e.test.ts), in
  * the zone Claude Code runs in, which options.ts pins to UTC.
  *
  * The text names the minute, never the second, so a reset within RESET_GRACE_MS
