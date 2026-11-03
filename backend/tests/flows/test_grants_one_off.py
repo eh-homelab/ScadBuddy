@@ -70,7 +70,7 @@ async def test_match_grant_parks_it_without_reading_or_spending_the_grant() -> N
         return CallFacts(fn=fn, tool=tool, args=args)
 
     verdict = await match_grant(
-        Store(),  # type: ignore[arg-type]
+        Store(),
         facts_of,
         lambda fn, tool, args: "hash",
         run_id="r1",
