@@ -29,9 +29,14 @@ describe('fetchPendingInput', () => {
     setPendingApprovals(2)
     // The mock's approvals are sessionless, as an MCP client's prepare is (#4813).
     const unattached = [expect.objectContaining({ tool: 'send_to_bambuddy' }), expect.objectContaining({ tool: 'send_to_bambuddy' })]
-    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0, summariesTruncated: false, unattached })
+    const approvalNotices = Array.from({ length: 2 }, () => expect.objectContaining({ reason: 'approval' }))
+    expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 0, attention: 0, summaries: 0, summariesTruncated: false, unattached, notices: approvalNotices })
     setPendingAnswers(1, 3)
-    const notices = Array.from({ length: 3 }, () => expect.objectContaining({ reason: 'tab_disconnected' }))
+    const notices = [
+      ...approvalNotices,
+      expect.objectContaining({ reason: 'question' }),
+      ...Array.from({ length: 3 }, () => expect.objectContaining({ reason: 'tab_disconnected' })),
+    ]
     expect(await fetchPendingInput()).toEqual({ approvals: 2, questions: 1, attention: 3, summaries: 0, summariesTruncated: false, unattached, notices })
   })
 
@@ -82,7 +87,7 @@ describe('fetchPendingInput', () => {
   it('counts a done summary apart: it waits for nothing, so it is not in the waiting total', async () => {
     setPendingAnswers(1, 1, 2)
     const counts = await fetchPendingInput()
-    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2, summariesTruncated: false, notices: [expect.objectContaining({ reason: 'tab_disconnected' })] })
+    expect(counts).toEqual({ approvals: 0, questions: 1, attention: 1, summaries: 2, summariesTruncated: false, notices: [expect.objectContaining({ reason: 'question' }), expect.objectContaining({ reason: 'tab_disconnected' })] })
     expect(totalOf(counts!)).toBe(2)
     expect(attentionLabel(totalOf(counts!))).toBe('2 waiting for you')
     expect(attentionDetail(counts)).toBe('1 question, 1 attention request')
@@ -94,7 +99,7 @@ describe('fetchPendingInput', () => {
     expect(summaryLabel(only)).toBe('1 summary')
   })
 
-  it('lists the attention requests waiting on the user, for their OS notification (#815)', async () => {
+  it('lists the requests waiting on the user, approvals and questions among them, for their OS notification (#815)', async () => {
     const attention = { kind: 'answer', id: 'question:q1', session_id: 'sess-1', prompt: 'Reopen the tab?', attention: { reason: 'tab_disconnected', on_timeout: 'proceed' } }
     server.use(
       http.get('/api/v1/ai/pending-input', () =>
@@ -102,10 +107,12 @@ describe('fetchPendingInput', () => {
           entries: [
             attention,
             { ...attention, id: 'question:q2', session_id: null, prompt: undefined, attention: { reason: 'blocked', on_timeout: 'wait' } },
-            // A summary waits for nothing; a question, an approval, one past its timer and one with no id are not attention requests to announce.
+            // A summary waits for nothing, and one past its timer or with no id is not announced; a
+            // plain question and an approval are, on the same channels as an attention request.
             { ...attention, id: 'question:q3', attention: { reason: 'done', on_timeout: null } },
             { kind: 'answer', id: 'question:q4', session_id: 'sess-1', prompt: 'Which colour?' },
-            { kind: 'approval', id: 'approval:a1', session_id: 'sess-1' },
+            { kind: 'approval', id: 'approval:a1', session_id: 'sess-1', summary: 'Send to Bambuddy' },
+            { kind: 'approval', id: 'approval:a2', session_id: 'sess-1', expiring: true },
             { ...attention, id: 'question:q5', expiring: true },
             { ...attention, id: undefined },
           ],
@@ -115,6 +122,8 @@ describe('fetchPendingInput', () => {
     expect((await fetchPendingInput())?.notices).toEqual([
       { id: 'question:q1', sessionId: 'sess-1', reason: 'tab_disconnected', message: 'Reopen the tab?' },
       { id: 'question:q2', sessionId: null, reason: 'blocked', message: '' },
+      { id: 'question:q4', sessionId: 'sess-1', reason: 'question', message: 'Which colour?' },
+      { id: 'approval:a1', sessionId: 'sess-1', reason: 'approval', message: 'Send to Bambuddy' },
     ])
   })
 

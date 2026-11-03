@@ -11,7 +11,10 @@ const TITLES = {
   tab_disconnected: 'The assistant lost its ScadBuddy tab',
   question: 'The assistant has a question',
   blocked: 'The assistant is blocked',
+  approval: 'The assistant needs your approval',
 }
+/** What to do, by reason (the agent's notify/dispatcher.ts `noticeBody`). */
+const BODIES = { approval: 'Open ScadBuddy to decide it.' }
 
 self.addEventListener('install', () => self.skipWaiting())
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()))
@@ -30,7 +33,7 @@ self.addEventListener('push', (event) => {
       if (windows.some((w) => w.visibilityState === 'visible')) return
       const id = typeof data.request_id === 'string' ? data.request_id : undefined
       await self.registration.showNotification(TITLES[data.reason] || 'The assistant needs you', {
-        body: 'Open ScadBuddy to answer it.',
+        body: BODIES[data.reason] || 'Open ScadBuddy to answer it.',
         icon: '/logo-512.png',
         // One per request: a page's own notification for it (same tag) replaces this, and the reverse.
         ...(id ? { tag: id } : {}),

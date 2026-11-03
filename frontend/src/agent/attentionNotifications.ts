@@ -36,6 +36,8 @@ export function noticeTitle(reason: string): string {
       return 'The assistant has a question'
     case 'blocked':
       return 'The assistant is blocked'
+    case 'approval':
+      return 'The assistant needs your approval'
     default:
       return 'The assistant needs you'
   }

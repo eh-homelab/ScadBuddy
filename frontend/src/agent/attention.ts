@@ -182,14 +182,19 @@ function unattached(entries: readonly PendingEntry[]): PendingApproval[] {
   return approvals
 }
 
-/** The attention requests that wait on the user, as `read` counts them; never a done summary. */
+/**
+ * What waits on the user, as `read` counts it: approvals (reason `approval`), plain questions
+ * (`question`) and attention requests; never a done summary (the agent's `pendingNotices`).
+ */
 function notices(entries: readonly PendingEntry[]): AttentionNotice[] {
   const out: AttentionNotice[] = []
   for (const entry of entries) {
+    if (!entry.id || entry.expiring || entry.run?.hop === 'parent') continue
     const a = entry.attention
-    if (entry.kind !== 'answer' || !a || !entry.id || entry.expiring || entry.run?.hop === 'parent') continue
-    if (isDoneSummary(a.reason, a.on_timeout !== null)) continue
-    out.push({ id: entry.id, sessionId: typeof entry.session_id === 'string' ? entry.session_id : null, reason: a.reason, message: entry.prompt ?? '' })
+    if (a && isDoneSummary(a.reason, a.on_timeout !== null)) continue
+    const sessionId = typeof entry.session_id === 'string' ? entry.session_id : null
+    if (entry.kind === 'approval') out.push({ id: entry.id, sessionId, reason: 'approval', message: entry.summary ?? '' })
+    else out.push({ id: entry.id, sessionId, reason: a?.reason ?? 'question', message: entry.prompt ?? '' })
   }
   return out
 }

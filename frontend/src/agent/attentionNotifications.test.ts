@@ -162,6 +162,7 @@ describe('permission', () => {
   it('titles each reason', () => {
     expect(noticeTitle('question')).toBe('The assistant has a question')
     expect(noticeTitle('blocked')).toBe('The assistant is blocked')
+    expect(noticeTitle('approval')).toBe('The assistant needs your approval')
     expect(noticeTitle('something-new')).toBe('The assistant needs you')
   })
 })
