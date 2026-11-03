@@ -56,7 +56,9 @@ case "$1 $2" in
       if [ "$1" = --jq ]; then filter=$2; fi
       shift
     done
-    jq -r "$filter" "$FAKE/../runs/$runs.json" ;;
+    # The step reads a failed read as no failure, so a broken filter or a
+    # missing fixture must fail the case here.
+    jq -r "$filter" "$FAKE/../runs/$runs.json" || { echo "jq failed: $runs" >> "$FAKE/bad"; exit 2; } ;;
   *) echo "unexpected: $*" >> "$FAKE/bad"; exit 2 ;;
 esac
 EOF
@@ -67,6 +69,12 @@ mkdir -p "$work/runs"
 echo '[{"workflowName":"CI","conclusion":"","createdAt":"2026-11-03T10:00:00Z"}]' > "$work/runs/running.json"
 echo '[{"workflowName":"CI","conclusion":"success","createdAt":"2026-11-03T10:00:00Z"}]' > "$work/runs/passed.json"
 echo '[{"workflowName":"CI","conclusion":"failure","createdAt":"2026-11-03T10:00:00Z"}]' > "$work/runs/failed.json"
+# A failed run, then a later run of the same workflow from another event
+# that was skipped.
+cat > "$work/runs/failed-then-skipped.json" <<'EOF'
+[{"workflowName":"CI","conclusion":"skipped","createdAt":"2026-11-03T10:05:00Z"},
+ {"workflowName":"CI","conclusion":"failure","createdAt":"2026-11-03T10:00:00Z"}]
+EOF
 # A duplicate run cancelled by a newer one of the same workflow, still going.
 cat > "$work/runs/rerun.json" <<'EOF'
 [{"workflowName":"CI","conclusion":"","createdAt":"2026-11-03T10:05:00Z"},
@@ -146,6 +154,11 @@ EOF
 run cancelled-duplicate 3600 none 2 <<'EOF'
 42 true BLOCKED rerun
 none
+EOF
+
+# A later skipped run of the same workflow does not hide the failure.
+run skipped-after-failure 3600 failed 1 <<'EOF'
+42 true BLOCKED failed-then-skipped
 EOF
 
 # Every run passed but the PR stays BLOCKED (a required check the App cannot

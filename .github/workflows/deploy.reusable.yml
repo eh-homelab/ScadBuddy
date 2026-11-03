@@ -269,9 +269,11 @@ jobs:
             # A run still going, or none started yet, means "keep waiting";
             # a success too, until the merge. Only each workflow's newest run
             # counts, so a duplicate cancelled by its newer run does not.
+            # Skipped runs (another event's trigger that did nothing) are
+            # dropped first, so they never hide an earlier failure.
             # A failed read is not a failure.
             failed=$(gh run list --commit "$head" --json workflowName,conclusion,createdAt \
-              --jq 'group_by(.workflowName) | map(max_by(.createdAt))
+              --jq 'map(select(.conclusion != "skipped")) | group_by(.workflowName) | map(max_by(.createdAt))
                 | map(select(.conclusion | IN("failure", "cancelled", "timed_out", "startup_failure"))) | length' \
               || true)
             if [ "${failed:-0}" != 0 ]; then outcome=failed; break; fi
