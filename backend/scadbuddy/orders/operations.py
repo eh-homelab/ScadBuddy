@@ -27,7 +27,12 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import PreviewStarted
-from scadbuddy.bambuddy.print_run import PrintRunRequest, registry_printer, slice_route
+from scadbuddy.bambuddy.print_run import (
+    PrintRunRequest,
+    registry_printer,
+    run_route,
+    slice_route,
+)
 from scadbuddy.bambuddy.print_source import OutputSource
 from scadbuddy.bambuddy.runs import PrintRun, run_key
 from scadbuddy.bambuddy.subject import PrintSubject
@@ -45,6 +50,7 @@ from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
 from scadbuddy.orders.models import Actor, Reference
 from scadbuddy.orders.printing import print_check, print_item
 from scadbuddy.orders.problems import PROBLEMS, refused
+from scadbuddy.orders.projects import item_project
 from scadbuddy.orders.quote import (
     MAX_SLICED_BYTES,
     QuoteRun,
@@ -55,6 +61,7 @@ from scadbuddy.orders.quote import (
 )
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.printers.component import PRINTERS
+from scadbuddy.printers.hot_path import native_backends
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
@@ -257,20 +264,24 @@ class _Renders:
         return self.core.render.store.read(job_id)
 
 
-def print_body(request: Mapping[str, Any], copies: int) -> PrintRunRequest:
+def print_body(
+    request: Mapping[str, Any], copies: int, project_id: int | None = None
+) -> PrintRunRequest:
     """The print run's request for one ``order_item_print`` (its operation's
     ``request``): §5.4's quantity still to print, of the whole output (a quote is the
     whole output's price), keyed by the operation so a retry or a re-send repeats its
-    run."""
-    return PrintRunRequest.model_validate(
-        {
-            **request["request"],
-            "copies": copies,
-            "all_plates": True,
-            "plate_ids": None,
-            "request_id": request["request_id"],
-        }
-    )
+    run. ``project_id`` is the item's Bambuddy project (§8.1), which files the print in
+    place of any project or folder the request named."""
+    body: dict[str, Any] = {
+        **request["request"],
+        "copies": copies,
+        "all_plates": True,
+        "plate_ids": None,
+        "request_id": request["request_id"],
+    }
+    if project_id is not None:
+        body = {**body, "project_id": project_id, "folder_id": None}
+    return PrintRunRequest.model_validate(body)
 
 
 async def existing_run(
@@ -371,6 +382,42 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             )
         return checked
 
+    async def item_project_of(request: dict[str, Any]) -> int | None:
+        """The item's Bambuddy project (§8.1), ensured before anything is claimed, so a
+        retry's run is keyed as its first try's; None without Bambuddy, and for a print
+        on the native path, which files under no project. Bambuddy failing to make it is
+        a 503 the operation tries again."""
+        orders = components.get(ORDERS)
+        if not orders.integrations.linked:
+            return None
+        body = PrintRunRequest.model_validate(request["request"])
+        settings = await asyncio.to_thread(core.settings_store.load)
+        if native_backends(settings):
+            printers = components.get(PRINTERS)
+            try:
+                route = await run_route(
+                    settings,
+                    printers.store,
+                    printers.reports,
+                    printer=body.printer,
+                    printer_id=body.printer_id,
+                )
+            except ApiError:
+                # The run refuses it itself, with its own words.
+                return None
+            if route.native:
+                return None
+        try:
+            return await item_project(
+                orders.store, orders.integrations, request["order_id"], request["item_id"]
+            )
+        except Exception as error:
+            logger.warning("could not make the item's Bambuddy project", exc_info=True)
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "Bambuddy could not make the item's project; the print is tried again",
+            ) from error
+
     async def item_print_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """The item claimed, then its print started as the print route starts one
         (``accept_run``), then the run attached (``orders/printing.py`` ``print_item``)."""
@@ -383,9 +430,10 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         output_id = checked["output_id"]
 
         subject = PrintSubject.output(output_id)
+        project_id = await item_project_of(request)
 
         def body(copies: int) -> PrintRunRequest:
-            return print_body(request, copies)
+            return print_body(request, copies, project_id)
 
         async def existing(copies: int) -> PrintRun | None:
             return await existing_run(core.print_runs, subject, body(copies))

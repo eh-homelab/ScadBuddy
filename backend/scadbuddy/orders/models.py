@@ -360,6 +360,17 @@ class Fulfilment(BaseModel):
     print_request_id: str | None = None
 
 
+class OrderProject(BaseModel):
+    """The Bambuddy project mirroring the order, or one of its items nested under it
+    (§8.1)."""
+
+    #: ``order:<id>`` or ``order_item:<id>``.
+    subject: str
+    project_id: int
+    #: The item's id for an item's project; None for the order's own.
+    item_id: str | None = None
+
+
 class ShipmentItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

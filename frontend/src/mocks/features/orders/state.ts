@@ -9,6 +9,7 @@ import type {
   OrderEvent,
   OrderAttachment,
   OrderItem,
+  OrderProject,
   Payment,
   Quote,
   Shipment,
@@ -78,6 +79,8 @@ export type State = {
   filaments: Filament[]
   /** An order's files and its items' (#4251), with each one's bytes. */
   attachments: OrderAttachment[]
+  /** #4253 §8.1 — `order_projects`: the Bambuddy projects of each order and its items. */
+  projects: (OrderProject & { order_id: string })[]
   files: Record<string, Blob>
 }
 
@@ -333,6 +336,7 @@ function fixtures(): State {
       filament(FILAMENT_PETG, 'PETG', '#1E1E1E', 'Black', '30'),
     ],
     attachments: [],
+    projects: [],
     files: {},
   }
 }
