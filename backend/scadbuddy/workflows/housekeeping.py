@@ -150,9 +150,10 @@ QUOTE_HOLDS_PATCH = "housekeeping-reap-quote-holds"
 #: #4439, #4747: the Bambuddy printer sync (`printers/bambuddy_sync.py`): import and link
 #: Bambuddy's printers and virtual printers, and fill an empty LAN link (a failed probe is
 #: tried again on the next pass). Last, behind its own patch; on the sweeps' Schedule
-#: only, since it calls Bambuddy (not in `PRUNE_SWEEPS`). Runs in the API's process (the
-#: ``library`` worker), so the access code it reads from Bambuddy never crosses a process
-#: or a payload.
+#: only, since it reads access codes and probes printers (not in `PRUNE_SWEEPS`; its
+#: virtual-printer part, which does neither, is `VP_SYNC_SWEEP`, on both). Runs in the
+#: API's process (the ``library`` worker), so the access code it reads from Bambuddy never
+#: crosses a process or a payload.
 PRINTER_SYNC_SWEEP = "housekeeping_sync_bambuddy_printers"
 PRINTER_SYNC_PATCH = "housekeeping-sync-bambuddy-printers"
 #: #4337: the lifetime of a native run's per-print copies and slices
@@ -172,6 +173,14 @@ GIT_REMOTE_PATCH = "housekeeping-push-git-remote"
 #: the prune Schedule too, so expired rows go with the sweeps off as well.
 AUTH_SESSIONS_SWEEP = "housekeeping_sweep_auth_sessions"
 AUTH_SESSIONS_PATCH = "housekeeping-sweep-auth-sessions"
+#: #5236: the Bambuddy printer sync's virtual-printer part alone
+#: (`printers.bambuddy_sync.sync_virtual_printers`): a VP's row, and a row holding its
+#: serial adopted as one. Two Bambuddy list reads, no access code and no probe. Last,
+#: behind its own patch; on the prune Schedule too, so a VP is marked within
+#: `PRUNE_INTERVAL` with the sweeps off as well (prod's hand-made row for its VP stayed
+#: ``physical``, and watched, while `PRINTER_SYNC_SWEEP` never ran).
+VP_SYNC_SWEEP = "housekeeping_sync_bambuddy_virtual_printers"
+VP_SYNC_PATCH = "housekeeping-sync-bambuddy-virtual-printers"
 #: Today's order: settled jobs first (they hold blob refs), then what they freed.
 SWEEPS = (
     "housekeeping_prune_jobs",
@@ -197,6 +206,7 @@ SWEEPS = (
     NATIVE_COPIES_SWEEP,
     GIT_REMOTE_SWEEP,
     AUTH_SESSIONS_SWEEP,
+    VP_SYNC_SWEEP,
 )
 #: Every `PRUNE_INTERVAL`, whatever the sweep interval: settled jobs and request claims,
 #: which would otherwise pile up for good with the sweeps off (review 3c M1); the files
@@ -215,11 +225,15 @@ SWEEPS = (
 #: printer watches (#3823), behind `PRINTER_WATCHES_PATCH`: a lost one is started again
 #: within the interval, not the sweeps' day. And the quote holds' reaper (#4250), behind
 #: `QUOTE_HOLDS_PATCH`, so a release lost after its commit leaks for one interval. Not the
-#: Bambuddy printer sync (#4439, #4747): it calls Bambuddy, so it obeys the sweeps'
-#: switch, and the import button, a passing connection test and each virtual printer's
-#: write run it besides. And the git remote's push (#4974), behind `GIT_REMOTE_PATCH`:
-#: a commit whose own push failed reaches the remote within the interval. And the expired
-#: signed-in sessions (#4975), behind `AUTH_SESSIONS_PATCH`.
+#: Bambuddy printer sync (#4439, #4747): it reads access codes and probes printers, so it
+#: obeys the sweeps' switch, and the import button, a passing connection test and each
+#: virtual printer's write run it besides. And the git remote's push (#4974), behind
+#: `GIT_REMOTE_PATCH`: a commit whose own push failed reaches the remote within the
+#: interval. And the expired signed-in sessions (#4975), behind `AUTH_SESSIONS_PATCH`.
+#: And the printer sync's virtual-printer part (#5236), behind `VP_SYNC_PATCH`: with the
+#: sweeps on it runs from both Schedules, and on the sweeps' one after
+#: `PRINTER_SYNC_SWEEP`, which has done the same work, so there it finds nothing left to
+#: adopt.
 PRUNE_SWEEPS = (
     SWEEPS[0],
     SWEEPS[4],
@@ -232,6 +246,7 @@ PRUNE_SWEEPS = (
     QUOTE_HOLDS_SWEEP,
     GIT_REMOTE_SWEEP,
     AUTH_SESSIONS_SWEEP,
+    VP_SYNC_SWEEP,
 )
 #: An asset sweep converges with the store over Bambuddy, at length.
 SWEEP_TIMEOUT = timedelta(minutes=30)
@@ -282,6 +297,8 @@ NATIVE_COPIES_TIMEOUT = timedelta(minutes=5)
 GIT_REMOTE_TIMEOUT = timedelta(minutes=5)
 #: One delete.
 AUTH_SESSIONS_TIMEOUT = timedelta(minutes=2)
+#: Two Bambuddy lists, then one locked upsert per virtual printer.
+VP_SYNC_TIMEOUT = timedelta(minutes=2)
 #: What a run spends between its activities: workflow tasks, and a start on a busy worker.
 RUN_MARGIN = timedelta(minutes=3)
 
@@ -320,6 +337,8 @@ def sweep_timeout(sweep: str) -> timedelta:
         return GIT_REMOTE_TIMEOUT
     if sweep == AUTH_SESSIONS_SWEEP:
         return AUTH_SESSIONS_TIMEOUT
+    if sweep == VP_SYNC_SWEEP:
+        return VP_SYNC_TIMEOUT
     return SWEEP_TIMEOUT
 
 
@@ -370,6 +389,8 @@ class Housekeeping:
             if sweep == GIT_REMOTE_SWEEP and not workflow.patched(GIT_REMOTE_PATCH):
                 continue
             if sweep == AUTH_SESSIONS_SWEEP and not workflow.patched(AUTH_SESSIONS_PATCH):
+                continue
+            if sweep == VP_SYNC_SWEEP and not workflow.patched(VP_SYNC_PATCH):
                 continue
             try:
                 await workflow.execute_activity(

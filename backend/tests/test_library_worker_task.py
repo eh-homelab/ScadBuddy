@@ -26,9 +26,11 @@ from scadbuddy.workflows.housekeeping import (
     LIBRARY_SWEEP,
     LOST_SLICES_SWEEP,
     PREVIEWS_SWEEP,
+    PRINTER_SYNC_SWEEP,
     PRINTER_WATCHES_SWEEP,
     PRUNE_SWEEPS,
     SWEEPS,
+    VP_SYNC_SWEEP,
 )
 from tests.test_print_worker_task import StubWorker
 
@@ -256,6 +258,7 @@ async def test_a_failing_sweep_fails_its_activity(
         main, "reap_orphan_quote_holds", _broken(RuntimeError("the quote holds are gone"))
     )
     monkeypatch.setattr(main, "sync_printers", _broken_async)
+    monkeypatch.setattr(main, "sync_virtual_printers", _broken_async)
     monkeypatch.setattr(
         main, "ClaimStore", lambda root: SimpleNamespace(sweep=_broken(OSError("read-only")))
     )
@@ -404,6 +407,12 @@ async def test_the_prune_sweeps_heartbeat_while_they_run(
         return SimpleNamespace(created=0, linked=0, lan_linked=0, conflicts=0)
 
     monkeypatch.setattr(main, "sync_printers", slow_sync)
+
+    # #5236: the sync's virtual-printer part, two Bambuddy lists and an upsert or two.
+    async def slow_vp_sync(*args: object) -> None:
+        await asyncio.sleep(0.1)
+
+    monkeypatch.setattr(main, "sync_virtual_printers", slow_vp_sync)
 
     # #4974: the git remote's push, a push or two over the network.
     def slow_push() -> list[str]:
@@ -700,6 +709,14 @@ def test_the_background_slices_obey_the_sweeps_switch() -> None:
 def test_the_printer_watches_come_back_within_the_prune_interval() -> None:
     """#4186 review I4: a lost watch is started again within 300 s, sweeps on or off."""
     assert PRINTER_WATCHES_SWEEP in PRUNE_SWEEPS
+
+
+def test_the_virtual_printers_follow_bambuddy_with_the_sweeps_off() -> None:
+    """#5236: prod runs with the sweeps off, so the full printer sync never ran and a
+    VP's hand-made row stayed physical. Its virtual-printer part is on the prune Schedule;
+    the full sync, which reads access codes and probes, still obeys the switch."""
+    assert VP_SYNC_SWEEP in PRUNE_SWEEPS
+    assert PRINTER_SYNC_SWEEP not in PRUNE_SWEEPS
 
 
 def test_the_native_library_sweep_runs_with_the_sweeps_off() -> None:

@@ -113,7 +113,7 @@ from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
-from scadbuddy.printers.bambuddy_sync import sync_printers
+from scadbuddy.printers.bambuddy_sync import sync_printers, sync_virtual_printers
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.watch import WatchActivities
@@ -184,6 +184,7 @@ from scadbuddy.workflows.housekeeping import (
     REAP_SWEEP,
     SWEEPS,
     TRANSFER_PUTS_SWEEP,
+    VP_SYNC_SWEEP,
     ensure_schedules,
     library_worker,
 )
@@ -679,6 +680,10 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
     async def sweep_auth_sessions() -> None:
         await _heartbeating(_sweep_auth_sessions_logged(state))
 
+    @activity.defn(name=VP_SYNC_SWEEP)
+    async def sync_bambuddy_virtual_printers() -> None:
+        await _heartbeating(_sync_virtual_printers_logged(state))
+
     return [
         prune_jobs,
         sweep_assets,
@@ -703,6 +708,7 @@ def _housekeeping_activities(state: AppState) -> list[Callable[..., Any]]:
         sweep_native_copies,
         push_git_remote,
         sweep_auth_sessions,
+        sync_bambuddy_virtual_printers,
     ]
 
 
@@ -787,6 +793,22 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
                     "target_missing": result.target_missing,
                 },
             )
+
+    await _with_bambuddy(state, sweep)
+
+
+async def _sync_virtual_printers_logged(state: AppState) -> None:
+    """#5236: the registry follows Bambuddy's virtual printers with the sweeps off too:
+    the sync's virtual-printer part alone, which reads no access code and probes nothing.
+    Nothing to do without a Bambuddy."""
+    registry = state.components.get(PRINTERS)
+
+    async def sweep(client: BambuddyClient) -> None:
+        try:
+            await sync_virtual_printers(registry, client)
+        except Exception:
+            logger.exception("could not sync the virtual printers from Bambuddy")
+            raise
 
     await _with_bambuddy(state, sweep)
 

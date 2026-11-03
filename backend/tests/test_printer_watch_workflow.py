@@ -292,6 +292,35 @@ async def test_the_sweep_stops_watching_a_row_a_virtual_printer_adopted(
         assert result == "stopped"
 
 
+async def test_a_watch_started_on_a_virtual_printers_row_ends_without_connecting(
+    client: Client,
+    printers: PrinterStore,
+    reports: PrinterReportStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#5236: a LAN link on a VP's row restarts its watch (`lan_link.probe_and_link`), and
+    the sweep that would stop it runs only every `PRUNE_INTERVAL`. The activity reads the
+    row: a VP is no printer, so it never dials Bambuddy's virtual printer."""
+    lan = FakeLan([{"mc_percent": 1}])
+    lan.install(monkeypatch)
+    pid = linked(printers)
+    printers.upsert_virtual(
+        1,
+        serial=SERIAL,
+        name="Bambuddy",
+        model="H2C",
+        mode="queue",
+        forwards_to=None,
+        view=BambuddyView(seen_at=datetime.now(UTC), name="Bambuddy"),
+    )
+    queue = f"bambuddy-{uuid.uuid4().hex[:8]}"
+    async with serving(client, queue, WatchActivities(printers, reports, None)):
+        await restart_watch(client, queue, pid)
+        ended = client.get_workflow_handle(watch_id(pid)).result()
+        assert await asyncio.wait_for(ended, 20) == "unlinked"
+    assert lan.connects == 0
+
+
 async def _running(client: Client, printer_id: str) -> bool:
     described = await client.get_workflow_handle(watch_id(printer_id)).describe()
     return described.status is not None and described.status.name == "RUNNING"

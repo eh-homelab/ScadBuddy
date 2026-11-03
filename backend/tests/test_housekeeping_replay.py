@@ -26,8 +26,9 @@ recorded with none of its own) and ``QUOTE_HOLDS_PATCH`` (#4250), which also run
 ``native_copies`` with ``NATIVE_COPIES_PATCH`` (#4337), which also runs
 ``NATIVE_COPIES_SWEEP``, and ``git_remote`` with ``GIT_REMOTE_PATCH`` (#4974), which
 also runs ``GIT_REMOTE_SWEEP``, and ``auth_sessions`` with ``AUTH_SESSIONS_PATCH`` (#4975),
-which also runs ``AUTH_SESSIONS_SWEEP`` (``SCADBUDDY_RECORD_HISTORIES=1`` runs the
-recording below).
+which also runs ``AUTH_SESSIONS_SWEEP``, and ``virtual_printer_sync`` with
+``VP_SYNC_PATCH`` (#5236), which also runs ``VP_SYNC_SWEEP``
+(``SCADBUDDY_RECORD_HISTORIES=1`` runs the recording below).
 Never re-record them: a later change adds a history recorded on the changed code beside
 them.
 """
@@ -68,6 +69,7 @@ HISTORIES = Path(__file__).parent / "fixtures" / "housekeeping_histories"
         "native_copies",
         "git_remote",
         "auth_sessions",
+        "virtual_printer_sync",
     ],
 )
 async def test_housekeeping_replays_its_recorded_history(name: str) -> None:
@@ -85,7 +87,7 @@ def recording_temporal() -> Iterator[str]:
 
 @pytest.mark.requires_temporal
 @pytest.mark.skipif(os.environ.get("SCADBUDDY_RECORD_HISTORIES") != "1", reason="records a history")
-async def test_record_auth_sessions(recording_temporal: str) -> None:
+async def test_record_virtual_printer_sync(recording_temporal: str) -> None:
     """Every sweep a stub, so only the workflow's own commands are recorded."""
 
     def stub(name: str) -> Any:
@@ -114,4 +116,4 @@ async def test_record_auth_sessions(recording_temporal: str) -> None:
         if e.HasField("activity_task_scheduled_event_attributes")
     ]
     assert names == list(SWEEPS)
-    (HISTORIES / "auth_sessions.json").write_text(history.to_json())
+    (HISTORIES / "virtual_printer_sync.json").write_text(history.to_json())
