@@ -10,3 +10,8 @@ export const SYSTEM_PROMPT_BASES = ['claude_code', 'minimal'] as const
 
 /** agent `sessions/turnSettings.ts` SYSTEM_PROMPT_APPEND_MAX. */
 export const SYSTEM_PROMPT_APPEND_MAX = 20_000
+
+/** `value` when it is one of `values`, else undefined: a draft that names no choice is never sent. */
+export function oneOf<T extends string>(values: readonly T[], value: string): T | undefined {
+  return (values as readonly string[]).includes(value) ? (value as T) : undefined
+}
