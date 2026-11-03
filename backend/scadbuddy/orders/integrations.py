@@ -106,6 +106,12 @@ class OrderIntegrations(Protocol):
         :class:`NotLinkedError` without a Bambuddy."""
         ...
 
+    async def archive_cost(self, archive_id: int) -> float | None:
+        """Bambuddy's cost of one archive, corrected for suspect filament readings
+        (``bambuddy/costs.py``, §6.4); None for one Bambuddy deleted or never priced.
+        :class:`NotLinkedError` without a Bambuddy."""
+        ...
+
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
     ) -> CopiedMedia:
@@ -132,6 +138,9 @@ class NotLinked:
         raise NotLinkedError
 
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
+        raise NotLinkedError
+
+    async def archive_cost(self, archive_id: int) -> float | None:
         raise NotLinkedError
 
     async def download_archive_media(
