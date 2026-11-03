@@ -63,6 +63,27 @@ def test_a_file_on_an_attempt_names_the_attempt_and_its_item(shop: Shop) -> None
     assert "attachment.added" in shop.kinds(order)
 
 
+def test_a_released_claims_files_become_the_items(shop: Shop) -> None:
+    """#5268 review: a file attached to a print's claim before its start was refused
+    outlives the attempt, as the item's."""
+    order, item = shop.accepted()
+    claim = shop.lifecycle.claim_print(
+        order.id, item.id, BY, request_id="r-1", sliced_sha256=None, sliced_blob_key=None
+    )
+    file = add(shop, order, item.id, claim.id)
+
+    shop.lifecycle.release_print(claim, "refused")
+
+    assert shop.rows.fulfilments(item.id) == []
+    [kept] = shop.rows.attachments(order.id)
+    assert (kept.id, kept.subject, kept.item_id, kept.fulfilment_id) == (
+        file.id,
+        f"order_item:{item.id}",
+        item.id,
+        None,
+    )
+
+
 def test_an_item_file_names_no_attempt(shop: Shop) -> None:
     order, item, _ = attempted(shop)
     file = add(shop, order, item.id)

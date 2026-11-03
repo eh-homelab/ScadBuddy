@@ -652,7 +652,7 @@ export const orderTools: Tool[] = [
       "The Bambuddy archives of a print attempt's run (#4253, one per plate) and what each offers to copy: its " +
       '`finish_photos` and whether it has a `timelapse`. Reading them copies what they say onto the attempt once ' +
       'its print settled (`archive_ids`, the times, `actual_seconds`, `actual_grams`). `linked` is false without ' +
-      'Bambuddy; an attempt by hand, or one Bambuddy has not linked an archive to yet, has none.',
+      'Bambuddy; an attempt by hand naming no archive, or one Bambuddy has not linked an archive to yet, has none.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -675,7 +675,7 @@ export const orderTools: Tool[] = [
     label: "Copy a print's photo or timelapse into an order",
     description:
       "Copy an attempt's Bambuddy archive's finish photo (`finished_photo`, its latest unless `name` names one of " +
-      "order_attempt_archives' `finish_photos`) or its `timelapse` into the line item's files (#4253), with the role " +
+      "order_attempt_archives' `finish_photos`) or its `timelapse` onto the attempt, listed under its line item (#4253, #4251), with the role " +
       '`finished` or `timelapse`; the same bytes again answer with the file already there. Refused with ' +
       '`not_linked`, `archive_not_attempts`, `archive_gone`, `no_finish_photo` and `no_timelapse` (pull it off the ' +
       'printer first).',

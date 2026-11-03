@@ -1310,10 +1310,16 @@ class OrderStore:
 
     def release_print_claim(self, conn: Conn, holder_kind: str, attempt_id: str) -> None:
         """A claim whose print was refused before it started: its row and its hold go,
-        in the caller's transaction, as if it was never made."""
+        in the caller's transaction, as if it was never made. A file attached to it in
+        between becomes its item's, so none names an attempt that is gone."""
         conn.execute(
             "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
             (holder_kind, attempt_id),
+        )
+        conn.execute(
+            "UPDATE order_attachments SET subject = 'order_item:' || attempt_item_id,"
+            " attempt_item_id = NULL WHERE subject = %s",
+            (fulfilment_subject(attempt_id),),
         )
         conn.execute("DELETE FROM order_item_fulfilments WHERE id = %s", (attempt_id,))
 

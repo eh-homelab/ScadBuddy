@@ -6,8 +6,8 @@ import { refusalText } from './refusal'
 
 /**
  * #4253 (spec 2026-10-18 §8.2) — a printed attempt's Bambuddy archives, read on request,
- * each offering its finish photo and its timelapse as a one-click copy into the item's
- * files. Reading them also copies what they say (times, grams) onto the attempt, so the
+ * each offering its finish photo and its timelapse as a one-click copy onto the attempt (listed among the item's
+ * files). Reading them also copies what they say (times, grams) onto the attempt, so the
  * page is told to reload once they are read.
  */
 export function ArchiveCopies({ orderId, itemId, attempt, onChanged }: { orderId: string; itemId: string; attempt: Fulfilment; onChanged: () => void }) {
