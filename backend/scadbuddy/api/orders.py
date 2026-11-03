@@ -25,7 +25,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Self
 
-from fastapi import APIRouter, Query, Request, Response, status
+from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -53,9 +53,10 @@ from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import SettingsPatch
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
+from scadbuddy.orders.archives import AttemptArchives, attempt_archives
 from scadbuddy.orders.component import OrdersDep
 from scadbuddy.orders.currency import minor_exponent
-from scadbuddy.orders.integrations import NotLinkedError, not_linked
+from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
     FulfilmentInput,
     LifecycleError,
@@ -86,7 +87,7 @@ from scadbuddy.orders.models import (
     Shipment,
     SpoolImport,
 )
-from scadbuddy.orders.operations import ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
+from scadbuddy.orders.operations import ORDER_ATTEMPT_COPY, ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
 from scadbuddy.orders.pricing import estimate_grams, to_minor
 from scadbuddy.orders.printing import print_request_id
 from scadbuddy.orders.problems import PROBLEMS, refused
@@ -1121,6 +1122,95 @@ async def update_fulfilment(
     return await _run(
         lambda: orders.lifecycle.update_fulfilment(order_id, item_id, fulfilment_id, body, by)
     )
+
+
+class ArchiveCopy(BaseModel):
+    """What of the archive to copy (§8.2)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    what: ArchiveMedia
+    #: A ``finish_`` photo of the archive (``AttemptArchives``' ``finish_photos``);
+    #: left out, its latest. Only for ``finished_photo``.
+    name: str | None = Field(
+        default=None, max_length=255, pattern=r"^finish_[A-Za-z0-9_-]+\.[a-z]+$"
+    )
+
+    @model_validator(mode="after")
+    def _name_for_a_photo(self) -> Self:
+        if self.name is not None and self.what != "finished_photo":
+            raise ValueError("`name` names a photo: it goes with `finished_photo` only")
+        return self
+
+
+@router.get(
+    "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives",
+    response_model=AttemptArchives,
+    summary="The Bambuddy archives of an attempt's print",
+)
+async def get_attempt_archives(
+    order_id: str, item_id: str, fulfilment_id: str, orders: OrdersDep
+) -> AttemptArchives:
+    """The archives the attempt's print run made in Bambuddy (one per plate, §8.2), with
+    what each offers to copy: its ``finish_`` photos and whether it has a timelapse.
+    Reading them copies what they say onto the attempt once its print settled
+    (``archive_ids``, the printer's times, ``actual_seconds``, ``actual_grams``).
+    ``linked`` is false, with no archives, without Bambuddy; an attempt by hand, or one
+    Bambuddy has linked no archive to yet, has none. 404 for an attempt not the item's."""
+    _path(order_id, item_id, fulfilment_id)
+    return await attempt_archives(
+        orders.store, orders.integrations, order_id, item_id, fulfilment_id
+    )
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives/{archive_id}/copy",
+    response_model=Attachment,
+    summary="Copy an archive's finish photo or timelapse into the item's files",
+    responses={
+        404: {"description": "No such attempt of the item"},
+        413: {"description": "Larger than the upload limit in Settings"},
+        **OPERATION_RESPONSES,
+    },
+)
+async def copy_archive_media(
+    order_id: str,
+    item_id: str,
+    fulfilment_id: str,
+    archive_id: Annotated[int, Path(ge=1)],
+    body: ArchiveCopy,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Attachment | JSONResponse:
+    """The ``order_attempt_copy`` operation (§8.2, §6.2): the archive's ``finish_``
+    photo (``name``, else its latest) or its timelapse pulled once from Bambuddy and
+    kept as ScadBuddy's own file, an attachment of the item with the role ``finished``
+    or ``timelapse``; the same bytes again are the attachment already there. Refused
+    with 409: ``not_linked`` (no Bambuddy), ``archive_not_attempts`` (not one of the
+    attempt's prints), ``archive_gone`` (deleted in Bambuddy), ``no_finish_photo``,
+    ``no_timelapse`` (pull it off the printer first, ``POST
+    /prints/{archive_id}/timelapse/pull``). Allowed in any state of the order, as an
+    upload is."""
+    _path(order_id, item_id, fulfilment_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[ORDER_ATTEMPT_COPY],
+        subject=subject_of(item_id),
+        request={
+            "order_id": order_id,
+            "item_id": item_id,
+            "fulfilment_id": fulfilment_id,
+            "archive_id": archive_id,
+            "what": body.what,
+            "name": body.name,
+            # Ruling 12: who added it comes from the author header, never the body.
+            "by": current_actor().model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Attachment)
 
 
 @router.post(

@@ -2,7 +2,8 @@
 that reaches ``bambuddy.client`` (``tests/test_orders_bambuddy_seam.py`` checks it).
 
 :class:`BambuddyIntegrations` is the ``OrderIntegrations`` seam with ``bambuddy_url`` set
-(``orders/integrations.py``): the spool import's read (§8.3). The functions below it are
+(``orders/integrations.py``): the spool import's read (§8.3) and an attempt's archives
+(§8.2). The functions below it are
 the quote's slice through Bambuddy's slicer (#4250 Ruling 2), the print dialog's own
 background slice, which the quote takes on whichever slicer the stack has; they are
 here so that ``orders/`` has one door to the client.
@@ -11,18 +12,27 @@ here so that ``orders/`` has one door to the client.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from collections import defaultdict
 from contextlib import aclosing
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-from scadbuddy.bambuddy.client import client_for, maybe_client
-from scadbuddy.bambuddy.models import SliceJob, Spool
+from scadbuddy.bambuddy.client import Operation, client_for, maybe_client
+from scadbuddy.bambuddy.models import FINISH_PHOTO_PREFIX, ArchiveDetail, SliceJob, Spool
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import PrintSource
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
-from scadbuddy.orders.integrations import SpoolGroup
+from scadbuddy.orders.integrations import (
+    ArchiveFacts,
+    ArchiveMedia,
+    CopiedMedia,
+    MediaTooLargeError,
+    SpoolGroup,
+)
 
 
 def _colour(rgba: str | None) -> str | None:
@@ -76,6 +86,28 @@ def spool_groups(spools: list[Spool]) -> list[SpoolGroup]:
     return out
 
 
+def archive_facts(archive: ArchiveDetail) -> ArchiveFacts:
+    """What an attempt copies of one archive (§8.2)."""
+    grams = archive.total_filament_actual_grams
+    if grams is None:
+        grams = archive.filament_used_grams
+    return ArchiveFacts(
+        archive_id=archive.id,
+        status=archive.status,
+        started_at=archive.started_at,
+        completed_at=archive.completed_at,
+        actual_seconds=archive.actual_time_seconds,
+        grams=grams,
+        finish_photos=[p for p in archive.photos if p.startswith(FINISH_PHOTO_PREFIX)],
+        timelapse=bool(archive.timelapse_path),
+    )
+
+
+def _timelapse_name(archive: ArchiveDetail) -> str:
+    suffix = PurePosixPath(archive.timelapse_path or "").suffix.lower()
+    return f"timelapse-{archive.id}{suffix if suffix in ('.mp4', '.avi', '.mov') else '.mp4'}"
+
+
 class BambuddyIntegrations:
     """The seam with a Bambuddy linked."""
 
@@ -93,6 +125,50 @@ class BambuddyIntegrations:
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
             return spool_groups(await client.spools())
+
+    async def archive(self, archive_id: int) -> ArchiveFacts | None:
+        stored = await asyncio.to_thread(self.settings.load)
+        async with client_for(stored) as client:
+            try:
+                return archive_facts(await client.archive(archive_id))
+            except ApiError as error:
+                if error.status == 404 and await client.archive_deleted(archive_id):
+                    return None
+                raise
+
+    async def download_archive_media(
+        self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
+    ) -> CopiedMedia:
+        """Streamed to ``target``, hashed as it is written, never held in memory: a
+        timelapse runs to hundreds of megabytes."""
+        stored = await asyncio.to_thread(self.settings.load)
+        async with client_for(stored) as client:
+            operation: Operation
+            if what == "finished_photo":
+                assert name is not None
+                path, filename = f"/archives/{archive_id}/photos/{name}", name
+                operation = "media.photo"
+            else:
+                detail = await client.archive(archive_id)
+                path, filename = f"/archives/{archive_id}/timelapse", _timelapse_name(detail)
+                operation = "media.timelapse"
+            digest = hashlib.sha256()
+            size = 0
+            try:
+                async with client.stream(
+                    path, operation=operation, what="copy the print's file", pass_416=False
+                ) as upstream:
+                    with target.open("wb") as out:
+                        async for chunk in upstream.aiter_bytes():
+                            size += len(chunk)
+                            if size > limit:
+                                raise MediaTooLargeError(f"{filename} is over {limit} bytes")
+                            digest.update(chunk)
+                            await asyncio.to_thread(out.write, chunk)
+            except BaseException:
+                target.unlink(missing_ok=True)
+                raise
+        return CopiedMedia(filename=filename, sha256=digest.hexdigest(), size=size)
 
 
 # -- the quote's slice through Bambuddy's slicer (#4250) ---------------------------------

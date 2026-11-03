@@ -39,6 +39,7 @@ from scadbuddy.library.operations import PIN_TIMEOUT
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import KindsBuild, OperationKind, to_thread_to_end
 from scadbuddy.orders import attachments
+from scadbuddy.orders.archives import copy_check, copy_in
 from scadbuddy.orders.bambuddy import download_sliced, quote_preview_job, start_quote_preview
 from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import QUOTE_TIMEOUT, LifecycleError
@@ -71,6 +72,7 @@ logger = logging.getLogger(__name__)
 ORDER_ITEM_QUOTE = "order_item_quote"
 ORDER_ATTACHMENT_ADD = "order_attachment_add"
 ORDER_ITEM_PRINT = "order_item_print"
+ORDER_ATTEMPT_COPY = "order_attempt_copy"
 #: One ``order_item_print`` run: the print run's accept, which answers within the command
 #: deadline, and the attempt's row. Its slices and queueing are the print run's own.
 PRINT_TIMEOUT = timedelta(minutes=5)
@@ -479,7 +481,61 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         dumped: dict[str, Any] = attachment.model_dump(mode="json")
         return dumped
 
+    async def copy_check_kind(request: dict[str, Any]) -> dict[str, Any]:
+        """§8.2's copy refused from the rows alone (nothing written, Bambuddy not asked)."""
+        orders = components.get(ORDERS)
+        await copy_check(
+            orders.store,
+            orders.integrations,
+            request["order_id"],
+            request["item_id"],
+            request["fulfilment_id"],
+            request["archive_id"],
+        )
+        return {}
+
+    async def copy_run_kind(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
+        """The archive's file pulled once into the claim store, kept as its blob and
+        recorded as the item's attachment (``orders/archives.py`` ``copy_in``)."""
+        orders = components.get(ORDERS)
+        try:
+            attachment = await copy_in(
+                store=orders.store,
+                lifecycle=orders.lifecycle,
+                integrations=orders.integrations,
+                blobs=core.store.blobs,
+                claims=ClaimStore(core.paths.claims),
+                order_id=request["order_id"],
+                item_id=request["item_id"],
+                fulfilment_id=request["fulfilment_id"],
+                archive_id=request["archive_id"],
+                what=request["what"],
+                name=request.get("name"),
+                by=Actor.model_validate(request["by"]),
+                limit=core.settings.media_upload_max_bytes,
+            )
+        except StaleBlobError:
+            raise ApiError(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "the stored copy of these bytes is not on this store's backend (a"
+                " `/store/migrate` in progress?); copy it again once the store has moved",
+            ) from None
+        except LifecycleError as error:
+            raise refused(error) from None
+        dumped: dict[str, Any] = attachment.model_dump(mode="json")
+        return dumped
+
     return [
+        OperationKind(
+            ORDER_ATTEMPT_COPY,
+            copy_check_kind,
+            copy_run_kind,
+            # A retry pulls the same bytes again and finds the attachment it made.
+            run_attempts=2,
+            queue="library",
+            run_timeout=PIN_TIMEOUT,
+            where="the item's attachments",
+        ),
         OperationKind(
             ORDER_ATTACHMENT_ADD,
             attachment_check,

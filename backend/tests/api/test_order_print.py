@@ -30,7 +30,7 @@ from tests.api.test_orders import create_order
 from tests.api.test_orders_lifecycle import add_item, problem, quote_and_accept
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import body, follow_run, run_routes
-from tests.api.test_send import configure, make_output, upload_route
+from tests.api.test_send import API, configure, make_output, upload_route
 from tests.api.test_settings_runtime import _state
 from tests.api.test_versions import SLUG, upload
 from tests.support.operations import press
@@ -222,3 +222,65 @@ def test_a_retry_finds_the_run_its_request_made(bambuddy: TestClient) -> None:
     other = {**request, "request_id": request["request_id"][:-4] + "beef"}
     assert other["request_id"] != request["request_id"]
     assert _lookup(bambuddy, item, other, attempt["copies"]) is None
+
+
+JPEG = b"\xff\xd8\xff\xe0" + b"j" * 1024
+
+
+def test_an_attempts_archive_offers_its_finish_photo_as_a_copy(bambuddy: TestClient) -> None:
+    """§8.2: the attempt's run's archive (``print_links`` by its queue item) is read from
+    Bambuddy and its ``finish_`` photo copied into the item's files, once."""
+    slice_routes()
+    queue_route()
+    item = Item(bambuddy)
+    attempt = printed(item, key="print-archive")
+    assert follow_run(bambuddy, attempt["print_run_id"])["status"] == "succeeded"
+    with _state(bambuddy).projection.pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO print_links (subject, archive_id, matched_by, queue_item_id)"
+            " VALUES (%s, 81, 'queue_item', 51) ON CONFLICT DO NOTHING",
+            (f"output:{item.output_id}",),
+        )
+    respx.get(f"{API}/archives/81").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "id": 81,
+                "status": "completed",
+                "photos": ["a1b2c3d4.jpg", "finish_20261101_ab12.jpg"],
+                "timelapse_path": None,
+                "actual_time_seconds": 3600,
+                "filament_used_grams": 9.5,
+            },
+        )
+    )
+    photo = respx.get(f"{API}/archives/81/photos/finish_20261101_ab12.jpg").mock(
+        return_value=httpx.Response(200, content=JPEG, headers={"content-type": "image/jpeg"})
+    )
+    base = f"{item.path}/fulfilments/{attempt['id']}/archives"
+    read = bambuddy.get(base)
+    assert read.status_code == 200, read.text
+    offers = read.json()
+    assert offers["linked"] is True
+    assert [(a["archive_id"], a["finish_photos"], a["timelapse"]) for a in offers["archives"]] == [
+        (81, ["finish_20261101_ab12.jpg"], False)
+    ]
+    # Not settled yet: nothing is copied onto the attempt.
+    assert offers["attempt"]["archive_ids"] == []
+
+    copied = answered(
+        bambuddy,
+        bambuddy.post(f"{base}/81/copy", json={"what": "finished_photo"}, headers=press()),
+    )
+    assert (copied["role"], copied["kind"], copied["item_id"]) == (
+        "finished",
+        "image",
+        item.item["id"],
+    )
+    assert photo.call_count == 1
+    refused = bambuddy.post(f"{base}/81/copy", json={"what": "timelapse"}, headers=press())
+    problem(refused, "no_timelapse")
+    elsewhere = bambuddy.post(f"{base}/99/copy", json={"what": "timelapse"}, headers=press())
+    problem(elsewhere, "archive_not_attempts")
+    detail = bambuddy.get(f"/api/v1/orders/{item.order['id']}").json()
+    assert [a["id"] for a in detail["attachments"]] == [copied["id"]]

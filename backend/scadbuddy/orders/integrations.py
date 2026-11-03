@@ -63,6 +63,15 @@ class ArchiveFacts(BaseModel):
 ArchiveMedia = Literal["finished_photo", "timelapse"]
 
 
+class CopiedMedia(BaseModel):
+    """An archive's file written to disk: the name it is attached under, its sha256 and
+    its size."""
+
+    filename: str
+    sha256: str
+    size: int
+
+
 class MediaTooLargeError(Exception):
     """The archive's file is larger than an attachment may be."""
 
@@ -96,10 +105,10 @@ class OrderIntegrations(Protocol):
 
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
-    ) -> tuple[str, int]:
+    ) -> CopiedMedia:
         """The archive's ``finish_`` photo ``name`` or its timelapse written to
-        ``target``, through Bambuddy's media routes; its sha256 and size.
-        :class:`MediaTooLargeError` past ``limit`` bytes, with ``target`` removed."""
+        ``target``, through Bambuddy's media routes. :class:`MediaTooLargeError` past
+        ``limit`` bytes, with ``target`` removed."""
         ...
 
 
@@ -118,7 +127,7 @@ class NotLinked:
 
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
-    ) -> tuple[str, int]:
+    ) -> CopiedMedia:
         raise NotLinkedError
 
 
