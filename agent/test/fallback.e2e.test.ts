@@ -18,7 +18,14 @@ import { PROBE_FALLBACK_MODEL } from '../src/harness/credentialErrors.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { createMemoryHooks, HindsightClient, type MemoryActivity } from '../src/memory/hindsight.js'
-import { displayUpdates, type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
+import {
+  displayUpdates,
+  type FakeAnthropic,
+  type RecordedRequest,
+  type Reply,
+  startFakeAnthropic,
+  tokenCount,
+} from './support/fakeAnthropic.js'
 import { startFakeHindsight } from './support/fakeHindsight.js'
 
 // #1093 end to end: runWithFallback over the real SDK and its bundled Claude
@@ -184,7 +191,7 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
 
   it('cools a subscription key down until the reset its limit text names (#4107)', async () => {
     // A subscription (OAuth) key's 429 as Anthropic's unified limiter answers it. Claude
-    // Code turns these headers into "You've hit your session limit · resets 6:35pm (UTC)",
+    // Code turns these headers into "You've hit your 5-hour limit · resets 6:35pm (UTC)",
     // in the zone it runs in (TZ, options.ts), and the probe asks an OAuth key nothing,
     // so that text's reset is the cooldown.
     const reset = Math.floor(Date.now() / 60_000) * 60_000 + 5 * 3_600_000
@@ -246,9 +253,10 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
       ['b', 'ok', undefined],
     ])
     const cooled = reports[0]!.outcome
-    // The canary for the bundled CLI's limit wording (2.1.296): if an SDK bump fails
-    // here, rateLimitResetFromText (and agent-durable's rate_limit_reset) need the new text.
-    expect(cooled).toMatchObject({ reason: expect.stringMatching(/^You've hit your session limit · resets \d{1,2}(:\d{2})?[ap]m \(UTC\)$/) })
+    // The canary for the bundled CLI's limit wording (2.1.314; "session limit" as of
+    // 2.1.296): if an SDK bump fails here, rateLimitResetFromText (and agent-durable's
+    // rate_limit_reset) need the new text.
+    expect(cooled).toMatchObject({ reason: expect.stringMatching(/^You've hit your 5-hour limit · resets \d{1,2}(:\d{2})?[ap]m \(UTC\)$/) })
     expect(cooled.class === 'rate_limited' ? cooled.until.getTime() : 0).toBe(reset)
   }, 60_000)
 
@@ -270,9 +278,14 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     expect(error).toBeInstanceOf(Error)
     expect(callsWith(TOKEN_B)).toHaveLength(0)
     expect(reports.map((r) => r.outcome.class)).toEqual(['ok'])
-    // Claude Code 2.1.287 sent it once more without the display beta, on the
-    // same credential, and its messages do not show it: no `api_retry`.
-    expect(callsWith(TOKEN_A).map(displayUpdates)).toEqual([true, false])
+    // Claude Code 2.1.314 sends it twice more on the same credential, first without
+    // the token-count beta, then without the display beta too, and its messages do
+    // not show it: no `api_retry`.
+    expect(callsWith(TOKEN_A).map((c) => [tokenCount(c), displayUpdates(c)])).toEqual([
+      [true, true],
+      [false, true],
+      [false, false],
+    ])
     expect(messages.filter((m) => m.type === 'system' && m.subtype === 'api_retry')).toEqual([])
   }, 60_000)
 
@@ -303,8 +316,8 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     expect(result).toMatchObject({ subtype: 'success', is_error: false })
     expect(reports[0]).toMatchObject({ id: 'a', outcome: { class: 'permanent' }, next: 'b' })
     // Claude Code knows a billing refusal is the account's and does not send it
-    // again without the display beta; A's only other request is the probe.
-    expect(callsWith(TOKEN_A).filter((c) => c.body?.model !== PROBE_FALLBACK_MODEL).map(displayUpdates)).toEqual([true])
+    // again without either beta; A's only other request is the probe.
+    expect(callsWith(TOKEN_A).filter((c) => c.body?.model !== PROBE_FALLBACK_MODEL).map((c) => [tokenCount(c), displayUpdates(c)])).toEqual([[true, true]])
   }, 60_000)
 
   it('resumes a turn that is rate limited after a tool ran, without running the tool again', async () => {
