@@ -1229,6 +1229,22 @@ class OrderStore:
         ).fetchone()
         return None if row is None else Fulfilment.model_validate(row)
 
+    def archive_claimed(self, conn: Conn, archive_id: int) -> bool:
+        """Whether an attempt already has Bambuddy archive ``archive_id``: one that named
+        it, or one whose print run made it (:meth:`run_archives`'s link). Asked under a
+        transaction-scoped lock on the archive, so two records naming it at once cannot
+        both see it free."""
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext('order_archive'), %s)", (archive_id,))
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM order_item_fulfilments WHERE %(a)s = ANY(archive_ids))"
+            " OR EXISTS (SELECT 1 FROM print_links l JOIN print_sends s"
+            " ON s.subject = l.subject AND s.queue_item_id = l.queue_item_id"
+            " JOIN order_item_fulfilments f ON f.print_run_id = s.run_id"
+            " WHERE l.archive_id = %(a)s) AS claimed",
+            {"a": archive_id},
+        ).fetchone()
+        return bool(row and row["claimed"])
+
     def run_archives(self, run_id: str, *, conn: Conn | None = None) -> list[int]:
         """The Bambuddy archives a print run's queue items made (§8.2): ``print_sends``
         by the run, then ``print_links`` by queue item, oldest first."""

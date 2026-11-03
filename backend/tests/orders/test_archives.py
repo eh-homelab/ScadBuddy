@@ -31,7 +31,7 @@ from scadbuddy.orders.integrations import (
     MediaTooLargeError,
     SpoolGroup,
 )
-from scadbuddy.orders.lifecycle import FulfilmentInput
+from scadbuddy.orders.lifecycle import FulfilmentInput, LifecycleError
 from scadbuddy.orders.models import Fulfilment, Order, OrderItem
 from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
@@ -203,6 +203,32 @@ async def test_an_attempt_by_hand_copies_the_archive_it_names(shop: Shop) -> Non
     await copy_check(shop.rows, Archives(facts(81)), order.id, item.id, attempt.id, 81)
     with pytest.raises(ApiError):
         await copy_check(shop.rows, Archives(facts(82)), order.id, item.id, attempt.id, 82)
+
+
+def test_a_hand_attempt_cannot_name_another_attempts_archive(shop: Shop, pool: PgPool) -> None:
+    """#5268 security review: naming an archive another order's print made would copy
+    that customer's photo and timelapse into this order."""
+    printed(shop, pool)
+    order, item = shop.accepted()
+    with pytest.raises(LifecycleError) as raised:
+        shop.lifecycle.record_fulfilment(
+            order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81), BY
+        )
+    assert raised.value.slug == "archive_claimed"
+    # Nor one another hand attempt already named.
+    shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="failed", archive_id=90), BY
+    )
+    other, other_item = shop.accepted()
+    with pytest.raises(LifecycleError):
+        shop.lifecycle.record_fulfilment(
+            other.id,
+            other_item.id,
+            FulfilmentInput(quantity=1, outcome="succeeded", archive_id=90),
+            BY,
+        )
+    # No attempt was recorded, so nothing of either archive can be copied there.
+    assert shop.rows.fulfilments(other_item.id) == []
 
 
 async def test_without_bambuddy_nothing_is_asked(shop: Shop, pool: PgPool) -> None:

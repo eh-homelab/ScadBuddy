@@ -1274,6 +1274,13 @@ class Lifecycle:
                 # Ruling 4: the new attempt first returns the item to `approved`; the
                 # bus hears the attempt's own status once, below.
                 item = self.store.update_item(conn, item.id, status="approved")
+            if body.archive_id is not None and self.store.archive_claimed(conn, body.archive_id):
+                # An archive is one print: another attempt's (this order's or any
+                # other's) is never copied into this one (#5268 security review).
+                raise LifecycleError(
+                    "archive_claimed",
+                    f"Bambuddy archive {body.archive_id} is already another attempt's print",
+                )
             attempt = self.store.insert_fulfilment(
                 conn,
                 item.id,

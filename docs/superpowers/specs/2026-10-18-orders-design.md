@@ -554,7 +554,7 @@ naming the attempt's item so the file is listed under it too (`item_id`, with
 `fulfilment_id`). An archive's copies (§8.2) land on their attempt. A print made outside
 the order's print path is attached from its own page ("Attach to order item"), which
 records an attempt naming its archive (`FulfilmentInput.archive_id`); that attempt copies
-the archive as a print's would. The row carries
+the archive as a print's would. An archive another attempt already has (named, or made by its run) is refused, `archive_claimed`, so no order copies another's print. The row carries
 `order_id` beside `subject`, so an order's whole list is one index read and
 `OrderDetail.attachments` returns it. `kind` is `image`, `video`, `document` (a PDF) or
 `other`, and it and `media_type` come from the bytes (`orders/attachments.py` `sniff`;

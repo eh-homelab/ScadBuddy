@@ -91,7 +91,7 @@ const attempt = z
       .int()
       .min(1)
       .optional()
-      .describe("A Bambuddy archive (a print) this attempt is; its time and grams are copied from it. Read on a record only"),
+      .describe("A Bambuddy archive (a print) this attempt is; its time and grams are copied from it. Read on a record only. Refused with `archive_claimed` when another attempt already has it"),
   })
   .strict()
 const shipmentItem = z.object({ order_item_id: itemId, quantity: z.number().int().min(1) }).strict()
