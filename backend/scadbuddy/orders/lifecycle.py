@@ -63,6 +63,7 @@ from scadbuddy.orders.store import (
     OrderNotFoundError,
     OrderStore,
     UnsetType,
+    fulfilment_subject,
     item_subject,
     order_subject,
 )
@@ -159,6 +160,10 @@ class FulfilmentInput(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     notes: str = ""
+    #: A Bambuddy archive this attempt is (#4251, "Attach to order item" on a print's
+    #: page): its facts are copied as a print's are (§8.2). Read when an attempt is
+    #: recorded; an edit leaves the attempt's archives as they are.
+    archive_id: int | None = Field(default=None, ge=1)
 
 
 def _distinct_lines(items: list[ShipmentItem]) -> list[ShipmentItem]:
@@ -1269,6 +1274,13 @@ class Lifecycle:
                 # Ruling 4: the new attempt first returns the item to `approved`; the
                 # bus hears the attempt's own status once, below.
                 item = self.store.update_item(conn, item.id, status="approved")
+            if body.archive_id is not None and self.store.archive_claimed(conn, body.archive_id):
+                # An archive is one print: another attempt's (this order's or any
+                # other's) is never copied into this one (#5268 security review).
+                raise LifecycleError(
+                    "archive_claimed",
+                    f"Bambuddy archive {body.archive_id} is already another attempt's print",
+                )
             attempt = self.store.insert_fulfilment(
                 conn,
                 item.id,
@@ -1279,6 +1291,7 @@ class Lifecycle:
                 started_at=body.started_at,
                 finished_at=body.finished_at,
                 notes=body.notes,
+                archive_ids=[] if body.archive_id is None else [body.archive_id],
             )
             status = self._after_attempt(body.outcome)
             if status != item.status:
@@ -1934,17 +1947,31 @@ class Lifecycle:
         sha256: str,
         blob_key: str,
         caption: str,
+        fulfilment_id: str | None = None,
     ) -> Attachment:
-        """The row of a file already kept as ``blob_key``, on the order or one of its
-        items; the store holds the blob for it in the same transaction."""
+        """The row of a file already kept as ``blob_key``, on the order, one of its
+        items, or with ``fulfilment_id`` one of that item's attempts (#4251); the store
+        holds the blob for it in the same transaction."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = None if item_id is None else self._item_of(conn, order, item_id)
+            if fulfilment_id is None:
+                subject = order_subject(order.id) if item is None else item_subject(item.id)
+            else:
+                attempt = self.store.fulfilment(fulfilment_id, conn=conn)
+                if item is None or attempt is None or attempt.order_item_id != item.id:
+                    raise LifecycleError(
+                        "fulfilment_not_found",
+                        f"no attempt {fulfilment_id} of that item",
+                        not_found=True,
+                    )
+                subject = fulfilment_subject(attempt.id)
             attachment = self.store.insert_attachment(
                 conn,
+                attempt_item_id=None if fulfilment_id is None else item_id,
                 attachment_id=attachment_id,
                 order_id=order.id,
-                subject=order_subject(order.id) if item is None else item_subject(item.id),
+                subject=subject,
                 kind=kind,
                 role=role,
                 filename=filename,
@@ -1962,6 +1989,7 @@ class Lifecycle:
                 "attachment.added",
                 attachment_id=attachment.id,
                 item_id=attachment.item_id,
+                fulfilment_id=attachment.fulfilment_id,
                 role=attachment.role,
             )
             change = _Change(order)
@@ -2039,14 +2067,15 @@ class Lifecycle:
     def set_delivered(
         self, order_id: str, item_id: str, attachment_id: str | None, by: Actor
     ) -> OrderItem:
-        """Mark one of the item's own image attachments, one a browser draws, as what
-        was actually delivered, or with None clear the mark."""
+        """Mark one of the item's own image attachments (or of its attempts), one a
+        browser draws, as what was actually delivered, or with None clear the mark."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = self._item_of(conn, order, item_id)
             if attachment_id is not None:
                 found = self.store.attachment(attachment_id, conn=conn)
-                if found is None or found[0].subject != item_subject(item.id):
+                # The item's own image, or one of its attempts' (#4251).
+                if found is None or found[0].item_id != item.id:
                     raise LifecycleError(
                         "attachment_id",
                         f"attachment {attachment_id} is not attached to this item",

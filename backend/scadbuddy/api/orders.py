@@ -1219,8 +1219,9 @@ async def get_attempt_archives(
     what each offers to copy: its ``finish_`` photos and whether it has a timelapse.
     Reading them copies what they say onto the attempt once its print settled
     (``archive_ids``, the printer's times, ``actual_seconds``, ``actual_grams``).
-    ``linked`` is false, with no archives, without Bambuddy; an attempt by hand, or one
-    Bambuddy has linked no archive to yet, has none. 404 for an attempt not the item's."""
+    ``linked`` is false, with no archives, without Bambuddy; an attempt by hand naming no
+    archive, or one Bambuddy has linked no archive to yet, has none. 404 for an attempt
+    not the item's."""
     _path(order_id, item_id, fulfilment_id)
     return await attempt_archives(
         orders.lifecycle, orders.integrations, order_id, item_id, fulfilment_id
@@ -1230,7 +1231,7 @@ async def get_attempt_archives(
 @router.post(
     "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives/{archive_id}/copy",
     response_model=Attachment,
-    summary="Copy an archive's finish photo or timelapse into the item's files",
+    summary="Copy an archive's finish photo or timelapse onto the attempt",
     responses={
         404: {"description": "No such attempt of the item"},
         413: {"description": "Larger than the upload limit in Settings"},
@@ -1249,8 +1250,9 @@ async def copy_archive_media(
 ) -> Attachment | JSONResponse:
     """The ``order_attempt_copy`` operation (§8.2, §6.2): the archive's ``finish_``
     photo (``name``, else its latest) or its timelapse pulled once from Bambuddy and
-    kept as ScadBuddy's own file, an attachment of the item with the role ``finished``
-    or ``timelapse``; the same bytes again are the attachment already there. Refused
+    kept as ScadBuddy's own file, an attachment of the attempt (listed under its item)
+    with the role ``finished`` or ``timelapse``; the same bytes again are the attachment
+    already there. Refused
     with 409: ``not_linked`` (no Bambuddy), ``archive_not_attempts`` (not one of the
     attempt's prints), ``archive_gone`` (deleted in Bambuddy), ``no_finish_photo``,
     ``no_timelapse`` (pull it off the printer first, ``POST

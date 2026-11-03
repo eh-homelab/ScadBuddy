@@ -23,7 +23,9 @@ function attemptOf(params: Record<string, string | readonly string[] | undefined
 }
 
 function archivesOf(attempt: Fulfilment): ArchiveOffer[] {
-  if (!mockSettings().bambuddy_url || !attempt.print_run_id) return []
+  if (!mockSettings().bambuddy_url) return []
+  // #4251: an attempt by hand names the archive it is.
+  if (!attempt.print_run_id) return (attempt.archive_ids ?? []).map((id) => ({ archive_id: id, status: 'completed', finish_photos: [`finish_${id}_ab12.jpg`], timelapse: true, actual_seconds: 3600, grams: 9.5 }))
   const id = 8000 + attempt.attempt
   return [{ archive_id: id, status: 'completed', finish_photos: [`finish_${id}_ab12.jpg`], timelapse: true, actual_seconds: 3600, grams: 9.5 }]
 }
@@ -61,8 +63,9 @@ export const handlers = [
       const attachment: OrderAttachment = {
         id: newId('att'),
         order_id: String(params.id),
-        subject: `order_item:${itemId}`,
+        subject: `order_item_fulfilment:${attempt.id}`,
         item_id: itemId,
+        fulfilment_id: attempt.id,
         kind: photo ? 'image' : 'video',
         role,
         filename: photo ? (body.name ?? archive.finish_photos![0]!) : `timelapse-${archive.archive_id}.mp4`,

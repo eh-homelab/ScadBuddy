@@ -364,7 +364,8 @@ class Fulfilment(BaseModel):
     #: started (#4719); a retried operation finds its claim by it.
     print_request_id: str | None = None
     #: The Bambuddy archives its run's queue items made, one per plate (§8.2), copied
-    #: once the print settled; empty for an attempt by hand or one not linked yet.
+    #: once the print settled (an attempt by hand: the one it named); empty for an attempt
+    #: by hand naming none, or one not linked yet.
     archive_ids: list[int] = Field(default_factory=list)
     #: The archives' printing time and filament, summed (§8.2).
     actual_seconds: int | None = None
@@ -446,10 +447,13 @@ def _listed(types: frozenset[str]) -> list[JsonValue]:
 class Attachment(BaseModel):
     id: str
     order_id: str
-    #: ``order:<id>`` or ``order_item:<id>``: what it is attached to.
+    #: ``order:<id>``, ``order_item:<id>`` or ``order_item_fulfilment:<id>``: what it is
+    #: attached to.
     subject: str
-    #: The line item it is attached to, or None for the order's own.
+    #: The line item it is attached to, or the attempt's item; None for the order's own.
     item_id: str | None
+    #: The fulfilment attempt it is attached to (#4251), or None.
+    fulfilment_id: str | None = None
     kind: AttachmentKind
     role: AttachmentRole
     #: The name it was sent with, for display and the download.

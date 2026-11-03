@@ -136,7 +136,7 @@ _PAYMENT = "id, order_id, amount_minor, method, reference, received_at, notes, c
 _EVENT = "id, order_id, at, by, kind, detail"
 _ATTACHMENT = (
     "id, order_id, subject, kind, role, filename, media_type, size_bytes, sha256, blob_key,"
-    " caption, created_at, created_by"
+    " caption, created_at, created_by, attempt_item_id"
 )
 
 #: The status timestamps `set_order_status` stamps (§3.2).
@@ -223,6 +223,11 @@ def order_subject(order_id: str) -> str:
     return f"order:{order_id}"
 
 
+def fulfilment_subject(fulfilment_id: str) -> str:
+    """A fulfilment attempt's attachment subject (§6.2, #4251)."""
+    return f"order_item_fulfilment:{fulfilment_id}"
+
+
 def _project_of(row: DictRow) -> OrderProject:
     kind, _, subject_id = str(row["subject"]).partition(":")
     return OrderProject(
@@ -236,12 +241,14 @@ def _attachment_of(row: DictRow) -> tuple[Attachment, str]:
     """The attachment and its blob key, which no wire shape carries."""
     subject: str = row["subject"]
     kind, _, subject_id = subject.partition(":")
+    attempt = kind == "order_item_fulfilment"
     return (
         Attachment(
             id=row["id"],
             order_id=row["order_id"],
             subject=subject,
-            item_id=subject_id if kind == "order_item" else None,
+            item_id=subject_id if kind == "order_item" else row["attempt_item_id"],
+            fulfilment_id=subject_id if attempt else None,
             kind=row["kind"],
             role=row["role"],
             filename=row["filename"],
@@ -1153,16 +1160,18 @@ class OrderStore:
         copies: int | None = None,
         sliced_sha256: str | None = None,
         sliced_blob_key: str | None = None,
+        archive_ids: Sequence[int] = (),
     ) -> Fulfilment:
         """The item's next attempt; numbered under the order's lock, which every writer
         of an item holds. ``print_request_id`` and the rest are the print path's claim
-        (#4719), made before its print starts."""
+        (#4719), made before its print starts; ``archive_ids`` the archive a person
+        named (#4251)."""
         row = conn.execute(
             "INSERT INTO order_item_fulfilments (order_item_id, attempt, quantity, outcome,"
             " failure_reason, started_at, finished_at, notes, created_by, print_request_id,"
-            " copies, sliced_sha256, sliced_blob_key)"
+            " copies, sliced_sha256, sliced_blob_key, archive_ids)"
             " VALUES (%s, (SELECT COALESCE(MAX(attempt) + 1, 1) FROM order_item_fulfilments"
-            " WHERE order_item_id = %s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " WHERE order_item_id = %s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             f" RETURNING {_FULFILMENT}",
             (
                 item_id,
@@ -1178,6 +1187,7 @@ class OrderStore:
                 copies,
                 sliced_sha256,
                 sliced_blob_key,
+                list(archive_ids),
             ),
         ).fetchone()
         assert row is not None
@@ -1241,6 +1251,22 @@ class OrderStore:
         ).fetchone()
         return None if row is None else Fulfilment.model_validate(row)
 
+    def archive_claimed(self, conn: Conn, archive_id: int) -> bool:
+        """Whether an attempt already has Bambuddy archive ``archive_id``: one that named
+        it, or one whose print run made it (:meth:`run_archives`'s link). Asked under a
+        transaction-scoped lock on the archive, so two records naming it at once cannot
+        both see it free."""
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext('order_archive'), %s)", (archive_id,))
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM order_item_fulfilments WHERE %(a)s = ANY(archive_ids))"
+            " OR EXISTS (SELECT 1 FROM print_links l JOIN print_sends s"
+            " ON s.subject = l.subject AND s.queue_item_id = l.queue_item_id"
+            " JOIN order_item_fulfilments f ON f.print_run_id = s.run_id"
+            " WHERE l.archive_id = %(a)s) AS claimed",
+            {"a": archive_id},
+        ).fetchone()
+        return bool(row and row["claimed"])
+
     def run_archives(self, run_id: str, *, conn: Conn | None = None) -> list[int]:
         """The Bambuddy archives a print run's queue items made (§8.2): ``print_sends``
         by the run, then ``print_links`` by queue item, oldest first."""
@@ -1264,16 +1290,22 @@ class OrderStore:
         actual_grams: float | None,
         conn: Conn,
     ) -> Fulfilment | None:
-        """What the attempt's archives say (§8.2), in the caller's transaction, which
-        holds the order's lock (``Lifecycle.record_archive_facts``). The times are written
-        by the first copy only, and one the archives do not give stays as the print path
-        recorded it, so a time a person corrected since (``PATCH``) is never put back."""
+        """What the attempt's archives say (§8.2), in the caller's transaction, which holds
+        the order's lock (``Lifecycle.record_archive_facts``). The times are written by the first
+        copy only, and one the archives do not give stays as the print path recorded it,
+        so a time a person corrected since (``PATCH``) is never put back. An attempt
+        recorded naming its archive (#4251) has its ids before its first copy, which is
+        told by no facts copied yet."""
+        first = (
+            "(archive_ids = '{}' OR (print_run_id IS NULL"
+            " AND actual_seconds IS NULL AND actual_grams IS NULL))"
+        )
         row = conn.execute(
             "UPDATE order_item_fulfilments SET archive_ids = %s,"
             # The times only on the first copy: one a person corrected since stands.
-            " started_at = CASE WHEN archive_ids = '{}' THEN coalesce(%s, started_at)"
+            f" started_at = CASE WHEN {first} THEN coalesce(%s, started_at)"
             "  ELSE started_at END,"
-            " finished_at = CASE WHEN archive_ids = '{}' THEN coalesce(%s, finished_at)"
+            f" finished_at = CASE WHEN {first} THEN coalesce(%s, finished_at)"
             "  ELSE finished_at END,"
             " actual_seconds = %s, actual_grams = %s"
             f" WHERE id = %s RETURNING {_FULFILMENT}",
@@ -1301,10 +1333,16 @@ class OrderStore:
 
     def release_print_claim(self, conn: Conn, holder_kind: str, attempt_id: str) -> None:
         """A claim whose print was refused before it started: its row and its hold go,
-        in the caller's transaction, as if it was never made."""
+        in the caller's transaction, as if it was never made. A file attached to it in
+        between becomes its item's, so none names an attempt that is gone."""
         conn.execute(
             "DELETE FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
             (holder_kind, attempt_id),
+        )
+        conn.execute(
+            "UPDATE order_attachments SET subject = 'order_item:' || attempt_item_id,"
+            " attempt_item_id = NULL WHERE subject = %s",
+            (fulfilment_subject(attempt_id),),
         )
         conn.execute("DELETE FROM order_item_fulfilments WHERE id = %s", (attempt_id,))
 
@@ -1597,10 +1635,12 @@ class OrderStore:
         blob_key: str,
         caption: str,
         created_by: Actor,
+        attempt_item_id: str | None = None,
     ) -> Attachment:
         """The row and its hold on ``blob_key`` (Ruling 8), in one transaction: the
         blob was written and touched just before, so the blob sweep's grace keeps it
-        until both are committed, and neither is ever there without the other."""
+        until both are committed, and neither is ever there without the other.
+        ``attempt_item_id`` is the item of an attempt's file (``fulfilment_subject``)."""
         conn.execute(
             "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
             " ON CONFLICT DO NOTHING",
@@ -1608,8 +1648,9 @@ class OrderStore:
         )
         row = conn.execute(
             "INSERT INTO order_attachments (id, order_id, subject, kind, role, filename,"
-            " media_type, size_bytes, sha256, blob_key, caption, created_by)"
-            f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ATTACHMENT}",
+            " media_type, size_bytes, sha256, blob_key, caption, created_by, attempt_item_id)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            f" RETURNING {_ATTACHMENT}",
             (
                 attachment_id,
                 order_id,
@@ -1623,6 +1664,7 @@ class OrderStore:
                 blob_key,
                 caption,
                 Jsonb(created_by.model_dump(mode="json")),
+                attempt_item_id,
             ),
         ).fetchone()
         assert row is not None

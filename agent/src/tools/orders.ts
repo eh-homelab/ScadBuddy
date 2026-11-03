@@ -86,6 +86,12 @@ const attempt = z
     started_at: datetime.optional(),
     finished_at: datetime.optional(),
     notes: z.string().default(''),
+    archive_id: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe("A Bambuddy archive (a print) this attempt is; its time and grams are copied from it. Read on a record only. Refused with `archive_claimed` when another attempt already has it"),
   })
   .strict()
 const shipmentItem = z.object({ order_item_id: itemId, quantity: z.number().int().min(1) }).strict()
@@ -614,7 +620,10 @@ export const orderTools: Tool[] = [
       'a print whose end could not be read is settled with order_item_fulfil. Refused with `requote_needed` (no ' +
       "accepted quote, the item's output gone, or a slice quote whose sliced file is gone or changed: quote it " +
       'again), `item_not_approved` (printing already), `item_made` (its attempts made its quantity: accept them), ' +
-      '`order_not_accepted` and `order_on_hold`, and the print run\'s own refusals. Outward: it prints.',
+      '`order_not_accepted` and `order_on_hold`, and the print run\'s own refusals. With Bambuddy, a slot whose ' +
+      "filament the item names and the plan leaves out takes that filament's spool loaded on the printer, else the " +
+      'shelf spool with most left (never one loaded in another printer); `needs_spool_choice` names the slots with ' +
+      "none (name a spool for them), `spool_not_filament` a named spool not of its slot's filament. Outward: it prints.",
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -646,7 +655,7 @@ export const orderTools: Tool[] = [
       "The Bambuddy archives of a print attempt's run (#4253, one per plate) and what each offers to copy: its " +
       '`finish_photos` and whether it has a `timelapse`. Reading them copies what they say onto the attempt once ' +
       'its print settled (`archive_ids`, the times, `actual_seconds`, `actual_grams`). `linked` is false without ' +
-      'Bambuddy; an attempt by hand, or one Bambuddy has not linked an archive to yet, has none.',
+      'Bambuddy; an attempt by hand naming no archive, or one Bambuddy has not linked an archive to yet, has none.',
     input: z.object({
       order_id: orderId,
       item_id: itemId,
@@ -669,7 +678,7 @@ export const orderTools: Tool[] = [
     label: "Copy a print's photo or timelapse into an order",
     description:
       "Copy an attempt's Bambuddy archive's finish photo (`finished_photo`, its latest unless `name` names one of " +
-      "order_attempt_archives' `finish_photos`) or its `timelapse` into the line item's files (#4253), with the role " +
+      "order_attempt_archives' `finish_photos`) or its `timelapse` onto the attempt, listed under its line item (#4253, #4251), with the role " +
       '`finished` or `timelapse`; the same bytes again answer with the file already there. Refused with ' +
       '`not_linked`, `archive_not_attempts`, `archive_gone`, `no_finish_photo` and `no_timelapse` (pull it off the ' +
       'printer first).',
@@ -832,6 +841,7 @@ export const orderTools: Tool[] = [
       .object({
         order_id: orderId,
         item_id: itemId.optional().describe('Attach to this line item; the order itself when left out'),
+        fulfilment_id: ID.optional().describe("Attach to this fulfilment attempt of `item_id` (a print's photo, its timelapse)"),
         workspace_path: workspacePathInput,
         workspace_sha256: workspaceShaInput,
         filename: z.string().min(1).max(255).optional().describe("e.g. \"finished.jpg\"; the workspace file's own name by default"),
@@ -840,10 +850,15 @@ export const orderTools: Tool[] = [
       })
       .strict(),
     risk: 'write',
-    routes: ['POST /api/v1/orders/{order_id}/attachments', 'POST /api/v1/orders/{order_id}/items/{item_id}/attachments'],
-    title: ({ order_id, item_id, filename, workspace_path }) =>
-      `Attach ${filename ?? workspace_path} to ${item_id ? `item ${item_id} of ` : ''}order ${order_id}`,
-    handler: async ({ order_id, item_id, workspace_path, workspace_sha256, filename, role, caption }, ctx) => {
+    routes: [
+      'POST /api/v1/orders/{order_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/attachments',
+    ],
+    title: ({ order_id, item_id, fulfilment_id, filename, workspace_path }) =>
+      `Attach ${filename ?? workspace_path} to ${fulfilment_id ? `attempt ${fulfilment_id} of ` : ''}${item_id ? `item ${item_id} of ` : ''}order ${order_id}`,
+    handler: async ({ order_id, item_id, fulfilment_id, workspace_path, workspace_sha256, filename, role, caption }, ctx) => {
+      if (fulfilment_id !== undefined && item_id === undefined) throw new ToolError('an attempt is attached to with its item_id')
       const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'order_attach')
       const name = filename ?? uploadName(info.path)
       const fields = { ...(role === undefined ? {} : { role }), ...(caption === undefined ? {} : { caption }) }
@@ -856,7 +871,13 @@ export const orderTools: Tool[] = [
               body,
               ...uploadInit(ctx, info, part, headers, fields),
             })
-          : ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/attachments', {
+          : fulfilment_id !== undefined
+            ? ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/attachments', {
+                params: { path: { order_id, item_id, fulfilment_id } },
+                body,
+                ...uploadInit(ctx, info, part, headers, fields),
+              })
+            : ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/attachments', {
               params: { path: { order_id, item_id } },
               body,
               ...uploadInit(ctx, info, part, headers, fields),

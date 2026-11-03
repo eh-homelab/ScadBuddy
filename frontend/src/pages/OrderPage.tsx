@@ -673,6 +673,7 @@ function ItemDrawer({
         itemId={item.id}
         attachments={detail.attachments.filter((a) => a.item_id === item.id)}
         deliveredId={item.delivered_attachment_id ?? null}
+        attempts={item.fulfilments}
         onChanged={onChanged}
       />
       {error && (

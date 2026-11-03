@@ -44,6 +44,23 @@ class SpoolGroup(BaseModel):
     spools: list[tuple[int, float | None]] = Field(default_factory=list)
 
 
+class ShelfSpool(BaseModel):
+    """One spool of the inventory and where it is loaded (§5.4 "Spools", #4251), in
+    orders' own shape."""
+
+    id: int
+    material: str
+    subtype: str | None = None
+    brand: str | None = None
+    #: ``#RRGGBB`` from its ``rgba``; None for one known only by its colour's name, which
+    #: is never taken for a record's colour.
+    colour: str | None = None
+    remaining_g: float = 0.0
+    archived: bool = False
+    #: The Bambuddy printer it is loaded in; None on the shelf.
+    loaded_printer_id: int | None = None
+
+
 class ArchiveFacts(BaseModel):
     """One Bambuddy archive (one plate's print) as an attempt copies it (§8.2), in
     orders' own shape."""
@@ -104,6 +121,11 @@ class OrderIntegrations(Protocol):
         without a Bambuddy."""
         ...
 
+    async def spool_inventory(self) -> list[ShelfSpool]:
+        """Every spool and the printer it is loaded in (§5.4 "Spools");
+        :class:`NotLinkedError` without a Bambuddy."""
+        ...
+
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
         """One archive's facts (§8.2); None for one Bambuddy deleted.
         :class:`NotLinkedError` without a Bambuddy."""
@@ -144,6 +166,9 @@ class NotLinked:
         return False
 
     async def spool_groups(self) -> list[SpoolGroup]:
+        raise NotLinkedError
+
+    async def spool_inventory(self) -> list[ShelfSpool]:
         raise NotLinkedError
 
     async def archive(self, archive_id: int) -> ArchiveFacts | None:

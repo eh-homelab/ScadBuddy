@@ -1,5 +1,5 @@
 import { Fragment, Suspense, lazy, useMemo, useRef, useState, type ReactNode } from 'react'
-import { ChevronRightIcon, ExternalLinkIcon, PrinterIcon, SlidersHorizontalIcon, TriangleAlertIcon } from 'lucide-react'
+import { ChevronRightIcon, ExternalLinkIcon, PackageIcon, PrinterIcon, SlidersHorizontalIcon, TriangleAlertIcon } from 'lucide-react'
 import { Link, useParams } from 'react-router'
 import { api, ApiError } from '../api/client'
 import type { Job, PrintDetail, PrinterMedia } from '../api/types'
@@ -22,6 +22,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
 import { modelPath } from '../lib/deeplink'
 import { USER_ONLY } from '../agent/dom'
+import { AttachToOrderItem } from '../components/orders/AttachToOrderItem'
 import { isEmbedded, openExternal } from '../lib/embed'
 import { formatBytes, formatDuration } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
@@ -145,6 +146,7 @@ export function PrintDetailPage() {
 function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }) {
   const deleted = print.status === DELETED_STATUS
   const [reprinting, setReprinting] = useState(false)
+  const [attaching, setAttaching] = useState(false)
   const title = print.output_name ?? `Print ${print.archive_id}`
 
   return (
@@ -186,6 +188,13 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
               <Button onClick={() => setReprinting(true)}>
                 <PrinterIcon aria-hidden="true" />
                 Print again
+              </Button>
+            )}
+            {/* #4251 §9 — the print as an attempt of an order's line item. */}
+            {!deleted && !isUnfinished(print.status) && (
+              <Button variant="outline" onClick={() => setAttaching(true)}>
+                <PackageIcon aria-hidden="true" />
+                Attach to order item
               </Button>
             )}
             {print.links.bambuddy_url && (
@@ -236,6 +245,9 @@ function PrintView({ print, reload }: { print: PrintDetail; reload: () => void }
       </div>
       {!deleted && (
         <PrintAgainDialog open={reprinting} print={print} onClose={() => setReprinting(false)} />
+      )}
+      {!deleted && (
+        <AttachToOrderItem open={attaching} archiveId={print.archive_id} printStatus={print.status} onClose={() => setAttaching(false)} />
       )}
     </div>
   )

@@ -32,8 +32,8 @@ What it does not do yet: print the quote's sliced file itself. A slice quote is 
 records and holds that file, but the run slices the item's output with the request's
 choices, as the dialog's run does; when those are the quote's, the run reuses the
 quote's own background slice (``bambuddy/preview.py``), otherwise it is a slice of the
-same output. A spool chosen per slot from the quote's filaments (``needs_spool_choice``,
-``spool_not_filament``) waits on §8.3's spool-to-filament match.
+same output. Each slot's spool is filled from the item's filaments in the operation's
+check (``orders/spools.py``, #4251): ``needs_spool_choice``, ``spool_not_filament``.
 """
 
 from __future__ import annotations

@@ -674,6 +674,24 @@ describe('order attachment tools (#4722)', () => {
     expect(fields).toEqual({})
   })
 
+  it('attaches to a fulfilment attempt of an item (#4251)', async () => {
+    const ATTEMPT = 'f0000000-1111-4222-8333-944455556666'
+    let hit = false
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/fulfilments/${ATTEMPT}/attachments`, () => {
+        hit = true
+        return HttpResponse.json({ id: ATTACHMENT, order_id: ORDER, item_id: ITEM, fulfilment_id: ATTEMPT })
+      }),
+    )
+    const { ctx: c, ref } = withWorkspace({ 'done.png': Buffer.from('png bytes') })
+    await tool('order_attach').execute({ order_id: ORDER, item_id: ITEM, fulfilment_id: ATTEMPT, ...ref('done.png') }, c)
+    expect(hit).toBe(true)
+    const { ctx: c2, ref: ref2 } = withWorkspace({ 'done.png': Buffer.from('png bytes') })
+    await expect(tool('order_attach').execute({ order_id: ORDER, fulfilment_id: ATTEMPT, ...ref2('done.png') }, c2)).rejects.toThrow(
+      'item_id',
+    )
+  })
+
   it('refuses a file that changed since it was read, before anything is sent', async () => {
     const { ctx: c } = withWorkspace({ 'a.png': Buffer.from('x') })
     await expect(
