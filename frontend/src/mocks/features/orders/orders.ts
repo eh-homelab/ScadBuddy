@@ -798,7 +798,7 @@ export const handlers = [
 
   http.post('/api/v1/orders/:id/items/:item/fulfilments', async ({ request, params }) => {
     const body = (await request.json()) as FulfilmentInput & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['quantity', 'outcome', 'failure_reason', 'started_at', 'finished_at', 'notes'])
+    const extra = unknownKeys(request, body, ['quantity', 'outcome', 'failure_reason', 'started_at', 'finished_at', 'notes', 'archive_id'])
     if (extra) return extra
     try {
       const order = lock(String(params.id))
@@ -820,6 +820,7 @@ export const handlers = [
         accepted_at: null,
         created_by: BROWSER,
         created_at: now(),
+        archive_ids: body.archive_id == null ? [] : [body.archive_id],
       }
       state.fulfilments.push(attempt)
       found.status = body.outcome === 'failed' ? 'failed' : 'approved'

@@ -80,7 +80,7 @@ export function FulfilmentForm({
                   </Button>
                 )
               )}
-              {attempt.print_run_id && attempt.finished_at && <ArchiveCopies orderId={orderId} itemId={itemId} attempt={attempt} onChanged={onChanged} />}
+              {((attempt.print_run_id && attempt.finished_at) || (!attempt.print_run_id && (attempt.archive_ids ?? []).length > 0)) && <ArchiveCopies orderId={orderId} itemId={itemId} attempt={attempt} onChanged={onChanged} />}
             </li>
           ))}
         </ol>

@@ -86,6 +86,12 @@ const attempt = z
     started_at: datetime.optional(),
     finished_at: datetime.optional(),
     notes: z.string().default(''),
+    archive_id: z
+      .number()
+      .int()
+      .min(1)
+      .optional()
+      .describe("A Bambuddy archive (a print) this attempt is; its time and grams are copied from it. Read on a record only"),
   })
   .strict()
 const shipmentItem = z.object({ order_item_id: itemId, quantity: z.number().int().min(1) }).strict()
@@ -813,6 +819,7 @@ export const orderTools: Tool[] = [
       .object({
         order_id: orderId,
         item_id: itemId.optional().describe('Attach to this line item; the order itself when left out'),
+        fulfilment_id: ID.optional().describe("Attach to this fulfilment attempt of `item_id` (a print's photo, its timelapse)"),
         workspace_path: workspacePathInput,
         workspace_sha256: workspaceShaInput,
         filename: z.string().min(1).max(255).optional().describe("e.g. \"finished.jpg\"; the workspace file's own name by default"),
@@ -821,10 +828,15 @@ export const orderTools: Tool[] = [
       })
       .strict(),
     risk: 'write',
-    routes: ['POST /api/v1/orders/{order_id}/attachments', 'POST /api/v1/orders/{order_id}/items/{item_id}/attachments'],
-    title: ({ order_id, item_id, filename, workspace_path }) =>
-      `Attach ${filename ?? workspace_path} to ${item_id ? `item ${item_id} of ` : ''}order ${order_id}`,
-    handler: async ({ order_id, item_id, workspace_path, workspace_sha256, filename, role, caption }, ctx) => {
+    routes: [
+      'POST /api/v1/orders/{order_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/attachments',
+      'POST /api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/attachments',
+    ],
+    title: ({ order_id, item_id, fulfilment_id, filename, workspace_path }) =>
+      `Attach ${filename ?? workspace_path} to ${fulfilment_id ? `attempt ${fulfilment_id} of ` : ''}${item_id ? `item ${item_id} of ` : ''}order ${order_id}`,
+    handler: async ({ order_id, item_id, fulfilment_id, workspace_path, workspace_sha256, filename, role, caption }, ctx) => {
+      if (fulfilment_id !== undefined && item_id === undefined) throw new ToolError('an attempt is attached to with its item_id')
       const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'order_attach')
       const name = filename ?? uploadName(info.path)
       const fields = { ...(role === undefined ? {} : { role }), ...(caption === undefined ? {} : { caption }) }
@@ -837,7 +849,13 @@ export const orderTools: Tool[] = [
               body,
               ...uploadInit(ctx, info, part, headers, fields),
             })
-          : ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/attachments', {
+          : fulfilment_id !== undefined
+            ? ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/attachments', {
+                params: { path: { order_id, item_id, fulfilment_id } },
+                body,
+                ...uploadInit(ctx, info, part, headers, fields),
+              })
+            : ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/attachments', {
               params: { path: { order_id, item_id } },
               body,
               ...uploadInit(ctx, info, part, headers, fields),

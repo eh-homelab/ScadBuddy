@@ -481,6 +481,14 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 raise ApiError(
                     status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}"
                 )
+        # A request recorded before attempts had files names none (#4251).
+        fulfilment_id = request.get("fulfilment_id")
+        if fulfilment_id is not None:
+            attempt = await asyncio.to_thread(store.fulfilment, fulfilment_id)
+            if attempt is None or attempt.order_item_id != item_id:
+                raise ApiError(
+                    status.HTTP_404_NOT_FOUND, f"no attempt {fulfilment_id!r} of that item"
+                )
         return {}
 
     async def attachment_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -522,6 +530,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     sha256=request["file"],
                     blob_key=key,
                     caption=request["caption"],
+                    fulfilment_id=request.get("fulfilment_id"),
                 )
             )
         except LifecycleError as error:

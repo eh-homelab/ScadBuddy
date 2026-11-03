@@ -548,7 +548,13 @@ not read as a print's `print_attachments`.)
 
 **As built (#4251, the order-entry slice, ahead of the print path).** Any file may be
 attached to the order (`order:<id>`) or to a line item (`order_item:<id>`); attempts'
-own attachments (`order_item_fulfilment:<id>`) wait for the print path. The row carries
+own attachments (`order_item_fulfilment:<id>`) came after the print path (plan 2026-11-03
+Ruling 3): `POST …/items/{item}/fulfilments/{f}/attachments`, the row's `attempt_item_id`
+naming the attempt's item so the file is listed under it too (`item_id`, with
+`fulfilment_id`). An archive's copies (§8.2) land on their attempt. A print made outside
+the order's print path is attached from its own page ("Attach to order item"), which
+records an attempt naming its archive (`FulfilmentInput.archive_id`); that attempt copies
+the archive as a print's would. The row carries
 `order_id` beside `subject`, so an order's whole list is one index read and
 `OrderDetail.attachments` returns it. `kind` is `image`, `video`, `document` (a PDF) or
 `other`, and it and `media_type` come from the bytes (`orders/attachments.py` `sniff`;

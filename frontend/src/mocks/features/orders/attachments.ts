@@ -63,12 +63,15 @@ async function parts(request: Request): Promise<Part[]> {
   return found
 }
 
-async function upload(request: Request, orderId: string, itemId: string | null) {
+async function upload(request: Request, orderId: string, itemId: string | null, fulfilmentId: string | null = null) {
   let subject: string
   try {
     const order = lock(orderId)
     if (itemId) itemOf(order, itemId)
-    subject = itemId ? `order_item:${itemId}` : `order:${orderId}`
+    if (fulfilmentId && !state.fulfilments.some((f) => f.id === fulfilmentId && f.order_item_id === itemId)) {
+      throw new Refused('fulfilment_not_found', `no attempt ${fulfilmentId} of that item`, [], true)
+    }
+    subject = fulfilmentId ? `order_item_fulfilment:${fulfilmentId}` : itemId ? `order_item:${itemId}` : `order:${orderId}`
   } catch (error) {
     return refused(request, error)
   }
@@ -86,6 +89,7 @@ async function upload(request: Request, orderId: string, itemId: string | null) 
     order_id: orderId,
     subject,
     item_id: itemId,
+    fulfilment_id: fulfilmentId,
     kind,
     role: role as OrderAttachmentRole,
     filename,
@@ -112,6 +116,9 @@ function found(orderId: string, id: string): OrderAttachment {
 export const handlers = [
   http.post('/api/v1/orders/:id/attachments', ({ request, params }) => upload(request, String(params.id), null)),
   http.post('/api/v1/orders/:id/items/:item/attachments', ({ request, params }) => upload(request, String(params.id), String(params.item))),
+  http.post('/api/v1/orders/:id/items/:item/fulfilments/:f/attachments', ({ request, params }) =>
+    upload(request, String(params.id), String(params.item), String(params.f)),
+  ),
   http.get('/api/v1/orders/:id/attachments', ({ request, params }) =>
     transition(request, () => {
       lock(String(params.id))
@@ -177,7 +184,7 @@ export const handlers = [
       const item = itemOf(order, String(params.item))
       if (id !== null) {
         const attachment = state.attachments.find((a) => a.id === id)
-        if (!attachment || attachment.subject !== `order_item:${item.id}`) return fieldProblem(request, 'attachment_id', `attachment ${id} is not attached to this item`)
+        if (!attachment || attachment.item_id !== item.id) return fieldProblem(request, 'attachment_id', `attachment ${id} is not attached to this item`)
         if (attachment.kind !== 'image' || !SHOWN_IMAGES.has(attachment.media_type)) {
           return fieldProblem(request, 'attachment_id', `attachment ${id} is not an image a browser shows (PNG, JPEG, WebP, GIF or AVIF), so it cannot stand as the item's picture`)
         }

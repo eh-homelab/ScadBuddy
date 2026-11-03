@@ -136,7 +136,7 @@ _PAYMENT = "id, order_id, amount_minor, method, reference, received_at, notes, c
 _EVENT = "id, order_id, at, by, kind, detail"
 _ATTACHMENT = (
     "id, order_id, subject, kind, role, filename, media_type, size_bytes, sha256, blob_key,"
-    " caption, created_at, created_by"
+    " caption, created_at, created_by, attempt_item_id"
 )
 
 #: The status timestamps `set_order_status` stamps (§3.2).
@@ -223,6 +223,11 @@ def order_subject(order_id: str) -> str:
     return f"order:{order_id}"
 
 
+def fulfilment_subject(fulfilment_id: str) -> str:
+    """A fulfilment attempt's attachment subject (§6.2, #4251)."""
+    return f"order_item_fulfilment:{fulfilment_id}"
+
+
 def _project_of(row: DictRow) -> OrderProject:
     kind, _, subject_id = str(row["subject"]).partition(":")
     return OrderProject(
@@ -236,12 +241,14 @@ def _attachment_of(row: DictRow) -> tuple[Attachment, str]:
     """The attachment and its blob key, which no wire shape carries."""
     subject: str = row["subject"]
     kind, _, subject_id = subject.partition(":")
+    attempt = kind == "order_item_fulfilment"
     return (
         Attachment(
             id=row["id"],
             order_id=row["order_id"],
             subject=subject,
-            item_id=subject_id if kind == "order_item" else None,
+            item_id=subject_id if kind == "order_item" else row["attempt_item_id"],
+            fulfilment_id=subject_id if attempt else None,
             kind=row["kind"],
             role=row["role"],
             filename=row["filename"],
@@ -1153,16 +1160,18 @@ class OrderStore:
         copies: int | None = None,
         sliced_sha256: str | None = None,
         sliced_blob_key: str | None = None,
+        archive_ids: Sequence[int] = (),
     ) -> Fulfilment:
         """The item's next attempt; numbered under the order's lock, which every writer
         of an item holds. ``print_request_id`` and the rest are the print path's claim
-        (#4719), made before its print starts."""
+        (#4719), made before its print starts; ``archive_ids`` the archive a person
+        named (#4251)."""
         row = conn.execute(
             "INSERT INTO order_item_fulfilments (order_item_id, attempt, quantity, outcome,"
             " failure_reason, started_at, finished_at, notes, created_by, print_request_id,"
-            " copies, sliced_sha256, sliced_blob_key)"
+            " copies, sliced_sha256, sliced_blob_key, archive_ids)"
             " VALUES (%s, (SELECT COALESCE(MAX(attempt) + 1, 1) FROM order_item_fulfilments"
-            " WHERE order_item_id = %s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " WHERE order_item_id = %s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             f" RETURNING {_FULFILMENT}",
             (
                 item_id,
@@ -1178,6 +1187,7 @@ class OrderStore:
                 copies,
                 sliced_sha256,
                 sliced_blob_key,
+                list(archive_ids),
             ),
         ).fetchone()
         assert row is not None
@@ -1243,14 +1253,20 @@ class OrderStore:
     ) -> Fulfilment | None:
         """What the attempt's archives say (§8.2). The times are written by the first
         copy only, and one the archives do not give stays as the print path recorded it,
-        so a time a person corrected since (``PATCH``) is never put back."""
+        so a time a person corrected since (``PATCH``) is never put back. An attempt
+        recorded naming its archive (#4251) has its ids before its first copy, which is
+        told by no facts copied yet."""
+        first = (
+            "(archive_ids = '{}' OR (print_run_id IS NULL"
+            " AND actual_seconds IS NULL AND actual_grams IS NULL))"
+        )
         with self.transaction() as conn:
             row = conn.execute(
                 "UPDATE order_item_fulfilments SET archive_ids = %s,"
                 # The times only on the first copy: one a person corrected since stands.
-                " started_at = CASE WHEN archive_ids = '{}' THEN coalesce(%s, started_at)"
+                f" started_at = CASE WHEN {first} THEN coalesce(%s, started_at)"
                 "  ELSE started_at END,"
-                " finished_at = CASE WHEN archive_ids = '{}' THEN coalesce(%s, finished_at)"
+                f" finished_at = CASE WHEN {first} THEN coalesce(%s, finished_at)"
                 "  ELSE finished_at END,"
                 " actual_seconds = %s, actual_grams = %s"
                 f" WHERE id = %s RETURNING {_FULFILMENT}",
@@ -1574,10 +1590,12 @@ class OrderStore:
         blob_key: str,
         caption: str,
         created_by: Actor,
+        attempt_item_id: str | None = None,
     ) -> Attachment:
         """The row and its hold on ``blob_key`` (Ruling 8), in one transaction: the
         blob was written and touched just before, so the blob sweep's grace keeps it
-        until both are committed, and neither is ever there without the other."""
+        until both are committed, and neither is ever there without the other.
+        ``attempt_item_id`` is the item of an attempt's file (``fulfilment_subject``)."""
         conn.execute(
             "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
             " ON CONFLICT DO NOTHING",
@@ -1585,8 +1603,9 @@ class OrderStore:
         )
         row = conn.execute(
             "INSERT INTO order_attachments (id, order_id, subject, kind, role, filename,"
-            " media_type, size_bytes, sha256, blob_key, caption, created_by)"
-            f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ATTACHMENT}",
+            " media_type, size_bytes, sha256, blob_key, caption, created_by, attempt_item_id)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            f" RETURNING {_ATTACHMENT}",
             (
                 attachment_id,
                 order_id,
@@ -1600,6 +1619,7 @@ class OrderStore:
                 blob_key,
                 caption,
                 Jsonb(created_by.model_dump(mode="json")),
+                attempt_item_id,
             ),
         ).fetchone()
         assert row is not None
