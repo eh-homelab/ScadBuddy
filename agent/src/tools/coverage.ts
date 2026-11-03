@@ -457,6 +457,19 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
       "A flow run's queue is the person's (spec 2026-10-11 §4.2): no grant decides it. The starter session " +
       'is sent the calls waiting for it in an escalation turn and answers with escalation_respond.',
   },
+  // Web Push (#815 §3, routes/push.ts).
+  ...['GET /api/v1/ai/push/key', 'PUT /api/v1/ai/push/subscription', 'DELETE /api/v1/ai/push/subscription'].map((route) => ({
+    route,
+    reason:
+      "A browser's own push subscription, made by the page once the person grants notifications from a click; " +
+      'an agent reaches the person through request_user_attention, which the push announces.',
+  })),
+  ...['GET /api/v1/ai/settings/push-services', 'PUT /api/v1/ai/settings/push-services'].map((route) => ({
+    route,
+    reason:
+      'Which push services the agent may POST to, a person\'s setting in Settings → Assistant → Notifications; ' +
+      'an agent must not widen where the service sends requests.',
+  })),
   // Settings → Tools & plugins (#2171).
   ...['GET /api/v1/ai/capabilities', 'GET /api/v1/ai/capabilities/{source}', 'GET /api/v1/ai/capabilities/{source}/items/{item}'].map(
     (route) => ({ route, reason: CAPABILITIES_READ }),

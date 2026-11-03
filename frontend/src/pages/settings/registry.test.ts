@@ -122,6 +122,7 @@ describe('registry', () => {
           'images',
           'workspace',
           'memory',
+          'notifications',
         ],
       ],
       ['tools', ['builtin', 'packages', 'remote']],

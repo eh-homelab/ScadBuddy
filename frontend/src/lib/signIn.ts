@@ -1,5 +1,6 @@
 import { useEffect, useSyncExternalStore } from 'react'
 import { api } from '../api/client'
+import { disableWebPush } from '../agent/webPush'
 import type { AuthSessionView } from '../api/types'
 import { isEmbedded, openExternal } from './embed'
 import { clearSignedOut, noteSignedOut, resetSignedOut, setEnforced } from './signedOut'
@@ -172,6 +173,8 @@ export function signIn(embedded = isEmbedded()): Promise<AuthSessionView | null>
  * or, from a frame, in a new one (an IdP's page commonly refuses to be framed).
  */
 export async function signOut(): Promise<void> {
+  // #815: while the session still stands, so the agent takes the DELETE as this person's.
+  await disableWebPush()
   const { end_session_url: next } = await api.logout()
   await refreshAuthSession()
   if (next) openExternal(next)

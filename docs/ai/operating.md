@@ -1851,3 +1851,34 @@ refresh token, and they can act only on the repositories the App is installed on
 ([GitHub docs](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)).
 Set the App's callback URL to the one the card shows, then give its client id and a
 client secret under **Use my own OAuth app**.
+
+## 16. Attention notifications (#815)
+
+When the assistant needs the person (a `request_user_attention` call, or a `browser_*`
+call waiting for its tab), these channels announce it:
+
+- **The badge.** The shell reads `GET /api/v1/ai/pending-input`. It reads again as soon as
+  `GET /api/v1/ai/pending-input/changes` says something changed, and every 15 s
+  regardless. The change stream is fed by `NOTIFY scadbuddy_pending`, which a trigger sends
+  on every write to `ai_pending_input`, `ai_approvals` and `ai_questions`
+  ([`agent/src/gate/changes.ts`](../../agent/src/gate/changes.ts)).
+- **The page's own notification**, while a ScadBuddy tab is open but hidden
+  (`frontend/src/agent/attentionNotifications.ts`).
+- **Web Push**, with every tab closed ([`agent/src/notify/`](../../agent/src/notify/),
+  `frontend/public/push-sw.js`). The page subscribes once the person turns notifications
+  on. The agent pushes each request once to every subscribed browser of someone who may see
+  it. A push carries the request's id, its session's id and its reason, never the message.
+  The VAPID key is made on first use and sealed under the KEK (`ai_push_vapid`).
+  Subscriptions (`ai_push_subscriptions`) are sealed under the KEK too, so Web Push needs
+  `SCADBUDDY_SECRET_KEY_FILE`, and rotation re-wraps both. A subscription's endpoint comes
+  from the browser, so it is checked strictly
+  ([`agent/src/notify/pushEgress.ts`](../../agent/src/notify/pushEgress.ts)), when it is
+  stored and again at every push. It must use https, and its host must be on the push-service
+  allowlist (`push_service_hosts` in `ai_settings`, edited in Settings → Assistant →
+  Notifications). The default list is `fcm.googleapis.com`, `updates.push.services.mozilla.com`,
+  `*.notify.windows.com`, `*.push.apple.com` and `web.push.apple.com`. Every address the host
+  resolves to must be public: never loopback, RFC 1918 or ULA, CGNAT, link-local or multicast.
+  The push connects to the checked address and follows no redirect. An endpoint another person
+  holds is refused, and each person keeps at most five subscriptions (the oldest go). A pass has
+  at most four pushes in flight and stops starting them after 30 s. The pod must be able to
+  reach the allowed push services. The VAPID `sub` is `SCADBUDDY_PUBLIC_URL`.
