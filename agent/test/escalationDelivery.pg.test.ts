@@ -94,8 +94,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
 
   async function flowRun(parentSession = parent): Promise<string> {
     await db.sql`
-      INSERT INTO workflow_definitions (id, name, version, script, created_by)
-      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+      INSERT INTO workflow_definitions (id, name, version, commit, created_by)
+      VALUES ('d1', 'swap', 1, 'c1', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
     const waiting = [
       {
         call_id: 'c1',
@@ -358,8 +358,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
   it("runs whose calls were all delivered already do not keep a newer run's call out of the batch", async () => {
     const waiting = [{ call_id: 'c1', kind: 'approval', fn: 'queue_print', hop: 'parent', hop_until: new Date(Date.now() + 600_000).toISOString(), hops: [] }]
     await db.sql`
-      INSERT INTO workflow_definitions (id, name, version, script, created_by)
-      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+      INSERT INTO workflow_definitions (id, name, version, commit, created_by)
+      VALUES ('d1', 'swap', 1, 'c1', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
     for (let i = 0; i < 200; i++) {
       const old = randomUUID()
       await db.sql`
@@ -377,8 +377,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
     // Timed out but not moved on yet (moveDue runs on its own tick): they yield nothing.
     const waiting = [{ call_id: 'c1', kind: 'approval', fn: 'queue_print', hop: 'parent', hop_until: new Date(Date.now() - 60_000).toISOString(), hops: [] }]
     await db.sql`
-      INSERT INTO workflow_definitions (id, name, version, script, created_by)
-      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+      INSERT INTO workflow_definitions (id, name, version, commit, created_by)
+      VALUES ('d1', 'swap', 1, 'c1', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
     // One statement, not 200: keeps this test quick under CI load.
     await db.sql`
       INSERT INTO workflow_runs (id, definition_id, version, name, status, workflow_id, workflow_run_id, started_by, waiting_on, updated_at)
@@ -393,8 +393,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`escalation delivery${TEST_DATABASE_URL ? ''
   // #3494 review: a malformed hop_until skips that call, never the scan of every run.
   it('skips a call whose hop_until is malformed and still delivers the others', async () => {
     await db.sql`
-      INSERT INTO workflow_definitions (id, name, version, script, created_by)
-      VALUES ('d1', 'swap', 1, 'x', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
+      INSERT INTO workflow_definitions (id, name, version, commit, created_by)
+      VALUES ('d1', 'swap', 1, 'c1', '{"kind": "browser"}') ON CONFLICT DO NOTHING`
     const bad = randomUUID()
     const waiting = [{ call_id: 'c1', kind: 'approval', fn: 'queue_print', hop: 'parent', hop_until: 'not a time', hops: [] }]
     await db.sql`

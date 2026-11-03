@@ -7,10 +7,10 @@ flows are not models. The layout is ``<name>/flow.py``, and ``<name>/inputs.json
 flow that declares typed inputs (#2483): source, versioned with the script in the same
 commit, never state (an approval timeout stays in Postgres).
 
-Every version is its own commit: a registration, a restore and a backfilled row each
-make exactly one, ``--allow-empty`` when the script is unchanged. A commit carries two
-trailers, ``ScadBuddy-Flow: <name>`` and ``ScadBuddy-Flow-Version: <definition id>``,
-after the author's (``core/authorship.py``). A version's number is its commit's position
+Every version is its own commit: a registration and a restore each make exactly one,
+``--allow-empty`` when the script is unchanged. A commit carries two trailers,
+``ScadBuddy-Flow: <name>`` and ``ScadBuddy-Flow-Version: <definition id>``, after the
+author's (``core/authorship.py``). A version's number is its commit's position
 among the commits with that name's ``ScadBuddy-Flow`` trailer, oldest first, and only
 this module numbers one. :meth:`FlowHistory.register` holds the write lock across the
 reconcile, the commit and the index insert, so two registrations of one name, in one
@@ -112,7 +112,6 @@ class FlowHistory(GitRepo):
         inputs: dict[str, Any] | None = None,
         restore: str | None = None,
         reconcile: Callable[[], object] | None = None,
-        date: datetime | None = None,
     ) -> tuple[str, int]:
         """One new version of ``name``: ``script`` with its ``inputs`` schema (none when
         None), or the script and schema at the commit ``restore``. Under the write lock:
@@ -122,7 +121,7 @@ class FlowHistory(GitRepo):
             if reconcile is not None:
                 reconcile()
             return self.register_locked(
-                name, version_id, index, script=script, inputs=inputs, restore=restore, date=date
+                name, version_id, index, script=script, inputs=inputs, restore=restore
             )
 
     def register_locked(
@@ -134,7 +133,6 @@ class FlowHistory(GitRepo):
         script: str | None = None,
         inputs: dict[str, Any] | None = None,
         restore: str | None = None,
-        date: datetime | None = None,
     ) -> tuple[str, int]:
         version = len(self.versions(name)) + 1
         trailers = [f"{FLOW_TRAILER}: {name}", f"{VERSION_TRAILER}: {version_id}"]
@@ -158,7 +156,7 @@ class FlowHistory(GitRepo):
             else:
                 schema.write_text(json.dumps(inputs, indent=2) + "\n", encoding="utf-8")
             commit = self._commit_locked(
-                f"Register {name} v{version}", name, trailers=trailers, allow_empty=True, date=date
+                f"Register {name} v{version}", name, trailers=trailers, allow_empty=True
             )
         if commit is None:  # pragma: no cover - an allowed-empty commit always lands
             raise GitError(f"no commit for {name} v{version}")

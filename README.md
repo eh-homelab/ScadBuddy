@@ -888,9 +888,11 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
   (`<name>/flow.py`), a repository of its own beside `/data/models` on the API's data
   volume, on the same git code (`core/gitrepo.py`). Only the API reads it: a run's
   script goes to the worker as the run's input. `workflow_definitions` keeps a row per
-  version naming its commit, and `workflow_runs` the commit each run ran. The first
-  start after the upgrade backfills the versions Postgres held (`flows/backfill.py`),
-  one commit each with its author and date; it is idempotent, and the log says how many.
+  version naming its commit, and `workflow_runs` the commit each run ran. The builds
+  from #2503 to #5124 backfilled the versions Postgres held into git at start; this one
+  no longer does (#5139), so an install from before #2503 upgrades through one of those
+  first. Until it does, its old versions read as missing their script, and the
+  `script` column stays (the migration says so in a notice instead of dropping it).
 - **`tool`, `agent`, `ask_session`** run on the agent's `agent-tools` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS`, read by the API when it starts a run).
 - **Tool tiers come from the agent** (#2704), as its own turns resolve them (the tool's
