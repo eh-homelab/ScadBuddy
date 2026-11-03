@@ -579,7 +579,7 @@ Both call `deploy.reusable.yml`, which:
    the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
-   first waits up to an hour for an older open one to land, and closes it and
+   first waits up to 45 minutes for an older open one to land, and closes it and
    replaces the branch only when it cannot (a failed CI run, a conflict,
    auto-merge off) or is still open after the wait (#5168: the PR's
    checks take 15 to 40 minutes, and closing it at every merge kept prod on one

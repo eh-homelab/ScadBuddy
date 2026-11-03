@@ -45,7 +45,7 @@ name: Deploy (reusable)
 #      what it runs cannot be checked.
 #   3. Open ONE PR, "deploy(scadbuddy): <version>", on the fixed branch
 #      `deploy/scadbuddy`, and arm `gh pr merge --auto --squash`. A newer deploy
-#      first waits up to an hour for an older open one to land (#5168); it
+#      first waits up to 45 minutes for an older open one to land (#5168); it
 #      closes that PR and replaces the branch only when it cannot land (checks
 #      failed, a conflict, auto-merge off) or is still open after the wait.
 #      The clusters ruleset (CI Summary + claude-review) is the safety net; the
@@ -133,8 +133,8 @@ jobs:
     name: Pin ${{ inputs.version }} in clusters
     runs-on: ubuntu-latest
     # The agent wait below can take up to 10 of these, the open deploy PR's
-    # 60, the agent-durable one 20, the slicer 10.
-    timeout-minutes: 110
+    # 45, the agent-durable one 20, the slicer 10.
+    timeout-minutes: 95
     # The one place the two callers can race: this job waits for the open
     # deploy PR, closes it if it cannot land, replaces the `deploy/scadbuddy`
     # branch and opens a new PR. Job-level, so deploy-release's image wait and
@@ -228,28 +228,35 @@ jobs:
       # PR, merges more often than that kept prod on one build for hours. So
       # this waits while the open PR can still land by itself: auto-merge
       # armed, no conflict, no workflow run on its head failed or cancelled
-      # (clusters' CI is the one workflow a deploy PR runs, and CI Summary
-      # is its job). It stops waiting when the PR is gone (merged, or closed
-      # by hand), and gives up on one that cannot land or is still open
-      # after WAIT_SECONDS; the next step then supersedes it as before.
-      # Meanwhile the concurrency group keeps only the newest request
-      # pending, so a burst deploys its first and its last build, and prod
-      # moves at every PR cycle.
+      # (clusters' CI, whose job is CI Summary, and whatever else runs on
+      # that commit, of any event). It stops waiting when the PR is gone
+      # (merged, or closed by hand), and gives up on one that cannot land or
+      # is still open after WAIT_SECONDS; the next step then supersedes it
+      # as before. WAIT_SECONDS stays well inside the watch token's hour: a
+      # read after it expires would fail. Meanwhile the concurrency group
+      # keeps only the newest request pending, so a burst deploys its first
+      # and its last build, and prod moves at every PR cycle.
       - name: Wait for the open deploy PR to land
         id: wait
         env:
           GH_TOKEN: ${{ steps.watch-token.outputs.token }}
           GH_REPO: ${{ env.CLUSTERS_REPO }}
-          WAIT_SECONDS: "3600"
+          WAIT_SECONDS: "2700"
           POLL_SECONDS: "30"
         run: |
           set -euo pipefail
           start=$SECONDS
           outcome=""
+          pr=""
           while :; do
-            pr=$(gh pr list --head "$DEPLOY_BRANCH" --state open --json number --jq '.[0].number // empty')
-            if [ -z "$pr" ]; then outcome=none; break; fi
+            # Checked before any read, so no read runs past the deadline.
             if [ $((SECONDS - start)) -ge "$WAIT_SECONDS" ]; then outcome=timeout; break; fi
+            # A failed read (a 5xx, say) is retried, never a failed deploy.
+            if ! open=$(gh pr list --head "$DEPLOY_BRANCH" --state open --json number --jq '.[0].number // empty'); then
+              sleep "$POLL_SECONDS"; continue
+            fi
+            if [ -z "$open" ]; then outcome=none; break; fi
+            pr=$open
             # Merged or closed since the list: look again.
             view=$(gh pr view "$pr" --json autoMergeRequest,mergeStateStatus,headRefOid \
               --jq '[(.autoMergeRequest != null), .mergeStateStatus, .headRefOid] | @tsv') \
@@ -259,7 +266,7 @@ jobs:
             if [ "$state" = DIRTY ]; then outcome=conflict; break; fi
             # A run still going, or none started yet, means "keep waiting";
             # a success too, until the merge. A failed read is not a failure.
-            failed=$(gh run list --commit "$head" --event pull_request --json conclusion \
+            failed=$(gh run list --commit "$head" --json conclusion \
               --jq '[.[] | select(.conclusion | IN("failure", "cancelled", "timed_out", "startup_failure"))] | length' \
               || true)
             if [ "${failed:-0}" != 0 ]; then outcome=failed; break; fi
@@ -268,7 +275,7 @@ jobs:
           done
           case "$outcome" in
             none)     echo "no open deploy PR (or it has landed)" ;;
-            *)        echo "::warning::deploy PR #${pr} will be superseded: ${outcome}" ;;
+            *)        echo "::warning::deploy PR #${pr:-?} will be superseded: ${outcome}" ;;
           esac
           echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
 

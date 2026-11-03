@@ -8,11 +8,11 @@
 # from the code it covers. No network.
 #
 # A scenario is one line per poll: `<pr> <armed> <mergeStateStatus> <failed>`,
-# or `none` for no open deploy PR, or `<pr> gone` for a PR that merged between
-# the list and the view; `<failed>` is how many workflow runs on its head
-# failed, or `err` for a read that fails. The fake `gh` answers each
-# `gh pr list` with the next line, and `gh pr view` and `gh run list` with
-# that line's fields.
+# or `none` for no open deploy PR, `err` for a list that fails, or `<pr> gone`
+# for a PR that merged between the list and the view; `<failed>` is how many
+# workflow runs on its head failed, or `err` for a read that fails. The fake
+# `gh` answers each `gh pr list` with the next line (the last one again once
+# they run out), and `gh pr view` and `gh run list` with that line's fields.
 #
 # Runs in ci.yml's `lint` job. Needs mikefarah yq v4.
 set -euo pipefail
@@ -30,11 +30,16 @@ cat > "$work/bin/gh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "$*" >> "$FAKE/calls"
-line() { sed -n "$(cat "$FAKE/n")p" "$FAKE/scenario"; }
+line() {
+  local n total
+  n=$(cat "$FAKE/n"); total=$(wc -l < "$FAKE/scenario")
+  sed -n "$(( n < total ? n : total ))p" "$FAKE/scenario"
+}
 case "$1 $2" in
   "pr list")
     echo $(( $(cat "$FAKE/n") + 1 )) > "$FAKE/n"
     read -r pr _ <<< "$(line)"
+    [ "$pr" != err ] || { echo "HTTP 502" >&2; exit 1; }
     [ "${pr:-none}" = none ] || echo "$pr" ;;
   "pr view")
     read -r _ armed state _ <<< "$(line)"
@@ -60,7 +65,7 @@ fail() {
 }
 
 # `run <name> <wait seconds> <expected outcome> <expected lists>` runs the step
-# over the scenario on stdin.
+# over the scenario on stdin; `any` skips the count.
 run() {
   local name=$1 wait=$2 want=$3 lists=$4 case_dir="$work/$1"
   mkdir -p "$case_dir"
@@ -77,7 +82,7 @@ run() {
   [ "$got" = "$want" ] || fail "$name: outcome '$got', want '$want'"
   local n
   n=$(grep -c '^pr list' "$case_dir/calls" || true)
-  [ "$n" = "$lists" ] || fail "$name: listed $n times, want $lists"
+  [ "$lists" = any ] || [ "$n" = "$lists" ] || fail "$name: listed $n times, want $lists"
   # The step tolerates a failed read, so a call the fake did not expect
   # would pass unseen without this.
   if [ -s "$case_dir/bad" ]; then
@@ -101,6 +106,13 @@ run lands-after-checks 3600 none 4 <<'EOF'
 none
 EOF
 
+# A transient failure of the list is retried, not a failed deploy.
+run list-fails-once 3600 none 3 <<'EOF'
+err
+42 true BLOCKED 0
+none
+EOF
+
 run merged-between-list-and-view 3600 none 2 <<'EOF'
 42 gone
 none
@@ -119,7 +131,13 @@ run conflict 3600 conflict 1 <<'EOF'
 42 true DIRTY 0
 EOF
 
-run still-open-after-the-wait 0 timeout 1 <<'EOF'
+run still-open-after-the-wait 1 timeout any <<'EOF'
+42 true BLOCKED 0
+EOF
+
+# The deadline is checked before any read: the watch token expires an hour
+# after it is minted, and a read past that would fail the step.
+run no-read-past-the-deadline 0 timeout 0 <<'EOF'
 42 true BLOCKED 0
 EOF
 
