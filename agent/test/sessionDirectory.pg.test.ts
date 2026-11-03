@@ -314,6 +314,46 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     expect(existsSync(path.join(turn.dir, 'notes.txt'))).toBe(true)
   })
 
+  it("the minute's write-back syncs only the workspace's files; new ones wait for a park or the turn's end (#5140)", async () => {
+    const id = await session()
+    await files.write(ws(id), 'kept.txt', Buffer.from('v1'))
+    const dirs = new SessionDirectory(files, await root())
+    const turn = await dirs.place(id)
+    await writeFile(path.join(turn.dir, 'kept.txt'), 'v2')
+    await mkdir(path.join(turn.dir, 'build'))
+    await writeFile(path.join(turn.dir, 'build', 'step.o'), 'intermediate')
+    // The timer's: the changed file is synced, the new one is not offered.
+    expect(await dirs.writeBack(turn, { prune: false, newFiles: false })).toMatchObject({ written: ['kept.txt'], skipped: [] })
+    expect((await files.list(ws(id))).map((f) => f.path)).toEqual(['kept.txt'])
+    // The turn removed its intermediate before the next park: the record never held it.
+    await rm(path.join(turn.dir, 'build'), { recursive: true })
+    await writeFile(path.join(turn.dir, 'result.txt'), 'kept')
+    expect(await dirs.writeBack(turn, { prune: false })).toMatchObject({ written: ['result.txt'], deleted: [] })
+    expect((await files.list(ws(id))).map((f) => f.path).sort()).toEqual(['kept.txt', 'result.txt'])
+  })
+
+  it("no write-back offers a new file under a scratch directory; the record's own file there still syncs (#5140)", async () => {
+    const id = await session()
+    await files.write(ws(id), 'node_modules/pinned.js', Buffer.from('v1'))
+    const dirs = new SessionDirectory(files, await root())
+    const turn = await dirs.place(id)
+    await writeFile(path.join(turn.dir, 'node_modules', 'pinned.js'), 'v2')
+    await mkdir(path.join(turn.dir, 'node_modules', 'left-pad'))
+    await writeFile(path.join(turn.dir, 'node_modules', 'left-pad', 'index.js'), 'module.exports = 1')
+    await mkdir(path.join(turn.dir, 'src', '__pycache__'), { recursive: true })
+    await writeFile(path.join(turn.dir, 'src', '__pycache__', 'a.pyc'), 'bytecode')
+    await writeFile(path.join(turn.dir, 'src', 'a.py'), 'print(1)')
+    const parked = await dirs.writeBack(turn, { prune: false })
+    expect(parked).toMatchObject({ written: ['node_modules/pinned.js', 'src/a.py'], scratch: 2 })
+    expect(existsSync(path.join(turn.dir, 'node_modules', 'left-pad', 'index.js'))).toBe(true)
+    // The turn's end removes the scratch files the record does not hold, and keeps its own.
+    expect(await dirs.writeBack(turn)).toMatchObject({ written: [], scratch: 2 })
+    expect(existsSync(path.join(turn.dir, 'node_modules', 'left-pad', 'index.js'))).toBe(false)
+    expect(existsSync(path.join(turn.dir, 'src', '__pycache__'))).toBe(false)
+    expect(await readFile(path.join(turn.dir, 'node_modules', 'pinned.js'), 'utf8')).toBe('v2')
+    expect((await files.list(ws(id))).map((f) => f.path).sort()).toEqual(['node_modules/pinned.js', 'src/a.py'])
+  })
+
   it("a late close's eviction never removes the directory of a process spawned since", async () => {
     const id = await session()
     let warmNow = false
@@ -411,7 +451,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     }
   }
 
-  const noWriteBack = async () => ({ written: [], deleted: [], skipped: [], strays: 0, bytes: 0 })
+  const noWriteBack = async () => ({ written: [], deleted: [], skipped: [], strays: 0, scratch: 0, bytes: 0 })
 
   it('a walk that never ends stops the turn at its timeout (fail closed), and no tick walks again under it', async () => {
     const dir = await root()
@@ -440,8 +480,10 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     const directory = {
       place: async (sessionId: string) => ({ sessionId, dir, base: new Map<string, string>() }),
       // A write-back during the turn never ends (a slow store); the turn's last one (prune) does.
-      writeBack: (_placed: unknown, options: { prune?: boolean } = {}) => {
+      writeBack: (_placed: unknown, options: { prune?: boolean; newFiles?: boolean } = {}) => {
         if (options.prune !== false) return noWriteBack()
+        // The timer's offers no new file (#5140).
+        expect(options.newFiles).toBe(false)
         timerWriteBacks += 1
         over = true
         return new Promise<never>(() => {})
@@ -583,7 +625,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       place: async (sessionId: string) => ({ sessionId, dir, base: new Map<string, string>() }),
       writeBack: async () => {
         writeBacks += 1
-        return { written: [], deleted: [], skipped, strays: 0, bytes: 0 }
+        return { written: [], deleted: [], skipped, strays: 0, scratch: 0, bytes: 0 }
       },
       usage: async () => ({ bytes: 0, cap: 1_000, maxEntries: 50 }),
       done: () => {},
@@ -669,7 +711,7 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
       place: async () => ({ sessionId: id, dir, base: new Map<string, string>() }),
       writeBack: async () => {
         writeBacks += 1
-        return { written: [], deleted: [], skipped: [], strays: 0, bytes: 0 }
+        return { written: [], deleted: [], skipped: [], strays: 0, scratch: 0, bytes: 0 }
       },
       // Far under the cap at the first check (a quarter), then a burst past it: no check is skipped.
       usage: async () => {

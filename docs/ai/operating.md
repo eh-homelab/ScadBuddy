@@ -1660,6 +1660,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     files) happens at the turn's end, at an eviction and at a placement, so a turn keeps its
     `.git` or a large intermediate file while it runs. Claude Code's own file tools (§9) and
     a Monitor's command use the directory.
+  - The minute's write-back syncs only the files the workspace already holds (#5140). A new file
+    is offered at the next park or at the turn's end, so a scratch tree that the turn builds and
+    removes again never reaches the workspace. No write-back offers a new file under a
+    `node_modules` or `__pycache__` directory (`SCRATCH`); a pruning write-back removes those
+    files. A file that the workspace already holds there still syncs. `dist`, `build` and
+    `target` are not on the list, because a turn's deliverable can be there.
 - A session's files go with the session (deleting it, or `forgetSubject`, deletes them,
   and forgetting deletes the key that opens its blobs); a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
   principal's own workspace, whose files are swept 24 h after their last write (every
