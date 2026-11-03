@@ -301,4 +301,3 @@ def test_a_fetch_is_stored_and_answered_when_the_readme_cannot_be_credited(
     assert response.json()["credited"] is False
     asset = client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{response.json()['id']}")
     assert asset.status_code == 200
-
