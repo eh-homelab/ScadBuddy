@@ -14,15 +14,14 @@ import { assertGatewayHostAllowed, type Resolver, systemResolver } from '../http
 //     not retried with an `api_retry`: this is the only sign of them.
 //   - the `result`, with `is_error` and `api_error_status`.
 //
-// New in 2.1.287 (#1540): a 400 that is not a billing refusal is sent once
-// more, on the same credential, without the `thinking-display-updates` beta
-// that version adds, in case the beta was what the endpoint refused (its
-// bundle: "retry:thinking-display-updates-unclaimed"). Measured through a
-// gateway, as the fake is configured: at most once per query, and the
-// messages above are exactly as before, so nothing here sees it. A refused
-// request is not billed, so it costs one more request, not money. Since
-// 2.1.314 it first re-sends without the `thinking-token-count` beta, then
-// without the display beta too: two more requests, measured the same way.
+// A 400 that is not a billing refusal is sent twice more (2.1.314), on the
+// same credential, in case a beta was what the endpoint refused: first without
+// the `thinking-token-count` beta, then without the `thinking-display-updates`
+// beta too (its bundle: "retry:thinking-token-count-unclaimed",
+// "retry:thinking-display-unclaimed"). Measured through a gateway, as the fake
+// is configured: at most twice per query, and the messages above are exactly
+// as before, so nothing here sees it. A refused request is not billed, so it
+// costs two more requests, not money. 2.1.287 (#1540) made only the second.
 //
 // Neither carries the response headers. A 429 with `retry-after: 60` is
 // reported as `api_retry` with `retry_delay_ms: 60000`, but one with
