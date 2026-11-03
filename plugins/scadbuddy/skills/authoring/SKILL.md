@@ -160,7 +160,8 @@ overlay_file = ""; // file:svg,png
   (main spec §5.2).
 - `// font` gives a font field that lists the installed families (main spec §5.2
   and §5.4). See section 6.
-- `// file` takes both SVG and PNG; `// file:png` takes one kind. The value is an
+- `// file` takes both SVG and PNG; `// file:png` takes one kind. A mesh for
+  `import()` is named: `// file:stl`, `// file:stl,3mf,obj`. The value is an
   uploaded asset's id or a bundled sample's bare name, never a path (main spec
   §5.5).
 

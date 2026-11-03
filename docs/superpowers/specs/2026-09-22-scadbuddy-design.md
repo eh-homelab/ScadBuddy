@@ -486,7 +486,7 @@ when the source changes.
 | `select` | dropdown; option `name` is the label, `value` is passed to OpenSCAD |
 | `color` | colour picker; the value is passed as a `"#RRGGBB"` string |
 | `font` | free-text field with an installed-font datalist, plus a **Browse** button opening the Google Fonts picker (§5.4) |
-| `file` | drop zone plus **Choose…**, a preview of the chosen SVG/PNG, its original name, and **Clear**; under it a row of thumbnails of the template's `samples`, one click to use one (§5.5) |
+| `file` | drop zone plus **Choose…**, a preview of the chosen SVG/PNG (a mesh's drawn by `…/assets/{id}/preview`, with its triangles and size), its original name, and **Clear**; under it a row of thumbnails of the template's `samples`, one click to use one (§5.5) |
 
 ### 5.3 The page
 
@@ -1258,9 +1258,10 @@ this document are the ones its design depends on.
 | GET/PUT/DELETE | `/models/{slug}/readme` | `GET` returns `text/markdown` (404 when there is none); `PUT` body `{content}`, at most 1,000,000 characters, no NUL; `DELETE` removes it. Each write is one git commit in the model's history (#179) |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source |
-| POST | `/models/{slug}/assets` | multipart `file` → `{id, name, kind, size, width, height}` (201); SVG/PNG only, sanitised (§5.5); 413 past the store's caps, with its `usage` |
+| POST | `/models/{slug}/assets` | multipart `file` → `{id, name, kind, size, width, height, view_box, path_count, source_url, licence, triangles, bounds}` (201); SVG, PNG, STL, 3MF or OBJ only, sanitised or rewritten (§5.5); 413 past the store's caps, with its `usage` |
 | GET | `/assets/usage` | the upload store: `{count, bytes, max_count, max_total_bytes}`, a cap of 0 being none (§5.5) |
 | GET | `/models/{slug}/assets/{id}` / `…/{id}/content` | an upload's metadata / its stored bytes (served with a sandboxing CSP) |
+| GET | `/models/{slug}/assets/{id}/preview` | a mesh upload's picture: a 256 px PNG in the plate thumbnails' iso view (#959); 404 for an image |
 | PUT | `/models/{slug}/source` | body `{source, force?, message?}` → parse-checks it (unless `force`; `?force=true` works too, as on `POST /models`), replaces it as one revision named by `message`, and re-derives the schema. `?merge_base=<commit>` saves a conflicted upstream merge's resolution: conflict markers are refused (422, `force` or not), and `upstream.base` advances to that revision in the same commit, `Merge <upstream id> into <slug>` by default |
 | GET | `/models/{slug}/upstream` | a duplicate's upstream: `{state, upstream, revision, preview}`. `state` is `current`, `update` (the upstream's current revision is neither `base` nor `dismissed`), `dismissed` or `gone`. On `update`, `preview` is `{ours, base, theirs, merged, clean, taken[], kept[]}`: `merged` is `git merge-file -p --diff3 ours base theirs`, `taken` the other files that follow the upstream (unchanged here since `base`) and `kept` those changed on both sides. 404 for a template that is not a duplicate |
 | POST | `/models/{slug}/upstream/merge` | clean → writes the merged `model.scad` and the `taken` files, sets `base` to the upstream's revision (and `path` to where it lives now), clears `dismissed`; one commit, `Merge <upstream id> into <slug>` → `{model, taken, kept}`. Conflicted → 409 with the marked-up source as `merged` and `merge_base`, nothing written. `model.json` is always the duplicate's own |
