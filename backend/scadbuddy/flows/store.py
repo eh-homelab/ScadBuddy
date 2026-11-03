@@ -30,7 +30,6 @@ from scadbuddy.flows.grants import Consumption, Grant, GrantSpec, GrantStatus, G
 from scadbuddy.flows.models import (
     RESULT_MAX,
     TERMINAL,
-    BackfillRow,
     Decision,
     Proposal,
     Run,
@@ -50,7 +49,7 @@ _DECISION = (
     "request_id, run_id, workflow_run_id, call_id, kind, outcome, response, responder,"
     " input_hash, hops, created_at"
 )
-_DEFINITION = "id, name, version, commit, script, approval_timeout_s, created_by, created_at"
+_DEFINITION = "id, name, version, commit, approval_timeout_s, created_by, created_at"
 _GRANT = (
     "id, run_id, status, spec, used, requested_by, approved_by, approved_at, revoked_by,"
     " revoked_at, expires_at, created_at"
@@ -198,23 +197,25 @@ class FlowStore:
         return StoredDefinition.model_validate(row)
 
     def version_commits(self) -> dict[str, str | None]:
-        """Every version id, and the commit it names (None before its backfill): the
-        reconciler's check."""
+        """Every version id, and the commit it names (None on a row written before flows
+        were in git that no backfill reached): the reconciler's check."""
         with self._pool.connection() as conn:
             rows = conn.execute("SELECT id, commit FROM workflow_definitions").fetchall()
         return {row["id"]: row["commit"] for row in rows}
 
-    def unbackfilled(self) -> list[BackfillRow]:
-        """The rows written before flows were in git, in ``(name, version)`` order."""
+    def has_commitless(self, name: str) -> bool:
+        """Whether ``name`` still has a version that names no commit (#5139)."""
         with self._pool.connection() as conn:
-            rows = conn.execute(
-                "SELECT id, name, version, script, created_by, created_at"
-                " FROM workflow_definitions WHERE commit IS NULL ORDER BY name, version"
-            ).fetchall()
-        return [BackfillRow.model_validate(row) for row in rows]
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM workflow_definitions"
+                " WHERE name = %s AND commit IS NULL) AS found",
+                (name,),
+            ).fetchone()
+        assert row is not None
+        return bool(row["found"])
 
     def set_commit(self, definition_id: str, commit: str) -> None:
-        """Join a row to its commit, and its runs with it."""
+        """Join a commit-less row to the commit carrying its id, and its runs with it."""
         with self._pool.connection() as conn, conn.transaction():
             conn.execute(
                 "UPDATE workflow_definitions SET commit = %s WHERE id = %s AND commit IS NULL",

@@ -353,11 +353,27 @@ class Fulfilment(BaseModel):
     sliced_blob_key: str | None = None
     #: The registry printer the run named, when it named one.
     printer: str | None = None
+    #: That printer as the registry named it when the run was attached (§8.4): its serial,
+    #: name and Bambuddy printer id, kept past a rename or delete.
+    printer_serial: str | None = None
+    printer_name: str | None = None
+    bambuddy_printer_id: int | None = None
     #: How many the run was sent; ``quantity`` is what it made, set when it settles.
     copies: int | None = None
     #: The print run's ``request_id`` this attempt was claimed under before its print
     #: started (#4719); a retried operation finds its claim by it.
     print_request_id: str | None = None
+
+
+class OrderProject(BaseModel):
+    """The Bambuddy project mirroring the order, or one of its items nested under it
+    (§8.1)."""
+
+    #: ``order:<id>`` or ``order_item:<id>``.
+    subject: str
+    project_id: int
+    #: The item's id for an item's project; None for the order's own.
+    item_id: str | None = None
 
 
 class ShipmentItem(BaseModel):

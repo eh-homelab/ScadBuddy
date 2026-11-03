@@ -65,6 +65,7 @@ export function FulfilmentForm({
               <span>
                 Attempt {attempt.attempt}: {attempt.outcome}, <span className="sb-num">{attempt.quantity}</span> made
                 {attempt.failure_reason ? ` (${attempt.failure_reason})` : ''}
+                {attempt.printer_name ? <span className="text-muted-foreground"> on {attempt.printer_name}</span> : null}
               </span>
               {attempt.accepted_at ? (
                 <span className="text-xs text-primary">Accepted</span>

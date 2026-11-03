@@ -18,6 +18,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, NoReturn
 
+import psycopg
 from psycopg import Connection, errors, sql
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
@@ -46,6 +47,7 @@ from scadbuddy.orders.models import (
     OrderEvent,
     OrderFilter,
     OrderItem,
+    OrderProject,
     OrderStatus,
     Outcome,
     Payment,
@@ -123,7 +125,7 @@ _QUOTE = (
 _FULFILMENT = (
     "id, order_item_id, attempt, quantity, outcome, failure_reason, started_at, finished_at,"
     " notes, accepted_at, created_by, created_at, print_run_id, sliced_sha256, sliced_blob_key,"
-    " printer, copies, print_request_id"
+    " printer, copies, print_request_id, printer_serial, printer_name, bambuddy_printer_id"
 )
 _SHIPMENT = (
     "id, order_id, carrier, service, tracking, shipped_at, address, cost_minor, notes, created_at"
@@ -203,6 +205,13 @@ def _item_of(row: DictRow) -> OrderItem:
 ATTACHMENT_HOLDER = "attachment"
 
 
+#: How long a project ensure waits for another one of the same order (§8.1): longer
+#: than the creates that one makes may take (``orders/projects.py``).
+PROJECT_LOCK_TIMEOUT_MS = 120_000
+#: As the row pool's (``orders/component.py`` ``CONNECT_TIMEOUT``).
+PROJECT_LOCK_CONNECT_TIMEOUT = 5
+
+
 def item_subject(item_id: str) -> str:
     """An item's attachment subject (§6.2)."""
     return f"order_item:{item_id}"
@@ -211,6 +220,15 @@ def item_subject(item_id: str) -> str:
 def order_subject(order_id: str) -> str:
     """An order's own attachment subject (§6.2)."""
     return f"order:{order_id}"
+
+
+def _project_of(row: DictRow) -> OrderProject:
+    kind, _, subject_id = str(row["subject"]).partition(":")
+    return OrderProject(
+        subject=row["subject"],
+        project_id=row["project_id"],
+        item_id=subject_id if kind == "order_item" else None,
+    )
 
 
 def _attachment_of(row: DictRow) -> tuple[Attachment, str]:
@@ -1187,11 +1205,16 @@ class OrderStore:
     ) -> Fulfilment | None:
         """The run a claimed attempt's print started, once it started; None when the
         attempt is gone or names another run already (one claim, one run)."""
+        # The registry row as it is now (§8.4): the attempt keeps it past a rename or delete.
         row = conn.execute(
-            "UPDATE order_item_fulfilments SET print_run_id = %s, printer = %s"
-            " WHERE id = %s AND (print_run_id IS NULL OR print_run_id = %s)"
+            "WITH p AS (SELECT serial, name, bambuddy_printer_id FROM printers"
+            "  WHERE id::text = %(printer)s)"
+            " UPDATE order_item_fulfilments SET print_run_id = %(run)s, printer = %(printer)s,"
+            " printer_serial = (SELECT serial FROM p), printer_name = (SELECT name FROM p),"
+            " bambuddy_printer_id = (SELECT bambuddy_printer_id FROM p)"
+            " WHERE id = %(id)s AND (print_run_id IS NULL OR print_run_id = %(run)s)"
             f" RETURNING {_FULFILMENT}",
-            (run_id, printer, attempt_id, run_id),
+            {"run": run_id, "printer": printer, "id": attempt_id},
         ).fetchone()
         return None if row is None else Fulfilment.model_validate(row)
 
@@ -1603,6 +1626,55 @@ class OrderStore:
         )
         assert row is not None
         return _item_of(row)
+
+    # -- Bambuddy projects (§8.1, #4253) ------------------------------------------------
+
+    @contextmanager
+    def project_lock(self, order_id: str) -> Iterator[None]:
+        """The order's project ensures, one at a time across replicas: a session advisory
+        lock held while Bambuddy is asked, so an accept's and a print's ensure never make
+        two projects for one subject. Waited for and held on a connection of its own,
+        never the row pool's: ensures queued on the lock would otherwise take every
+        pooled connection, and the holder's reads and writes, and every other orders
+        request, would find none. Closing that connection ends the lock with it."""
+        key = "order_projects:" + order_id
+        conninfo = self._pool.conninfo
+        with psycopg.connect(
+            conninfo() if callable(conninfo) else conninfo,
+            autocommit=True,
+            connect_timeout=PROJECT_LOCK_CONNECT_TIMEOUT,
+            options=f"-c lock_timeout={PROJECT_LOCK_TIMEOUT_MS}",
+        ) as conn:
+            conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
+            try:
+                yield
+            finally:
+                conn.execute("SELECT pg_advisory_unlock(hashtextextended(%s, 0))", (key,))
+
+    def projects(self, order_id: str, *, conn: Conn | None = None) -> list[OrderProject]:
+        """The order's project and its items', the order's first."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                "SELECT subject, project_id FROM order_projects WHERE order_id = %s"
+                " ORDER BY subject NOT LIKE 'order:%%', created_at, subject",
+                (order_id,),
+            ).fetchall()
+        return [_project_of(row) for row in rows]
+
+    def set_project(self, order_id: str, subject: str, project_id: int) -> int:
+        """Record a subject's project; one already recorded stands, and is the answer."""
+        with self.transaction() as conn:
+            conn.execute(
+                "INSERT INTO order_projects (subject, order_id, project_id) VALUES (%s, %s, %s)"
+                " ON CONFLICT (subject) DO NOTHING",
+                (subject, order_id, project_id),
+            )
+            row = conn.execute(
+                "SELECT project_id FROM order_projects WHERE subject = %s", (subject,)
+            ).fetchone()
+        assert row is not None
+        found: int = row["project_id"]
+        return found
 
     # -- the audit line (§3.2, Ruling 12) ---------------------------------------------
 

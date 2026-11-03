@@ -811,6 +811,27 @@ do today, so Bambuddy's own project page shows the order's tree. A project is ne
 deleted by ScadBuddy on cancel; the mapping is dropped and the project left to its
 owner.
 
+**As built (#4253).** `orders/projects.py` `ensure_projects`, through the seam's
+`ensure_project` (`bambuddy/projects.py` `ensure_project`, with the upload store's
+folderless record, #2263). `POST /orders/{id}/accept` makes the order's project (named
+by its number) and one per item from a template (`ORD-2026-12 · 1 <title>`, nested
+under it) after the accept commits, best effort: the accept answers after 20 s at most
+and stands without them, and an ensure still running then is left to finish, never
+cancelled, so a project Bambuddy made is always recorded. `order_item_print`'s run ensures the item's project again before it claims
+anything, so an accept whose ensure failed is made good, and sets it as the run's
+`project_id` (in place of any project or folder the request named); a Bambuddy failure
+there is a 503 the operation retries, and a print on the native path files under no
+project. The ensures of one order run one at a time under a Postgres advisory lock
+(`OrderStore.project_lock`), taken on a connection of its own rather than the orders row
+pool, so ensures queued on it never starve the holder's reads and writes or any other
+orders request; an accept and a flow's print racing it make each project once. The wait for it is bounded (`lock_timeout`, 120 s), each create under it is bounded
+(30 s), and a task cancelled while its thread waits for the lock leaves no lock held: the
+thread lets go of one it got too late. `OrderDetail.projects` lists them; the order page links the order's project and the
+item drawer the item's. One change from the design: **a cancel keeps the mapping.** A
+retried print of an item cancelled meanwhile looks for its run by the run's key
+(`existing_run`), which the project is part of, and a reopened order (§3.5 Undo) goes on
+in the projects it had instead of making a second of each name.
+
 ### 8.2 Archives
 
 When an item's print settles, `print_links` (F8) names its archive; the fulfilment
@@ -834,6 +855,13 @@ time, so a quote is the same with Bambuddy down.
 Until #3823's registry, an attempt's `printer` is the Bambuddy printer id and name the
 run used. When the registry lands, the serial is the key and the Bambuddy id is one of
 its paths, as the own-store spec §6 says.
+
+**As built (#4253).** The registry landed first, so an attempt keeps `printer` (the
+registry id its run named, `print_runs.printer`) and, copied from that row when the run is
+attached (`OrderStore.attach_print_run`), `printer_serial`, `printer_name` and
+`bambuddy_printer_id`: a printer renamed, relinked or deleted since leaves the record as
+it printed. An attempt recorded by hand, or a run that named no registry printer, has
+none. The order page shows the name beside the attempt.
 
 ## 9. Pages: generalising template-owned UIs (and why orders is not one)
 
