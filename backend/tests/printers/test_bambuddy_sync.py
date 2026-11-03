@@ -815,19 +815,20 @@ async def test_the_virtual_pass_alone_runs_over_a_bare_store(store: PrinterStore
     assert row.lan_host is None
 
 
-async def test_the_prune_schedule_adopts_a_vps_lan_row_with_the_sweeps_off(
+def _boot_state(printers: FakePrinters) -> Any:
+    from types import SimpleNamespace
+
+    return SimpleNamespace(components=SimpleNamespace(get=lambda _key: printers))
+
+
+async def test_the_boot_adopts_a_vps_hand_made_lan_row(
     monkeypatch: pytest.MonkeyPatch, printers: FakePrinters, store: PrinterStore
 ) -> None:
     """#5236: prod's row for 09400A391800001 was added and LAN-linked by hand before the
     sync existed, and prod runs with the sweeps off, so the full sync never ran over it.
-    The virtual-printer pass is on the prune Schedule: it adopts the row, reads no access
-    code and probes nothing."""
-    from types import SimpleNamespace
-
+    The boot's virtual-printer pass adopts it, reads no access code and probes nothing."""
     from scadbuddy import main
-    from scadbuddy.workflows.housekeeping import PRUNE_SWEEPS, VP_SYNC_SWEEP
 
-    assert VP_SYNC_SWEEP in PRUNE_SWEEPS
     made = store.create(PrinterCreate(serial=VP_SERIAL, name="Bambuddy (virtual)"))
     store.link_lan(made.id, LanLink(host="192.168.10.9", access_code="vpcode12"), cert_sha256=CERT)
     client = FakeClient([bambuddy(1, SERIAL)], [vp(1, VP_SERIAL, 1)], codes={1: CODE})
@@ -836,14 +837,52 @@ async def test_the_prune_schedule_adopts_a_vps_lan_row_with_the_sweeps_off(
         await sweep(client)
 
     monkeypatch.setattr(main, "_with_bambuddy", with_bambuddy)
-    state = SimpleNamespace(components=SimpleNamespace(get=lambda _key: printers))
-    await main._sync_virtual_printers_logged(cast(Any, state))
+    await main._adopt_virtual_rows_logged(_boot_state(printers))
 
     row = store.require(made.id)
     assert row.kind == "bambuddy_virtual" and row.bambuddy_vp_id == 1
     assert row.lan_host == "192.168.10.9" and row.name == "Bambuddy (virtual)"
     assert printers.changed_ids == [made.id]
     assert client.code_reads == [] and printers.probes == []
+
+
+async def test_the_boot_asks_bambuddy_nothing_when_no_row_could_be_a_vp(
+    monkeypatch: pytest.MonkeyPatch, printers: FakePrinters, store: PrinterStore
+) -> None:
+    """#5236: the pass runs only while a row may be a VP's (`may_be_virtual`), so a
+    registry of Bambuddy-linked printers costs no Bambuddy call at boot."""
+    from scadbuddy import main
+
+    made = store.create(PrinterCreate(serial=SERIAL, name="H2C"))
+    store.link_bambuddy(made.id, 1)
+    called: list[object] = []
+
+    async def with_bambuddy(_state: object, sweep: Callable[[Any], Any]) -> None:
+        called.append(sweep)
+
+    monkeypatch.setattr(main, "_with_bambuddy", with_bambuddy)
+    await main._adopt_virtual_rows_logged(_boot_state(printers))
+    assert called == []
+
+
+async def test_a_failing_boot_pass_is_logged_and_never_raised(
+    monkeypatch: pytest.MonkeyPatch,
+    printers: FakePrinters,
+    store: PrinterStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from scadbuddy import main
+
+    store.create(PrinterCreate(serial=VP_SERIAL, name="hand-made"))
+    client = FakeClient([], [])
+    client.vp_error = ApiError(502, "unreachable")
+
+    async def with_bambuddy(_state: object, sweep: Callable[[Any], Any]) -> None:
+        await sweep(client)
+
+    monkeypatch.setattr(main, "_with_bambuddy", with_bambuddy)
+    await main._adopt_virtual_rows_logged(_boot_state(printers))
+    assert "could not sync the virtual printers from Bambuddy at start" in caplog.text
 
 
 async def test_the_housekeeping_sweep_logs_a_missing_target_quietly_unless_there_is_news(

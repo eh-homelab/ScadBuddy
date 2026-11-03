@@ -58,8 +58,6 @@ from scadbuddy.workflows.housekeeping import (
     SWEEPS,
     TRANSFER_PUTS_SWEEP,
     TRANSFER_PUTS_TIMEOUT,
-    VP_SYNC_SWEEP,
-    VP_SYNC_TIMEOUT,
     Housekeeping,
     ensure_schedule,
     ensure_schedules,
@@ -148,7 +146,6 @@ async def test_the_prune_is_short_and_every_sweep_heartbeats(client: Client) -> 
         NATIVE_COPIES_SWEEP: NATIVE_COPIES_TIMEOUT,
         GIT_REMOTE_SWEEP: GIT_REMOTE_TIMEOUT,
         AUTH_SESSIONS_SWEEP: AUTH_SESSIONS_TIMEOUT,
-        VP_SYNC_SWEEP: VP_SYNC_TIMEOUT,
     }
     for sweep in SWEEPS:
         assert fake.timeouts[sweep] == (expected.get(sweep, SWEEP_TIMEOUT), HEARTBEAT_TIMEOUT)
@@ -299,11 +296,8 @@ async def test_the_prune_keeps_its_own_cadence_when_the_sweeps_are_off(client: C
         "housekeeping_push_git_remote",
         # #4975: expired and revoked signed-in sessions go with the sweeps off too.
         "housekeeping_sweep_auth_sessions",
-        # #5236: the printer sync's virtual-printer part, so a VP's row is marked.
-        "housekeeping_sync_bambuddy_virtual_printers",
     ]
-    # #4439, #4747: the full Bambuddy printer sync reads access codes and probes, so it
-    # obeys the switch.
+    # #4439, #4747: the Bambuddy printer sync calls Bambuddy, so it obeys the switch.
     assert PRINTER_SYNC_SWEEP not in sweeps
     # #4337: the per-print copies' sweep trashes files, so it obeys the switch.
     assert NATIVE_COPIES_SWEEP not in sweeps
@@ -435,8 +429,8 @@ async def test_a_run_is_bounded_by_its_sweeps_timeouts(client: Client) -> None:
     assert isinstance(prune_action, ScheduleActionStartWorkflow)
     assert isinstance(sweeps_action, ScheduleActionStartWorkflow)
     assert prune_action.execution_timeout == housekeeping_timeout(PRUNE_SWEEPS)
-    # 57 minutes since #5236's virtual-printer sync joined the prune Schedule (2 minutes).
-    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=57)
+    # 55 minutes since #4974's git remote push joined the prune Schedule (5 minutes).
+    assert PRUNE_TIMEOUT + CLAIMS_TIMEOUT < prune_action.execution_timeout <= timedelta(minutes=55)
     assert sweeps_action.execution_timeout == housekeeping_timeout(SWEEPS)
     assert sweeps_action.execution_timeout > 3 * SWEEP_TIMEOUT + PRUNE_TIMEOUT
 

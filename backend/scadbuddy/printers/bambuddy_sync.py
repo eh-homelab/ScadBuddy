@@ -19,9 +19,9 @@ one idempotent pass that brings the registry up to what Bambuddy knows.
 The pass runs in the API, from ``POST /printers/sync-bambuddy`` and from the housekeeping
 sweep ``housekeeping_sync_bambuddy_printers`` on the ``library`` worker (the API's own
 process), so the code never crosses a process. ``dry_run`` plans the same steps and
-writes nothing. That sweep obeys the sweeps' switch; its virtual-printer part alone
-(`sync_virtual_printers`, no access code, no probe) is also the sweep
-``housekeeping_sync_bambuddy_virtual_printers``, on the prune Schedule too (#5236)."""
+writes nothing. That sweep obeys the sweeps' switch, so each API boot also runs the
+virtual-printer part alone (`sync_virtual_printers`) while a row `may_be_virtual`
+(#5236: prod's hand-made row for its VP, with the sweeps off)."""
 
 from __future__ import annotations
 
@@ -210,6 +210,12 @@ def may_adopt(vp: VirtualPrinter, physical_serials: set[str]) -> bool:
     (its serial is its target's, `VirtualPrinter`), nor when a Bambuddy printer reports
     that serial (security review of the sync)."""
     return vp.mode != "proxy" and vp.serial not in physical_serials
+
+
+def may_be_virtual(row: PrinterRow) -> bool:
+    """Whether a virtual printer could still adopt ``row`` (`adopts_for_virtual` with no
+    VP in hand): a physical row with a real serial and no Bambuddy link now or before."""
+    return adopts_for_virtual(row, may_adopt=True) and not is_synthetic_serial(row.serial)
 
 
 def plan_virtual(
