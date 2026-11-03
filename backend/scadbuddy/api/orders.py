@@ -728,12 +728,25 @@ async def accept_order(order_id: str, orders: OrdersDep) -> Order:
     _path(order_id)
     by = current_actor()
     accepted = await _run(lambda: orders.lifecycle.accept_order(order_id, by))
-    try:
-        async with asyncio.timeout(PROJECTS_WAIT_SECONDS):
-            await ensure_projects(orders.store, orders.integrations, accepted.id)
-    except Exception:
-        logger.warning("could not make the Bambuddy projects of %s", accepted.number, exc_info=True)
+    # Waited for, never cancelled: a create cut off after Bambuddy made the project would
+    # leave it unrecorded, and the next ensure would make a second of the same name.
+    ensuring = asyncio.create_task(ensure_projects(orders.store, orders.integrations, accepted.id))
+    _ENSURING.add(ensuring)
+    ensuring.add_done_callback(lambda task: _ensured(task, accepted.number))
+    await asyncio.wait({ensuring}, timeout=PROJECTS_WAIT_SECONDS)
     return accepted
+
+
+#: The accepts' project ensures still running past the wait, kept from the collector.
+_ENSURING: set[asyncio.Task[Any]] = set()
+
+
+def _ensured(task: asyncio.Task[Any], number: str) -> None:
+    _ENSURING.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning(
+            "could not make the Bambuddy projects of %s", number, exc_info=task.exception()
+        )
 
 
 @router.post("/{order_id}/cancel", response_model=Order, summary="Cancel an order")

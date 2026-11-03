@@ -18,6 +18,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any, NoReturn
 
+import psycopg
 from psycopg import Connection, errors, sql
 from psycopg.rows import DictRow
 from psycopg.types.json import Jsonb
@@ -207,6 +208,8 @@ ATTACHMENT_HOLDER = "attachment"
 #: How long a project ensure waits for another one of the same order (§8.1): longer
 #: than the creates that one makes may take (``orders/projects.py``).
 PROJECT_LOCK_TIMEOUT_MS = 120_000
+#: As the row pool's (``orders/component.py`` ``CONNECT_TIMEOUT``).
+PROJECT_LOCK_CONNECT_TIMEOUT = 5
 
 
 def item_subject(item_id: str) -> str:
@@ -1625,17 +1628,19 @@ class OrderStore:
     def project_lock(self, order_id: str) -> Iterator[None]:
         """The order's project ensures, one at a time across replicas: a session advisory
         lock held while Bambuddy is asked, so an accept's and a print's ensure never make
-        two projects for one subject."""
+        two projects for one subject. Waited for and held on a connection of its own,
+        never the row pool's: ensures queued on the lock would otherwise take every
+        pooled connection, and the holder's reads and writes, and every other orders
+        request, would find none. Closing that connection ends the lock with it."""
         key = "order_projects:" + order_id
-        with self._pool.connection() as conn:
-            # Bounded: a holder stuck elsewhere fails this wait, never hangs it.
-            conn.execute(
-                "SELECT set_config('lock_timeout', %s, false)", (f"{PROJECT_LOCK_TIMEOUT_MS}ms",)
-            )
-            try:
-                conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
-            finally:
-                conn.execute("RESET lock_timeout")
+        conninfo = self._pool.conninfo
+        with psycopg.connect(
+            conninfo() if callable(conninfo) else conninfo,
+            autocommit=True,
+            connect_timeout=PROJECT_LOCK_CONNECT_TIMEOUT,
+            options=f"-c lock_timeout={PROJECT_LOCK_TIMEOUT_MS}",
+        ) as conn:
+            conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
             try:
                 yield
             finally:

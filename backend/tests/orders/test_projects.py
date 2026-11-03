@@ -7,8 +7,12 @@ import asyncio
 import time
 
 import pytest
+from psycopg import Connection
+from psycopg.rows import DictRow, dict_row
+from psycopg_pool import ConnectionPool
 
 import scadbuddy.orders.projects as projects_module
+from scadbuddy.orders.component import ROW_POOL_SIZE
 from scadbuddy.orders.integrations import NOT_LINKED, SpoolGroup
 from scadbuddy.orders.projects import ensure_projects, item_project, item_project_name
 from scadbuddy.orders.store import OrderStore, item_subject, order_subject
@@ -172,3 +176,41 @@ def test_a_bambuddy_that_never_answers_lets_the_lock_go(
     with pytest.raises(TimeoutError):
         asyncio.run(ensure_projects(shop.rows, Hangs(), order.id))
     assert _settled(pool) == 0
+
+
+def test_more_ensures_than_the_pool_holds_all_finish(pg_conninfo: str, pool: PgPool) -> None:
+    """The lock is waited for and held on a connection of its own: ensures queued on one
+    order, and others of other orders, never take the row pool (`ROW_POOL_SIZE`) the
+    holder needs for its reads and writes."""
+    small: PgPool = ConnectionPool(
+        pg_conninfo,
+        min_size=1,
+        max_size=ROW_POOL_SIZE,
+        timeout=3,
+        open=False,
+        connection_class=Connection[DictRow],
+        kwargs={"autocommit": True, "row_factory": dict_row},
+    )
+    small.open(wait=True, timeout=30)
+    try:
+        shop = Shop(OrderStore(small), BlobRefs(pool))
+        busy = shop.order()
+        items = [shop.item(busy) for _ in range(5)]
+        for item in items:
+            shop.quoted(busy, item)
+        busy = shop.lifecycle.accept_order(busy.id, BY)
+        others = [shop.accepted()[0] for _ in range(3)]
+        seam = Projects()
+
+        async def all_at_once() -> None:
+            await asyncio.gather(
+                *(item_project(shop.rows, seam, busy.id, item.id) for item in items),
+                *(ensure_projects(shop.rows, seam, order.id) for order in others),
+            )
+
+        asyncio.run(all_at_once())
+        names = [name for name, _ in seam.made]
+        assert len(names) == len(set(names)) == 1 + len(items) + 2 * len(others)
+        assert len(shop.rows.projects(busy.id)) == 1 + len(items)
+    finally:
+        small.close()

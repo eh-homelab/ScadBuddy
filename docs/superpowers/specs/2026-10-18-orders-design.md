@@ -815,14 +815,16 @@ owner.
 `ensure_project` (`bambuddy/projects.py` `ensure_project`, with the upload store's
 folderless record, #2263). `POST /orders/{id}/accept` makes the order's project (named
 by its number) and one per item from a template (`ORD-2026-12 · 1 <title>`, nested
-under it) after the accept commits, best effort and bounded at 20 s: the accept stands
-without them. `order_item_print`'s run ensures the item's project again before it claims
+under it) after the accept commits, best effort: the accept answers after 20 s at most
+and stands without them, and an ensure still running then is left to finish, never
+cancelled, so a project Bambuddy made is always recorded. `order_item_print`'s run ensures the item's project again before it claims
 anything, so an accept whose ensure failed is made good, and sets it as the run's
 `project_id` (in place of any project or folder the request named); a Bambuddy failure
 there is a 503 the operation retries, and a print on the native path files under no
 project. The ensures of one order run one at a time under a Postgres advisory lock
-(`OrderStore.project_lock`), so an accept and a flow's print racing it make each project
-once. The wait for it is bounded (`lock_timeout`, 120 s), each create under it is bounded
+(`OrderStore.project_lock`), taken on a connection of its own rather than the orders row
+pool, so ensures queued on it never starve the holder's reads and writes or any other
+orders request; an accept and a flow's print racing it make each project once. The wait for it is bounded (`lock_timeout`, 120 s), each create under it is bounded
 (30 s), and a task cancelled while its thread waits for the lock leaves no lock held: the
 thread lets go of one it got too late. `OrderDetail.projects` lists them; the order page links the order's project and the
 item drawer the item's. One change from the design: **a cancel keeps the mapping.** A
