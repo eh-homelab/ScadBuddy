@@ -12,6 +12,7 @@ import {
   attentionLabel,
   fetchPendingInput,
   fetchRunning,
+  PENDING_CHANGES_PATH,
   RUNNING_PATH,
   summaryLabel,
   totalOf,
@@ -427,6 +428,50 @@ describe('useAttention', () => {
     rerender({ on: true })
     await waitFor(() => expect(calls).toBe(2))
     await waitFor(() => expect(result.current.waiting).toBe(2))
+  })
+
+  it("reads again at once when the agent's change stream says so, and once more for a change during a read (#815)", async () => {
+    const sources: FakeEventSource[] = []
+    class FakeEventSource extends EventTarget {
+      closed = false
+      readonly url: string
+      constructor(url: string) {
+        super()
+        this.url = url
+        sources.push(this)
+      }
+      close() {
+        this.closed = true
+      }
+    }
+    vi.stubGlobal('EventSource', FakeEventSource)
+    try {
+      let calls = 0
+      let hold: (() => void) | undefined
+      server.use(
+        http.get('/api/v1/ai/pending-input', async () => {
+          calls += 1
+          if (calls === 2) await new Promise<void>((resolve) => (hold = resolve))
+          return HttpResponse.json({ entries: Array.from({ length: calls }, () => ({ kind: 'approval' })) })
+        }),
+      )
+      const { result, unmount } = renderHook(() => useAttention(true))
+      await waitFor(() => expect(result.current.waiting).toBe(1))
+      expect(sources.map((s) => s.url)).toEqual([PENDING_CHANGES_PATH])
+
+      act(() => void sources[0]!.dispatchEvent(new Event('changed')))
+      await waitFor(() => expect(calls).toBe(2))
+      // A change while that read is open is read after it, not dropped.
+      act(() => void sources[0]!.dispatchEvent(new Event('changed')))
+      act(() => hold?.())
+      await waitFor(() => expect(result.current.waiting).toBe(3))
+      expect(calls).toBe(3)
+
+      unmount()
+      expect(sources[0]!.closed).toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('reads again on refresh and when the tab comes back into view', async () => {

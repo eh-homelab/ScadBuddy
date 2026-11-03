@@ -8,6 +8,7 @@ import { BambuddyProject } from '../components/orders/BambuddyProject'
 import { FulfilmentForm } from '../components/orders/FulfilmentForm'
 import { ItemPicture } from '../components/orders/ItemPicture'
 import { OrderAttachments } from '../components/orders/OrderAttachments'
+import { OrderCosts } from '../components/orders/OrderCosts'
 import { ItemStatusBadge, OrderStatusBadge } from '../components/orders/OrderStatusBadge'
 import { CUSTOM_ITEM_TITLE, itemAnchor } from '../components/orders/itemLink'
 import { OrderItemsTable } from '../components/orders/OrderItemsTable'
@@ -404,6 +405,14 @@ export function OrderPage() {
             <ShipmentForm orderId={order.id} currency={order.currency} exponent={order.minor_exponent} items={items} shipments={shipments} enabled={IN_PRODUCTION.has(order.status) && !order.on_hold} onChanged={reload} />
           </CardContent>
         </Card>
+
+        {order.accepted_at && (
+          <Card size="sm">
+            <CardContent>
+              <OrderCosts orderId={order.id} />
+            </CardContent>
+          </Card>
+        )}
 
         <section className="flex flex-col gap-1" aria-label="Audit line">
           <h2 className="text-sm font-medium">History</h2>
