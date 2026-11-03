@@ -34,6 +34,7 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+from prometheus_client import Counter
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
@@ -83,6 +84,7 @@ class WatchActivities:
         connect: Connect = LanPrinter,
         clock: Callable[[], float] = time.monotonic,
         rack: LanUsage | None = None,
+        settle_failed: Counter | None = None,
     ) -> None:
         self.printers = printers
         self.reports = reports
@@ -90,8 +92,10 @@ class WatchActivities:
         self.write_every = write_every
         self.connect = connect
         self.clock = clock
-        #: Where a print's rack picks are settled as the printer ends it (#5138, #5142).
+        #: Where a print's rack picks are settled as the printer ends it (#5138, #5142),
+        #: and the count of those settles that failed.
         self.rack = rack
+        self.settle_failed = settle_failed
 
     @activity.defn(name=PRINTER_WATCH_ACTIVITY)
     async def printer_watch(self, input: PrinterWatchInput) -> str:
@@ -195,5 +199,10 @@ class WatchActivities:
             # The print's rack picks, up to the report that ended it: the run's follow
             # may read it late, or no longer read it at all (a newer run of the subject).
             await settle_lan_end(
-                self.rack, printer_id, ended.subtask_name, report.received_at, timed=ended.timed
+                self.rack,
+                printer_id,
+                ended.subtask_name,
+                report.received_at,
+                timed=ended.timed,
+                failed=self.settle_failed,
             )

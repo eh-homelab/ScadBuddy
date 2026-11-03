@@ -1296,7 +1296,13 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         printers=printers,
         reports=reports,
         kek=kek,
-        printer_watch=WatchActivities(printers, reports, events, rack=rack).printer_watch,
+        printer_watch=WatchActivities(
+            printers,
+            reports,
+            events,
+            rack=rack,
+            settle_failed=metrics.rack_watch_settle_failed,
+        ).printer_watch,
     )
 
 

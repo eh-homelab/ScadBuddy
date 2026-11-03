@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
+import psycopg
 import pytest
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
@@ -175,6 +176,46 @@ async def test_the_watch_settles_a_start_its_printer_ends_whatever_run_follows(
 
         usage = (await rack.usage([HOTEND]))[HOTEND]
         assert (usage.prints, usage.pending) == (1, 0)
+    finally:
+        rack.close()
+
+
+async def test_a_start_the_printer_moved_on_from_settles_untimed(
+    linked: tuple[PrinterStore, PrinterReportStore, str], pg_conninfo: str
+) -> None:
+    """A report naming another print says the start ended, not when or how: its pick
+    settles as one print with no time, through the watch's own write."""
+    printers, reports, pid = linked
+    rack = RackUsageStore(pg_conninfo)
+    try:
+        hotend = PickedHotend(group_id=0, position=2, serial=HOTEND)
+        await rack.record_lan_picks(OLD_RUN, OLD_START, None, [hotend], pid)
+        lan = Lan(
+            subscribes=True,
+            deltas=[
+                {"gcode_state": "RUNNING", "subtask_name": OLD_START},
+                {"gcode_state": "RUNNING", "subtask_name": "someone-elses-print"},
+            ],
+        )
+        # No card field changes, so the report waits for `write_every`: none here.
+        watches = WatchActivities(
+            printers,
+            reports,
+            None,
+            connect=lambda *a: cast(LanPrinter, lan),
+            rack=rack,
+            write_every=0,
+        )
+        await _run_for(ActivityEnvironment(), watches, pid, 0.4)
+
+        usage = (await rack.usage([HOTEND]))[HOTEND]
+        assert (usage.prints, usage.pending, usage.print_seconds) == (1, 0, 0)
+        with psycopg.connect(pg_conninfo) as conn:
+            row = conn.execute(
+                "SELECT print_seconds FROM rack_nozzle_prints WHERE lan_subtask = %s",
+                (OLD_START,),
+            ).fetchone()
+        assert row == (None,)
     finally:
         rack.close()
 

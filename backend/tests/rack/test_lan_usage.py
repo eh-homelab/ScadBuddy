@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
+from prometheus_client import CollectorRegistry, Counter
 
 from scadbuddy.bambuddy.progress import PrintProgress
 from scadbuddy.printers.models import PrinterCreate
@@ -281,7 +282,9 @@ async def test_saving_skips_a_pick_with_no_serial_and_never_raises() -> None:
 
     await save_lan_picks(_Recording(fail=True), RUN, FIRST, None, [_picked(A)])  # type: ignore[arg-type]
     await settle_lan_print(_Recording(fail=True), RUN, FIRST)  # type: ignore[arg-type]
-    await settle_lan_end(_Recording(fail=True), "p", FIRST, datetime.now(UTC))  # type: ignore[arg-type]
+    failed = Counter("failed", "test", registry=CollectorRegistry())
+    await settle_lan_end(_Recording(fail=True), "p", FIRST, datetime.now(UTC), failed=failed)  # type: ignore[arg-type]
+    assert failed._value.get() == 1
 
 
 def _lan(stage: str, *, settled: bool, run_id: str | None = RUN) -> PrintProgress:

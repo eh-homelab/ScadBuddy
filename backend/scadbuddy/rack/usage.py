@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from prometheus_client import Counter
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
@@ -754,15 +755,19 @@ async def settle_lan_end(
     ended_at: datetime,
     *,
     timed: bool = True,
+    failed: Counter | None = None,
 ) -> None:
     """Settle a LAN start's open picks as its printer's report ends it (#5138, #5142),
-    from the printer watch. Advisory: a failure is logged by type, and ``lan_wait``, the
-    run's follow or the pick's age (`PENDING_PICK_MAX_AGE`) closes it."""
+    from the printer watch. Advisory: a failure is logged by type and counted on
+    ``failed`` (`Metrics.rack_watch_settle_failed`), and ``lan_wait``, the run's follow
+    or the pick's age (`PENDING_PICK_MAX_AGE`) closes it."""
     if store is None:
         return
     try:
         await store.settle_lan_ended(printer, subtask_name, ended_at, timed=timed)
     except Exception as exc:
+        if failed is not None:
+            failed.inc()
         logger.warning(
             RACK_SETTLE_FALLBACK,
             extra={"printer": printer, "error": type(exc).__name__},

@@ -1330,7 +1330,11 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
     ops = state.components.get(OPERATIONS)
     registry = state.components.get(PRINTERS)
     watches = WatchActivities(
-        registry.store, registry.reports, state.events, rack=state.components.get(RACK_USAGE)
+        registry.store,
+        registry.reports,
+        state.events,
+        rack=state.components.get(RACK_USAGE),
+        settle_failed=state.metrics.rack_watch_settle_failed,
     )
     content = state.store.content
     lan = LanDeps(
