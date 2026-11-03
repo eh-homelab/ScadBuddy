@@ -1175,8 +1175,14 @@ directory, the path the model is told (Claude Code's own Read and Edit reach it 
 which the turn's write-back records in the workspace; without a working directory, in the
 workspace itself (#5162). `scriptPath` reads the directory's copy first, then the
 workspace's; `workflow({scriptPath})` inside a script runs on any worker and reads the
-workspace's, so it sees a native edit once its turn wrote it back. A path relative to the
-directory and an earlier build's `/workspace/…` are read too. Its end is Claude Code's
+workspace's, so it sees a native edit, and a script launched in the same turn, only once
+that turn wrote it back (at a park or its end): until then it fails "no workflow script".
+A copy the write-back refuses (the workspace caps) never reaches the workspace, so a later
+turn on another pod finds no script there, and the model is told to pass it inline. The
+copy is written only to the directory because a workspace copy written mid-turn would win
+over a later edit in that turn (`workspace/directory.ts` `writeBack`). A path relative to
+the directory, one in it (`sessionWorkDir`, the same on every replica), and an earlier
+build's `/workspace/…` are read; no other absolute path. Its end is Claude Code's
 `<task-notification>`, sent as a monitor's events are.
 `PushNotification` is not provided yet, and the session says so. Skill shell injection
 is off (`disableSkillShellExecution`, `harness/options.ts`) except for an allowed

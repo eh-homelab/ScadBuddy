@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { type SessionFiles, workspacePath } from '../workspace/store.js'
 import { type SessionDirectory, watchCaps } from '../workspace/directory.js'
 import type { HarnessPaths } from '../harness/options.js'
-import { ensureSessionDir } from '../harness/stateDirs.js'
+import { ensureSessionDir, sessionWorkDir } from '../harness/stateDirs.js'
 import { TASK_QUEUE } from '../temporal/names.js'
 import type { Resolver } from '../http/egress.js'
 import { wrapUntrustedText } from '../safety/untrusted.js'
@@ -121,18 +121,14 @@ export function workflowScriptPath(name: string, taskId: string): string {
 
 /**
  * A Workflow scriptPath's workspace path, or undefined: a path relative to the session's working
- * directory, one in it (`<root>/<session id>/…`, on whichever pod named it: workspace/directory.ts
- * `sessionDirOf`), or an earlier build's `/workspace/…`. Checked as a workspace path, so no `..`.
+ * directory `dir`, one in it (every replica computes the same `dir`: harness/stateDirs.ts
+ * `sessionWorkDir`), or an earlier build's `/workspace/…`. Checked as a workspace path, so no `..`.
  */
-export function workspaceRelative(p: string, sessionId: string): string | undefined {
+export function workspaceRelative(p: string, dir: string | undefined): string | undefined {
   let rel: string | undefined
   if (p.startsWith(LEGACY_ROOT)) rel = p.slice(LEGACY_ROOT.length)
   else if (!p.startsWith('/')) rel = p
-  else {
-    const marker = `/${sessionId.toLowerCase()}/`
-    const at = p.indexOf(marker)
-    rel = at < 0 ? undefined : p.slice(at + marker.length)
-  }
+  else if (dir !== undefined && p.startsWith(`${dir}/`)) rel = p.slice(dir.length + 1)
   if (rel === undefined) return undefined
   try {
     return workspacePath(rel)
@@ -445,7 +441,7 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
         log: (message) => progress(message),
         script: async (scriptPath) => {
           // A worker of any pod: the record's copy, which a native edit reaches at its turn's write-back.
-          const rel = workspaceRelative(scriptPath, t.sessionId)
+          const rel = workspaceRelative(scriptPath, deps.paths ? sessionWorkDir(deps.paths, t.sessionId) : undefined)
           if (!rel || !deps.workspace) throw new Error(`no workflow script at ${scriptPath}: give a path in the session's working directory`)
           const file = await deps.workspace.read({ kind: 'session', sessionId: t.sessionId }, rel)
           if (!file) throw new Error(`no workflow script at ${scriptPath}`)

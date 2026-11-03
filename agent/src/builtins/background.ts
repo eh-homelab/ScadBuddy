@@ -206,14 +206,14 @@ export async function workflow(
   const ws = { kind: 'session' as const, sessionId: ctx.sessionId }
   let script = input.script
   if (script === undefined && input.scriptPath !== undefined) {
-    const rel = workspaceRelative(input.scriptPath, ctx.sessionId)
+    const rel = workspaceRelative(input.scriptPath, ctx.dir)
     // The working directory's copy first: a native Edit reaches the record only at the turn's write-back.
     const bytes =
       rel === undefined
         ? undefined
         : ((ctx.dir ? await readDirFile(ctx.dir, rel, WORKFLOW_SCRIPT_MAX) : undefined) ??
           (ctx.workspace ? (await ctx.workspace.read(ws, rel))?.bytes : undefined))
-    if (!bytes) return error(`No workflow script at ${input.scriptPath}: give the path a Workflow's result names.`)
+    if (!bytes) return error(`No workflow script at ${input.scriptPath}: give the path a Workflow's result names, or pass the script inline.`)
     script = bytes.toString('utf8')
   }
   if (script === undefined) {
