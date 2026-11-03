@@ -11,6 +11,7 @@
  */
 import type { Origin, Owner, SessionStatus } from '../agent/chat/protocol'
 import type { components } from './schema'
+import type { SYSTEM_PROMPT_BASES, TOOL_SEARCH_MODES } from './sessionTurn'
 
 type Schemas = components['schemas']
 
@@ -559,7 +560,18 @@ export interface SessionRuntime {
   warm_max_per_replica: number
   warm_idle_seconds: number
   turn_max_seconds: number
+  /** Tool search (agent `harness/toolSearch.ts`): off loads every tool upfront; auto defers past 10% of the context; always defers. */
+  tool_search: (typeof TOOL_SEARCH_MODES)[number]
+  /** What the system prompt is built on: Claude Code's preset, or the SDK's minimal default. */
+  system_prompt_base: (typeof SYSTEM_PROMPT_BASES)[number]
+  /** The user's own instructions, after ScadBuddy's fixed part. */
+  system_prompt_append: string
+  /** ScadBuddy's fixed part, read-only: it always goes in, whatever the settings say. */
+  system_prompt_fixed: string
 }
+
+/** What a PUT may change: everything but the read-only fixed part. */
+export type SessionRuntimeUpdate = Partial<Omit<SessionRuntime, 'system_prompt_fixed'>>
 
 /**
  * How many of the assistant's renders run at once (`GET/PUT /api/v1/ai/settings/render-limits`,

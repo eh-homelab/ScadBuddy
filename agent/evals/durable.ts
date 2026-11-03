@@ -50,6 +50,8 @@ import { localTemporal, TEMPORAL_CLI, TEMPORAL_CLI_ENV } from '../test/support/t
 import { EVAL_BACKEND_URL, EvalBackend } from './backend.js'
 import { collectRenders, type ScenarioBackend } from './render.js'
 import { type CollectBudget, collectWithin, foldMessages, type Outcome, type Scenario, type ScriptedTurn } from './runner.js'
+import { TOOL_SEARCH_MODES } from '../src/harness/toolSearch.js'
+import type { TurnSettings } from '../src/sessions/turnSettings.js'
 
 // The evals on the one runtime (plan 2026-10-13 Step 6.6, spec §3 goal 7): each scenario is a
 // session, an AgentSession on Temporal, as every session has been since Step 6.3. Two agent
@@ -96,6 +98,27 @@ export type EvalStackOptions = {
   renderWaitMs?: number
   /** Claude Code's stderr, line by line. */
   stderr?: (line: string) => void
+  /**
+   * The turn settings stored before any session starts (sessions/turnSettings.ts: tool search and the
+   * system prompt, #5221, #5222); unset, `evalTurnSettings()` (the environment), else the defaults.
+   */
+  turn?: Partial<TurnSettings>
+}
+
+/** SCADBUDDY_EVAL_TOOL_SEARCH (off, auto, always) and SCADBUDDY_EVAL_SYSTEM_PROMPT_BASE (claude_code, minimal): what a run compares. */
+export function evalTurnSettings(env: NodeJS.ProcessEnv = process.env): Partial<TurnSettings> {
+  const out: Partial<TurnSettings> = {}
+  const search = env.SCADBUDDY_EVAL_TOOL_SEARCH?.trim()
+  if (search) {
+    if (!(TOOL_SEARCH_MODES as string[]).includes(search)) throw new Error(`SCADBUDDY_EVAL_TOOL_SEARCH must be one of ${TOOL_SEARCH_MODES.join(', ')}`)
+    out.tool_search = search as TurnSettings['tool_search']
+  }
+  const base = env.SCADBUDDY_EVAL_SYSTEM_PROMPT_BASE?.trim()
+  if (base) {
+    if (base !== 'claude_code' && base !== 'minimal') throw new Error('SCADBUDDY_EVAL_SYSTEM_PROMPT_BASE must be claude_code or minimal')
+    out.system_prompt_base = base
+  }
+  return out
 }
 
 export type EvalRunOptions = CollectBudget & {
@@ -197,6 +220,7 @@ export async function startEvalStack(options: EvalStackOptions): Promise<EvalSta
     const stored = new SettingsStore(db.sql)
     if (options.model) await stored.set(SETTING_MODEL, options.model)
     await stored.set(SETTING_SESSION_BUDGET_USD, options.maxBudgetUsd ?? 0.5)
+    for (const [key, value] of Object.entries(options.turn ?? evalTurnSettings())) await stored.set(key, value)
 
     // Each run's backend, and the message stream of the Claude Code its session spawned.
     let current: ScenarioBackend = new EvalBackend()

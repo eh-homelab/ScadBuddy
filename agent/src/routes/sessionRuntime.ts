@@ -2,6 +2,8 @@ import type { Hono } from 'hono'
 import { UI_ACTOR } from '../audit/writes.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { readRuntimeSettings, type RuntimeSettings, RuntimePutBody } from '../sessions/runtimeSettings.js'
+import { readTurnSettings, TurnPutShape, type TurnSettings } from '../sessions/turnSettings.js'
+import { systemAppend } from '../sessions/turnShared.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 import type { SettingsRepo } from '../credentials.js'
 import type { SettingsWriter } from './mcpAuthMode.js'
@@ -10,11 +12,13 @@ import { ready, type RouteModule } from './module.js'
 // /api/v1/ai/settings/session-runtime (unified runtime spec 2026-10-13 §13,
 // plan Task 2.5): how long a parked call is held, the warm process cache's size
 // and idle time, and the most a turn may run. Stored in `ai_settings` under the
-// four names in sessions/runtimeSettings.ts. (The flag `tools_as_activities` of plan 2026-10-13
+// four names in sessions/runtimeSettings.ts; and what a turn's Claude Code is spawned with
+// (sessions/turnSettings.ts: tool search and the system prompt, #5221, #5222). (The flag `tools_as_activities` of plan 2026-10-13
 // Step 9.2 is gone since Step 9.9: a turn's calls always run as activities when Temporal is there.)
 //
-//   GET /api/v1/ai/settings/session-runtime   RuntimeSettings (the defaults when unset)
-//   PUT /api/v1/ai/settings/session-runtime   a partial RuntimeSettings; 422 { detail } out of range
+//   GET /api/v1/ai/settings/session-runtime   RuntimeSettings & TurnSettings (the defaults when unset), and
+//                                             system_prompt_fixed, read-only
+//   PUT /api/v1/ai/settings/session-runtime   a partial RuntimeSettings & TurnSettings; 422 { detail } out of range
 //
 // Guarded and audited like PUT /api/v1/ai/settings/workspace: the keys are
 // written in one transaction (credentials.ts SettingsStore.setMany), which sends
@@ -36,8 +40,13 @@ const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is no
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
 const WHAT = 'assistant session runtime settings'
 
-function current(settings: SettingsRepo): Promise<RuntimeSettings> {
-  return readRuntimeSettings(settings)
+/** Both sets in one body. */
+const PutBody = RuntimePutBody.extend(TurnPutShape)
+
+/** And ScadBuddy's fixed part of the system prompt, read-only: what goes in before `system_prompt_append` whatever it says. */
+async function current(settings: SettingsRepo): Promise<RuntimeSettings & TurnSettings & { system_prompt_fixed: string }> {
+  const [runtime, turn] = await Promise.all([readRuntimeSettings(settings), readTurnSettings(settings)])
+  return { ...runtime, ...turn, system_prompt_fixed: systemAppend() }
 }
 
 export function registerSessionRuntimeRoutes(app: Hono, deps: SessionRuntimeRouteDeps): void {
@@ -71,12 +80,12 @@ export function registerSessionRuntimeRoutes(app: Hono, deps: SessionRuntimeRout
     } catch {
       return c.json({ detail: 'body is not valid JSON' }, 400)
     }
-    const parsed = RuntimePutBody.safeParse(json)
+    const parsed = PutBody.safeParse(json)
     if (!parsed.success) {
       const detail = parsed.error.issues.map((i) => `${i.path.join('.') || 'body'}: ${i.message}`).join('; ')
       return c.json({ detail }, 422)
     }
-    const values: Partial<RuntimeSettings> = parsed.data
+    const values: Partial<RuntimeSettings & TurnSettings> = parsed.data
     if (Object.keys(values).length > 0) {
       const context = { actor: UI_ACTOR, surface: 'http' as const, clientIp: deps.remoteAddress(c) }
       await store.setMany(values, undefined, context)

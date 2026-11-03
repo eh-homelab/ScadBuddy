@@ -41,6 +41,7 @@ import type {
   RenderLimits,
   SessionLimits,
   SessionRuntime,
+  SessionRuntimeUpdate,
   BlankTemplate,
   SessionResource,
   ResourceRef,
@@ -2764,7 +2765,7 @@ export const api = {
   /** The park hold, warm process cache and turn limit, served by the agent service. */
   getSessionRuntime: () => request<SessionRuntime>('/ai/settings/session-runtime'),
 
-  putSessionRuntime: (settings: Partial<SessionRuntime>) =>
+  putSessionRuntime: (settings: SessionRuntimeUpdate) =>
     request<SessionRuntime>('/ai/settings/session-runtime', {
       method: 'PUT',
       body: JSON.stringify(settings),

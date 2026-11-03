@@ -94,6 +94,8 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm ca
         tiers: null,
         owner: 'user:alice',
         systemAppend: '',
+        systemPromptBase: 'claude_code',
+        toolSearch: 'off',
         disabledTools: [],
         raisedTiers: [],
         httpRequest: false,

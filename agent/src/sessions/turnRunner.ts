@@ -42,6 +42,7 @@ import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
 import { readRuntimeSettings, RUNTIME_DEFAULTS } from './runtimeSettings.js'
+import { readTurnSettings, TURN_DEFAULTS } from './turnSettings.js'
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import { type ProxiedTool, type ToolCallRequest, turnToolProxies } from '../tools/activityProjection.js'
 import { poolRemainingUsd, recordMemoryActivity, SETTING_MODEL, systemAppend } from './turnShared.js'
@@ -113,6 +114,10 @@ export type FingerprintParts = {
   tiers: string[] | null
   owner: string
   systemAppend: string
+  /** Settings → Assistant → Runtime `system_prompt_base` (#5222): the preset or the SDK's minimal default. */
+  systemPromptBase: string
+  /** Settings → Assistant → Runtime `tool_search` (#5221): ENABLE_TOOL_SEARCH and ToolSearch, in the process's env and tools. */
+  toolSearch: string
   disabledTools: string[]
   /** Settings → Tools & plugins' raised tiers (#1953), `<harness name>=<tier>`, sorted. */
   raisedTiers: string[]
@@ -210,6 +215,8 @@ export class TurnRunner {
     'prepareApproval',
     'questionGate',
     'systemPromptAppend',
+    'systemPromptBase',
+    'toolSearch',
     'resume',
     'sessionId',
     'model',
@@ -251,6 +258,8 @@ export class TurnRunner {
     prepareApproval: 'tiers', // bound to the principal, as `mcpServers` is (#4442)
     questionGate: 'slot', // present only for a browser-owned session, which `owner` fingerprints
     systemPromptAppend: 'systemAppend',
+    systemPromptBase: 'systemPromptBase',
+    toolSearch: 'toolSearch',
     resume: 'spawn', // resume or new id: the transcript tail rule
     sessionId: 'spawn', // as `resume` (transcript tail rule)
     model: 'model',
@@ -527,13 +536,14 @@ export class TurnRunner {
           }
         }
       }
-      const [cwd, resume, settingModel, httpAccess, runtime] = await phase('session', () =>
+      const [cwd, resume, settingModel, httpAccess, runtime, turnSettings] = await phase('session', () =>
         Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.deps.store.exists(id),
           this.deps.settings?.get<string>(SETTING_MODEL),
           this.deps.httpRequest ? access.entry(BUILTIN_SOURCES.http, HTTP_TOOL) : undefined,
           this.deps.settings ? readRuntimeSettings(this.deps.settings) : undefined,
+          this.deps.settings ? readTurnSettings(this.deps.settings) : TURN_DEFAULTS,
         ]),
       )
       // Claude Code's task list in the session directory, so it moves with it (Step 9.6, stateDirs.ts).
@@ -668,7 +678,13 @@ export class TurnRunner {
               },
             }
           : {}),
-        systemPromptAppend: served.length ? `${systemAppend()}\n\n${classicBuiltinNote(served)}` : systemAppend(),
+        // ScadBuddy's fixed part (the untrusted-data notice and the tool notes), then the user's own
+        // text from Settings → Assistant → Runtime (#5222), on the base the user chose.
+        systemPromptAppend: [systemAppend(), ...(served.length ? [classicBuiltinNote(served)] : []), turnSettings.system_prompt_append.trim()]
+          .filter((part) => part !== '')
+          .join('\n\n'),
+        systemPromptBase: turnSettings.system_prompt_base,
+        toolSearch: turnSettings.tool_search,
         // First turn: the SDK session gets OUR id; later turns resume it.
         ...(resume ? { resume: id } : { sessionId: id }),
         ...(typeof model === 'string' && model ? { model } : {}),
@@ -785,6 +801,9 @@ export class TurnRunner {
         tiers: principal.tiers ? [...principal.tiers] : null,
         owner: `${session.owner.kind}:${session.owner.id}`,
         systemAppend: run.systemPromptAppend ?? '',
+        systemPromptBase: run.systemPromptBase ?? 'claude_code',
+        // `unset`: ENABLE_TOOL_SEARCH left out and no ToolSearch (a run that names no mode).
+        toolSearch: run.toolSearch ?? 'unset',
         // Settings → Tools & plugins' disabled built-ins; each plugin's own are in its `plugins` entry.
         // And each local package server's tools set off (#4757).
         disabledTools: [...(builtIn?.disallowed ?? []), ...localOff],

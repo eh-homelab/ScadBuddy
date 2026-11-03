@@ -3,6 +3,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
+import { UPFRONT_TOOLS } from '../src/harness/toolSearch.js'
 import { ALL_TOOLS, tierOf } from '../src/tools/index.js'
 import { createExternalServer, createHarnessServer } from '../src/tools/projections.js'
 import { createBackendClient } from '../src/api/backend.js'
@@ -40,8 +41,15 @@ describe('registry projections', () => {
     const external = await listVia(createExternalServer(ALL_TOOLS, svc))
 
     expect(inProcess.map((t) => t.name)).toEqual(ALL_TOOLS.map((t) => t.name).sort())
+    // The few tools a turn loads upfront carry the SDK's alwaysLoad in-process only (harness/toolSearch.ts, #5221).
+    const upfront = inProcess.filter((t) => t._meta?.['anthropic/alwaysLoad'] === true).map((t) => t.name)
+    expect(upfront).toEqual([...UPFRONT_TOOLS].sort())
+    const loading = ({ _meta, ...rest }: (typeof inProcess)[number]) => {
+      const { 'anthropic/alwaysLoad': _load, ...meta } = _meta ?? {}
+      return { ...rest, _meta: Object.keys(meta).length ? meta : undefined }
+    }
     // The SDK's in-process tool has no top-level `title`; the label is in annotations.title on both.
-    expect(inProcess).toEqual(external.map(({ title: _title, ...rest }) => rest))
+    expect(inProcess.map(loading)).toEqual(external.map(({ title: _title, ...rest }) => rest))
     expect(external.map((t) => t.title)).toEqual(external.map((t) => ALL_TOOLS.find((x) => x.name === t.name)?.label))
     // A defaulted field lists its literal default on both sides, not just the
     // same thing (claude-review of #526, finding 1).

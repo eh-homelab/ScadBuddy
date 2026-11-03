@@ -169,7 +169,11 @@ scenarios always run against the recorded backend, because they seed models and 
 that it holds.
 
 `SCADBUDDY_EVAL_MODEL` overrides the model. Unset, the Settings model or the SDK's
-default is used. With no credential, every scenario **skips**, and the suite name and
+default is used. `SCADBUDDY_EVAL_TOOL_SEARCH` (`off`, `auto`, `always`) and
+`SCADBUDDY_EVAL_SYSTEM_PROMPT_BASE` (`claude_code`, `minimal`) store those turn settings
+before the first session ([`agent/evals/durable.ts`](../../agent/evals/durable.ts)
+`evalTurnSettings`, #5221, #5222), so a run can compare them; unset, the defaults apply.
+The scripted replay (`test/evals.durable.e2e.test.ts`) reads them too. With no credential, every scenario **skips**, and the suite name and
 stderr say why (for example `SCADBUDDY_DATABASE_URL is not set and
 SCADBUDDY_EVAL_ANTHROPIC_API_KEY is not set`). The command still exits 0.
 
@@ -196,7 +200,8 @@ to 3 more minutes for any render still running.
 [`.github/workflows/ai-evals.yml`](../../.github/workflows/ai-evals.yml) runs
 `pnpm evals` on `ubuntu-latest`. The key comes from the repository secret
 `SCADBUDDY_EVAL_ANTHROPIC_API_KEY`, and an optional `model` input sets
-`SCADBUDDY_EVAL_MODEL`. It takes the pinned Temporal CLI from the test image and points
+`SCADBUDDY_EVAL_MODEL`; the `tool_search` and `system_prompt_base` inputs set the two
+variables above. It takes the pinned Temporal CLI from the test image and points
 `SCADBUDDY_TEST_DATABASE_URL` at its Postgres service for the eval stack. With the
 secret set, the job first builds the image's `runtime`
 target and starts it the way `ci.yml`'s `image` job does: with Postgres, a Temporal dev
