@@ -1,7 +1,8 @@
 import { pendingInput } from './routes/pendingInput.js'
-import { attentionNotices, PushDispatcher } from './notify/dispatcher.js'
+import { attentionNotices, NotificationDispatcher } from './notify/dispatcher.js'
 import { pushHostsOf, SETTING_PUSH_HOSTS } from './notify/pushEgress.js'
 import { PushStore } from './notify/pushStore.js'
+import { ChannelStore } from './notify/channels.js'
 import { PendingChanges } from './gate/changes.js'
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
@@ -226,6 +227,13 @@ const database = config.databaseUrl
           console.log(
             `secret key rotation: re-wrapped ${push.rewrapped} Web Push key(s)` +
               (push.failed ? `; ${push.failed} could not be opened with the previous key` : ''),
+          )
+        }
+        const channels = await new ChannelStore(sql, kek.kek).rewrapFrom(previousKek.kek, kek.kek)
+        if (channels.rewrapped || channels.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${channels.rewrapped} notification channel token(s)` +
+              (channels.failed ? `; ${channels.failed} could not be opened with the previous key` : ''),
           )
         }
         const grants = await new PluginOAuth(sql).rewrapFrom(previousKek.kek, kek.kek)
@@ -1123,15 +1131,19 @@ const commands =
 // so a closed tab still alerts. Its keys are sealed under the KEK, so it needs one. A pass
 // runs on each pending-input change and once the database is ready.
 const pushStore = role.http && database && kek.ok ? new PushStore(database.sql, kek.kek) : undefined
+// The out-of-browser channels (#815, notify/channels.ts): their tokens are sealed too.
+const notifyChannels = role.http && database && kek.ok ? new ChannelStore(database.sql, kek.kek) : undefined
 const pushDispatcher =
   pushStore && sessions
-    ? new PushDispatcher({
+    ? new NotificationDispatcher({
         store: pushStore,
         notices: async (owner) => attentionNotices(await pendingInput(sessions, owner)),
         // RFC 8292 §2.1: who the push service may contact about these messages.
         subject: config.publicUrl ?? 'mailto:scadbuddy@localhost',
         // The push-service allowlist, as Settings last saved it (notify/pushEgress.ts).
         hosts: async () => pushHostsOf(await settings?.get<unknown>(SETTING_PUSH_HOSTS)),
+        channels: notifyChannels,
+        publicUrl: config.publicUrl,
       })
     : undefined
 if (pushDispatcher && database) {
@@ -1176,6 +1188,8 @@ const app = !role.http
   ...(audit ? { audit } : {}),
   ...(pendingChanges ? { pendingChanges } : {}),
   ...(pushStore && pushDispatcher ? { push: { store: pushStore, dispatcher: pushDispatcher } } : {}),
+  ...(notifyChannels ? { notifyChannels } : {}),
+  publicUrl: config.publicUrl,
   upgradeWebSocket,
   tabs,
   // A person's session on /api/v1/ai/* (#4975 phase 5), dropped when the backend revokes it.

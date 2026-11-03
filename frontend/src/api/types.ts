@@ -629,6 +629,33 @@ export interface PushServices {
 }
 
 /**
+ * #815 — a notification channel out of the browser (agent `src/routes/notifyChannels.ts`):
+ * an ntfy topic, or a Home Assistant notify service. The token is never returned.
+ */
+export interface NotifyChannel {
+  id: string
+  kind: 'ntfy' | 'home_assistant'
+  name: string
+  url: string
+  target: string | null
+  enabled: boolean
+  has_token: boolean
+  token_last4: string
+  last_error: string | null
+  last_sent_at: string | null
+}
+
+/** What a new channel is made of; `token` and `target` as each kind needs. */
+export interface NotifyChannelInput {
+  kind: NotifyChannel['kind']
+  name: string
+  url: string
+  target?: string | null
+  token?: string | null
+  enabled?: boolean
+}
+
+/**
  * #2329 — the caps on the assistant's workspace, in bytes (agent
  * `routes/workspaceSettings.ts`), with the bounds the form may save.
  */

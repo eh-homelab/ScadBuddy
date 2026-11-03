@@ -1882,3 +1882,20 @@ call waiting for its tab), these channels announce it:
   holds is refused, and each person keeps at most five subscriptions (the oldest go). A pass has
   at most four pushes in flight and stops starting them after 30 s. The pod must be able to
   reach the allowed push services. The VAPID `sub` is `SCADBUDDY_PUBLIC_URL`.
+- **Notification channels** for when nobody is at a browser
+  ([`agent/src/notify/channels.ts`](../../agent/src/notify/channels.ts), Settings →
+  Assistant → Notifications, `ai_notify_channels`). The two kinds are an
+  [ntfy](https://docs.ntfy.sh/publish/) topic URL (`https://ntfy.sh/<topic>` or a self-hosted
+  server, with an optional access token) and a Home Assistant
+  [notify service](https://www.home-assistant.io/integrations/notify/) (its URL, the service
+  name such as `mobile_app_<device>`, and a long-lived access token, called through
+  `POST /api/services/notify/<service>` of the
+  [REST API](https://developers.home-assistant.io/docs/api/rest/)). Each enabled channel is
+  told of every attention request once, with its reason as the title, a fixed line and a link
+  to `SCADBUDDY_PUBLIC_URL/?assistant-session=<id>`. Each token is sealed under the KEK, with
+  the channel's kind and URL in the AAD, so changing the URL drops the token. Only the person
+  sets channels: the routes take the UI's requests only, no tool reaches them, and every write
+  is audited. A channel URL follows the plugin endpoint rule: https anywhere, plain http only to
+  loopback or private addresses, never link-local or a metadata host. It is checked when saved
+  and at every send. Neither kind has been run against a real ntfy server or Home Assistant;
+  the tests use fakes. There is no email or Bambuddy channel.

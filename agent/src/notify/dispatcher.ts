@@ -3,6 +3,8 @@ import { EgressError, type Resolver, systemResolver } from '../http/egress.js'
 import { pinnedFetch } from '../http/pinned.js'
 import type { PendingInputPage } from '../routes/pendingInput.js'
 import type { Owner } from '../sessions/protocol.js'
+import { BROWSER_USER } from '../routes/approvals.js'
+import { ChannelError, type ChannelMessage, type ChannelStore, type OpenChannel } from './channels.js'
 import { checkPushEndpoint, type PinnedEndpoint } from './pushEgress.js'
 import type { PushStore, PushSubscriptionRow } from './pushStore.js'
 import { encryptPayload, vapidAuthorization } from './webPush.js'
@@ -44,7 +46,7 @@ export const PASS_DEADLINE_MS = 30_000
 /** How long one push may take. */
 export const PUSH_TIMEOUT_MS = 10_000
 
-export type PushDispatcherDeps = {
+export type NotificationDispatcherDeps = {
   store: PushStore
   /** The attention requests `owner` may see now (`attentionNotices` of `pendingInput`). */
   notices: (owner: Owner) => Promise<AttentionNotice[]>
@@ -57,17 +59,21 @@ export type PushDispatcherDeps = {
   pinEndpoint?: (endpoint: string) => Promise<PinnedEndpoint>
   /** A pass's deadline, PASS_DEADLINE_MS unless a test sets it. */
   passDeadlineMs?: number
+  /** The out-of-browser channels (channels.ts), told of what the browser user may see; none without the KEK. */
+  channels?: ChannelStore | undefined
+  /** SCADBUDDY_PUBLIC_URL: where a channel's link opens the session; no link without it. */
+  publicUrl?: string | undefined
   log?: (message: string) => void
 }
 
 type Vapid = Awaited<ReturnType<PushStore['vapidKeys']>>
 
-export class PushDispatcher {
-  readonly #deps: PushDispatcherDeps
+export class NotificationDispatcher {
+  readonly #deps: NotificationDispatcherDeps
   #running: Promise<void> | undefined
   #again = false
 
-  constructor(deps: PushDispatcherDeps) {
+  constructor(deps: NotificationDispatcherDeps) {
     this.#deps = deps
   }
 
@@ -88,10 +94,11 @@ export class PushDispatcher {
       })
   }
 
-  /** Sends what has not been sent yet to every subscription. */
+  /** Sends what has not been sent yet to every subscription and every enabled channel. */
   async pass(): Promise<void> {
     const subscriptions = await this.#deps.store.subscriptions()
-    if (subscriptions.length === 0) return
+    const channels = (await this.#deps.channels?.enabled()) ?? []
+    if (subscriptions.length === 0 && channels.length === 0) return
     const deadline = AbortSignal.timeout(this.#deps.passDeadlineMs ?? PASS_DEADLINE_MS)
     const byOwner = new Map<string, { owner: Owner; subs: PushSubscriptionRow[] }>()
     for (const sub of subscriptions) {
@@ -100,24 +107,56 @@ export class PushDispatcher {
       group.subs.push(sub)
       byOwner.set(key, group)
     }
-    const jobs: { sub: PushSubscriptionRow; notice: AttentionNotice }[] = []
-    for (const { owner, subs } of byOwner.values()) {
-      for (const notice of await this.#deps.notices(owner)) for (const sub of subs) jobs.push({ sub, notice })
-    }
-    if (jobs.length === 0) return
-    const hosts = await this.#deps.hosts()
+    type Job = { notice: AttentionNotice; target: string; run: () => Promise<void> }
+    const jobs: Job[] = []
+    let hosts: readonly string[] | undefined
     let vapid: Promise<Vapid> | undefined
+    for (const { owner, subs } of byOwner.values()) {
+      for (const notice of await this.#deps.notices(owner)) {
+        for (const sub of subs) {
+          jobs.push({
+            notice,
+            target: `push:${sub.id}`,
+            run: async () => {
+              hosts ??= await this.#deps.hosts()
+              vapid ??= this.#deps.store.vapidKeys()
+              await this.#send(sub, notice, await vapid, hosts, deadline)
+            },
+          })
+        }
+      }
+    }
+    // Channels are the deployment's, set in Settings by the browser user: told what that user sees.
+    if (channels.length > 0) {
+      for (const notice of await this.#deps.notices(BROWSER_USER)) {
+        for (const channel of channels) {
+          jobs.push({ notice, target: `channel:${channel.id}`, run: () => this.#tell(channel, notice, deadline) })
+        }
+      }
+    }
     let next = 0
     const worker = async () => {
       while (next < jobs.length && !deadline.aborted) {
-        const { sub, notice } = jobs[next++]!
-        if (!(await this.#deps.store.claim(notice.id, `push:${sub.id}`))) continue
-        vapid ??= this.#deps.store.vapidKeys()
-        await this.#send(sub, notice, await vapid, hosts, deadline)
+        const job = jobs[next++]!
+        // Claimed only as it starts, so one the deadline cut off is the next pass's.
+        if (!(await this.#deps.store.claim(job.notice.id, job.target))) continue
+        await job.run()
       }
     }
     await Promise.all(Array.from({ length: Math.min(PUSH_CONCURRENCY, jobs.length) }, worker))
-    if (next < jobs.length) this.#log('web push: a pass reached its deadline; the rest go on the next pass')
+    if (next < jobs.length) this.#log('notifications: a pass reached its deadline; the rest go on the next pass')
+  }
+
+  async #tell(channel: OpenChannel, notice: AttentionNotice, deadline: AbortSignal): Promise<void> {
+    const store = this.#deps.channels!
+    try {
+      await store.send(channel, attentionMessage(notice, this.#deps.publicUrl), AbortSignal.any([deadline, AbortSignal.timeout(PUSH_TIMEOUT_MS)]))
+      await store.record(channel.id, null)
+    } catch (err) {
+      const why = err instanceof EgressError || err instanceof ChannelError ? err.message : `the send failed (${(err as Error).message})`
+      await store.record(channel.id, why).catch(() => {})
+      this.#log(`notification channel ${channel.id}: ${why}`)
+    }
   }
 
   async #send(sub: PushSubscriptionRow, notice: AttentionNotice, vapid: Vapid, hosts: readonly string[], deadline: AbortSignal): Promise<void> {
@@ -155,6 +194,34 @@ export class PushDispatcher {
   #log(message: string): void {
     ;(this.#deps.log ?? console.error)(message)
   }
+}
+
+/** A notification's title by reason (frontend `attentionNotifications.ts` `noticeTitle`, `public/push-sw.js`). */
+export function noticeTitle(reason: string): string {
+  switch (reason) {
+    case 'tab_disconnected':
+      return 'The assistant lost its ScadBuddy tab'
+    case 'question':
+      return 'The assistant has a question'
+    case 'blocked':
+      return 'The assistant is blocked'
+    default:
+      return 'The assistant needs you'
+  }
+}
+
+/** The page a click opens: ScadBuddy at the request's session (frontend `webPush.ts` `SESSION_PARAM`). */
+export function sessionLink(publicUrl: string | undefined, sessionId: string | null): string | undefined {
+  if (!publicUrl) return undefined
+  const url = new URL('/', publicUrl)
+  if (sessionId) url.searchParams.set('assistant-session', sessionId)
+  return url.href
+}
+
+/** What a channel is sent for an attention request: its reason and a link, never its message. */
+export function attentionMessage(notice: AttentionNotice, publicUrl: string | undefined): ChannelMessage {
+  const click = sessionLink(publicUrl, notice.sessionId)
+  return { title: noticeTitle(notice.reason), body: 'Open ScadBuddy to answer it.', ...(click ? { click } : {}) }
 }
 
 /** RFC 8030 §5.4: a message with the same topic replaces one not yet delivered; at most 32 base64url characters. */
