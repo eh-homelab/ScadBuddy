@@ -16,7 +16,7 @@ from scadbuddy.printers import watch as watch_module
 from scadbuddy.printers.lan import LanPrinter
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.models import LanLink, PrinterCreate
-from scadbuddy.printers.reports import PrintEnd, PrinterReportStore, ended_print
+from scadbuddy.printers.reports import PrintEnd, PrinterReportStore, advance_print
 from scadbuddy.printers.store import PrinterStore
 from scadbuddy.printers.watch import SHOWN, WatchActivities, shown
 from scadbuddy.rack.usage import PickedHotend, RackUsageStore
@@ -180,57 +180,57 @@ async def test_the_watch_settles_a_start_its_printer_ends_whatever_run_follows(
 
 
 RUNNING_X = {"gcode_state": "RUNNING", "subtask_name": "x"}
+FINISH_X = {"gcode_state": "FINISH", "subtask_name": "x"}
 
 
 @pytest.mark.parametrize(
-    ("old", "new", "ended"),
+    ("running", "new", "after", "ended"),
     [
-        (RUNNING_X, {"gcode_state": "FINISH", "subtask_name": "x"}, PrintEnd("x", timed=True)),
-        (RUNNING_X, {"gcode_state": "FAILED", "subtask_name": "x"}, PrintEnd("x", timed=True)),
-        (RUNNING_X, {"gcode_state": "IDLE", "subtask_name": "x"}, PrintEnd("x", timed=False)),
-        (RUNNING_X, {"gcode_state": "RUNNING", "subtask_name": "y"}, PrintEnd("x", timed=False)),
-        (
-            {"gcode_state": "PAUSE", "subtask_name": "x"},
-            {"gcode_state": "FINISH", "subtask_name": "x"},
-            PrintEnd("x", timed=True),
-        ),
-        (RUNNING_X, {"gcode_state": "PAUSE", "subtask_name": "x"}, None),
-        (RUNNING_X, {"gcode_state": "RUNNING", "subtask_name": "x"}, None),
+        ("x", FINISH_X, None, PrintEnd("x", timed=True)),
+        ("x", {"gcode_state": "FAILED", "subtask_name": "x"}, None, PrintEnd("x", timed=True)),
+        ("x", {"gcode_state": "IDLE", "subtask_name": "x"}, None, PrintEnd("x", timed=False)),
+        ("x", {"gcode_state": "RUNNING", "subtask_name": "y"}, "y", PrintEnd("x", timed=False)),
+        ("x", {"gcode_state": "FINISH", "subtask_name": "y"}, None, PrintEnd("x", timed=False)),
+        ("x", {"gcode_state": "PAUSE", "subtask_name": "x"}, "x", None),
+        ("x", RUNNING_X, "x", None),
+        (None, RUNNING_X, "x", None),
         # #4935: a new job's name while the printer still says the last one's FINISH.
-        (
-            {"gcode_state": "FINISH", "subtask_name": "x"},
-            {"gcode_state": "FINISH", "subtask_name": "y"},
-            None,
-        ),
-        ({"gcode_state": "IDLE"}, {"gcode_state": "FINISH", "subtask_name": "x"}, None),
-        (RUNNING_X, {"mc_percent": 3}, None),
-        (None, {"gcode_state": "FINISH", "subtask_name": "x"}, None),
+        (None, {"gcode_state": "FINISH", "subtask_name": "y"}, None, None),
+        (None, FINISH_X, None, None),
+        # A delta before the reconnect's pushall answer keeps the running print.
+        ("x", {"mc_percent": 3}, "x", None),
+        ("x", {"gcode_state": "FINISH"}, "x", None),
+        (None, {"subtask_name": "x"}, None, None),
     ],
     ids=[
         "finished",
         "failed",
         "idle",
         "moved on",
-        "paused then finished",
+        "moved on under FINISH",
         "paused",
         "running",
+        "a start",
         "a start under FINISH",
         "never seen running",
         "says too little",
-        "no row",
+        "names no print",
+        "names no state",
     ],
 )
-def test_a_write_ends_only_the_print_the_row_showed_running(
-    old: dict[str, Any] | None, new: dict[str, Any], ended: PrintEnd | None
+def test_a_report_ends_only_the_print_running_before_it(
+    running: str | None, new: dict[str, Any], after: str | None, ended: PrintEnd | None
 ) -> None:
-    assert ended_print(old, new) == ended
+    assert advance_print(running, new) == (after, ended)
 
 
-def test_a_write_returns_the_end_it_shows(
+def test_a_write_returns_the_end_it_shows_after_a_report_that_says_too_little(
     linked: tuple[PrinterStore, PrinterReportStore, str],
 ) -> None:
+    """#5138 review: a reconnect's first delta may name no print; the row keeps the one
+    running, so the next whole report still ends it."""
     _, reports, pid = linked
-    finish = {"gcode_state": "FINISH", "subtask_name": "x"}
     assert reports.put(pid, RUNNING_X, datetime.now(UTC)) is None
-    assert reports.put(pid, finish, datetime.now(UTC)) == PrintEnd("x", timed=True)
-    assert reports.put(pid, finish, datetime.now(UTC)) is None
+    assert reports.put(pid, {"mc_percent": 3}, datetime.now(UTC)) is None
+    assert reports.put(pid, FINISH_X, datetime.now(UTC)) == PrintEnd("x", timed=True)
+    assert reports.put(pid, FINISH_X, datetime.now(UTC)) is None

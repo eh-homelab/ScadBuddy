@@ -6,4 +6,4 @@
 ALTER TABLE output_last_prints
     ADD COLUMN sent_to_bambuddy boolean NOT NULL DEFAULT false;
 
-UPDATE output_last_prints SET sent_to_bambuddy = true WHERE print_route <> 'lan';
+UPDATE output_last_prints SET sent_to_bambuddy = true WHERE print_route = 'slice_queue';

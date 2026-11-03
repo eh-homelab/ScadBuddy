@@ -3,9 +3,15 @@
 print dialog and the native follow. ``seen_at`` is when the printer was last heard
 from: a report, or the connection still being up (`touch`).
 
-A write that shows the print the row named before has ended returns that end
-(`ended_print`), so the watch settles the print's rack picks as the printer ends it
-(#5138, #5142), whether or not a follow still reads its run."""
+The row also keeps the print its reports last showed running (``running_subtask``). A
+write that shows that print ended returns the end (`advance_print`), so the watch
+settles the print's rack picks as the printer ends it (#5138, #5142), whether or not a
+follow still reads its run.
+
+The end is timed to the report that shows it. A watch that was down, or a printer off
+the network, past the print's end charges the print up to that report: the end lies
+somewhere after the row's last ``seen_at``, and an upper bound counts the wear a lower
+one would miss."""
 
 from __future__ import annotations
 
@@ -34,27 +40,25 @@ class PrintEnd:
     timed: bool
 
 
-def ended_print(old: dict[str, Any] | None, new: dict[str, Any]) -> PrintEnd | None:
-    """The print ``old`` showed running that ``new`` shows ended: its own ``FINISH``,
-    ``FAILED`` or ``IDLE``, or another print's name (the printer moved on). ``None``
-    when ``old`` showed none running, or ``new`` still runs it or says too little.
+def advance_print(running: str | None, new: dict[str, Any]) -> tuple[str | None, PrintEnd | None]:
+    """The print running after the report ``new``, given the one ``running`` before it,
+    and the print ``new`` shows ended: ``running``'s own ``FINISH``, ``FAILED`` or
+    ``IDLE``, or another print's name (the printer moved on).
 
-    Only an end seen after a run counts: a report naming a new ``subtask_name`` while it
-    still says the last job's ``FINISH`` (#4935) is a start, and the row before it showed
-    nothing running."""
-    if old is None:
-        return None
-    name = old.get("subtask_name")
-    if not name or old.get("gcode_state") not in RUNNING:
-        return None
+    A report that says too little (no ``subtask_name`` or ``gcode_state``: a delta
+    before a reconnect's ``pushall`` answer) keeps ``running`` and ends nothing, so the
+    next whole report still ends it. Only an end seen after a run counts: a report
+    naming a new ``subtask_name`` while it still says the last job's ``FINISH`` (#4935)
+    is a start, and nothing was running before it."""
     named, state = new.get("subtask_name"), new.get("gcode_state")
-    if named is None or state is None:
-        return None
-    if named != name:
-        return PrintEnd(subtask_name=name, timed=False)
-    if state in RUNNING:
-        return None
-    return PrintEnd(subtask_name=name, timed=state in ("FINISH", "FAILED"))
+    if not named or state is None:
+        return running, None
+    now_running = named if state in RUNNING else None
+    if running is None or (named == running and state in RUNNING):
+        return now_running, None
+    if named != running:
+        return now_running, PrintEnd(subtask_name=running, timed=False)
+    return None, PrintEnd(subtask_name=running, timed=state in ("FINISH", "FAILED"))
 
 
 class PrinterReportStore:
@@ -62,28 +66,27 @@ class PrinterReportStore:
         self.pool = pool
 
     def put(self, printer_id: str, report: dict[str, Any], seen_at: datetime) -> PrintEnd | None:
-        """Write the report; the print it shows ended since the row's last one
-        (`ended_print`), if any. A printer gone from the registry (deleted while it was
-        watched) or no longer LAN-linked (an attempt still running after the unlink)
-        writes nothing and ends nothing."""
+        """Write the report; the print it shows ended (`advance_print`), if any. A
+        printer gone from the registry (deleted while it was watched) or no longer
+        LAN-linked (an attempt still running after the unlink) writes nothing and ends
+        nothing."""
         key = printer_uuid(printer_id)
         if key is None:
             return None
         with self.pool.connection() as conn, conn.transaction():
             old = conn.execute(
-                "SELECT report FROM printer_reports WHERE printer_id = %s FOR UPDATE",
+                "SELECT running_subtask FROM printer_reports WHERE printer_id = %s FOR UPDATE",
                 (printer_id,),
             ).fetchone()
+            running, ended = advance_print(None if old is None else old["running_subtask"], report)
             written = conn.execute(
-                "INSERT INTO printer_reports (printer_id, report, seen_at)"
-                " SELECT id, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"
-                " ON CONFLICT (printer_id) DO UPDATE"
-                " SET report = EXCLUDED.report, seen_at = EXCLUDED.seen_at",
-                (Jsonb(report), seen_at, printer_id),
+                "INSERT INTO printer_reports (printer_id, report, seen_at, running_subtask)"
+                " SELECT id, %s, %s, %s FROM printers WHERE id = %s AND lan_host IS NOT NULL"
+                " ON CONFLICT (printer_id) DO UPDATE SET report = EXCLUDED.report,"
+                " seen_at = EXCLUDED.seen_at, running_subtask = EXCLUDED.running_subtask",
+                (Jsonb(report), seen_at, running, printer_id),
             ).rowcount
-        if not written:
-            return None
-        return ended_print(None if old is None else dict(old["report"]), report)
+        return ended if written else None
 
     def touch(self, printer_id: str, seen_at: datetime) -> None:
         """Heard from as late as ``seen_at``, with nothing new to say; never earlier than

@@ -16,7 +16,7 @@ attempt fails, and `FOLLOW_RETRY` starts the next; ``seen_at`` then ages until
 down ends the attempt at once, as `FollowActivities` does, so a stop never waits out
 its graceful timeout per printer.
 
-A write that shows the print the printer was running has ended (`reports.ended_print`)
+A write that shows the print the printer was running has ended (`reports.advance_print`)
 settles that start's rack picks up to the report's time (#5138, #5142): the run's own
 follow reads only the subject's newest run, and may read it late.
 

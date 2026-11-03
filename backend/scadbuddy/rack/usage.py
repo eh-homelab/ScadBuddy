@@ -567,7 +567,9 @@ class RackUsageStore:
         printer had ended this start to take it, #5142), or none when not ``timed`` (the
         report never said it ended); its grams the group's sliced grams. A start settled
         already writes nothing, so the watch's settle (`settle_lan_ended`), each copy's
-        own and the run's last one never count it twice."""
+        own and the run's last one never count it twice. So the next-pick cap applies
+        only to a pick no other settle has closed: one the watch closed untimed (the
+        printer moved on without saying how it ended) stays untimed."""
         return await asyncio.to_thread(self._settle_lan, run_id, subtask_name, timed)
 
     def _settle_lan(self, run_id: str, subtask: str | None, timed: bool) -> int:
