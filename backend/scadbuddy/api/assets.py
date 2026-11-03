@@ -250,9 +250,16 @@ class FetchedAsset(AssetMeta):
         "Fetches an SVG or PNG on the server and stores it exactly as an upload: the "
         "answer's `id` is the value a `// file` parameter takes. The URL's host, and "
         "every redirect's, must be on the asset allowlist (`asset_fetch_domains` in "
-        "Settings, each domain with its subdomains). Otherwise as the URL import: "
+        "Settings, each domain with its subdomains), or be the body's `allow_host`: one "
+        "fetch from that host alone, which needs the single-use grant a person's approval "
+        "of this fetch minted in the `X-ScadBuddy-Fetch-Grant` header, bound to that host "
+        "and URL. The allowlist is left as it is. Otherwise as the URL import: "
         f"https only, public internet addresses only, at most {MAX_ASSET_BYTES} bytes, "
-        f"within {IMPORT_TIMEOUT:.0f} seconds. Every refusal is a 422; a full store is "
+        f"within {IMPORT_TIMEOUT:.0f} seconds; a URL with a backslash, a control "
+        "character or a user name or password is refused. Every refusal of the URL or "
+        "its content is a 422, as is an `allow_host` that is not the URL's host; a "
+        "missing, forged, expired, other-host, other-URL or spent grant is a 403, and a "
+        "one-off with no secret key configured to check it is a 503. A full store is "
         "the upload's 413. The asset keeps the URL and its licence: the body's `licence`, "
         "else the one known for its catalogue (Material Design Icons, Tabler, game-icons, "
         "OpenMoji). The model's README gets a line in its Credits section naming the "
@@ -260,10 +267,17 @@ class FetchedAsset(AssetMeta):
     ),
     responses={
         **OPERATION_RESPONSES,
+        status.HTTP_403_FORBIDDEN: {
+            "description": (
+                "an `allow_host` fetch whose `X-ScadBuddy-Fetch-Grant` is missing, forged, "
+                "expired, for another host or URL, or already spent"
+            )
+        },
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
                 "the replica's fetch budget (shared with imports) or its resolver threads "
-                "are all in use; retry after `Retry-After` seconds"
+                "are all in use; retry after `Retry-After` seconds. Also an `allow_host` "
+                "fetch on a server with no secret key to check its grant"
             )
         },
     },
