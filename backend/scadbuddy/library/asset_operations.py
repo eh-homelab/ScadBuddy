@@ -14,6 +14,7 @@ from fastapi import status
 from scadbuddy.api import assets as assets_api
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.assets import AssetLicence
 from scadbuddy.library.operations import answered_as_routes
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.operations.kinds import OperationKind
@@ -49,7 +50,14 @@ def asset_kinds(state: AppState) -> list[OperationKind]:
 
     async def fetch_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         url = (await _claimed(request["url"])).decode()
-        fetched = await assets_api.fetch_run(request["slug"], url, state)
+        # A request recorded before #959 has no licence.
+        licence = request.get("licence")
+        fetched = await assets_api.fetch_run(
+            request["slug"],
+            url,
+            state,
+            licence=None if licence is None else AssetLicence.model_validate(licence),
+        )
         dumped: dict[str, Any] = fetched.model_dump(mode="json")
         return dumped
 

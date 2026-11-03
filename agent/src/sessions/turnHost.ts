@@ -129,6 +129,8 @@ export const INPUT_POLL_MS = 1_000
 const GATE_ASK = 'ask_user'
 /** Every this many cap checks (each minute, directory.ts DIR_CHECK_MS), a running turn also writes its directory back. */
 const DIR_SYNC_EVERY = 4
+/** When a turn writes its directory back: on the minute's timer, at a park, or at its end. */
+type SyncPoint = 'tick' | 'park' | 'end'
 /** How many skipped files' reasons one log line names; a flood of them is counted, not listed. */
 const LOGGED_REASONS = 5
 
@@ -459,12 +461,13 @@ export class TurnHost {
     /** The session's working directory as placed for this turn (set just before it runs). */
     let placed: Placement | undefined
     /**
-     * The directory's changes so far, into the workspace: at each park and every minute (offers
-     * only, so the turn keeps what it still uses), and at the turn's end (`prune`); not once cut
-     * off. The bytes it found, when it ran.
+     * The directory's changes so far, into the workspace: at each park (offers only, so the turn
+     * keeps what it still uses), every minute (`tick`: only the files already in the workspace, so
+     * a scratch tree the turn builds is not offered mid-build, #5140), and at the turn's end
+     * (`end`, which prunes); not once cut off. The bytes it found, when it ran.
      */
-    const sync = async (prune: boolean): Promise<number | undefined> => {
-      if (placed && !fenced()) return this.#writeBack(placed, prune)
+    const sync = async (when: SyncPoint): Promise<number | undefined> => {
+      if (placed && !fenced()) return this.#writeBack(placed, when)
       return undefined
     }
     /**
@@ -580,7 +583,7 @@ export class TurnHost {
             if (checks % DIR_SYNC_EVERY !== 0 || syncing) return
             syncing = true
             // sync logs its own failures (#writeBack).
-            void sync(false)
+            void sync('tick')
               .catch(() => {})
               .finally(() => {
                 syncing = false
@@ -594,7 +597,7 @@ export class TurnHost {
       } finally {
         stopCaps?.()
         // Not once cut off: the placement that holds the turn now has the directory.
-        await sync(true)
+        await sync('end')
       }
       clearInterval(fence)
       result = run.result
@@ -665,12 +668,14 @@ export class TurnHost {
   }
 
   /**
-   * The directory's changes written back to the workspace, removing what cannot be synced only
-   * when `prune` (the turn's end); the bytes it found. A failure is logged, and the turn keeps its end.
+   * The directory's changes written back to the workspace, removing what cannot be synced only at
+   * the turn's `end`, and offering new files at a `park` and the `end` only; the bytes it found. A
+   * failure is logged, and the turn keeps its end.
    */
-  async #writeBack(placed: Placement, prune: boolean): Promise<number | undefined> {
+  async #writeBack(placed: Placement, when: SyncPoint): Promise<number | undefined> {
+    const prune = when === 'end'
     try {
-      const back = await this.#deps.directory!.writeBack(placed, { prune })
+      const back = await this.#deps.directory!.writeBack(placed, { prune, newFiles: when !== 'tick' })
       // Each skipped path is logged once per placement: a file the turn keeps (a write-back during
       // the turn only offers) is skipped again at every park and every minute.
       let reported = this.#reported.get(placed)
@@ -708,7 +713,7 @@ export class TurnHost {
     trace: GateTrace
     asks: boolean
     /** Writes the session's directory back: a parked turn's writes so far outlive the pod. */
-    sync: (prune: boolean) => Promise<unknown>
+    sync: (when: SyncPoint) => Promise<unknown>
     endTurn: (why: string) => void
   }): TurnGates {
     const { session, turnId, control, stop, holds, secrets, shown, trace, asks, sync, endTurn } = turn
@@ -746,7 +751,7 @@ export class TurnHost {
       holds.held.add(rid)
       options.opened?.(rid)
       // A park may outlast this pod (a release, a shutdown): what the turn wrote so far goes to the workspace first.
-      await sync(false)
+      await sync('park')
       // Past the hold, the turn lets its process go (§5.4 "Release"); the entry stays open.
       const timer = setTimeout(() => holds.release(), options.holdMs ?? holds.holdMs)
       timer.unref()

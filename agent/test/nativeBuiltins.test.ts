@@ -77,6 +77,15 @@ describe('the file tools are confined to the session directory', () => {
       ['Glob', { pattern: 'notes/[a-c]?.txt' }],
       ['Grep', { pattern: 'a' }],
       ['Grep', { pattern: 'a', path: 'notes' }],
+      // Grep splits `glob` into several `rg --glob`s (see confine.ts); each piece is checked.
+      ['Grep', { pattern: 'a', glob: '*.ts,*.tsx' }],
+      ['Grep', { pattern: 'a', glob: '*.ts *.md' }],
+      ['Grep', { pattern: 'a', glob: '*.{ts,tsx} *.md' }],
+      // An escaped `(` and `)` name themselves.
+      ['Glob', { pattern: 'file \\(1\\).txt' }],
+      ['Grep', { pattern: 'a', glob: 'file \\(1\\).txt' }],
+      // A `]` that closes no class is a name character, as minimatch and picomatch read it.
+      ['Glob', { pattern: 'notes/a].txt' }],
       ['TaskList', {}],
     ] as const) {
       expect(await guard(tool, input), `${tool} ${JSON.stringify(input)}`).toBeUndefined()
@@ -130,6 +139,20 @@ describe('the file tools are confined to the session directory', () => {
       ['Grep', { pattern: 'kek', glob: 'a/{x/..,y}/*' }],
       ['Grep', { pattern: 'kek', glob: '{-..0}/*' }],
       ['Grep', { pattern: 'kek', glob: 42 }],
+      // What failing closed costs: no name in these is `..`, but each could match it.
+      ['Glob', { pattern: '.*' }],
+      ['Glob', { pattern: '*.*' }],
+      ['Glob', { pattern: 'a..b*' }],
+      ['Glob', { pattern: 'file (1).txt' }],
+      ['Grep', { pattern: 'kek', glob: '.*' }],
+      ['Grep', { pattern: 'kek', glob: '*.*' }],
+      ['Grep', { pattern: 'kek', glob: 'a..b*' }],
+      ['Grep', { pattern: 'kek', glob: 'file (1).txt' }],
+      // Each piece Grep splits its glob into: on a comma, and on whitespace.
+      ['Grep', { pattern: 'kek', glob: '.?,x' }],
+      ['Grep', { pattern: 'kek', glob: 'x,.?/*' }],
+      ['Grep', { pattern: 'kek', glob: '*.ts .?' }],
+      ['Grep', { pattern: 'kek', glob: '*.ts\t.{x,.}/*' }],
       ['Glob', { pattern: path.join(root, 'dirlink', '*') }],
       ['Glob', { pattern: '*', path: outside }],
       ['Grep', { pattern: 'kek', path: outside }],
@@ -159,6 +182,8 @@ describe('the file tools are confined to the session directory', () => {
       ['Grep', { pattern: 'k', path: '~' }],
       ['Grep', { pattern: 'k', path: '~root' }],
       ['Grep', { pattern: 'k', glob: '~/x' }],
+      ['Grep', { pattern: 'k', glob: '*.ts ~/x' }],
+      ['Grep', { pattern: 'k', glob: '*.ts,~/x' }],
     ] as const) {
       expect(await guard(tool, input), `${tool} ${JSON.stringify(input)}`).toMatchObject({ deny: expect.stringContaining('session') })
     }

@@ -229,35 +229,42 @@ def _work(lifecycle: Lifecycle, event: Event) -> Callable[[], Any] | None:
 
 
 def listen_for_prints(
-    events: EventBus, lifecycle: Lifecycle
+    events: EventBus,
+    lifecycle: Lifecycle,
+    on_outcome: Callable[[str], Awaitable[None]] | None = None,
 ) -> Callable[[], Coroutine[Any, Any, None]]:
     """Follow every open print attempt (§5.4): reconciled once now, then on each print
     event heard and each resync, off the listener's thread, as ``flow_triggers/events.py``
     fires its triggers. Every replica hears each event; ``follow_print`` writes under the
-    order's lock and only what is still open, so they record it once. Returns the
-    remover, which stops hearing events and waits for the follows in flight."""
+    order's lock and only what is still open, so they record it once. ``on_outcome`` is
+    then given the run of each print outcome heard (§8.2: the attempt copies its
+    archives). Returns the remover, which stops hearing events and waits for the follows
+    in flight."""
     loop = asyncio.get_running_loop()
     pending: set[asyncio.Task[None]] = set()
     stopped = False
 
-    async def run(work: Callable[[], Any]) -> None:
+    async def run(work: Callable[[], Any], then: str | None) -> None:
         try:
             await asyncio.to_thread(work)
         except Exception:
             logger.exception("could not follow an order item's print")
+        if then is not None and on_outcome is not None:
+            await on_outcome(then)
 
-    def schedule(work: Callable[[], Any]) -> None:
+    def schedule(work: Callable[[], Any], then: str | None = None) -> None:
         if stopped:
             return
-        task = loop.create_task(run(work))
+        task = loop.create_task(run(work, then))
         pending.add(task)
         task.add_done_callback(pending.discard)
 
     def on_event(event: Event) -> None:
         work = _work(lifecycle, event)
         if work is not None:
+            then = event.run_id if isinstance(event, PrintOutcome) else None
             with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(schedule, work)
+                loop.call_soon_threadsafe(schedule, work, then)
 
     remove_listener = events.add_listener(on_event)
     schedule(lambda: reconcile(lifecycle))

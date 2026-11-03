@@ -212,3 +212,29 @@ def test_a_url_that_grows_when_encoded_is_still_answered(client: TestClient) -> 
 
     assert response.status_code == 201, response.text
     assert len(response.json()["source_url"]) > 2048
+
+
+@respx.mock
+def test_a_fetched_asset_keeps_its_source_licence_and_view_box(client: TestClient) -> None:
+    """#959: the asset itself records where it came from and under what licence, so
+    its metadata route says so long after the fetch's answer."""
+    respx.get(url__startswith=ICON_URL).mock(return_value=httpx.Response(200, content=UNICORN_SVG))
+    licence = {
+        "spdx": "CC-BY-SA-4.0",
+        "name": "CC BY-SA 4.0",
+        "url": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "author": "OpenMoji",
+    }
+
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch",
+        json={"url": ICON_URL + "?token=secret", "licence": licence},
+        headers=press(),
+    )
+
+    assert response.status_code == 201, response.text
+    meta = client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{response.json()['id']}").json()
+    # Never the query, which may carry a token.
+    assert meta["source_url"] == ICON_URL
+    assert meta["licence"] == licence
+    assert (meta["view_box"], meta["path_count"]) == ([0, 0, 24, 24], 1)
