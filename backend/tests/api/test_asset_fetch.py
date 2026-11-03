@@ -238,3 +238,41 @@ def test_a_fetched_asset_keeps_its_source_licence_and_view_box(client: TestClien
     assert meta["source_url"] == ICON_URL
     assert meta["licence"] == licence
     assert (meta["view_box"], meta["path_count"]) == ([0, 0, 24, 24], 1)
+
+
+@respx.mock
+def test_a_fetch_from_a_known_catalogue_captures_its_licence_and_credits_it_once(
+    client: TestClient,
+) -> None:
+    """#959: OpenMoji's licence without the caller naming it, and one README line."""
+    respx.get(ICON_URL).mock(return_value=httpx.Response(200, content=UNICORN_SVG))
+
+    first = _fetch(client, ICON_URL)
+
+    assert first.status_code == 201, first.text
+    assert first.json()["credited"] is True
+    assert first.json()["licence"]["spdx"] == "CC-BY-SA-4.0"
+    readme = client.get(f"/api/v1/models/{MODEL_SLUG}/readme").text
+    assert "## Credits" in readme
+    assert f"- `1F984.svg` from <{ICON_URL}>, by OpenMoji, under [CC-BY-SA-4.0]" in readme
+    history = client.get(f"/api/v1/models/{MODEL_SLUG}/versions").json()
+    assert history[0]["message"] == "Credit 1F984.svg in the README"
+
+    again = _fetch(client, ICON_URL)
+    assert again.status_code == 201, again.text
+    assert again.json()["credited"] is True
+    assert client.get(f"/api/v1/models/{MODEL_SLUG}/readme").text == readme
+
+
+@respx.mock
+def test_a_fetch_from_elsewhere_is_credited_with_no_licence_stated(client: TestClient) -> None:
+    url = "https://icons.example.org/a.svg"
+    client.put("/api/v1/settings", json={"asset_fetch_domains": ["example.org"]})
+    respx.get(url).mock(return_value=httpx.Response(200, content=UNICORN_SVG))
+
+    response = _fetch(client, url)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["licence"] is None
+    readme = client.get(f"/api/v1/models/{MODEL_SLUG}/readme").text
+    assert f"- `a.svg` from <{url}>, licence not stated" in readme
