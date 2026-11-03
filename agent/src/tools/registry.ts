@@ -219,6 +219,12 @@ export type ToolContext = ToolServices & {
    */
   gate?: 'harness' | 'workflow'
   /**
+   * Under `workflow`: whether this call's own approval was a person's in the ScadBuddy UI
+   * (responder `browser`), not a run grant, a flow's standing grant or another principal's
+   * decision (#959). Only what must reach a person reads it: fetch_asset's one-off host.
+   */
+  approvedByPerson?: boolean
+  /**
    * Under `harness`: the tier the turn's permission seam applied to this call. The
    * seam reads each call's access (#2171, access/live.ts) and records the tier it
    * applied (harness/seamLedger.ts); without a record this is the tier the turn read

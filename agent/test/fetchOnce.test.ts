@@ -82,7 +82,7 @@ describe('fetch_asset allow_host (#959)', () => {
       }),
     )
     const minted: [string, string][] = []
-    const approved = ctx({ gate: 'harness', fetchGrant: (host, url) => (minted.push([host, url]), 'the-grant') })
+    const approved = ctx({ gate: 'workflow', approvedByPerson: true, fetchGrant: (host, url) => (minted.push([host, url]), 'the-grant') })
     expect((await runTool(fetchAsset, ONCE, approved)).isError).toBeFalsy()
     expect(minted).toEqual([['icons.example.com', URL_OFF]])
     expect(seen).toEqual([{ body: { url: URL_OFF, allow_host: 'icons.example.com' }, grant: 'the-grant' }])
@@ -100,8 +100,30 @@ describe('fetch_asset allow_host (#959)', () => {
     expect(JSON.stringify(fragment.content)).toContain("the URL's host is evil.com")
   })
 
+  it("mints nothing for a call a run grant, a flow's standing grant or another decider let through", async () => {
+    const minted: string[] = []
+    const sent: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/box/assets/fetch`, async ({ request }) => {
+        sent.push(await request.json())
+        return HttpResponse.json({}, { status: 500 })
+      }),
+    )
+    for (const approvedByPerson of [false, undefined]) {
+      const answer = await runTool(
+        fetchAsset,
+        ONCE,
+        ctx({ gate: 'workflow', ...(approvedByPerson === undefined ? {} : { approvedByPerson }), fetchGrant: (host) => (minted.push(host), 'grant') }),
+      )
+      expect(answer.isError).toBe(true)
+      expect(JSON.stringify(answer.content)).toContain("needs a person's own approval")
+    }
+    expect(minted).toEqual([])
+    expect(sent).toEqual([])
+  })
+
   it('refuses the one-off without a key to mint its grant', async () => {
-    const answer = await runTool(fetchAsset, ONCE, ctx({ gate: 'harness' }))
+    const answer = await runTool(fetchAsset, ONCE, ctx({ gate: 'workflow', approvedByPerson: true }))
     expect(answer.isError).toBe(true)
     expect(JSON.stringify(answer.content)).toContain('SCADBUDDY_SECRET_KEY_FILE')
   })

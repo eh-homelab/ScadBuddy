@@ -107,6 +107,8 @@ export interface ApprovalRecords {
    * #2481) now revoked or expired: `approved` is false for it, refused GrantRevoked.
    */
   lapsed?(requestId: string, call?: ApprovalBinding): Promise<boolean>
+  /** Whether the call's approval was a person's in the UI (responder `browser`, #959). */
+  byPerson?(requestId: string, call?: ApprovalBinding): Promise<boolean>
 }
 
 /** A run grant's responder in `ai_input_responses` (#2481): `{kind: 'run_grant', id}`. */
@@ -127,6 +129,16 @@ export class PgApprovalRecords implements ApprovalRecords {
   async lapsed(requestId: string, call?: ApprovalBinding): Promise<boolean> {
     const grant = await this.#approval(requestId, call)
     return typeof grant === 'string' && !(await this.#inForce(grant))
+  }
+
+  async byPerson(requestId: string, call?: ApprovalBinding): Promise<boolean> {
+    if (call === undefined) return false
+    const rows = await this.#sql`
+      SELECT 1 FROM ai_input_responses r
+      JOIN ai_audit a ON a.request_id = r.request_id AND a.kind = 'approval' AND a.action = 'approved'
+      WHERE r.request_id = ${requestId} AND r.kind = 'approval' AND r.outcome = 'approved'
+        AND a.input_hash = ${call.inputHash} AND r.responder->>'kind' = 'browser'`
+    return rows.length > 0
   }
 
   /** The approval for this call: undefined for none, null for a person's, a grant id for a run grant's. */
@@ -398,6 +410,7 @@ async function flowCaller(tool: Tool, flow: string, deps: ToolActivityDeps, tool
   const approvals = flows && {
     approved: (requestId: string, call?: ApprovalBinding) => flows.approved(requestId, call?.inputHash),
     lapsed: async (requestId: string, call?: ApprovalBinding) => (await flows.lapsed?.(requestId, call?.inputHash)) ?? false,
+    byPerson: async (requestId: string, call?: ApprovalBinding) => (await flows.byPerson?.(requestId, call?.inputHash)) ?? false,
   }
   return { owner, session: undefined, requestId: flowRequestId(flow, runId, toolUseId), approvals, tiers }
 }
@@ -592,6 +605,8 @@ async function runGated(
       lookup,
       gate: 'workflow',
       effective,
+      // Read only for a gated call: what was approved, and by whom (#959).
+      approvedByPerson: effective.gated && ((await caller.approvals?.byPerson?.(requestId, binding)) ?? false),
     })
   } finally {
     clearInterval(heartbeat)

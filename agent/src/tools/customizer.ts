@@ -644,6 +644,13 @@ export const customizerTools: Tool[] = [
         if (new URL(url).hostname !== allow_host) {
           throw new ToolError(`allow_host is ${allow_host}, but the URL's host is ${new URL(url).hostname}; nothing was sent`)
         }
+        // A person's approval of this very call, never a grant's or another principal's (#959).
+        if (ctx.approvedByPerson !== true) {
+          throw new ToolError(
+            "a one-off host off the asset allowlist needs a person's own approval of this call in the ScadBuddy " +
+              'UI; a run grant or another decider does not cover it. Nothing was sent',
+          )
+        }
         if (!ctx.fetchGrant) {
           throw new ToolError('a one-off host needs the secret key (SCADBUDDY_SECRET_KEY_FILE), which this agent lacks; nothing was sent')
         }
