@@ -2,7 +2,8 @@
 that reaches ``bambuddy.client`` (``tests/test_orders_bambuddy_seam.py`` checks it).
 
 :class:`BambuddyIntegrations` is the ``OrderIntegrations`` seam with ``bambuddy_url`` set
-(``orders/integrations.py``): the spool import's read (§8.3). The functions below it are
+(``orders/integrations.py``): the spool import's read (§8.3) and the order's nested
+projects (§8.1). The functions below it are
 the quote's slice through Bambuddy's slicer (#4250 Ruling 2), the print dialog's own
 background slice, which the quote takes on whichever slicer the stack has; they are
 here so that ``orders/`` has one door to the client.
@@ -20,6 +21,7 @@ from scadbuddy.bambuddy.models import SliceJob, Spool
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
 from scadbuddy.bambuddy.print_run import PrintRunRequest
 from scadbuddy.bambuddy.print_source import PrintSource
+from scadbuddy.bambuddy.projects import FolderlessProjects, ProjectRequest, ensure_project
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.library.settings_store import SettingsStore, StoredSettings
 from scadbuddy.orders.integrations import SpoolGroup
@@ -79,8 +81,11 @@ def spool_groups(spools: list[Spool]) -> list[SpoolGroup]:
 class BambuddyIntegrations:
     """The seam with a Bambuddy linked."""
 
-    def __init__(self, settings: SettingsStore) -> None:
+    def __init__(
+        self, settings: SettingsStore, folderless: FolderlessProjects | None = None
+    ) -> None:
         self.settings = settings
+        self.folderless = folderless
 
     @property
     def linked(self) -> bool:
@@ -93,6 +98,18 @@ class BambuddyIntegrations:
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
             return spool_groups(await client.spools())
+
+    async def ensure_project(self, name: str, parent_id: int | None) -> int:
+        """``ensure_project``'s create, as the project picker's create makes one: the
+        project and its library folder, nested under ``parent_id``'s (#930)."""
+        stored = await asyncio.to_thread(self.settings.load)
+        async with client_for(stored) as client:
+            view = await ensure_project(
+                client,
+                ProjectRequest(name=name, parent_id=parent_id),
+                folderless=self.folderless,
+            )
+        return view.id
 
 
 # -- the quote's slice through Bambuddy's slicer (#4250) ---------------------------------

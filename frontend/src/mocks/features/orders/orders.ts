@@ -150,6 +150,7 @@ function detail(order: Order): OrderDetail {
     payments,
     shipments: shipmentsOf(order.id),
     attachments: state.attachments.filter((a) => a.order_id === order.id),
+    projects: state.projects.filter((p) => p.order_id === order.id).map(({ order_id: _order, ...project }) => project),
     totals: { subtotal_minor: subtotal, pending_minor: pending, unpriced_items: unpriced, charges_minor: charged, total_minor: subtotal + charged, paid_minor: paid, balance_minor: subtotal + charged - paid },
   }
 }
@@ -411,6 +412,14 @@ export const handlers = [
         }
       }
       setStatus(order, 'accepted')
+      // #4253 §8.1 — with Bambuddy linked, the order's project and one per item that prints.
+      if (mockSettings().bambuddy_url && !state.projects.some((p) => p.order_id === order.id)) {
+        const top = 900 + state.projects.length
+        state.projects.push({ order_id: order.id, subject: `order:${order.id}`, project_id: top, item_id: null })
+        for (const item of open.filter((i) => i.reference !== null)) {
+          state.projects.push({ order_id: order.id, subject: `order_item:${item.id}`, project_id: 900 + state.projects.length, item_id: item.id })
+        }
+      }
       return order
     }),
   ),

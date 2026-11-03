@@ -12,7 +12,7 @@ every ``settings.changed``, so setting the URL later lights it up without a rest
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -20,6 +20,9 @@ from pydantic import BaseModel, Field
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.orders.problems import PROBLEMS
+
+if TYPE_CHECKING:
+    from scadbuddy.bambuddy.projects import FolderlessProjects
 
 
 class SpoolGroup(BaseModel):
@@ -61,6 +64,12 @@ class OrderIntegrations(Protocol):
         without a Bambuddy."""
         ...
 
+    async def ensure_project(self, name: str, parent_id: int | None) -> int:
+        """A new Bambuddy project named ``name``, nested under ``parent_id``, with its
+        library folder (§8.1, ``bambuddy/projects.py`` ``ensure_project``); its id.
+        :class:`NotLinkedError` without a Bambuddy."""
+        ...
+
 
 class NotLinked:
     """The seam without ``bambuddy_url``: nothing to mirror, nothing to import."""
@@ -72,15 +81,23 @@ class NotLinked:
     async def spool_groups(self) -> list[SpoolGroup]:
         raise NotLinkedError
 
+    async def ensure_project(self, name: str, parent_id: int | None) -> int:
+        raise NotLinkedError
+
 
 NOT_LINKED = NotLinked()
 
 
-def choose(bambuddy_url: str | None, settings: SettingsStore) -> OrderIntegrations:
+def choose(
+    bambuddy_url: str | None,
+    settings: SettingsStore,
+    folderless: FolderlessProjects | None = None,
+) -> OrderIntegrations:
     """The seam for a running ``bambuddy_url``: Bambuddy's when it is set, else
-    :data:`NOT_LINKED`."""
+    :data:`NOT_LINKED`. ``folderless`` is the record that keeps a project create whose
+    folder step failed from making a second project when it is tried again (#2263)."""
     if not bambuddy_url:
         return NOT_LINKED
     from scadbuddy.orders.bambuddy import BambuddyIntegrations
 
-    return BambuddyIntegrations(settings)
+    return BambuddyIntegrations(settings, folderless)

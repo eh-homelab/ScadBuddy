@@ -63,9 +63,13 @@ describe('OrderPage (#4249)', () => {
     await waitFor(() => expect(within(drawer).getByText('Accepted')).toBeInTheDocument())
     await user.click(within(drawer).getByRole('button', { name: 'Close' }))
     await waitFor(() => expect(screen.getByText('Quoted')).toBeInTheDocument())
+    expect(screen.queryByTestId('bambuddy-project')).toBeNull()
     await user.click(screen.getByRole('button', { name: 'Accept order' }))
     await waitFor(() => expect(screen.getByText('Accepted')).toBeInTheDocument())
     expect(screen.getByTestId('order-totals')).toHaveTextContent('25.00')
+    // #4253 §8.1 — accepted with Bambuddy linked, the order has its Bambuddy project.
+    // No web URL is loaded here, so it is named by its number.
+    expect(await screen.findByTestId('bambuddy-project')).toHaveTextContent(/^Bambuddy project #\d+$/)
     // Record and accept an attempt, ship it, close.
     await user.click(within(screen.getByTestId(`order-item-${ITEM_DRAFT}`)).getByRole('button', { name: 'Name Keychain' }))
     const again = await screen.findByRole('dialog', { name: 'Name Keychain' })

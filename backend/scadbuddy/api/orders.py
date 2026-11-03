@@ -19,6 +19,7 @@ runtime (``api/components.py``).
 """
 
 import asyncio
+import logging
 import zipfile
 from collections.abc import Callable
 from datetime import datetime
@@ -78,6 +79,7 @@ from scadbuddy.orders.models import (
     OrderEvent,
     OrderFilter,
     OrderItem,
+    OrderProject,
     OrderStatus,
     Payment,
     PriceBook,
@@ -90,10 +92,13 @@ from scadbuddy.orders.operations import ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
 from scadbuddy.orders.pricing import estimate_grams, to_minor
 from scadbuddy.orders.printing import print_request_id
 from scadbuddy.orders.problems import PROBLEMS, refused
+from scadbuddy.orders.projects import ensure_projects
 from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
 from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -276,6 +281,9 @@ class OrderDetail(BaseModel):
     totals: OrderTotals
     #: The order's files and its items' (``item_id``), oldest first (§6.2).
     attachments: list[Attachment]
+    #: The Bambuddy projects mirroring the order and its items (§8.1), the order's first;
+    #: empty without Bambuddy, or before the order is accepted.
+    projects: list[OrderProject] = Field(default_factory=list)
 
 
 class OrderPage(BaseModel):
@@ -667,6 +675,7 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
             shipments=store.shipments(order.id),
             totals=_totals(items, charges, payments),
             attachments=store.attachments(order.id),
+            projects=store.projects(order.id),
         )
 
     detail = await asyncio.to_thread(read)
@@ -700,11 +709,44 @@ async def order_events(order_id: str, orders: OrdersDep) -> list[OrderEvent]:
     return await asyncio.to_thread(orders.store.events, order_id)
 
 
-@router.post("/{order_id}/accept", response_model=Order, summary="Accept an order")
+#: How long an accept waits for its Bambuddy projects (§8.1) before answering anyway.
+PROJECTS_WAIT_SECONDS = 20.0
+
+
+@router.post(
+    "/{order_id}/accept",
+    response_model=Order,
+    summary="Accept an order",
+    description=(
+        "With Bambuddy linked, the order then gets a Bambuddy project named by its number, "
+        "and each item that prints one nested under it (`OrderDetail.projects`). That is "
+        "best effort: the accept stands without them, and an item's print makes what is "
+        "missing."
+    ),
+)
 async def accept_order(order_id: str, orders: OrdersDep) -> Order:
     _path(order_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.accept_order(order_id, by))
+    accepted = await _run(lambda: orders.lifecycle.accept_order(order_id, by))
+    # Waited for, never cancelled: a create cut off after Bambuddy made the project would
+    # leave it unrecorded, and the next ensure would make a second of the same name.
+    ensuring = asyncio.create_task(ensure_projects(orders.store, orders.integrations, accepted.id))
+    _ENSURING.add(ensuring)
+    ensuring.add_done_callback(lambda task: _ensured(task, accepted.number))
+    await asyncio.wait({ensuring}, timeout=PROJECTS_WAIT_SECONDS)
+    return accepted
+
+
+#: The accepts' project ensures still running past the wait, kept from the collector.
+_ENSURING: set[asyncio.Task[Any]] = set()
+
+
+def _ensured(task: asyncio.Task[Any], number: str) -> None:
+    _ENSURING.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning(
+            "could not make the Bambuddy projects of %s", number, exc_info=task.exception()
+        )
 
 
 @router.post("/{order_id}/cancel", response_model=Order, summary="Cancel an order")
