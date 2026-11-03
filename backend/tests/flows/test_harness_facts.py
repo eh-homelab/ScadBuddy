@@ -66,7 +66,14 @@ HARNESS_UPDATES = {
     "provide_callback_result",
     "__temporal_workflow_stream_poll",
 }
-HARNESS_QUERIES = {"agent_status", "agent_interface", "__temporal_workflow_stream_offset"}
+#: temporalio 1.35's workflow streams also answer the poll as a Query
+#: (`contrib/workflow_streams/_stream.py`).
+HARNESS_QUERIES = {
+    "agent_status",
+    "agent_interface",
+    "__temporal_workflow_stream_offset",
+    "__temporal_workflow_stream_poll",
+}
 HARNESS_SIGNALS = {"close", "__temporal_workflow_stream_publish"}
 
 

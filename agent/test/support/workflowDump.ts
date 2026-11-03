@@ -1,6 +1,6 @@
 import type { Client } from '@temporalio/client'
 import { defaultPayloadConverter } from '@temporalio/common'
-import { historyToJSON } from '@temporalio/common/lib/proto-utils.js'
+import { historyToJSON } from '@temporalio/common/proto-utils'
 
 // What a workflow was waiting on, for a test that failed or ran into its timeout (#3693): its
 // status, its pending activities (attempt, last failure, heartbeat), its pending timers and the

@@ -246,9 +246,10 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
       ['b', 'ok', undefined],
     ])
     const cooled = reports[0]!.outcome
-    // The canary for the bundled CLI's limit wording (2.1.296): if an SDK bump fails
-    // here, rateLimitResetFromText (and agent-durable's rate_limit_reset) need the new text.
-    expect(cooled).toMatchObject({ reason: expect.stringMatching(/^You've hit your session limit · resets \d{1,2}(:\d{2})?[ap]m \(UTC\)$/) })
+    // The canary for the bundled CLI's limit wording (2.1.314; "session limit" until
+    // 2.1.296): if an SDK bump fails here, rateLimitResetFromText (and agent-durable's
+    // rate_limit_reset) need the new text.
+    expect(cooled).toMatchObject({ reason: expect.stringMatching(/^You've hit your 5-hour limit · resets \d{1,2}(:\d{2})?[ap]m \(UTC\)$/) })
     expect(cooled.class === 'rate_limited' ? cooled.until.getTime() : 0).toBe(reset)
   }, 60_000)
 
@@ -270,9 +271,10 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     expect(error).toBeInstanceOf(Error)
     expect(callsWith(TOKEN_B)).toHaveLength(0)
     expect(reports.map((r) => r.outcome.class)).toEqual(['ok'])
-    // Claude Code 2.1.287 sent it once more without the display beta, on the
-    // same credential, and its messages do not show it: no `api_retry`.
-    expect(callsWith(TOKEN_A).map(displayUpdates)).toEqual([true, false])
+    // Claude Code 2.1.314 sends it twice more on the same credential, first without
+    // the token-count beta, then without the display beta too, and its messages do
+    // not show it: no `api_retry`.
+    expect(callsWith(TOKEN_A).map(displayUpdates)).toEqual([true, true, false])
     expect(messages.filter((m) => m.type === 'system' && m.subtype === 'api_retry')).toEqual([])
   }, 60_000)
 

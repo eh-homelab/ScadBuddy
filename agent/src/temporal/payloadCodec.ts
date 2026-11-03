@@ -324,7 +324,8 @@ function claimOf(claim: { subject?: unknown; digest?: unknown }): { subject: str
 }
 
 function workflowIdOf(context: SerializationContext | undefined): string | undefined {
-  return context?.workflowId ?? undefined
+  if (context === undefined || context.type === 'nexus') return undefined
+  return context.workflowId ?? undefined
 }
 
 export class SubjectPayloadCodec implements PayloadCodec {
