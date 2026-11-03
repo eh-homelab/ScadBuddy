@@ -1,3 +1,4 @@
+import userEvent from '@testing-library/user-event'
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { notifyChannelsState } from '../mocks/features/notifyChannels'
@@ -29,7 +30,9 @@ describe('NotifyChannelsSetting', () => {
 
   it('asks Home Assistant for its notify service and token, and shows a refusal', async () => {
     render(<NotifyChannelsSetting />)
-    fireEvent.change(await screen.findByLabelText('Kind'), { target: { value: 'home_assistant' } })
+    const user = userEvent.setup()
+    await user.click(await screen.findByRole('combobox', { name: 'Kind' }))
+    await user.click(await screen.findByRole('option', { name: 'Home Assistant' }))
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'HA' } })
     fireEvent.change(screen.getByLabelText('Home Assistant URL'), { target: { value: 'http://192.168.1.10:8123' } })
     fireEvent.change(screen.getByLabelText('Notify service'), { target: { value: 'mobile_app_pixel' } })
