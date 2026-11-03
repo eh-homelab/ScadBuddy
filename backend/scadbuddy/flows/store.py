@@ -203,6 +203,29 @@ class FlowStore:
             rows = conn.execute("SELECT id, commit FROM workflow_definitions").fetchall()
         return {row["id"]: row["commit"] for row in rows}
 
+    def has_commitless(self, name: str) -> bool:
+        """Whether ``name`` still has a version that names no commit (#5139)."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM workflow_definitions"
+                " WHERE name = %s AND commit IS NULL) AS found",
+                (name,),
+            ).fetchone()
+        assert row is not None
+        return bool(row["found"])
+
+    def set_commit(self, definition_id: str, commit: str) -> None:
+        """Join a commit-less row to the commit carrying its id, and its runs with it."""
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "UPDATE workflow_definitions SET commit = %s WHERE id = %s AND commit IS NULL",
+                (commit, definition_id),
+            )
+            conn.execute(
+                "UPDATE workflow_runs SET commit = %s WHERE definition_id = %s AND commit IS NULL",
+                (commit, definition_id),
+            )
+
     def stored_definition(self, definition_id: str) -> StoredDefinition | None:
         with self._pool.connection() as conn:
             row = conn.execute(

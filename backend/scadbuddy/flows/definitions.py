@@ -15,6 +15,8 @@ import logging
 import uuid
 from typing import Any
 
+import psycopg
+
 from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.flows.models import (
     Definition,
@@ -43,6 +45,11 @@ class FlowDeletedError(Exception):
     """The flow is deleted: restore a version first (#2646)."""
 
 
+class UnmigratedFlowError(Exception):
+    """The flow still has a version from before flows were in git that names no commit
+    (#5139): a new version would take a number that row holds."""
+
+
 class ScriptMissingError(Exception):
     """The commit a version names is not in the repository (a damaged volume), or it
     names none (a row from before flows were in git that no backfill reached)."""
@@ -67,7 +74,7 @@ class FlowDefinitions:
             return
         try:
             reconcile(self.history, self.store)
-        except (GitError, OSError):
+        except (GitError, OSError, psycopg.Error):
             # The app boots either way: the next registration reconciles first.
             logger.exception("could not reconcile flow versions with git")
 
@@ -98,6 +105,13 @@ class FlowDefinitions:
         row = self.store.stored_definition(target.version_id)
         timeout = row.approval_timeout_s if row is not None else None
         return self._write(name, author, timeout, None, target.commit)
+
+    def _before_commit(self, name: str) -> None:
+        """Under the write lock, before a registration's or restore's commit: reconcile,
+        then refuse a name whose commit-less row holds a number git would give again."""
+        reconcile_locked(self.history, self.store)
+        if self.store.has_commitless(name):
+            raise UnmigratedFlowError(name)
 
     def _write(
         self,
@@ -133,7 +147,7 @@ class FlowDefinitions:
             script=script,
             inputs=inputs_schema,
             restore=restore,
-            reconcile=lambda: reconcile_locked(self.history, self.store),
+            reconcile=lambda: self._before_commit(name),
         )
         return Definition.model_validate(
             {

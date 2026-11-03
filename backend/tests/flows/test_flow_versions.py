@@ -11,7 +11,12 @@ import pytest
 
 from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.gitrepo import GitError, git_env
-from scadbuddy.flows.definitions import FlowDefinitions, ScriptMissingError, UnknownFlowError
+from scadbuddy.flows.definitions import (
+    FlowDefinitions,
+    ScriptMissingError,
+    UnknownFlowError,
+    UnmigratedFlowError,
+)
 from scadbuddy.flows.repository import FlowHistory
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
@@ -197,3 +202,60 @@ async def test_an_orphan_of_a_flow_deleted_after_it_stays_deleted(
     await definitions.register("other", ONE, BROWSER, approval_timeout_s=None)
     assert [v for n, v, _ in rows(store) if n == "swap"] == [1, 2]
     assert definitions.states.state("swap").deleted_at is not None
+
+
+def commitless(store: FlowStore, version_id: str, name: str, version: int) -> None:
+    """A row from before flows were in git that no backfill reached (#5139)."""
+    with store._pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO workflow_definitions (id, name, version, created_by)"
+            " VALUES (%s, %s, %s, '{}')",
+            (version_id, name, version),
+        )
+
+
+def commit_count(root: Path) -> int:
+    return len(git(root, "log", "--format=%H").splitlines())
+
+
+async def test_a_name_with_a_commitless_row_is_refused_before_its_commit(
+    definitions: FlowDefinitions, store: FlowStore, root: Path
+) -> None:
+    # Git would number it v1, the number the row holds: refused under the lock, before
+    # the commit, so no orphan is left for the reconciler to trip on (#5139).
+    await definitions.start()
+    commitless(store, "old", "swap", 1)
+    before = commit_count(root)
+    with pytest.raises(UnmigratedFlowError):
+        await definitions.register("swap", ONE, BROWSER, approval_timeout_s=None)
+    assert commit_count(root) == before
+    other = await definitions.register("other", ONE, BROWSER, approval_timeout_s=None)
+    assert other.version == 1
+    assert commit_count(root) == before + 1
+
+
+async def test_an_orphan_whose_number_a_row_holds_is_skipped_by_start_and_registration(
+    definitions: FlowDefinitions, store: FlowStore
+) -> None:
+    # An orphan commit numbered as a commit-less row is (left before the refusal): logged
+    # and skipped, never a failed start or a failed registration.
+    await definitions.start()
+    definitions.history.register("swap", "orphan", lambda commit, version: None, script=ONE)
+    commitless(store, "old", "swap", 1)
+    await definitions.start()
+    other = await definitions.register("other", ONE, BROWSER, approval_timeout_s=None)
+    assert other.version == 1
+    assert ("swap", 1, None) in rows(store)
+
+
+async def test_a_commitless_row_a_commit_names_is_joined_to_it(
+    definitions: FlowDefinitions, store: FlowStore
+) -> None:
+    # An older build's backfill that committed and crashed before its update: the
+    # reconciler joins them, so the version reads its script from git.
+    await definitions.start()
+    definitions.history.register("swap", "old", lambda commit, version: None, script=ONE)
+    commitless(store, "old", "swap", 1)
+    await definitions.start()
+    got = await definitions.get("old")
+    assert got is not None and (got.version, got.script) == (1, ONE)
