@@ -1,3 +1,4 @@
+import { fetchNotingSignedOut } from '../lib/signedOut'
 /**
  * The agent service's audit log of AI actions (#258): `GET /api/v1/ai/audit` and
  * `PUT /api/v1/ai/audit/settings`, served by the agent (`agent/src/routes/audit.ts`),
@@ -92,7 +93,7 @@ export async function fetchAudit(query: AuditQuery = {}, signal?: AbortSignal): 
   if (query.before) params.set('before', query.before)
   if (query.limit) params.set('limit', String(query.limit))
   const search = params.toString()
-  const res = await fetch(`/api/v1/ai/audit${search ? `?${search}` : ''}`, {
+  const res = await fetchNotingSignedOut(`/api/v1/ai/audit${search ? `?${search}` : ''}`, {
     headers: { accept: 'application/json' },
     ...(signal ? { signal } : {}),
   })
@@ -101,7 +102,7 @@ export async function fetchAudit(query: AuditQuery = {}, signal?: AbortSignal): 
 }
 
 export async function saveAuditRetention(days: number): Promise<number> {
-  const res = await fetch('/api/v1/ai/audit/settings', {
+  const res = await fetchNotingSignedOut('/api/v1/ai/audit/settings', {
     method: 'PUT',
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify({ retention_days: days }),

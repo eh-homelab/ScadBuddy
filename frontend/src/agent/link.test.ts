@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import { AgentBridge } from './bridge'
 import { createTabLink, IMAGE_CHUNK_BYTES, MAX_RESULT_BYTES } from './link'
 import { TAB_ID } from './tabId'
+import { clearSignedOut, isSignedOut, setEnforced } from '../lib/signedOut'
 
 /** Just enough of a browser WebSocket for the link. */
 class FakeSocket {
@@ -287,5 +288,26 @@ describe('createTabLink', () => {
     vi.advanceTimersByTime(10)
     expect(FakeSocket.instances).toHaveLength(3)
     random.mockRestore()
+  })
+})
+
+describe('createTabLink signed out (#4975 phase 8)', () => {
+  beforeEach(() => {
+    FakeSocket.instances = []
+    vi.useFakeTimers()
+  })
+  afterEach(() => vi.useRealTimers())
+
+  it('waits for the sign-in after a 4401 under enforce instead of reconnecting', () => {
+    setEnforced(true)
+    const { link, ws } = linked()
+    ws().open()
+    ws().drop(4401)
+    expect(isSignedOut()).toBe(true)
+    vi.advanceTimersByTime(60_000)
+    expect(FakeSocket.instances).toHaveLength(1)
+    clearSignedOut()
+    expect(FakeSocket.instances).toHaveLength(2)
+    link.close()
   })
 })

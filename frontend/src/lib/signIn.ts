@@ -2,6 +2,7 @@ import { useEffect, useSyncExternalStore } from 'react'
 import { api } from '../api/client'
 import type { AuthSessionView } from '../api/types'
 import { isEmbedded, openExternal } from './embed'
+import { clearSignedOut, noteSignedOut, resetSignedOut, setEnforced } from './signedOut'
 
 // #4975 — signing in (spec 2026-11-01 §5.1, §6.2). In a top-level tab the page navigates to
 // the login; inside Bambuddy's frame it opens a popup, which the sandbox lets escape, and
@@ -36,11 +37,25 @@ export class CrossSiteFrameError extends Error {
 }
 
 let current: AuthSessionView | null = null
+let everSignedIn = false
 const listeners = new Set<() => void>()
 
 function publish(next: AuthSessionView | null) {
   current = next
+  // #4975 phase 8: what waited for a sign-in goes on; in `enforce`, signed out is refused.
+  if (next) setEnforced(next.mode === 'enforce')
+  if (next?.signed_in) {
+    everSignedIn = true
+    clearSignedOut()
+  } else if (next?.mode === 'enforce') {
+    noteSignedOut()
+  }
   for (const listener of listeners) listener()
+}
+
+/** Whether this page has been signed in since it loaded: a sign-out then may cost unsaved work. */
+export function wasSignedIn(): boolean {
+  return everSignedIn
 }
 
 /** Read the session again; the store keeps the last answer when the read fails. */
@@ -56,7 +71,9 @@ export async function refreshAuthSession(): Promise<AuthSessionView | null> {
 /** For tests: forget the page's session. */
 export function resetAuthSession() {
   current = null
+  everSignedIn = false
   listeners.clear()
+  resetSignedOut()
 }
 
 export function useAuthSession(): AuthSessionView | null {
@@ -79,8 +96,28 @@ function loginUrl(returnTo: string, popup: boolean): string {
   return `${LOGIN_PATH}?${query.toString()}`
 }
 
+/**
+ * Where to come back to (spec 2026-11-01 §5.1 step 1): a same-origin path, a single `/`
+ * followed by neither `/` nor `\\`, with no scheme or authority once percent-decoded;
+ * anything else is `/`. The backend applies the same rule; this keeps the URL honest.
+ */
+export function returnTo(path: string): string {
+  // As the backend's `auth/login_state.py` `safe_return_to`: decoded up to three times.
+  let decoded = path
+  try {
+    for (let i = 0; i < 3; i += 1) decoded = decodeURIComponent(decoded)
+  } catch {
+    return '/'
+  }
+  if (!path.startsWith('/') || /[\r\n\t\0]/.test(path)) return '/'
+  for (const candidate of [path, decoded]) {
+    if (!candidate.startsWith('/') || candidate[1] === '/' || candidate.includes('\\')) return '/'
+  }
+  return path
+}
+
 function here(): string {
-  return `${window.location.pathname}${window.location.search}${window.location.hash}`
+  return returnTo(`${window.location.pathname}${window.location.search}${window.location.hash}`)
 }
 
 /**

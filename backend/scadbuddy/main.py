@@ -67,6 +67,7 @@ from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
 from scadbuddy.auth.service_credentials import grant_caller_views
+from scadbuddy.auth.start_check import check_enforce
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
@@ -1681,6 +1682,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await asyncio.to_thread(grant_at_start, state.settings_store.pool)
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)
+    # #4975 phase 8 (spec 2026-11-01 §9.1): `enforce` without a usable login stops here.
+    if state.settings.auth_mode == "enforce":
+        auth = state.components.get(AUTH)
+        try:
+            public_url = await asyncio.to_thread(lambda: state.settings_store.load().public_url)
+            await check_enforce(auth, public_url)
+        except BaseException:
+            await asyncio.to_thread(auth.close)
+            await asyncio.to_thread(state.settings_store.close)
+            raise
     # Then what the UI saved (#322), before anything below is sized or started from it.
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
     apply_runtime(state, snapshot.runtime, booting=True)

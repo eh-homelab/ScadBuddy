@@ -11,6 +11,7 @@
  */
 import type { Omitted } from './capabilities'
 import { ApiError, command } from './client'
+import { fetchNotingSignedOut } from '../lib/signedOut'
 
 export type RiskTier = 'read' | 'write' | 'outward'
 
@@ -260,7 +261,7 @@ export type PackageInstall =
 export const AI_BASE = '/api/v1/ai'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${AI_BASE}${path}`, {
+  const response = await fetchNotingSignedOut(`${AI_BASE}${path}`, {
     ...init,
     headers: {
       Accept: 'application/json',

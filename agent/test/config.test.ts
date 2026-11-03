@@ -56,8 +56,8 @@ describe('loadConfig', () => {
     })
   })
 
-  it('refuses SCADBUDDY_AUTH_MODE=enforce until it exists, and an unknown mode', () => {
-    expect(() => loadConfig({ SCADBUDDY_AUTH_MODE: 'enforce' })).toThrow(/phase 8/)
+  it('takes SCADBUDDY_AUTH_MODE=enforce, and refuses an unknown mode', () => {
+    expect(loadConfig({ SCADBUDDY_AUTH_MODE: 'enforce' }).authMode).toBe('enforce')
     expect(() => loadConfig({ SCADBUDDY_AUTH_MODE: 'strict' })).toThrow(ConfigError)
   })
 

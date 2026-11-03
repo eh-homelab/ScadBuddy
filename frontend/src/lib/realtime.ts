@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react'
 import { API_BASE } from '../api/client'
 import { socketUrl } from './lsp'
 import { inReadScope, ReadScope } from './readCursor'
+import { isSignedOut, noteSignedOut, SIGNED_OUT_CLOSE, whenSignedIn } from './signedOut'
 
 /**
  * #266 — the UI's realtime channel, `WS /api/v1/ws` (backend `api/realtime.py`).
@@ -98,6 +99,8 @@ export class RealtimeClient {
   private closed = false
   private checks = 0
   private readonly pending = new Map<number, (changed: string[] | undefined) => void>()
+  /** Set while a socket closed signed out waits for the sign-in (`lib/signedOut.ts`). */
+  private unwaitSignIn: (() => void) | undefined
 
   constructor(options: RealtimeOptions = {}) {
     this.url = options.url ?? socketUrl(`${API_BASE}/ws`)
@@ -184,6 +187,8 @@ export class RealtimeClient {
 
   close(): void {
     this.closed = true
+    this.unwaitSignIn?.()
+    this.unwaitSignIn = undefined
     this.failChecks()
     clearTimeout(this.reconnectTimer)
     clearTimeout(this.fallbackTimer)
@@ -194,7 +199,7 @@ export class RealtimeClient {
   }
 
   private ensureConnected(): void {
-    if (this.closed || this.socket || this.reconnectTimer !== undefined) return
+    if (this.closed || this.socket || this.reconnectTimer !== undefined || this.unwaitSignIn) return
     this.connect()
   }
 
@@ -230,12 +235,25 @@ export class RealtimeClient {
       }
       this.handle(frame)
     }
-    socket.onclose = () => {
+    socket.onclose = (event?: CloseEvent) => {
       if (this.socket !== socket) return
       this.socket = undefined
       this.confirmed.clear()
       this.failChecks()
       clearTimeout(this.idleTimer)
+      // #4975 phase 8: the session was revoked (4401), or the page knows it is signed out
+      // (a refused handshake). Under `enforce` a new socket would be refused too: wait for
+      // the sign-in.
+      if (event?.code === SIGNED_OUT_CLOSE) noteSignedOut()
+      if (isSignedOut()) {
+        this.armFallback()
+        this.attempt = 0
+        this.unwaitSignIn = whenSignedIn(() => {
+          this.unwaitSignIn = undefined
+          this.ensureConnected()
+        })
+        return
+      }
       this.scheduleReconnect()
     }
     // An error is always followed by a close, which is where it is handled.

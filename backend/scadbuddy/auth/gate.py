@@ -1,11 +1,11 @@
 """``AuthGate`` (spec 2026-11-01 §8.1): resolves each request's caller once and puts it on
 the ASGI scope, where ``CallerDep`` reads it.
 
-It refuses nothing, in any mode this build has: a request with neither a session cookie
-nor a bearer (a service credential ``sbsvc_…``, plan phase 4, or a personal access token
-``sbpat_…``, phase 6) costs no lookup, and one whose lookup fails (the database
-unreachable) is served as anonymous.
-``observe`` counts what ``enforce`` would refuse (``auth/check.py``, plan phase 3).
+It refuses nothing itself: a request with neither a session cookie nor a bearer (a
+service credential ``sbsvc_…``, plan phase 4, or a personal access token ``sbpat_…``,
+phase 6) costs no lookup, and one whose lookup fails (the database unreachable) is
+anonymous. ``auth/check.py`` decides once the route is matched: ``observe`` counts what
+``enforce`` refuses (plan phases 3 and 8).
 """
 
 from __future__ import annotations

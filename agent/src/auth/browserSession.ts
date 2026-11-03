@@ -16,7 +16,11 @@ import type { Owner } from '../sessions/protocol.js'
 // The browser user (routes/approvals.ts `BROWSER_USER`, `id: 'browser'`) becomes the
 // signed-in person: `kind: 'browser'` stays, `id` is the session's principal. A request
 // without a live session is the anonymous browser user, as every request was before sign-in;
-// in SCADBUDDY_AUTH_MODE=observe that is logged, and only `enforce` (plan phase 8) refuses it.
+// in SCADBUDDY_AUTH_MODE=observe that is logged, and `enforce` (#4975 phase 8) refuses it with
+// the backend's 401 problem (`auth/check.py` `SIGNED_OUT`), the chat and bridge sockets'
+// handshakes included. The plugin OAuth callback is the one exception (`UNGATED`): a
+// cross-site redirect from an authorization server carries no `SameSite=Strict` cookie, and
+// its own state cookie is its credential, as the backend's `/auth/callback` is public.
 // Rows that say `browser` stay shared: every browser-kind principal may act on them (D8,
 // sessions/protocol.ts `sameOwner`).
 
@@ -157,10 +161,16 @@ export function requestSession(c: Context): { id: string; principal: string } | 
 /** Rate-limited, so a page without a session does not log every request. */
 const LOG_INTERVAL_MS = 60_000
 
+/** The backend's problem type for a request with no live session (`auth/check.py` `SIGNED_OUT`). */
+export const SIGNED_OUT_PROBLEM = 'https://scadbuddy.dev/problems/auth/signed-out'
+
+/** Paths under `/api/v1/ai/*` that `enforce` serves without a session (see the top of this file). */
+export const UNGATED: ReadonlySet<string> = new Set(['/api/v1/ai/plugin-oauth/callback'])
+
 /**
  * Resolves the session cookie once per request under `/api/v1/ai/*`, for `browserUser`. A
- * request without a cookie costs no lookup. In `observe` a request without a live session is
- * logged once a minute; nothing is refused in any mode this build accepts.
+ * request without a cookie costs no lookup. Without a live session (a delegated one counts),
+ * a request is refused with 401 in `enforce` and logged once a minute in `observe`.
  */
 export function personSessions(
   sessions: BrowserSessions | undefined,
@@ -176,7 +186,20 @@ export function personSessions(
       people.set(c.req.raw, personOwner(session))
       handshakes.set(c.req.raw, { id: sessionIdHash(token), principal: session.principal })
     }
-    if (!session && mode === 'observe' && (loggedAt === undefined || now() - loggedAt >= LOG_INTERVAL_MS)) {
+    const gated = !session && !UNGATED.has(c.req.path)
+    if (gated && mode === 'enforce') {
+      return c.json(
+        {
+          type: SIGNED_OUT_PROBLEM,
+          title: 'Unauthorized',
+          status: 401,
+          detail: 'Sign in to ScadBuddy: this request carries no live session.',
+        },
+        401,
+        { 'content-type': 'application/problem+json' },
+      )
+    }
+    if (gated && mode === 'observe' && (loggedAt === undefined || now() - loggedAt >= LOG_INTERVAL_MS)) {
       loggedAt = now()
       log("enforce would refuse an /api/v1/ai request with no signed-in session; served, as SCADBUDDY_AUTH_MODE=observe")
     }
