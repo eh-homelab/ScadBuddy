@@ -178,6 +178,8 @@ function segmentMayClimb(segment: string): boolean {
       // `?.|x`; minimatch reads `0.[:0+*\|` as matching `..`), so refuse. `\(` names one.
       return true
     } else if (c === '*' || c === '?') tokens.push('w')
+    // Everything else names itself, a `]` that closes no class too (minimatch and picomatch read
+    // it as the character; a `[` that opens none is refused above).
     else tokens.push(c === '.' ? '.' : 'x')
   }
   if (tokens.length === 1 && tokens[0] === '.') return false
@@ -196,6 +198,24 @@ function mayClimb(glob: string): boolean {
   const spelled = alternatives(glob)
   if (spelled === undefined) return true
   return spelled.some((s) => s.split('/').some(segmentMayClimb))
+}
+
+/**
+ * The globs Claude Code's Grep passes to `rg --glob` for its `glob` input. Read from the bundled
+ * 2.1.314 binary (the code that builds Grep's rg arguments, 2026-11-03): the value is split on
+ * `/\s+/`, a piece holding both `{` and `}` is kept whole, and any other piece is split on every
+ * `,`, empty pieces dropped. Each whitespace piece is checked whole and each comma piece too,
+ * so the check covers both readings. Even unchecked, a piece only filters the files rg walks
+ * under `path` (checked as a path): Claude Code's rg 14.1.1, run in a directory beside a file
+ * `secret`, found nothing for `--glob '../*'` or `--glob '../secret'` (measured 2026-11-03).
+ */
+function grepGlobs(glob: string): string[] {
+  const out: string[] = []
+  for (const piece of glob.split(/\s+/).filter(Boolean)) {
+    out.push(piece)
+    if (!(piece.includes('{') && piece.includes('}'))) out.push(...piece.split(',').filter(Boolean))
+  }
+  return out
 }
 
 const inside = (root: string, abs: string): boolean => {
@@ -271,11 +291,14 @@ export function confineGuard(root: string | undefined): InputGuard {
         if (await outside(fixed)) return deny(toolName, `its pattern ${pattern} starts outside it`)
       }
     }
-    // Grep's `path` is a path (checked above, no glob); its `glob` filter follows the Glob rule.
+    // Grep's `path` is a path (checked above, no glob); its `glob` filter follows the Glob rule,
+    // for the whole value and for each piece Grep makes of it (`grepGlobs`).
     if (toolName === 'Grep' && args.glob !== undefined) {
       if (typeof args.glob !== 'string') return deny(toolName, 'its glob is not a string')
-      if (fromHome(args.glob)) return deny(toolName, `its glob ${args.glob} starts at a home directory`)
-      if (mayClimb(args.glob)) return deny(toolName, `its glob ${args.glob} may reach .. (${CLIMB_HINT})`)
+      for (const glob of [args.glob, ...grepGlobs(args.glob)]) {
+        if (fromHome(glob)) return deny(toolName, `its glob ${glob} starts at a home directory`)
+        if (mayClimb(glob)) return deny(toolName, `its glob ${glob} may reach .. (${CLIMB_HINT})`)
+      }
     }
     return undefined
   }
