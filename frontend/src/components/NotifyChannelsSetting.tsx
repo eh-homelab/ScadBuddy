@@ -3,6 +3,8 @@ import { api, ApiError } from '../api/client'
 import type { NotifyChannel } from '../api/types'
 import { useAsync } from '../lib/useAsync'
 import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { LabeledInput, SaveFooter, SettingBody, SettingCard } from './settings/form'
 
 /** Human-only: the browser bridge (#254) must never let an agent press these. */
@@ -121,18 +123,18 @@ export function NotifyChannelsSetting() {
       <form className="contents" onSubmit={(event) => void add(event)}>
         <SettingBody className="grid gap-3 sm:grid-cols-2">
           <div className="grid gap-1.5">
-            <label htmlFor="notify-channel-kind" className="text-sm">
+            <Label id="notify-channel-kind" className="text-sm font-normal">
               Kind
-            </label>
-            <select
-              id="notify-channel-kind"
-              className="h-9 rounded-md border bg-transparent px-2 text-sm"
-              value={kind}
-              onChange={(event) => setKind(event.target.value as NotifyChannel['kind'])}
-            >
-              <option value="ntfy">ntfy</option>
-              <option value="home_assistant">Home Assistant</option>
-            </select>
+            </Label>
+            <Select value={kind} onValueChange={(next) => setKind(next as NotifyChannel['kind'])}>
+              <SelectTrigger aria-labelledby="notify-channel-kind">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ntfy">ntfy</SelectItem>
+                <SelectItem value="home_assistant">Home Assistant</SelectItem>
+              </SelectContent>
+            </Select>
           </div>
           <LabeledInput label="Name" value={name} onChange={(event) => setName(event.target.value)} required maxLength={100} />
           <LabeledInput
