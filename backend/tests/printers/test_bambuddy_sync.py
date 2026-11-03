@@ -894,6 +894,52 @@ async def test_the_boot_asks_bambuddy_nothing_when_no_adoption_is_due(
     assert used == []
 
 
+def test_a_vps_row_alone_is_enough_bambuddy_for_the_boot_pass(store: PrinterStore) -> None:
+    """#5236: the registry follows Bambuddy when a VP's row is its only Bambuddy row (the
+    ``kind`` arm of `boot_adoption_due`), as when another hand-made row holds a VP's
+    serial beside it."""
+    from scadbuddy.printers.bambuddy_sync import boot_adoption_due
+
+    store.upsert_virtual(
+        2,
+        serial="09400A391800002",
+        name="VP2",
+        model="H2C",
+        mode="queue",
+        forwards_to=None,
+        view=BambuddyView(seen_at=datetime.now(UTC), name="VP2"),
+    )
+    assert boot_adoption_due(store.list()) is False  # no row that may still be a VP's
+    store.create(PrinterCreate(serial=VP_SERIAL, name="hand-made"))
+    assert boot_adoption_due(store.list()) is True
+
+
+async def test_a_bambuddy_that_hangs_at_boot_is_one_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    printers: FakePrinters,
+    store: PrinterStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import asyncio
+
+    from scadbuddy import main
+
+    _prods_registry(store)
+    client = FakeClient([], [])
+
+    async def hangs() -> VirtualPrinterList:
+        await asyncio.sleep(10)
+        raise AssertionError("not reached")
+
+    client.virtual_printers = hangs  # type: ignore[method-assign]
+    monkeypatch.setattr(main, "VP_BOOT_TIMEOUT", 0.05)
+    _boot_client(monkeypatch, client)
+    with caplog.at_level(logging.WARNING, logger=main.logger.name):
+        await main._adopt_virtual_rows_logged(_boot_state(printers))
+    (record,) = [r for r in caplog.records if r.name == main.logger.name]
+    assert record.levelno == logging.WARNING and record.exc_info is None
+
+
 async def test_an_unreachable_bambuddy_at_boot_is_one_warning_and_never_raised(
     monkeypatch: pytest.MonkeyPatch,
     printers: FakePrinters,

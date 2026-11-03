@@ -224,7 +224,9 @@ def boot_adoption_due(rows: list[PrinterRow]) -> bool:
     one, or a VP's row). A registry of LAN-only rows (a native deployment that uses
     Bambuddy for spools alone, `e2e-stack`'s recorder pass) asks Bambuddy nothing. Nothing
     records that a row was checked: while both hold, every boot of every replica makes the
-    pass's two list reads, which then change nothing."""
+    pass's two list reads, which then change nothing. A hand-made VP row beside only
+    LAN-only printers is therefore never adopted at boot: Settings > Printers' import
+    (``POST /printers/sync-bambuddy``) adopts it."""
     follows = any(r.bambuddy_printer_id is not None or r.kind != "physical" for r in rows)
     return follows and any(may_be_virtual(r) for r in rows)
 

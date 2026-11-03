@@ -805,8 +805,9 @@ async def _adopt_virtual_rows_logged(state: AppState) -> None:
     with a Bambuddy virtual printer's serial, stayed ``physical`` while the full sync was
     left to the sweeps' Schedule, which prod turns off. So, once per boot and only when
     `boot_adoption_due`, the sync's virtual-printer part runs: two Bambuddy lists, no
-    access code, no probe. Nothing without a Bambuddy. Bambuddy refusing or unreachable is
-    one WARNING; anything else one logged traceback; never raised."""
+    access code, no probe. Nothing without a Bambuddy. Bambuddy refusing, unreachable or
+    past `VP_BOOT_TIMEOUT` is one WARNING from this pass (the client logs its own failed
+    request besides); anything else one logged traceback; never raised."""
     try:
         registry = state.components.get(PRINTERS)
         rows = await asyncio.to_thread(registry.store.list)
@@ -821,6 +822,11 @@ async def _adopt_virtual_rows_logged(state: AppState) -> None:
         logger.warning(
             "could not sync the virtual printers from Bambuddy at start",
             extra={"status": error.status},
+        )
+    except TimeoutError:
+        logger.warning(
+            "could not sync the virtual printers from Bambuddy at start",
+            extra={"timeout": VP_BOOT_TIMEOUT},
         )
     except Exception:
         logger.exception("could not sync the virtual printers from Bambuddy at start")
