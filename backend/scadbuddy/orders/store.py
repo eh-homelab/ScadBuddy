@@ -1211,6 +1211,27 @@ class OrderStore:
             ).fetchone()
         return None if row is None else Fulfilment.model_validate(row)
 
+    def set_claim_project(self, conn: Conn, attempt_id: str, project_id: int | None) -> None:
+        """The Bambuddy project a print claim's run is keyed with (#5263)."""
+        conn.execute(
+            "UPDATE order_item_fulfilments SET print_project_id = %s, print_project_keyed = true"
+            " WHERE id = %s",
+            (project_id, attempt_id),
+        )
+
+    def claim_project(self, request_id: str) -> tuple[bool, int | None] | None:
+        """``(keyed, project_id)`` of the print claim under ``request_id``; ``keyed`` is
+        false for a claim from before #5263, which recorded none. None with no claim."""
+        with self._read(None) as c:
+            row = c.execute(
+                "SELECT print_project_keyed, print_project_id FROM order_item_fulfilments"
+                " WHERE print_request_id = %s",
+                (request_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return bool(row["print_project_keyed"]), row["print_project_id"]
+
     def attach_print_run(
         self, conn: Conn, attempt_id: str, run_id: str, printer: str | None
     ) -> Fulfilment | None:
@@ -1219,7 +1240,8 @@ class OrderStore:
         # The registry row as it is now (§8.4): the attempt keeps it past a rename or delete.
         row = conn.execute(
             "WITH p AS (SELECT serial, name, bambuddy_printer_id FROM printers"
-            "  WHERE id::text = %(printer)s)"
+            # The run's `printer` is the registry row's uuid (`print_runs.printer`).
+            "  WHERE id = %(printer)s::uuid)"
             " UPDATE order_item_fulfilments SET print_run_id = %(run)s, printer = %(printer)s,"
             " printer_serial = (SELECT serial FROM p), printer_name = (SELECT name FROM p),"
             " bambuddy_printer_id = (SELECT bambuddy_printer_id FROM p)"
@@ -1266,8 +1288,10 @@ class OrderStore:
         finished_at: datetime | None,
         actual_seconds: int | None,
         actual_grams: float | None,
+        conn: Conn,
     ) -> Fulfilment | None:
-        """What the attempt's archives say (§8.2). The times are written by the first
+        """What the attempt's archives say (§8.2), in the caller's transaction, which holds
+        the order's lock (``Lifecycle.record_archive_facts``). The times are written by the first
         copy only, and one the archives do not give stays as the print path recorded it,
         so a time a person corrected since (``PATCH``) is never put back. An attempt
         recorded naming its archive (#4251) has its ids before its first copy, which is
@@ -1276,25 +1300,24 @@ class OrderStore:
             "(archive_ids = '{}' OR (print_run_id IS NULL"
             " AND actual_seconds IS NULL AND actual_grams IS NULL))"
         )
-        with self.transaction() as conn:
-            row = conn.execute(
-                "UPDATE order_item_fulfilments SET archive_ids = %s,"
-                # The times only on the first copy: one a person corrected since stands.
-                f" started_at = CASE WHEN {first} THEN coalesce(%s, started_at)"
-                "  ELSE started_at END,"
-                f" finished_at = CASE WHEN {first} THEN coalesce(%s, finished_at)"
-                "  ELSE finished_at END,"
-                " actual_seconds = %s, actual_grams = %s"
-                f" WHERE id = %s RETURNING {_FULFILMENT}",
-                (
-                    list(archive_ids),
-                    started_at,
-                    finished_at,
-                    actual_seconds,
-                    actual_grams,
-                    attempt_id,
-                ),
-            ).fetchone()
+        row = conn.execute(
+            "UPDATE order_item_fulfilments SET archive_ids = %s,"
+            # The times only on the first copy: one a person corrected since stands.
+            f" started_at = CASE WHEN {first} THEN coalesce(%s, started_at)"
+            "  ELSE started_at END,"
+            f" finished_at = CASE WHEN {first} THEN coalesce(%s, finished_at)"
+            "  ELSE finished_at END,"
+            " actual_seconds = %s, actual_grams = %s"
+            f" WHERE id = %s RETURNING {_FULFILMENT}",
+            (
+                list(archive_ids),
+                started_at,
+                finished_at,
+                actual_seconds,
+                actual_grams,
+                attempt_id,
+            ),
+        ).fetchone()
         return None if row is None else Fulfilment.model_validate(row)
 
     def print_starting(self, item_id: str, *, conn: Conn | None = None) -> bool:
@@ -1750,12 +1773,20 @@ class OrderStore:
             ).fetchall()
         return [_project_of(row) for row in rows]
 
-    def set_project(self, order_id: str, subject: str, project_id: int) -> int:
-        """Record a subject's project; one already recorded stands, and is the answer."""
+    def set_project(
+        self, order_id: str, subject: str, project_id: int, replace: bool = False
+    ) -> int:
+        """Record a subject's project; one already recorded stands, and is the answer,
+        unless ``replace`` (the recorded one was deleted in Bambuddy, #5263; asked under
+        :meth:`project_lock`)."""
         with self.transaction() as conn:
             conn.execute(
                 "INSERT INTO order_projects (subject, order_id, project_id) VALUES (%s, %s, %s)"
-                " ON CONFLICT (subject) DO NOTHING",
+                + (
+                    " ON CONFLICT (subject) DO UPDATE SET project_id = EXCLUDED.project_id"
+                    if replace
+                    else " ON CONFLICT (subject) DO NOTHING"
+                ),
                 (subject, order_id, project_id),
             )
             row = conn.execute(

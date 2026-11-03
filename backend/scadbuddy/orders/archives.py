@@ -100,7 +100,7 @@ async def _facts(integrations: OrderIntegrations, archive_ids: list[int]) -> lis
 
 
 async def mirror_archives(
-    store: OrderStore, integrations: OrderIntegrations, attempt: Fulfilment
+    lifecycle: Lifecycle, integrations: OrderIntegrations, attempt: Fulfilment
 ) -> tuple[Fulfilment, list[ArchiveFacts]]:
     """The attempt with its archives' facts copied (once its print settled), and those
     facts. An attempt recorded by hand naming its archive (#4251, a print attached to
@@ -112,7 +112,7 @@ async def mirror_archives(
     if attempt.print_run_id is None:
         archive_ids, settled = attempt.archive_ids, True
     else:
-        archive_ids = await asyncio.to_thread(store.run_archives, attempt.print_run_id)
+        archive_ids = await asyncio.to_thread(lifecycle.store.run_archives, attempt.print_run_id)
         settled = attempt.finished_at is not None
     if not archive_ids:
         return attempt, []
@@ -122,24 +122,24 @@ async def mirror_archives(
     started = [f.started_at for f in facts if f.started_at is not None]
     completed = [f.completed_at for f in facts if f.completed_at is not None]
     written = await asyncio.to_thread(
-        store.set_archive_facts,
-        attempt.id,
+        lifecycle.record_archive_facts,
+        attempt,
         [f.archive_id for f in facts],
         started_at=min(started) if started else None,
         finished_at=max(completed) if completed else None,
         actual_seconds=_sum([f.actual_seconds for f in facts]),
         actual_grams=_sum([f.grams for f in facts]),
     )
-    return written or attempt, facts
+    return written, facts
 
 
-async def mirror_run(store: OrderStore, integrations: OrderIntegrations, run_id: str) -> None:
+async def mirror_run(lifecycle: Lifecycle, integrations: OrderIntegrations, run_id: str) -> None:
     """:func:`mirror_archives` for the attempt a run started, if any; logged, never
     raised: the attempt's archives are read again when they are shown."""
     try:
-        attempt = await asyncio.to_thread(store.print_attempt, run_id)
+        attempt = await asyncio.to_thread(lifecycle.store.print_attempt, run_id)
         if attempt is not None:
-            await mirror_archives(store, integrations, attempt)
+            await mirror_archives(lifecycle, integrations, attempt)
     except Exception:
         logger.warning("could not copy an order item's print archives", exc_info=True)
 
@@ -156,14 +156,14 @@ def attempt_of(store: OrderStore, order_id: str, item_id: str, fulfilment_id: st
 
 
 async def attempt_archives(
-    store: OrderStore,
+    lifecycle: Lifecycle,
     integrations: OrderIntegrations,
     order_id: str,
     item_id: str,
     fulfilment_id: str,
 ) -> AttemptArchives:
-    attempt = await asyncio.to_thread(attempt_of, store, order_id, item_id, fulfilment_id)
-    attempt, facts = await mirror_archives(store, integrations, attempt)
+    attempt = await asyncio.to_thread(attempt_of, lifecycle.store, order_id, item_id, fulfilment_id)
+    attempt, facts = await mirror_archives(lifecycle, integrations, attempt)
     return AttemptArchives(
         linked=integrations.linked,
         attempt=attempt,
@@ -239,7 +239,11 @@ async def copy_in(
     staging = claims.root / f".copy-{uuid.uuid4().hex}"
     try:
         copied = await integrations.download_archive_media(
-            archive_id, what, name if what == "finished_photo" else None, staging, limit
+            archive_id,
+            what,
+            name if what == "finished_photo" else facts.timelapse_name,
+            staging,
+            limit,
         )
     except MediaTooLargeError as error:
         raise ApiError(status.HTTP_413_CONTENT_TOO_LARGE, str(error)) from None

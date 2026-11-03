@@ -1224,7 +1224,7 @@ async def get_attempt_archives(
     not the item's."""
     _path(order_id, item_id, fulfilment_id)
     return await attempt_archives(
-        orders.store, orders.integrations, order_id, item_id, fulfilment_id
+        orders.lifecycle, orders.integrations, order_id, item_id, fulfilment_id
     )
 
 
