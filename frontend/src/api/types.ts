@@ -376,6 +376,10 @@ export type Shipment = Schemas['Shipment']
 export type Payment = Schemas['Payment']
 export type OrderCharge = Schemas['Charge']
 export type OrderEvent = Schemas['OrderEvent']
+// #4251 §6.4 — `GET /orders/{id}/costs`.
+export type OrderCosts = Schemas['OrderCosts']
+export type ItemCost = Schemas['ItemCost']
+export type AttemptCost = Schemas['AttemptCost']
 export type AddressSnapshot = Schemas['AddressSnapshot']
 export type OrderCreate = Defaulted<Schemas['OrderCreate'], 'notes' | 'due_at'>
 export type OrderPatch = Partial<Schemas['OrderPatch']>

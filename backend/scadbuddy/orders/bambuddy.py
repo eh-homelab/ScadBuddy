@@ -19,7 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from scadbuddy.bambuddy.client import Operation, client_for, maybe_client
-from scadbuddy.bambuddy.farm import inventory_view
+from scadbuddy.bambuddy.costs import archive_cost
 from scadbuddy.bambuddy.models import FINISH_PHOTO_PREFIX, ArchiveDetail, SliceJob, Spool
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
 from scadbuddy.bambuddy.print_run import PrintRunRequest
@@ -133,11 +133,15 @@ class BambuddyIntegrations:
             return spool_groups(await client.spools())
 
     async def spool_inventory(self) -> list[ShelfSpool]:
-        """``inventory_view``'s spools (archived ones included, so a named one is
-        known), each with the printer it is loaded in."""
+        """``GET /inventory/spools`` (archived ones included, so a named one is known)
+        and ``GET /inventory/assignments`` for where each is loaded: two reads, none per
+        printer, so one printer Bambuddy cannot reach refuses no print (#5269 review)."""
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
-            view = await inventory_view(client, include_archived=True)
+            spools, assignments = await asyncio.gather(
+                client.spools(include_archived=True), client.spool_assignments()
+            )
+        loaded = {a.spool_id: a.printer_id for a in assignments}
         return [
             ShelfSpool(
                 id=spool.id,
@@ -146,10 +150,10 @@ class BambuddyIntegrations:
                 brand=spool.brand,
                 colour=_colour(spool.rgba),
                 remaining_g=spool.remaining_g,
-                archived=spool.archived,
-                loaded_printer_id=None if spool.loaded is None else spool.loaded.printer_id,
+                archived=spool.archived_at is not None,
+                loaded_printer_id=loaded.get(spool.id),
             )
-            for spool in view.spools
+            for spool in spools
         ]
 
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
@@ -161,6 +165,18 @@ class BambuddyIntegrations:
                 if error.status == 404 and await client.archive_deleted(archive_id):
                     return None
                 raise
+
+    async def archive_cost(self, archive_id: int) -> float | None:
+        stored = await asyncio.to_thread(self.settings.load)
+        async with client_for(stored) as client:
+            try:
+                archive = await client.archive(archive_id)
+            except ApiError as error:
+                if error.status == 404 and await client.archive_deleted(archive_id):
+                    return None
+                raise
+            runs = await client.archive_runs(archive_id)
+        return archive_cost(archive.cost, archive.filament_used_grams, runs.items)
 
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int

@@ -154,6 +154,9 @@ async def item_plan(
         spools = await integrations.spool_inventory()
     except NotLinkedError:
         return None
+    except ApiError:
+        # The client's own answer, naming a missing scope or Bambuddy unavailable.
+        raise
     except Exception as error:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE,

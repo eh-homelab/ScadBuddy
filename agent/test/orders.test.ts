@@ -121,6 +121,17 @@ describe('order tools (#4249)', () => {
     await expect(tool('customer_upsert').execute({ archive: true }, ctx())).rejects.toThrow('customer_id')
   })
 
+  it('reads an order’s real cost (#4251 §6.4)', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}/costs`, () =>
+        HttpResponse.json({ order_id: ORDER, currency: 'USD', items: [], bambuddy_unavailable: false }),
+      ),
+    )
+    expect(tool('order_costs').risk).toBe('read')
+    const result = await tool('order_costs').execute({ order_id: ORDER }, ctx())
+    expect(firstText(result)).toEqual({ order_id: ORDER, currency: 'USD', items: [], bambuddy_unavailable: false })
+  })
+
   it('passes the list filters and the cursor through to the backend', async () => {
     let url = ''
     server.use(

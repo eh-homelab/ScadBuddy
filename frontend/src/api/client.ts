@@ -206,6 +206,7 @@ import type {
   OrderCreate,
   OrderDetail,
   OrderEstimate,
+  OrderCosts,
   OrderEvent,
   OrderItem,
   OrderItemCreate,
@@ -2155,6 +2156,8 @@ export const api = {
   },
   order: (id: string) => request<OrderDetail>(`/orders/${seg(id)}`),
   orderEvents: (id: string) => request<OrderEvent[]>(`/orders/${seg(id)}/events`),
+  /** #4251 §6.4 — the accepted quotes beside the attempts. */
+  orderCosts: (id: string) => request<OrderCosts>(`/orders/${seg(id)}/costs`),
   createOrder: (body: OrderCreate) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(body) }),
   updateOrder: (id: string, body: OrderPatch) =>
     request<Order>(`/orders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
