@@ -123,7 +123,7 @@ _QUOTE = (
 _FULFILMENT = (
     "id, order_item_id, attempt, quantity, outcome, failure_reason, started_at, finished_at,"
     " notes, accepted_at, created_by, created_at, print_run_id, sliced_sha256, sliced_blob_key,"
-    " printer, copies, print_request_id"
+    " printer, copies, print_request_id, printer_serial, printer_name, bambuddy_printer_id"
 )
 _SHIPMENT = (
     "id, order_id, carrier, service, tracking, shipped_at, address, cost_minor, notes, created_at"
@@ -1187,11 +1187,16 @@ class OrderStore:
     ) -> Fulfilment | None:
         """The run a claimed attempt's print started, once it started; None when the
         attempt is gone or names another run already (one claim, one run)."""
+        # The registry row as it is now (§8.4): the attempt keeps it past a rename or delete.
         row = conn.execute(
-            "UPDATE order_item_fulfilments SET print_run_id = %s, printer = %s"
-            " WHERE id = %s AND (print_run_id IS NULL OR print_run_id = %s)"
+            "WITH p AS (SELECT serial, name, bambuddy_printer_id FROM printers"
+            "  WHERE id::text = %(printer)s)"
+            " UPDATE order_item_fulfilments SET print_run_id = %(run)s, printer = %(printer)s,"
+            " printer_serial = (SELECT serial FROM p), printer_name = (SELECT name FROM p),"
+            " bambuddy_printer_id = (SELECT bambuddy_printer_id FROM p)"
+            " WHERE id = %(id)s AND (print_run_id IS NULL OR print_run_id = %(run)s)"
             f" RETURNING {_FULFILMENT}",
-            (run_id, printer, attempt_id, run_id),
+            {"run": run_id, "printer": printer, "id": attempt_id},
         ).fetchone()
         return None if row is None else Fulfilment.model_validate(row)
 
