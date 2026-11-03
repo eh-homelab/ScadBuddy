@@ -115,7 +115,7 @@ async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
     remove = listen_for_prints(
         orders.core.events,
         orders.lifecycle,
-        lambda run_id: mirror_run(orders.store, orders.integrations, run_id),
+        lambda run_id: mirror_run(orders.lifecycle, orders.integrations, run_id),
     )
     try:
         yield

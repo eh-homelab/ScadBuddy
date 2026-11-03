@@ -1201,7 +1201,7 @@ async def get_attempt_archives(
     Bambuddy has linked no archive to yet, has none. 404 for an attempt not the item's."""
     _path(order_id, item_id, fulfilment_id)
     return await attempt_archives(
-        orders.store, orders.integrations, order_id, item_id, fulfilment_id
+        orders.lifecycle, orders.integrations, order_id, item_id, fulfilment_id
     )
 
 
