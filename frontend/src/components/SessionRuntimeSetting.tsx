@@ -4,7 +4,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { api, ApiError } from '../api/client'
-import { SYSTEM_PROMPT_APPEND_MAX, SYSTEM_PROMPT_BASES, TOOL_SEARCH_MODES } from '../api/sessionTurn'
+import { oneOf, SYSTEM_PROMPT_APPEND_MAX, SYSTEM_PROMPT_BASES, TOOL_SEARCH_MODES } from '../api/sessionTurn'
 import type { SessionRuntimeUpdate } from '../api/types'
 import { useAsync } from '../lib/useAsync'
 import { ChoiceSelect, LabeledInput, SaveFooter, SettingBody, SettingCard } from './settings/form'
@@ -26,11 +26,6 @@ const TOOL_SEARCH: { value: (typeof TOOL_SEARCH_MODES)[number]; label: string }[
   { value: 'auto', label: 'Auto: defer tools once they fill 10% of the context' },
   { value: 'always', label: 'Always defer tools' },
 ]
-
-/** `value` when it is one of `values`, else undefined: a draft that names no choice is never sent. */
-function oneOf<T extends string>(values: readonly T[], value: string): T | undefined {
-  return (values as readonly string[]).includes(value) ? (value as T) : undefined
-}
 
 /** agent `sessions/turnSettings.ts` SystemPromptBase (api/sessionTurn.ts SYSTEM_PROMPT_BASES). */
 const PROMPT_BASES: { value: (typeof SYSTEM_PROMPT_BASES)[number]; label: string }[] = [

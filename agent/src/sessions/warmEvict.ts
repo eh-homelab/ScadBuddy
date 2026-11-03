@@ -20,10 +20,12 @@ export const WARM_EVICT_CHANNEL = 'scadbuddy_warm_evict'
 /**
  * Whether a write to this Settings key changes what a warm process was spawned
  * with (sessions/turnRunner.ts `FingerprintParts`), so every cache is told
- * (`credentials.ts` SettingsStore): the model, the recall cap, tool search and the system prompt. Tool access is
- * in `ai_access`, whose writes send their own eviction (`AccessStore.write`,
- * `PluginStore.writeAccess`). Named here by their strings, as credentials.ts is
- * below the modules that export them; test/warmEvict.pg.test.ts holds the two together.
+ * (`credentials.ts` SettingsStore): the model, the recall cap, tool search and the
+ * system prompt. Tool access is in `ai_access`, whose writes send their own eviction
+ * (`AccessStore.write`, `PluginStore.writeAccess`). The model and the recall cap are
+ * named here by their strings, as credentials.ts is below the modules that export them
+ * (test/warmEvict.pg.test.ts holds them together); the turn keys come from
+ * turnSettings.ts `isTurnKey`, which takes only a type from credentials.ts.
  */
 export function evictsWarmOnWrite(key: string): boolean {
   return (
