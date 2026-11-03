@@ -225,6 +225,24 @@ def test_a_slice_quote_prints_and_holds_its_sliced_file(bambuddy: TestClient) ->
     problem(bambuddy.post(f"{shop.path}/print", json=body(), headers=press()), "requote_needed")
     sliced.write_bytes(kept)
 
+    # #4251 §5.4 "Spools": spools 9 and 5 are not the red PLA and green PETG it was
+    # quoted with, so the print is refused before anything starts.
+    refused = problem(
+        bambuddy.post(f"{shop.path}/print", json=body(), headers=press()), "spool_not_filament"
+    )
+    assert refused["slots"] == [0, 1]
+    # The book's records made the recorded spools' filaments (a bookkeeping fix, which
+    # moves no quote): now they are the slots'.
+    for record, (material, subtype, colour) in (
+        (shop.pla, ("PETG", "Basic", "#688197")),
+        (shop.petg, ("PLA", "Tri Color", "#0047BB")),
+    ):
+        fixed = bambuddy.patch(
+            f"/api/v1/orders/price-book/filaments/{record}",
+            json={"material": material, "subtype": subtype, "brand": "Bambu Lab", "colour": colour},
+        )
+        assert fixed.status_code == 200, fixed.text
+
     queue_route()
     attempt = answered(bambuddy, bambuddy.post(f"{shop.path}/print", json=body(), headers=press()))
     assert attempt["sliced_sha256"] == quote["sliced_sha256"]

@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from scadbuddy.bambuddy.client import Operation, client_for, maybe_client
+from scadbuddy.bambuddy.farm import inventory_view
 from scadbuddy.bambuddy.models import FINISH_PHOTO_PREFIX, ArchiveDetail, SliceJob, Spool
 from scadbuddy.bambuddy.preview import PreviewStarted, preview_job, start_preview_plates
 from scadbuddy.bambuddy.print_run import PrintRunRequest
@@ -32,6 +33,7 @@ from scadbuddy.orders.integrations import (
     ArchiveMedia,
     CopiedMedia,
     MediaTooLargeError,
+    ShelfSpool,
     SpoolGroup,
 )
 
@@ -129,6 +131,26 @@ class BambuddyIntegrations:
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
             return spool_groups(await client.spools())
+
+    async def spool_inventory(self) -> list[ShelfSpool]:
+        """``inventory_view``'s spools (archived ones included, so a named one is
+        known), each with the printer it is loaded in."""
+        stored = await asyncio.to_thread(self.settings.load)
+        async with client_for(stored) as client:
+            view = await inventory_view(client, include_archived=True)
+        return [
+            ShelfSpool(
+                id=spool.id,
+                material=spool.material,
+                subtype=spool.subtype,
+                brand=spool.brand,
+                colour=_colour(spool.rgba),
+                remaining_g=spool.remaining_g,
+                archived=spool.archived,
+                loaded_printer_id=None if spool.loaded is None else spool.loaded.printer_id,
+            )
+            for spool in view.spools
+        ]
 
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
         stored = await asyncio.to_thread(self.settings.load)

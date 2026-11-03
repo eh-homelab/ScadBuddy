@@ -595,7 +595,10 @@ export const orderTools: Tool[] = [
       'a print whose end could not be read is settled with order_item_fulfil. Refused with `requote_needed` (no ' +
       "accepted quote, the item's output gone, or a slice quote whose sliced file is gone or changed: quote it " +
       'again), `item_not_approved` (printing already), `item_made` (its attempts made its quantity: accept them), ' +
-      '`order_not_accepted` and `order_on_hold`, and the print run\'s own refusals. Outward: it prints.',
+      '`order_not_accepted` and `order_on_hold`, and the print run\'s own refusals. With Bambuddy, a slot whose ' +
+      "filament the item names and the plan leaves out takes that filament's spool loaded on the printer, else the " +
+      'shelf spool with most left (never one loaded in another printer); `needs_spool_choice` names the slots with ' +
+      "none (name a spool for them), `spool_not_filament` a named spool not of its slot's filament. Outward: it prints.",
     input: z.object({
       order_id: orderId,
       item_id: itemId,

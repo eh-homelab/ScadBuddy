@@ -512,9 +512,17 @@ an outcome recorded against a newer run of the same output, is settled by hand. 
 is edited in `queued`, `printing` and `printed`, and accepted in `printed` (an accepted
 part leaves the item `approved` for the rest). Not yet: the run slices the item's output
 with the request's choices rather than printing the quote's file itself (with the quote's
-own choices the dialog's slice reuse queues that slice), an accepted `manual` quote's
-attempt records no file, and the per-slot spool fill (`needs_spool_choice`,
-`spool_not_filament`) waits on §8.3's spool-to-filament match.
+own choices the dialog's slice reuse queues that slice), and an accepted `manual` quote's
+attempt records no file. Both need a third `SourceSpec` kind, a pre-sliced file, on both
+queue paths (plan 2026-11-03 "Not in this plan").
+
+**As built, the spools (#4251, plan 2026-11-03 Ruling 4).** `orders/spools.py`, run in
+`order_item_print`'s check, so a refusal writes nothing and the filled plan is recorded with
+the check, which keys a retry's run as its first try's. A slot's filament is matched to
+spools by the spool import's identity (§8.3): material, subtype, brand and `#RRGGBB`,
+upper-cased. The run's printer is the request's `printer_id`, else its registry printer's
+Bambuddy id. A spool named only by its colour's name is never taken. On the native path,
+and for a slot the item names no filament for, the plan stays as the request gave it.
 
 ## 6. Fulfilment and provenance
 
