@@ -2195,9 +2195,11 @@ export const api = {
     file: File,
     fields: { role?: OrderAttachmentRole; caption?: string },
     onProgress?: (fraction: number) => void,
+    /** #4251 — one of the item's attempts. */
+    fulfilmentId?: string | null,
   ): Promise<OrderAttachment> =>
     uploadForm<OrderAttachment>(
-      `/orders/${seg(orderId)}${itemId ? `/items/${seg(itemId)}` : ''}/attachments`,
+      `/orders/${seg(orderId)}${itemId ? `/items/${seg(itemId)}` : ''}${itemId && fulfilmentId ? `/fulfilments/${seg(fulfilmentId)}` : ''}/attachments`,
       () => {
         const body = new FormData()
         body.append('file', file)

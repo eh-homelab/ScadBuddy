@@ -563,6 +563,14 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 raise ApiError(
                     status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}"
                 )
+        # A request recorded before attempts had files names none (#4251).
+        fulfilment_id = request.get("fulfilment_id")
+        if fulfilment_id is not None:
+            attempt = await asyncio.to_thread(store.fulfilment, fulfilment_id)
+            if attempt is None or attempt.order_item_id != item_id:
+                raise ApiError(
+                    status.HTTP_404_NOT_FOUND, f"no attempt {fulfilment_id!r} of that item"
+                )
         return {}
 
     async def attachment_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -604,6 +612,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     sha256=request["file"],
                     blob_key=key,
                     caption=request["caption"],
+                    fulfilment_id=request.get("fulfilment_id"),
                 )
             )
         except LifecycleError as error:
@@ -626,7 +635,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
 
     async def copy_run_kind(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """The archive's file pulled once into the claim store, kept as its blob and
-        recorded as the item's attachment (``orders/archives.py`` ``copy_in``)."""
+        recorded as the attempt's attachment, listed under its item
+        (``orders/archives.py`` ``copy_in``)."""
         orders = components.get(ORDERS)
         try:
             attachment = await copy_in(

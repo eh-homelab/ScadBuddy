@@ -341,7 +341,7 @@ agent's follow a 202.
 | `POST /orders/{id}/reopen`, `POST /orders/{id}/items/{item}/reopen`, `POST /customers/{id}/unarchive` | §3.5's undo and §3.1's: a closed order, a cancelled item, an archived customer back |
 | `POST /orders/{id}/items/{item}/print` (operation `order_item_print`) | §5.4: a print run for the item at its accepted quote's sliced file; the item becomes `queued` |
 | `POST /orders/{id}/items/{item}/fulfilments`, `PATCH …/{fulfilment}` | §6.1: an attempt and its outcome |
-| `POST /orders/{id}/attachments`, `POST /orders/{id}/items/{item}/attachments` (multipart, operation `order_attachment_add`), `GET /orders/{id}/attachments`, `GET …/attachments/{attachment}/content` (`Range`), `GET …/thumbnail`, `PATCH …/{attachment}`, `DELETE …/{attachment}` | §6.2 (#4251): any file on the order or an item; the delete removes the row and its blob ref (a mis-upload), recorded on the audit line. An attempt's own attachments (`…/fulfilments/{f}/attachments`) wait for the print path |
+| `POST /orders/{id}/attachments`, `POST /orders/{id}/items/{item}/attachments`, `POST /orders/{id}/items/{item}/fulfilments/{f}/attachments` (multipart, operation `order_attachment_add`), `GET /orders/{id}/attachments`, `GET …/attachments/{attachment}/content` (`Range`), `GET …/thumbnail`, `PATCH …/{attachment}`, `DELETE …/{attachment}` | §6.2 (#4251): any file on the order, an item or an attempt (listed under its item); the delete removes the row and its blob ref (a mis-upload), recorded on the audit line. |
 | `PUT /orders/{id}/items/{item}/delivered` | §6.2: marks one of the item's own image attachments as what was delivered (`delivered_attachment_id`), or clears it with `null` |
 | `POST /orders/{id}/items/{item}/fulfilments/{f}/accept` | §6.1: the attempt's quantity counts as made; the item becomes `fulfilled` when its attempts cover its quantity |
 | `POST /orders/{id}/shipments`, `PATCH …/{shipment}` | §6.3 |
@@ -556,7 +556,13 @@ not read as a print's `print_attachments`.)
 
 **As built (#4251, the order-entry slice, ahead of the print path).** Any file may be
 attached to the order (`order:<id>`) or to a line item (`order_item:<id>`); attempts'
-own attachments (`order_item_fulfilment:<id>`) wait for the print path. The row carries
+own attachments (`order_item_fulfilment:<id>`) came after the print path (plan 2026-11-03
+Ruling 3): `POST …/items/{item}/fulfilments/{f}/attachments`, the row's `attempt_item_id`
+naming the attempt's item so the file is listed under it too (`item_id`, with
+`fulfilment_id`). An archive's copies (§8.2) land on their attempt. A print made outside
+the order's print path is attached from its own page ("Attach to order item"), which
+records an attempt naming its archive (`FulfilmentInput.archive_id`); that attempt copies
+the archive as a print's would. An archive another attempt already has (named, or made by its run) is refused, `archive_claimed`, so no order copies another's print. The row carries
 `order_id` beside `subject`, so an order's whole list is one index read and
 `OrderDetail.attachments` returns it. `kind` is `image`, `video`, `document` (a PDF) or
 `other`, and it and `media_type` come from the bytes (`orders/attachments.py` `sniff`;
@@ -878,8 +884,9 @@ and whether it has a timelapse, so a link Bambuddy made late is still copied. `P
 …/archives/{archive_id}/copy` (`{what: finished_photo | timelapse, name?}`) is the
 `order_attempt_copy` operation: the bytes are streamed once through the seam's
 `download_archive_media` into the claim store, up to `media_upload_max_bytes`, kept as
-`attachment-<sha256>` and recorded as an attachment **of the item** (not of the attempt,
-whose own subject is still unbuilt), with the role `finished` or `timelapse` and the
+`attachment-<sha256>` and recorded as an attachment **of the attempt**
+(`order_item_fulfilment:<id>`, listed under its item, #4251), with the role `finished` or
+`timelapse` and the
 caption `Attempt <n>, Bambuddy archive <id>`. The same bytes copied again under the same
 role answer with the attachment already there. An archive with no timelapse is
 `no_timelapse`: pull it off the printer first (`POST /prints/{archive_id}/timelapse/pull`).

@@ -53,7 +53,7 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.operations import ORDER_ATTACHMENT_ADD
 from scadbuddy.orders.problems import refused
-from scadbuddy.orders.store import item_subject, order_subject
+from scadbuddy.orders.store import fulfilment_subject, item_subject, order_subject
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -92,8 +92,11 @@ def _path(*values: str) -> None:
         raise ApiError(status.HTTP_400_BAD_REQUEST, "a path value holds a NUL byte")
 
 
-async def _require(orders: OrdersDep, order_id: str, item_id: str | None) -> None:
-    """404 before a byte of the upload is read, for an order or item not there."""
+async def _require(
+    orders: OrdersDep, order_id: str, item_id: str | None, fulfilment_id: str | None = None
+) -> None:
+    """404 before a byte of the upload is read, for an order, item or attempt not
+    there."""
     store = orders.store
     order = await asyncio.to_thread(store.order, order_id)
     if order is None:
@@ -104,6 +107,10 @@ async def _require(orders: OrdersDep, order_id: str, item_id: str | None) -> Non
             raise ApiError(
                 status.HTTP_404_NOT_FOUND, f"no item {item_id!r} of order {order.number}"
             )
+    if fulfilment_id is not None:
+        attempt = await asyncio.to_thread(store.fulfilment, fulfilment_id)
+        if attempt is None or attempt.order_item_id != item_id:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no attempt {fulfilment_id!r} of that item")
 
 
 def _role(received: media_api.ReceivedUpload) -> str:
@@ -141,9 +148,10 @@ async def _upload(
     ops: OperationsDep,
     paths: PathsDep,
     idempotency_key: str | None,
+    fulfilment_id: str | None = None,
 ) -> Attachment | JSONResponse:
-    _path(order_id, *(() if item_id is None else (item_id,)))
-    await _require(orders, order_id, item_id)
+    _path(order_id, *(v for v in (item_id, fulfilment_id) if v is not None))
+    await _require(orders, order_id, item_id, fulfilment_id)
     received = await media_api.receive_upload(request, paths.cache, fields={"role": MAX_ROLE_BYTES})
     claims = ClaimStore(paths.claims)
     held: list[Held] = []
@@ -163,6 +171,7 @@ async def _upload(
         body: dict[str, Any] = {
             "order_id": order_id,
             "item_id": item_id,
+            **({} if fulfilment_id is None else {"fulfilment_id": fulfilment_id}),
             "file": digest,
             "filename": filename,
             "kind": kind,
@@ -174,7 +183,13 @@ async def _upload(
             "by": current_actor().model_dump(mode="json"),
         }
         kind_ = ops.kinds[ORDER_ATTACHMENT_ADD]
-        subject = order_subject(order_id) if item_id is None else item_subject(item_id)
+        subject = (
+            order_subject(order_id)
+            if item_id is None
+            else item_subject(item_id)
+            if fulfilment_id is None
+            else fulfilment_subject(fulfilment_id)
+        )
         if (
             await recorded(
                 ops, kind=kind_, subject=subject, request=body, idempotency_key=idempotency_key
@@ -258,6 +273,31 @@ async def add_item_attachment(
     idempotency_key: IdempotencyKey = None,
 ) -> Attachment | JSONResponse:
     return await _upload(order_id, item_id, request, response, orders, ops, paths, idempotency_key)
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/attachments",
+    summary="Attach a file to a fulfilment attempt",
+    description=_UPLOAD_TEXT
+    + " On one of the item's attempts (#4251): a photo of what it printed, its timelapse, an"
+    " issue. Listed under the item too (`item_id`), with `fulfilment_id`; an attempt's image"
+    " may be marked as the item's delivered picture.",
+    **_UPLOAD_DOC,
+)
+async def add_attempt_attachment(
+    order_id: str,
+    item_id: str,
+    fulfilment_id: str,
+    request: Request,
+    response: Response,
+    orders: OrdersDep,
+    ops: OperationsDep,
+    paths: PathsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Attachment | JSONResponse:
+    return await _upload(
+        order_id, item_id, request, response, orders, ops, paths, idempotency_key, fulfilment_id
+    )
 
 
 @router.get(

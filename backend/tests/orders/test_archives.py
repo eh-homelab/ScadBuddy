@@ -16,7 +16,13 @@ import pytest
 from scadbuddy.core.events import OrderItemChanged, PrintOutcome
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore
-from scadbuddy.orders.archives import attempt_archives, copy_in, mirror_archives, mirror_run
+from scadbuddy.orders.archives import (
+    attempt_archives,
+    copy_check,
+    copy_in,
+    mirror_archives,
+    mirror_run,
+)
 from scadbuddy.orders.integrations import (
     NOT_LINKED,
     ArchiveFacts,
@@ -26,6 +32,7 @@ from scadbuddy.orders.integrations import (
     ShelfSpool,
     SpoolGroup,
 )
+from scadbuddy.orders.lifecycle import FulfilmentInput, LifecycleError
 from scadbuddy.orders.models import Fulfilment, Order, OrderItem
 from scadbuddy.orders.printing import listen_for_prints
 from scadbuddy.orders.store import OrderStore
@@ -190,6 +197,56 @@ async def test_an_open_attempt_offers_its_archives_and_copies_nothing(
     assert after.archive_ids == [] and after.actual_seconds is None
 
 
+async def test_an_attempt_by_hand_copies_the_archive_it_names(shop: Shop) -> None:
+    """#4251: a print attached to the item from its own page."""
+    order, item = shop.accepted()
+    attempt = shop.lifecycle.record_fulfilment(
+        order.id,
+        item.id,
+        FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81),
+        BY,
+    )
+    assert attempt.archive_ids == [81] and attempt.print_run_id is None
+
+    read = await attempt_archives(
+        shop.lifecycle, Archives(facts(81)), order.id, item.id, attempt.id
+    )
+
+    assert [a.archive_id for a in read.archives] == [81]
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert (kept.archive_ids, kept.actual_seconds, kept.actual_grams) == ([81], 7200, 12.5)
+    assert kept.started_at == datetime(2026, 11, 1, 10, tzinfo=UTC)
+    await copy_check(shop.rows, Archives(facts(81)), order.id, item.id, attempt.id, 81)
+    with pytest.raises(ApiError):
+        await copy_check(shop.rows, Archives(facts(82)), order.id, item.id, attempt.id, 82)
+
+
+def test_a_hand_attempt_cannot_name_another_attempts_archive(shop: Shop, pool: PgPool) -> None:
+    """#5268 security review: naming an archive another order's print made would copy
+    that customer's photo and timelapse into this order."""
+    printed(shop, pool)
+    order, item = shop.accepted()
+    with pytest.raises(LifecycleError) as raised:
+        shop.lifecycle.record_fulfilment(
+            order.id, item.id, FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81), BY
+        )
+    assert raised.value.slug == "archive_claimed"
+    # Nor one another hand attempt already named.
+    shop.lifecycle.record_fulfilment(
+        order.id, item.id, FulfilmentInput(quantity=1, outcome="failed", archive_id=90), BY
+    )
+    other, other_item = shop.accepted()
+    with pytest.raises(LifecycleError):
+        shop.lifecycle.record_fulfilment(
+            other.id,
+            other_item.id,
+            FulfilmentInput(quantity=1, outcome="succeeded", archive_id=90),
+            BY,
+        )
+    # No attempt was recorded, so nothing of either archive can be copied there.
+    assert shop.rows.fulfilments(other_item.id) == []
+
+
 async def test_without_bambuddy_nothing_is_asked(shop: Shop, pool: PgPool) -> None:
     order, item, attempt, _ = printed(shop, pool)
     read = await attempt_archives(shop.lifecycle, NOT_LINKED, order.id, item.id, attempt.id)
@@ -226,9 +283,10 @@ async def test_the_finish_photo_and_timelapse_copy_into_the_items_files(
     # #5263: named from the facts already read, never by reading the archive again.
     assert seam.downloads[-1] == (81, "timelapse", "timelapse-81.avi")
     files = shop.rows.attachments(order.id)
-    assert [(a.role, a.kind, a.item_id) for a in files] == [
-        ("finished", "image", item.id),
-        ("timelapse", "video", item.id),
+    # #4251: on the attempt the archive came from, and so under its item.
+    assert [(a.role, a.kind, a.item_id, a.fulfilment_id) for a in files] == [
+        ("finished", "image", item.id, attempt.id),
+        ("timelapse", "video", item.id, attempt.id),
     ]
     assert files[0].caption == "Attempt 1, Bambuddy archive 81"
     assert files[0].filename == "finish_2_bb.jpg"
