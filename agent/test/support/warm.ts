@@ -77,6 +77,7 @@ export async function warmHarness(db: Throwaway, options: WarmHarnessOptions = {
     systemAppend: '',
     systemPromptBase: 'claude_code',
     toolSearch: 'off',
+    toolLoadings: [],
     disabledTools: [],
     raisedTiers: [],
     httpRequest: false,

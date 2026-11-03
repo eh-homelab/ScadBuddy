@@ -1,5 +1,6 @@
 import type { Sql, TransactionSql } from 'postgres'
 import { isUuid } from '../harness/stateDirs.js'
+import { TOOL_LOADING_KEY } from '../harness/toolSearch.js'
 import { isTurnKey } from './turnSettings.js'
 import type { WarmSessions } from './warm.js'
 
@@ -20,8 +21,8 @@ export const WARM_EVICT_CHANNEL = 'scadbuddy_warm_evict'
 /**
  * Whether a write to this Settings key changes what a warm process was spawned
  * with (sessions/turnRunner.ts `FingerprintParts`), so every cache is told
- * (`credentials.ts` SettingsStore): the model, the recall cap, tool search and the
- * system prompt. Tool access is in `ai_access`, whose writes send their own eviction
+ * (`credentials.ts` SettingsStore): the model, the recall cap, tool search, the
+ * tools' loadings and the system prompt. Tool access is in `ai_access`, whose writes send their own eviction
  * (`AccessStore.write`, `PluginStore.writeAccess`). The model and the recall cap are
  * named here by their strings, as credentials.ts is below the modules that export them
  * (test/warmEvict.pg.test.ts holds them together); the turn keys come from
@@ -32,7 +33,9 @@ export function evictsWarmOnWrite(key: string): boolean {
     key === 'model' ||
     key === 'memory_recall_max_query_chars' ||
     // Tool search and the system prompt (#5221, #5222): every key of turnSettings.ts.
-    isTurnKey(key)
+    isTurnKey(key) ||
+    // Each ScadBuddy tool's loading (#838): what the in-process server sends upfront.
+    key === TOOL_LOADING_KEY
   )
 }
 

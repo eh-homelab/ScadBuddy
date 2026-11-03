@@ -34,6 +34,20 @@ describe('capabilities mock (#2171)', () => {
     expect(summarize(after)).toBe('10 tools')
   })
 
+  it("keeps a ScadBuddy tool's loading across a reload, and refuses one on any other item (#838)", async () => {
+    const before = await aiCapabilities.source('builtin:scadbuddy')
+    expect(before.items.find((i) => i.id === 'list_models')).toMatchObject({ loading: 'base', default_loading: 'base' })
+    expect(before.items.find((i) => i.id === 'list_outputs')).toMatchObject({ loading: 'searchable', default_loading: 'searchable' })
+    await aiCapabilities.setLoading('builtin:scadbuddy', 'list_outputs', 'base')
+    reloadMockState()
+    const after = await aiCapabilities.source('builtin:scadbuddy')
+    expect(after.items.find((i) => i.id === 'list_outputs')!.loading).toBe('base')
+    const reset = await aiCapabilities.resetLoading('builtin:scadbuddy', 'list_outputs')
+    expect(reset.items.find((i) => i.id === 'list_outputs')!.loading).toBe('searchable')
+    expect((await aiCapabilities.source('builtin:claude-code')).items.every((i) => i.loading === null)).toBe(true)
+    await expect(aiCapabilities.setLoading('builtin:claude-code', 'Read', 'base')).rejects.toMatchObject({ status: 409 })
+  })
+
   it('lists a remote plugin after a refresh, recall at its stored read', async () => {
     expect((await aiCapabilities.source('remote:hindsight')).items.map((i) => [i.id, i.missing])).toEqual([['recall', true]])
     const { source } = await aiCapabilities.refresh('remote:hindsight')

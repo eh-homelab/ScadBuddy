@@ -96,6 +96,7 @@ describe.skipIf((!TEST_DATABASE_URL) || AGENT_SESSIONS_SKIP !== '')(`the warm ca
         systemAppend: '',
         systemPromptBase: 'claude_code',
         toolSearch: 'off',
+        toolLoadings: [],
         disabledTools: [],
         raisedTiers: [],
         httpRequest: false,

@@ -48,6 +48,15 @@ describe('registry projections', () => {
       const { 'anthropic/alwaysLoad': _load, ...meta } = _meta ?? {}
       return { ...rest, _meta: Object.keys(meta).length ? meta : undefined }
     }
+    // Settings → Tools & plugins' loadings (#838) move a tool in or out of the upfront set.
+    const loaded = await listVia(
+      createHarnessServer(ALL_TOOLS, svc, { id: 'browser', kind: 'browser', tiers: tiersUpTo('outward') }, undefined, undefined, undefined, undefined, {
+        list_models: 'searchable',
+        list_outputs: 'base',
+      }).instance,
+    )
+    const base = loaded.filter((t) => t._meta?.['anthropic/alwaysLoad'] === true).map((t) => t.name)
+    expect(base).toEqual([...[...UPFRONT_TOOLS].filter((n) => n !== 'list_models'), 'list_outputs'].sort())
     // The SDK's in-process tool has no top-level `title`; the label is in annotations.title on both.
     expect(inProcess.map(loading)).toEqual(external.map(({ title: _title, ...rest }) => rest))
     expect(external.map((t) => t.title)).toEqual(external.map((t) => ALL_TOOLS.find((x) => x.name === t.name)?.label))
