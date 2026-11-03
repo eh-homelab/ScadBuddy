@@ -4,7 +4,7 @@
  * confirmation line), a source's summary and the row filter. The declared default is never
  * a floor: every access of the kind is offered unless the agent narrows it (`allowed`).
  */
-import { ITEM_ACCESS, type Access, type ItemView, type SourceView } from '../../api/capabilities'
+import { ITEM_ACCESS, type Access, type ItemView, type Loading, type SourceView } from '../../api/capabilities'
 
 export const ACCESS_RANK: Record<Access, number> = { off: 0, read: 1, on: 1, write: 2, outward: 3 }
 
@@ -17,6 +17,16 @@ export function choicesOf(item: ItemView): { value: Access | 'default'; label: s
     label: value === item.default ? `${word(value)} (default)` : word(value),
   }))
   return item.default === null ? [{ value: 'default', label: 'By call (default)' }, ...choices] : choices
+}
+
+const LOADING_WORDS: Record<Loading, string> = { base: 'Sent every turn', searchable: 'Found by search' }
+
+/** The loading select's choices, the default marked (#838). */
+export function loadingChoices(item: ItemView): { value: Loading; label: string }[] {
+  return (['base', 'searchable'] as const).map((value) => ({
+    value,
+    label: value === item.default_loading ? `${LOADING_WORDS[value]} (default)` : LOADING_WORDS[value],
+  }))
 }
 
 /**

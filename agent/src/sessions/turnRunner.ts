@@ -42,6 +42,7 @@ import { event } from './protocol.js'
 import { scrubForLog } from './sdkEvents.js'
 import type { PostgresSessionStore } from './store.js'
 import { readRuntimeSettings, RUNTIME_DEFAULTS } from './runtimeSettings.js'
+import { readToolLoadings } from '../harness/toolSearch.js'
 import { readTurnSettings, TURN_DEFAULTS } from './turnSettings.js'
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
 import { type ProxiedTool, type ToolCallRequest, turnToolProxies } from '../tools/activityProjection.js'
@@ -118,6 +119,8 @@ export type FingerprintParts = {
   systemPromptBase: string
   /** Settings → Assistant → Runtime `tool_search` (#5221): ENABLE_TOOL_SEARCH and ToolSearch, in the process's env and tools. */
   toolSearch: string
+  /** Settings → Tools & plugins' stored loadings (#838, harness/toolSearch.ts), `<tool>=<loading>`: what the in-process server sends upfront. */
+  toolLoadings: string[]
   disabledTools: string[]
   /** Settings → Tools & plugins' raised tiers (#1953), `<harness name>=<tier>`, sorted. */
   raisedTiers: string[]
@@ -265,7 +268,7 @@ export class TurnRunner {
     model: 'model',
     effort: 'effort', // a Workflow agent's chat (background/workflowAgents.ts)
     agent: 'agentType', // its subagent definition, by name: the plugin's agents/<name>.md, fixed per image
-    mcpServers: 'tiers', // the in-process servers depend on the principal's tiers (and `owner`, `httpRequest`)
+    mcpServers: 'tiers', // the in-process servers depend on the principal's tiers (and `owner`, `httpRequest`, `toolLoadings`)
     pluginPaths: 'packageHashes',
     allowedPluginPaths: 'allowedPackageHashes',
     builtinTools: 'builtinTools',
@@ -536,7 +539,7 @@ export class TurnRunner {
           }
         }
       }
-      const [cwd, resume, settingModel, httpAccess, runtime, turnSettings] = await phase('session', () =>
+      const [cwd, resume, settingModel, httpAccess, runtime, turnSettings, loadings] = await phase('session', () =>
         Promise.all([
           ensureSessionDir(this.deps.paths, id),
           this.deps.store.exists(id),
@@ -544,6 +547,7 @@ export class TurnRunner {
           this.deps.httpRequest ? access.entry(BUILTIN_SOURCES.http, HTTP_TOOL) : undefined,
           this.deps.settings ? readRuntimeSettings(this.deps.settings) : undefined,
           this.deps.settings ? readTurnSettings(this.deps.settings) : TURN_DEFAULTS,
+          this.deps.settings ? readToolLoadings(this.deps.settings) : {},
         ]),
       )
       // Claude Code's task list in the session directory, so it moves with it (Step 9.6, stateDirs.ts).
@@ -708,6 +712,7 @@ export class TurnRunner {
                       ...(builtIn ? { builtIn } : {}),
                       ...(live ? { ledger } : {}),
                       ...(activities ? { activities } : {}),
+                      loadings,
                       // The turn's credentials and plugin tokens, which workspace_read redacts (#2329).
                       secrets: () => secrets,
                     })
@@ -806,6 +811,7 @@ export class TurnRunner {
         systemPromptBase: run.systemPromptBase ?? 'claude_code',
         // `unset`: ENABLE_TOOL_SEARCH left out and no ToolSearch (a run that names no mode).
         toolSearch: run.toolSearch ?? 'unset',
+        toolLoadings: Object.entries(loadings).map(([tool, loading]) => `${tool}=${loading}`),
         // Settings → Tools & plugins' disabled built-ins; each plugin's own are in its `plugins` entry.
         // And each local package server's tools set off (#4757).
         disabledTools: [...(builtIn?.disallowed ?? []), ...localOff],

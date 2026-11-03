@@ -155,6 +155,9 @@ describe('remote MCP plugins as capability sources', () => {
         allowed: null,
         fixed: null,
         reason: 'Off while "hs" is switched off',
+        // A remote plugin's tools take no loading (#838): only ScadBuddy's own do.
+        loading: null,
+        default_loading: null,
       },
       expect.objectContaining({ id: 'retain', label: 'retain', description: 'Stores a memory', suggested: null, access: 'off', own_access: 'outward' }),
     ])

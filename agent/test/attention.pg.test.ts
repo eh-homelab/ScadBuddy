@@ -1521,7 +1521,7 @@ describe.skipIf(!TEST_DATABASE_URL || AGENT_SESSIONS_SKIP !== '')(`attention req
     })
     const { turn } = await m.start(agentA, { origin: 'mcp', prompt: 'go' })
     await turn!.done
-    expect(extrasSeen).toEqual({ turnContext: expect.any(Function), secrets: expect.any(Function) })
+    expect(extrasSeen).toEqual({ turnContext: expect.any(Function), secrets: expect.any(Function), loadings: {} })
   })
 
   // #1333: the hub, the manager and the harness tools wired as main.ts wires them. A

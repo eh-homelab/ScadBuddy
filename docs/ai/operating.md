@@ -271,6 +271,15 @@ main on 2026-11-01:
     with the whole registry went from 334,793 bytes (283 tool definitions) to 47,990. A remote
     plugin's tools are deferred too: the forwarder marks each `_meta['anthropic/alwaysLoad']:
     false`, while the server keeps `alwaysLoad: true` so the first turn waits for it.
+  - Each ScadBuddy tool's loading (#838) is set in Settings → Tools & plugins beside its
+    access, not in this section: **Sent every turn** (`base`, `alwaysLoad`) or **Found by
+    search** (`searchable`). `UPFRONT_TOOLS` are `base` by default, every other tool
+    `searchable`; a searchable tool is still callable by name. Off is the tool's access. The
+    loadings are the `ai_settings` key `tool_loading` (only those that differ from the
+    default), written through `PUT`/`DELETE /api/v1/ai/capabilities/:source/items/:item/loading`
+    as audited settings writes; like the keys above, each turn reads them and a write evicts.
+    Only the in-process server's tools (`builtin:scadbuddy`, `builtin:browser`) take one so
+    far: plugin tools are #5239, tool belts #5240.
   - `system_prompt_base` (`claude_code` or `minimal`; default `claude_code`, #5222): Claude
     Code's preset (29,033 bytes of `system` on 2.1.310), or the SDK's one-line default with
     ScadBuddy's text after it (2,400 bytes).

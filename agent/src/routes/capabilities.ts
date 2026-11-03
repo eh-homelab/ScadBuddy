@@ -1,6 +1,6 @@
 import type { Context, Hono } from 'hono'
 import { z } from 'zod'
-import { Capabilities, CapabilityError, type CapabilityProvider } from '../access/capabilities.js'
+import { Capabilities, CapabilityError, type CapabilityProvider, settingsLoadingStore } from '../access/capabilities.js'
 import type { ToolListings } from '../access/listings.js'
 import { packageProvider } from '../access/packageProvider.js'
 import { builtInProviders, remoteProvider } from '../access/providers.js'
@@ -23,6 +23,8 @@ import { pluginTestDeps, testAndList } from './plugins.js'
 //   GET    /api/v1/ai/capabilities/:source/items/:item      the item with its schemas
 //   PUT    /api/v1/ai/capabilities/:source/items/:item      { access } sets it
 //   DELETE /api/v1/ai/capabilities/:source/items/:item      back to its default
+//   PUT    /api/v1/ai/capabilities/:source/items/:item/loading  { loading } base | searchable (#838)
+//   DELETE /api/v1/ai/capabilities/:source/items/:item/loading  its loading back to its default
 //   POST   /api/v1/ai/capabilities/:source/refresh          lists a remote plugin's or a package server's tools again
 //
 // A source or item id is one path segment, percent-encoded (`remote%3Ahs`,
@@ -37,6 +39,7 @@ const NOT_READY = 'the AI database is unreachable or its migrations have not app
 
 const SourceBody = z.strictObject({ enabled: z.boolean() })
 const ItemBody = z.strictObject({ access: z.enum(['off', 'read', 'write', 'outward', 'on']) })
+const LoadingBody = z.strictObject({ loading: z.enum(['base', 'searchable']) })
 
 /** No stored listings (no database for them): every remote source reads as never listed. */
 const NO_LISTINGS: Pick<ToolListings, 'get' | 'getMany'> = {
@@ -99,7 +102,9 @@ export const route: RouteModule = {
           })
           providers.push(provider)
         }
-        built = new Capabilities(providers)
+        // A ScadBuddy tool's loading (#838) is an ai_settings key, written as the other settings are.
+        const loadings = deps.settings && deps.aiSettings ? settingsLoadingStore(deps.settings, deps.aiSettings) : undefined
+        built = new Capabilities(providers, loadings)
       }
       return built
     }
@@ -161,6 +166,14 @@ export const route: RouteModule = {
 
     app.delete(item, (c) =>
       answer(c, (caps) => caps.resetItem(c.req.param('source'), c.req.param('item'), context(c))),
+    )
+
+    app.put(`${item}/loading`, (c) =>
+      answer(c, (caps, body) => caps.setLoading(c.req.param('source'), c.req.param('item'), body.loading, context(c)), LoadingBody),
+    )
+
+    app.delete(`${item}/loading`, (c) =>
+      answer(c, (caps) => caps.setLoading(c.req.param('source'), c.req.param('item'), null, context(c))),
     )
 
     // No body. One test or refresh per plugin at a time (plugins.ts `testAndList`): 429.

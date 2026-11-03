@@ -3,6 +3,7 @@ import type { Context } from '@opentelemetry/api'
 import { harnessPrincipal, hasTier, type Principal, TIERS } from '../auth/principal.js'
 import type { ApprovalPreparer, TierResolver } from '../harness/permissions.js'
 import type { CallApproval, SeamLedger } from '../harness/seamLedger.js'
+import type { ToolLoadings } from '../harness/toolSearch.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import { OWN_PLUGIN_NAME } from '../plugins/packages/vet.js'
 import type { TurnPrincipal } from '../sessions/manager.js'
@@ -50,6 +51,8 @@ export type HarnessTools = {
       ledger?: Pick<SeamLedger, 'tierOf'>
       /** The turn's calls as activities (plan 2026-10-13 Step 9.2): how each starts, and the entry it was approved on. */
       activities?: { start: ToolCallStarter; approvalOf: (toolUseId: string) => CallApproval | undefined }
+      /** Settings → Tools & plugins' stored loadings (#838): which tools are sent upfront. */
+      loadings?: ToolLoadings
     },
   ) => Record<string, McpSdkServerConfigWithInstance>
   /**
@@ -127,7 +130,7 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
           : withSecrets
       // The session id too, so its commits name it (authorship.ts, #252).
       // The turn's context, for a call whose span is not found (telemetry/trace.ts toolContextFor).
-      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal, session.id, extras?.turnContext, seamTierOf, extras?.activities) }
+      return { [SERVER_NAME]: createHarnessServer(allowed, bound, principal, session.id, extras?.turnContext, seamTierOf, extras?.activities, extras?.loadings) }
     },
   }
 }

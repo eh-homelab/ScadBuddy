@@ -1,4 +1,5 @@
 import type { AccessResolver } from '../access/resolver.js'
+import type { ToolLoadings } from '../harness/toolSearch.js'
 import type { nestedQueries } from '../builtins/nested.js'
 import type { BackgroundTasks } from '../background/service.js'
 import { randomUUID } from 'node:crypto'
@@ -642,6 +643,8 @@ export type SessionManagerDeps = {
       ledger?: Pick<SeamLedger, 'tierOf'>
       /** The turn's calls as activities (plan 2026-10-13 Step 9.2): how each starts, and the entry it was approved on. */
       activities?: { start: ToolCallStarter; approvalOf: (toolUseId: string) => CallApproval | undefined }
+      /** Settings → Tools & plugins' stored loadings (#838, harness/toolSearch.ts): which tools are sent upfront. */
+      loadings?: ToolLoadings
     },
   ) => Record<string, McpSdkServerConfigWithInstance>
   /**
