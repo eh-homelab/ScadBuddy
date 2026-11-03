@@ -456,6 +456,32 @@ describe('pricing tools (#4250)', () => {
     )
   })
 
+  it("reads an attempt's archives and copies one's finish photo with a key (#4253 §8.2)", async () => {
+    expect([tool('order_attempt_archives').risk, tool('order_attempt_copy').risk]).toEqual(['read', 'write'])
+    const keys: (string | null)[] = []
+    let body: unknown
+    const FILE = { id: 'a1', role: 'finished', kind: 'image' }
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/fulfilments/f1/archives`, () =>
+        HttpResponse.json({ linked: true, attempt: { id: 'f1' }, archives: [{ archive_id: 81, finish_photos: ['finish_1.jpg'], timelapse: false }] }),
+      ),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/fulfilments/f1/archives/81/copy`, async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        body = await request.json()
+        return HttpResponse.json(FILE)
+      }),
+    )
+    const read = await tool('order_attempt_archives').execute({ order_id: ORDER, item_id: ITEM, fulfilment_id: 'f1' }, ctx())
+    expect(firstText(read)).toMatchObject({ linked: true, archives: [{ archive_id: 81 }] })
+    const copied = await tool('order_attempt_copy').execute(
+      { order_id: ORDER, item_id: ITEM, fulfilment_id: 'f1', archive_id: 81, what: 'finished_photo' },
+      ctx(),
+    )
+    expect(firstText(copied)).toEqual(FILE)
+    expect(body).toEqual({ what: 'finished_photo' })
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+  })
+
   it('records a typed price in manual mode, and takes exactly one mode', async () => {
     let body: unknown
     server.use(

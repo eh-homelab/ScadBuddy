@@ -621,6 +621,62 @@ export const orderTools: Tool[] = [
       ),
   }),
   defineTool({
+    name: 'order_attempt_archives',
+    label: "Read an attempt's Bambuddy archives",
+    description:
+      "The Bambuddy archives of a print attempt's run (#4253, one per plate) and what each offers to copy: its " +
+      '`finish_photos` and whether it has a `timelapse`. Reading them copies what they say onto the attempt once ' +
+      'its print settled (`archive_ids`, the times, `actual_seconds`, `actual_grams`). `linked` is false without ' +
+      'Bambuddy; an attempt by hand, or one Bambuddy has not linked an archive to yet, has none.',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      fulfilment_id: ID.describe("A fulfilment attempt's id, as order_get lists an item's fulfilments"),
+    }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives'],
+    handler: async ({ order_id, item_id, fulfilment_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives', {
+            params: { path: { order_id, item_id, fulfilment_id } },
+          }),
+          `read attempt ${fulfilment_id}'s archives`,
+        ),
+      ),
+  }),
+  defineTool({
+    name: 'order_attempt_copy',
+    label: "Copy a print's photo or timelapse into an order",
+    description:
+      "Copy an attempt's Bambuddy archive's finish photo (`finished_photo`, its latest unless `name` names one of " +
+      "order_attempt_archives' `finish_photos`) or its `timelapse` into the line item's files (#4253), with the role " +
+      '`finished` or `timelapse`; the same bytes again answer with the file already there. Refused with ' +
+      '`not_linked`, `archive_not_attempts`, `archive_gone`, `no_finish_photo` and `no_timelapse` (pull it off the ' +
+      'printer first).',
+    input: z.object({
+      order_id: orderId,
+      item_id: itemId,
+      fulfilment_id: ID.describe("A fulfilment attempt's id, as order_get lists an item's fulfilments"),
+      archive_id: z.number().int().min(1).describe('One of order_attempt_archives\' archive ids'),
+      what: z.enum(['finished_photo', 'timelapse']),
+      name: z.string().max(255).optional().describe('A finish photo of the archive, for `finished_photo`'),
+    }),
+    risk: 'write',
+    routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives/{archive_id}/copy'],
+    title: ({ what, archive_id }) => `Copy archive ${archive_id}'s ${what === 'timelapse' ? 'timelapse' : 'finish photo'}`,
+    handler: async ({ order_id, item_id, fulfilment_id, archive_id, ...body }, ctx) =>
+      json(
+        await command(ctx, `copy archive ${archive_id}'s ${body.what}`, (headers) =>
+          ctx.backend.POST('/api/v1/orders/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives/{archive_id}/copy', {
+            params: { path: { order_id, item_id, fulfilment_id, archive_id } },
+            body,
+            headers,
+          }),
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_item_unfulfil',
     label: 'Undo a line item\'s fulfilment',
     description:
