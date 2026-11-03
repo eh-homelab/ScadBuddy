@@ -638,10 +638,13 @@ export class SessionDirectory {
       for (const stray of found.strays) await rm(stray, { recursive: true, force: true })
       out.strays = found.strays.length
       // A scratch tree that holds a file of the record's keeps that file: only its new files go.
+      const recorded = new Set([...base.keys()].map(scratchRoot).filter((root) => root !== undefined))
       for (const root of scratch) {
-        if ([...base.keys()].some((rel) => rel.startsWith(root + '/'))) {
-          for (const [rel, abs] of walked.files) if (rel.startsWith(root + '/') && !base.has(rel)) await rm(abs, { force: true })
-        } else await rm(path.join(dir, root), { recursive: true, force: true })
+        if (!recorded.has(root)) await rm(path.join(dir, root), { recursive: true, force: true })
+      }
+      for (const [rel, abs] of walked.files) {
+        const root = base.has(rel) ? undefined : scratchRoot(rel)
+        if (root !== undefined && recorded.has(root)) await rm(abs, { force: true })
       }
     }
     return out

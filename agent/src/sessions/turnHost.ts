@@ -100,8 +100,13 @@ import { type Placement, type SessionDirectory, watchCaps } from '../workspace/d
 // with the retryable ShuttingDown, which places the turn on another replica; a turn that ended
 // on its own in the grace (a reply, a refusal) keeps its end.
 
+/**
+ * What a restart may have lost of the working directory: a new file reaches the workspace only at a
+ * park or at the turn's end (the minute's write-back syncs only files it holds, #5140).
+ */
+const RESTARTED_FILES = 'New files in the working directory since the last wait for an answer may be missing; check before relying on them.'
 export const RESTARTED_PROMPT =
-  'The agent service restarted during this turn. Calls that were in flight are marked as interrupted; check before repeating any of them. Continue the task.'
+  `The agent service restarted during this turn. Calls that were in flight are marked as interrupted; check before repeating any of them. ${RESTARTED_FILES} Continue the task.`
 /**
  * The restart message when calls in flight had finished as ToolCall workflows (plan 2026-10-13 Step
  * 9.2): which ones, and whether each succeeded, so the model need not repeat them; the rest are still
@@ -115,7 +120,7 @@ export function restartedPrompt(finished: readonly FinishedCall[]): string {
     'The agent service restarted during this turn. These calls finished before the restart; do not repeat them:\n' +
     `${lines.join('\n')}\n` +
     `Read what one returned with the ${TOOL_CALL_RESULT_TOOL} tool, giving its call id. ` +
-    'Any other call that was in flight is marked as interrupted; check before repeating it. Continue the task.'
+    `Any other call that was in flight is marked as interrupted; check before repeating it. ${RESTARTED_FILES} Continue the task.`
   )
 }
 
