@@ -68,14 +68,24 @@ export class PushStore {
    * replaced. An owner keeps at most SUBSCRIPTIONS_PER_OWNER; past that the oldest go.
    */
   async subscribe(owner: Owner, endpoint: string, keys: Subscriber): Promise<string> {
-    const id = randomUUID()
     const secret = JSON.stringify({ p256dh: keys.p256dh.toString('base64url'), auth: keys.auth.toString('base64url') })
-    const sealed = sealSecret(this.#kek, secret, subscriptionAad(id, endpoint))
-    await this.#sql.begin(async (tx) => {
-      const [held] = await tx<{ owner_kind: string; owner_id: string }[]>`
-        SELECT owner_kind, owner_id FROM ai_push_subscriptions WHERE endpoint = ${endpoint} FOR UPDATE`
+    return this.#sql.begin(async (tx) => {
+      const [held] = await tx<{ id: string; owner_kind: string; owner_id: string }[]>`
+        SELECT id, owner_kind, owner_id FROM ai_push_subscriptions WHERE endpoint = ${endpoint} FOR UPDATE`
       if (held && (held.owner_kind !== owner.kind || held.owner_id !== owner.id)) throw new SubscriptionTakenError()
-      await tx`DELETE FROM ai_push_subscriptions WHERE endpoint = ${endpoint} AND owner_kind = ${owner.kind} AND owner_id = ${owner.id}`
+      if (held) {
+        // The same browser again (every shell mount PUTs it): the same id, so what was already
+        // pushed to it (ai_notifications_sent, `push:<id>`) is not pushed again. Its keys are
+        // re-sealed, in case the browser rotated them, and it counts as the newest.
+        const sealed = sealSecret(this.#kek, secret, subscriptionAad(held.id, endpoint))
+        await tx`
+          UPDATE ai_push_subscriptions SET owner_label = ${owner.label}, secret_sealed = ${sealed.secretSealed},
+                 dek_sealed = ${sealed.dekSealed}, kek_id = ${sealed.kekId}, created_at = now()
+           WHERE id = ${held.id}`
+        return held.id
+      }
+      const id = randomUUID()
+      const sealed = sealSecret(this.#kek, secret, subscriptionAad(id, endpoint))
       await tx`
         INSERT INTO ai_push_subscriptions (id, owner_kind, owner_id, owner_label, endpoint, secret_sealed, dek_sealed, kek_id)
         VALUES (${id}, ${owner.kind}, ${owner.id}, ${owner.label}, ${endpoint}, ${sealed.secretSealed}, ${sealed.dekSealed}, ${sealed.kekId})`
@@ -83,8 +93,8 @@ export class PushStore {
         DELETE FROM ai_push_subscriptions WHERE id IN (
           SELECT id FROM ai_push_subscriptions WHERE owner_kind = ${owner.kind} AND owner_id = ${owner.id}
            ORDER BY created_at DESC, id OFFSET ${SUBSCRIPTIONS_PER_OWNER})`
+      return id
     })
-    return id
   }
 
   /** Forgets `endpoint`, when `owner` stored it (or it is gone at the push service: `owner` left out). */

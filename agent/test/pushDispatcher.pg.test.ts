@@ -148,6 +148,21 @@ describe.skipIf(!TEST_DATABASE_URL)(`web push${TEST_DATABASE_URL ? '' : ` (skipp
     expect(browser.open(received[1]!.body)).toMatchObject({ request_id: 'question:2' })
   })
 
+  it('keeps the subscription id when the same browser subscribes again, so nothing is pushed twice', async () => {
+    const store = new PushStore(db.sql, KEK)
+    const browser = browserKeys()
+    const first = await store.subscribe(YOU, `${base}/push/one`, browser.keys)
+    const d = dispatcher(store, () => [notice('question:1'), notice('question:2')])
+    await d.pass()
+    // Every shell mount PUTs the subscription again (frontend webPush.ts enableWebPush).
+    expect(await store.subscribe(YOU, `${base}/push/one`, browser.keys)).toBe(first)
+    await d.pass()
+    expect(received.map((r) => browser.open(r.body))).toEqual([
+      expect.objectContaining({ request_id: 'question:1' }),
+      expect.objectContaining({ request_id: 'question:2' }),
+    ])
+  })
+
   it('sends one request once though two replicas pass at the same time', async () => {
     const store = new PushStore(db.sql, KEK)
     await store.subscribe(YOU, `${base}/push/one`, browserKeys().keys)
