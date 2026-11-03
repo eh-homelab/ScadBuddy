@@ -264,10 +264,15 @@ jobs:
             IFS=$'\t' read -r armed state head <<< "$view"
             if [ "$armed" != true ]; then outcome=unarmed; break; fi
             if [ "$state" = DIRTY ]; then outcome=conflict; break; fi
+            # BEHIND waits: clusters' ruleset does not require an up-to-date
+            # branch (strict_required_status_checks_policy false, 2026-11-03).
             # A run still going, or none started yet, means "keep waiting";
-            # a success too, until the merge. A failed read is not a failure.
-            failed=$(gh run list --commit "$head" --json conclusion \
-              --jq '[.[] | select(.conclusion | IN("failure", "cancelled", "timed_out", "startup_failure"))] | length' \
+            # a success too, until the merge. Only each workflow's newest run
+            # counts, so a duplicate cancelled by its newer run does not.
+            # A failed read is not a failure.
+            failed=$(gh run list --commit "$head" --json workflowName,conclusion,createdAt \
+              --jq 'group_by(.workflowName) | map(max_by(.createdAt))
+                | map(select(.conclusion | IN("failure", "cancelled", "timed_out", "startup_failure"))) | length' \
               || true)
             if [ "${failed:-0}" != 0 ]; then outcome=failed; break; fi
             echo "$(date -u +%H:%M:%S) waiting for #${pr} (${state}) to land"

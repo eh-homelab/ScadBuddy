@@ -7,10 +7,11 @@
 # the workflow with yq, against a fake `gh` on PATH, so the test cannot drift
 # from the code it covers. No network.
 #
-# A scenario is one line per poll: `<pr> <armed> <mergeStateStatus> <failed>`,
+# A scenario is one line per poll: `<pr> <armed> <mergeStateStatus> <runs>`,
 # or `none` for no open deploy PR, `err` for a list that fails, or `<pr> gone`
-# for a PR that merged between the list and the view; `<failed>` is how many
-# workflow runs on its head failed, or `err` for a read that fails. The fake
+# for a PR that merged between the list and the view; `<runs>` names a fixture
+# of the workflow runs on its head (below), or is `err` for a read that
+# fails. The fake
 # `gh` answers each `gh pr list` with the next line (the last one again once
 # they run out), and `gh pr view` and `gh run list` with that line's fields.
 #
@@ -47,13 +48,30 @@ case "$1 $2" in
     printf '%s\t%s\t%s\n' "$armed" "$state" "$(printf 'a%.0s' {1..40})" ;;
   "run list")
     [[ " $* " == *" --commit $(printf 'a%.0s' {1..40}) "* ]] || { echo "no head sha: $*" >> "$FAKE/bad"; exit 2; }
-    read -r _ _ _ failed <<< "$(line)"
-    if [ "$failed" = err ]; then echo "HTTP 502" >&2; exit 1; fi
-    echo "$failed" ;;
+    read -r _ _ _ runs <<< "$(line)"
+    if [ "$runs" = err ]; then echo "HTTP 502" >&2; exit 1; fi
+    # The step's own --jq, applied to the fixture's runs as gh would.
+    filter=""
+    while [ $# -gt 0 ]; do
+      if [ "$1" = --jq ]; then filter=$2; fi
+      shift
+    done
+    jq -r "$filter" "$FAKE/../runs/$runs.json" ;;
   *) echo "unexpected: $*" >> "$FAKE/bad"; exit 2 ;;
 esac
 EOF
 chmod +x "$work/bin/gh"
+
+# What `gh run list --json workflowName,conclusion,createdAt` returns.
+mkdir -p "$work/runs"
+echo '[{"workflowName":"CI","conclusion":"","createdAt":"2026-11-03T10:00:00Z"}]' > "$work/runs/running.json"
+echo '[{"workflowName":"CI","conclusion":"success","createdAt":"2026-11-03T10:00:00Z"}]' > "$work/runs/passed.json"
+echo '[{"workflowName":"CI","conclusion":"failure","createdAt":"2026-11-03T10:00:00Z"}]' > "$work/runs/failed.json"
+# A duplicate run cancelled by a newer one of the same workflow, still going.
+cat > "$work/runs/rerun.json" <<'EOF'
+[{"workflowName":"CI","conclusion":"","createdAt":"2026-11-03T10:05:00Z"},
+ {"workflowName":"CI","conclusion":"cancelled","createdAt":"2026-11-03T10:00:00Z"}]
+EOF
 
 export DEPLOY_BRANCH=deploy/scadbuddy
 export POLL_SECONDS=0
@@ -100,16 +118,16 @@ EOF
 # The case #5168 is about: checks still running. The old step closed the PR
 # at once; now it waits until the PR has merged.
 run lands-after-checks 3600 none 4 <<'EOF'
-42 true BLOCKED 0
+42 true BLOCKED running
 42 true BLOCKED err
-42 true CLEAN 0
+42 true CLEAN passed
 none
 EOF
 
 # A transient failure of the list is retried, not a failed deploy.
 run list-fails-once 3600 none 3 <<'EOF'
 err
-42 true BLOCKED 0
+42 true BLOCKED running
 none
 EOF
 
@@ -119,26 +137,39 @@ none
 EOF
 
 run checks-failed 3600 failed 2 <<'EOF'
-42 true BLOCKED 0
-42 true BLOCKED 1
+42 true BLOCKED running
+42 true BLOCKED failed
+EOF
+
+# Only each workflow's newest run counts: a duplicate its newer run
+# cancelled does not close a PR about to merge.
+run cancelled-duplicate 3600 none 2 <<'EOF'
+42 true BLOCKED rerun
+none
+EOF
+
+# Every run passed but the PR stays BLOCKED (a required check the App cannot
+# read, say): it waits out the deadline, never reported as failed.
+run blocked-after-success 1 timeout any <<'EOF'
+42 true BLOCKED passed
 EOF
 
 run auto-merge-off 3600 unarmed 1 <<'EOF'
-42 false BLOCKED 0
+42 false BLOCKED running
 EOF
 
 run conflict 3600 conflict 1 <<'EOF'
-42 true DIRTY 0
+42 true DIRTY running
 EOF
 
 run still-open-after-the-wait 1 timeout any <<'EOF'
-42 true BLOCKED 0
+42 true BLOCKED running
 EOF
 
 # The deadline is checked before any read: the watch token expires an hour
 # after it is minted, and a read past that would fail the step.
 run no-read-past-the-deadline 0 timeout 0 <<'EOF'
-42 true BLOCKED 0
+42 true BLOCKED running
 EOF
 
 if [ "$failures" -gt 0 ]; then
