@@ -1,6 +1,6 @@
 import { Context } from '@temporalio/activity'
 import { createHash } from 'node:crypto'
-import type { SessionFiles } from '../workspace/store.js'
+import { type SessionFiles, workspacePath } from '../workspace/store.js'
 import { type SessionDirectory, watchCaps } from '../workspace/directory.js'
 import type { HarnessPaths } from '../harness/options.js'
 import { ensureSessionDir } from '../harness/stateDirs.js'
@@ -106,19 +106,39 @@ export type BackgroundActivityDeps = {
   workspace?: Pick<SessionFiles, 'read'> | undefined
 }
 
-/** The root a Workflow's scriptPath names workspace files under (the workspace_* tools' paths, relative to it). */
-export const WORKSPACE_ROOT = '/workspace'
+/** The root an earlier build's Workflow named its script under (`/workspace/<workspace path>`), still read. */
+const LEGACY_ROOT = '/workspace/'
 
-/** Where a Workflow's script is kept in the session workspace, for scriptPath (Claude Code keeps it in its session dir). */
+/**
+ * Where a Workflow's script is kept, as a workspace path (Claude Code keeps it in its session
+ * dir): in the session's working directory, `<dir>/<this>`, where Claude Code's own Read and
+ * Edit reach it (harness/confine.ts), and in the record once a write-back took it (#5162).
+ */
 export function workflowScriptPath(name: string, taskId: string): string {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'workflow'
-  return `${WORKSPACE_ROOT}/_claude/workflows/${slug}-wf_${taskId}.js`
+  return `_claude/workflows/${slug}-wf_${taskId}.js`
 }
 
-/** A workspace file's path relative to its root, or undefined when it is not under it. */
-export function workspaceRelative(p: string): string | undefined {
-  const prefix = `${WORKSPACE_ROOT}/`
-  return p.startsWith(prefix) ? p.slice(prefix.length) : undefined
+/**
+ * A Workflow scriptPath's workspace path, or undefined: a path relative to the session's working
+ * directory, one in it (`<root>/<session id>/…`, on whichever pod named it: workspace/directory.ts
+ * `sessionDirOf`), or an earlier build's `/workspace/…`. Checked as a workspace path, so no `..`.
+ */
+export function workspaceRelative(p: string, sessionId: string): string | undefined {
+  let rel: string | undefined
+  if (p.startsWith(LEGACY_ROOT)) rel = p.slice(LEGACY_ROOT.length)
+  else if (!p.startsWith('/')) rel = p
+  else {
+    const marker = `/${sessionId.toLowerCase()}/`
+    const at = p.indexOf(marker)
+    rel = at < 0 ? undefined : p.slice(at + marker.length)
+  }
+  if (rel === undefined) return undefined
+  try {
+    return workspacePath(rel)
+  } catch {
+    return undefined
+  }
 }
 
 /** Claude Code's notice of a Workflow's end (measured on 2.1.296), with this session's diagnostics. */
@@ -424,8 +444,9 @@ export function backgroundActivities(deps: BackgroundActivityDeps) {
         phase: (title) => progress(`phase: ${title}`),
         log: (message) => progress(message),
         script: async (scriptPath) => {
-          const rel = workspaceRelative(scriptPath)
-          if (!rel || !deps.workspace) throw new Error(`no workflow script at ${scriptPath}: give a path under ${WORKSPACE_ROOT}`)
+          // A worker of any pod: the record's copy, which a native edit reaches at its turn's write-back.
+          const rel = workspaceRelative(scriptPath, t.sessionId)
+          if (!rel || !deps.workspace) throw new Error(`no workflow script at ${scriptPath}: give a path in the session's working directory`)
           const file = await deps.workspace.read({ kind: 'session', sessionId: t.sessionId }, rel)
           if (!file) throw new Error(`no workflow script at ${scriptPath}`)
           return (await readScript(file.bytes.toString('utf8'))).body

@@ -6,6 +6,7 @@ import type { BuiltinResult } from './result.js'
 import { type WebContext, webFetch, webSearch } from './web.js'
 import { type BackgroundContext, cronCreate, cronDelete, cronList, monitor, scheduleWakeup, taskStop, workflow } from './background.js'
 import { MAX_ACTIVE } from '../background/store.js'
+import { WORKFLOW_SCRIPT_MAX } from '../background/workflowScript.js'
 import { CALL_ID_META } from './callId.js'
 
 // The built-ins the session provides in place of Claude Code's (#2393): WebFetch,
@@ -113,7 +114,7 @@ export const BUILTINS: Record<string, Builtin> = {
       "opts.schema returning a checked object. Date.now(), new Date() and Math.random() throw. Run it only when the user asked " +
       'for a workflow or multi-agent orchestration in their own words.',
     input: z.object({
-      script: z.string().max(524_288).optional(),
+      script: z.string().max(WORKFLOW_SCRIPT_MAX).optional(),
       scriptPath: z.string().optional(),
       name: z.string().optional(),
       args: z.unknown().optional(),

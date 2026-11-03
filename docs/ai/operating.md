@@ -1170,8 +1170,13 @@ activity after its worker died, and `resumeFromRunId`, answer the calls already 
 Every child chat a run starts is recorded (`ai_workflow_children`); an attempt first ends
 (interrupts and marks done) the ones an earlier attempt left open and no journal row names,
 since a worker that died never ran its agents' cleanup (#3395).
-The script is kept in the workspace (`/workspace/_claude/workflows/<name>-wf_<id>.js`),
-which `scriptPath` and `workflow({scriptPath})` read. Its end is Claude Code's
+The script is kept at `_claude/workflows/<name>-wf_<id>.js` in the session's working
+directory, the path the model is told (Claude Code's own Read and Edit reach it there),
+which the turn's write-back records in the workspace; without a working directory, in the
+workspace itself (#5162). `scriptPath` reads the directory's copy first, then the
+workspace's; `workflow({scriptPath})` inside a script runs on any worker and reads the
+workspace's, so it sees a native edit once its turn wrote it back. A path relative to the
+directory and an earlier build's `/workspace/…` are read too. Its end is Claude Code's
 `<task-notification>`, sent as a monitor's events are.
 `PushNotification` is not provided yet, and the session says so. Skill shell injection
 is off (`disableSkillShellExecution`, `harness/options.ts`) except for an allowed
