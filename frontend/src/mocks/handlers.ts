@@ -787,7 +787,7 @@ function sniffAsset(bytes: ArrayBuffer): Asset['kind'] | undefined {
   return new TextDecoder().decode(head).includes('<svg') ? 'svg' : undefined
 }
 
-export const ASSET_REFUSAL = 'only SVG and PNG files can be attached'
+export const ASSET_REFUSAL = 'only SVG, PNG, STL, 3MF and OBJ files can be attached'
 
 /**
  * What `POST /models/{slug}/assets` does with a file, exported so a jsdom test can

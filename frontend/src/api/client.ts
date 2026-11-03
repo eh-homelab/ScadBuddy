@@ -1479,6 +1479,10 @@ export const api = {
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
 
+  /** A PNG of an uploaded STL, 3MF or OBJ (#959); an image is its own picture. */
+  assetPreviewUrl: (slug: string, id: string) =>
+    `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/preview`,
+
   /**
    * A sample file the template ships beside its source (a `file` parameter's
    * `samples`), at `version` when customizing an older revision.

@@ -548,10 +548,11 @@ export const customizerTools: Tool[] = [
 
   defineTool({
     name: 'upload_asset',
-    label: 'Upload an image for a parameter',
+    label: 'Upload a file for a parameter',
     description:
-      'Upload an SVG or PNG for a `// file` parameter. Returns its asset id, the value to pass ' +
-      'for that parameter. SVGs are sanitised and PNGs downscaled by the backend.' +
+      'Upload an SVG, PNG, STL, 3MF or OBJ for a `// file` parameter (one whose `accept` names the kind). ' +
+      'Returns its asset id, the value to pass for that parameter. SVGs are sanitised, PNGs downscaled, and ' +
+      'a mesh is stored as its triangles alone (at most 500,000; a 3MF of exactly one object).' +
       FROM_WORKSPACE_ONLY,
     input: z
       .object({
@@ -571,8 +572,7 @@ export const customizerTools: Tool[] = [
     handler: async ({ slug, filename, workspace_path, workspace_sha256 }, ctx) => {
       const info = await workspaceFile(ctx, { path: workspace_path, sha256: workspace_sha256 }, 'upload_asset')
       const name = filename ?? uploadName(info.path)
-      const type =
-        filename === undefined ? info.mediaType : name.toLowerCase().endsWith('.svg') ? 'image/svg+xml' : 'image/png'
+      const type = filename === undefined ? info.mediaType : (UPLOAD_TYPES[name.split('.').pop()?.toLowerCase() ?? ''] ?? 'image/png')
       const answer = await command(ctx, `upload ${name}`, (headers) =>
         ctx.backend.POST('/api/v1/models/{slug}/assets', {
           params: { path: { slug } },
@@ -589,9 +589,9 @@ export const customizerTools: Tool[] = [
   // or redirect, off the allowlist the user keeps in Settings (#844).
   defineTool({
     name: 'fetch_asset',
-    label: 'Fetch an image from a URL for a parameter',
+    label: 'Fetch a file from a URL for a parameter',
     description:
-      'Fetch an SVG or PNG from an https URL into a model, for a `// file` parameter. The backend fetches it, ' +
+      'Fetch an SVG, PNG, STL, 3MF or OBJ from an https URL into a model, for a `// file` parameter. The backend fetches it, ' +
       "so this needs a human approval, and only from a domain on the user's allowlist (Settings); any other " +
       'host is refused unless you name it as `allow_host` and a person approves that one fetch. Returns the asset id (the value for the parameter), its source_url and licence. ' +
       "The backend credits the source and licence in the model's README (its Credits section), so do not " +
@@ -603,7 +603,7 @@ export const customizerTools: Tool[] = [
         .url()
         .max(2048)
         .refine(plainFetchUrl, 'must be a plain https URL: no backslash, user name, password or control character')
-        .describe('A direct https link to the .svg or .png file'),
+        .describe('A direct https link to the .svg, .png, .stl, .3mf or .obj file'),
       licence: z
         .object({
           spdx: z.string().max(100).optional().describe('SPDX id, e.g. "CC-BY-4.0"'),
@@ -692,20 +692,34 @@ export const customizerTools: Tool[] = [
   defineTool({
     name: 'get_asset',
     label: 'Read an uploaded file',
-    description: "An uploaded file's metadata and, with `include_content`, the image itself.",
+    description: "An uploaded file's metadata and, with `include_content`, the image itself (a mesh's picture: its preview PNG).",
     input: z.object({
       slug,
       asset_id: z.string().regex(/^[0-9a-f]{64}$/),
       include_content: z.boolean().default(false),
     }),
     risk: 'read',
-    routes: ['GET /api/v1/models/{slug}/assets/{asset_id}', 'GET /api/v1/models/{slug}/assets/{asset_id}/content'],
+    routes: [
+      'GET /api/v1/models/{slug}/assets/{asset_id}',
+      'GET /api/v1/models/{slug}/assets/{asset_id}/content',
+      'GET /api/v1/models/{slug}/assets/{asset_id}/preview',
+    ],
     handler: async ({ slug, asset_id, include_content }, ctx) => {
       const path = { slug, asset_id }
-      const meta = json(
-        await ok(ctx.backend.GET('/api/v1/models/{slug}/assets/{asset_id}', { params: { path } }), `get asset ${asset_id}`),
-      )
+      const stored = await ok(ctx.backend.GET('/api/v1/models/{slug}/assets/{asset_id}', { params: { path } }), `get asset ${asset_id}`)
+      const meta = json(stored)
       if (!include_content) return meta
+      if (MESH_KINDS.has(stored.kind)) {
+        // A mesh's bytes are no image: its picture is the backend's preview (#959).
+        const preview = await binary(
+          ctx.backend.GET('/api/v1/models/{slug}/assets/{asset_id}/preview', { params: { path }, parseAs: 'stream' }),
+          `get asset preview ${asset_id}`,
+          ctx,
+          { path: `/api/v1/models/${slug}/assets/${asset_id}/preview`, name: `asset-${asset_id}.png`, fallbackType: 'image/png' },
+          imageOrText,
+        )
+        return { content: [...meta.content, ...preview.content] }
+      }
       const content = await binary(
         ctx.backend.GET('/api/v1/models/{slug}/assets/{asset_id}/content', { params: { path }, parseAs: 'stream' }),
         `get asset content ${asset_id}`,
@@ -741,6 +755,18 @@ export const customizerTools: Tool[] = [
       ),
   }),
 ]
+
+/** An upload's type by its name's extension, when the call names one (the backend sniffs the bytes). */
+const UPLOAD_TYPES: Record<string, string> = {
+  svg: 'image/svg+xml',
+  png: 'image/png',
+  stl: 'model/stl',
+  '3mf': 'model/3mf',
+  obj: 'model/obj',
+}
+
+/** The asset kinds that are meshes (#959): their picture is `/preview`, never their bytes. */
+const MESH_KINDS = new Set<string>(['stl', '3mf', 'obj'])
 
 /**
  * A URL the backend and this process parse alike (#959): one with a backslash, a user

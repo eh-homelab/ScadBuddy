@@ -2185,6 +2185,19 @@ describe('binary results: inline under the cap, a link over it', () => {
     expect(large.isError).toBeFalsy()
     expect(large.content.map((c) => c.type)).toEqual(['text', 'resource_link', 'text'])
   })
+
+  it("get_asset with content: a mesh's picture is its preview, never its bytes (#959)", async () => {
+    const asset = 'c'.repeat(64)
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}`, () => HttpResponse.json({ id: asset, kind: 'stl', triangles: 12 })),
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/content`, () => HttpResponse.json({}, { status: 500 })),
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/preview`, () =>
+        new HttpResponse(new Uint8Array(4), { headers: { 'content-type': 'image/png' } }),
+      ),
+    )
+    const answer = await runTool(tool('get_asset'), { slug: 'box', asset_id: asset, include_content: true }, ctx({ maxInlineBytes: 16 }))
+    expect(answer.content.map((c) => c.type)).toEqual(['text', 'text', 'image'])
+  })
 })
 
 describe("tools for #324's routes", () => {
