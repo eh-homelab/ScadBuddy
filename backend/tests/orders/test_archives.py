@@ -221,6 +221,59 @@ async def test_an_attempt_by_hand_copies_the_archive_it_names(shop: Shop) -> Non
         await copy_check(shop.rows, Archives(facts(82)), order.id, item.id, attempt.id, 82)
 
 
+async def test_a_hand_attempts_archive_without_facts_keeps_corrected_times(shop: Shop) -> None:
+    """#5273: an archive with no time or grams leaves no sign it was copied, which once
+    made every read copy the times again over one a person corrected."""
+    order, item = shop.accepted()
+    attempt = shop.lifecycle.record_fulfilment(
+        order.id,
+        item.id,
+        FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81),
+        BY,
+    )
+    seam = Archives(facts(81, actual_seconds=None, grams=None))
+    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id)
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert kept.finished_at == datetime(2026, 11, 1, 12, tzinfo=UTC)
+    corrected = datetime(2026, 11, 1, 14, tzinfo=UTC)
+    with shop.rows.transaction() as conn:
+        shop.rows.update_fulfilment(conn, attempt.id, finished_at=corrected)
+    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id)
+    assert shop.rows.fulfilments(item.id)[0].finished_at == corrected
+
+
+async def test_an_archive_named_by_hand_is_not_a_later_runs(shop: Shop, pool: PgPool) -> None:
+    """#5273: an archive named by hand before Bambuddy linked it to an order's run stays
+    the hand attempt's only: the run's attempt neither copies it nor offers its media."""
+    order, item = shop.accepted()
+    hand = shop.lifecycle.record_fulfilment(
+        order.id,
+        item.id,
+        FulfilmentInput(quantity=1, outcome="succeeded", archive_id=81),
+        BY,
+    )
+    other, other_item = shop.accepted()
+    run_id = run_row(pool)
+    started(shop, other, other_item, run_id)
+    link(pool, run_id, 51, 81)
+    link(pool, run_id, 52, 82)
+    settle(pool, run_id, "finished")
+    attempt = shop.lifecycle.follow_print(run_id)
+    assert attempt is not None
+
+    seam = Archives(facts(81), facts(82, actual_seconds=600, grams=2.5))
+    read = await attempt_archives(shop.lifecycle, seam, other.id, other_item.id, attempt.id)
+
+    assert [a.archive_id for a in read.archives] == [82]
+    kept = shop.rows.fulfilments(other_item.id)[0]
+    assert (kept.archive_ids, kept.actual_seconds, kept.actual_grams) == ([82], 600, 2.5)
+    with pytest.raises(ApiError):
+        await copy_check(shop.rows, seam, other.id, other_item.id, attempt.id, 81)
+    # The hand attempt still has it.
+    await copy_check(shop.rows, seam, order.id, item.id, hand.id, 81)
+    assert shop.rows.fulfilments(item.id)[0].archive_ids == [81]
+
+
 def test_a_hand_attempt_cannot_name_another_attempts_archive(shop: Shop, pool: PgPool) -> None:
     """#5268 security review: naming an archive another order's print made would copy
     that customer's photo and timelapse into this order."""

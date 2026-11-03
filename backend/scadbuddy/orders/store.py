@@ -1269,15 +1269,37 @@ class OrderStore:
 
     def run_archives(self, run_id: str, *, conn: Conn | None = None) -> list[int]:
         """The Bambuddy archives a print run's queue items made (§8.2): ``print_sends``
-        by the run, then ``print_links`` by queue item, oldest first."""
+        by the run, then ``print_links`` by queue item, oldest first. One an attempt not
+        of this run names is that attempt's (#5273: named by hand before Bambuddy linked
+        it), and left out."""
         with self._read(conn) as c:
             rows = c.execute(
                 "SELECT l.archive_id, min(l.first_seen) AS seen FROM print_sends s"
                 " JOIN print_links l ON l.subject = s.subject AND l.queue_item_id = s.queue_item_id"
-                " WHERE s.run_id = %s GROUP BY l.archive_id ORDER BY seen, l.archive_id",
-                (run_id,),
+                " WHERE s.run_id = %(run)s AND NOT EXISTS (SELECT 1 FROM order_item_fulfilments f"
+                "  WHERE l.archive_id = ANY(f.archive_ids)"
+                "  AND f.print_run_id IS DISTINCT FROM %(run)s)"
+                " GROUP BY l.archive_id ORDER BY seen, l.archive_id",
+                {"run": run_id},
             ).fetchall()
         return [int(row["archive_id"]) for row in rows]
+
+    def archives_named_elsewhere(
+        self, conn: Conn, attempt_id: str, archive_ids: Sequence[int]
+    ) -> list[int]:
+        """Of ``archive_ids``, those an attempt other than ``attempt_id`` names, asked
+        under :meth:`archive_claimed`'s lock on each, so a hand attempt naming one cannot
+        commit between this and the caller's write (#5273)."""
+        for archive_id in sorted(set(archive_ids)):
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext('order_archive'), %s)", (archive_id,)
+            )
+        rows = conn.execute(
+            "SELECT DISTINCT a FROM order_item_fulfilments f, unnest(f.archive_ids) a"
+            " WHERE f.id <> %s AND a = ANY(%s) ORDER BY a",
+            (attempt_id, list(archive_ids)),
+        ).fetchall()
+        return [int(row["a"]) for row in rows]
 
     def set_archive_facts(
         self,
@@ -1294,14 +1316,11 @@ class OrderStore:
         the order's lock (``Lifecycle.record_archive_facts``). The times are written by the first
         copy only, and one the archives do not give stays as the print path recorded it,
         so a time a person corrected since (``PATCH``) is never put back. An attempt
-        recorded naming its archive (#4251) has its ids before its first copy, which is
-        told by no facts copied yet."""
-        first = (
-            "(archive_ids = '{}' OR (print_run_id IS NULL"
-            " AND actual_seconds IS NULL AND actual_grams IS NULL))"
-        )
+        recorded naming its archive (#4251) has its ids before its first copy, so the
+        first is told by ``archive_copied`` (#5273), never by the facts copied."""
+        first = "NOT archive_copied"
         row = conn.execute(
-            "UPDATE order_item_fulfilments SET archive_ids = %s,"
+            "UPDATE order_item_fulfilments SET archive_ids = %s, archive_copied = true,"
             # The times only on the first copy: one a person corrected since stands.
             f" started_at = CASE WHEN {first} THEN coalesce(%s, started_at)"
             "  ELSE started_at END,"

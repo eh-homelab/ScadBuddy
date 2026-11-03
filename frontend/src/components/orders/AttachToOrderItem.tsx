@@ -11,6 +11,8 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { refusalText } from './refusal'
 
+/** Orders asked for at a time. */
+const PAGE = 100
 /** An accepted order still being made: its items take attempts. */
 const IN_WORK = new Set<Order['status']>(['accepted', 'in_production', 'ready'])
 /** An item an attempt may be recorded for (`orders/lifecycle.py` `FULFILLABLE`). */
@@ -30,7 +32,10 @@ function outcomeOf(status: string): FulfilmentInput['outcome'] {
  */
 export function AttachToOrderItem({ open, archiveId, printStatus, onClose }: { open: boolean; archiveId: number; printStatus: string; onClose: () => void }) {
   const outcome = outcomeOf(printStatus)
-  const orders = useAsync(() => (open ? api.orders(DEFAULT_ORDERS_QUERY, { limit: 100 }) : Promise.resolve({ items: [] as Order[], next_cursor: null })), [open])
+  // #5273: searched (number, notes, customer) and paged, so no order is out of reach.
+  const [search, setSearch] = useState('')
+  const [found, setFound] = useState<{ orders: Order[]; next: string | null } | null>(null)
+  const [more, setMore] = useState(false)
   const [orderId, setOrderId] = useState('')
   const detail = useAsync(() => (orderId ? api.order(orderId) : Promise.resolve(undefined)), [orderId])
   const [itemId, setItemId] = useState('')
@@ -38,11 +43,54 @@ export function AttachToOrderItem({ open, archiveId, printStatus, onClose }: { o
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<{ order: Order; itemId: string } | null>(null)
-  const choices = (orders.data?.items ?? []).filter((o) => IN_WORK.has(o.status))
+  const choices = (found?.orders ?? []).filter((o) => IN_WORK.has(o.status))
+  // The order chosen stays offered while a search shows others.
+  const chosen = detail.data?.order
+  if (chosen && chosen.id === orderId && !choices.some((o) => o.id === chosen.id)) choices.unshift(chosen)
   const items = (detail.data?.items ?? []).filter((i) => i.reference !== null && OPEN_ITEM.has(i.status))
 
   useEffect(() => {
+    if (!open) return
+    let live = true
+    setFound(null)
+    const timer = setTimeout(
+      () => {
+        api.orders({ ...DEFAULT_ORDERS_QUERY, q: search.trim() }, { limit: PAGE }).then(
+          (page) => live && setFound({ orders: page.items, next: page.next_cursor }),
+          (err: unknown) => {
+            if (!live) return
+            setFound({ orders: [], next: null })
+            setError(refusalText(err))
+          },
+        )
+      },
+      search ? 250 : 0,
+    )
+    return () => {
+      live = false
+      clearTimeout(timer)
+    }
+  }, [open, search])
+
+  async function loadMore() {
+    const cursor = found?.next
+    if (!cursor) return
+    setMore(true)
+    try {
+      const page = await api.orders({ ...DEFAULT_ORDERS_QUERY, q: search.trim() }, { limit: PAGE, cursor })
+      // Only onto the list it continues: a search typed meanwhile has its own.
+      setFound((prev) => (prev && prev.next === cursor ? { orders: [...prev.orders, ...page.items], next: page.next_cursor } : prev))
+    } catch (err) {
+      setError(refusalText(err))
+    } finally {
+      setMore(false)
+    }
+  }
+
+  useEffect(() => {
     if (!open) {
+      setSearch('')
+      setFound(null)
       setOrderId('')
       setItemId('')
       setError(null)
@@ -86,6 +134,10 @@ export function AttachToOrderItem({ open, archiveId, printStatus, onClose }: { o
         ) : (
           <div className="flex flex-col gap-3">
             <div className="flex flex-col gap-1">
+              <Label htmlFor="attach-search">Search orders</Label>
+              <Input id="attach-search" type="search" placeholder="Number, customer or notes" value={search} onChange={(e) => setSearch(e.target.value)} />
+            </div>
+            <div className="flex flex-col gap-1">
               <Label htmlFor="attach-order">Order</Label>
               <Select
                 value={orderId}
@@ -95,7 +147,7 @@ export function AttachToOrderItem({ open, archiveId, printStatus, onClose }: { o
                 }}
               >
                 <SelectTrigger id="attach-order" aria-label="Order">
-                  <SelectValue placeholder={orders.loading ? 'Loading…' : choices.length ? 'Choose an order' : 'No order in production'} />
+                  <SelectValue placeholder={found === null ? 'Loading…' : choices.length ? 'Choose an order' : 'No order in production'} />
                 </SelectTrigger>
                 <SelectContent position="popper">
                   {choices.map((o) => (
@@ -105,6 +157,11 @@ export function AttachToOrderItem({ open, archiveId, printStatus, onClose }: { o
                   ))}
                 </SelectContent>
               </Select>
+              {found?.next && (
+                <Button type="button" variant="link" size="sm" className="self-start px-0" disabled={more} onClick={() => void loadMore()}>
+                  More orders
+                </Button>
+              )}
             </div>
             {orderId && (
               <div className="flex flex-col gap-1">
