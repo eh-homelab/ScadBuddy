@@ -164,7 +164,7 @@ export function SessionRuntimeSetting() {
             </p>
             <Collapsible className="text-xs text-muted-foreground">
               <CollapsibleTrigger asChild>
-                <Button type="button" variant="link" size="xs" className="h-auto px-0">
+                <Button type="button" variant="link" size="sm" className="px-0">
                   ScadBuddy&apos;s part (always included)
                 </Button>
               </CollapsibleTrigger>
