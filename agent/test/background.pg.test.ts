@@ -268,15 +268,25 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     const relative = await call('Workflow', { scriptPath: rel })
     expect((await store.get(/Task ID: ([0-9a-f]{8})/.exec(relative.text)![1]!))?.spec.body).toBe("\nreturn await agent('look harder')")
 
+    // Only a path in this session's own directory: the same session id under another root is no path of its.
+    expect(await call('Workflow', { scriptPath: `/etc/${sessionId}/${rel}` })).toMatchObject({ isError: true, text: expect.stringContaining('No workflow script at') })
+
+    // The copy gone before a write-back took it (a pod lost, the caps refused it): no script, and the model is told so.
+    await rm(sessionDir, { recursive: true, force: true })
+    expect(await call('Workflow', { scriptPath })).toMatchObject({
+      isError: true,
+      text: `No workflow script at ${scriptPath}: give the path a Workflow's result names, or pass the script inline.`,
+    })
+
     // After the write-back (the record holds the edit) on a pod with no copy here: read from the record.
     await files.write(ws, rel, Buffer.from(edited, 'utf8'))
-    await rm(sessionDir, { recursive: true, force: true })
     const fromRecord = await call('Workflow', { scriptPath })
     expect(fromRecord.isError).toBe(false)
     expect((await store.get(/Task ID: ([0-9a-f]{8})/.exec(fromRecord.text)![1]!))?.spec.body).toBe("\nreturn await agent('look harder')")
 
-    // A script's workflow({scriptPath}) in the run's activity, on a worker with no directory: the record.
-    const acts = backgroundActivities({ store, tz: 'UTC', send: async () => ({ result: 'sent' }), agents: managerAgents(m), workspace: files })
+    // A script's workflow({scriptPath}) in the run's activity, on a worker with no copy of the directory: the record.
+    const paths = { ...(await tempPaths()), sessionsDir: path.dirname(sessionDir) }
+    const acts = backgroundActivities({ store, tz: 'UTC', paths, send: async () => ({ result: 'sent' }), agents: managerAgents(m), workspace: files })
     const outer = (await store.create({
       sessionId,
       kind: 'workflow',
