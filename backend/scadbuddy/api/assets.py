@@ -4,6 +4,7 @@ the sample files a template ships beside its source."""
 from __future__ import annotations
 
 import asyncio
+import logging
 from functools import partial
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -38,7 +39,9 @@ from scadbuddy.api.operations import (
     run_operation,
 )
 from scadbuddy.api.versions import CommitQuery, require_history
+from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.asset_credits import credit_line, known_licence, with_credit
 from scadbuddy.library.asset_fetch import fetch_file, parse_fetch_url
 from scadbuddy.library.assets import (
     ASSET_ID_PATTERN,
@@ -54,6 +57,11 @@ from scadbuddy.library.assets import (
     AssetUsage,
     sample_files,
 )
+from scadbuddy.library.catalogue import (
+    ModelNotFoundError,
+    SidecarNotFoundError,
+    StaleVersionError,
+)
 from scadbuddy.library.history import GitError, RevisionNotFoundError
 from scadbuddy.library.icon_search import COLLECTIONS, MAX_LIMIT, IconSearch, search_icons
 from scadbuddy.library.url_import import (
@@ -67,6 +75,8 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.schema import BARE_FILENAME_PATTERN
 from scadbuddy.store.content import StoreFullError, template_title
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["assets"])
 
@@ -205,6 +215,9 @@ class FetchedAsset(AssetMeta):
     #: Not capped: it is the parsed form, which percent-encodes what the request's 2048
     #: characters allowed, and can be longer.
     source_url: str
+    #: Whether the model's README credits this source (#959): a line was added to its
+    #: Credits section, or one was already there.
+    credited: bool = False
 
 
 @router.post(
@@ -219,7 +232,10 @@ class FetchedAsset(AssetMeta):
         "Settings, each domain with its subdomains). Otherwise as the URL import: "
         f"https only, public internet addresses only, at most {MAX_ASSET_BYTES} bytes, "
         f"within {IMPORT_TIMEOUT:.0f} seconds. Every refusal is a 422; a full store is "
-        "the upload's 413."
+        "the upload's 413. The asset keeps the URL and its licence: the body's `licence`, "
+        "else the one known for its catalogue (Material Design Icons, Tabler, game-icons, "
+        "OpenMoji). The model's README gets a line in its Credits section naming the "
+        "file, the source and the licence, once per source URL, as a revision of its own."
     ),
     responses={
         **OPERATION_RESPONSES,
@@ -304,6 +320,9 @@ async def fetch_run(
     # Never the URL as given: its query may carry a token, and the row and this answer
     # are kept.
     source_url = shown_url(fetched.source_url)
+    # The body's licence, else the one its catalogue is known by: stored, credited and
+    # answered alike.
+    licence = licence or known_licence(source_url)
     meta = await store_asset(
         slug,
         fetched.data,
@@ -313,8 +332,60 @@ async def fetch_run(
         source_url=source_url,
         licence=licence,
     )
-    # This fetch's URL, even when the content was stored from elsewhere first.
-    return FetchedAsset(**{**meta.model_dump(), "source_url": source_url})
+    # This fetch's URL and licence, even when the content was stored from elsewhere
+    # first: they are what the README credits.
+    credited = await _credit(slug, meta.name, source_url, licence, state)
+    return FetchedAsset(
+        **{**meta.model_dump(), "source_url": source_url, "licence": licence, "credited": credited}
+    )
+
+
+#: How often a credit is tried again when the model moved under it.
+CREDIT_ATTEMPTS = 3
+
+
+async def _credit(
+    slug: str, name: str, source_url: str, licence: AssetLicence | None, state: AppState
+) -> bool:
+    """Add ``source_url``'s credit to the model's README, once (#959). The README is read
+    and written at one revision, so an edit landing in between is never overwritten:
+    the credit is made again on top of it. False when the README cannot be written
+    (no model history): the file is stored all the same, and the answer says so."""
+    line = credit_line(name, source_url, licence)
+    catalogue = state.catalogue
+
+    def attempt() -> bool:
+        version = catalogue.record(slug).version
+        try:
+            readme = catalogue.read_readme(slug)
+        except SidecarNotFoundError:
+            readme = ""
+        text = with_credit(readme, source_url, line)
+        if text is None:
+            return False
+        catalogue.write_readme(
+            slug, text, message=f"Credit {name} in the README", expected_version=version
+        )
+        return True
+
+    for _ in range(CREDIT_ATTEMPTS):
+        try:
+            written = await asyncio.to_thread(attempt)
+        except StaleVersionError:
+            continue
+        except ModelNotFoundError:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+        except GitError as error:
+            logger.warning("asset credit for %s not written: %s", slug, type(error).__name__)
+            return False
+        if written:
+            emit(state.events, ModelEvent(kind="model.updated", slug=slug))
+        return True
+    raise ApiError(
+        status.HTTP_409_CONFLICT,
+        f"the file is stored, but {slug} kept changing while its README was credited; "
+        "fetch it again to credit it",
+    )
 
 
 @router.get(
