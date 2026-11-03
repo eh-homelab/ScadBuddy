@@ -733,6 +733,8 @@ export class TurnRunner {
                                 // A Monitor's command runs where this turn's Bash runs: this replica.
                                 commandQueue: this.deps.background.commandQueue,
                                 workspace: this.deps.files,
+                                // Where Claude Code's file tools work: a Workflow's script is kept there (#5162).
+                                dir: cwd,
                               },
                             }
                           : {}),

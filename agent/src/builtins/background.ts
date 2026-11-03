@@ -1,3 +1,4 @@
+import path from 'node:path'
 import type { BackgroundTasks } from '../background/service.js'
 import { checkCron, CRON_EXPIRY_MS, CronError, describeCron, nextFire, timeOfDay, WAKEUP_MAX_S, WAKEUP_MIN_S } from '../background/schedule.js'
 import { checkSocketUrl, MONITOR_DEFAULT_MS, MONITOR_MAX_MS, shortDuration } from '../background/monitor.js'
@@ -5,8 +6,9 @@ import { type BackgroundTask, MAX_ACTIVE } from '../background/store.js'
 import type { Owner } from '../sessions/protocol.js'
 import type { SessionFiles } from '../workspace/store.js'
 import { workflowScriptPath, workspaceRelative } from '../background/activities.js'
+import { readDirFile, writeDirFile } from '../workspace/directory.js'
 import { readScript } from '../background/workflowRunner.js'
-import { WORKFLOW_CONCURRENCY, WORKFLOW_MAX_AGENTS } from '../background/workflowScript.js'
+import { WORKFLOW_CONCURRENCY, WORKFLOW_MAX_AGENTS, WORKFLOW_SCRIPT_MAX } from '../background/workflowScript.js'
 import type { BuiltinResult } from './result.js'
 
 // Claude Code's background built-ins, as the session keeps them (src/background/):
@@ -28,8 +30,13 @@ export type BackgroundContext = {
    * that ran a classic turn, agent-durable's for a durable one). None: no commands.
    */
   commandQueue?: string | undefined
-  /** The session workspace: a Workflow's script is kept there, and a scriptPath read from it. */
+  /** The session workspace: a Workflow's script is kept there without a working directory, and a scriptPath read from it. */
   workspace?: Pick<SessionFiles, 'read' | 'write'> | undefined
+  /**
+   * The turn's working directory (workspace/directory.ts), where Claude Code's own file tools
+   * work: a Workflow's script is kept there, and a scriptPath read from there first (#5162).
+   */
+  dir?: string | undefined
 }
 
 const error = (text: string): BuiltinResult => ({ text, isError: true })
@@ -199,10 +206,15 @@ export async function workflow(
   const ws = { kind: 'session' as const, sessionId: ctx.sessionId }
   let script = input.script
   if (script === undefined && input.scriptPath !== undefined) {
-    const rel = workspaceRelative(input.scriptPath)
-    const file = rel && ctx.workspace ? await ctx.workspace.read(ws, rel) : undefined
-    if (!file) return error(`No workflow script at ${input.scriptPath}: give a path under /workspace, as a Workflow's result names it.`)
-    script = file.bytes.toString('utf8')
+    const rel = workspaceRelative(input.scriptPath, ctx.sessionId)
+    // The working directory's copy first: a native Edit reaches the record only at the turn's write-back.
+    const bytes =
+      rel === undefined
+        ? undefined
+        : ((ctx.dir ? await readDirFile(ctx.dir, rel, WORKFLOW_SCRIPT_MAX) : undefined) ??
+          (ctx.workspace ? (await ctx.workspace.read(ws, rel))?.bytes : undefined))
+    if (!bytes) return error(`No workflow script at ${input.scriptPath}: give the path a Workflow's result names.`)
+    script = bytes.toString('utf8')
   }
   if (script === undefined) {
     return error(
@@ -243,24 +255,36 @@ export async function workflow(
     expiresAt: new Date(ctx.now().getTime() + WORKFLOW_EXPIRY_MS),
   })
   if (!t) return full()
-  // Kept in the workspace, as Claude Code keeps it in its session dir, so it can be edited and run again.
-  const scriptPath = workflowScriptPath(meta.name, t.id)
-  let kept = false
-  if (ctx.workspace) {
+  // Kept as Claude Code keeps it in its session dir, so it can be edited and run again: in the
+  // working directory, which the turn's write-back records (only there: a record copy written now
+  // would win over an edit made later in this turn, directory.ts `writeBack`), else in the record.
+  const rel = workflowScriptPath(meta.name, t.id)
+  const bytes = Buffer.from(script, 'utf8')
+  let scriptPath: string | undefined
+  if (ctx.dir) {
     try {
-      await ctx.workspace.write(ws, workspaceRelative(scriptPath)!, Buffer.from(script, 'utf8'))
-      await ctx.tasks.store.setSpec(t.id, { ...t.spec, scriptPath })
-      kept = true
+      await writeDirFile(ctx.dir, rel, bytes)
+      scriptPath = path.join(ctx.dir, rel)
+    } catch {
+      // Not in the directory: the record's copy, if that can be kept.
+    }
+  }
+  if (scriptPath === undefined && ctx.workspace) {
+    try {
+      await ctx.workspace.write(ws, rel, bytes)
+      scriptPath = rel
     } catch {
       // The run does not need the copy; without it there is no scriptPath to give.
     }
   }
+  const kept = scriptPath !== undefined && (await ctx.tasks.store.setSpec(t.id, { ...t.spec, scriptPath }).then(() => true, () => false))
+  const editWith = scriptPath === rel ? 'workspace_edit or workspace_write' : 'Edit or Write'
   const runId = `wf_${t.id}`
   return {
     text:
       `Workflow launched in background. Task ID: ${t.id}\nSummary: ${meta.description}\n` +
       (kept
-        ? `Script file: ${scriptPath}\n(Edit this file with workspace_edit or workspace_write and re-invoke Workflow with {scriptPath: "${scriptPath}"} to iterate without resending the script.)\n`
+        ? `Script file: ${scriptPath}\n(Edit this file with ${editWith} and re-invoke Workflow with {scriptPath: "${scriptPath}"} to iterate without resending the script.)\n`
         : '') +
       `Run ID: ${runId}\n` +
       (kept

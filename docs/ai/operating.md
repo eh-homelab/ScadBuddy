@@ -1179,8 +1179,13 @@ activity after its worker died, and `resumeFromRunId`, answer the calls already 
 Every child chat a run starts is recorded (`ai_workflow_children`); an attempt first ends
 (interrupts and marks done) the ones an earlier attempt left open and no journal row names,
 since a worker that died never ran its agents' cleanup (#3395).
-The script is kept in the workspace (`/workspace/_claude/workflows/<name>-wf_<id>.js`),
-which `scriptPath` and `workflow({scriptPath})` read. Its end is Claude Code's
+The script is kept at `_claude/workflows/<name>-wf_<id>.js` in the session's working
+directory, the path the model is told (Claude Code's own Read and Edit reach it there),
+which the turn's write-back records in the workspace; without a working directory, in the
+workspace itself (#5162). `scriptPath` reads the directory's copy first, then the
+workspace's; `workflow({scriptPath})` inside a script runs on any worker and reads the
+workspace's, so it sees a native edit once its turn wrote it back. A path relative to the
+directory and an earlier build's `/workspace/…` are read too. Its end is Claude Code's
 `<task-notification>`, sent as a monitor's events are.
 `PushNotification` is not provided yet, and the session says so. Skill shell injection
 is off (`disableSkillShellExecution`, `harness/options.ts`) except for an allowed
@@ -1669,6 +1674,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     files) happens at the turn's end, at an eviction and at a placement, so a turn keeps its
     `.git` or a large intermediate file while it runs. Claude Code's own file tools (§9) and
     a Monitor's command use the directory.
+  - The minute's write-back syncs only the files the workspace already holds (#5140). A new file
+    is offered at the next park or at the turn's end, so a scratch tree that the turn builds and
+    removes again never reaches the workspace. No write-back offers a new file under a
+    `node_modules` or `__pycache__` directory (`SCRATCH`); a pruning write-back removes those
+    files. A file that the workspace already holds there still syncs. `dist`, `build` and
+    `target` are not on the list, because a turn's deliverable can be there.
 - A session's files go with the session (deleting it, or `forgetSubject`, deletes them,
   and forgetting deletes the key that opens its blobs); a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
   principal's own workspace, whose files are swept 24 h after their last write (every

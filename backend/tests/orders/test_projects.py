@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 
 import pytest
 from psycopg import Connection
@@ -13,7 +14,13 @@ from psycopg_pool import ConnectionPool
 
 import scadbuddy.orders.projects as projects_module
 from scadbuddy.orders.component import ROW_POOL_SIZE
-from scadbuddy.orders.integrations import NOT_LINKED, SpoolGroup
+from scadbuddy.orders.integrations import (
+    NOT_LINKED,
+    ArchiveFacts,
+    ArchiveMedia,
+    CopiedMedia,
+    SpoolGroup,
+)
 from scadbuddy.orders.projects import ensure_projects, item_project, item_project_name
 from scadbuddy.orders.store import OrderStore, item_subject, order_subject
 from scadbuddy.store.refs import BlobRefs
@@ -33,6 +40,14 @@ class Projects:
         self.fail_after = fail_after
 
     async def spool_groups(self) -> list[SpoolGroup]:
+        raise AssertionError("not asked")
+
+    async def archive(self, archive_id: int) -> ArchiveFacts | None:
+        raise AssertionError("not asked")
+
+    async def download_archive_media(
+        self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
+    ) -> CopiedMedia:
         raise AssertionError("not asked")
 
     async def ensure_project(self, name: str, parent_id: int | None) -> int:

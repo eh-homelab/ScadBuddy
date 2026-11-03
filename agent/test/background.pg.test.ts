@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import os from 'node:os'
@@ -17,6 +17,7 @@ import { BackgroundTaskStore, MAX_ACTIVE } from '../src/background/store.js'
 import { type BuiltinContext, builtinServer, classicBuiltinServer } from '../src/builtins/server.js'
 import type { WebContext } from '../src/builtins/web.js'
 import type { Database } from '../src/db.js'
+import { confineGuard } from '../src/harness/confine.js'
 import { NoUsableCredentialError } from '../src/harness/fallback.js'
 import { originPolicy } from '../src/http/origins.js'
 import { SessionBlobs } from '../src/sessions/blobs.js'
@@ -56,6 +57,8 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
   const terminated: string[] = []
   // What the stand-in runner answers a start: undefined, or a task with nothing to run.
   let startEnd: { end: string } | undefined
+  // The turn's working directory the Workflow built-in sees, when a test places one.
+  let sessionDir: string | undefined
   const runner: TaskRunner = {
     start: async (t) => {
       started.push(t.id)
@@ -70,6 +73,7 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     expect(await db.ready()).toBe(true)
     started.length = 0
     startEnd = undefined
+    sessionDir = undefined
     cancelled.length = 0
     terminated.length = 0
     store = new BackgroundTaskStore(db.sql)
@@ -78,7 +82,16 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     sessionId = (await m.start(browser, { origin: 'chat' })).session.id
     const context = () =>
       ({
-        background: { tasks, sessionId, owner: browser, tz: 'UTC', now: () => NOW, commandQueue: 'agent-tools.pod-a', workspace: new SessionFiles(db.sql) },
+        background: {
+          tasks,
+          sessionId,
+          owner: browser,
+          tz: 'UTC',
+          now: () => NOW,
+          commandQueue: 'agent-tools.pod-a',
+          workspace: new SessionFiles(db.sql),
+          ...(sessionDir ? { dir: sessionDir } : {}),
+        },
       }) as unknown as BuiltinContext
     client = await connectInProcess(() => builtinServer(NAMES, context))
   }, 60_000)
@@ -198,20 +211,22 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     const script = "export const meta = { name: 'Find Bugs', description: 'find them' }\nreturn await agent('look')"
     const started_ = await call('Workflow', { script, args: { dir: 'src' } })
     const id = /Task ID: ([0-9a-f]{8})/.exec(started_.text)![1]!
-    const scriptPath = `/workspace/_claude/workflows/find-bugs-wf_${id}.js`
-    expect(started_.text).toMatch(new RegExp(`^Workflow launched in background\\. Task ID: ${id}\\nSummary: find them\\nScript file: ${scriptPath}\\n`))
+    // No working directory (a turn with no file tools): the workspace path the workspace_* tools take.
+    const scriptPath = `_claude/workflows/find-bugs-wf_${id}.js`
+    expect(started_.text).toMatch(new RegExp(`^Workflow launched in background\\. Task ID: ${id}\\nSummary: find them\\nScript file: ${scriptPath}\\n\\(Edit this file with workspace_edit`))
     expect(started_.text).toContain(`Run ID: wf_${id}`)
     expect(await store.get(id)).toMatchObject({
       kind: 'workflow',
       description: 'find them',
       spec: { name: 'Find Bugs', body: "\nreturn await agent('look')", args: { dir: 'src' }, scriptPath },
     })
-    const kept = await new SessionFiles(db.sql).read({ kind: 'session', sessionId }, scriptPath.slice('/workspace/'.length))
+    const kept = await new SessionFiles(db.sql).read({ kind: 'session', sessionId }, scriptPath)
     expect(kept?.bytes.toString('utf8')).toBe(script)
     // Still running: no resume until it is stopped; then one from the kept script.
     expect(await call('Workflow', { scriptPath, resumeFromRunId: `wf_${id}` })).toMatchObject({ isError: true, text: expect.stringContaining('still running') })
     await call('TaskStop', { task_id: id })
-    const resumed = await call('Workflow', { scriptPath, resumeFromRunId: `wf_${id}` })
+    // An earlier run's notice named it under /workspace: still read.
+    const resumed = await call('Workflow', { scriptPath: `/workspace/${scriptPath}`, resumeFromRunId: `wf_${id}` })
     expect(resumed.isError).toBe(false)
     expect(await store.get(/Task ID: ([0-9a-f]{8})/.exec(resumed.text)![1]!)).toMatchObject({ spec: { resumeFrom: id } })
     // What it refuses, as Claude Code would.
@@ -219,7 +234,61 @@ describe.skipIf((skip !== undefined) || AGENT_SESSIONS_SKIP !== '')(`a session's
     expect(await call('Workflow', { script: "export const meta = { name: N, description: 'd' }\n" })).toMatchObject({ isError: true, text: expect.stringContaining('N is a variable') })
     expect(await call('Workflow', { name: 'saved' })).toMatchObject({ isError: true, text: expect.stringContaining('No saved workflow named "saved"') })
     expect(await call('Workflow', { scriptPath: '/workspace/nope.js' })).toMatchObject({ isError: true })
+    expect(await call('Workflow', { scriptPath: '../other/x.js' })).toMatchObject({ isError: true })
   })
+
+  it("keeps a Workflow's script in the turn's working directory, where Claude Code's Edit reaches it, and runs the edited one (#5162)", async () => {
+    // `<root>/<session id>`, as directory.ts places it.
+    sessionDir = path.join(await mkdtemp(path.join(os.tmpdir(), 'wf-dir-')), sessionId)
+    await mkdir(sessionDir, { mode: 0o700 })
+    const files = new SessionFiles(db.sql)
+    const ws = { kind: 'session' as const, sessionId }
+    const script = "export const meta = { name: 'Find Bugs', description: 'find them' }\nreturn await agent('look')"
+    const started_ = await call('Workflow', { script })
+    const id = /Task ID: ([0-9a-f]{8})/.exec(started_.text)![1]!
+    const rel = `_claude/workflows/find-bugs-wf_${id}.js`
+    const scriptPath = path.join(sessionDir, rel)
+    // The path the model is told is in its working directory, which the file-tool seam allows.
+    expect(started_.text).toContain(`Script file: ${scriptPath}\n(Edit this file with Edit or Write`)
+    expect(started_.text).not.toContain('/workspace')
+    expect(await confineGuard(sessionDir)('Edit', { file_path: scriptPath, old_string: 'a', new_string: 'b' })).toBeUndefined()
+    expect(await store.get(id)).toMatchObject({ spec: { scriptPath } })
+    expect(await readFile(scriptPath, 'utf8')).toBe(script)
+    await call('TaskStop', { task_id: id })
+
+    // Claude Code's Edit changes the copy in the directory; the record is written back only later.
+    const edited = script.replace("agent('look')", "agent('look harder')")
+    await writeFile(scriptPath, edited)
+    const again = await call('Workflow', { scriptPath, resumeFromRunId: `wf_${id}` })
+    expect(again.isError).toBe(false)
+    const second = /Task ID: ([0-9a-f]{8})/.exec(again.text)![1]!
+    expect(await store.get(second)).toMatchObject({ spec: { body: "\nreturn await agent('look harder')", resumeFrom: id } })
+    await call('TaskStop', { task_id: second })
+    // Relative to the directory works too.
+    const relative = await call('Workflow', { scriptPath: rel })
+    expect((await store.get(/Task ID: ([0-9a-f]{8})/.exec(relative.text)![1]!))?.spec.body).toBe("\nreturn await agent('look harder')")
+
+    // After the write-back (the record holds the edit) on a pod with no copy here: read from the record.
+    await files.write(ws, rel, Buffer.from(edited, 'utf8'))
+    await rm(sessionDir, { recursive: true, force: true })
+    const fromRecord = await call('Workflow', { scriptPath })
+    expect(fromRecord.isError).toBe(false)
+    expect((await store.get(/Task ID: ([0-9a-f]{8})/.exec(fromRecord.text)![1]!))?.spec.body).toBe("\nreturn await agent('look harder')")
+
+    // A script's workflow({scriptPath}) in the run's activity, on a worker with no directory: the record.
+    const acts = backgroundActivities({ store, tz: 'UTC', send: async () => ({ result: 'sent' }), agents: managerAgents(m), workspace: files })
+    const outer = (await store.create({
+      sessionId,
+      kind: 'workflow',
+      description: 'outer',
+      spec: { name: 'outer', description: 'outer', body: `return await workflow({ scriptPath: ${JSON.stringify(scriptPath)} })`, scriptPath: '' },
+      createdBy: browser,
+    }))!
+    await files.write(ws, rel, Buffer.from("export const meta = { name: 'n', description: 'd' }\nreturn 42", 'utf8'))
+    const info = { activityType: 'wf_run', workflowExecution: { workflowId: `bgtask-${sessionId}-${outer.id}`, runId: 'r' }, taskQueue: 'agent-tools' }
+    const out = await new MockActivityEnvironment({ ...info, attempt: 1 }).run(acts.wf_run!, { taskId: outer.id })
+    expect(out).toMatchObject({ status: 'completed', result: 42 })
+  }, 60_000)
 
   it("ends the child chats a dead attempt left open before a retried run's script starts (#3395)", async () => {
     // Attempt 1's agent hangs in its chat's turn; its worker "dies": the attempt is never awaited, its finally never runs.
