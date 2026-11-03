@@ -15,7 +15,9 @@ import { FilePayloadStore, PgPayloadKeys, SubjectPayloadCodec } from './temporal
 // SCADBUDDY_PAYLOAD_DIR (the run's payloads are sealed under each session's data key, and its
 // large ones are files there). Prints one JSON line per session and a summary; never a payload.
 //
-// `--dry-run` writes nothing: it reads each run's history and reports what it would write.
+// `--dry-run` writes nothing: it reads each run's history and reports what it would write. The
+// exit is 1 when a session failed or its row stays `durable` for a reason to look at
+// (`no_history`, `inconsistent`); `empty` (no model segment ever committed) is not one.
 
 const DRY_RUN = '--dry-run'
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -70,6 +72,7 @@ try {
       line = { session: id, error: err instanceof Error ? `${err.name}: ${err.message}`.slice(0, 300) : 'error' }
     }
     const key = 'error' in line ? 'error' : line.outcome
+    if (key === 'no_history' || key === 'inconsistent') failed++
     counts[key] = (counts[key] ?? 0) + 1
     console.log(JSON.stringify(line))
   }

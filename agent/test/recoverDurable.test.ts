@@ -138,6 +138,43 @@ describe('rebuilding a closed DurableSession conversation from its history', () 
     expect((await rebuildConversation(h.events as never, decode)).consistent).toBe(false)
   })
 
+  it('a run that continued as new is inconsistent: its first segment was given a conversation this run never built', async () => {
+    const all = await entries()
+    const h = history()
+    const seg = h.schedule('run_claude_segment', '1', { conversation: { entries: 5 }, injected: {} })
+    h.complete(seg, { session_id: 's', checkpoint: all.at(-2)!.uuid, transcript_keep: 5, transcript_add: all.slice(5), is_error: false })
+    expect((await rebuildConversation(h.events as never, decode)).consistent).toBe(false)
+  })
+
+  it('derived held results that disagreed with a later segment are not trusted for the last pause', async () => {
+    const all = await entries()
+    const first = all.findIndex((e) => e.attachment?.type === 'hook_deferred_tool' && e.attachment.toolUseID === 'toolu_000001')
+    const second = all.findIndex((e) => e.attachment?.type === 'hook_deferred_tool' && e.attachment.toolUseID === 'toolu_000003')
+    const h = history()
+    h.complete(h.schedule('run_claude_segment', '1', { conversation: { entries: 0 } }), {
+      session_id: 's',
+      checkpoint: all[first]!.uuid,
+      transcript_keep: 0,
+      transcript_add: all.slice(0, first + 1),
+      deferred: { id: 'toolu_000001', name: 'get_schema', input: {} },
+      is_error: false,
+    })
+    h.complete(h.schedule('get_schema', 'tool-toolu_000001', {}), { schema: 'name' })
+    // The next segment delivered something else than the activity returned.
+    const next = h.schedule('run_claude_segment', '2', { conversation: { entries: first + 1 }, injected: { toolu_000001: { content: 'other', is_error: false, blocks: null } } })
+    h.complete(next, {
+      session_id: 's',
+      checkpoint: all[second]!.uuid,
+      transcript_keep: first + 1,
+      transcript_add: all.slice(first + 1, second + 1),
+      deferred: { id: 'toolu_000003', name: 'render_model', input: {} },
+      is_error: false,
+    })
+    h.complete(h.schedule('render_model', 'tool-toolu_000003', {}), { rendered: true })
+    const rebuilt = await rebuildConversation(h.events as never, decode)
+    expect(rebuilt).toMatchObject({ pending: 'tool_activities', derivedChecked: 1, derivedMatched: 0, consistent: false })
+  })
+
   it('a run whose segments never committed has no conversation', async () => {
     const h = history()
     h.fail(h.schedule('run_claude_segment', '1', { conversation: { entries: 0 } }), 'the model segment failed')

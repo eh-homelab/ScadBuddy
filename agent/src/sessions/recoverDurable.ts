@@ -238,7 +238,11 @@ export type Rebuilt = {
    */
   derivedChecked: number
   derivedMatched: number
-  /** A segment's input that named another entry count than the rebuild had: the history is not the whole story. */
+  /**
+   * False when a segment's input named another entry count than the rebuild had (the history is
+   * not the whole story: a run that continued as new starts from its predecessor's conversation),
+   * or when the held results are derived and the derivation disagreed with a later segment's own.
+   */
   consistent: boolean
 }
 
@@ -352,6 +356,8 @@ export async function rebuildConversation(events: readonly HistoryEvent[], decod
     } else {
       pending = derived()
       source = 'tool_activities'
+      // Derived results that disagreed with a real `injected` earlier in the run are not trusted here either.
+      if (derivedMatched < derivedChecked) consistent = false
     }
   }
   return {
@@ -454,7 +460,7 @@ export type RecoverOutcome =
   | 'empty'
   /** No closed DurableSession run is retained or archived for it. */
   | 'no_history'
-  /** The rebuild does not hold together (a segment saw another conversation, or the checkpoint is missing): nothing is written. */
+  /** The rebuild does not hold together (a segment saw another conversation, derived results disagreed, or the checkpoint is missing): nothing is written. */
   | 'inconsistent'
 
 export type RecoverLine = {
