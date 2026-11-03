@@ -818,7 +818,37 @@ async def test_the_virtual_pass_alone_runs_over_a_bare_store(store: PrinterStore
 def _boot_state(printers: FakePrinters) -> Any:
     from types import SimpleNamespace
 
-    return SimpleNamespace(components=SimpleNamespace(get=lambda _key: printers))
+    return SimpleNamespace(
+        components=SimpleNamespace(get=lambda _key: printers),
+        settings_store=SimpleNamespace(load=lambda: None),
+    )
+
+
+def _boot_client(monkeypatch: pytest.MonkeyPatch, client: object) -> list[object]:
+    """``main.client_for`` handing out ``client``; the list records each use."""
+    from contextlib import asynccontextmanager
+
+    from scadbuddy import main
+
+    used: list[object] = []
+
+    @asynccontextmanager
+    async def client_for(settings: object) -> Any:
+        used.append(settings)
+        yield client
+
+    monkeypatch.setattr(main, "client_for", client_for)
+    return used
+
+
+def _prods_registry(store: PrinterStore) -> str:
+    """Prod on 2026-11-03: the H2C linked to Bambuddy printer 1, and the row made and
+    LAN-linked by hand for Bambuddy's VP 1, which forwards to it."""
+    h2c = store.create(PrinterCreate(serial=SERIAL, name="3DP-31B-598"))
+    store.link_bambuddy(h2c.id, 1)
+    made = store.create(PrinterCreate(serial=VP_SERIAL, name="Bambuddy (virtual)"))
+    store.link_lan(made.id, LanLink(host="192.168.10.9", access_code="vpcode12"), cert_sha256=CERT)
+    return made.id
 
 
 async def test_the_boot_adopts_a_vps_hand_made_lan_row(
@@ -829,43 +859,42 @@ async def test_the_boot_adopts_a_vps_hand_made_lan_row(
     The boot's virtual-printer pass adopts it, reads no access code and probes nothing."""
     from scadbuddy import main
 
-    made = store.create(PrinterCreate(serial=VP_SERIAL, name="Bambuddy (virtual)"))
-    store.link_lan(made.id, LanLink(host="192.168.10.9", access_code="vpcode12"), cert_sha256=CERT)
+    made = _prods_registry(store)
     client = FakeClient([bambuddy(1, SERIAL)], [vp(1, VP_SERIAL, 1)], codes={1: CODE})
-
-    async def with_bambuddy(_state: object, sweep: Callable[[Any], Any]) -> None:
-        await sweep(client)
-
-    monkeypatch.setattr(main, "_with_bambuddy", with_bambuddy)
+    _boot_client(monkeypatch, client)
     await main._adopt_virtual_rows_logged(_boot_state(printers))
 
-    row = store.require(made.id)
+    row = store.require(made)
     assert row.kind == "bambuddy_virtual" and row.bambuddy_vp_id == 1
     assert row.lan_host == "192.168.10.9" and row.name == "Bambuddy (virtual)"
-    assert printers.changed_ids == [made.id]
+    assert row.forwards_to == store.by_serial(SERIAL).id  # type: ignore[union-attr]
+    assert printers.changed_ids == [made]
     assert client.code_reads == [] and printers.probes == []
 
 
-async def test_the_boot_asks_bambuddy_nothing_when_no_row_could_be_a_vp(
-    monkeypatch: pytest.MonkeyPatch, printers: FakePrinters, store: PrinterStore
+@pytest.mark.parametrize("registry", ["bambuddy_linked_only", "lan_only"])
+async def test_the_boot_asks_bambuddy_nothing_when_no_adoption_is_due(
+    registry: str,
+    monkeypatch: pytest.MonkeyPatch,
+    printers: FakePrinters,
+    store: PrinterStore,
 ) -> None:
-    """#5236: the pass runs only while a row may be a VP's (`may_be_virtual`), so a
-    registry of Bambuddy-linked printers costs no Bambuddy call at boot."""
+    """#5236 (`boot_adoption_due`): no row that may be a VP's, or a registry that follows
+    no Bambuddy printer (`e2e-stack`'s recorder pass: one LAN-only row, and a recorder
+    that counts every call), so the boot makes no Bambuddy call."""
     from scadbuddy import main
 
     made = store.create(PrinterCreate(serial=SERIAL, name="H2C"))
-    store.link_bambuddy(made.id, 1)
-    called: list[object] = []
-
-    async def with_bambuddy(_state: object, sweep: Callable[[Any], Any]) -> None:
-        called.append(sweep)
-
-    monkeypatch.setattr(main, "_with_bambuddy", with_bambuddy)
+    if registry == "bambuddy_linked_only":
+        store.link_bambuddy(made.id, 1)
+    else:
+        store.link_lan(made.id, LanLink(host="10.0.0.9", access_code="12345678"), cert_sha256=CERT)
+    used = _boot_client(monkeypatch, FakeClient([], []))
     await main._adopt_virtual_rows_logged(_boot_state(printers))
-    assert called == []
+    assert used == []
 
 
-async def test_a_failing_boot_pass_is_logged_and_never_raised(
+async def test_an_unreachable_bambuddy_at_boot_is_one_warning_and_never_raised(
     monkeypatch: pytest.MonkeyPatch,
     printers: FakePrinters,
     store: PrinterStore,
@@ -873,16 +902,39 @@ async def test_a_failing_boot_pass_is_logged_and_never_raised(
 ) -> None:
     from scadbuddy import main
 
-    store.create(PrinterCreate(serial=VP_SERIAL, name="hand-made"))
+    _prods_registry(store)
     client = FakeClient([], [])
     client.vp_error = ApiError(502, "unreachable")
+    _boot_client(monkeypatch, client)
+    with caplog.at_level(logging.WARNING, logger=main.logger.name):
+        await main._adopt_virtual_rows_logged(_boot_state(printers))
+    (record,) = [r for r in caplog.records if r.name == main.logger.name]
+    assert record.getMessage() == "could not sync the virtual printers from Bambuddy at start"
+    assert record.levelno == logging.WARNING and record.exc_info is None
 
-    async def with_bambuddy(_state: object, sweep: Callable[[Any], Any]) -> None:
-        await sweep(client)
 
-    monkeypatch.setattr(main, "_with_bambuddy", with_bambuddy)
-    await main._adopt_virtual_rows_logged(_boot_state(printers))
-    assert "could not sync the virtual printers from Bambuddy at start" in caplog.text
+async def test_no_bambuddy_at_boot_logs_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    printers: FakePrinters,
+    store: PrinterStore,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from contextlib import asynccontextmanager
+
+    from scadbuddy import main
+    from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
+
+    _prods_registry(store)
+
+    @asynccontextmanager
+    async def client_for(settings: object) -> Any:
+        raise ApiError(409, "no Bambuddy", type_=NOT_CONFIGURED_PROBLEM)
+        yield
+
+    monkeypatch.setattr(main, "client_for", client_for)
+    with caplog.at_level(logging.DEBUG, logger=main.logger.name):
+        await main._adopt_virtual_rows_logged(_boot_state(printers))
+    assert [r for r in caplog.records if r.name == main.logger.name] == []
 
 
 async def test_the_housekeeping_sweep_logs_a_missing_target_quietly_unless_there_is_news(
