@@ -1474,6 +1474,7 @@ class Lifecycle:
         request_id: str,
         sliced_sha256: str | None,
         sliced_blob_key: str | None,
+        project_id: int | None = None,
     ) -> Fulfilment:
         """Claim the item for one print before it starts (§5.4, #4719): under the order's
         lock, its next attempt, made nothing yet (``quantity`` 0, outcome `unknown`, no
@@ -1489,7 +1490,9 @@ class Lifecycle:
         nothing. A ``request_id`` another item claimed is
         ``print_request_conflict``. Refused as a hand-recorded attempt is: the order
         accepted, not ended, not on hold, the item `approved` or `failed`; and
-        ``item_made`` when its attempts made its quantity."""
+        ``item_made`` when its attempts made its quantity. A new claim records
+        ``project_id``, the Bambuddy project its run is keyed with (#5263), which a retry
+        keys it with again."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             existing = self.store.print_claim(request_id, conn=conn)
@@ -1545,6 +1548,7 @@ class Lifecycle:
                 sliced_sha256=sliced_sha256,
                 sliced_blob_key=sliced_blob_key,
             )
+            self.store.set_claim_project(conn, attempt.id, project_id)
             if sliced_blob_key is not None:
                 self.store.hold_attempt_file(conn, FULFILMENT_HOLDER, sliced_blob_key, attempt.id)
             item = self.store.update_item(conn, item.id, status="queued")
@@ -1561,6 +1565,40 @@ class Lifecycle:
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, attempt.attempt)]))
         return attempt
+
+    def record_archive_facts(
+        self,
+        attempt: Fulfilment,
+        archive_ids: Sequence[int],
+        *,
+        started_at: datetime | None,
+        finished_at: datetime | None,
+        actual_seconds: int | None,
+        actual_grams: float | None,
+    ) -> Fulfilment:
+        """What the attempt's archives say (§8.2, ``OrderStore.set_archive_facts``), under
+        the order's lock as every writer of an item is, and told as `order_item.changed`
+        when it changed the attempt (#5263). Allowed on any order: it records a print."""
+        item = self.store.item(attempt.order_item_id)
+        if item is None:
+            return attempt
+        with self.store.transaction() as conn:
+            order = self._lock(conn, item.order_id)
+            written = self.store.set_archive_facts(
+                attempt.id,
+                archive_ids,
+                started_at=started_at,
+                finished_at=finished_at,
+                actual_seconds=actual_seconds,
+                actual_grams=actual_grams,
+                conn=conn,
+            )
+            item = self.store.item(item.id, conn=conn) or item
+        if written is None:
+            return attempt
+        if written != attempt:
+            self._told(_Change(order, [(item, written.attempt)]))
+        return written
 
     def attach_print(self, claim: Fulfilment, run_id: str, printer: str | None) -> Fulfilment:
         """The run a claim's print started (`print.started` on the audit line); again

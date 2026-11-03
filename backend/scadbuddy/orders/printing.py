@@ -293,6 +293,7 @@ async def print_item(
     request_id: str,
     sliced_sha256: str | None,
     sliced_blob_key: str | None,
+    project_id: int | None = None,
 ) -> Fulfilment:
     """``order_item_print``'s run: the item claimed (``Lifecycle.claim_print``, refused
     as the check would be when the rows moved since), then its print started with the
@@ -314,6 +315,7 @@ async def print_item(
                 request_id=request_id,
                 sliced_sha256=sliced_sha256,
                 sliced_blob_key=sliced_blob_key,
+                project_id=project_id,
             )
         )
     except ClaimRefusedError as error:

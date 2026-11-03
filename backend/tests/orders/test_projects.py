@@ -39,6 +39,11 @@ class Projects:
     def __init__(self, *, fail_after: int | None = None) -> None:
         self.made: list[tuple[str, int | None]] = []
         self.fail_after = fail_after
+        #: Projects deleted in Bambuddy since they were made.
+        self.deleted: set[int] = set()
+
+    async def project_exists(self, project_id: int) -> bool:
+        return project_id not in self.deleted
 
     async def spool_inventory(self) -> list[ShelfSpool]:
         raise AssertionError("not asked")
@@ -118,6 +123,24 @@ def test_a_failed_ensure_keeps_what_it_made_and_the_print_makes_the_rest(shop: S
     assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 101
     # The order's project was kept: only the item's is made, under it.
     assert seam.made == [(item_project_name(order, item), 101)]
+
+
+def test_a_project_deleted_in_bambuddy_is_made_again(shop: Shop) -> None:
+    """#5263: the mapping names a project Bambuddy no longer has; the next ensure makes
+    it again and records the new one, the order's and the item's alike."""
+    order, item = shop.accepted()
+    seam = Projects()
+    assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 102
+    seam.deleted.add(102)
+    assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 103
+    assert seam.made[-1] == (item_project_name(order, item), 101)
+    seam.deleted.update({101, 103})
+    assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 105
+    assert seam.made[-2:] == [(order.number, None), (item_project_name(order, item), 104)]
+    assert [(p.subject, p.project_id) for p in shop.rows.projects(order.id)] == [
+        (order_subject(order.id), 104),
+        (item_subject(item.id), 105),
+    ]
 
 
 def test_without_bambuddy_nothing_is_asked_or_recorded(shop: Shop) -> None:

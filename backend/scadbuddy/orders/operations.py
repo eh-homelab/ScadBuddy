@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import aclosing
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -25,6 +25,7 @@ from fastapi import Response, status
 from temporalio.client import WorkflowExecutionStatus
 from temporalio.service import RPCError, RPCStatusCode
 
+from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.output_reader import LocalOutputs, require
 from scadbuddy.bambuddy.preview import PreviewStarted
 from scadbuddy.bambuddy.print_run import (
@@ -319,6 +320,24 @@ async def existing_run(
     return await runs.store.find(key, has_request_id=True)
 
 
+async def claimed_run(
+    runs: PrintCommands,
+    subject: PrintSubject,
+    request: Mapping[str, Any],
+    copies: int,
+    projects: Sequence[int | None],
+    filament_plan: Mapping[str, Any] | None = None,
+) -> PrintRun | None:
+    """The run an ``order_item_print`` request made, keyed with any of ``projects``
+    (:func:`existing_run` for each, in order) and the check's ``filament_plan``."""
+    for project_id in projects:
+        body = print_body(request, copies, project_id, filament_plan)
+        run = await existing_run(runs, subject, body)
+        if run is not None:
+            return run
+    return None
+
+
 def order_kinds(core: Core, components: Components) -> list[OperationKind]:
     """The orders' kinds, bound to this process's state."""
 
@@ -461,6 +480,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             raise ApiError(
                 status.HTTP_503_SERVICE_UNAVAILABLE,
                 "Bambuddy could not make the item's project; the print is tried again",
+                # Transient (`is_transient`), or the operation would never try it again.
+                type_=UNAVAILABLE_PROBLEM,
             ) from error
 
     async def item_print_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -476,20 +497,37 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
 
         subject = PrintSubject.output(output_id)
         project_id = await item_project_of(request)
+        store = components.get(ORDERS).store
+        # The check's filled plan (§5.4 "Spools"); one checked before it has none.
+        plan = checked.get("filament_plan")
 
-        def body(copies: int) -> PrintRunRequest:
-            return print_body(request, copies, project_id, checked.get("filament_plan"))
+        async def keyed() -> tuple[bool, list[int | None]]:
+            """Whether the claim recorded its project, and the projects its run may be
+            keyed with (#5263). A claim recorded the one it was made with, which a retry
+            keeps even once a deleted project is made again. One from before recorded
+            none: its run was keyed with no project (before #5231) or with the item's."""
+            recorded = await asyncio.to_thread(store.claim_project, request["request_id"])
+            if recorded is not None and recorded[0]:
+                return True, [recorded[1]]
+            return False, list(dict.fromkeys([project_id, None]))
 
         async def existing(copies: int) -> PrintRun | None:
-            return await existing_run(core.print_runs, subject, body(copies))
+            _, projects = await keyed()
+            return await claimed_run(core.print_runs, subject, request, copies, projects, plan)
 
         async def start(copies: int) -> PrintRun:
+            recorded, projects = await keyed()
+            if not recorded:
+                # A claim from before #5263, retried: its run may be under either key.
+                found = await claimed_run(core.print_runs, subject, request, copies, projects, plan)
+                if found is not None:
+                    return found
             run = await accept_run(
                 core.print_runs,
                 Response(),
                 subject=subject,
                 slug=checked["slug"],
-                request=body(copies),
+                request=print_body(request, copies, projects[0], plan),
                 source=SourceSpec(kind="output", output_id=output_id),
                 activity=components.get(ACTIVITY),
             )
@@ -507,6 +545,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             request_id=request["request_id"],
             sliced_sha256=checked["sliced_sha256"],
             sliced_blob_key=checked["sliced_blob_key"],
+            project_id=project_id,
         )
         dumped: dict[str, Any] = attempt.model_dump(mode="json")
         return dumped

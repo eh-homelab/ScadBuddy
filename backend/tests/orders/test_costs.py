@@ -56,16 +56,14 @@ def attempt(
         FulfilmentInput.model_validate({"quantity": made, "outcome": outcome}),
         BY,
     )
-    written = shop.rows.set_archive_facts(
-        recorded.id,
+    return shop.lifecycle.record_archive_facts(
+        recorded,
         [archive],
         started_at=None,
         finished_at=None,
         actual_seconds=500,
         actual_grams=grams,
     )
-    assert written is not None
-    return written
 
 
 async def test_failed_attempts_count_in_the_actual_cost(shop: Shop) -> None:

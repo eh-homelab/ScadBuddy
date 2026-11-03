@@ -848,7 +848,13 @@ thread lets go of one it got too late. `OrderDetail.projects` lists them; the or
 item drawer the item's. One change from the design: **a cancel keeps the mapping.** A
 retried print of an item cancelled meanwhile looks for its run by the run's key
 (`existing_run`), which the project is part of, and a reopened order (§3.5 Undo) goes on
-in the projects it had instead of making a second of each name.
+in the projects it had instead of making a second of each name. A project deleted in
+Bambuddy is made again by the next ensure (`project_exists`, false only on a 404), and the
+mapping names the new one (#5263). A print's claim records the project its run is keyed
+with (`print_project_id`), so a retry keys the run the same whatever the mapping says
+since. A claim from before that recorded none, and its retry looks for the run under no
+project and under the item's current one. One whose project was deleted and made again
+before the retry is not found under the old project: that narrow gap is accepted.
 
 ### 8.2 Archives
 
