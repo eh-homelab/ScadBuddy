@@ -29,8 +29,9 @@ never enters the history; whatever it cannot resolve sends no field, and the fir
 picks. What the pick says, or why the firmware picks, rides on `LanStarted.warnings` to
 the run's warnings (#4545). The picks sent are saved under the run and the start's
 ``subtask_name`` (#4543), since a LAN start has no queue item, so Least used sees them
-open; ``lan_wait`` settles each copy's as the printer ends it, and the follow the last
-(`rack.usage.lan_settle_hook`).
+open; the printer's watch settles each as the report ends it (`printers.watch`, #5138),
+and ``lan_wait`` (each earlier copy) and the follow (`rack.usage.lan_settle_hook`) settle
+any it missed.
 """
 
 from __future__ import annotations

@@ -475,7 +475,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   row (`print_route` `lan`), and `lan_print` saves its rack picks keyed by run and
   `subtask_name` (`rack_nozzle_*`'s `lan_run_id`, `lan_subtask`); the follow's read hooks
   (`Follower.on_read`: `printers/progress.py` `lan_last_print`, `rack/usage.py`
-  `lan_settle_hook`) move the row and settle the picks, `lan_wait` each earlier copy's.
+  `lan_settle_hook`) move the row and settle the picks, `lan_wait` each earlier copy's;
+  first, the printer's watch settles each start's picks as its report ends it, timed to
+  that report (`printers/reports.py` `advance_print`, #5138, #5142). A LAN print keeps
+  `output_last_prints.sent_to_bambuddy`, so the output still says "Send again" (#5143).
   A run of several plates or copies is its own queue (#4541, `workflows/printing.py`
   `_print_lan`): it succeeds at its first start, then `lan_wait` (`printers/print_activities.py`,
   over the watch's `printer_reports`) waits out each print before the next starts, and
