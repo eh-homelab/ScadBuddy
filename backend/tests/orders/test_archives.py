@@ -55,6 +55,9 @@ class Archives:
     async def spool_groups(self) -> list[SpoolGroup]:
         raise AssertionError("not asked")
 
+    async def ensure_project(self, name: str, parent_id: int | None) -> int:
+        raise AssertionError("not asked")
+
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
         return self.facts.get(archive_id)
 

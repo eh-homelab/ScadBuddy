@@ -78,7 +78,10 @@ class OrdersComponent:
         """The seam for the running ``bambuddy_url`` (F10, Ruling 7)."""
         url = self.core.settings.bambuddy_url
         if self._integrations is None or self._integrations[0] != url:
-            self._integrations = (url, choose(url, self.core.settings_store))
+            self._integrations = (
+                url,
+                choose(url, self.core.settings_store, self.core.uploads),
+            )
         return self._integrations[1]
 
     @property

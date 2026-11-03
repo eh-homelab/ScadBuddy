@@ -38,6 +38,28 @@ from tests.support.operations import press
 pytestmark = [pytest.mark.requires_postgres, pytest.mark.requires_git]
 
 
+class Projects:
+    """Bambuddy's project create (§8.1): ids from 700, each with its folder."""
+
+    def __init__(self) -> None:
+        self.made: list[dict[str, Any]] = []
+        respx.post(f"{API}/projects/").mock(side_effect=self.create)
+        respx.get(url__regex=rf"{API}/library/folders/by-project/\d+").mock(
+            side_effect=self.folders
+        )
+
+    def create(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        project = {"id": 700 + len(self.made), "status": "active", **body}
+        self.made.append(project)
+        return httpx.Response(200, json=project)
+
+    def folders(self, request: httpx.Request) -> httpx.Response:
+        project_id = int(request.url.path.rsplit("/", 1)[1])
+        folder = {"id": project_id + 100, "name": "p", "project_id": project_id}
+        return httpx.Response(200, json=[folder])
+
+
 @pytest.fixture
 def bambuddy(client: TestClient, fake_openscad: str) -> Iterator[TestClient]:
     with respx.mock as router:
@@ -46,6 +68,7 @@ def bambuddy(client: TestClient, fake_openscad: str) -> Iterator[TestClient]:
         configure(client)
         upload_route(COPY)
         run_routes()
+        Projects()
         yield client
 
 
@@ -94,6 +117,40 @@ def answered(client: TestClient, started: httpx.Response) -> dict[str, Any]:
 
 def printed(item: Item, key: str | None = None) -> dict[str, Any]:
     return answered(item.client, item.post(key))
+
+
+def test_an_accepted_order_and_its_item_get_projects_the_print_files_under(
+    client: TestClient, fake_openscad: str
+) -> None:
+    """§8.1: accepting makes the order's Bambuddy project and the item's nested under it;
+    the item's print is queued in the item's project."""
+    with respx.mock as router:
+        router.route(host="testserver").pass_through()
+        two_colours(fake_openscad)
+        configure(client)
+        upload_route(COPY)
+        run_routes()
+        slice_routes()
+        queued = queue_route()
+        projects = Projects()
+        item = Item(client)
+        number = item.order["number"]
+        assert [(p["name"], p.get("parent_id")) for p in projects.made] == [
+            (number, None),
+            (f"{number} · 1 {item.item['title']}".strip(), 700),
+        ]
+        detail = client.get(f"/api/v1/orders/{item.order['id']}").json()
+        assert [(p["subject"], p["project_id"], p["item_id"]) for p in detail["projects"]] == [
+            (f"order:{item.order['id']}", 700, None),
+            (f"order_item:{item.item['id']}", 701, item.item["id"]),
+        ]
+        attempt = printed(item, key="print-projects")
+        run = follow_run(client, attempt["print_run_id"])
+        assert run["status"] == "succeeded", run
+        sent = json.loads(queued.calls.last.request.content)
+        assert sent["project_id"] == 701
+        # Ensured again by the print, nothing new was made.
+        assert len(projects.made) == 2
 
 
 def test_an_item_prints_from_its_quote_and_follows_the_print(bambuddy: TestClient) -> None:
@@ -184,10 +241,18 @@ def test_a_slice_quote_prints_and_holds_its_sliced_file(bambuddy: TestClient) ->
 def _lookup(client: TestClient, item: Item, request: dict[str, Any], copies: int) -> Any:
     """``existing_run`` as a refused retry asks it, on the app's own loop and client."""
     state = _state(client)
+    # The item's Bambuddy project (§8.1) is part of the run's request, so of its key.
+    project = next(
+        p["project_id"]
+        for p in client.get(f"/api/v1/orders/{item.order['id']}").json()["projects"]
+        if p["item_id"] == item.item["id"]
+    )
 
     async def run() -> PrintRun | None:
         return await existing_run(
-            state.print_runs, PrintSubject.output(item.output_id), print_body(request, copies)
+            state.print_runs,
+            PrintSubject.output(item.output_id),
+            print_body(request, copies, project),
         )
 
     assert client.portal is not None

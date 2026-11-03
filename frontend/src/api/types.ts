@@ -367,6 +367,7 @@ export type Fulfilment = Schemas['Fulfilment']
 export type AttemptArchives = Schemas['AttemptArchives']
 export type ArchiveOffer = Schemas['ArchiveOffer']
 export type ArchiveCopy = Schemas['ArchiveCopy']
+export type OrderProject = Schemas['OrderProject']
 /** #4251 — any file on an order or a line item (spec 2026-10-18 §6.2). */
 export type OrderAttachment = Schemas['Attachment']
 export type OrderAttachmentRole = OrderAttachment['role']
