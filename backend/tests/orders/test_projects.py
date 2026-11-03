@@ -160,9 +160,12 @@ def test_a_cancel_keeps_the_projects_for_a_reopen(shop: Shop) -> None:
 
 
 def _advisory_locks(pool: PgPool) -> int:
+    """Granted advisory locks in this database only: `pg_locks` spans the cluster, and
+    under xdist every other worker's database holds locks of its own."""
     with pool.connection() as conn:
         row = conn.execute(
             "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND granted"
+            " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
         ).fetchone()
     assert row is not None
     return int(row["n"])
