@@ -1241,12 +1241,17 @@ class OrderStore:
         actual_seconds: int | None,
         actual_grams: float | None,
     ) -> Fulfilment | None:
-        """What the attempt's archives say (§8.2); a time the archives do not give stays
-        as the print path recorded it."""
+        """What the attempt's archives say (§8.2). The times are written by the first
+        copy only, and one the archives do not give stays as the print path recorded it,
+        so a time a person corrected since (``PATCH``) is never put back."""
         with self.transaction() as conn:
             row = conn.execute(
                 "UPDATE order_item_fulfilments SET archive_ids = %s,"
-                " started_at = coalesce(%s, started_at), finished_at = coalesce(%s, finished_at),"
+                # The times only on the first copy: one a person corrected since stands.
+                " started_at = CASE WHEN archive_ids = '{}' THEN coalesce(%s, started_at)"
+                "  ELSE started_at END,"
+                " finished_at = CASE WHEN archive_ids = '{}' THEN coalesce(%s, finished_at)"
+                "  ELSE finished_at END,"
                 " actual_seconds = %s, actual_grams = %s"
                 f" WHERE id = %s RETURNING {_FULFILMENT}",
                 (

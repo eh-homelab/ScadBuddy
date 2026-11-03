@@ -156,6 +156,12 @@ async def test_a_settled_attempt_copies_what_its_archives_say(shop: Shop, pool: 
     assert kept.finished_at == datetime(2026, 11, 1, 13, tzinfo=UTC)
     # Its outcome is the print path's, never the archive's.
     assert kept.outcome == "succeeded"
+    # A time a person corrects since stands when the archives are read again.
+    corrected = datetime(2026, 11, 1, 14, tzinfo=UTC)
+    with shop.rows.transaction() as conn:
+        shop.rows.update_fulfilment(conn, attempt.id, finished_at=corrected)
+    await attempt_archives(shop.rows, seam, order.id, item.id, attempt.id)
+    assert shop.rows.fulfilments(item.id)[0].finished_at == corrected
 
 
 async def test_an_open_attempt_offers_its_archives_and_copies_nothing(

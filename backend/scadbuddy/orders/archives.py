@@ -83,8 +83,20 @@ def _sum[T: (int, float)](values: list[T | None]) -> T | None:
 
 
 async def _facts(integrations: OrderIntegrations, archive_ids: list[int]) -> list[ArchiveFacts]:
-    read = await asyncio.gather(*(integrations.archive(a) for a in archive_ids))
-    return [facts for facts in read if facts is not None]
+    """Each archive Bambuddy still has; one that fails to read is left out (logged), so
+    the other plates still offer their copies."""
+    read = await asyncio.gather(
+        *(integrations.archive(a) for a in archive_ids), return_exceptions=True
+    )
+    facts: list[ArchiveFacts] = []
+    for archive_id, answer in zip(archive_ids, read, strict=True):
+        if isinstance(answer, NotLinkedError):
+            return []
+        if isinstance(answer, BaseException):
+            logger.warning("could not read archive %s", archive_id, exc_info=answer)
+        elif answer is not None:
+            facts.append(answer)
+    return facts
 
 
 async def mirror_archives(
@@ -235,7 +247,13 @@ async def copy_in(
         with claims.open(copied.sha256) as handle:
             head = handle.read(attachments.SNIFF_BYTES)
         kind, media_type = attachments.sniff(head, copied.filename)
-        key = await attachments.keep(blobs, claims, copied.sha256, copied.sha256)
+        try:
+            key = await attachments.keep(blobs, claims, copied.sha256, copied.sha256)
+        except LookupError:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                "the copied file was swept before it was kept; copy it again",
+            ) from None
         return await asyncio.to_thread(
             lambda: lifecycle.add_attachment(
                 order_id,
