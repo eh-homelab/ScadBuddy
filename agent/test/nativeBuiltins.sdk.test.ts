@@ -114,6 +114,26 @@ describe.skipIf(cliMissing !== undefined)("Claude Code's own built-ins in a sess
     expect(results[4]).toContain('a.txt')
   }, 60_000)
 
+  // confine.ts `grepGlobs` copies how Claude Code splits Grep's `glob` (read from 2.1.314):
+  // on whitespace, then on commas unless the piece holds both braces. A build that splits
+  // another way fails here, so the guard is checked against the pieces rg really gets.
+  it("splits Grep's glob as the guard reads it", async () => {
+    const { paths, cwd } = await session()
+    for (const name of ['a.ts', 'b.md', 'c.txt']) await writeFile(path.join(cwd, name), 'MARK\n')
+    const grep = (glob: string): Reply => ({ toolUse: { name: 'Grep', input: { pattern: 'MARK', glob, output_mode: 'files_with_matches' } } })
+    steps = [grep('*.ts,*.md'), grep('*.ts *.md'), grep('*.{ts,md}'), grep('*.ts,*.md *.txt')]
+    const { decisions } = await turn({ paths, cwd })
+    expect(decisions).toEqual([])
+    expect(toolResults().filter((b) => b.is_error)).toEqual([])
+    const found = toolResults().map((b) => ['a.ts', 'b.md', 'c.txt'].filter((n) => JSON.stringify(b.content).includes(n)))
+    expect(found).toEqual([
+      ['a.ts', 'b.md'],
+      ['a.ts', 'b.md'],
+      ['a.ts', 'b.md'],
+      ['a.ts', 'b.md', 'c.txt'],
+    ])
+  }, 60_000)
+
   it('refuses a path outside the session directory', async () => {
     const { paths, cwd } = await session()
     const outside = await mkdtemp(path.join(os.tmpdir(), 'native-out-'))
