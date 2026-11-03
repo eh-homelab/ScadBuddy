@@ -34,6 +34,7 @@ import {
   type PendingApproval,
 } from '../agent/attention'
 import { useAttentionNotifications } from '../agent/attentionNotifications'
+import { useWebPush } from '../agent/webPush'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
   ASSISTANT_SHORTCUT_ARIA,
@@ -228,6 +229,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     [openPanel],
   )
   useAttentionNotifications(notices, shown && !embedded, openNotice)
+  // #815 — and with every tab closed, through Web Push; its click opens the session here.
+  useWebPush(shown && !embedded, openNotice)
   const opener = useMemo<AssistantOpener | null>(
     () =>
       shown

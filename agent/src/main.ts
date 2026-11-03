@@ -1,3 +1,6 @@
+import { pendingInput } from './routes/pendingInput.js'
+import { attentionNotices, PushDispatcher } from './notify/dispatcher.js'
+import { PushStore } from './notify/pushStore.js'
 import { PendingChanges } from './gate/changes.js'
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
@@ -215,6 +218,13 @@ const database = config.databaseUrl
           console.log(
             `secret key rotation: re-wrapped ${plugins.rewrapped} plugin secret(s)` +
               (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
+          )
+        }
+        const push = await new PushStore(sql, kek.kek).rewrapFrom(previousKek.kek, kek.kek)
+        if (push.rewrapped || push.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${push.rewrapped} Web Push key(s)` +
+              (push.failed ? `; ${push.failed} could not be opened with the previous key` : ''),
           )
         }
         const grants = await new PluginOAuth(sql).rewrapFrom(previousKek.kek, kek.kek)
@@ -1108,6 +1118,24 @@ const commands =
       })
     : undefined
 
+// Web Push (#815 §3, notify/): each attention request pushed once to every subscribed browser,
+// so a closed tab still alerts. Its keys are sealed under the KEK, so it needs one. A pass
+// runs on each pending-input change and once the database is ready.
+const pushStore = role.http && database && kek.ok ? new PushStore(database.sql, kek.kek) : undefined
+const pushDispatcher =
+  pushStore && sessions
+    ? new PushDispatcher({
+        store: pushStore,
+        notices: async (owner) => attentionNotices(await pendingInput(sessions, owner)),
+        // RFC 8292 §2.1: who the push service may contact about these messages.
+        subject: config.publicUrl ?? 'mailto:scadbuddy@localhost',
+      })
+    : undefined
+if (pushDispatcher && database) {
+  pendingChanges?.subscribe(() => pushDispatcher.wake())
+  void database.ready().then((ok) => ok && pushDispatcher.wake())
+}
+
 const app = !role.http
   ? undefined
   : createApp({
@@ -1144,6 +1172,7 @@ const app = !role.http
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
   ...(pendingChanges ? { pendingChanges } : {}),
+  ...(pushStore && pushDispatcher ? { push: { store: pushStore, dispatcher: pushDispatcher } } : {}),
   upgradeWebSocket,
   tabs,
   // A person's session on /api/v1/ai/* (#4975 phase 5), dropped when the backend revokes it.

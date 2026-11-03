@@ -1851,3 +1851,27 @@ refresh token, and they can act only on the repositories the App is installed on
 ([GitHub docs](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)).
 Set the App's callback URL to the one the card shows, then give its client id and a
 client secret under **Use my own OAuth app**.
+
+## 16. Attention notifications (#815)
+
+When the assistant needs the person (a `request_user_attention` call, or a `browser_*`
+call waiting for its tab), these channels announce it:
+
+- **The badge.** The shell reads `GET /api/v1/ai/pending-input`. It reads again as soon as
+  `GET /api/v1/ai/pending-input/changes` says something changed, and every 15 s
+  regardless. The change stream is fed by `NOTIFY scadbuddy_pending`, which a trigger sends
+  on every write to `ai_pending_input`, `ai_approvals` and `ai_questions`
+  ([`agent/src/gate/changes.ts`](../../agent/src/gate/changes.ts)).
+- **The page's own notification**, while a ScadBuddy tab is open but hidden
+  (`frontend/src/agent/attentionNotifications.ts`).
+- **Web Push**, with every tab closed ([`agent/src/notify/`](../../agent/src/notify/),
+  `frontend/public/push-sw.js`). The page subscribes once the person turns notifications
+  on. The agent pushes each request once to every subscribed browser of someone who may see
+  it. A push carries the request's id, its session's id and its reason, never the message.
+  The VAPID key is made on first use and sealed under the KEK (`ai_push_vapid`).
+  Subscriptions (`ai_push_subscriptions`) are sealed under the KEK too, so Web Push needs
+  `SCADBUDDY_SECRET_KEY_FILE`, and rotation re-wraps both. Each push passes the egress
+  check (https only, every resolved address checked, the connection pinned, no redirect
+  followed), so the pod must be able to reach the browsers' push services
+  (`fcm.googleapis.com`, `updates.push.services.mozilla.com`, `web.push.apple.com`, …).
+  The VAPID `sub` is `SCADBUDDY_PUBLIC_URL`.

@@ -9,9 +9,9 @@ import type { AttentionNotice } from './attention'
  * `components/assistant/NotificationsOffer.tsx`), never on load. A click on a notification
  * focuses this tab and opens the request's session in the panel.
  *
- * Only an open tab can notify: a closed one would need a service worker and Web Push, which
- * this does not add. Each notification is tagged with its request id, so several ScadBuddy
- * tabs raising the same request replace one another rather than stacking.
+ * Only an open tab can notify from here; with every tab closed, Web Push does (`webPush.ts`,
+ * `public/push-sw.js`). Each notification is tagged with its request id, so several ScadBuddy
+ * tabs, and the push worker, raising the same request replace one another rather than stacking.
  */
 
 export type NotificationsState = NotificationPermission | 'unsupported'
