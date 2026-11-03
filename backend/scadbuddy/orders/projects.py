@@ -16,6 +16,7 @@ without ``bambuddy_url`` nothing here is asked and nothing is recorded.
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
@@ -41,14 +42,49 @@ def prints(item: OrderItem) -> bool:
     return item.reference is not None and item.status != "cancelled"
 
 
+#: How long one Bambuddy project create may take while the order's lock is held.
+ENSURE_TIMEOUT_SECONDS = 30.0
+
+
 @asynccontextmanager
 async def _locked(store: OrderStore, order_id: str) -> AsyncIterator[None]:
+    """``OrderStore.project_lock`` held across awaits. The lock is taken in a worker
+    thread, which a cancelled task cannot stop, so that thread itself lets go of a lock
+    it got after its task gave up waiting, and a task cancelled just after the thread got
+    it lets go in a thread of its own: neither depends on the event loop still running.
+    The release in ``finally`` runs in a thread that completes even if the task is
+    cancelled again."""
     held = store.project_lock(order_id)
-    await asyncio.to_thread(held.__enter__)
+    guard = threading.Lock()
+    state = {"abandoned": False, "held": False}
+
+    def enter() -> None:
+        held.__enter__()
+        with guard:
+            if state["abandoned"]:
+                held.__exit__(None, None, None)
+                return
+            state["held"] = True
+
+    try:
+        await asyncio.to_thread(enter)
+    except BaseException:
+        with guard:
+            state["abandoned"] = True
+            late = state["held"]
+        if late:
+            threading.Thread(target=held.__exit__, args=(None, None, None), daemon=True).start()
+        raise
     try:
         yield
     finally:
-        await asyncio.to_thread(held.__exit__, None, None, None)
+        await asyncio.shield(asyncio.to_thread(held.__exit__, None, None, None))
+
+
+async def _ensure(integrations: OrderIntegrations, name: str, parent_id: int | None) -> int:
+    """One create, bounded: nothing holds the order's lock longer than this."""
+    async with asyncio.timeout(ENSURE_TIMEOUT_SECONDS):
+        return await integrations.ensure_project(name, parent_id)
 
 
 async def ensure_projects(
@@ -74,7 +110,7 @@ async def ensure_projects(
         top_subject = order_subject(order_id)
         top = known.get(top_subject)
         if top is None:
-            made = await integrations.ensure_project(order.number, None)
+            made = await _ensure(integrations, order.number, None)
             top = await asyncio.to_thread(store.set_project, order_id, top_subject, made)
         items = await asyncio.to_thread(store.items, order_id)
         wanted = (
@@ -86,7 +122,7 @@ async def ensure_projects(
             subject = item_subject(item.id)
             if subject in known:
                 continue
-            made = await integrations.ensure_project(item_project_name(order, item), top)
+            made = await _ensure(integrations, item_project_name(order, item), top)
             await asyncio.to_thread(store.set_project, order_id, subject, made)
     return await asyncio.to_thread(store.projects, order_id)
 

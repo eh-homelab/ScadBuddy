@@ -204,6 +204,11 @@ def _item_of(row: DictRow) -> OrderItem:
 ATTACHMENT_HOLDER = "attachment"
 
 
+#: How long a project ensure waits for another one of the same order (§8.1): longer
+#: than the creates that one makes may take (``orders/projects.py``).
+PROJECT_LOCK_TIMEOUT_MS = 120_000
+
+
 def item_subject(item_id: str) -> str:
     """An item's attachment subject (§6.2)."""
     return f"order_item:{item_id}"
@@ -1623,7 +1628,14 @@ class OrderStore:
         two projects for one subject."""
         key = "order_projects:" + order_id
         with self._pool.connection() as conn:
-            conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
+            # Bounded: a holder stuck elsewhere fails this wait, never hangs it.
+            conn.execute(
+                "SELECT set_config('lock_timeout', %s, false)", (f"{PROJECT_LOCK_TIMEOUT_MS}ms",)
+            )
+            try:
+                conn.execute("SELECT pg_advisory_lock(hashtextextended(%s, 0))", (key,))
+            finally:
+                conn.execute("RESET lock_timeout")
             try:
                 yield
             finally:

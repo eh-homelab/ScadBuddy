@@ -822,7 +822,9 @@ anything, so an accept whose ensure failed is made good, and sets it as the run'
 there is a 503 the operation retries, and a print on the native path files under no
 project. The ensures of one order run one at a time under a Postgres advisory lock
 (`OrderStore.project_lock`), so an accept and a flow's print racing it make each project
-once. `OrderDetail.projects` lists them; the order page links the order's project and the
+once. The wait for it is bounded (`lock_timeout`, 120 s), each create under it is bounded
+(30 s), and a task cancelled while its thread waits for the lock leaves no lock held: the
+thread lets go of one it got too late. `OrderDetail.projects` lists them; the order page links the order's project and the
 item drawer the item's. One change from the design: **a cancel keeps the mapping.** A
 retried print of an item cancelled meanwhile looks for its run by the run's key
 (`existing_run`), which the project is part of, and a reopened order (§3.5 Undo) goes on

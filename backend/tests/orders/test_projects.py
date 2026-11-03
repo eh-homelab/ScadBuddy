@@ -4,9 +4,11 @@ named by its number, and one per item that prints nested under it, each made onc
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
+import scadbuddy.orders.projects as projects_module
 from scadbuddy.orders.integrations import NOT_LINKED, SpoolGroup
 from scadbuddy.orders.projects import ensure_projects, item_project, item_project_name
 from scadbuddy.orders.store import OrderStore, item_subject, order_subject
@@ -106,3 +108,67 @@ def test_a_cancel_keeps_the_projects_for_a_reopen(shop: Shop) -> None:
     shop.lifecycle.reopen_order(order.id, BY)
     assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 102
     assert len(seam.made) == 2
+
+
+def _advisory_locks(pool: PgPool) -> int:
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT count(*) AS n FROM pg_locks WHERE locktype = 'advisory' AND granted"
+        ).fetchone()
+    assert row is not None
+    return int(row["n"])
+
+
+def _settled(pool: PgPool) -> int:
+    """The advisory locks held once a late thread has had time to let its own go."""
+    deadline = time.monotonic() + 10
+    while _advisory_locks(pool) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return _advisory_locks(pool)
+
+
+def test_a_cancel_while_waiting_for_the_lock_leaves_it_free(shop: Shop, pool: PgPool) -> None:
+    """The ensure is cancelled while its thread waits for the lock another holds: once
+    that holder lets go, the thread's late acquisition is released, not leaked."""
+    order, _ = shop.accepted()
+    holder = shop.rows.project_lock(order.id)
+    holder.__enter__()
+    released = False
+
+    def release() -> None:
+        nonlocal released
+        if not released:
+            released = True
+            holder.__exit__(None, None, None)
+
+    try:
+
+        async def cancelled() -> None:
+            task = asyncio.create_task(ensure_projects(shop.rows, Projects(), order.id))
+            await asyncio.sleep(0.3)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            # Only now may the waiting thread take the lock: after its task is gone.
+            release()
+
+        asyncio.run(cancelled())
+        assert _settled(pool) == 0
+    finally:
+        release()
+
+
+def test_a_bambuddy_that_never_answers_lets_the_lock_go(
+    shop: Shop, pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(projects_module, "ENSURE_TIMEOUT_SECONDS", 0.2)
+    order, _ = shop.accepted()
+
+    class Hangs(Projects):
+        async def ensure_project(self, name: str, parent_id: int | None) -> int:
+            await asyncio.sleep(3600)
+            raise AssertionError("unreachable")
+
+    with pytest.raises(TimeoutError):
+        asyncio.run(ensure_projects(shop.rows, Hangs(), order.id))
+    assert _settled(pool) == 0
