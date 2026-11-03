@@ -75,6 +75,27 @@ describe('file parameter (#204)', () => {
     vi.restoreAllMocks()
   })
 
+  it("shows a fetched file's viewBox, licence and source (#959)", async () => {
+    const id = 'f'.repeat(64)
+    vi.spyOn(api, 'getAsset').mockResolvedValue({
+      id,
+      name: 'unicorn.svg',
+      kind: 'svg',
+      size: 100,
+      view_box: [0, 0, 512, 512],
+      path_count: 3,
+      source_url: 'https://api.iconify.design/game-icons/unicorn.svg',
+      licence: { spdx: 'CC-BY-3.0', author: 'GameIcons' },
+    })
+    setup(id)
+    expect(await screen.findByText('SVG · viewBox 0 0 512 512')).toBeInTheDocument()
+    expect(screen.getByText('CC-BY-3.0 · GameIcons')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Source' })).toHaveAttribute(
+      'href',
+      'https://api.iconify.design/game-icons/unicorn.svg',
+    )
+  })
+
   it('starts empty, naming the kinds it takes', () => {
     setup()
     expect(screen.getByText('Label artwork')).toBeInTheDocument()

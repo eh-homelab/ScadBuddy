@@ -190,9 +190,27 @@ export function FileWidget({
                 </span>
               </Hint>
               {asset && (
-                <span className="sb-num text-muted-foreground">
+                <span className="sb-num block text-muted-foreground">
                   {asset.kind.toUpperCase()}
                   {asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : ''}
+                  {asset.view_box ? ` · viewBox ${asset.view_box.join(' ')}` : ''}
+                </span>
+              )}
+              {asset && (asset.licence || asset.source_url) && (
+                <span className="block truncate text-muted-foreground">
+                  {asset.licence && (
+                    <span>
+                      {[asset.licence.spdx ?? asset.licence.name, asset.licence.author].filter(Boolean).join(' · ')}
+                    </span>
+                  )}
+                  {asset.source_url && (
+                    <>
+                      {asset.licence ? ' · ' : ''}
+                      <a href={asset.source_url} target="_blank" rel="noreferrer" className="underline">
+                        Source
+                      </a>
+                    </>
+                  )}
                 </span>
               )}
             </>
