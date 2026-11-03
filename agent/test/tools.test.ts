@@ -1936,6 +1936,24 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
     })
   })
 
+  it("fetch_asset names the file's licence on its approval and sends it to be kept (#959)", async () => {
+    const url = 'https://openmoji.org/data/color/svg/1F984.svg'
+    const licence = { spdx: 'CC-BY-SA-4.0', author: 'OpenMoji' }
+    const pending = await runTool(tool('fetch_asset'), { slug: 'box', url, licence }, ctx())
+    expect(firstText(pending)).toMatchObject({
+      summary: `Fetch ${url} (openmoji.org) into model "box" as a file asset, under CC-BY-SA-4.0`,
+    })
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/box/assets/fetch`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: 'a'.repeat(64), name: 'u.svg', kind: 'svg', size: 10, source_url: url }, { status: 201 })
+      }),
+    )
+    await runTool({ ...tool('fetch_asset'), gated: false }, { slug: 'box', url, licence }, ctx())
+    expect(bodies).toEqual([{ url, licence }])
+  })
+
   it('fetch_asset is gated, and once approved posts the URL to the backend (#844)', async () => {
     const url = 'https://openmoji.org/data/color/svg/1F984.svg'
     const pending = await runTool(tool('fetch_asset'), { slug: 'box', url }, ctx())

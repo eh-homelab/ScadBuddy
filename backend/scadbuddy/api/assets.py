@@ -4,6 +4,7 @@ the sample files a template ships beside its source."""
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import Annotated
 from urllib.parse import urlsplit
 
@@ -43,6 +44,7 @@ from scadbuddy.library.assets import (
     MAX_ASSET_BYTES,
     MEDIA_TYPES,
     AssetKind,
+    AssetLicence,
     AssetMeta,
     AssetNotFoundError,
     AssetQuotaError,
@@ -147,13 +149,22 @@ async def upload_asset(
 
 
 async def store_asset(
-    slug: str, data: bytes, filename: str | None, *, assets: AssetStore, state: AppState
+    slug: str,
+    data: bytes,
+    filename: str | None,
+    *,
+    assets: AssetStore,
+    state: AppState,
+    source_url: str | None = None,
+    licence: AssetLicence | None = None,
 ) -> AssetMeta:
     """An upload's bytes into the store, and mirrored where workers read them: the
     ``asset_upload`` and ``asset_fetch`` operations' runs (#1054)."""
     try:
         # Decoding a PNG and parsing an SVG are CPU work; keep them off the loop.
-        meta = await asyncio.to_thread(assets.put, data, filename)
+        meta = await asyncio.to_thread(
+            partial(assets.put, data, filename, source_url=source_url, licence=licence)
+        )
     except AssetRejectedError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     except AssetQuotaError as error:
@@ -177,6 +188,13 @@ async def store_asset(
 
 class AssetFetch(BaseModel):
     url: str = Field(max_length=2048, description="An https URL to an SVG or PNG")
+    licence: AssetLicence | None = Field(
+        default=None,
+        description=(
+            "The licence the file is under, as the source states it (`search_icons` "
+            "answers it per icon); kept on the asset as given, never checked"
+        ),
+    )
 
 
 class FetchedAsset(AssetMeta):
@@ -242,7 +260,12 @@ async def fetch_asset(
         kind=ops.kinds["asset_fetch"],
         # The host, never the URL: the subject is a search attribute.
         subject=urlsplit(pasted).hostname or "url",
-        request={"slug": slug, "url": url.name, "shown": shown_url(pasted)},
+        request={
+            "slug": slug,
+            "url": url.name,
+            "shown": shown_url(pasted),
+            "licence": None if body.licence is None else body.licence.model_dump(),
+        },
         idempotency_key=idempotency_key,
         claimed=Claimed(claims, [url]),
         before_start=permit,
@@ -259,7 +282,9 @@ def _require_fetch_permit(imports: ImportPermits) -> None:
         )
 
 
-async def fetch_run(slug: str, url: str, state: AppState) -> FetchedAsset:
+async def fetch_run(
+    slug: str, url: str, state: AppState, *, licence: AssetLicence | None = None
+) -> FetchedAsset:
     """The ``asset_fetch`` operation's run (#1054): the fetch, then the store."""
     # Off the loop: `load` is blocking psycopg I/O.
     domains = (await asyncio.to_thread(state.settings_store.load)).allowed_asset_domains()
@@ -274,9 +299,20 @@ async def fetch_run(slug: str, url: str, state: AppState) -> FetchedAsset:
             raise fetch_busy(
                 "every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER
             ) from None
-    meta = await store_asset(slug, fetched.data, fetched.filename, assets=state.assets, state=state)
-    # Never the URL as given: its query may carry a token, and this answer is recorded.
-    return FetchedAsset(**meta.model_dump(), source_url=shown_url(fetched.source_url))
+    # Never the URL as given: its query may carry a token, and the row and this answer
+    # are kept.
+    source_url = shown_url(fetched.source_url)
+    meta = await store_asset(
+        slug,
+        fetched.data,
+        fetched.filename,
+        assets=state.assets,
+        state=state,
+        source_url=source_url,
+        licence=licence,
+    )
+    # This fetch's URL, even when the content was stored from elsewhere first.
+    return FetchedAsset(**{**meta.model_dump(), "source_url": source_url})
 
 
 @router.get(

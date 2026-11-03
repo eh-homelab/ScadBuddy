@@ -30,6 +30,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -48,8 +49,9 @@ from lxml import etree
 from PIL import Image, UnidentifiedImageError
 from psycopg import Connection
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, DataPaths
 from scadbuddy.library.catalogue import THUMBNAIL_NAME
@@ -82,15 +84,14 @@ def asset_lock_key(asset_id: str) -> str:
 _LOCK_XACT = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 _LOCK_SESSION = "SELECT pg_advisory_lock(hashtextextended(%s, 0))"
 _UNLOCK_SESSION = "SELECT pg_advisory_unlock(hashtextextended(%s, 0))"
-_SELECT_META = "SELECT id, name, kind, size, width, height FROM assets WHERE id = %s"
+#: Every column `AssetMeta` reads.
+_META_COLUMNS = "id, name, kind, size, width, height, view_box, path_count, source_url, licence"
+_SELECT_META = f"SELECT {_META_COLUMNS} FROM assets WHERE id = %s"
 #: The sweep's candidates among the rows: those last used before the cutoff, read
 #: through the `assets_last_used` index.
 STALE_ROWS = "SELECT id FROM assets WHERE last_used_at < %s"
 _ROWS_AMONG = "SELECT id FROM assets WHERE id = ANY(%s)"
-_MARK_USED = (
-    "UPDATE assets SET last_used_at = %s WHERE id = %s"
-    " RETURNING id, name, kind, size, width, height"
-)
+_MARK_USED = f"UPDATE assets SET last_used_at = %s WHERE id = %s RETURNING {_META_COLUMNS}"
 #: Anything in a reference source that could be an asset id. Deliberately looser than
 #: "the value of a `file` parameter": a sweep that keeps an asset it need not is
 #: harmless, one that misses a reference destroys an output's provenance. Matching
@@ -185,6 +186,19 @@ class AssetQuotaError(Exception):
         self.usage = usage
 
 
+class AssetLicence(BaseModel):
+    """The licence a fetch said its file is under (#959), as given: nothing checks it."""
+
+    #: Its SPDX identifier (https://spdx.org/licenses/), e.g. ``CC-BY-4.0``.
+    spdx: str | None = Field(default=None, max_length=100)
+    #: Its name as the source writes it, e.g. ``CC BY 4.0``.
+    name: str | None = Field(default=None, max_length=200)
+    #: Where its text is.
+    url: str | None = Field(default=None, max_length=2048)
+    #: Whom to credit.
+    author: str | None = Field(default=None, max_length=200)
+
+
 class AssetMeta(BaseModel):
     #: The SHA-256 of the stored bytes (after sanitising), hex.
     id: str
@@ -194,6 +208,34 @@ class AssetMeta(BaseModel):
     size: int
     width: int | None = None
     height: int | None = None
+    #: An SVG's ``viewBox``: min-x, min-y, width and height, in its user units (#959).
+    #: ``None`` for a PNG, an SVG without one, and one that is not four numbers with a
+    #: positive size.
+    view_box: list[float] | None = None
+    #: How many ``<path>`` elements an SVG keeps after sanitising (#959).
+    path_count: int | None = None
+    #: The URL a fetched asset came from, without its query (#959); ``None`` for an
+    #: upload. Content stored twice keeps the first source it was given.
+    source_url: str | None = None
+    #: The licence its fetch named (#959).
+    licence: AssetLicence | None = None
+
+
+def _meta_values(meta: AssetMeta) -> tuple[object, ...]:
+    """``meta`` in :data:`_META_COLUMNS`'s order, for an insert."""
+    licence = None if meta.licence is None else Jsonb(meta.licence.model_dump())
+    return (
+        meta.id,
+        meta.name,
+        meta.kind,
+        meta.size,
+        meta.width,
+        meta.height,
+        meta.view_box,
+        meta.path_count,
+        meta.source_url,
+        licence,
+    )
 
 
 def display_name(filename: str | None, kind: AssetKind) -> str:
@@ -276,6 +318,26 @@ def sanitise_svg(data: bytes) -> bytes:
 
     cleaned: bytes = etree.tostring(root, xml_declaration=True, encoding="UTF-8")
     return cleaned
+
+
+_VIEW_BOX_SPLIT = re.compile(r"[\s,]+")
+
+
+def svg_shape(data: bytes) -> tuple[list[float] | None, int]:
+    """A sanitised SVG's ``viewBox`` and its count of ``<path>`` elements (#959)."""
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
+    root = etree.fromstring(data, parser)
+    paths = sum(1 for element in root.iter() if _local(element.tag) == "path")
+    raw = root.get("viewBox") or ""
+    try:
+        numbers = [float(part) for part in _VIEW_BOX_SPLIT.split(raw.strip()) if part]
+    except ValueError:
+        return None, paths
+    if len(numbers) != 4 or not all(math.isfinite(n) for n in numbers):
+        return None, paths
+    if numbers[2] <= 0 or numbers[3] <= 0:
+        return None, paths
+    return numbers, paths
 
 
 #: In Pillow's ValueErrors for its PNG metadata limits, what tells them from another
@@ -497,17 +559,30 @@ class AssetStore:
                 raise AssetNotFoundError(asset_id)
         return meta
 
-    def put(self, data: bytes, filename: str | None) -> AssetMeta:
-        """Validate, sanitise and store an upload; the same content is stored once."""
+    def put(
+        self,
+        data: bytes,
+        filename: str | None,
+        *,
+        source_url: str | None = None,
+        licence: AssetLicence | None = None,
+    ) -> AssetMeta:
+        """Validate, sanitise and store an upload; the same content is stored once.
+
+        ``source_url`` and ``licence`` are a fetch's (#959): a later upload of the same
+        content without them keeps the ones stored. The answer is the row as stored."""
         if len(data) > MAX_ASSET_BYTES:
             raise AssetRejectedError(f"the file is larger than {MAX_ASSET_BYTES} bytes")
         kind = sniff(data)
         width: int | None = None
         height: int | None = None
+        view_box: list[float] | None = None
+        path_count: int | None = None
         if kind == "png":
             stored, width, height = normalise_png(data)
         else:
             stored = sanitise_svg(data)
+            view_box, path_count = svg_shape(stored)
         meta = AssetMeta(
             id=hashlib.sha256(stored).hexdigest(),
             name=display_name(filename, kind),
@@ -515,6 +590,10 @@ class AssetStore:
             size=len(stored),
             width=width,
             height=height,
+            view_box=view_box,
+            path_count=path_count,
+            source_url=source_url,
+            licence=licence,
         )
         with self._require().connection() as conn, conn.transaction():
             conn.execute(_LOCK_XACT, (asset_lock_key(meta.id),))
@@ -533,15 +612,20 @@ class AssetStore:
                 self.root.mkdir(parents=True, exist_ok=True)
                 _write_atomically(blob, stored)
             now = datetime.now(UTC)
-            conn.execute(
-                "INSERT INTO assets"
-                " (id, name, kind, size, width, height, created_at, last_used_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+            row = conn.execute(
+                f"INSERT INTO assets ({_META_COLUMNS}, created_at, last_used_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (id) DO UPDATE"
-                " SET name = EXCLUDED.name, last_used_at = EXCLUDED.last_used_at",
-                (meta.id, meta.name, meta.kind, meta.size, meta.width, meta.height, now, now),
-            )
-        return meta
+                " SET name = EXCLUDED.name, last_used_at = EXCLUDED.last_used_at,"
+                " view_box = coalesce(assets.view_box, EXCLUDED.view_box),"
+                " path_count = coalesce(assets.path_count, EXCLUDED.path_count),"
+                " source_url = coalesce(assets.source_url, EXCLUDED.source_url),"
+                " licence = coalesce(assets.licence, EXCLUDED.licence)"
+                f" RETURNING {_META_COLUMNS}",
+                (*_meta_values(meta), now, now),
+            ).fetchone()
+        assert row is not None
+        return AssetMeta.model_validate(row)
 
     def adopt(self, meta: AssetMeta, data: bytes) -> None:
         """Keep an asset fetched from the blob store exactly as it was stored elsewhere.
@@ -559,11 +643,10 @@ class AssetStore:
                 _write_atomically(blob, data)
             now = datetime.now(UTC)
             conn.execute(
-                "INSERT INTO assets"
-                " (id, name, kind, size, width, height, created_at, last_used_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                f"INSERT INTO assets ({_META_COLUMNS}, created_at, last_used_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (id) DO UPDATE SET last_used_at = EXCLUDED.last_used_at",
-                (meta.id, meta.name, meta.kind, meta.size, meta.width, meta.height, now, now),
+                (*_meta_values(meta), now, now),
             )
 
     def ids(self) -> list[str]:
