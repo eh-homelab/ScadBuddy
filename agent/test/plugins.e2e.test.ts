@@ -276,6 +276,9 @@ describe.skipIf(cliMissing !== undefined)(
       expect(result).toMatchObject({ subtype: 'success', result: 'Found it.' })
       // forget and files.delete are disabled; files.list/files_list collide, so both are hidden.
       expect(offered()).toEqual(['mcp__my-memory__recall', 'mcp__my-memory__retain'])
+      // With no tool search the forwarder's `_meta['anthropic/alwaysLoad']: false` defers nothing (#5221).
+      const tools = fake.messageCalls()[0]!.body?.tools as { name: string; defer_loading?: boolean }[]
+      expect(tools.filter((t) => t.name.startsWith('mcp__my-memory__')).map((t) => t.defer_loading ?? false)).toEqual([false, false])
       expect(decisions).toEqual([['mcp__my-memory__recall', { decision: 'allow', tier: 'read' }]])
       expect(mcp.calls).toEqual(['recall:PETG settings'])
       expect(lastContent(fake.messageCalls().at(-1)!)).toContain('remembered: PETG settings')
