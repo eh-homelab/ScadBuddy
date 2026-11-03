@@ -61,6 +61,9 @@ class Archives:
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
         return self.facts.get(archive_id)
 
+    async def archive_cost(self, archive_id: int) -> float | None:
+        raise AssertionError("not asked")
+
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
     ) -> CopiedMedia:

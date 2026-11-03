@@ -55,6 +55,7 @@ from scadbuddy.bambuddy.archive_cache import ArchiveCache
 from scadbuddy.bambuddy.attachments import Attachment, AttachmentStore
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.component import ArchiveCacheDep
+from scadbuddy.bambuddy.costs import archive_cost, run_cost
 from scadbuddy.bambuddy.linking import link_library_prints, scan_library_by_hash
 from scadbuddy.bambuddy.models import (
     ArchiveDetail,
@@ -298,11 +299,6 @@ class PrintedRun(ArchiveRun):
     #: not what the print used. Its ``cost`` is then the run's own price per gram
     #: at the archive's grams, not the cost Bambuddy worked out from the reading.
     filament_reading_suspect: bool = False
-
-
-#: How many times the archive's grams a run may read before it is not believed.
-#: A reprint uses about what the archive says; a spool's weight is 50x and more.
-SUSPECT_RUN_GRAMS_RATIO = 3.0
 
 
 class PrintOutcome(_Response):
@@ -1128,10 +1124,9 @@ async def _plate_names(
 
 
 def _run(run: ArchiveRun, archive_grams: float | None) -> PrintedRun:
-    grams = run.filament_used_grams
-    if not archive_grams or not grams or grams <= archive_grams * SUSPECT_RUN_GRAMS_RATIO:
+    cost, suspect = run_cost(run, archive_grams)
+    if not suspect:
         return PrintedRun(**run.model_dump())
-    cost = None if run.cost is None else round(run.cost * archive_grams / grams, 2)
     return PrintedRun(**run.model_dump(exclude={"cost"}), cost=cost, filament_reading_suspect=True)
 
 
@@ -1141,16 +1136,8 @@ def _outcome(
     if archive is None:
         return PrintOutcome(status=summary.status, printer_id=summary.printer_id)
     shown = [_run(run, archive.filament_used_grams) for run in runs]
-    # Bambuddy's cost includes what it worked out from a suspect reading; take the
-    # overstatement back out, when the archive's cost is evidently carrying it.
-    overstated = sum(
-        (recorded.cost or 0.0) - (run.cost or 0.0)
-        for recorded, run in zip(runs, shown, strict=True)
-        if run.filament_reading_suspect
-    )
-    cost = archive.cost
-    if cost is not None and 0 < overstated <= cost:
-        cost = round(cost - overstated, 2)
+    # Bambuddy's cost includes what it worked out from a suspect reading (#950).
+    cost = archive_cost(archive.cost, archive.filament_used_grams, runs)
     return PrintOutcome(
         status=summary.status,
         failure_reason=archive.failure_reason,

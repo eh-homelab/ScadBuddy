@@ -288,6 +288,25 @@ export const orderTools: Tool[] = [
       json(await ok(backend.GET('/api/v1/orders/{order_id}', { params: { path: { order_id } } }), `get order ${order_id}`)),
   }),
   defineTool({
+    name: 'order_costs',
+    label: "Read an order's real cost",
+    description:
+      "An order's real cost (#4251): per item, its accepted quote's seconds, grams and filament cost for the " +
+      "item's quantity beside every attempt's actual seconds and grams, failed attempts included, the grams " +
+      "priced at the quote's own price per gram (a manual quote prices none). `bambuddy_cost` is Bambuddy's own " +
+      'cost of an attempt, shown and never in any sum.',
+    input: z.object({ order_id: orderId }),
+    risk: 'read',
+    routes: ['GET /api/v1/orders/{order_id}/costs'],
+    handler: async ({ order_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/orders/{order_id}/costs', { params: { path: { order_id } } }),
+          `get the costs of order ${order_id}`,
+        ),
+      ),
+  }),
+  defineTool({
     name: 'order_create',
     label: 'Create an order',
     description:
