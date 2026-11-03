@@ -75,6 +75,8 @@ cat > "$work/runs/failed-then-skipped.json" <<'EOF'
 [{"workflowName":"CI","conclusion":"skipped","createdAt":"2026-11-03T10:05:00Z"},
  {"workflowName":"CI","conclusion":"failure","createdAt":"2026-11-03T10:00:00Z"}]
 EOF
+# Every run of the workflow was skipped: no group is left to count.
+echo '[{"workflowName":"CI","conclusion":"skipped","createdAt":"2026-11-03T10:00:00Z"}]' > "$work/runs/all-skipped.json"
 # A duplicate run cancelled by a newer one of the same workflow, still going.
 cat > "$work/runs/rerun.json" <<'EOF'
 [{"workflowName":"CI","conclusion":"","createdAt":"2026-11-03T10:05:00Z"},
@@ -159,6 +161,12 @@ EOF
 # A later skipped run of the same workflow does not hide the failure.
 run skipped-after-failure 3600 failed 1 <<'EOF'
 42 true BLOCKED failed-then-skipped
+EOF
+
+# Only skipped runs: nothing failed, so it keeps waiting until the PR lands.
+run all-skipped 3600 none 2 <<'EOF'
+42 true BLOCKED all-skipped
+none
 EOF
 
 # Every run passed but the PR stays BLOCKED (a required check the App cannot
