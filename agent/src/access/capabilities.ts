@@ -201,7 +201,9 @@ export class Capabilities {
 
   /**
    * Sets a ScadBuddy tool's loading (#838); `null` puts it back to its default. Only the
-   * in-process server's tools take one (`LOADING_SOURCES`): 409 for any other item.
+   * in-process server's tools take one (`LOADING_SOURCES`): 409 for any other item. A tool
+   * that is off takes one too (the page hides the select then): the loading is not its
+   * access, so it is kept across an off and on.
    */
   async setLoading(id: string, item: string, loading: ToolLoading | null, context: AuditContext): Promise<SourceView> {
     const { own } = await this.found(id)
