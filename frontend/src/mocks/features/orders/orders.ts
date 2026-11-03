@@ -19,6 +19,7 @@ import type {
 } from '../../../api/types'
 import { mockModels, mockOutput, mockSettings } from '../../handlers'
 import { versionIds } from '../../fixtures'
+import { printersState } from '../printers'
 import { byCreated } from '../../../components/orders/price'
 import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state, UNKNOWN_PARAMETER } from './state'
 
@@ -868,7 +869,7 @@ export const handlers = [
     if (!request.headers.get('Idempotency-Key')) {
       return problem(request, 428, 'This request needs an Idempotency-Key header', 'https://scadbuddy.dev/problems/idempotency-key-required')
     }
-    await request.json()
+    const body = (await request.json()) as { printer?: string | null; printer_id?: number | null }
     try {
       const order = lock(String(params.id))
       notEnded(order)
@@ -886,6 +887,8 @@ export const handlers = [
       if (!quote || found.output_id === null) {
         throw new Refused('requote_needed', `item ${found.id} needs a new quote before it prints`, [found.id])
       }
+      // §8.4: the registry printer the run used, as it was named then.
+      const printer = printersState().find((row) => row.id === body.printer || (body.printer_id != null && row.bambuddy_printer_id === body.printer_id))
       const attempt: Fulfilment = {
         id: newId('f'),
         order_item_id: found.id,
@@ -903,7 +906,10 @@ export const handlers = [
         copies,
         sliced_sha256: quote.sliced_sha256,
         sliced_blob_key: quote.sliced_blob_key,
-        printer: null,
+        printer: printer?.id ?? null,
+        printer_serial: printer?.serial ?? null,
+        printer_name: printer?.name ?? null,
+        bambuddy_printer_id: printer?.bambuddy_printer_id ?? null,
       }
       state.fulfilments.push(attempt)
       found.status = 'queued'

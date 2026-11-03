@@ -66,6 +66,7 @@ export function FulfilmentForm({
               <span>
                 Attempt {attempt.attempt}: {attempt.outcome}, <span className="sb-num">{attempt.quantity}</span> made
                 {attempt.failure_reason ? ` (${attempt.failure_reason})` : ''}
+                {attempt.printer_name ? <span className="text-muted-foreground"> on {attempt.printer_name}</span> : null}
                 {attempt.actual_grams != null && <span className="text-muted-foreground">, {attempt.actual_grams.toFixed(1)} g</span>}
                 {attempt.actual_seconds != null && <span className="text-muted-foreground">, {Math.round(attempt.actual_seconds / 60)} min</span>}
               </span>

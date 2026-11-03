@@ -125,6 +125,43 @@ def test_a_print_records_its_attempt_and_queues_the_item(shop: Shop, pool: PgPoo
     assert len(shop.rows.fulfilments(item.id)) == 1
 
 
+def test_an_attempt_keeps_the_printer_its_run_used(shop: Shop, pool: PgPool) -> None:
+    """§8.4: the registry printer's serial, name and Bambuddy id as the run used them,
+    kept when the printer is renamed or deleted since."""
+    printer = str(uuid.uuid4())
+    with pool.connection() as conn:
+        conn.execute(
+            "INSERT INTO printers (id, serial, name, bambuddy_printer_id)"
+            " VALUES (%s, '01P00A000000001', 'Workshop P1S', 7)",
+            (printer,),
+        )
+    order, item = shop.accepted()
+    claim = claimed(shop, order, item, "req-printer")
+    attempt = shop.lifecycle.attach_print(claim, run_row(pool), printer)
+    assert attempt.printer == printer
+    assert (attempt.printer_serial, attempt.printer_name, attempt.bambuddy_printer_id) == (
+        "01P00A000000001",
+        "Workshop P1S",
+        7,
+    )
+    with pool.connection() as conn:
+        conn.execute("UPDATE printers SET name = 'Renamed' WHERE id = %s", (printer,))
+        conn.execute("DELETE FROM printers WHERE id = %s", (printer,))
+    kept = shop.rows.fulfilments(item.id)[0]
+    assert (kept.printer_serial, kept.printer_name, kept.bambuddy_printer_id) == (
+        "01P00A000000001",
+        "Workshop P1S",
+        7,
+    )
+
+
+def test_an_attempt_without_a_registry_printer_names_none(shop: Shop, pool: PgPool) -> None:
+    order, item = shop.accepted()
+    attempt = started(shop, order, item, run_row(pool))
+    assert (attempt.printer, attempt.printer_name, attempt.printer_serial) == (None, None, None)
+    assert attempt.bambuddy_printer_id is None
+
+
 def test_a_print_needs_an_approved_item_on_an_accepted_order(shop: Shop, pool: PgPool) -> None:
     order = shop.order()
     item = shop.item(order)

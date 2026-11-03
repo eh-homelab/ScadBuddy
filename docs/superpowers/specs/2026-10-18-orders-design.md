@@ -856,6 +856,13 @@ Until #3823's registry, an attempt's `printer` is the Bambuddy printer id and na
 run used. When the registry lands, the serial is the key and the Bambuddy id is one of
 its paths, as the own-store spec §6 says.
 
+**As built (#4253).** The registry landed first, so an attempt keeps `printer` (the
+registry id its run named, `print_runs.printer`) and, copied from that row when the run is
+attached (`OrderStore.attach_print_run`), `printer_serial`, `printer_name` and
+`bambuddy_printer_id`: a printer renamed, relinked or deleted since leaves the record as
+it printed. An attempt recorded by hand, or a run that named no registry printer, has
+none. The order page shows the name beside the attempt.
+
 ## 9. Pages: generalising template-owned UIs (and why orders is not one)
 
 The user asked whether the template-UI work can give "generalised UI pages with

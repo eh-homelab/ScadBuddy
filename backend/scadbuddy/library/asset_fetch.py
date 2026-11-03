@@ -40,11 +40,14 @@ from scadbuddy.library.url_import import (
 #: Left out: svgrepo.com answers 429 with a "Vercel Security Checkpoint" page,
 #: printables.com 403s, and printables.com and thingiverse.com serve meshes, which the
 #: asset store does not take yet (#959). Each entry also allows its subdomains.
+#: api.iconify.design (#959) serves the SVGs `search_icons` finds
+#: (`library/icon_search.py`, measured there).
 DEFAULT_ASSET_FETCH_DOMAINS: Final = (
     "game-icons.net",
     "github.com",
     "raw.githubusercontent.com",
     "openmoji.org",
+    "api.iconify.design",
 )
 
 #: A host name of at least two labels, each a letter-digit-hyphen label, ending in a
