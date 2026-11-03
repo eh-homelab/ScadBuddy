@@ -13,6 +13,8 @@ from scadbuddy.api.deps import IMPORT_CONCURRENCY, STATE_ATTR, ImportPermits
 from scadbuddy.api.models import RESOLVER_RETRY_AFTER
 from scadbuddy.library import url_import
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS
+from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.history import GitUnavailableError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.library.url_import import resolve_host as real_resolve_host
 from tests.conftest import MODEL_SLUG
@@ -241,6 +243,7 @@ def test_a_fetched_asset_keeps_its_source_licence_and_view_box(client: TestClien
 
 
 @respx.mock
+@pytest.mark.requires_git
 def test_a_fetch_from_a_known_catalogue_captures_its_licence_and_credits_it_once(
     client: TestClient,
 ) -> None:
@@ -252,6 +255,8 @@ def test_a_fetch_from_a_known_catalogue_captures_its_licence_and_credits_it_once
     assert first.status_code == 201, first.text
     assert first.json()["credited"] is True
     assert first.json()["licence"]["spdx"] == "CC-BY-SA-4.0"
+    stored = client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{first.json()['id']}").json()
+    assert stored["licence"]["spdx"] == "CC-BY-SA-4.0"
     readme = client.get(f"/api/v1/models/{MODEL_SLUG}/readme").text
     assert "## Credits" in readme
     assert f"- `1F984.svg` from <{ICON_URL}>, by OpenMoji, under [CC-BY-SA-4.0]" in readme
@@ -276,3 +281,23 @@ def test_a_fetch_from_elsewhere_is_credited_with_no_licence_stated(client: TestC
     assert response.json()["licence"] is None
     readme = client.get(f"/api/v1/models/{MODEL_SLUG}/readme").text
     assert f"- `a.svg` from <{url}>, licence not stated" in readme
+
+
+@respx.mock
+def test_a_fetch_is_stored_and_answered_when_the_readme_cannot_be_credited(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#959: with no model history the credit is skipped, never a 500 after the store."""
+
+    def unavailable(*args: object, **kwargs: object) -> None:
+        raise GitUnavailableError("git is not available")
+
+    monkeypatch.setattr(Catalogue, "write_readme", unavailable)
+    respx.get(ICON_URL).mock(return_value=httpx.Response(200, content=UNICORN_SVG))
+
+    response = _fetch(client, ICON_URL)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["credited"] is False
+    asset = client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{response.json()['id']}")
+    assert asset.status_code == 200

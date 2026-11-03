@@ -4,6 +4,7 @@ the sample files a template ships beside its source."""
 from __future__ import annotations
 
 import asyncio
+import logging
 from functools import partial
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -74,6 +75,8 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.schema import BARE_FILENAME_PATTERN
 from scadbuddy.store.content import StoreFullError, template_title
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["assets"])
 
@@ -317,6 +320,9 @@ async def fetch_run(
     # Never the URL as given: its query may carry a token, and the row and this answer
     # are kept.
     source_url = shown_url(fetched.source_url)
+    # The body's licence, else the one its catalogue is known by: stored, credited and
+    # answered alike.
+    licence = licence or known_licence(source_url)
     meta = await store_asset(
         slug,
         fetched.data,
@@ -328,10 +334,9 @@ async def fetch_run(
     )
     # This fetch's URL and licence, even when the content was stored from elsewhere
     # first: they are what the README credits.
-    licence = licence or known_licence(source_url)
-    await _credit(slug, meta.name, source_url, licence, state)
+    credited = await _credit(slug, meta.name, source_url, licence, state)
     return FetchedAsset(
-        **{**meta.model_dump(), "source_url": source_url, "licence": licence, "credited": True}
+        **{**meta.model_dump(), "source_url": source_url, "licence": licence, "credited": credited}
     )
 
 
@@ -341,10 +346,11 @@ CREDIT_ATTEMPTS = 3
 
 async def _credit(
     slug: str, name: str, source_url: str, licence: AssetLicence | None, state: AppState
-) -> None:
+) -> bool:
     """Add ``source_url``'s credit to the model's README, once (#959). The README is read
     and written at one revision, so an edit landing in between is never overwritten:
-    the credit is made again on top of it."""
+    the credit is made again on top of it. False when the README cannot be written
+    (no model history): the file is stored all the same, and the answer says so."""
     line = credit_line(name, source_url, licence)
     catalogue = state.catalogue
 
@@ -369,9 +375,12 @@ async def _credit(
             continue
         except ModelNotFoundError:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+        except GitError as error:
+            logger.warning("asset credit for %s not written: %s", slug, type(error).__name__)
+            return False
         if written:
             emit(state.events, ModelEvent(kind="model.updated", slug=slug))
-        return
+        return True
     raise ApiError(
         status.HTTP_409_CONFLICT,
         f"the file is stored, but {slug} kept changing while its README was credited; "
