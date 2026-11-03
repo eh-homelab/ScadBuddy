@@ -806,8 +806,8 @@ async def _adopt_virtual_rows_logged(state: AppState) -> None:
     left to the sweeps' Schedule, which prod turns off. So, once per boot and only while
     some row could still be a VP (`may_be_virtual`), the sync's virtual-printer part runs:
     two Bambuddy lists, no access code, no probe. A failure is logged, never raised."""
-    registry = state.components.get(PRINTERS)
     try:
+        registry = state.components.get(PRINTERS)
         rows = await asyncio.to_thread(registry.store.list)
         if not any(may_be_virtual(row) for row in rows):
             return
