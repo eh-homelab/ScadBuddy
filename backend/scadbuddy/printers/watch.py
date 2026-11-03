@@ -91,6 +91,10 @@ class WatchActivities:
         row = await asyncio.to_thread(self.printers.get, printer_id)
         if row is None or row.lan_host is None or row.lan_cert_sha256 is None:
             return "unlinked"
+        if row.kind != "physical":
+            # A Bambuddy virtual printer's row is no printer (#4747), even with the LAN
+            # link it kept from before the sync adopted it (#5236): never dialled.
+            return "unlinked"
         try:
             code = await asyncio.to_thread(self.printers.open_access_code, printer_id)
         except KekMissingError:

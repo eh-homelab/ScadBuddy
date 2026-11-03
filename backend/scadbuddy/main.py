@@ -113,7 +113,11 @@ from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
-from scadbuddy.printers.bambuddy_sync import sync_printers
+from scadbuddy.printers.bambuddy_sync import (
+    may_be_virtual,
+    sync_printers,
+    sync_virtual_printers,
+)
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.watch import WatchActivities
@@ -789,6 +793,32 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
             )
 
     await _with_bambuddy(state, sweep)
+
+
+#: How long the boot's virtual-printer pass may take: two Bambuddy lists and an upsert
+#: per virtual printer.
+VP_BOOT_TIMEOUT = 60.0
+
+
+async def _adopt_virtual_rows_logged(state: AppState) -> None:
+    """#5236: the boot's virtual-printer pass. A row made by hand before the sync existed,
+    with a Bambuddy virtual printer's serial, stayed ``physical`` while the full sync was
+    left to the sweeps' Schedule, which prod turns off. So, once per boot and only while
+    some row could still be a VP (`may_be_virtual`), the sync's virtual-printer part runs:
+    two Bambuddy lists, no access code, no probe. A failure is logged, never raised."""
+    try:
+        registry = state.components.get(PRINTERS)
+        rows = await asyncio.to_thread(registry.store.list)
+        if not any(may_be_virtual(row) for row in rows):
+            return
+
+        async def adopt(client: BambuddyClient) -> None:
+            await sync_virtual_printers(registry, client)
+
+        async with asyncio.timeout(VP_BOOT_TIMEOUT):
+            await _with_bambuddy(state, adopt)
+    except Exception:
+        logger.exception("could not sync the virtual printers from Bambuddy at start")
 
 
 async def _sweep_print_library_logged(state: AppState) -> None:
@@ -1774,6 +1804,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     unfollow = follow_changes(state)
     unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
+    adopt_now: asyncio.Task[None] | None = None
     stop_background = threading.Event()
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
@@ -1810,6 +1841,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         attach_now = asyncio.create_task(
             _attach_backfills_logged(state, reraise=False, stop=stop_background),
             name="attach backfills",
+        )
+        # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
+        # VP's, with the sweeps off too.
+        adopt_now = asyncio.create_task(
+            _adopt_virtual_rows_logged(state), name="adopt virtual printers"
         )
         # Print runs (#1052): the `scadbuddy-print` worker serves the `bambuddy` queue,
         # or this process does when told to (#1060); the upkeep is this process's.
@@ -1853,7 +1889,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _stop_queue_worker(library, "library", LIBRARY_WORKER_STOP_TIMEOUT)
         if unfollow_backfills is not None:
             await unfollow_backfills()
-        await _join_background(stop_background, backfill, attach_now)
+        await _join_background(stop_background, backfill, attach_now, adopt_now)
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")
