@@ -17,6 +17,7 @@ from scadbuddy.library.assets import (
     MAX_PNG_PIXELS,
     MAX_PNG_SIDE,
     NOT_SAMPLES,
+    AssetLicence,
     AssetNotFoundError,
     AssetRejectedError,
     AssetStore,
@@ -486,3 +487,42 @@ def test_an_adopted_asset_is_stored_as_it_was_and_listed(tmp_path: Path, pg_pool
     assert worker.ids() == [meta.id]
     assert worker.usage().count == 1
     assert asset_ids_in({"logo": meta.id, "n": 2}) == {meta.id}
+
+
+def test_an_svg_keeps_its_view_box_and_path_count(store: AssetStore) -> None:
+    """#959: what an author sizes an `import()` by, without reading the file."""
+    meta = store.put(HEART_SVG, "heart.svg")
+    assert (meta.view_box, meta.path_count) == ([0.0, 0.0, 20.0, 20.0], 1)
+    assert store.get(meta.id) == meta
+    png = store.put(png_bytes(4, 4), "dot.png")
+    assert (png.view_box, png.path_count) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("view_box", "expected"),
+    [
+        ("-1.5,2 30e0 .5", [-1.5, 2.0, 30.0, 0.5]),
+        ("0 0 20", None),
+        ("0 0 0 20", None),
+        ("0 0 nan 20", None),
+        ("a b c d", None),
+    ],
+)
+def test_a_view_box_is_four_numbers_with_a_positive_size(
+    store: AssetStore, view_box: str, expected: list[float] | None
+) -> None:
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view_box}"><path d="M0 0"/></svg>'
+    assert store.put(svg.encode(), "a.svg").view_box == expected
+
+
+def test_where_an_asset_came_from_is_kept_and_a_plain_upload_never_erases_it(
+    store: AssetStore,
+) -> None:
+    licence = AssetLicence(spdx="CC-BY-4.0", url="https://creativecommons.org/licenses/by/4.0/")
+    fetched = store.put(
+        HEART_SVG, "heart.svg", source_url="https://openmoji.org/heart.svg", licence=licence
+    )
+    assert (fetched.source_url, fetched.licence) == ("https://openmoji.org/heart.svg", licence)
+    uploaded = store.put(HEART_SVG, "heart.svg")
+    assert uploaded.id == fetched.id
+    assert store.get(fetched.id) == fetched

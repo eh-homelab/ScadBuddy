@@ -597,14 +597,31 @@ export const customizerTools: Tool[] = [
     input: z.object({
       slug,
       url: z.string().url().max(2048).describe('A direct https link to the .svg or .png file'),
+      licence: z
+        .object({
+          spdx: z.string().max(100).optional().describe('SPDX id, e.g. "CC-BY-4.0"'),
+          name: z.string().max(200).optional().describe('As the source writes it, e.g. "CC BY 4.0"'),
+          url: z.string().url().max(2048).optional().describe("Where the licence's text is"),
+          author: z.string().max(200).optional().describe('Whom to credit'),
+        })
+        .strict()
+        .optional()
+        .describe("The file's licence as its source states it; kept on the asset, so the user can see whom to credit"),
     }),
     risk: 'outward',
     routes: ['POST /api/v1/models/{slug}/assets/fetch'],
-    summarize: ({ slug, url }) => `Fetch ${url} (${new URL(url).host}) into model "${slug}" as a file asset`,
-    handler: async ({ slug, url }, ctx) =>
+    summarize: ({ slug, url, licence }) => {
+      const under = licence?.spdx ?? licence?.name
+      return `Fetch ${url} (${new URL(url).host}) into model "${slug}" as a file asset${under ? `, under ${under}` : ''}`
+    },
+    handler: async ({ slug, url, licence }, ctx) =>
       json(
         await command(ctx, `fetch ${url}`, (headers) =>
-          ctx.backend.POST('/api/v1/models/{slug}/assets/fetch', { params: { path: { slug } }, body: { url }, headers }),
+          ctx.backend.POST('/api/v1/models/{slug}/assets/fetch', {
+            params: { path: { slug } },
+            body: { url, licence },
+            headers,
+          }),
         ),
       ),
   }),
