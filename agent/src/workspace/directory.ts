@@ -357,6 +357,21 @@ async function writeInside(dir: string, rel: string, bytes: Uint8Array): Promise
   }
 }
 
+/**
+ * A file's bytes in a session's directory, `rel` a workspace path (store.ts `workspacePath`): a
+ * regular file, never read through a link; undefined when there is none there, or it is past
+ * `max` bytes. A Workflow's script is read so (builtins/background.ts).
+ */
+export async function readDirFile(dir: string, rel: string, max: number): Promise<Buffer | undefined> {
+  const read = await readRegular(dir, path.join(dir, rel), max)
+  return read && 'bytes' in read ? read.bytes : undefined
+}
+
+/** Writes a file into a session's directory, never through a link, `rel` a workspace path; the next write-back offers it to the record. */
+export function writeDirFile(dir: string, rel: string, bytes: Uint8Array): Promise<void> {
+  return writeInside(dir, rel, bytes)
+}
+
 /** The directory itself, a real one: a link or a file in its place is removed first. */
 async function ensureDir(dir: string): Promise<void> {
   const st = await lstat(dir).catch((err: unknown) => (missing(err) ? undefined : Promise.reject(err)))
