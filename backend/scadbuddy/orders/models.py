@@ -353,6 +353,11 @@ class Fulfilment(BaseModel):
     sliced_blob_key: str | None = None
     #: The registry printer the run named, when it named one.
     printer: str | None = None
+    #: That printer as the registry named it when the run was attached (§8.4): its serial,
+    #: name and Bambuddy printer id, kept past a rename or delete.
+    printer_serial: str | None = None
+    printer_name: str | None = None
+    bambuddy_printer_id: int | None = None
     #: How many the run was sent; ``quantity`` is what it made, set when it settles.
     copies: int | None = None
     #: The print run's ``request_id`` this attempt was claimed under before its print

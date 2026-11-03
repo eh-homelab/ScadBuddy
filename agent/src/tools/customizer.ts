@@ -626,6 +626,26 @@ export const customizerTools: Tool[] = [
       ),
   }),
 
+  // Read, as http_request's GET is: the query goes to one fixed catalogue host and
+  // nothing comes into a model; fetching what it finds is fetch_asset, approved.
+  defineTool({
+    name: 'search_icons',
+    label: 'Search open icon catalogues',
+    description:
+      'Search Material Design Icons, Tabler, game-icons and OpenMoji for artwork, instead of hand-transcribing ' +
+      "SVG paths. Each icon has its catalogue's licence (SPDX id), author and an SVG `url` to pass to " +
+      'fetch_asset; `allowlisted` says whether the user\'s asset allowlist lets that fetch through. Credit the ' +
+      'licence when you use one.',
+    input: z.object({
+      q: z.string().trim().min(1).max(100).describe('What to look for, e.g. "unicorn"'),
+      limit: z.number().int().min(1).max(64).default(20),
+    }),
+    risk: 'read',
+    routes: ['GET /api/v1/icons/search'],
+    handler: async ({ q, limit }, ctx) =>
+      json(await ok(ctx.backend.GET('/api/v1/icons/search', { params: { query: { q, limit } } }), `search icons for ${q}`)),
+  }),
+
   defineTool({
     name: 'get_asset',
     label: 'Read an uploaded file',

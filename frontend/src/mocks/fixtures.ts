@@ -1026,7 +1026,7 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
 }
 
 /** `asset_fetch.py` `DEFAULT_ASSET_FETCH_DOMAINS`: what a stored `null` resolves to. */
-export const DEFAULT_ASSET_FETCH_DOMAINS = ['game-icons.net', 'github.com', 'raw.githubusercontent.com', 'openmoji.org']
+export const DEFAULT_ASSET_FETCH_DOMAINS = ['game-icons.net', 'github.com', 'raw.githubusercontent.com', 'openmoji.org', 'api.iconify.design']
 
 export const settings: Settings = {
   ...settingsDefaults,

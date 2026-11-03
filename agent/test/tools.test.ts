@@ -1954,6 +1954,21 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
     expect(bodies).toEqual([{ url, licence }])
   })
 
+  it('search_icons runs unattended and answers the backend search (#959)', async () => {
+    const queries: string[] = []
+    const icon = { id: 'mdi:unicorn', url: 'https://api.iconify.design/mdi/unicorn.svg', licence: { spdx: 'Apache-2.0' } }
+    server.use(
+      http.get(`${BACKEND}/api/v1/icons/search`, ({ request }) => {
+        queries.push(new URL(request.url).search)
+        return HttpResponse.json({ icons: [icon] })
+      }),
+    )
+    expect(tool('search_icons').risk).toBe('read')
+    const answer = await runTool(tool('search_icons'), { q: ' unicorn ', limit: 5 }, ctx())
+    expect(firstText(answer)).toEqual({ icons: [icon] })
+    expect(queries).toEqual(['?q=unicorn&limit=5'])
+  })
+
   it('fetch_asset is gated, and once approved posts the URL to the backend (#844)', async () => {
     const url = 'https://openmoji.org/data/color/svg/1F984.svg'
     const pending = await runTool(tool('fetch_asset'), { slug: 'box', url }, ctx())
