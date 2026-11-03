@@ -7,7 +7,7 @@ import asyncio
 from typing import Annotated
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, File, Path, Response, UploadFile, status
+from fastapi import APIRouter, File, Path, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,7 @@ from scadbuddy.api.deps import (
     ImportPermits,
     ImportsDep,
     PathsDep,
+    SettingsStoreDep,
     SlugPath,
 )
 from scadbuddy.api.models import (
@@ -52,6 +53,7 @@ from scadbuddy.library.assets import (
     sample_files,
 )
 from scadbuddy.library.history import GitError, RevisionNotFoundError
+from scadbuddy.library.icon_search import COLLECTIONS, MAX_LIMIT, IconSearch, search_icons
 from scadbuddy.library.url_import import (
     IMPORT_TIMEOUT,
     ImportRefusedError,
@@ -277,6 +279,47 @@ async def fetch_run(slug: str, url: str, state: AppState) -> FetchedAsset:
     meta = await store_asset(slug, fetched.data, fetched.filename, assets=state.assets, state=state)
     # Never the URL as given: its query may carry a token, and this answer is recorded.
     return FetchedAsset(**meta.model_dump(), source_url=shown_url(fetched.source_url))
+
+
+@router.get(
+    "/icons/search",
+    response_model=IconSearch,
+    summary="Search open icon catalogues",
+    description=(
+        "Searches " + ", ".join(COLLECTIONS) + " (Iconify prefixes) through "
+        "api.iconify.design, on the server. Each icon has its catalogue's licence and an "
+        "SVG `url` for `POST /models/{slug}/assets/fetch`, with `allowlisted` saying "
+        "whether the asset allowlist lets that fetch through. The request is the URL "
+        f"import's: https, public addresses, no redirect, within {IMPORT_TIMEOUT:.0f} "
+        "seconds. A catalogue that fails to answer is a 502."
+    ),
+    responses={
+        status.HTTP_502_BAD_GATEWAY: {"description": "the catalogue could not be searched"},
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": (
+                "the replica's fetch budget (shared with imports) or its resolver threads "
+                "are all in use; retry after `Retry-After` seconds"
+            )
+        },
+    },
+)
+async def search_icon_catalogues(
+    imports: ImportsDep,
+    settings: SettingsStoreDep,
+    q: Annotated[str, Query(min_length=1, max_length=100, pattern=r"\S")],
+    limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = 20,
+) -> IconSearch:
+    domains = (await asyncio.to_thread(settings.load)).allowed_asset_domains()
+    _require_fetch_permit(imports)
+    with imports.hold():
+        try:
+            return await search_icons(q.strip(), limit=limit, domains=domains)
+        except ImportRefusedError as error:
+            raise ApiError(status.HTTP_502_BAD_GATEWAY, str(error)) from None
+        except ResolverBusyError:
+            raise fetch_busy(
+                "every resolver thread on this replica is busy", RESOLVER_RETRY_AFTER
+            ) from None
 
 
 @router.get(
