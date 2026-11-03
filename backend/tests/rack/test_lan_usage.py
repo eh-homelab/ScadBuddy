@@ -6,24 +6,30 @@ Invented serials only."""
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import psycopg
 import pytest
 
 from scadbuddy.bambuddy.progress import PrintProgress
+from scadbuddy.printers.models import PrinterCreate
+from scadbuddy.printers.store import PrinterStore
 from scadbuddy.rack.usage import (
     PickedHotend,
     PickedSpool,
     RackUsageStore,
     lan_settle_hook,
     save_lan_picks,
+    settle_lan_end,
     settle_lan_print,
 )
+from tests.conftest import PgPool
+from tests.printers.conftest import KEK
 from tests.rack.helpers import serial
 
 pytestmark = pytest.mark.requires_postgres
 
+PRINTER_SERIAL = "01P00A000005138"
 A, B = serial(17), serial(18)
 RUN = "run-4543"
 FIRST, SECOND = "scadbuddy-run-4543-p1", "scadbuddy-run-4543-p1-c2"
@@ -163,6 +169,69 @@ async def test_a_lan_pick_never_collides_with_a_queue_items(store: RackUsageStor
     assert (await store.usage([A]))[A].pending == 1
 
 
+@pytest.fixture
+def printer(pg_pool: PgPool) -> str:
+    """A registry printer the picks name (`rack_nozzle_picks.printer`)."""
+    return PrinterStore(pg_pool, KEK).create(PrinterCreate(serial=PRINTER_SERIAL, name="H2C")).id
+
+
+def _start_picked_ago(conninfo: str, subtask: str, seconds: int) -> None:
+    with psycopg.connect(conninfo) as conn:
+        conn.execute(
+            "UPDATE rack_nozzle_picks SET picked_at = now() - make_interval(secs => %s)"
+            " WHERE lan_subtask = %s",
+            (seconds, subtask),
+        )
+
+
+async def test_the_watchs_settle_times_a_start_to_its_reports_end(
+    store: RackUsageStore, pg_conninfo: str, printer: str
+) -> None:
+    """#5142: the printer watch settles a start as its report ends it, timed to that
+    report, however late anything else settles it; the follow's settle after it then
+    writes nothing."""
+    await store.record_lan_picks(RUN, FIRST, None, [_picked(A, GREEN)], printer)
+    _picked_ago(pg_conninfo, 3600)
+
+    ended_at = datetime.now(UTC) - timedelta(seconds=3000)
+    assert await store.settle_lan_ended(printer, FIRST, ended_at) == 1
+    assert await store.settle_lan(RUN) == 0
+
+    usage = (await store.usage([A]))[A]
+    assert (usage.prints, usage.pending) == (1, 0)
+    assert 595 <= usage.print_seconds <= 660
+
+
+async def test_the_watchs_settle_names_only_that_printers_start(
+    store: RackUsageStore, printer: str
+) -> None:
+    await store.record_lan_picks(RUN, FIRST, None, [_picked(A)], printer)
+    assert await store.settle_lan_ended(printer, SECOND, datetime.now(UTC)) == 0
+    other = "0" * 8 + "-0000-4000-8000-" + "0" * 12
+    assert await store.settle_lan_ended(other, FIRST, datetime.now(UTC)) == 0
+    assert await store.settle_lan_ended(printer, FIRST, datetime.now(UTC), timed=False) == 1
+    usage = (await store.usage([A]))[A]
+    assert (usage.prints, usage.print_seconds) == (1, 0)
+
+
+async def test_a_run_settle_stops_an_earlier_copy_at_the_printers_next_start(
+    store: RackUsageStore, pg_conninfo: str, printer: str
+) -> None:
+    """#5142: a copy the watch and ``lan_wait`` both missed is settled by the run's
+    last settle, but the printer had ended it to take the next copy: its time stops at
+    that copy's pick, not at the run's end."""
+    await store.record_lan_picks(RUN, FIRST, None, [_picked(A)], printer)
+    await store.record_lan_picks(RUN, SECOND, None, [_picked(B)], printer)
+    _start_picked_ago(pg_conninfo, FIRST, 3600)
+    _start_picked_ago(pg_conninfo, SECOND, 600)
+
+    assert await store.settle_lan(RUN) == 2
+
+    usage = await store.usage([A, B])
+    assert 2995 <= usage[A].print_seconds <= 3060
+    assert 595 <= usage[B].print_seconds <= 660
+
+
 class _Recording:
     def __init__(self, *, fail: bool = False) -> None:
         self.picks: list[tuple[str, str, int | None, list[PickedHotend]]] = []
@@ -190,6 +259,13 @@ class _Recording:
         self.settled.append((run_id, subtask_name, timed))
         return 1
 
+    async def settle_lan_ended(
+        self, printer: str, subtask_name: str, ended_at: datetime, *, timed: bool = True
+    ) -> int:
+        if self.fail:
+            raise psycopg.OperationalError("the database is gone")
+        return 1
+
 
 async def test_saving_skips_a_pick_with_no_serial_and_never_raises() -> None:
     recording = _Recording()
@@ -205,6 +281,7 @@ async def test_saving_skips_a_pick_with_no_serial_and_never_raises() -> None:
 
     await save_lan_picks(_Recording(fail=True), RUN, FIRST, None, [_picked(A)])  # type: ignore[arg-type]
     await settle_lan_print(_Recording(fail=True), RUN, FIRST)  # type: ignore[arg-type]
+    await settle_lan_end(_Recording(fail=True), "p", FIRST, datetime.now(UTC))  # type: ignore[arg-type]
 
 
 def _lan(stage: str, *, settled: bool, run_id: str | None = RUN) -> PrintProgress:

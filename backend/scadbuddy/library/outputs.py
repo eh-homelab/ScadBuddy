@@ -43,7 +43,7 @@ from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 
 if TYPE_CHECKING:
-    from scadbuddy.library.output_prints import OutputPrintStore
+    from scadbuddy.library.output_prints import LastPrint, OutputPrintStore
     from scadbuddy.store.refs import BlobRefs
 
 logger = logging.getLogger(__name__)
@@ -201,6 +201,9 @@ class OutputMeta(BaseModel):
     #: Whether ``print_stage`` is final: nothing changes without another print. ``None``
     #: when the last print was not over the LAN.
     print_settled: bool | None = None
+    #: Whether a print of it ever reached Bambuddy's queue (#5143): the last print's ids
+    #: say so, but a later print over the LAN clears them, and this stays.
+    sent_to_bambuddy: bool = False
     #: The library pins the render read (#169): each checkout's name, ref and exact
     #: commit, so an output names what it was built from beyond ``model_version``.
     #: Empty for a model with none, and on records written before the field existed.
@@ -219,6 +222,21 @@ class OutputMeta(BaseModel):
         if route == "pipeline" or (route is None and data.get("pipeline_run_id") is not None):
             return {key: value for key, value in data.items() if key not in _LAST_PRINT_FIELDS}
         return data
+
+
+def _with_last_print(meta: OutputMeta, row: LastPrint | None) -> OutputMeta:
+    """``row``, the output's recorded last print (#1060), over its file's; with no row
+    the file's own. Either way ``sent_to_bambuddy`` (#5143) also counts the ids the file
+    names, which a LAN print's row lays nulls over."""
+    queued = (
+        meta.sent_to_bambuddy
+        or meta.queue_item_id is not None
+        or bool(meta.plates)
+        or meta.print_route == "slice_queue"
+    )
+    fields = row.fields() if row is not None else {}
+    sent = queued or (row is not None and row.sent_to_bambuddy)
+    return meta.model_copy(update={**fields, "sent_to_bambuddy": sent})
 
 
 @dataclass(frozen=True)
@@ -343,10 +361,7 @@ class OutputStore:
         if self.prints is None:
             return metas
         rows = self.prints.for_outputs([meta.id for meta in metas])
-        return [
-            meta.model_copy(update=rows[meta.id].fields()) if meta.id in rows else meta
-            for meta in metas
-        ]
+        return [_with_last_print(meta, rows.get(meta.id)) for meta in metas]
 
     async def model_3mf(self, output_id: str) -> bytes | None:
         return await asyncio.to_thread(self._model_3mf, output_id)

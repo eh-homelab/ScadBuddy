@@ -12,6 +12,7 @@ const never: Output = {
   queue_item_id: null,
   plates: [],
   print_route: null,
+  sent_to_bambuddy: false,
 }
 
 describe('wasSent (#2287, #2545)', () => {
@@ -29,5 +30,12 @@ describe('wasSent (#2287, #2545)', () => {
 
   it('is false for an output printed only over the LAN, which never reached Bambuddy (#4644)', () => {
     expect(wasSent({ ...never, print_route: 'lan', print_run_id: 'run-1' })).toBe(false)
+  })
+
+  it('is true for an output queued to Bambuddy, then printed over the LAN (#5143)', () => {
+    // The LAN print cleared the queue item; the backend keeps that it was sent.
+    expect(
+      wasSent({ ...never, print_route: 'lan', print_run_id: 'run-1', sent_to_bambuddy: true }),
+    ).toBe(true)
   })
 })

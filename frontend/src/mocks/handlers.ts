@@ -2936,6 +2936,7 @@ export const handlers = [
       job_id: job.id,
       created_at: new Date().toISOString(),
       has_thumbnail: false,
+      sent_to_bambuddy: false,
       params: job.params,
       // The inputs sent with Generate, else the job's own, as the backend records them.
       inputs: withVersion(body.inputs ?? job.inputs ?? { params: job.params }),

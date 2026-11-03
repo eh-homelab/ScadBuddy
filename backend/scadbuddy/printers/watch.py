@@ -16,6 +16,10 @@ attempt fails, and `FOLLOW_RETRY` starts the next; ``seen_at`` then ages until
 down ends the attempt at once, as `FollowActivities` does, so a stop never waits out
 its graceful timeout per printer.
 
+A write that shows the print the printer was running has ended (`reports.ended_print`)
+settles that start's rack picks up to the report's time (#5138, #5142): the run's own
+follow reads only the subject's newest run, and may read it late.
+
 The access code is opened from the row inside the attempt, never passed in its input,
 and goes nowhere but the connection.
 """
@@ -38,6 +42,7 @@ from scadbuddy.printers.lan import KEEPALIVE, LanPrinter
 from scadbuddy.printers.lan_models import LanReport
 from scadbuddy.printers.reports import PrinterReportStore
 from scadbuddy.printers.store import KekMissingError, NoAccessCodeError, PrinterStore
+from scadbuddy.rack.usage import LanUsage, settle_lan_end
 from scadbuddy.workflows.printer_watch import PRINTER_WATCH_ACTIVITY, PrinterWatchInput
 
 logger = logging.getLogger(__name__)
@@ -77,6 +82,7 @@ class WatchActivities:
         write_every: float = 1.0,
         connect: Connect = LanPrinter,
         clock: Callable[[], float] = time.monotonic,
+        rack: LanUsage | None = None,
     ) -> None:
         self.printers = printers
         self.reports = reports
@@ -84,6 +90,8 @@ class WatchActivities:
         self.write_every = write_every
         self.connect = connect
         self.clock = clock
+        #: Where a print's rack picks are settled as the printer ends it (#5138, #5142).
+        self.rack = rack
 
     @activity.defn(name=PRINTER_WATCH_ACTIVITY)
     async def printer_watch(self, input: PrinterWatchInput) -> str:
@@ -180,4 +188,12 @@ class WatchActivities:
                 await marker
 
     async def _write(self, printer_id: str, report: LanReport) -> None:
-        await asyncio.to_thread(self.reports.put, printer_id, report.print, report.received_at)
+        ended = await asyncio.to_thread(
+            self.reports.put, printer_id, report.print, report.received_at
+        )
+        if ended is not None:
+            # The print's rack picks, up to the report that ended it: the run's follow
+            # may read it late, or no longer read it at all (a newer run of the subject).
+            await settle_lan_end(
+                self.rack, printer_id, ended.subtask_name, report.received_at, timed=ended.timed
+            )

@@ -162,6 +162,10 @@ class LanUsage(Protocol):
         self, run_id: str, subtask_name: str | None = None, *, timed: bool = True
     ) -> int: ...
 
+    async def settle_lan_ended(
+        self, printer: str, subtask_name: str, ended_at: datetime, *, timed: bool = True
+    ) -> int: ...
+
 
 class LanRackUsage(RackUsage, LanUsage, Protocol):
     """What a LAN start ranks its pick with and saves it to (`printers.print_activities`)."""
@@ -559,28 +563,65 @@ class RackUsageStore:
         """One ``rack_nozzle_prints`` row per open pick of a LAN run (#4543): of one start,
         or with ``subtask_name`` ``None`` of every start of the run; the rows written. Its
         time is from the pick (made as the printer took the start) to now, on the
-        database's clock, or none when not ``timed`` (the report never said it ended);
-        its grams the group's sliced grams. A start settled already writes nothing, so
-        each copy's own settle and the run's last one never count it twice."""
+        database's clock, or to the printer's next LAN pick when that came first (the
+        printer had ended this start to take it, #5142), or none when not ``timed`` (the
+        report never said it ended); its grams the group's sliced grams. A start settled
+        already writes nothing, so the watch's settle (`settle_lan_ended`), each copy's
+        own and the run's last one never count it twice."""
         return await asyncio.to_thread(self._settle_lan, run_id, subtask_name, timed)
 
     def _settle_lan(self, run_id: str, subtask: str | None, timed: bool) -> int:
         with self._ready().connection() as conn:
             cursor = conn.execute(
-                "INSERT INTO rack_nozzle_prints"
-                " (lan_run_id, lan_subtask, group_id, serial, settled_at, print_seconds, grams)"
-                " SELECT k.lan_run_id, k.lan_subtask, k.group_id, k.serial, now(),"
-                "  CASE WHEN %s THEN greatest(0, extract(epoch FROM now() - k.picked_at))::bigint"
-                "  END,"
-                "  (SELECT sum(s.grams) FROM rack_nozzle_pick_spools AS s"
-                "   WHERE s.lan_run_id = k.lan_run_id AND s.lan_subtask = k.lan_subtask"
-                "   AND s.group_id = k.group_id)"
-                " FROM rack_nozzle_picks AS k"
-                " WHERE k.lan_run_id = %s AND (%s::text IS NULL OR k.lan_subtask = %s)"
-                " ON CONFLICT (lan_run_id, lan_subtask, group_id) DO NOTHING",
-                (timed, run_id, subtask, subtask),
+                _SETTLE_LAN.format(
+                    end="least(now(), (SELECT min(n.picked_at) FROM rack_nozzle_picks AS n"
+                    "  WHERE n.printer = k.printer AND n.lan_run_id IS NOT NULL"
+                    "  AND n.picked_at > k.picked_at))",
+                    where="k.lan_run_id = %(run)s"
+                    " AND (%(subtask)s::text IS NULL OR k.lan_subtask = %(subtask)s)",
+                ).encode(),
+                {"timed": timed, "run": run_id, "subtask": subtask},
             )
         return cursor.rowcount
+
+    async def settle_lan_ended(
+        self, printer: str, subtask_name: str, ended_at: datetime, *, timed: bool = True
+    ) -> int:
+        """The open picks of the LAN start ``subtask_name`` on the registry printer
+        ``printer``, settled as the printer's report ends it (#5138, #5142): whichever
+        run started it, and timed to ``ended_at``, the report's time, never to when a
+        follow reads it. As `settle_lan`, a start settled already writes nothing."""
+        return await asyncio.to_thread(
+            self._settle_lan_ended, printer, subtask_name, ended_at, timed
+        )
+
+    def _settle_lan_ended(self, printer: str, subtask: str, ended_at: datetime, timed: bool) -> int:
+        with self._ready().connection() as conn:
+            cursor = conn.execute(
+                _SETTLE_LAN.format(
+                    end="%(ended_at)s",
+                    where="k.printer = %(printer)s::uuid AND k.lan_subtask = %(subtask)s",
+                ).encode(),
+                {"timed": timed, "ended_at": ended_at, "printer": printer, "subtask": subtask},
+            )
+        return cursor.rowcount
+
+
+#: A LAN start's settle (#4543): one print row per open pick that ``where`` names, its
+#: time from the pick to ``end`` (SQL over the pick ``k``) when ``timed``.
+_SETTLE_LAN = (
+    "INSERT INTO rack_nozzle_prints"
+    " (lan_run_id, lan_subtask, group_id, serial, settled_at, print_seconds, grams)"
+    " SELECT k.lan_run_id, k.lan_subtask, k.group_id, k.serial, now(),"
+    "  CASE WHEN %(timed)s"
+    "  THEN greatest(0, extract(epoch FROM {end} - k.picked_at))::bigint END,"
+    "  (SELECT sum(s.grams) FROM rack_nozzle_pick_spools AS s"
+    "   WHERE s.lan_run_id = k.lan_run_id AND s.lan_subtask = k.lan_subtask"
+    "   AND s.group_id = k.group_id)"
+    " FROM rack_nozzle_picks AS k"
+    " WHERE k.lan_run_id IS NOT NULL AND {where}"
+    " ON CONFLICT (lan_run_id, lan_subtask, group_id) DO NOTHING"
+)
 
 
 def group_spools(
@@ -704,12 +745,34 @@ async def settle_lan_print(
         )
 
 
+async def settle_lan_end(
+    store: LanUsage | None,
+    printer: str,
+    subtask_name: str,
+    ended_at: datetime,
+    *,
+    timed: bool = True,
+) -> None:
+    """Settle a LAN start's open picks as its printer's report ends it (#5138, #5142),
+    from the printer watch. Advisory: a failure is logged by type, and ``lan_wait``, the
+    run's follow or the pick's age (`PENDING_PICK_MAX_AGE`) closes it."""
+    if store is None:
+        return
+    try:
+        await store.settle_lan_ended(printer, subtask_name, ended_at, timed=timed)
+    except Exception as exc:
+        logger.warning(
+            RACK_SETTLE_FALLBACK,
+            extra={"printer": printer, "error": type(exc).__name__},
+        )
+
+
 def lan_settle_hook(store: LanUsage) -> ReadHook:
     """The print follow's read hook for a LAN rack print (#4543): once the run's print
     has settled (its last start ended, or the run stopped the rest), every pick of the
-    run not settled yet is. ``lan_wait`` settles each earlier copy as the printer ends
-    it; this settles the last, and any it missed. Timed unless the report never said how
-    the print ended (``unknown``)."""
+    run not settled yet is. The printer's watch settles each start as the report ends it
+    (`settle_lan_end`), and ``lan_wait`` each earlier copy; this settles any they missed.
+    Timed unless the report never said how the print ended (``unknown``)."""
 
     async def hook(run_subject: str, progress: PrintProgress) -> None:
         if progress.route != "lan" or not progress.settled or progress.run_id is None:

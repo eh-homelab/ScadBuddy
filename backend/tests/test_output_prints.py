@@ -143,6 +143,30 @@ def test_a_lan_print_is_recorded_with_its_run_printer_and_plates(
     assert listed.print_run_id == "run-1"
 
 
+def test_an_output_queued_to_bambuddy_then_printed_over_the_lan_was_sent(
+    tmp_path: Path, prints: OutputPrintStore
+) -> None:
+    """#5143: a LAN print clears the Bambuddy print's ids from the last print, but the
+    output did reach Bambuddy's queue, so it still says so (the browser's "Send again"),
+    whether the ids were the row's or an older ``meta.json``'s."""
+    store = OutputStore(DataPaths(root=tmp_path), prints=prints)
+    queued = saved(tmp_path, "a" * 32)
+    prints.record(queued.id, queue_item_id=5, slice_job_id=9, project_id=None, plates=[])
+    assert store.get(queued.id).sent_to_bambuddy is True
+    prints.record_lan(queued.id, run_id="run-1", printer=None, plates=[])
+    got = store.get(queued.id)
+    assert (got.queue_item_id, got.sent_to_bambuddy) == (None, True)
+
+    older = saved(tmp_path, "b" * 32, queue_item_id=1, print_route="slice_queue")
+    prints.record_lan(older.id, run_id="run-2", printer=None, plates=[])
+    assert store.get(older.id).sent_to_bambuddy is True
+
+    never = saved(tmp_path, "c" * 32)
+    assert store.get(never.id).sent_to_bambuddy is False
+    prints.record_lan(never.id, run_id="run-3", printer=None, plates=[])
+    assert store.get(never.id).sent_to_bambuddy is False
+
+
 def test_the_lan_follow_moves_its_runs_last_print(tmp_path: Path, prints: OutputPrintStore) -> None:
     store = OutputStore(DataPaths(root=tmp_path), prints=prints)
     meta = saved(tmp_path, "f" * 32)
