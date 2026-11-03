@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { HttpResponse, http } from 'msw'
 import { mockLoginEnabled, mockSignedIn } from '../mocks/features/auth'
-import { CrossSiteFrameError, SIGNED_IN, SIGN_IN_FAILED, SignInBlockedError, refreshAuthSession, signIn } from './signIn'
+import { server } from '../mocks/server'
+import { CrossSiteFrameError, SIGNED_IN, SIGN_IN_FAILED, SignInBlockedError, refreshAuthSession, signIn, signOut } from './signIn'
 
 // #4975 — signing in from inside Bambuddy's frame (spec 2026-11-01 §6.2).
 
@@ -76,5 +78,37 @@ describe('the session store', () => {
   it('reads the session', async () => {
     mockSignedIn()
     expect((await refreshAuthSession())?.user?.name).toBe('Alice')
+  })
+})
+
+describe('signOut', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    Reflect.deleteProperty(navigator, 'serviceWorker')
+  })
+
+  it("forgets this browser's push subscription before the session ends, so the next person's is not refused (#815)", async () => {
+    mockSignedIn()
+    const order: string[] = []
+    const endpoint = 'https://fcm.googleapis.com/fcm/send/abc'
+    const subscription = { endpoint, unsubscribe: () => (order.push('unsubscribe'), Promise.resolve(true)) }
+    const registration = { pushManager: { getSubscription: () => Promise.resolve(subscription) } }
+    Object.defineProperty(navigator, 'serviceWorker', {
+      value: { getRegistration: () => Promise.resolve(registration) },
+      configurable: true,
+    })
+    vi.stubGlobal('PushManager', class {})
+    server.use(
+      http.delete('/api/v1/ai/push/subscription', ({ request }) => {
+        order.push(`delete ${new URL(request.url).searchParams.get('endpoint')}`)
+        return new HttpResponse(null, { status: 204 })
+      }),
+      http.post('/api/v1/auth/logout', () => {
+        order.push('logout')
+        return HttpResponse.json({ end_session_url: null })
+      }),
+    )
+    await signOut()
+    expect(order).toEqual([`delete ${endpoint}`, 'unsubscribe', 'logout'])
   })
 })

@@ -2,7 +2,7 @@ import { renderHook, waitFor } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { server } from '../mocks/server'
-import { enableWebPush, PUSH_KEY_PATH, PUSH_SUBSCRIPTION_PATH, PUSH_WORKER_SCOPE, PUSH_WORKER_URL, SESSION_PARAM, useWebPush } from './webPush'
+import { disableWebPush, enableWebPush, PUSH_KEY_PATH, PUSH_SUBSCRIPTION_PATH, PUSH_WORKER_SCOPE, PUSH_WORKER_URL, SESSION_PARAM, useWebPush } from './webPush'
 
 // #815 §3 — the page's half of Web Push: subscribe once notifications are granted, hand the
 // subscription to the agent, and open the session a notification click names.
@@ -13,23 +13,43 @@ const SUBSCRIPTION = { endpoint: 'https://push.example.net/send/abc', expiration
 function fakeWorker() {
   const registered: { url: string; scope: string | undefined }[] = []
   const subscribed: unknown[] = []
-  const messages = new EventTarget() as EventTarget & { startMessages: () => void; register: unknown }
+  const unsubscribed: string[] = []
+  let current: { endpoint: string } | null = null
+  let made = 0
+  const subscriptionOf = (endpoint: string) => {
+    const sub = {
+      endpoint,
+      options: { applicationServerKey: null },
+      toJSON: () => ({ ...SUBSCRIPTION, endpoint }),
+      unsubscribe: () => {
+        unsubscribed.push(endpoint)
+        if (current === sub) current = null
+        return Promise.resolve(true)
+      },
+    }
+    return sub
+  }
+  const registration = {
+    pushManager: {
+      getSubscription: () => Promise.resolve(current),
+      subscribe: (options: unknown) => {
+        subscribed.push(options)
+        made += 1
+        current = subscriptionOf(made === 1 ? SUBSCRIPTION.endpoint : `${SUBSCRIPTION.endpoint}-${made}`)
+        return Promise.resolve(current)
+      },
+    },
+  }
+  const messages = new EventTarget() as EventTarget & { startMessages: () => void; register: unknown; getRegistration: unknown }
   messages.startMessages = () => {}
   messages.register = (url: string, options?: { scope?: string }) => {
     registered.push({ url, scope: options?.scope })
-    return Promise.resolve({
-      pushManager: {
-        getSubscription: () => Promise.resolve(null),
-        subscribe: (options: unknown) => {
-          subscribed.push(options)
-          return Promise.resolve({ options: { applicationServerKey: null }, toJSON: () => SUBSCRIPTION, unsubscribe: () => Promise.resolve(true) })
-        },
-      },
-    })
+    return Promise.resolve(registration)
   }
+  messages.getRegistration = (scope?: string) => Promise.resolve(scope === PUSH_WORKER_SCOPE && registered.length > 0 ? registration : undefined)
   Object.defineProperty(navigator, 'serviceWorker', { value: messages, configurable: true })
   vi.stubGlobal('PushManager', class {})
-  return { registered, subscribed, messages }
+  return { registered, subscribed, unsubscribed, messages, current: () => current }
 }
 
 let permission: NotificationPermission = 'granted'
@@ -75,6 +95,47 @@ describe('enableWebPush', () => {
     fakeWorker()
     server.use(http.get(PUSH_KEY_PATH, () => HttpResponse.json({ detail: 'no KEK' }, { status: 503 })))
     expect(await enableWebPush()).toBe(false)
+  })
+})
+
+describe('a browser shared by two people (#5266 review)', () => {
+  it('on a 409 (the endpoint is someone else\'s), unsubscribes and subscribes again with a new endpoint', async () => {
+    const worker = fakeWorker()
+    const puts: { endpoint: string }[] = []
+    server.use(
+      http.get(PUSH_KEY_PATH, () => HttpResponse.json({ public_key: KEY })),
+      http.put(PUSH_SUBSCRIPTION_PATH, async ({ request }) => {
+        const body = (await request.json()) as { endpoint: string }
+        puts.push(body)
+        return body.endpoint === SUBSCRIPTION.endpoint
+          ? HttpResponse.json({ detail: 'this push endpoint is subscribed for someone else' }, { status: 409 })
+          : new HttpResponse(null, { status: 204 })
+      }),
+    )
+    expect(await enableWebPush()).toBe(true)
+    expect(puts.map((p) => p.endpoint)).toEqual([SUBSCRIPTION.endpoint, `${SUBSCRIPTION.endpoint}-2`])
+    expect(worker.unsubscribed).toEqual([SUBSCRIPTION.endpoint])
+  })
+
+  it('disableWebPush forgets the subscription at the agent and in the browser, as sign-out does', async () => {
+    const worker = fakeWorker()
+    const deleted: string[] = []
+    server.use(
+      http.get(PUSH_KEY_PATH, () => HttpResponse.json({ public_key: KEY })),
+      http.put(PUSH_SUBSCRIPTION_PATH, () => new HttpResponse(null, { status: 204 })),
+      http.delete(PUSH_SUBSCRIPTION_PATH, ({ request }) => {
+        deleted.push(new URL(request.url).searchParams.get('endpoint') ?? '')
+        return new HttpResponse(null, { status: 204 })
+      }),
+    )
+    await enableWebPush()
+    await disableWebPush()
+    expect(deleted).toEqual([SUBSCRIPTION.endpoint])
+    expect(worker.unsubscribed).toEqual([SUBSCRIPTION.endpoint])
+    expect(worker.current()).toBeNull()
+    // Nothing subscribed: nothing to forget, and no error.
+    await disableWebPush()
+    expect(deleted).toHaveLength(1)
   })
 })
 

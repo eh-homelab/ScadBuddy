@@ -621,7 +621,17 @@ grams and seconds against actual, the quoted filament cost against the actual gr
 the quote's prices, the attempts that failed and what they consumed. That is "the real
 cost of a specific line item": the sum over its attempts, failures included. Bambuddy's
 own `cost` (F8) is shown alongside when an archive is linked, corrected as
-`api/print_history.py:1119-1151` corrects it, and not used in the sums.
+`bambuddy/costs.py` corrects it (shared with `api/print_history.py`), and not used in the sums.
+
+**As built (#4251, plan 2026-11-03 Rulings 1 and 2).** `orders/costs.py`, read only. Per
+item, the accepted quote's seconds, grams and filament cost come from a `slice` quote's
+plates and `filament` lines, for the item's quantity. Every attempt's `actual_grams` (§8.2)
+is priced at that quote's own price per gram, not at today's book. A `manual` quote prices
+no grams, so that item has actual figures and no filament cost. Bambuddy's cost is the
+seam's `archive_cost` (archive and runs). Its correction moved to `bambuddy/costs.py`,
+which the print page shares. An archive that cannot be read sets `bambuddy_unavailable`
+and fails nothing. The order page shows it in a Cost card once the order is accepted, and
+the agent reads it with `order_costs`.
 
 ## 7. The flow
 

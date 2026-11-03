@@ -112,6 +112,15 @@ describe.skipIf(!TEST_DATABASE_URL)(`the push routes${TEST_DATABASE_URL ? '' : `
     expect(await store.subscriptions()).toEqual([])
   })
 
+  it('keeps one row and its id when the same subscription is PUT again, as every shell mount does', async () => {
+    const a = app()
+    const body = subscription(FCM)
+    expect((await put(a, PUSH_SUBSCRIPTION_PATH, body)).status).toBe(204)
+    const [before] = await store.subscriptions()
+    expect((await put(a, PUSH_SUBSCRIPTION_PATH, body)).status).toBe(204)
+    expect((await store.subscriptions()).map((s) => s.id)).toEqual([before!.id])
+  })
+
   it("refuses an endpoint another person holds (409), and leaves theirs", async () => {
     await store.subscribe({ kind: 'oidc', id: 'alice', label: 'Alice' }, FCM, { p256dh: createECDH('prime256v1').generateKeys(), auth: Buffer.alloc(16) })
     expect((await put(app(), PUSH_SUBSCRIPTION_PATH, subscription(FCM))).status).toBe(409)

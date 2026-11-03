@@ -5,9 +5,12 @@ prints one nested under it (``parent_id``, #930); ``order_projects`` keeps the m
 item's print ensures its project again (an accept whose ensure failed, Bambuddy down) and
 sets it as the run's ``project_id``, so the 3MF lands in the item's project folder and the
 queue item carries the project, as any print filed under a project does. Nothing here
-deletes a project. A cancel keeps the mapping too (the spec dropped it): a retried print
-of a cancelled item must key its run as its first try did (``existing_run``), and a
-reopened order goes on in the projects it had rather than making a second of each name.
+deletes a project; one deleted in Bambuddy is made again by the next ensure, and the
+mapping names the new one (#5263). A print's claim records the project its run is keyed
+with, so a retry keys it the same whatever the mapping says since. A cancel keeps the
+mapping too (the spec dropped it): a retried print of a cancelled item must key its run
+as its first try did (``existing_run``), and a reopened order goes on in the projects it
+had rather than making a second of each name.
 
 Every Bambuddy call goes through the seam (``OrderIntegrations.ensure_project``), so
 without ``bambuddy_url`` nothing here is asked and nothing is recorded.
@@ -87,6 +90,15 @@ async def _ensure(integrations: OrderIntegrations, name: str, parent_id: int | N
         return await integrations.ensure_project(name, parent_id)
 
 
+async def _kept(integrations: OrderIntegrations, project_id: int | None) -> int | None:
+    """``project_id`` while Bambuddy still has it; None for one deleted there (#5263),
+    which the caller makes again."""
+    if project_id is None:
+        return None
+    async with asyncio.timeout(ENSURE_TIMEOUT_SECONDS):
+        return project_id if await integrations.project_exists(project_id) else None
+
+
 async def ensure_projects(
     store: OrderStore,
     integrations: OrderIntegrations,
@@ -108,10 +120,12 @@ async def ensure_projects(
             for project in await asyncio.to_thread(store.projects, order_id)
         }
         top_subject = order_subject(order_id)
-        top = known.get(top_subject)
+        top = await _kept(integrations, known.get(top_subject))
         if top is None:
             made = await _ensure(integrations, order.number, None)
-            top = await asyncio.to_thread(store.set_project, order_id, top_subject, made)
+            top = await asyncio.to_thread(
+                store.set_project, order_id, top_subject, made, top_subject in known
+            )
         items = await asyncio.to_thread(store.items, order_id)
         wanted = (
             [item for item in items if prints(item)]
@@ -120,10 +134,10 @@ async def ensure_projects(
         )
         for item in wanted:
             subject = item_subject(item.id)
-            if subject in known:
+            if await _kept(integrations, known.get(subject)) is not None:
                 continue
             made = await _ensure(integrations, item_project_name(order, item), top)
-            await asyncio.to_thread(store.set_project, order_id, subject, made)
+            await asyncio.to_thread(store.set_project, order_id, subject, made, subject in known)
     return await asyncio.to_thread(store.projects, order_id)
 
 
