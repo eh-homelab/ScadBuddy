@@ -512,9 +512,17 @@ an outcome recorded against a newer run of the same output, is settled by hand. 
 is edited in `queued`, `printing` and `printed`, and accepted in `printed` (an accepted
 part leaves the item `approved` for the rest). Not yet: the run slices the item's output
 with the request's choices rather than printing the quote's file itself (with the quote's
-own choices the dialog's slice reuse queues that slice), an accepted `manual` quote's
-attempt records no file, and the per-slot spool fill (`needs_spool_choice`,
-`spool_not_filament`) waits on §8.3's spool-to-filament match.
+own choices the dialog's slice reuse queues that slice), and an accepted `manual` quote's
+attempt records no file. Both need a third `SourceSpec` kind, a pre-sliced file, on both
+queue paths (plan 2026-11-03 "Not in this plan").
+
+**As built, the spools (#4251, plan 2026-11-03 Ruling 4).** `orders/spools.py`, run in
+`order_item_print`'s check, so a refusal writes nothing and the filled plan is recorded with
+the check, which keys a retry's run as its first try's. A slot's filament is matched to
+spools by the spool import's identity (§8.3): material, subtype, brand and `#RRGGBB`,
+upper-cased. The run's printer is the request's `printer_id`, else its registry printer's
+Bambuddy id. A spool named only by its colour's name is never taken. On the native path,
+and for a slot the item names no filament for, the plan stays as the request gave it.
 
 ## 6. Fulfilment and provenance
 
@@ -840,7 +848,13 @@ thread lets go of one it got too late. `OrderDetail.projects` lists them; the or
 item drawer the item's. One change from the design: **a cancel keeps the mapping.** A
 retried print of an item cancelled meanwhile looks for its run by the run's key
 (`existing_run`), which the project is part of, and a reopened order (§3.5 Undo) goes on
-in the projects it had instead of making a second of each name.
+in the projects it had instead of making a second of each name. A project deleted in
+Bambuddy is made again by the next ensure (`project_exists`, false only on a 404), and the
+mapping names the new one (#5263). A print's claim records the project its run is keyed
+with (`print_project_id`), so a retry keys the run the same whatever the mapping says
+since. A claim from before that recorded none, and its retry looks for the run under no
+project and under the item's current one. One whose project was deleted and made again
+before the retry is not found under the old project: that narrow gap is accepted.
 
 ### 8.2 Archives
 

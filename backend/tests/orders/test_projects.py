@@ -19,6 +19,7 @@ from scadbuddy.orders.integrations import (
     ArchiveFacts,
     ArchiveMedia,
     CopiedMedia,
+    ShelfSpool,
     SpoolGroup,
 )
 from scadbuddy.orders.projects import ensure_projects, item_project, item_project_name
@@ -43,6 +44,9 @@ class Projects:
 
     async def project_exists(self, project_id: int) -> bool:
         return project_id not in self.deleted
+
+    async def spool_inventory(self) -> list[ShelfSpool]:
+        raise AssertionError("not asked")
 
     async def spool_groups(self) -> list[SpoolGroup]:
         raise AssertionError("not asked")

@@ -61,6 +61,7 @@ from scadbuddy.orders.quote import (
     quote_check,
     quote_run,
 )
+from scadbuddy.orders.spools import item_plan
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.hot_path import native_backends
@@ -268,13 +269,17 @@ class _Renders:
 
 
 def print_body(
-    request: Mapping[str, Any], copies: int, project_id: int | None = None
+    request: Mapping[str, Any],
+    copies: int,
+    project_id: int | None = None,
+    filament_plan: Mapping[str, Any] | None = None,
 ) -> PrintRunRequest:
     """The print run's request for one ``order_item_print`` (its operation's
     ``request``): §5.4's quantity still to print, of the whole output (a quote is the
     whole output's price), keyed by the operation so a retry or a re-send repeats its
     run. ``project_id`` is the item's Bambuddy project (§8.1), which files the print in
-    place of any project or folder the request named."""
+    place of any project or folder the request named; ``filament_plan`` the check's
+    filled plan (§5.4 "Spools"), in place of the request's."""
     body: dict[str, Any] = {
         **request["request"],
         "copies": copies,
@@ -282,6 +287,8 @@ def print_body(
         "plate_ids": None,
         "request_id": request["request_id"],
     }
+    if filament_plan is not None:
+        body["filament_plan"] = filament_plan
     if project_id is not None:
         body = {**body, "project_id": project_id, "folder_id": None}
     return PrintRunRequest.model_validate(body)
@@ -319,11 +326,13 @@ async def claimed_run(
     request: Mapping[str, Any],
     copies: int,
     projects: Sequence[int | None],
+    filament_plan: Mapping[str, Any] | None = None,
 ) -> PrintRun | None:
     """The run an ``order_item_print`` request made, keyed with any of ``projects``
-    (:func:`existing_run` for each, in order)."""
+    (:func:`existing_run` for each, in order) and the check's ``filament_plan``."""
     for project_id in projects:
-        run = await existing_run(runs, subject, print_body(request, copies, project_id))
+        body = print_body(request, copies, project_id, filament_plan)
+        run = await existing_run(runs, subject, body)
         if run is not None:
             return run
     return None
@@ -399,7 +408,43 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
             await registry_printer(
                 body.printer, body.printer_id, settings, components.get(PRINTERS).store
             )
+        # §5.4 "Spools" (#4251): each slot's spool from the item's filaments, in the check
+        # so a refusal writes nothing, and recorded with it so a retry keys its run as
+        # the first try did. On the native path the plan is the request's.
+        if not await native_run(body):
+            printer_id = body.printer_id
+            if printer_id is None and body.printer is not None:
+                row = await asyncio.to_thread(components.get(PRINTERS).store.get, body.printer)
+                printer_id = None if row is None else row.bambuddy_printer_id
+            plan = await item_plan(
+                orders.store,
+                orders.integrations,
+                request["item_id"],
+                body.filament_plan,
+                printer_id,
+            )
+            if plan is not None:
+                checked["filament_plan"] = plan.model_dump(mode="json")
         return checked
+
+    async def native_run(body: PrintRunRequest) -> bool:
+        """Whether ``body``'s print takes the native path (no Bambuddy). A printer the
+        route refuses is not native here: the run refuses it itself, in its own words."""
+        settings = await asyncio.to_thread(core.settings_store.load)
+        if not native_backends(settings):
+            return False
+        printers = components.get(PRINTERS)
+        try:
+            route = await run_route(
+                settings,
+                printers.store,
+                printers.reports,
+                printer=body.printer,
+                printer_id=body.printer_id,
+            )
+        except ApiError:
+            return False
+        return route.native
 
     async def item_project_of(request: dict[str, Any]) -> int | None:
         """The item's Bambuddy project (§8.1), ensured before anything is claimed, so a
@@ -453,6 +498,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         subject = PrintSubject.output(output_id)
         project_id = await item_project_of(request)
         store = components.get(ORDERS).store
+        # The check's filled plan (§5.4 "Spools"); one checked before it has none.
+        plan = checked.get("filament_plan")
 
         async def keyed() -> tuple[bool, list[int | None]]:
             """Whether the claim recorded its project, and the projects its run may be
@@ -466,13 +513,13 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
 
         async def existing(copies: int) -> PrintRun | None:
             _, projects = await keyed()
-            return await claimed_run(core.print_runs, subject, request, copies, projects)
+            return await claimed_run(core.print_runs, subject, request, copies, projects, plan)
 
         async def start(copies: int) -> PrintRun:
             recorded, projects = await keyed()
             if not recorded:
                 # A claim from before #5263, retried: its run may be under either key.
-                found = await claimed_run(core.print_runs, subject, request, copies, projects)
+                found = await claimed_run(core.print_runs, subject, request, copies, projects, plan)
                 if found is not None:
                     return found
             run = await accept_run(
@@ -480,7 +527,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 Response(),
                 subject=subject,
                 slug=checked["slug"],
-                request=print_body(request, copies, projects[0]),
+                request=print_body(request, copies, projects[0], plan),
                 source=SourceSpec(kind="output", output_id=output_id),
                 activity=components.get(ACTIVITY),
             )

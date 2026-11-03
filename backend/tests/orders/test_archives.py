@@ -23,6 +23,7 @@ from scadbuddy.orders.integrations import (
     ArchiveMedia,
     CopiedMedia,
     MediaTooLargeError,
+    ShelfSpool,
     SpoolGroup,
 )
 from scadbuddy.orders.models import Fulfilment, Order, OrderItem
@@ -51,6 +52,9 @@ class Archives:
     def __init__(self, *facts: ArchiveFacts) -> None:
         self.facts = {f.archive_id: f for f in facts}
         self.downloads: list[tuple[int, str, str | None]] = []
+
+    async def spool_inventory(self) -> list[ShelfSpool]:
+        raise AssertionError("not asked")
 
     async def spool_groups(self) -> list[SpoolGroup]:
         raise AssertionError("not asked")

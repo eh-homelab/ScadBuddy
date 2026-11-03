@@ -33,6 +33,7 @@ from scadbuddy.orders.integrations import (
     ArchiveMedia,
     CopiedMedia,
     MediaTooLargeError,
+    ShelfSpool,
     SpoolGroup,
 )
 
@@ -131,6 +132,30 @@ class BambuddyIntegrations:
         stored = await asyncio.to_thread(self.settings.load)
         async with client_for(stored) as client:
             return spool_groups(await client.spools())
+
+    async def spool_inventory(self) -> list[ShelfSpool]:
+        """``GET /inventory/spools`` (archived ones included, so a named one is known)
+        and ``GET /inventory/assignments`` for where each is loaded: two reads, none per
+        printer, so one printer Bambuddy cannot reach refuses no print (#5269 review)."""
+        stored = await asyncio.to_thread(self.settings.load)
+        async with client_for(stored) as client:
+            spools, assignments = await asyncio.gather(
+                client.spools(include_archived=True), client.spool_assignments()
+            )
+        loaded = {a.spool_id: a.printer_id for a in assignments}
+        return [
+            ShelfSpool(
+                id=spool.id,
+                material=spool.material,
+                subtype=spool.subtype,
+                brand=spool.brand,
+                colour=_colour(spool.rgba),
+                remaining_g=spool.remaining_g,
+                archived=spool.archived_at is not None,
+                loaded_printer_id=loaded.get(spool.id),
+            )
+            for spool in spools
+        ]
 
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
         stored = await asyncio.to_thread(self.settings.load)
