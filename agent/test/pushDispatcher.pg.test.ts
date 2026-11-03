@@ -3,14 +3,16 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
-import { PushDispatcher, type AttentionNotice } from '../src/notify/dispatcher.js'
-import { PushStore } from '../src/notify/pushStore.js'
+import { PushDispatcher, type AttentionNotice, type PushDispatcherDeps } from '../src/notify/dispatcher.js'
+import { DEFAULT_PUSH_HOSTS } from '../src/notify/pushEgress.js'
+import { PushStore, SubscriptionTakenError } from '../src/notify/pushStore.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import type { Owner } from '../src/sessions/protocol.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // #815 §3: a closed tab still alerts. Each attention request is pushed once to every browser
-// subscribed for someone who may see it, through the egress check, with nothing secret in it.
+// subscribed for someone who may see it, only to an allowlisted push service at a public
+// address, with nothing secret in it.
 
 const KEK = kekFromBase64(Buffer.alloc(32, 7).toString('base64'))
 const OTHER_KEK = kekFromBase64(Buffer.alloc(32, 9).toString('base64'))
@@ -41,7 +43,7 @@ function browserKeys() {
   }
 }
 
-type Received = { path: string; headers: Record<string, string | string[] | undefined>; body: Buffer }
+type Received = { path: string; headers: Record<string, string | string[] | undefined>; body: Buffer; hung?: true }
 
 describe.skipIf(!TEST_DATABASE_URL)(`web push${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   let db: Database
@@ -50,17 +52,31 @@ describe.skipIf(!TEST_DATABASE_URL)(`web push${TEST_DATABASE_URL ? '' : ` (skipp
   let base: string
   let received: Received[]
   let status: number
+  let hang: boolean
+  let inFlight: number
+  let maxInFlight: number
 
   beforeEach(async () => {
     ;({ db, drop } = await throwawayDatabase())
     expect(await db.ready()).toBe(true)
     received = []
     status = 201
+    hang = false
+    inFlight = 0
+    maxInFlight = 0
     server = createServer((req, res) => {
       const chunks: Buffer[] = []
       req.on('data', (c: Buffer) => chunks.push(c))
       req.on('end', () => {
-        received.push({ path: req.url ?? '', headers: req.headers, body: Buffer.concat(chunks) })
+        const entry: Received = { path: req.url ?? '', headers: req.headers, body: Buffer.concat(chunks) }
+        received.push(entry)
+        if (hang) {
+          entry.hung = true
+          inFlight += 1
+          maxInFlight = Math.max(maxInFlight, inFlight)
+          res.on('close', () => void (inFlight -= 1))
+          return
+        }
         res.statusCode = status
         res.end()
       })
@@ -69,14 +85,36 @@ describe.skipIf(!TEST_DATABASE_URL)(`web push${TEST_DATABASE_URL ? '' : ` (skipp
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
   })
   afterEach(async () => {
+    server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
     await drop()
   })
 
   const notice = (id: string): AttentionNotice => ({ id, sessionId: '0b0e2c51-2f0a-4b8e-9c1e-1d6c1e1f2a3b', reason: 'tab_disconnected' })
 
-  function dispatcher(store: PushStore, notices: () => AttentionNotice[], resolve = (host: string) => Promise.resolve([host])) {
-    return new PushDispatcher({ store, notices: () => Promise.resolve(notices()), subject: 'https://scadbuddy.example', resolve, log: () => {} })
+  /** Sends to the fake push service on loopback, which only a test may pin to (`pinEndpoint`). */
+  function dispatcher(store: PushStore, notices: () => AttentionNotice[], extra: Partial<PushDispatcherDeps> = {}) {
+    return new PushDispatcher({
+      store,
+      notices: () => Promise.resolve(notices()),
+      subject: 'https://scadbuddy.example',
+      hosts: () => Promise.resolve(DEFAULT_PUSH_HOSTS),
+      pinEndpoint: (endpoint) => Promise.resolve({ url: endpoint, address: '127.0.0.1' }),
+      log: () => {},
+      ...extra,
+    })
+  }
+
+  /** The real check: no pin, each name resolved by `resolve`. */
+  function strict(store: PushStore, resolve: (host: string) => Promise<string[]>, log: (m: string) => void = () => {}) {
+    return new PushDispatcher({
+      store,
+      notices: () => Promise.resolve([notice('question:1')]),
+      subject: 'https://scadbuddy.example',
+      hosts: () => Promise.resolve(DEFAULT_PUSH_HOSTS),
+      resolve,
+      log,
+    })
   }
 
   it('makes one VAPID key, keeps it sealed under the KEK, and gives the same one back', async () => {
@@ -128,11 +166,55 @@ describe.skipIf(!TEST_DATABASE_URL)(`web push${TEST_DATABASE_URL ? '' : ` (skipp
     expect(await store.subscriptions()).toEqual([])
   })
 
-  it('never sends to a refused address: the egress check is on every push', async () => {
+  it('never sends to a private address, a name resolving to one, or a host off the allowlist: checked at every push', async () => {
     const store = new PushStore(db.sql, KEK)
-    await store.subscribe(YOU, 'https://metadata.example/push', browserKeys().keys)
-    await dispatcher(store, () => [notice('question:1')], () => Promise.resolve(['169.254.169.254'])).pass()
+    // Stored directly: the route refuses each of them already (push.routes.pg.test.ts).
+    await store.subscribe(YOU, 'https://10.0.0.5/push', browserKeys().keys)
+    await store.subscribe(YOU, 'https://fcm.googleapis.com/fcm/send/x', browserKeys().keys)
+    await store.subscribe(YOU, 'https://push.example.net/send/x', browserKeys().keys)
+    const logged: string[] = []
+    const resolve = (host: string) => Promise.resolve(host === 'fcm.googleapis.com' ? ['192.168.1.20'] : ['203.0.113.5'])
+    await strict(store, resolve, (m) => logged.push(m)).pass()
     expect(received).toEqual([])
+    const log = logged.join('\n')
+    expect(log).toMatch(/10\.0\.0\.5 is not a known push service/)
+    expect(log).toMatch(/fcm\.googleapis\.com resolves to 192\.168\.1\.20/)
+    expect(log).toMatch(/push\.example\.net is not a known push service/)
+  })
+
+  it('refuses the loopback fake without the test-only pin: no plain http, no loopback', async () => {
+    const store = new PushStore(db.sql, KEK)
+    await store.subscribe(YOU, `${base}/push/one`, browserKeys().keys)
+    await strict(store, (host) => Promise.resolve([host])).pass()
+    expect(received).toEqual([])
+  })
+
+  it('has at most four pushes in flight, and starts none past the pass deadline', async () => {
+    const store = new PushStore(db.sql, KEK)
+    for (let i = 0; i < 6; i++) await store.subscribe({ ...YOU, id: `p${i}` }, `${base}/hang/${i}`, browserKeys().keys)
+    hang = true
+    const started = Date.now()
+    await dispatcher(store, () => [notice('question:1')], { passDeadlineMs: 500 }).pass()
+    expect(Date.now() - started).toBeLessThan(5_000)
+    expect(maxInFlight).toBe(4)
+    // The two never started are unclaimed, so the next pass sends them.
+    hang = false
+    await dispatcher(store, () => [notice('question:1')]).pass()
+    expect(received.filter((r) => !r.hung)).toHaveLength(2)
+  })
+
+  it("never replaces another person's subscription, and keeps five per person", async () => {
+    const store = new PushStore(db.sql, KEK)
+    const mallory: Owner = { kind: 'oidc', id: 'mallory', label: 'Mallory' }
+    await store.subscribe(YOU, 'https://fcm.googleapis.com/fcm/send/a', browserKeys().keys)
+    await expect(store.subscribe(mallory, 'https://fcm.googleapis.com/fcm/send/a', browserKeys().keys)).rejects.toThrow(SubscriptionTakenError)
+    expect(await store.unsubscribe('https://fcm.googleapis.com/fcm/send/a', mallory)).toBe(false)
+    expect((await store.subscriptions()).map((s) => s.owner.id)).toEqual(['browser'])
+    for (let i = 0; i < 6; i++) await store.subscribe(YOU, `https://fcm.googleapis.com/fcm/send/${i}`, browserKeys().keys)
+    const kept = (await store.subscriptions()).map((s) => s.endpoint)
+    expect(kept).toHaveLength(5)
+    expect(kept).not.toContain('https://fcm.googleapis.com/fcm/send/a')
+    expect(kept).toContain('https://fcm.googleapis.com/fcm/send/5')
   })
 
   it("re-wraps the VAPID key and the subscriptions' keys on rotation", async () => {

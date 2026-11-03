@@ -1,5 +1,6 @@
 import { pendingInput } from './routes/pendingInput.js'
 import { attentionNotices, PushDispatcher } from './notify/dispatcher.js'
+import { pushHostsOf, SETTING_PUSH_HOSTS } from './notify/pushEgress.js'
 import { PushStore } from './notify/pushStore.js'
 import { PendingChanges } from './gate/changes.js'
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
@@ -1129,6 +1130,8 @@ const pushDispatcher =
         notices: async (owner) => attentionNotices(await pendingInput(sessions, owner)),
         // RFC 8292 §2.1: who the push service may contact about these messages.
         subject: config.publicUrl ?? 'mailto:scadbuddy@localhost',
+        // The push-service allowlist, as Settings last saved it (notify/pushEgress.ts).
+        hosts: async () => pushHostsOf(await settings?.get<unknown>(SETTING_PUSH_HOSTS)),
       })
     : undefined
 if (pushDispatcher && database) {

@@ -464,6 +464,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
       "A browser's own push subscription, made by the page once the person grants notifications from a click; " +
       'an agent reaches the person through request_user_attention, which the push announces.',
   })),
+  ...['GET /api/v1/ai/settings/push-services', 'PUT /api/v1/ai/settings/push-services'].map((route) => ({
+    route,
+    reason:
+      'Which push services the agent may POST to, a person\'s setting in Settings → Assistant → Notifications; ' +
+      'an agent must not widen where the service sends requests.',
+  })),
   // Settings → Tools & plugins (#2171).
   ...['GET /api/v1/ai/capabilities', 'GET /api/v1/ai/capabilities/{source}', 'GET /api/v1/ai/capabilities/{source}/items/{item}'].map(
     (route) => ({ route, reason: CAPABILITIES_READ }),

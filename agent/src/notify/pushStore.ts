@@ -18,6 +18,17 @@ const subscriptionAad = (id: string, endpoint: string) => `push-subscription:${i
 
 export type PushSubscriptionRow = { id: string; owner: Owner; endpoint: string; keys: Subscriber }
 
+/** How many browsers one person may subscribe; a new one past it evicts the oldest. */
+export const SUBSCRIPTIONS_PER_OWNER = 5
+
+/** The endpoint is another person's subscription. */
+export class SubscriptionTakenError extends Error {
+  override name = 'SubscriptionTakenError'
+  constructor() {
+    super('this push endpoint is subscribed for someone else')
+  }
+}
+
 /** How long a "told" row is kept: past any entry's 86 400 s ceiling (ai_pending_input). */
 export const SENT_KEEP_DAYS = 2
 
@@ -51,16 +62,27 @@ export class PushStore {
     return (await read())!
   }
 
-  /** Stores `endpoint` for `owner`, replacing what was stored for it (a browser re-subscribing, or another person on it). */
+  /**
+   * Stores `endpoint` for `owner`, replacing what `owner` stored for it (a browser
+   * re-subscribing). One another person holds is refused (SubscriptionTakenError), never
+   * replaced. An owner keeps at most SUBSCRIPTIONS_PER_OWNER; past that the oldest go.
+   */
   async subscribe(owner: Owner, endpoint: string, keys: Subscriber): Promise<string> {
     const id = randomUUID()
     const secret = JSON.stringify({ p256dh: keys.p256dh.toString('base64url'), auth: keys.auth.toString('base64url') })
     const sealed = sealSecret(this.#kek, secret, subscriptionAad(id, endpoint))
     await this.#sql.begin(async (tx) => {
-      await tx`DELETE FROM ai_push_subscriptions WHERE endpoint = ${endpoint}`
+      const [held] = await tx<{ owner_kind: string; owner_id: string }[]>`
+        SELECT owner_kind, owner_id FROM ai_push_subscriptions WHERE endpoint = ${endpoint} FOR UPDATE`
+      if (held && (held.owner_kind !== owner.kind || held.owner_id !== owner.id)) throw new SubscriptionTakenError()
+      await tx`DELETE FROM ai_push_subscriptions WHERE endpoint = ${endpoint} AND owner_kind = ${owner.kind} AND owner_id = ${owner.id}`
       await tx`
         INSERT INTO ai_push_subscriptions (id, owner_kind, owner_id, owner_label, endpoint, secret_sealed, dek_sealed, kek_id)
         VALUES (${id}, ${owner.kind}, ${owner.id}, ${owner.label}, ${endpoint}, ${sealed.secretSealed}, ${sealed.dekSealed}, ${sealed.kekId})`
+      await tx`
+        DELETE FROM ai_push_subscriptions WHERE id IN (
+          SELECT id FROM ai_push_subscriptions WHERE owner_kind = ${owner.kind} AND owner_id = ${owner.id}
+           ORDER BY created_at DESC, id OFFSET ${SUBSCRIPTIONS_PER_OWNER})`
     })
     return id
   }

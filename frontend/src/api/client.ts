@@ -32,6 +32,7 @@ import type {
   ModelSetting,
   ImageSettings,
   MemorySettings,
+  PushServices,
   WorkspaceFile,
   WorkspaceFileList,
   WorkspaceSettings,
@@ -2714,6 +2715,12 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ recall_max_query_chars: recallMaxQueryChars }),
     }),
+
+  /** #815 — the push services the agent may send Web Push to. */
+  getPushServices: () => request<PushServices>('/ai/settings/push-services'),
+
+  putPushServices: (hosts: string[]) =>
+    request<PushServices>('/ai/settings/push-services', { method: 'PUT', body: JSON.stringify({ hosts }) }),
 
   /** #2329 — the caps on the assistant's workspace (bytes), served by the agent service. */
   getWorkspaceSettings: () => request<WorkspaceSettings>('/ai/settings/workspace'),

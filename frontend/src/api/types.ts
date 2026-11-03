@@ -619,6 +619,16 @@ export interface MemorySettings {
 }
 
 /**
+ * #815 — the push services the agent may send Web Push to (`GET/PUT
+ * /api/v1/ai/settings/push-services`, agent `src/routes/push.ts`): host names, or `*.` and
+ * one for its subdomains. `default` is the browsers' own services.
+ */
+export interface PushServices {
+  hosts: string[]
+  default: string[]
+}
+
+/**
  * #2329 — the caps on the assistant's workspace, in bytes (agent
  * `routes/workspaceSettings.ts`), with the bounds the form may save.
  */
