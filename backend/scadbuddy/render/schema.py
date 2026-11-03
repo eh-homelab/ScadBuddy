@@ -196,7 +196,7 @@ def _resolve_type(raw: dict[str, Any], annotation: Annotation | None) -> Paramet
             return "color"
         if kind == "font":
             return "font"
-        # An annotation naming no kind ScadBuddy can store (`// file:stl`) stays a
+        # An annotation naming no kind ScadBuddy can store (`// file:step`) stays a
         # plain string rather than a picker nothing can be dropped on.
         if kind == "file" and annotation is not None and annotation.accept:
             return "file"

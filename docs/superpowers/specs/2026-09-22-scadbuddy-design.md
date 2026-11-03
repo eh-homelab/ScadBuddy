@@ -600,15 +600,21 @@ the kinds it takes:
 overlay_file = ""; // file:svg,png
 ```
 
-`// file` alone takes both kinds; `// file:png` takes one. Unlike `// [..]` this is
+`// file` alone takes both image kinds; `// file:png` takes one. A mesh is named:
+`// file:stl`, `// file:stl,3mf,obj` (#959). Unlike `// [..]` this is
 not OpenSCAD customizer syntax, and that is deliberate: OpenSCAD (measured on
 2026.09.23) exports the parameter as a plain `string`, caption kept, so the model
 still opens in the OpenSCAD GUI and on MakerWorld, and only ScadBuddy types it
-`file`. An annotation naming no kind ScadBuddy stores (`// file:stl`) leaves it a
+`file`. An annotation naming no kind ScadBuddy stores (`// file:step`) leaves it a
 string.
 
 - **Upload.** `POST /models/{id}/assets` (multipart `file`) sniffs the bytes, never
-  the name, and refuses anything but SVG and PNG (422) or over 8 MiB (413). An SVG
+  the name, and refuses anything but SVG, PNG, STL, 3MF and OBJ (422) or over 8 MiB
+  (413). A mesh (#959, `library/meshes.py`) is read by bounded readers and stored as
+  its triangles alone: a binary STL with a blank header, an OBJ of `v` and `f` lines,
+  or a 3MF of exactly one object. It is held to 500,000 triangles, finite coordinates
+  within 1,000,000 mm, and, for a 3MF, a zip of at most 64 entries checked for sizes,
+  ratios and paths before it is inflated; its picture is `GET …/assets/{id}/preview`. An SVG
   is re-serialised without scripts, event handlers, `foreignObject`/`image`/
   animation elements, entity declarations, or any `href`/`url()` that leaves the
   document. A PNG is decoded (refused past 25 MP), downscaled to 256 px on its

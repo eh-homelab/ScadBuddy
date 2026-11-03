@@ -160,7 +160,7 @@ _UNSAFE_TEXT = re.compile(r"@import|javascript:|expression\(", re.IGNORECASE)
 
 
 class AssetRejectedError(ValueError):
-    """The upload is not an SVG or PNG this store will keep."""
+    """The upload is not an SVG, PNG, STL, 3MF or OBJ this store will keep."""
 
 
 class AssetUnavailableError(ValueError):

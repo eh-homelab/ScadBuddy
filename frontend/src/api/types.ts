@@ -24,7 +24,7 @@ export type CustomizerSchema = Schemas['CustomizerSchema']
 /** A revision's schema, with that revision's own `ui` declaration (#425). */
 export type RevisionSchema = Schemas['RevisionSchema']
 
-/** #204 — an SVG or PNG uploaded for a `// file` parameter; its `id` is the value. */
+/** #204 — an SVG, PNG, STL, 3MF or OBJ uploaded for a `// file` parameter; its `id` is the value. */
 export type Asset = Schemas['AssetMeta']
 /** #296 — how much the upload store holds, against its caps (0 is no limit). */
 export type AssetUsage = Schemas['AssetUsage']

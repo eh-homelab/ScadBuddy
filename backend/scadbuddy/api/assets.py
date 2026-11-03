@@ -1,4 +1,5 @@
-"""Files for `// file` parameters (#204): an SVG or PNG attached to one render, and
+"""Files for `// file` parameters (#204, #959): an SVG, PNG, STL, 3MF or OBJ attached
+to one render, and
 the sample files a template ships beside its source."""
 
 from __future__ import annotations

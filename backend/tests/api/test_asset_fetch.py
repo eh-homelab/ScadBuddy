@@ -1,4 +1,5 @@
-"""`POST /models/{slug}/assets/fetch`: an SVG or PNG off an allowlisted URL (#844)."""
+"""`POST /models/{slug}/assets/fetch`: an SVG, PNG, STL, 3MF or OBJ off an allowlisted URL
+(#844, #959)."""
 
 from __future__ import annotations
 

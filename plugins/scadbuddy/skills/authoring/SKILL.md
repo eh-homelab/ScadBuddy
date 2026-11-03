@@ -42,7 +42,7 @@ in `models/name-keychain/`:
 | `README.md`, `thumbnail.png` | Catalogue text and image. |
 | `ui/index.js` | Optional. The template's own customizer (`"ui": {"module": "ui/index.js", "slot": "panel" \| "page", "api": 1}` in `model.json`). Plain ES module, no build step, exporting `mount(root, host, ctx)`; see section 12, "Template UI" (template-pipelines spec `docs/superpowers/specs/2026-09-27-template-pipelines-design.md` §4.1). |
 | `verify.sh` | The template's render checks (section 8 below). |
-| sample files | SVG or PNG files for `// file` parameters, e.g. `models/coaster-set/sample-overlay.svg` (main spec §5.5). |
+| sample files | SVG or PNG files (or STL, 3MF or OBJ, for a parameter that names the kind, `// file:stl`) for `// file` parameters, e.g. `models/coaster-set/sample-overlay.svg` (main spec §5.5). |
 
 On a running instance the same layout lives in the data volume's `models/` git
 repository, and every save is a commit (main spec §4.2 and §4.3).

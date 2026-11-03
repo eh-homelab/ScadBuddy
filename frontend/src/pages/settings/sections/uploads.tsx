@@ -24,7 +24,7 @@ export function Component() {
       <FieldRow
         id="asset-fetch-domains"
         label="Fetch assets from"
-        help={`The domains an SVG or PNG may be fetched from by URL (the assistant's fetch_asset), a domain a line; each takes its subdomains, and every redirect must stay on the list. Empty restores the defaults; "${FETCH_NOWHERE}" allows none.`}
+        help={`The domains an SVG, PNG, STL, 3MF or OBJ may be fetched from by URL (the assistant's fetch_asset), a domain a line; each takes its subdomains, and every redirect must stay on the list. Empty restores the defaults; "${FETCH_NOWHERE}" allows none.`}
         error={errors.asset_fetch_domains}
       >
         <Textarea
