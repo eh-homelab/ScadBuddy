@@ -1,3 +1,4 @@
+import { PendingChanges } from './gate/changes.js'
 import { ATTACHMENT_SWEEP_MS, AttachmentStore } from './attachments/store.js'
 import { serve, upgradeWebSocket } from '@hono/node-server'
 import { WebSocketServer } from 'ws'
@@ -284,6 +285,8 @@ const backend = createBackendClient(
 // The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
 // of its own, retried in the background, feeding MCP resource subscriptions.
 const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
+// The pending-input tables' change ticks (#815, gate/changes.ts), for the badge's stream.
+const pendingChanges = events ? new PendingChanges(events) : undefined
 // This replica's own queue: a pinned turn tool's calls (#2320), a classic session's
 // Monitor commands, which run where its turns' Bash runs, and the browser_* calls other
 // replicas make for a tab connected here (#4780).
@@ -1140,6 +1143,7 @@ const app = !role.http
   // The panel's background tasks (routes/backgroundTasks.ts).
   ...(backgroundTasks ? { backgroundTasks } : {}),
   ...(audit ? { audit } : {}),
+  ...(pendingChanges ? { pendingChanges } : {}),
   upgradeWebSocket,
   tabs,
   // A person's session on /api/v1/ai/* (#4975 phase 5), dropped when the backend revokes it.

@@ -440,6 +440,12 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
   { route: 'GET /api/v1/ai/pending-input', tool: 'pending_input_list' },
   { route: 'GET /api/v1/ai/sessions/{id}/pending-input', tool: 'sessions_pending_input' },
   {
+    route: 'GET /api/v1/ai/pending-input/changes',
+    reason:
+      "The badge's wake-up (#815): an event stream that says only that pending_input_list may have changed, " +
+      'for a browser tab to re-read; an agent reads pending_input_list itself.',
+  },
+  {
     route: 'POST /api/v1/ai/pending-input/{request_id}',
     reason:
       'Browser-only for `answer` kinds (only the user answers a question); an `approval` is decided through ' +

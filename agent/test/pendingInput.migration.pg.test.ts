@@ -58,6 +58,22 @@ describe.skipIf(!TEST_DATABASE_URL)(`the pending-input tables${TEST_DATABASE_URL
     expect(await db.sql`SELECT 1 FROM ai_input_responses`).toHaveLength(0)
   })
 
+  it('NOTIFYs scadbuddy_pending on every write to a table of parked calls (#815)', async () => {
+    const heard: string[] = []
+    const listening = await db.sql.listen('scadbuddy_pending', (payload) => heard.push(payload))
+    const s = await session()
+    const id = `durable:${s}:run-1:toolu_n`
+    await db.sql`INSERT INTO ai_pending_input ${db.sql(pending(s, id))}`
+    await db.sql`DELETE FROM ai_pending_input WHERE request_id = ${id}`
+    await db.sql`
+      INSERT INTO ai_questions (id, session_id, turn_id, tool_use_id, questions)
+      VALUES (${randomUUID()}, ${s}, ${randomUUID()}, 'toolu_q', '[]'::jsonb)`
+    const deadline = Date.now() + 5_000
+    while (heard.length < 3 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20))
+    expect(heard).toEqual(['', '', ''])
+    await listening.unlisten()
+  })
+
   it('refuses an unknown kind or outcome, and an entry that waits past the 86 400 s ceiling', async () => {
     const s = await session()
     await expect(db.sql`INSERT INTO ai_pending_input ${db.sql(pending(s, 'durable:a', { kind: 'other' }))}`).rejects.toThrow(/check/)

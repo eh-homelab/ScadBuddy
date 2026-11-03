@@ -23,6 +23,13 @@ import { fetchNotingSignedOut } from '../lib/signedOut'
 export const ATTENTION_PATH = '/api/v1/ai/pending-input'
 /** How often the count is read while the assistant is available. */
 export const ATTENTION_POLL_MS = 15_000
+/**
+ * #815 — the agent's event stream that says, with no data, when what `ATTENTION_PATH` lists may
+ * have changed (agent routes/pendingInput.ts `PENDING_CHANGES_PATH`), so a new request is read
+ * within moments rather than on the next poll, which a background tab's throttled timers stretch.
+ * The poll stays: it covers an agent without the stream (a 503 closes the EventSource for good).
+ */
+export const PENDING_CHANGES_PATH = '/api/v1/ai/pending-input/changes'
 
 /** How long one read may take; a proxy that accepts and never answers counts as no answer. */
 export const ATTENTION_TIMEOUT_MS = 8_000
@@ -244,9 +251,13 @@ export function useAttention(enabled: boolean): Attention {
   // toggles must not pile requests up behind it. Held per generation, so a read
   // left open by a switch off does not hold back the first read after switching on.
   const inflight = useRef<number | null>(null)
+  // #815: a change heard while a read is open, read once that one settles: it may have
+  // happened after the agent answered that read.
+  const changedDuring = useRef(false)
 
-  const refresh = useCallback(() => {
+  const refresh = useCallback(function read() {
     if (!enabled || inflight.current === generation.current) return
+    changedDuring.current = false
     const started = generation.current
     inflight.current = started
     // Each answer is shown as it lands, so a slow sessions list does not hold back the
@@ -262,6 +273,7 @@ export function useAttention(enabled: boolean): Attention {
       }),
     ]).then(() => {
       if (inflight.current === started) inflight.current = null
+      if (changedDuring.current && current()) read()
     })
   }, [enabled])
 
@@ -279,7 +291,15 @@ export function useAttention(enabled: boolean): Attention {
     }
     document.addEventListener('visibilitychange', onVisible)
     window.addEventListener('focus', refresh)
+    const changes = typeof EventSource === 'undefined' ? undefined : new EventSource(PENDING_CHANGES_PATH)
+    const onChange = () => {
+      if (inflight.current === generation.current) changedDuring.current = true
+      else refresh()
+    }
+    changes?.addEventListener('changed', onChange)
     return () => {
+      changes?.removeEventListener('changed', onChange)
+      changes?.close()
       clearInterval(timer)
       document.removeEventListener('visibilitychange', onVisible)
       window.removeEventListener('focus', refresh)
