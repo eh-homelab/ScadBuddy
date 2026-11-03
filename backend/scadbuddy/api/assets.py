@@ -1,4 +1,5 @@
-"""Files for `// file` parameters (#204): an SVG or PNG attached to one render, and
+"""Files for `// file` parameters (#204, #959): an SVG, PNG, STL, 3MF or OBJ attached
+to one render, and
 the sample files a template ships beside its source."""
 
 from __future__ import annotations
@@ -7,7 +8,7 @@ import asyncio
 import logging
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import Annotated
+from typing import Annotated, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -73,6 +74,7 @@ from scadbuddy.library.fetch_grants import (
 from scadbuddy.library.fetch_grants import verify as verify_fetch_grant
 from scadbuddy.library.history import GitError, RevisionNotFoundError
 from scadbuddy.library.icon_search import COLLECTIONS, MAX_LIMIT, IconSearch, search_icons
+from scadbuddy.library.meshes import MESH_KINDS, preview_png
 from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.url_import import (
     IMPORT_TIMEOUT,
@@ -130,11 +132,14 @@ def _require_asset(store: AssetStore, asset_id: str) -> AssetMeta:
     status_code=status.HTTP_201_CREATED,
     summary="Upload a file for a file parameter",
     description=(
-        "Stores an SVG or PNG for a `// file` parameter and answers its id, the "
-        "SHA-256 of the stored bytes, which is the value the render takes. The "
+        "Stores an SVG, PNG, STL, 3MF or OBJ for a `// file` parameter and answers its "
+        "id, the SHA-256 of the stored bytes, which is the value the render takes. The "
         "content is sniffed, not trusted by its name: an SVG is stripped of scripts "
         "and external references, a PNG is re-encoded and downscaled to at most "
-        "256 px on its long side. Anything else is a 422. A file not already stored "
+        "256 px on its long side, and a mesh is read with bounded readers and stored "
+        "as its triangles alone (a binary STL with a blank header, an OBJ of `v` and "
+        "`f` lines, a 3MF of one object), at most 500,000 triangles; a 3MF must place "
+        "exactly one object. Anything else is a 422. A file not already stored "
         "that would take the store past SCADBUDDY_ASSET_MAX_COUNT files or "
         "SCADBUDDY_ASSET_MAX_TOTAL_BYTES bytes is a 413 whose problem document carries "
         "the store's `usage`; re-uploading stored content is never refused."
@@ -146,7 +151,7 @@ async def upload_asset(
     response: Response,
     ops: OperationsDep,
     paths: PathsDep,
-    file: Annotated[UploadFile, File(description="An SVG or PNG")],
+    file: Annotated[UploadFile, File(description="An SVG, PNG, STL, 3MF or OBJ")],
     idempotency_key: IdempotencyKey = None,
 ) -> AssetMeta | JSONResponse:
     data = await file.read(MAX_ASSET_BYTES + 1)
@@ -209,7 +214,7 @@ async def store_asset(
 
 
 class AssetFetch(BaseModel):
-    url: str = Field(max_length=2048, description="An https URL to an SVG or PNG")
+    url: str = Field(max_length=2048, description="An https URL to an SVG, PNG, STL, 3MF or OBJ")
     allow_host: str | None = Field(
         default=None,
         max_length=253,
@@ -247,7 +252,8 @@ class FetchedAsset(AssetMeta):
     status_code=status.HTTP_201_CREATED,
     summary="Fetch a file for a file parameter from a URL",
     description=(
-        "Fetches an SVG or PNG on the server and stores it exactly as an upload: the "
+        "Fetches an SVG, PNG, STL, 3MF or OBJ on the server and stores it exactly as an "
+        "upload: the "
         "answer's `id` is the value a `// file` parameter takes. The URL's host, and "
         "every redirect's, must be on the asset allowlist (`asset_fetch_domains` in "
         "Settings, each domain with its subdomains), or be the body's `allow_host`: one "
@@ -551,7 +557,7 @@ def get_asset(
 @router.get(
     "/models/{slug}/assets/{asset_id}/content",
     response_class=FileResponse,
-    responses={200: {"content": {"image/svg+xml": {}, "image/png": {}}}},
+    responses={200: {"content": {media: {} for media in MEDIA_TYPES.values()}}},
     summary="An uploaded file's bytes",
 )
 def get_asset_content(
@@ -565,12 +571,36 @@ def get_asset_content(
 
 
 @router.get(
+    "/models/{slug}/assets/{asset_id}/preview",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+    summary="A picture of an uploaded mesh",
+    description=(
+        "A PNG of an uploaded STL, 3MF or OBJ, drawn from the stored mesh in the plate "
+        "thumbnails' iso view, for the customizer's file field. An SVG or PNG is its "
+        "own picture (`/content`): asking for its preview is a 404."
+    ),
+)
+async def get_asset_preview(
+    slug: SlugPath, asset_id: AssetIdPath, catalogue: CatalogueDep, assets: AssetsDep
+) -> Response:
+    require_model_exists(catalogue, slug)
+    meta = _require_asset(assets, asset_id)
+    if meta.kind not in MESH_KINDS:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{asset_id!r} is an image: it has no preview")
+    data = await asyncio.to_thread(assets.blob_path(meta).read_bytes)
+    picture = await asyncio.to_thread(preview_png, meta.kind, data)
+    return Response(picture, media_type="image/png", headers=CONTENT_HEADERS)
+
+
+@router.get(
     "/models/{slug}/samples/{name}",
     response_class=FileResponse,
-    responses={200: {"content": {"image/svg+xml": {}, "image/png": {}}}},
+    responses={200: {"content": {media: {} for media in MEDIA_TYPES.values()}}},
     summary="A sample file the template ships",
     description=(
-        "Serves one of the files a `file` parameter's `samples` lists: an SVG or PNG "
+        "Serves one of the files a `file` parameter's `samples` lists: an SVG, PNG, STL, "
+        "3MF or OBJ "
         "directly in the template's directory, by its bare name. `version` reads the "
         "template as it was at that revision. Any other name is a 404."
     ),
@@ -601,5 +631,5 @@ async def get_sample_content(
     # a file parameter takes. Nothing else in the directory is reachable here.
     if name not in await asyncio.to_thread(sample_files, directory):
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} ships no sample {name!r}")
-    kind: AssetKind = "svg" if name.lower().endswith(".svg") else "png"
+    kind = cast(AssetKind, name.rsplit(".", 1)[-1].lower())
     return FileResponse(directory / name, media_type=MEDIA_TYPES[kind], headers=SAMPLE_HEADERS)

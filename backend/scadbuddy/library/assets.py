@@ -61,13 +61,13 @@ from scadbuddy.render.solids import WRAPPER_PREFIX
 
 logger = logging.getLogger(__name__)
 
-AssetKind = Literal["svg", "png"]
+AssetKind = Literal["svg", "png", "stl", "3mf", "obj"]
 
 ASSET_ID_PATTERN = r"^[0-9a-f]{64}$"
 ASSET_ID_RE = re.compile(ASSET_ID_PATTERN)
 #: A stored blob's file name: the id and the kind, nothing else. A write's temporary
 #: file never matches.
-_BLOB_RE = re.compile(r"^([0-9a-f]{64})\.(svg|png)$")
+_BLOB_RE = re.compile(r"^([0-9a-f]{64})\.(svg|png|stl|3mf|obj)$")
 #: The metadata sidecar the file-based store kept beside each blob: a leftover (#591).
 _SIDECAR_RE = re.compile(r"^[0-9a-f]{64}\.json$")
 #: The store's advisory lock, hashed as the preset store hashes its own: held only
@@ -85,7 +85,10 @@ _LOCK_XACT = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 _LOCK_SESSION = "SELECT pg_advisory_lock(hashtextextended(%s, 0))"
 _UNLOCK_SESSION = "SELECT pg_advisory_unlock(hashtextextended(%s, 0))"
 #: Every column `AssetMeta` reads.
-_META_COLUMNS = "id, name, kind, size, width, height, view_box, path_count, source_url, licence"
+_META_COLUMNS = (
+    "id, name, kind, size, width, height, view_box, path_count, source_url, licence,"
+    " triangles, bounds"
+)
 _SELECT_META = f"SELECT {_META_COLUMNS} FROM assets WHERE id = %s"
 #: The sweep's candidates among the rows: those last used before the cutoff, read
 #: through the `assets_last_used` index.
@@ -108,7 +111,18 @@ MAX_PNG_PIXELS = 25_000_000
 #: How much of the original file name is kept for display.
 MAX_NAME_CHARS = 200
 
-MEDIA_TYPES: dict[AssetKind, str] = {"svg": "image/svg+xml", "png": "image/png"}
+#: The mesh types are IANA's (https://www.iana.org/assignments/media-types/model/).
+MEDIA_TYPES: dict[AssetKind, str] = {
+    "svg": "image/svg+xml",
+    "png": "image/png",
+    "stl": "model/stl",
+    "3mf": "model/3mf",
+    "obj": "model/obj",
+}
+#: What an `<img>` can show; a mesh's picture is its preview (`meshes.preview_png`).
+IMAGE_KINDS: tuple[AssetKind, ...] = ("svg", "png")
+#: The refusal of anything else, sniffed.
+UNSUPPORTED = "only SVG, PNG, STL, 3MF and OBJ files can be attached"
 
 #: Files in a model's directory that are never offered as samples: the catalogue's
 #: cover image is a PNG beside every model, not a picture for its parameters.
@@ -146,7 +160,7 @@ _UNSAFE_TEXT = re.compile(r"@import|javascript:|expression\(", re.IGNORECASE)
 
 
 class AssetRejectedError(ValueError):
-    """The upload is not an SVG or PNG this store will keep."""
+    """The upload is not an SVG, PNG, STL, 3MF or OBJ this store will keep."""
 
 
 class AssetUnavailableError(ValueError):
@@ -219,6 +233,10 @@ class AssetMeta(BaseModel):
     source_url: str | None = None
     #: The licence its fetch named (#959).
     licence: AssetLicence | None = None
+    #: A mesh's triangle count (#959).
+    triangles: int | None = None
+    #: A mesh's bounding box (#959): min x, y, z, then max x, y, z, in its units.
+    bounds: list[float] | None = None
 
 
 def _meta_values(meta: AssetMeta) -> tuple[object, ...]:
@@ -235,6 +253,8 @@ def _meta_values(meta: AssetMeta) -> tuple[object, ...]:
         meta.path_count,
         meta.source_url,
         licence,
+        meta.triangles,
+        meta.bounds,
     )
 
 
@@ -408,7 +428,13 @@ def sniff(data: bytes) -> AssetKind:
     head = data[:4096].lstrip(b"\xef\xbb\xbf \t\r\n")
     if head.startswith(b"<") and b"<svg" in data[:65536]:
         return "svg"
-    raise AssetRejectedError("only SVG and PNG files can be attached")
+    # Here, not at the top: the mesh readers import the render, which imports this.
+    from scadbuddy.library.meshes import looks_like_mesh
+
+    mesh = looks_like_mesh(data)
+    if mesh is not None:
+        return mesh
+    raise AssetRejectedError(UNSUPPORTED)
 
 
 class AssetStoreUnavailableError(RuntimeError):
@@ -578,11 +604,21 @@ class AssetStore:
         height: int | None = None
         view_box: list[float] | None = None
         path_count: int | None = None
+        triangles: int | None = None
+        bounds: list[float] | None = None
         if kind == "png":
             stored, width, height = normalise_png(data)
-        else:
+        elif kind == "svg":
             stored = sanitise_svg(data)
             view_box, path_count = svg_shape(stored)
+        else:
+            from scadbuddy.library.meshes import MeshRejectedError, normalise_mesh
+
+            try:
+                mesh = normalise_mesh(kind, data)
+            except MeshRejectedError as error:
+                raise AssetRejectedError(str(error)) from None
+            stored, triangles, bounds = mesh.data, mesh.triangles, mesh.bounds
         meta = AssetMeta(
             id=hashlib.sha256(stored).hexdigest(),
             name=display_name(filename, kind),
@@ -594,6 +630,8 @@ class AssetStore:
             path_count=path_count,
             source_url=source_url,
             licence=licence,
+            triangles=triangles,
+            bounds=bounds,
         )
         with self._require().connection() as conn, conn.transaction():
             conn.execute(_LOCK_XACT, (asset_lock_key(meta.id),))
@@ -614,7 +652,7 @@ class AssetStore:
             now = datetime.now(UTC)
             row = conn.execute(
                 f"INSERT INTO assets ({_META_COLUMNS}, created_at, last_used_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (id) DO UPDATE"
                 " SET name = EXCLUDED.name, last_used_at = EXCLUDED.last_used_at,"
                 " view_box = coalesce(assets.view_box, EXCLUDED.view_box),"
@@ -644,7 +682,7 @@ class AssetStore:
             now = datetime.now(UTC)
             conn.execute(
                 f"INSERT INTO assets ({_META_COLUMNS}, created_at, last_used_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (id) DO UPDATE SET last_used_at = EXCLUDED.last_used_at",
                 (*_meta_values(meta), now, now),
             )

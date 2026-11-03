@@ -59,7 +59,7 @@ $fn = 64;
 | `x = true;` | toggle |
 | `x = "#RRGGBB"; // color` | colour picker; the value reaches OpenSCAD as a `"#RRGGBB"` string |
 | `x = "Family:style=Bold"; // font` | font field with the installed families, plus **Browse** for Google Fonts |
-| `x = ""; // file:svg,png` | drop zone for an SVG or PNG, with a preview and **Clear** (see [File parameters](#file-parameters)) |
+| `x = ""; // file:svg,png` | drop zone for an SVG or PNG (or, named, an STL, 3MF or OBJ), with a preview and **Clear** (see [File parameters](#file-parameters)) |
 
 Groups:
 
@@ -105,20 +105,26 @@ if (overlay_file != "")
   linear_extrude(0.6) resize([30, 30]) import(overlay_file);
 ```
 
-- List the kinds after the colon: `// file:svg`, `// file:png` or both. A bare
-  `// file` takes both. Use an SVG with `import()` and a PNG with `surface()`.
+- List the kinds after the colon: `// file:svg`, `// file:png`, `// file:stl`,
+  `// file:3mf`, `// file:obj`, or several (`// file:stl,3mf,obj`). A bare `// file`
+  takes SVG and PNG only. Use an SVG or a mesh with `import()` and a PNG with
+  `surface()`.
 - The value is a bare file name in the model's directory, so `import()` and
   `surface()` resolve it as they would a file shipped beside the model. A default
   such as `"sample.svg"` keeps working; `""` means no file.
 - Ship sample pictures next to `model.scad` and the customizer offers them as
   thumbnails under the drop zone, so a viewer can pick one instead of uploading
-  their own. Every `.svg` or `.png` directly in the model's folder is offered to
+  their own. Every `.svg`, `.png`, `.stl`, `.3mf` or `.obj` directly in the model's folder is offered to
   the parameters that take its kind, except `thumbnail.png`, hidden files
   (a leading `.`), and names with spaces or characters other than letters,
   digits, `_`, `-` and `.`.
 - ScadBuddy checks the upload's content, not its name. It strips scripts and
   external references from an SVG, and scales a PNG down to 256 px on its long
-  side, because `surface()` gets slow with large images. Other files are refused.
+  side, because `surface()` gets slow with large images. It keeps a mesh's
+  triangles alone: an STL as binary with a blank header, an OBJ as its vertices and
+  faces, a 3MF as its one object (a 3MF of several objects is refused; export the
+  one you want). A mesh may have at most 500,000 triangles, and the field shows a
+  drawn preview, its triangle count and its size. Other files are refused.
 - The render records the file's SHA-256 with the output's parameters, so
   re-rendering an output uses the same picture.
 - An uploaded file is kept while a saved output, a preset or a render uses it. One

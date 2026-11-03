@@ -1436,7 +1436,7 @@ export const api = {
     command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
 
   /**
-   * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the
+   * #204 — stores an SVG, PNG, STL, 3MF or OBJ for a `// file` parameter (#959). The answer's `id` (the
    * SHA-256 of what the server kept) is the value the render takes.
    */
   uploadAsset: (slug: string, file: File) => {
@@ -1478,6 +1478,10 @@ export const api = {
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
+
+  /** A PNG of an uploaded STL, 3MF or OBJ (#959); an image is its own picture. */
+  assetPreviewUrl: (slug: string, id: string) =>
+    `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/preview`,
 
   /**
    * A sample file the template ships beside its source (a `file` parameter's

@@ -44,8 +44,8 @@ from scadbuddy.library.url_import import (
 #: game-icons.net, openmoji.org and raw.githubusercontent.com answer 200 with
 #: ``image/svg+xml``; a github.com ``/raw/`` link 302s to raw.githubusercontent.com.
 #: Left out: svgrepo.com answers 429 with a "Vercel Security Checkpoint" page,
-#: printables.com 403s, and printables.com and thingiverse.com serve meshes, which the
-#: asset store does not take yet (#959). Each entry also allows its subdomains.
+#: printables.com 403s; thingiverse.com, a mesh host, was not measured. A person adds
+#: a mesh host in Settings. Each entry also allows its subdomains.
 #: api.iconify.design (#959) serves the SVGs `search_icons` finds
 #: (`library/icon_search.py`, measured there).
 DEFAULT_ASSET_FETCH_DOMAINS: Final = (
