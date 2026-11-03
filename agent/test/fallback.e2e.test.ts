@@ -316,8 +316,8 @@ describe.skipIf(cliMissing !== undefined)(`credential fallback against a fake en
     expect(result).toMatchObject({ subtype: 'success', is_error: false })
     expect(reports[0]).toMatchObject({ id: 'a', outcome: { class: 'permanent' }, next: 'b' })
     // Claude Code knows a billing refusal is the account's and does not send it
-    // again without the display beta; A's only other request is the probe.
-    expect(callsWith(TOKEN_A).filter((c) => c.body?.model !== PROBE_FALLBACK_MODEL).map(displayUpdates)).toEqual([true])
+    // again without either beta; A's only other request is the probe.
+    expect(callsWith(TOKEN_A).filter((c) => c.body?.model !== PROBE_FALLBACK_MODEL).map((c) => [tokenCount(c), displayUpdates(c)])).toEqual([[true, true]])
   }, 60_000)
 
   it('resumes a turn that is rate limited after a tool ran, without running the tool again', async () => {

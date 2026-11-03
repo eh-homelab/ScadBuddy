@@ -323,6 +323,7 @@ function claimOf(claim: { subject?: unknown; digest?: unknown }): { subject: str
   return { subject, digest }
 }
 
+/** A Nexus operation names no workflow, so its payloads have no subject and pass unsealed; none is started today. */
 function workflowIdOf(context: SerializationContext | undefined): string | undefined {
   if (context === undefined || context.type === 'nexus') return undefined
   return context.workflowId ?? undefined
