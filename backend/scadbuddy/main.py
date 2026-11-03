@@ -114,7 +114,7 @@ from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_hol
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
 from scadbuddy.printers.bambuddy_sync import (
-    may_be_virtual,
+    boot_adoption_due,
     sync_printers,
     sync_virtual_printers,
 )
@@ -803,20 +803,25 @@ VP_BOOT_TIMEOUT = 60.0
 async def _adopt_virtual_rows_logged(state: AppState) -> None:
     """#5236: the boot's virtual-printer pass. A row made by hand before the sync existed,
     with a Bambuddy virtual printer's serial, stayed ``physical`` while the full sync was
-    left to the sweeps' Schedule, which prod turns off. So, once per boot and only while
-    some row could still be a VP (`may_be_virtual`), the sync's virtual-printer part runs:
-    two Bambuddy lists, no access code, no probe. A failure is logged, never raised."""
+    left to the sweeps' Schedule, which prod turns off. So, once per boot and only when
+    `boot_adoption_due`, the sync's virtual-printer part runs: two Bambuddy lists, no
+    access code, no probe. Nothing without a Bambuddy. Bambuddy refusing or unreachable is
+    one WARNING; anything else one logged traceback; never raised."""
     try:
         registry = state.components.get(PRINTERS)
         rows = await asyncio.to_thread(registry.store.list)
-        if not any(may_be_virtual(row) for row in rows):
+        if not boot_adoption_due(rows):
             return
-
-        async def adopt(client: BambuddyClient) -> None:
+        settings = await asyncio.to_thread(state.settings_store.load)
+        async with asyncio.timeout(VP_BOOT_TIMEOUT), client_for(settings) as client:
             await sync_virtual_printers(registry, client)
-
-        async with asyncio.timeout(VP_BOOT_TIMEOUT):
-            await _with_bambuddy(state, adopt)
+    except ApiError as error:
+        if error.type == NOT_CONFIGURED_PROBLEM:
+            return
+        logger.warning(
+            "could not sync the virtual printers from Bambuddy at start",
+            extra={"status": error.status},
+        )
     except Exception:
         logger.exception("could not sync the virtual printers from Bambuddy at start")
 
