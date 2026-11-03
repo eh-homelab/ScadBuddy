@@ -51,8 +51,9 @@ import { event, type Owner, type SentImage, type SessionStatus } from './protoco
 // ai_session_entries, which the turn resumes. A row still `durable` is a DurableSession that
 // closed before plan Step 7.2 moved the open ones (six in production on 2026-11-01, all
 // archived, none with a transcript): no worker runs its workflow, so a send is refused `closed`
-// and a fork of it starts an AgentSession (manager.ts `fork`). No prompt, image or tool content
-// is logged or traced here.
+// and a fork of it starts an AgentSession (manager.ts `fork`). `dist/recover-durable-sessions.js`
+// rebuilds such a row's conversation from its closed run's archived history and sets it
+// `unified` (recoverDurable.ts, #4772). No prompt, image or tool content is logged or traced here.
 
 export const SEND_MESSAGE_UPDATE = 'send_message'
 /** `ai_sessions.runtime`: AgentSession (`unified`), or a closed DurableSession (`durable`, see the header). */
