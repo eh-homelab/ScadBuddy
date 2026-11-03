@@ -12,7 +12,9 @@ every ``settings.changed``, so setting the URL later lights it up without a rest
 
 from __future__ import annotations
 
-from typing import Protocol
+from datetime import datetime
+from pathlib import Path
+from typing import Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -39,6 +41,32 @@ class SpoolGroup(BaseModel):
     spools: list[tuple[int, float | None]] = Field(default_factory=list)
 
 
+class ArchiveFacts(BaseModel):
+    """One Bambuddy archive (one plate's print) as an attempt copies it (§8.2), in
+    orders' own shape."""
+
+    archive_id: int
+    #: Bambuddy's ``status`` (``completed``, ``failed``, …), shown, never counted.
+    status: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    actual_seconds: int | None = None
+    #: ``total_filament_actual_grams``, else ``filament_used_grams``.
+    grams: float | None = None
+    #: The photos Bambuddy captured as the print finished (``finish_``), oldest first.
+    finish_photos: list[str] = Field(default_factory=list)
+    #: Whether the archive has a timelapse (pulled off the printer) to copy.
+    timelapse: bool = False
+
+
+#: What of an archive an attempt can copy into its attachments (§8.2).
+ArchiveMedia = Literal["finished_photo", "timelapse"]
+
+
+class MediaTooLargeError(Exception):
+    """The archive's file is larger than an attachment may be."""
+
+
 class NotLinkedError(Exception):
     """The seam has no integration to ask: ``bambuddy_url`` is not set."""
 
@@ -61,6 +89,19 @@ class OrderIntegrations(Protocol):
         without a Bambuddy."""
         ...
 
+    async def archive(self, archive_id: int) -> ArchiveFacts | None:
+        """One archive's facts (§8.2); None for one Bambuddy deleted.
+        :class:`NotLinkedError` without a Bambuddy."""
+        ...
+
+    async def download_archive_media(
+        self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
+    ) -> tuple[str, int]:
+        """The archive's ``finish_`` photo ``name`` or its timelapse written to
+        ``target``, through Bambuddy's media routes; its sha256 and size.
+        :class:`MediaTooLargeError` past ``limit`` bytes, with ``target`` removed."""
+        ...
+
 
 class NotLinked:
     """The seam without ``bambuddy_url``: nothing to mirror, nothing to import."""
@@ -70,6 +111,14 @@ class NotLinked:
         return False
 
     async def spool_groups(self) -> list[SpoolGroup]:
+        raise NotLinkedError
+
+    async def archive(self, archive_id: int) -> ArchiveFacts | None:
+        raise NotLinkedError
+
+    async def download_archive_media(
+        self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
+    ) -> tuple[str, int]:
         raise NotLinkedError
 
 

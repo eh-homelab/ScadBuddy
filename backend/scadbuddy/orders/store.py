@@ -123,7 +123,7 @@ _QUOTE = (
 _FULFILMENT = (
     "id, order_item_id, attempt, quantity, outcome, failure_reason, started_at, finished_at,"
     " notes, accepted_at, created_by, created_at, print_run_id, sliced_sha256, sliced_blob_key,"
-    " printer, copies, print_request_id"
+    " printer, copies, print_request_id, archive_ids, actual_seconds, actual_grams"
 )
 _SHIPMENT = (
     "id, order_id, carrier, service, tracking, shipped_at, address, cost_minor, notes, created_at"
@@ -1193,6 +1193,47 @@ class OrderStore:
             f" RETURNING {_FULFILMENT}",
             (run_id, printer, attempt_id, run_id),
         ).fetchone()
+        return None if row is None else Fulfilment.model_validate(row)
+
+    def run_archives(self, run_id: str, *, conn: Conn | None = None) -> list[int]:
+        """The Bambuddy archives a print run's queue items made (§8.2): ``print_sends``
+        by the run, then ``print_links`` by queue item, oldest first."""
+        with self._read(conn) as c:
+            rows = c.execute(
+                "SELECT l.archive_id, min(l.first_seen) AS seen FROM print_sends s"
+                " JOIN print_links l ON l.subject = s.subject AND l.queue_item_id = s.queue_item_id"
+                " WHERE s.run_id = %s GROUP BY l.archive_id ORDER BY seen, l.archive_id",
+                (run_id,),
+            ).fetchall()
+        return [int(row["archive_id"]) for row in rows]
+
+    def set_archive_facts(
+        self,
+        attempt_id: str,
+        archive_ids: Sequence[int],
+        *,
+        started_at: datetime | None,
+        finished_at: datetime | None,
+        actual_seconds: int | None,
+        actual_grams: float | None,
+    ) -> Fulfilment | None:
+        """What the attempt's archives say (§8.2); a time the archives do not give stays
+        as the print path recorded it."""
+        with self.transaction() as conn:
+            row = conn.execute(
+                "UPDATE order_item_fulfilments SET archive_ids = %s,"
+                " started_at = coalesce(%s, started_at), finished_at = coalesce(%s, finished_at),"
+                " actual_seconds = %s, actual_grams = %s"
+                f" WHERE id = %s RETURNING {_FULFILMENT}",
+                (
+                    list(archive_ids),
+                    started_at,
+                    finished_at,
+                    actual_seconds,
+                    actual_grams,
+                    attempt_id,
+                ),
+            ).fetchone()
         return None if row is None else Fulfilment.model_validate(row)
 
     def print_starting(self, item_id: str, *, conn: Conn | None = None) -> bool:

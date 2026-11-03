@@ -358,6 +358,12 @@ class Fulfilment(BaseModel):
     #: The print run's ``request_id`` this attempt was claimed under before its print
     #: started (#4719); a retried operation finds its claim by it.
     print_request_id: str | None = None
+    #: The Bambuddy archives its run's queue items made, one per plate (§8.2), copied
+    #: once the print settled; empty for an attempt by hand or one not linked yet.
+    archive_ids: list[int] = Field(default_factory=list)
+    #: The archives' printing time and filament, summed (§8.2).
+    actual_seconds: int | None = None
+    actual_grams: float | None = None
 
 
 class ShipmentItem(BaseModel):
