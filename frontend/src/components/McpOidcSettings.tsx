@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { LoadingLines, SwitchField } from './settings/form'
 import { Spinner } from './ui/spinner'
+import { fetchNotingSignedOut } from '../lib/signedOut'
 
 // Settings → MCP access → OIDC sign-in (#262). Talks to the agent service's
 // /api/v1/ai/mcp/oidc (agent/src/routes/mcpAuth.ts), which the ingress routes to
@@ -46,7 +47,7 @@ interface DiscoveryReport {
 }
 
 async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(`${OIDC_API}${path}`, {
+  const res = await fetchNotingSignedOut(`${OIDC_API}${path}`, {
     method,
     headers: body === undefined ? {} : { 'content-type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),

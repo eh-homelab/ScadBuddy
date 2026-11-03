@@ -20,7 +20,7 @@ import { toast } from '../../lib/toast'
  * 401 from the gate, a socket closed with 4401, or the first session read. A page that
  * never was signed in, in a tab of its own, goes straight to the sign-in and comes back here
  * (`return_to`, §5.1). Otherwise the page stays as it is under this dialog, so nothing typed
- * is lost: from Bambuddy's frame the sign-in is a popup, which needs the click.
+ * is lost: its Sign in is the popup in a tab too, which needs the click.
  */
 export function SignInRequired() {
   const signedOut = useSyncExternalStore(subscribeSignedOut, isSignedOut)
@@ -50,9 +50,10 @@ export function SignInRequired() {
             <Button
               disabled={busy}
               onClick={() => {
-                // No await before signIn: from a frame the popup must open inside the click.
+                // Always the popup, so this page and what is unsaved on it stay; no await
+                // before it, so the popup opens inside the click.
                 setBusy(true)
-                signIn()
+                signIn(true)
                   .catch((error: Error) =>
                     toast(
                       error instanceof CrossSiteFrameError

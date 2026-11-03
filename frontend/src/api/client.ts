@@ -242,7 +242,7 @@ import type {
 } from './aiCredential'
 import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
 import { REQUEST_HEADER } from '../lib/requestHeader'
-import { isSignedOutResponse, noteSignedOut, SIGNED_OUT_PROBLEM } from '../lib/signedOut'
+import { noteIfSignedOut, noteSignedOut, SIGNED_OUT_PROBLEM } from '../lib/signedOut'
 import { ordersApiParams, type OrdersQuery } from '../lib/ordersQuery'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
@@ -468,11 +468,7 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
     const response = await fetch(url, init)
     answered(response.headers)
     // #4975 phase 8: the gate's "sign in" (SCADBUDDY_AUTH_MODE=enforce), noted for the shell.
-    if (response.status === 401) {
-      void isSignedOutResponse(response).then((signedOut) => {
-        if (signedOut) noteSignedOut()
-      })
-    }
+    noteIfSignedOut(response)
     return response
   } catch (cause) {
     answered(undefined)

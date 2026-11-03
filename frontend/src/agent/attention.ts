@@ -1,6 +1,7 @@
 import { createContext, useCallback, useEffect, useRef, useState } from 'react'
 import { z } from 'zod'
 import { isDoneSummary, PendingInputSchema } from './chat/protocol'
+import { fetchNotingSignedOut } from '../lib/signedOut'
 
 /**
  * #815 — whether the assistant is waiting on the user, for the header outside the
@@ -83,7 +84,7 @@ export function fetchRunning(timeoutMs = ATTENTION_TIMEOUT_MS): Promise<boolean 
 
 async function readRunning(signal: AbortSignal): Promise<boolean | null> {
   try {
-    const response = await fetch(RUNNING_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
+    const response = await fetchNotingSignedOut(RUNNING_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
     if (!response.ok || !(response.headers.get('content-type') ?? '').includes('application/json')) return null
     const parsed = RunningSchema.safeParse(await response.json())
     return parsed.success ? parsed.data.sessions.length > 0 : null
@@ -188,7 +189,7 @@ function notices(entries: readonly PendingEntry[]): AttentionNotice[] {
 
 async function read(signal: AbortSignal): Promise<PendingCounts | null> {
   try {
-    const response = await fetch(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
+    const response = await fetchNotingSignedOut(ATTENTION_PATH, { headers: { Accept: 'application/json' }, cache: 'no-store', signal })
     if (!response.ok || !(response.headers.get('content-type') ?? '').includes('application/json')) return null
     const parsed = PendingInputSchema.safeParse(await response.json())
     if (!parsed.success) return null

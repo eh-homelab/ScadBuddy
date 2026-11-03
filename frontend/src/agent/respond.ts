@@ -1,4 +1,5 @@
 import type { Question } from './chat/protocol'
+import { fetchNotingSignedOut } from '../lib/signedOut'
 
 /**
  * #815 — the panel's one way to answer anything the assistant waits on: `POST
@@ -70,7 +71,7 @@ export class RespondError extends Error {
 export async function respond(requestId: string, body: RespondBody): Promise<RespondOutcome> {
   let res: Response
   try {
-    res = await fetch(respondPath(requestId), {
+    res = await fetchNotingSignedOut(respondPath(requestId), {
       method: 'POST',
       headers: { 'content-type': 'application/json', accept: 'application/json' },
       body: JSON.stringify(body),

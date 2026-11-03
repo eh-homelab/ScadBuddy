@@ -134,6 +134,19 @@ def test_enforce_refuses_to_start_when_the_issuer_does_not_answer(
         _start(_app(settings, "enforce", down))
 
 
+def test_enforce_names_a_transport_that_fails_its_own_way(
+    settings: Settings, issuer: FakeIssuer
+) -> None:
+    """Not an `OidcError`: a transport raising something else is still the start check's."""
+    _configure(settings, issuer)
+
+    def broken(request: httpx.Request) -> httpx.Response:
+        raise OSError("resolver gone")
+
+    with pytest.raises(LoginNotUsableError, match=r"needs a usable login: .*fetch failed"):
+        _start(_app(settings, "enforce", httpx.MockTransport(broken)))
+
+
 def test_enforce_starts_with_a_usable_login(enforced: TestClient) -> None:
     assert enforced.get("/healthz").status_code == 200
     session = enforced.get("/api/v1/auth/session").json()

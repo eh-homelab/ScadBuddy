@@ -75,6 +75,21 @@ export async function isSignedOutResponse(response: Response): Promise<boolean> 
   }
 }
 
+/** Note `response` if it is the gate's "sign in" answer; the body is left to the caller. */
+export function noteIfSignedOut(response: Response): void {
+  if (response.status !== 401) return
+  void isSignedOutResponse(response).then((signedOut) => {
+    if (signedOut) noteSignedOut()
+  })
+}
+
+/** `fetch` for a caller outside the API client (`api/client.ts` `send` does the same). */
+export async function fetchNotingSignedOut(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const response = await fetch(input, init)
+  noteIfSignedOut(response)
+  return response
+}
+
 /** For tests. */
 export function resetSignedOut(): void {
   signedOut = false

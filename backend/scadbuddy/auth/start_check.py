@@ -57,6 +57,9 @@ async def login_problems(auth: AuthComponent, public_url: str | None) -> list[st
             await auth.oidc.keys(provider)
         except OidcError as error:
             problems.append(f"the issuer cannot be used: {error}")
+        except Exception as error:
+            # A transport's own failure; the type only, as a message can carry addresses.
+            problems.append(f"the issuer cannot be used: its fetch failed ({type(error).__name__})")
     return problems
 
 

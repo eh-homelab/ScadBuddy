@@ -1,5 +1,6 @@
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { fetchAudit } from '../agent/audit'
 import { api } from '../api/client'
 import { mockSignedIn } from '../mocks/features/auth'
 import { server } from '../mocks/server'
@@ -79,6 +80,14 @@ describe('signed out', () => {
     expect(isSignedOut()).toBe(false)
     server.use(http.get('/api/v1/models', signedOut))
     await expect(api.listModels()).rejects.toThrow()
+    await vi.waitFor(() => expect(isSignedOut()).toBe(true))
+  })
+
+  it("is the agent's 401 too, on a call outside the API client", async () => {
+    enforceSession(true)
+    await refreshAuthSession()
+    server.use(http.get('/api/v1/ai/audit', signedOut))
+    await expect(fetchAudit()).rejects.toThrow()
     await vi.waitFor(() => expect(isSignedOut()).toBe(true))
   })
 

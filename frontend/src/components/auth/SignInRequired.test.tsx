@@ -1,4 +1,5 @@
 import { act, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { http, HttpResponse } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type * as Embed from '../../lib/embed'
@@ -54,6 +55,27 @@ describe('SignInRequired', () => {
     })
     expect(await screen.findByRole('alertdialog', { name: 'Sign in to continue' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Sign in' })).toBeInTheDocument()
+  })
+
+  it('signs in from a top-level tab in a popup, so the page and its unsaved work stay', async () => {
+    frame.embedded = false
+    const assign = vi.fn()
+    vi.spyOn(window, 'location', 'get').mockReturnValue({ ...window.location, assign })
+    const open = vi.spyOn(window, 'open').mockReturnValue({ closed: false } as unknown as Window)
+    enforce(true)
+    await refreshAuthSession()
+    renderPage(<SignInRequired />)
+    enforce(false)
+    await act(async () => {
+      await refreshAuthSession()
+    })
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Sign in' }))
+    expect(open).toHaveBeenCalledWith(
+      '/api/v1/auth/login?return_to=%2F&popup=true',
+      'scadbuddy-sign-in',
+      expect.any(String),
+    )
+    expect(assign).not.toHaveBeenCalled()
   })
 
   it('sends a page that never was signed in straight to the sign-in, coming back here', async () => {
