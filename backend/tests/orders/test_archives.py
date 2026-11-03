@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from scadbuddy.core.events import PrintOutcome
+from scadbuddy.core.events import OrderItemChanged, PrintOutcome
 from scadbuddy.core.problems import ApiError
 from scadbuddy.operations.claims import ClaimStore
 from scadbuddy.orders.archives import attempt_archives, copy_in, mirror_archives, mirror_run
@@ -55,6 +55,9 @@ class Archives:
     async def spool_groups(self) -> list[SpoolGroup]:
         raise AssertionError("not asked")
 
+    async def project_exists(self, project_id: int) -> bool:
+        raise AssertionError("not asked")
+
     async def ensure_project(self, name: str, parent_id: int | None) -> int:
         raise AssertionError("not asked")
 
@@ -89,6 +92,7 @@ def facts(archive_id: int, **fields: object) -> ArchiveFacts:
             "grams": 12.5,
             "finish_photos": ["finish_1_aa.jpg", "finish_2_bb.jpg"],
             "timelapse": True,
+            "timelapse_name": f"timelapse-{archive_id}.avi",
             **fields,
         }
     )
@@ -150,7 +154,10 @@ async def test_a_settled_attempt_copies_what_its_archives_say(shop: Shop, pool: 
             grams=2.5,
         ),
     )
-    read = await attempt_archives(shop.rows, seam, order.id, item.id, attempt.id)
+    shop.events.clear()
+    read = await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id)
+    # #5263: written under the order's lock and told, as every item write is.
+    assert [e.item_id for e in shop.events if isinstance(e, OrderItemChanged)] == [item.id]
     assert read.linked and [a.archive_id for a in read.archives] == [81, 82]
     kept = shop.rows.fulfilments(item.id)[0]
     assert kept.archive_ids == [81, 82]
@@ -163,7 +170,7 @@ async def test_a_settled_attempt_copies_what_its_archives_say(shop: Shop, pool: 
     corrected = datetime(2026, 11, 1, 14, tzinfo=UTC)
     with shop.rows.transaction() as conn:
         shop.rows.update_fulfilment(conn, attempt.id, finished_at=corrected)
-    await attempt_archives(shop.rows, seam, order.id, item.id, attempt.id)
+    await attempt_archives(shop.lifecycle, seam, order.id, item.id, attempt.id)
     assert shop.rows.fulfilments(item.id)[0].finished_at == corrected
 
 
@@ -174,14 +181,14 @@ async def test_an_open_attempt_offers_its_archives_and_copies_nothing(
     run_id = run_row(pool)
     attempt = started(shop, order, item, run_id)
     link(pool, run_id, 51, 81)
-    after, offered = await mirror_archives(shop.rows, Archives(facts(81)), attempt)
+    after, offered = await mirror_archives(shop.lifecycle, Archives(facts(81)), attempt)
     assert [f.archive_id for f in offered] == [81]
     assert after.archive_ids == [] and after.actual_seconds is None
 
 
 async def test_without_bambuddy_nothing_is_asked(shop: Shop, pool: PgPool) -> None:
     order, item, attempt, _ = printed(shop, pool)
-    read = await attempt_archives(shop.rows, NOT_LINKED, order.id, item.id, attempt.id)
+    read = await attempt_archives(shop.lifecycle, NOT_LINKED, order.id, item.id, attempt.id)
     assert (read.linked, read.archives) == (False, [])
 
 
@@ -212,6 +219,8 @@ async def test_the_finish_photo_and_timelapse_copy_into_the_items_files(
     photo = await copy("finished_photo")
     assert seam.downloads == [(81, "finished_photo", "finish_2_bb.jpg")]
     video = await copy("timelapse")
+    # #5263: named from the facts already read, never by reading the archive again.
+    assert seam.downloads[-1] == (81, "timelapse", "timelapse-81.avi")
     files = shop.rows.attachments(order.id)
     assert [(a.role, a.kind, a.item_id) for a in files] == [
         ("finished", "image", item.id),
@@ -260,12 +269,12 @@ async def test_a_copy_is_refused_for_what_the_archive_lacks(
     assert await refusal("timelapse", 82) == (409, "archive_gone")
     seam.facts[81] = facts(81)
     assert await refusal("timelapse", 81, limit=10) == (413, "about:blank")
-    assert seam.downloads == [(81, "timelapse", None)]
+    assert seam.downloads == [(81, "timelapse", "timelapse-81.avi")]
     assert shop.rows.attachments(order.id) == []
     # Another order's attempt is no attempt of this item.
     other = str(uuid.uuid4())
     with pytest.raises(ApiError) as missing:
-        await attempt_archives(shop.rows, seam, order.id, item.id, other)
+        await attempt_archives(shop.lifecycle, seam, order.id, item.id, other)
     assert missing.value.status == 404
 
 
@@ -276,7 +285,7 @@ async def test_a_heard_outcome_copies_the_attempts_archives(shop: Shop, pool: Pg
     link(pool, run_id, 51, 81)
     seam = Archives(facts(81))
     remove = listen_for_prints(
-        shop.bus, shop.lifecycle, lambda run: mirror_run(shop.rows, seam, run)
+        shop.bus, shop.lifecycle, lambda run: mirror_run(shop.lifecycle, seam, run)
     )
     try:
         settle(pool, run_id, "finished")
