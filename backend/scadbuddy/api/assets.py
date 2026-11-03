@@ -42,7 +42,7 @@ from scadbuddy.api.versions import CommitQuery, require_history
 from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.asset_credits import credit_line, known_licence, with_credit
-from scadbuddy.library.asset_fetch import fetch_file, parse_fetch_url
+from scadbuddy.library.asset_fetch import ascii_host, fetch_file, parse_fetch_url
 from scadbuddy.library.assets import (
     ASSET_ID_PATTERN,
     MAX_ASSET_BYTES,
@@ -200,6 +200,15 @@ async def store_asset(
 
 class AssetFetch(BaseModel):
     url: str = Field(max_length=2048, description="An https URL to an SVG or PNG")
+    allow_host_once: bool = Field(
+        default=False,
+        description=(
+            "Let the URL's own host through for this one fetch although it is not on "
+            "the asset allowlist (#959): that host exactly, not its subdomains, and "
+            "redirects within it. The allowlist is left as it was. The agent sends it "
+            "only from a `fetch_asset` call a person approved with that said"
+        ),
+    )
     licence: AssetLicence | None = Field(
         default=None,
         description=(
@@ -259,7 +268,7 @@ async def fetch_asset(
     pasted = body.url.strip()
     try:
         # Refusals that quote the URL whole: here, so no operation records them.
-        parse_fetch_url(pasted)
+        parsed = parse_fetch_url(pasted)
     except ImportRefusedError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
     # The URL by claim, so its query, which may carry a token, is in neither the
@@ -283,6 +292,7 @@ async def fetch_asset(
             "url": url.name,
             "shown": shown_url(pasted),
             "licence": None if body.licence is None else body.licence.model_dump(),
+            "allow_host": ascii_host(parsed) if body.allow_host_once else None,
         },
         idempotency_key=idempotency_key,
         claimed=Claimed(claims, [url]),
@@ -301,7 +311,12 @@ def _require_fetch_permit(imports: ImportPermits) -> None:
 
 
 async def fetch_run(
-    slug: str, url: str, state: AppState, *, licence: AssetLicence | None = None
+    slug: str,
+    url: str,
+    state: AppState,
+    *,
+    licence: AssetLicence | None = None,
+    allow_host: str | None = None,
 ) -> FetchedAsset:
     """The ``asset_fetch`` operation's run (#1054): the fetch, then the store."""
     # Off the loop: `load` is blocking psycopg I/O.
@@ -310,7 +325,9 @@ async def fetch_run(
     _require_fetch_permit(imports)
     with imports.hold():
         try:
-            fetched = await fetch_file(url, domains=domains, limit=MAX_ASSET_BYTES)
+            fetched = await fetch_file(
+                url, domains=domains, limit=MAX_ASSET_BYTES, allow_host=allow_host
+            )
         except ImportRefusedError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
         except ResolverBusyError:
