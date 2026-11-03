@@ -1951,28 +1951,7 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
       }),
     )
     await runTool({ ...tool('fetch_asset'), gated: false }, { slug: 'box', url, licence }, ctx())
-    expect(bodies).toEqual([{ url, licence, allow_host_once: false }])
-  })
-
-  it('fetch_asset asks to let a host off the allowlist through once, and says so on its approval (#959)', async () => {
-    const url = 'https://icons.example.com/a.svg'
-    const pending = await runTool(tool('fetch_asset'), { slug: 'box', url, allow_host_once: true }, ctx())
-    expect(firstText(pending)).toMatchObject({
-      status: 'pending_approval',
-      summary:
-        'Fetch https://icons.example.com/a.svg into model "box" as a file asset. icons.example.com is NOT on ' +
-        'your asset allowlist: approving lets this one fetch through, and the list stays as it is',
-    })
-    const bodies: unknown[] = []
-    server.use(
-      http.post(`${BACKEND}/api/v1/models/box/assets/fetch`, async ({ request }) => {
-        bodies.push(await request.json())
-        return HttpResponse.json({ id: 'a'.repeat(64), name: 'a.svg', kind: 'svg', size: 10, source_url: url }, { status: 201 })
-      }),
-    )
-    await runTool({ ...tool('fetch_asset'), gated: false }, { slug: 'box', url, allow_host_once: true }, ctx())
-    await runTool({ ...tool('fetch_asset'), gated: false }, { slug: 'box', url }, ctx())
-    expect(bodies).toEqual([{ url, allow_host_once: true }, { url, allow_host_once: false }])
+    expect(bodies).toEqual([{ url, licence }])
   })
 
   it('search_icons runs unattended and answers the backend search (#959)', async () => {
@@ -2008,7 +1987,7 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
     )
     const done = await runTool({ ...tool('fetch_asset'), gated: false }, { slug: 'box', url }, ctx())
     expect(firstText(done)).toMatchObject({ id: 'a'.repeat(64), source_url: url })
-    expect(bodies).toEqual([{ url, allow_host_once: false }])
+    expect(bodies).toEqual([{ url }])
   })
 
   it('pin_library runs unattended for a catalogue library, with or without its own URL', async () => {

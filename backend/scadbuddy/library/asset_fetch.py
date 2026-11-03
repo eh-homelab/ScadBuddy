@@ -10,7 +10,8 @@ refused rather than followed, and the refusal names the host that was refused.
 
 One fetch may also let a host off the list through (#959): ``allow_host``, the URL's own
 host exactly (not its subdomains or its parent), for that fetch only, redirects within
-that host included. The route takes it as ``allow_host_once``; the agent sends it only
+that host included. The route takes it as ``allow_host`` with a grant (`fetch_grants.py`);
+the agent sends it only
 from a `fetch_asset` call whose approval said so, and the list itself never changes.
 
 What arrives is stored exactly as an upload is (`AssetStore.put`): sniffed rather than
@@ -106,7 +107,7 @@ def _refuse(host: str, *, redirected_from: str | None = None) -> AssetFetchRefus
         f"{host}{via} is not on the asset allowlist, so it was not fetched; the user can "
         "add its domain in Settings"
         # A one-off covers the URL's own host only, never a redirect's.
-        + ("" if via else ", or approve fetching from it once (`allow_host_once`)")
+        + ("" if via else ", or approve fetching from it once (`allow_host`)")
     )
 
 
@@ -117,16 +118,35 @@ def ascii_host(url: httpx.URL) -> str:
 
 def parse_fetch_url(pasted: str) -> httpx.URL:
     """``pasted`` as an https URL with a host. Its refusals quote the URL whole, so the
-    route makes them before an operation could record them (#1054)."""
+    route makes them before an operation could record them (#1054).
+
+    A backslash, a control character or a user name or password is refused (#959):
+    each is where URL parsers disagree on the host, and the host is what the allowlist
+    and an approval hold the fetch to, so it must be the one every parser reads."""
+    stripped = pasted.strip()
+    if _AMBIGUOUS.search(stripped):
+        raise ImportRefusedError(
+            f"{pasted!r} holds a backslash or a control character, which parsers read "
+            "different hosts from; give the plain https URL"
+        )
     try:
-        url = httpx.URL(pasted.strip())
+        url = httpx.URL(stripped)
     except httpx.InvalidURL:
         raise ImportRefusedError(f"{pasted!r} is not a URL") from None
     if url.scheme != "https":
         raise ImportRefusedError(f"only https URLs can be fetched, and {str(url)!r} is not one")
     if not url.host:
         raise ImportRefusedError(f"{pasted!r} names no host")
+    if url.userinfo:
+        raise ImportRefusedError(
+            "the URL names a user or password before its host, which is not fetched; "
+            "give the plain https URL"
+        )
     return url
+
+
+#: What makes a URL's host depend on the parser reading it (#959).
+_AMBIGUOUS = re.compile(r"[\\\x00-\x1f\x7f]")
 
 
 async def fetch_file(

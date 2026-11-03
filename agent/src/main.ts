@@ -49,6 +49,7 @@ import { BrowserSessions } from './auth/browserSession.js'
 import { sealBackfill } from './sessions/sealBackfill.js'
 import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey, sweepErrorText } from './approvals/service.js'
+import { fetchGrantKey, fetchGrantMinter } from './tools/fetchGrant.js'
 import { AuditLog } from './audit/log.js'
 import { auditedTokenStore } from './audit/writes.js'
 import { TabHub } from './bridge/hub.js'
@@ -329,6 +330,8 @@ const toolServices: ToolServices = {
   ...(settings ? { renderLimiter: new RenderLimiter(settingsRenderLimits(settings)) } : {}),
   // Settings → Tools & plugins' changed tiers and disabled tools (#1953, #2171), read at each call.
   toolOverrides: builtInTools.registryOverrides(),
+  // An approved one-off fetch off the asset allowlist's grant (#959): needs the KEK.
+  ...(kek.ok ? { fetchGrant: fetchGrantMinter(fetchGrantKey(kek.kek)) } : {}),
 }
 // The browser bridge (#254, bridge/hub.ts): the tabs connected over
 // /api/v1/ai/bridge, which the browser_* tools drive; MCP clients pair with

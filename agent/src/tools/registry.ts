@@ -14,6 +14,8 @@ import { DEFAULT_SOURCE, markUntrusted, wrapUntrustedText } from '../safety/untr
 import { authored, authorHeaders } from './authorship.js'
 import { type OutwardActions, PendingStoreFullError } from './pending.js'
 import type { RenderLimiter } from './renderLimits.js'
+import { pinnedOutward } from './pinnedOutward.js'
+import type { FetchGrantMinter } from './fetchGrant.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -125,6 +127,8 @@ export type ToolServices = {
    * own tier without it.
    */
   toolOverrides?: ToolOverrides | undefined
+  /** Mints the grant an approved one-off fetch off the asset allowlist sends (#959, fetchGrant.ts); absent without a KEK. */
+  fetchGrant?: FetchGrantMinter | undefined
 }
 
 /** One tool's override: a tier other than its own (raised or lowered, #2171), and whether it is disabled. */
@@ -145,10 +149,17 @@ export type EffectiveTool = { risk: Risk; gated: boolean; disabled: boolean }
  * any outward tool (`approval: 'none'` tools are outward already, so this never
  * gates them), and an outward tool lowered below it is not gated at all.
  */
-export async function effectiveTool(tool: Tool, services: Pick<ToolServices, 'toolOverrides'>): Promise<EffectiveTool> {
+export async function effectiveTool(
+  tool: Tool,
+  services: Pick<ToolServices, 'toolOverrides'>,
+  /** The call's arguments, when there is a call: one outward by its input (#959, pinnedOutward.ts) stays gated whatever the override. */
+  input?: unknown,
+): Promise<EffectiveTool> {
   const override = await services.toolOverrides?.of(tool.name)
+  const disabled = override?.disabled === true
+  if (input !== undefined && pinnedOutward(tool.name, input)) return { risk: 'outward', gated: true, disabled }
   const risk = override?.tier ?? tool.risk
-  return { risk, gated: risk === 'outward' && (tool.gated || tool.risk !== 'outward'), disabled: override?.disabled === true }
+  return { risk, gated: risk === 'outward' && (tool.gated || tool.risk !== 'outward'), disabled }
 }
 
 /** A flow run's own images (#2477, temporal/flowBlobs.ts): what a `flow_image` reference names. */
@@ -641,7 +652,7 @@ async function runJudgedByResult(
 ): Promise<ToolRun> {
   let effective: EffectiveTool
   try {
-    effective = ctx.effective ?? (await effectiveTool(tool, ctx))
+    effective = ctx.effective ?? (await effectiveTool(tool, ctx, args))
   } catch {
     // Fails closed: a database blip never runs a tool Settings disabled.
     return refused(`${tool.name} is refused: its Settings → Tools & plugins entry cannot be read`)

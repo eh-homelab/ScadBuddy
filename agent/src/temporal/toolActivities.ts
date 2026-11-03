@@ -488,7 +488,7 @@ async function runGated(
   // again. So a tool raised to outward after the workflow let it through unparked has no
   // approval and is refused NotApproved; one disabled after its approval is refused as
   // disabled; and no second read can disagree with the one that was checked.
-  const effective = await effectiveTool(tool, deps.services)
+  const effective = await effectiveTool(tool, deps.services, input)
   const refuse = async (detail: string, message: string, type: string, outcome: 'refused' | 'error' = 'refused'): Promise<never> => {
     const parsed = parsedOrRaw(tool, input)
     const now = new Date()

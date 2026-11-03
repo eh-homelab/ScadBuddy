@@ -5,11 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Annotated
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, File, Path, Query, Response, UploadFile, status
+import httpx
+from fastapi import APIRouter, File, Header, Path, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
@@ -62,8 +64,16 @@ from scadbuddy.library.catalogue import (
     SidecarNotFoundError,
     StaleVersionError,
 )
+from scadbuddy.library.fetch_grants import (
+    FETCH_GRANT_HEADER,
+    FETCH_GRANT_TTL_SECONDS,
+    FetchGrantError,
+    fetch_grant_key,
+)
+from scadbuddy.library.fetch_grants import verify as verify_fetch_grant
 from scadbuddy.library.history import GitError, RevisionNotFoundError
 from scadbuddy.library.icon_search import COLLECTIONS, MAX_LIMIT, IconSearch, search_icons
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.url_import import (
     IMPORT_TIMEOUT,
     ImportRefusedError,
@@ -200,13 +210,15 @@ async def store_asset(
 
 class AssetFetch(BaseModel):
     url: str = Field(max_length=2048, description="An https URL to an SVG or PNG")
-    allow_host_once: bool = Field(
-        default=False,
+    allow_host: str | None = Field(
+        default=None,
+        max_length=253,
         description=(
-            "Let the URL's own host through for this one fetch although it is not on "
-            "the asset allowlist (#959): that host exactly, not its subdomains, and "
-            "redirects within it. The allowlist is left as it was. The agent sends it "
-            "only from a `fetch_asset` call a person approved with that said"
+            "Let this host through for this one fetch although it is not on the asset "
+            "allowlist (#959): it must be the URL's own host exactly (its IDNA form, "
+            "lower case), not a subdomain, and covers redirects within it. The allowlist "
+            "is left as it was. Refused without the `X-ScadBuddy-Fetch-Grant` the agent "
+            "mints for a `fetch_asset` call a person approved, which serves one fetch"
         ),
     )
     licence: AssetLicence | None = Field(
@@ -263,7 +275,10 @@ async def fetch_asset(
     ops: OperationsDep,
     imports: ImportsDep,
     paths: PathsDep,
+    assets: AssetsDep,
+    settings: SettingsStoreDep,
     idempotency_key: IdempotencyKey = None,
+    fetch_grant: Annotated[str | None, Header(alias=FETCH_GRANT_HEADER)] = None,
 ) -> FetchedAsset | JSONResponse:
     pasted = body.url.strip()
     try:
@@ -271,6 +286,10 @@ async def fetch_asset(
         parsed = parse_fetch_url(pasted)
     except ImportRefusedError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    if body.allow_host is not None:
+        await _spend_grant(
+            body.allow_host, parsed, pasted, fetch_grant, idempotency_key, assets, settings
+        )
     # The URL by claim, so its query, which may carry a token, is in neither the
     # operation's record nor its history (as an import's, review 3c 1.5).
     claims = ClaimStore(paths.claims)
@@ -292,13 +311,55 @@ async def fetch_asset(
             "url": url.name,
             "shown": shown_url(pasted),
             "licence": None if body.licence is None else body.licence.model_dump(),
-            "allow_host": ascii_host(parsed) if body.allow_host_once else None,
+            "allow_host": body.allow_host,
         },
         idempotency_key=idempotency_key,
         claimed=Claimed(claims, [url]),
         before_start=permit,
     )
     return operation_answer(result, FetchedAsset)
+
+
+async def _spend_grant(
+    allow_host: str,
+    parsed: httpx.URL,
+    pasted: str,
+    grant: str | None,
+    idempotency_key: str | None,
+    assets: AssetStore,
+    settings: SettingsStore,
+) -> None:
+    """A one-off host's checks (#959): the host is the one this route fetches from, by
+    its own parse, and the grant is a person's approval of this very fetch, spent now."""
+    host = ascii_host(parsed)
+    if allow_host != host:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"allow_host is {allow_host!r}, but the URL's host is {host!r}; nothing was fetched",
+        )
+    if grant is None:
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "a host off the asset allowlist is fetched only with the grant of a person's "
+            "approval (the assistant's fetch_asset sends one); add the domain in Settings instead",
+        )
+    kek = settings.kek
+    if kek is None:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "a one-off host needs the secret key (SCADBUDDY_SECRET_KEY_FILE) to check its grant",
+        )
+    now = datetime.now(UTC)
+    try:
+        nonce = verify_fetch_grant(fetch_grant_key(kek), grant, host=host, url=pasted, now=now)
+    except FetchGrantError as error:
+        raise ApiError(status.HTTP_403_FORBIDDEN, str(error)) from None
+    expires = now + timedelta(seconds=FETCH_GRANT_TTL_SECONDS)
+    if not await asyncio.to_thread(assets.spend_fetch_grant, nonce, idempotency_key, expires):
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN,
+            "this fetch grant was already used; each approval serves one fetch",
+        )
 
 
 def _require_fetch_permit(imports: ImportPermits) -> None:

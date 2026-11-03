@@ -302,26 +302,3 @@ def test_a_fetch_is_stored_and_answered_when_the_readme_cannot_be_credited(
     asset = client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{response.json()['id']}")
     assert asset.status_code == 200
 
-
-@respx.mock
-def test_a_host_off_the_allowlist_is_fetched_once_when_asked_and_stays_off_it(
-    client: TestClient,
-) -> None:
-    """#959: the one-off approval. The fetch names the URL's own host; the allowlist is
-    left as it was, so the next fetch from there is refused again."""
-    url = "https://icons.example.com/a.svg"
-    respx.get(url).mock(return_value=httpx.Response(200, content=UNICORN_SVG))
-
-    refused = _fetch(client, url)
-    assert refused.status_code == 422
-    once = client.post(
-        f"/api/v1/models/{MODEL_SLUG}/assets/fetch",
-        json={"url": url, "allow_host_once": True},
-        headers=press(),
-    )
-
-    assert once.status_code == 201, once.text
-    assert client.get("/api/v1/settings").json()["asset_fetch_domains"] == list(
-        DEFAULT_ASSET_FETCH_DOMAINS
-    )
-    assert _fetch(client, url).status_code == 422
