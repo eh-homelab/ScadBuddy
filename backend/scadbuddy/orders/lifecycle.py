@@ -2067,7 +2067,7 @@ class Lifecycle:
     def set_delivered(
         self, order_id: str, item_id: str, attachment_id: str | None, by: Actor
     ) -> OrderItem:
-        """Mark one of the item's own image attachments, one a browser draws, as what
+        """Mark one of the item's own image attachments (or of its attempts), one a browser draws, as what
         was actually delivered, or with None clear the mark."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)

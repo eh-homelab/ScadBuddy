@@ -870,8 +870,9 @@ and whether it has a timelapse, so a link Bambuddy made late is still copied. `P
 …/archives/{archive_id}/copy` (`{what: finished_photo | timelapse, name?}`) is the
 `order_attempt_copy` operation: the bytes are streamed once through the seam's
 `download_archive_media` into the claim store, up to `media_upload_max_bytes`, kept as
-`attachment-<sha256>` and recorded as an attachment **of the item** (not of the attempt,
-whose own subject is still unbuilt), with the role `finished` or `timelapse` and the
+`attachment-<sha256>` and recorded as an attachment **of the attempt**
+(`order_item_fulfilment:<id>`, listed under its item, #4251), with the role `finished` or
+`timelapse` and the
 caption `Attempt <n>, Bambuddy archive <id>`. The same bytes copied again under the same
 role answer with the attachment already there. An archive with no timelapse is
 `no_timelapse`: pull it off the printer first (`POST /prints/{archive_id}/timelapse/pull`).

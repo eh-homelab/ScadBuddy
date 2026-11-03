@@ -588,7 +588,8 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
 
     async def copy_run_kind(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
         """The archive's file pulled once into the claim store, kept as its blob and
-        recorded as the item's attachment (``orders/archives.py`` ``copy_in``)."""
+        recorded as the attempt's attachment, listed under its item
+        (``orders/archives.py`` ``copy_in``)."""
         orders = components.get(ORDERS)
         try:
             attachment = await copy_in(

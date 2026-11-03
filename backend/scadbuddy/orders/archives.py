@@ -213,8 +213,9 @@ async def copy_in(
     limit: int,
 ) -> Attachment:
     """The archive's ``finish_`` photo (``name``, else its latest) or its timelapse as
-    an attachment of the item, with the role ``finished`` or ``timelapse``. The same
-    bytes copied again under the same role are the attachment already there."""
+    an attachment of the attempt (listed under its item), with the role ``finished`` or
+    ``timelapse``. The same bytes copied again under the same role are the attachment
+    already there."""
     await copy_check(store, integrations, order_id, item_id, fulfilment_id, archive_id)
     attempt = await asyncio.to_thread(attempt_of, store, order_id, item_id, fulfilment_id)
     try:
