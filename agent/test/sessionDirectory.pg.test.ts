@@ -354,6 +354,22 @@ describe.skipIf(skip !== undefined)(`a session's working directory${skip ? ` (sk
     expect((await files.list(ws(id))).map((f) => f.path).sort()).toEqual(['node_modules/pinned.js', 'src/a.py'])
   })
 
+  it('a workspace write under a scratch directory during the turn is kept, and the next placement brings it in (#5140)', async () => {
+    const id = await session()
+    const dirs = new SessionDirectory(files, await root())
+    const turn = await dirs.place(id)
+    // The turn builds its own copy; a `workspace_*` write records one at the same path meanwhile.
+    await mkdir(path.join(turn.dir, 'node_modules'))
+    await writeFile(path.join(turn.dir, 'node_modules', 'kept.js'), 'the turn')
+    await files.write(ws(id), 'node_modules/kept.js', Buffer.from('the record'))
+    expect(await dirs.writeBack(turn)).toMatchObject({ written: [], deleted: [], skipped: [], scratch: 1 })
+    dirs.done(turn)
+    expect((await files.read(ws(id), 'node_modules/kept.js'))?.bytes.toString()).toBe('the record')
+    const next = await dirs.place(id)
+    expect(await readFile(path.join(next.dir, 'node_modules', 'kept.js'), 'utf8')).toBe('the record')
+    dirs.done(next)
+  })
+
   it("a late close's eviction never removes the directory of a process spawned since", async () => {
     const id = await session()
     let warmNow = false
