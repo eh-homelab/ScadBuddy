@@ -741,8 +741,19 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   never names, and fails the print runs a pre-#1052 pod left `running` and the renders
   a pre-#1053 API left unsettled, as upgraded. It may roll out beside the previous
   release. `print_runs.heartbeat_at`, `render_jobs.params` and
-  `workflow_definitions.script` stay, unread, until a later release drops them; that one
-  needs this one deployed everywhere first.
+  `workflow_definitions.script` stay, unread, until the release with #5139 drops them
+  (below).
+- **Upgrading past #5139** (the second contract step): deploy the release with #1142
+  (#5124) everywhere first, with no API or worker of an earlier build left running,
+  since an earlier build still reads the columns this one drops. Its migrations drop
+  `print_runs.heartbeat_at` and `render_jobs.params`, and drop
+  `workflow_definitions.script` only when every flow version names a commit. A version
+  without one (an install from before #2503 whose start never moved it into git) keeps
+  the column, and the migration logs a `NOTICE`
+  (`workflow_definitions.script kept: N flow version(s) have no commit…`) instead of
+  failing the start. Such a version reads as missing its script, and its flow takes
+  no new version (409 `flow-unmigrated`) until an upgrade through a release from #2503
+  to #5124 moves it.
 
 ### Bambuddy writes on the `bambuddy` queue (#1052, #1053, #1060)
 
@@ -888,9 +899,12 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
   (`<name>/flow.py`), a repository of its own beside `/data/models` on the API's data
   volume, on the same git code (`core/gitrepo.py`). Only the API reads it: a run's
   script goes to the worker as the run's input. `workflow_definitions` keeps a row per
-  version naming its commit, and `workflow_runs` the commit each run ran. The first
-  start after the upgrade backfills the versions Postgres held (`flows/backfill.py`),
-  one commit each with its author and date; it is idempotent, and the log says how many.
+  version naming its commit, and `workflow_runs` the commit each run ran. The builds
+  from #2503 to #5124 backfilled the versions Postgres held into git at start; this one
+  no longer does (#5139), so an install from before #2503 upgrades through one of those
+  first. Until it does, its old versions read as missing their script, their flows
+  take no new version, and the `script` column stays (the migration says so in a
+  notice instead of dropping it; "Upgrading past #5139" above).
 - **`tool`, `agent`, `ask_session`** run on the agent's `agent-tools` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS`, read by the API when it starts a run).
 - **Tool tiers come from the agent** (#2704), as its own turns resolve them (the tool's
