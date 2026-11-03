@@ -195,6 +195,8 @@ import type {
   NativeSpoolCreate,
   NativeSpoolPatch,
   Fulfilment,
+  AttemptArchives,
+  ArchiveCopy,
   FulfilmentInput,
   OrderAttachment,
   OrderAttachmentPatch,
@@ -2274,6 +2276,16 @@ export const api = {
     }),
   acceptFulfilment: (orderId: string, itemId: string, fulfilmentId: string) =>
     request<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/accept`, { method: 'POST' }),
+  /** #4253 §8.2 — the attempt's Bambuddy archives and what each offers to copy. */
+  attemptArchives: (orderId: string, itemId: string, fulfilmentId: string) =>
+    request<AttemptArchives>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/archives`),
+  /** #4253 §8.2 — the `order_attempt_copy` operation: an archive's finish photo or timelapse
+   * kept as the item's attachment. */
+  copyArchiveMedia: (orderId: string, itemId: string, fulfilmentId: string, archiveId: number, body: ArchiveCopy) =>
+    command<OrderAttachment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/archives/${archiveId}/copy`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   addShipment: (orderId: string, body: ShipmentInput) =>
     request<Shipment>(`/orders/${seg(orderId)}/shipments`, { method: 'POST', body: JSON.stringify(body) }),
   updateShipment: (orderId: string, shipmentId: string, body: ShipmentEdit) =>

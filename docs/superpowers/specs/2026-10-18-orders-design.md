@@ -820,6 +820,27 @@ once through the existing proxies, then ScadBuddy's own blob). Nothing is promot
 Bambuddy from an order: the project `Media/` folder copy that `print_attachments`
 makes is that feature's, not this one's.
 
+**As built (#4253).** `orders/archives.py`. A print run queues one item per plate, so an
+attempt has one archive per plate: `OrderStore.run_archives` finds them through
+`print_sends` (by `run_id`) and `print_links` (by queue item). Once the attempt's print
+settled it copies `archive_ids`, the archives' earliest start and latest end as its
+`started_at`/`finished_at`, and `actual_seconds` and `actual_grams` summed
+(`total_filament_actual_grams`, else `filament_used_grams`). It does not copy the
+outcome: the attempt's is the print path's (`print_outcomes`), read from the same print.
+The copy runs on each `print.outcome` heard (`listen_for_prints`' `on_outcome`) and on
+each `GET …/fulfilments/{f}/archives`, which also lists each archive's `finish_` photos
+and whether it has a timelapse, so a link Bambuddy made late is still copied. `POST
+…/archives/{archive_id}/copy` (`{what: finished_photo | timelapse, name?}`) is the
+`order_attempt_copy` operation: the bytes are streamed once through the seam's
+`download_archive_media` into the claim store, up to `media_upload_max_bytes`, kept as
+`attachment-<sha256>` and recorded as an attachment **of the item** (not of the attempt,
+whose own subject is still unbuilt), with the role `finished` or `timelapse` and the
+caption `Attempt <n>, Bambuddy archive <id>`. The same bytes copied again under the same
+role answer with the attachment already there. An archive with no timelapse is
+`no_timelapse`: pull it off the printer first (`POST /prints/{archive_id}/timelapse/pull`).
+`timelapse_blob_key` is not a column: the timelapse is an attachment like the photo.
+Agent tools `order_attempt_archives` (read) and `order_attempt_copy` (write).
+
 ### 8.3 Spool prices
 
 The price book's filament records can be **imported from spools**: `POST

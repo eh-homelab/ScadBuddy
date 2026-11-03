@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { ArchiveCopies } from './ArchiveCopies'
 import { refusalText } from './refusal'
 
 const OUTCOMES: FulfilmentInput['outcome'][] = ['succeeded', 'partial', 'failed', 'unknown']
@@ -65,6 +66,8 @@ export function FulfilmentForm({
               <span>
                 Attempt {attempt.attempt}: {attempt.outcome}, <span className="sb-num">{attempt.quantity}</span> made
                 {attempt.failure_reason ? ` (${attempt.failure_reason})` : ''}
+                {attempt.actual_grams != null && <span className="text-muted-foreground">, {attempt.actual_grams.toFixed(1)} g</span>}
+                {attempt.actual_seconds != null && <span className="text-muted-foreground">, {Math.round(attempt.actual_seconds / 60)} min</span>}
               </span>
               {attempt.accepted_at ? (
                 <span className="text-xs text-primary">Accepted</span>
@@ -76,6 +79,7 @@ export function FulfilmentForm({
                   </Button>
                 )
               )}
+              {attempt.print_run_id && attempt.finished_at && <ArchiveCopies orderId={orderId} itemId={itemId} attempt={attempt} onChanged={onChanged} />}
             </li>
           ))}
         </ol>
