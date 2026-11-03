@@ -896,8 +896,10 @@ export const handlers = [
       if (!quote || found.output_id === null) {
         throw new Refused('requote_needed', `item ${found.id} needs a new quote before it prints`, [found.id])
       }
-      // §8.4: the registry printer the run used, as it was named then.
-      const printer = printersState().find((row) => row.id === body.printer || (body.printer_id != null && row.bambuddy_printer_id === body.printer_id))
+      // §8.4: the registry printer the run used (`run.printer`), as it was named then. The run
+      // has one only when the body names a row that is still there (`print_run.py`
+      // `_named_printer`): `printer_id` alone, or a row gone since, prints on no registry row.
+      const printer = body.printer == null ? undefined : printersState().find((row) => row.id === body.printer)
       const attempt: Fulfilment = {
         id: newId('f'),
         order_item_id: found.id,

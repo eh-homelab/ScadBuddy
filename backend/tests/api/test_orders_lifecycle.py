@@ -457,3 +457,31 @@ def test_a_patch_with_filaments_sets_the_slots(client: TestClient) -> None:
     assert unknown_slot.json()["errors"][0]["loc"] == ["body", "filaments"]
     assert client.patch(path, json={"filaments": {"0": "nobody"}}).status_code == 422
     assert client.patch(path, json={"filaments": {"zero": filament_id}}).status_code == 422
+
+
+def test_the_costs_lay_the_quote_beside_the_attempts(client: TestClient) -> None:
+    """#4251 §6.4: `GET /orders/{id}/costs`; a manual quote prices no grams."""
+    upload(client)
+    customer = create_customer(client)
+    order = create_order(client, customer["id"])
+    item = add_item(client, order["id"], output_id=make_output(client, SLUG), quantity=2)
+    quote_and_accept(client, order["id"], item["id"], price=700)
+    assert client.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    fulfil(client, order["id"], item["id"], 2)
+
+    response = client.get(f"/api/v1/orders/{order['id']}/costs")
+
+    assert response.status_code == 200, response.text
+    costs = response.json()
+    assert (costs["currency"], costs["minor_exponent"]) == ("USD", 2)
+    (line,) = costs["items"]
+    assert (line["item_id"], line["quote_source"], line["quoted_price_minor"]) == (
+        item["id"],
+        "manual",
+        1400,
+    )
+    assert line["quoted_grams"] is None and line["actual_filament_minor"] is None
+    assert [a["outcome"] for a in line["attempts"]] == ["succeeded"]
+    assert line["attempts"][0]["bambuddy_cost"] is None
+    assert not costs["bambuddy_unavailable"]
+    assert client.get("/api/v1/orders/nope/costs").status_code == 404

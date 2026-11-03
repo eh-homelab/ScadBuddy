@@ -60,6 +60,9 @@ class ArchiveFacts(BaseModel):
     finish_photos: list[str] = Field(default_factory=list)
     #: Whether the archive has a timelapse (pulled off the printer) to copy.
     timelapse: bool = False
+    #: The name its timelapse is attached under (``timelapse-<id>.mp4``), so the copy
+    #: needs no second read of the archive (#5263).
+    timelapse_name: str | None = None
 
 
 #: What of an archive an attempt can copy into its attachments (§8.2).
@@ -106,12 +109,24 @@ class OrderIntegrations(Protocol):
         :class:`NotLinkedError` without a Bambuddy."""
         ...
 
+    async def archive_cost(self, archive_id: int) -> float | None:
+        """Bambuddy's cost of one archive, corrected for suspect filament readings
+        (``bambuddy/costs.py``, §6.4); None for one Bambuddy deleted or never priced.
+        :class:`NotLinkedError` without a Bambuddy."""
+        ...
+
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
     ) -> CopiedMedia:
-        """The archive's ``finish_`` photo ``name`` or its timelapse written to
+        """The archive's ``finish_`` photo ``name`` or its timelapse (attached as ``name``,
+        else as its archive names it) written to
         ``target``, through Bambuddy's media routes. :class:`MediaTooLargeError` past
         ``limit`` bytes, with ``target`` removed."""
+        ...
+
+    async def project_exists(self, project_id: int) -> bool:
+        """Whether Bambuddy still has project ``project_id`` (#5263: one deleted there is
+        made again). :class:`NotLinkedError` without a Bambuddy."""
         ...
 
     async def ensure_project(self, name: str, parent_id: int | None) -> int:
@@ -134,9 +149,15 @@ class NotLinked:
     async def archive(self, archive_id: int) -> ArchiveFacts | None:
         raise NotLinkedError
 
+    async def archive_cost(self, archive_id: int) -> float | None:
+        raise NotLinkedError
+
     async def download_archive_media(
         self, archive_id: int, what: ArchiveMedia, name: str | None, target: Path, limit: int
     ) -> CopiedMedia:
+        raise NotLinkedError
+
+    async def project_exists(self, project_id: int) -> bool:
         raise NotLinkedError
 
     async def ensure_project(self, name: str, parent_id: int | None) -> int:

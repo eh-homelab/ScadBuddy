@@ -56,6 +56,7 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.archives import AttemptArchives, attempt_archives
 from scadbuddy.orders.component import OrdersDep
+from scadbuddy.orders.costs import OrderCosts, order_costs
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
@@ -710,6 +711,27 @@ async def order_events(order_id: str, orders: OrdersDep) -> list[OrderEvent]:
     return await asyncio.to_thread(orders.store.events, order_id)
 
 
+@router.get(
+    "/{order_id}/costs",
+    response_model=OrderCosts,
+    summary="The real cost: the accepted quotes beside the attempts",
+    description=(
+        "Per item, its accepted quote's seconds, grams and filament cost for the item's "
+        "quantity beside every attempt's actual seconds and grams, failures included, the "
+        "grams priced at the quote's own price per gram (a `manual` quote prices none). "
+        "With Bambuddy linked, each attempt's `bambuddy_cost` is Bambuddy's cost of its "
+        "archives, corrected for suspect filament readings, shown and never in any sum; "
+        "`bambuddy_unavailable` says some archive could not be read. Nothing is stored."
+    ),
+)
+async def get_order_costs(order_id: str, orders: OrdersDep) -> OrderCosts:
+    _path(order_id)
+    costs = await order_costs(orders.store, orders.integrations, order_id)
+    if costs is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    return costs
+
+
 #: How long an accept waits for its Bambuddy projects (§8.1) before answering anyway.
 PROJECTS_WAIT_SECONDS = 20.0
 
@@ -1201,7 +1223,7 @@ async def get_attempt_archives(
     Bambuddy has linked no archive to yet, has none. 404 for an attempt not the item's."""
     _path(order_id, item_id, fulfilment_id)
     return await attempt_archives(
-        orders.store, orders.integrations, order_id, item_id, fulfilment_id
+        orders.lifecycle, orders.integrations, order_id, item_id, fulfilment_id
     )
 
 
