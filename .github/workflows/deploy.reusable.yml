@@ -45,7 +45,9 @@ name: Deploy (reusable)
 #      what it runs cannot be checked.
 #   3. Open ONE PR, "deploy(scadbuddy): <version>", on the fixed branch
 #      `deploy/scadbuddy`, and arm `gh pr merge --auto --squash`. A newer deploy
-#      supersedes an older open one: it closes that PR and replaces the branch.
+#      first waits up to 45 minutes for an older open one to land (#5168); it
+#      closes that PR and replaces the branch only when it cannot land (checks
+#      failed, a conflict, auto-merge off) or is still open after the wait.
 #      The clusters ruleset (CI Summary + claude-review) is the safety net; the
 #      merge is the deploy.
 #   4. On merge ArgoCD syncs the `scadbuddy` Application, and clusters'
@@ -130,19 +132,20 @@ jobs:
   pin:
     name: Pin ${{ inputs.version }} in clusters
     runs-on: ubuntu-latest
-    # The agent wait below can take up to 10 of these, the agent-durable one 20, the slicer 10.
-    timeout-minutes: 45
-    # The one place the two callers can race: this job closes the previous
-    # deploy PR, replaces the `deploy/scadbuddy` branch and opens a new PR.
-    # Job-level, so only these few seconds serialise — deploy-release's image
-    # wait and deploy-main's digest lookup run concurrently. Never cancel: a
-    # run cut off between the push and `gh pr merge --auto` leaves an orphan.
+    # The agent wait below can take up to 10 of these, the open deploy PR's
+    # 45, the agent-durable one 20, the slicer 10.
+    timeout-minutes: 95
+    # The one place the two callers can race: this job waits for the open
+    # deploy PR, closes it if it cannot land, replaces the `deploy/scadbuddy`
+    # branch and opens a new PR. Job-level, so deploy-release's image wait and
+    # deploy-main's digest lookup run concurrently. Never cancel: a run cut
+    # off between the push and `gh pr merge --auto` leaves an orphan.
     #
     # GitHub keeps ONE running and ONE pending job per group; a third request
     # cancels the pending one (it never runs) and takes its place. So the
     # newest request always runs, and a deploy dropped from the queue is one
-    # a newer request overtook before it started — the same outcome its own
-    # supersession logic would have produced, minus the PR. The callers
+    # a newer request overtook while the running one waited for its PR to
+    # land: only the newest build of a burst needs to deploy. The callers
     # report that case (`needs.deploy.result == 'cancelled'`) so it is never
     # silent; re-running the dropped run deploys it.
     concurrency:
@@ -203,6 +206,78 @@ jobs:
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::could not resolve $ref (got '$digest')"; exit 1; }
           echo "$ref -> $digest"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Its own token: the wait below can outlast an App token's hour, and
+      # the write token is minted after it. Read-only. Actions, not checks:
+      # the App has no `checks` or `statuses` permission, so on the private
+      # clusters repo the PR's check runs cannot be read; its workflow runs
+      # can (checked 2026-11-03 with `gh api /orgs/eh-homelab/installations`).
+      - name: Mint an App token to watch the open deploy PR
+        id: watch-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+          owner: eh-homelab
+          repositories: clusters
+          permission-pull-requests: read
+          permission-actions: read
+
+      # Let an open deploy PR land before this run replaces it (#5168). Its
+      # checks take 15 to 40 minutes; when each merge to main closed the open
+      # PR, merges more often than that kept prod on one build for hours. So
+      # this waits while the open PR can still land by itself: auto-merge
+      # armed, no conflict, no workflow run on its head failed or cancelled
+      # (clusters' CI, whose job is CI Summary, and whatever else runs on
+      # that commit, of any event). It stops waiting when the PR is gone
+      # (merged, or closed by hand), and gives up on one that cannot land or
+      # is still open after WAIT_SECONDS; the next step then supersedes it
+      # as before. WAIT_SECONDS stays well inside the watch token's hour: a
+      # read after it expires would fail. Meanwhile the concurrency group
+      # keeps only the newest request pending, so a burst deploys its first
+      # and its last build, and prod moves at every PR cycle.
+      - name: Wait for the open deploy PR to land
+        id: wait
+        env:
+          GH_TOKEN: ${{ steps.watch-token.outputs.token }}
+          GH_REPO: ${{ env.CLUSTERS_REPO }}
+          WAIT_SECONDS: "2700"
+          POLL_SECONDS: "30"
+        run: |
+          set -euo pipefail
+          start=$SECONDS
+          outcome=""
+          pr=""
+          while :; do
+            # Checked before any read, so no read runs past the deadline.
+            if [ $((SECONDS - start)) -ge "$WAIT_SECONDS" ]; then outcome=timeout; break; fi
+            # A failed read (a 5xx, say) is retried, never a failed deploy.
+            if ! open=$(gh pr list --head "$DEPLOY_BRANCH" --state open --json number --jq '.[0].number // empty'); then
+              sleep "$POLL_SECONDS"; continue
+            fi
+            if [ -z "$open" ]; then outcome=none; break; fi
+            pr=$open
+            # Merged or closed since the list: look again.
+            view=$(gh pr view "$pr" --json autoMergeRequest,mergeStateStatus,headRefOid \
+              --jq '[(.autoMergeRequest != null), .mergeStateStatus, .headRefOid] | @tsv') \
+              || { sleep "$POLL_SECONDS"; continue; }
+            IFS=$'\t' read -r armed state head <<< "$view"
+            if [ "$armed" != true ]; then outcome=unarmed; break; fi
+            if [ "$state" = DIRTY ]; then outcome=conflict; break; fi
+            # A run still going, or none started yet, means "keep waiting";
+            # a success too, until the merge. A failed read is not a failure.
+            failed=$(gh run list --commit "$head" --json conclusion \
+              --jq '[.[] | select(.conclusion | IN("failure", "cancelled", "timed_out", "startup_failure"))] | length' \
+              || true)
+            if [ "${failed:-0}" != 0 ]; then outcome=failed; break; fi
+            echo "$(date -u +%H:%M:%S) waiting for #${pr} (${state}) to land"
+            sleep "$POLL_SECONDS"
+          done
+          case "$outcome" in
+            none)     echo "no open deploy PR (or it has landed)" ;;
+            *)        echo "::warning::deploy PR #${pr:-?} will be superseded: ${outcome}" ;;
+          esac
+          echo "outcome=$outcome" >> "$GITHUB_OUTPUT"
 
       - name: Mint an App token for clusters
         id: app-token
@@ -698,6 +773,7 @@ jobs:
           SOURCE_URL: ${{ inputs.source_url }}
           KIND: ${{ inputs.source_kind }}
           FILES: ${{ steps.edit.outputs.files }}
+          WAIT_OUTCOME: ${{ steps.wait.outputs.outcome }}
           DASHBOARD: ${{ steps.edit.outputs.dashboard }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
@@ -705,11 +781,12 @@ jobs:
           git config user.name "eh-homelab-org-runners[bot]"
           git config user.email "287522375+eh-homelab-org-runners[bot]@users.noreply.github.com"
 
-          # One deploy branch, one open deploy PR. A newer deploy supersedes
-          # the older one: close it (with a pointer) and replace the branch.
+          # One deploy branch, one open deploy PR. Still open after the wait
+          # step, the older one cannot land soon: close it (with a pointer)
+          # and replace the branch.
           gh pr list --head "$DEPLOY_BRANCH" --state open --json number --jq '.[].number' \
             | while read -r old; do
-                gh pr close "$old" --comment "Superseded by a newer ScadBuddy deploy (${VERSION}, ${RUN_URL})."
+                gh pr close "$old" --comment "Superseded by a newer ScadBuddy deploy (${VERSION}, ${RUN_URL}): this one could not land (${WAIT_OUTCOME:-unknown})."
               done
           git push origin --delete "$DEPLOY_BRANCH" 2>/dev/null || true
 

@@ -579,13 +579,18 @@ Both call `deploy.reusable.yml`, which:
    the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
-   closes an older open one and replaces the branch; this one job carries a
-   concurrency group shared by both paths, so only the branch/PR handling
-   serialises — a release's image wait never holds up a main deploy. GitHub
+   first waits up to 45 minutes for an older open one to land, and closes it and
+   replaces the branch only when it cannot (a failed CI run, a conflict,
+   auto-merge off) or is still open after the wait (#5168: the PR's
+   checks take 15 to 40 minutes, and closing it at every merge kept prod on one
+   build for hours during a run of merges). This one job carries a concurrency
+   group shared by both paths, so only the wait and the branch/PR handling
+   serialise — a release's image wait never holds up a main deploy. GitHub
    keeps one running and one queued job per group and drops the queued one
-   when a third arrives, so the **newest** request always runs; an overtaken
-   deploy is reported (⚠️ on the commit or release) rather than lost, and
-   re-running it deploys that build anyway.
+   when a third arrives, so the **newest** request always runs, and a burst of
+   merges deploys its first and its last build; an overtaken deploy is
+   reported (⚠️ on the commit or release) rather than lost, and re-running it
+   deploys that build anyway.
 
 The clusters ruleset (`CI Summary` + `claude-review`) gates the merge; the
 merge is the deploy. ArgoCD then syncs the `scadbuddy` Application, and
