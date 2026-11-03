@@ -4,8 +4,10 @@ import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { decide } from '../src/harness/permissions.js'
+import { approvalTools } from '../src/tools/approvals.js'
 import { FETCH_GRANT_HEADER, FETCH_GRANT_KEY_INFO, fetchGrantMinter } from '../src/tools/fetchGrant.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
+import type { OutwardActions } from '../src/tools/pending.js'
 import { pinnedOutward } from '../src/tools/pinnedOutward.js'
 import { effectiveTool, runTool, type Tool, type ToolContext, type ToolOverrides } from '../src/tools/registry.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
@@ -120,6 +122,41 @@ describe('fetch_asset allow_host (#959)', () => {
     }
     expect(minted).toEqual([])
     expect(sent).toEqual([])
+  })
+
+  it("over /mcp, prepare then confirm_action fetches once a person approved it, never on a grant holder's approval", async () => {
+    const confirm = approvalTools.find((t) => t.name === 'confirm_action')!
+    const seen: { body: unknown; grant: string | null }[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/box/assets/fetch`, async ({ request }) => {
+        seen.push({ body: await request.json(), grant: request.headers.get(FETCH_GRANT_HEADER) })
+        return HttpResponse.json({ id: 'a'.repeat(64), name: 'a.svg', kind: 'svg', size: 1, source_url: URL_OFF }, { status: 201 })
+      }),
+    )
+    const action = { id: 'p1', tool: 'fetch_asset', summary: 'fetch it', expiresAt: new Date(Date.now() + 60_000) }
+    const prepared: unknown[] = []
+    const store = (byPerson: boolean): OutwardActions => ({
+      prepare: async (_principal, call) => (prepared.push(call.input), action),
+      list: async () => [action],
+      find: async () => action,
+      claim: async () => ({ status: 'approved', action, byPerson }),
+    })
+    const mcp = (byPerson: boolean) =>
+      ctx({ pending: store(byPerson), toolOverrides: lowered, lookup: (name) => ALL_TOOLS.find((t) => t.name === name), fetchGrant: () => 'minted' })
+
+    // Prepared, not run: lowered in Settings, the one-off still asks.
+    expect(firstText(await runTool(fetchAsset, ONCE, mcp(true)))).toMatchObject({ status: 'pending_approval', pending_action_id: 'p1' })
+    expect(prepared).toHaveLength(1)
+    expect(seen).toEqual([])
+
+    const byGrant = await runTool(confirm, { pending_action_id: 'p1', arguments: ONCE }, mcp(false))
+    expect(byGrant.isError).toBe(true)
+    expect(JSON.stringify(byGrant.content)).toContain("needs a person's own approval")
+    expect(seen).toEqual([])
+
+    const byPerson = await runTool(confirm, { pending_action_id: 'p1', arguments: ONCE }, mcp(true))
+    expect(byPerson.isError).toBeFalsy()
+    expect(seen).toEqual([{ body: { url: URL_OFF, allow_host: 'icons.example.com' }, grant: 'minted' }])
   })
 
   it('refuses the one-off without a key to mint its grant', async () => {

@@ -219,9 +219,10 @@ export type ToolContext = ToolServices & {
    */
   gate?: 'harness' | 'workflow'
   /**
-   * Under `workflow`: whether this call's own approval was a person's in the ScadBuddy UI
-   * (responder `browser`), not a run grant, a flow's standing grant or another principal's
-   * decision (#959). Only what must reach a person reads it: fetch_asset's one-off host.
+   * Whether this call's own approval was a person's in the ScadBuddy UI (responder or
+   * decider `browser`), not a run grant, a flow's standing grant or another principal's
+   * decision (#959). Set by the ToolCall activity (`workflow`) and by /mcp's
+   * confirm_action from the approval it consumed; unset anywhere else. Only what must reach a person reads it: fetch_asset's one-off host.
    */
   approvedByPerson?: boolean
   /**
