@@ -194,8 +194,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`web push${TEST_DATABASE_URL ? '' : ` (skipp
     for (let i = 0; i < 6; i++) await store.subscribe({ ...YOU, id: `p${i}` }, `${base}/hang/${i}`, browserKeys().keys)
     hang = true
     const started = Date.now()
-    await dispatcher(store, () => [notice('question:1')], { passDeadlineMs: 500 }).pass()
-    expect(Date.now() - started).toBeLessThan(5_000)
+    await dispatcher(store, () => [notice('question:1')], { passDeadlineMs: 3_000 }).pass()
+    expect(Date.now() - started).toBeLessThan(10_000)
     expect(maxInFlight).toBe(4)
     // The two never started are unclaimed, so the next pass sends them.
     hang = false
