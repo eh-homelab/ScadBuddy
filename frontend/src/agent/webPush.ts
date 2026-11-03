@@ -54,15 +54,45 @@ export async function enableWebPush(): Promise<boolean> {
       await subscription.unsubscribe()
       subscription = null
     }
-    subscription ??= await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
-    const saved = await fetch(PUSH_SUBSCRIPTION_PATH, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(subscription.toJSON()),
-    })
+    const subscribe = () => registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key })
+    subscription ??= await subscribe()
+    let saved = await save(subscription)
+    // 409: the endpoint is another person's (they used this browser and their session ended
+    // without a sign-out here). A new subscription is a new endpoint; the old one, unsubscribed,
+    // answers its push service 410, and the agent forgets it.
+    if (saved.status === 409) {
+      await subscription.unsubscribe()
+      saved = await save(await subscribe())
+    }
     return saved.ok
   } catch {
     return false
+  }
+}
+
+function save(subscription: PushSubscription): Promise<Response> {
+  return fetch(PUSH_SUBSCRIPTION_PATH, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(subscription.toJSON()),
+  })
+}
+
+/**
+ * Forgets this browser's subscription, at the agent and in the browser: what sign-out does
+ * first (`lib/signIn.ts` `signOut`), so the person signing out is no longer pushed to here and
+ * the next person on this browser can subscribe. Never throws.
+ */
+export async function disableWebPush(): Promise<void> {
+  if (!webPushSupported()) return
+  try {
+    const registration = await navigator.serviceWorker.getRegistration(PUSH_WORKER_SCOPE)
+    const subscription = await registration?.pushManager.getSubscription()
+    if (!subscription) return
+    await fetch(`${PUSH_SUBSCRIPTION_PATH}?endpoint=${encodeURIComponent(subscription.endpoint)}`, { method: 'DELETE' }).catch(() => undefined)
+    await subscription.unsubscribe()
+  } catch {
+    // Push is an extra: a failure here never holds up the sign-out.
   }
 }
 
