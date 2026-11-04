@@ -1,10 +1,10 @@
 import { useEffect, useRef } from 'react'
 
 /**
- * #815 §3 — Web Push, so an attention request still alerts with every ScadBuddy tab closed.
+ * #815 §3 — Web Push, so a pending request still alerts with every ScadBuddy tab closed.
  * Once notifications are granted (only ever from a click, `NotificationsOffer`), the page
  * registers `public/push-sw.js`, subscribes with the agent's VAPID key and gives the agent
- * the subscription (agent `routes/push.ts`); the agent then pushes each attention request
+ * the subscription (agent `routes/push.ts`); the agent then pushes each request waiting on the person
  * (`notify/dispatcher.ts`). The worker's scope is `/push-sw/`, so it controls no page.
  *
  * Off when embedded in Bambuddy, like the page's own notifications, and wherever the

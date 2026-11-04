@@ -2,8 +2,8 @@ import { useEffect, useRef } from 'react'
 import type { AttentionNotice } from './attention'
 
 /**
- * #815 §3 — an OS notification for each attention request (a `tab_disconnected` wait among
- * them) that opens while this page is hidden, from the badge's own read (`useAttention`'s
+ * #815 §3 — an OS notification for each request waiting on the person (an approval, a question
+ * or an attention request, a `tab_disconnected` wait among them) that opens while this page is hidden, from the badge's own read (`useAttention`'s
  * `notices`). Nothing is shown while the page is visible: the badge and the panel say it there.
  * Permission is asked only from a click (`requestAttentionNotifications`,
  * `components/assistant/NotificationsOffer.tsx`), never on load. A click on a notification
@@ -36,6 +36,8 @@ export function noticeTitle(reason: string): string {
       return 'The assistant has a question'
     case 'blocked':
       return 'The assistant is blocked'
+    case 'approval':
+      return 'The assistant needs your approval'
     default:
       return 'The assistant needs you'
   }

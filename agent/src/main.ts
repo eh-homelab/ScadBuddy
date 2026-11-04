@@ -1,5 +1,5 @@
 import { pendingInput } from './routes/pendingInput.js'
-import { attentionNotices, NotificationDispatcher } from './notify/dispatcher.js'
+import { pendingNotices, NotificationDispatcher } from './notify/dispatcher.js'
 import { pushHostsOf, SETTING_PUSH_HOSTS } from './notify/pushEgress.js'
 import { PushStore } from './notify/pushStore.js'
 import { ChannelStore } from './notify/channels.js'
@@ -1127,7 +1127,8 @@ const commands =
       })
     : undefined
 
-// Web Push (#815 §3, notify/): each attention request pushed once to every subscribed browser,
+// Web Push (#815 §3, notify/): each request waiting on the person (an approval, a question
+// or an attention request) pushed once to every subscribed browser,
 // so a closed tab still alerts. Its keys are sealed under the KEK, so it needs one. A pass
 // runs on each pending-input change and once the database is ready.
 const pushStore = role.http && database && kek.ok ? new PushStore(database.sql, kek.kek) : undefined
@@ -1137,7 +1138,7 @@ const pushDispatcher =
   pushStore && sessions
     ? new NotificationDispatcher({
         store: pushStore,
-        notices: async (owner) => attentionNotices(await pendingInput(sessions, owner)),
+        notices: async (owner) => pendingNotices(await pendingInput(sessions, owner)),
         // RFC 8292 §2.1: who the push service may contact about these messages.
         subject: config.publicUrl ?? 'mailto:scadbuddy@localhost',
         // The push-service allowlist, as Settings last saved it (notify/pushEgress.ts).

@@ -218,7 +218,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     setFocusKey((k) => k + 1)
   }, [])
   const openHandled = useCallback(() => setOpenRequest(null), [])
-  // #815 — an OS notification for an attention request that opens while this page is hidden;
+  // #815 — an OS notification for a pending request that opens while this page is hidden;
   // a click opens its session. Not when embedded: a cross-origin frame cannot ask for the permission.
   const notices = attention.counts === null ? null : (attention.counts.notices ?? NO_NOTICES)
   const openNotice = useCallback(

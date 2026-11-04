@@ -9,12 +9,12 @@ import { checkPushEndpoint, type PinnedEndpoint } from './pushEgress.js'
 import type { PushStore, PushSubscriptionRow } from './pushStore.js'
 import { encryptPayload, vapidAuthorization } from './webPush.js'
 
-// #815 §3, the closed-tab channel: every attention request waiting on a person (a
-// `tab_disconnected` wait among them) is pushed once to each browser subscribed for someone
-// who may see it, so the service worker (frontend `public/push-sw.js`) can show it with no
-// ScadBuddy tab open. A pass runs on each pending-input change (gate/changes.ts) and at
-// start; `ai_notifications_sent` makes each (request, subscription) one send across replicas
-// and restarts.
+// #815 §3, the closed-tab channel: every request waiting on a person (an attention request,
+// a `tab_disconnected` wait, a plain question or an approval) is pushed once to each
+// browser subscribed for someone who may see it, so the service worker (frontend
+// `public/push-sw.js`) can show it with no ScadBuddy tab open. A pass runs on each
+// pending-input change (gate/changes.ts) and at start; `ai_notifications_sent` makes each
+// (request, subscription) one send across replicas and restarts.
 //
 // What is pushed is the request's id, its session's id and its reason, never its message:
 // enough to name the notification and open the request, and nothing a push service could
@@ -24,16 +24,24 @@ import { encryptPayload, vapidAuthorization } from './webPush.js'
 // in flight and starts none past PASS_DEADLINE_MS; a send is claimed only as it starts, so
 // what a pass did not reach is the next pass's.
 
-/** An attention request waiting on the user, as a push announces it. */
+/**
+ * A request waiting on the user, as a push announces it. `reason` is an attention request's
+ * own, `question` for a plain question, or `approval` for a parked call's decision.
+ */
 export type AttentionNotice = { id: string; sessionId: string | null; reason: string }
 
-/** The attention requests in a pending-input page that wait on the person: never a `done` summary (frontend `attention.ts` `notices`). */
-export function attentionNotices(page: PendingInputPage): AttentionNotice[] {
+/**
+ * Every request in a pending-input page that waits on the person: approvals, plain questions
+ * and attention requests, never a `done` summary, one past its timer, or a flow run's call still
+ * with the session that started it (frontend `attention.ts` `notices`, the badge's count).
+ */
+export function pendingNotices(page: PendingInputPage): AttentionNotice[] {
   return page.entries.flatMap((entry) => {
+    if (!entry.id || entry.expiring || entry.run?.hop === 'parent') return []
     const a = entry.attention
-    if (entry.kind !== 'answer' || !a || !entry.id || entry.expiring || entry.run?.hop === 'parent') return []
-    if (a.reason === 'done' && a.on_timeout === null) return []
-    return [{ id: entry.id, sessionId: typeof entry.session_id === 'string' ? entry.session_id : null, reason: a.reason }]
+    if (a && a.reason === 'done' && a.on_timeout === null) return []
+    const reason = entry.kind === 'approval' ? 'approval' : (a?.reason ?? 'question')
+    return [{ id: entry.id, sessionId: typeof entry.session_id === 'string' ? entry.session_id : null, reason }]
   })
 }
 
@@ -48,7 +56,7 @@ export const PUSH_TIMEOUT_MS = 10_000
 
 export type NotificationDispatcherDeps = {
   store: PushStore
-  /** The attention requests `owner` may see now (`attentionNotices` of `pendingInput`). */
+  /** The requests waiting on `owner` now (`pendingNotices` of `pendingInput`). */
   notices: (owner: Owner) => Promise<AttentionNotice[]>
   /** VAPID's `sub`: who the push service may contact (SCADBUDDY_PUBLIC_URL). */
   subject: string
@@ -205,6 +213,8 @@ export function noticeTitle(reason: string): string {
       return 'The assistant has a question'
     case 'blocked':
       return 'The assistant is blocked'
+    case 'approval':
+      return 'The assistant needs your approval'
     default:
       return 'The assistant needs you'
   }
@@ -218,10 +228,15 @@ export function sessionLink(publicUrl: string | undefined, sessionId: string | n
   return url.href
 }
 
-/** What a channel is sent for an attention request: its reason and a link, never its message. */
+/** What a notification says to do (frontend `public/push-sw.js` `BODIES`). */
+export function noticeBody(reason: string): string {
+  return reason === 'approval' ? 'Open ScadBuddy to decide it.' : 'Open ScadBuddy to answer it.'
+}
+
+/** What a channel is sent for a request: its reason and a link, never its message or the call it would approve. */
 export function attentionMessage(notice: AttentionNotice, publicUrl: string | undefined): ChannelMessage {
   const click = sessionLink(publicUrl, notice.sessionId)
-  return { title: noticeTitle(notice.reason), body: 'Open ScadBuddy to answer it.', ...(click ? { click } : {}) }
+  return { title: noticeTitle(notice.reason), body: noticeBody(notice.reason), ...(click ? { click } : {}) }
 }
 
 /** RFC 8030 §5.4: a message with the same topic replaces one not yet delivered; at most 32 base64url characters. */

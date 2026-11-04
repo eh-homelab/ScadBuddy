@@ -8,7 +8,8 @@ import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecr
 // #815 §3, out of the browser: an ntfy topic or a Home Assistant notify service, set in
 // Settings (routes/notifyChannels.ts; the agent has no tool for them, so it cannot add a
 // place to send to). The dispatcher (dispatcher.ts) tells each enabled channel of every
-// attention request once, with the request's reason as the title, a fixed line and a link
+// request waiting on the person (an approval, a question or an attention request) once,
+// with the request's kind as the title, a fixed line and a link
 // to the session: never the agent's message, since an ntfy topic or a phone's lock screen
 // is no place for what a conversation said.
 //

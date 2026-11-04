@@ -1,4 +1,5 @@
-/* ScadBuddy's push service worker (#815 §3): shows an attention request pushed by the agent
+/* ScadBuddy's push service worker (#815 §3): shows a pending request (an approval, a question or an
+ * attention request) pushed by the agent
  * (agent/src/notify/dispatcher.ts) when no ScadBuddy tab is in view, closed tabs included.
  * Registered by src/agent/webPush.ts under the scope /push-sw/, so it controls no page and
  * never stands in the way of the app's own fetches (or msw's worker in the mocked build).
@@ -11,7 +12,10 @@ const TITLES = {
   tab_disconnected: 'The assistant lost its ScadBuddy tab',
   question: 'The assistant has a question',
   blocked: 'The assistant is blocked',
+  approval: 'The assistant needs your approval',
 }
+/** What to do, by reason (the agent's notify/dispatcher.ts `noticeBody`). */
+const BODIES = { approval: 'Open ScadBuddy to decide it.' }
 
 self.addEventListener('install', () => self.skipWaiting())
 self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()))
@@ -30,7 +34,7 @@ self.addEventListener('push', (event) => {
       if (windows.some((w) => w.visibilityState === 'visible')) return
       const id = typeof data.request_id === 'string' ? data.request_id : undefined
       await self.registration.showNotification(TITLES[data.reason] || 'The assistant needs you', {
-        body: 'Open ScadBuddy to answer it.',
+        body: BODIES[data.reason] || 'Open ScadBuddy to answer it.',
         icon: '/logo-512.png',
         // One per request: a page's own notification for it (same tag) replaces this, and the reverse.
         ...(id ? { tag: id } : {}),

@@ -15,9 +15,10 @@ const KIND_LABEL: Record<NotifyChannel['kind'], string> = { ntfy: 'ntfy', home_a
 const message = (caught: unknown, fallback: string) => (caught instanceof ApiError ? caught.detail : fallback)
 
 /**
- * #815 — where the assistant's attention requests go when nobody is at a browser: an ntfy
- * topic, or a Home Assistant notify service (agent `routes/notifyChannels.ts`). Each is told
- * the request's reason and a link to its session, never what the assistant wrote. Tokens are
+ * #815 — where the requests waiting on you (approvals, questions and attention requests) are
+ * announced when nobody is at a browser: an ntfy topic, or a Home Assistant notify service
+ * (agent `routes/notifyChannels.ts`). Each is told the request's kind and a link to its
+ * session, never what the assistant wrote. Tokens are
  * kept sealed by the agent and never shown again, only their last four characters. Every
  * button is user-only; hidden without the agent service.
  */

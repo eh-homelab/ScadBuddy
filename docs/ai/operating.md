@@ -1854,8 +1854,12 @@ client secret under **Use my own OAuth app**.
 
 ## 16. Attention notifications (#815)
 
-When the assistant needs the person (a `request_user_attention` call, or a `browser_*`
-call waiting for its tab), these channels announce it:
+When the assistant needs the person, these channels announce it. That covers a
+`request_user_attention` call, a `browser_*` call waiting for its tab, a plain question
+(`AskUserQuestion`, a durable `ask_user`), and a parked call's approval. A `done` summary
+waits for nothing, so it is not announced. The notice names the kind ("The assistant needs
+your approval", "The assistant has a question"), never the question or the call it would
+approve:
 
 - **The badge.** The shell reads `GET /api/v1/ai/pending-input`. It reads again as soon as
   `GET /api/v1/ai/pending-input/changes` says something changed, and every 15 s
@@ -1891,7 +1895,7 @@ call waiting for its tab), these channels announce it:
   name such as `mobile_app_<device>`, and a long-lived access token, called through
   `POST /api/services/notify/<service>` of the
   [REST API](https://developers.home-assistant.io/docs/api/rest/)). Each enabled channel is
-  told of every attention request once, with its reason as the title, a fixed line and a link
+  told of every such request once, with its kind as the title, a fixed line and a link
   to `SCADBUDDY_PUBLIC_URL/?assistant-session=<id>`. Each token is sealed under the KEK, with
   the channel's kind and URL in the AAD, so changing the URL drops the token. Only the person
   sets channels: the routes take the UI's requests only, no tool reaches them, and every write
