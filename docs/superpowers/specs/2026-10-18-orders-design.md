@@ -562,7 +562,7 @@ naming the attempt's item so the file is listed under it too (`item_id`, with
 `fulfilment_id`). An archive's copies (§8.2) land on their attempt. A print made outside
 the order's print path is attached from its own page ("Attach to order item"), which
 records an attempt naming its archive (`FulfilmentInput.archive_id`); that attempt copies
-the archive as a print's would. An archive another attempt already has (named, or made by its run) is refused, `archive_claimed`, so no order copies another's print. The row carries
+the archive as a print's would. An archive another attempt already has (named, or made by its run) is refused, `archive_claimed`, so no order copies another's print. The rule holds the other way too (#5273): a run's archives leave out one another attempt named before Bambuddy linked it to the run, so it stays the hand attempt's only. The row carries
 `order_id` beside `subject`, so an order's whole list is one index read and
 `OrderDetail.attachments` returns it. `kind` is `image`, `video`, `document` (a PDF) or
 `other`, and it and `media_type` come from the bytes (`orders/attachments.py` `sniff`;
@@ -856,7 +856,9 @@ retried print of an item cancelled meanwhile looks for its run by the run's key
 (`existing_run`), which the project is part of, and a reopened order (§3.5 Undo) goes on
 in the projects it had instead of making a second of each name. A project deleted in
 Bambuddy is made again by the next ensure (`project_exists`, false only on a 404), and the
-mapping names the new one (#5263). A print's claim records the project its run is keyed
+mapping names the new one (#5263). A project made or found there within the last
+minute (`EXISTS_TTL_SECONDS`, per seam) is not asked for again (#5273), so an accept and
+the prints after it ask once; a deletion is seen by the first ensure past that. A print's claim records the project its run is keyed
 with (`print_project_id`), so a retry keys the run the same whatever the mapping says
 since. A claim from before that recorded none, and its retry looks for the run under no
 project and under the item's current one. One whose project was deleted and made again
@@ -878,6 +880,8 @@ settled it copies `archive_ids`, the archives' earliest start and latest end as 
 `started_at`/`finished_at`, and `actual_seconds` and `actual_grams` summed
 (`total_filament_actual_grams`, else `filament_used_grams`). It does not copy the
 outcome: the attempt's is the print path's (`print_outcomes`), read from the same print.
+The times are copied once, told by `archive_copied` (#5273), so one a person corrected
+stands even when the archives give no seconds or grams.
 The copy runs on each `print.outcome` heard (`listen_for_prints`' `on_outcome`) and on
 each `GET …/fulfilments/{f}/archives`, which also lists each archive's `finish_` photos
 and whether it has a timelapse, so a link Bambuddy made late is still copied. `POST

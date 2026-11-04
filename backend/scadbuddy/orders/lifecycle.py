@@ -1591,12 +1591,17 @@ class Lifecycle:
     ) -> Fulfilment:
         """What the attempt's archives say (§8.2, ``OrderStore.set_archive_facts``), under
         the order's lock as every writer of an item is, and told as `order_item.changed`
-        when it changed the attempt (#5263). Allowed on any order: it records a print."""
+        when it changed the attempt (#5263). Allowed on any order: it records a print.
+        Nothing is written when another attempt names one of the archives (#5273)."""
         item = self.store.item(attempt.order_item_id)
         if item is None:
             return attempt
         with self.store.transaction() as conn:
             order = self._lock(conn, item.order_id)
+            if self.store.archives_named_elsewhere(conn, attempt.id, archive_ids):
+                # Named by hand since its run's archives were read (#5273): they are
+                # read again, without it, when the attempt's archives are next shown.
+                return attempt
             written = self.store.set_archive_facts(
                 attempt.id,
                 archive_ids,

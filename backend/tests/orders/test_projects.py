@@ -41,8 +41,11 @@ class Projects:
         self.fail_after = fail_after
         #: Projects deleted in Bambuddy since they were made.
         self.deleted: set[int] = set()
+        #: Every ``project_exists`` asked, in order.
+        self.asked: list[int] = []
 
     async def project_exists(self, project_id: int) -> bool:
+        self.asked.append(project_id)
         return project_id not in self.deleted
 
     async def spool_inventory(self) -> list[ShelfSpool]:
@@ -125,22 +128,53 @@ def test_a_failed_ensure_keeps_what_it_made_and_the_print_makes_the_rest(shop: S
     assert seam.made == [(item_project_name(order, item), 101)]
 
 
-def test_a_project_deleted_in_bambuddy_is_made_again(shop: Shop) -> None:
-    """#5263: the mapping names a project Bambuddy no longer has; the next ensure makes
-    it again and records the new one, the order's and the item's alike."""
+@pytest.fixture(name="clock")
+def _clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """``projects``' clock, moved on by hand."""
+    now = [1000.0]
+    monkeypatch.setattr(projects_module, "_now", lambda: now[0])
+    return now
+
+
+def test_a_project_deleted_in_bambuddy_is_made_again(shop: Shop, clock: list[float]) -> None:
+    """#5263: the mapping names a project Bambuddy no longer has; the next ensure past
+    the time a project is known to stand (#5273) makes it again and records the new
+    one, the order's and the item's alike."""
     order, item = shop.accepted()
     seam = Projects()
     assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 102
     seam.deleted.add(102)
+    clock[0] += projects_module.EXISTS_TTL_SECONDS + 1
     assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 103
     assert seam.made[-1] == (item_project_name(order, item), 101)
     seam.deleted.update({101, 103})
+    clock[0] += projects_module.EXISTS_TTL_SECONDS + 1
     assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 105
     assert seam.made[-2:] == [(order.number, None), (item_project_name(order, item), 104)]
     assert [(p.subject, p.project_id) for p in shop.rows.projects(order.id)] == [
         (order_subject(order.id), 104),
         (item_subject(item.id), 105),
     ]
+
+
+def test_a_project_known_to_stand_is_not_asked_again(shop: Shop, clock: list[float]) -> None:
+    """#5273: an accept, then each print, asked Bambuddy for every project it already
+    had; one made or found there just now is taken as standing."""
+    order, item = shop.accepted()
+    seam = Projects()
+    asyncio.run(ensure_projects(shop.rows, seam, order.id))
+    # Made just now: nothing to ask.
+    assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 102
+    assert seam.asked == []
+    clock[0] += projects_module.EXISTS_TTL_SECONDS + 1
+    assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 102
+    assert seam.asked == [101, 102]
+    assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 102
+    assert seam.asked == [101, 102]
+    # Another Bambuddy's seam knows none of them.
+    other = Projects()
+    assert asyncio.run(item_project(shop.rows, other, order.id, item.id)) == 102
+    assert other.asked == [101, 102]
 
 
 def test_without_bambuddy_nothing_is_asked_or_recorded(shop: Shop) -> None:

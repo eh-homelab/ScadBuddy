@@ -6,7 +6,9 @@ item's print ensures its project again (an accept whose ensure failed, Bambuddy 
 sets it as the run's ``project_id``, so the 3MF lands in the item's project folder and the
 queue item carries the project, as any print filed under a project does. Nothing here
 deletes a project; one deleted in Bambuddy is made again by the next ensure, and the
-mapping names the new one (#5263). A print's claim records the project its run is keyed
+mapping names the new one (#5263). A project made or found there within the last
+``EXISTS_TTL_SECONDS`` is not asked for again (#5273), so a deletion is seen by the
+first ensure after that. A print's claim records the project its run is keyed
 with, so a retry keys it the same whatever the mapping says since. A cancel keeps the
 mapping too (the spec dropped it): a retried print of a cancelled item must key its run
 as its first try did (``existing_run``), and a reopened order goes on in the projects it
@@ -20,6 +22,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
+import weakref
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
@@ -47,6 +51,27 @@ def prints(item: OrderItem) -> bool:
 
 #: How long one Bambuddy project create may take while the order's lock is held.
 ENSURE_TIMEOUT_SECONDS = 30.0
+
+#: How long a project made or found in Bambuddy is taken to stand without asking again
+#: (#5273): an accept and the prints after it, or a run of prints, ask once. One deleted
+#: in Bambuddy within it is made again by the first ensure after.
+EXISTS_TTL_SECONDS = 60.0
+
+_now = time.monotonic
+
+#: Per seam (a Bambuddy's ids are its own), each project id and when it was last made or
+#: found there.
+_standing: weakref.WeakKeyDictionary[OrderIntegrations, dict[int, float]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _stands(integrations: OrderIntegrations, project_id: int) -> None:
+    now = _now()
+    seen = _standing.setdefault(integrations, {})
+    for stale in [p for p, at in seen.items() if now - at >= EXISTS_TTL_SECONDS]:
+        del seen[stale]
+    seen[project_id] = now
 
 
 @asynccontextmanager
@@ -87,16 +112,27 @@ async def _locked(store: OrderStore, order_id: str) -> AsyncIterator[None]:
 async def _ensure(integrations: OrderIntegrations, name: str, parent_id: int | None) -> int:
     """One create, bounded: nothing holds the order's lock longer than this."""
     async with asyncio.timeout(ENSURE_TIMEOUT_SECONDS):
-        return await integrations.ensure_project(name, parent_id)
+        made = await integrations.ensure_project(name, parent_id)
+    _stands(integrations, made)
+    return made
 
 
 async def _kept(integrations: OrderIntegrations, project_id: int | None) -> int | None:
     """``project_id`` while Bambuddy still has it; None for one deleted there (#5263),
-    which the caller makes again."""
+    which the caller makes again. One made or found within ``EXISTS_TTL_SECONDS`` is
+    not asked of Bambuddy again (#5273)."""
     if project_id is None:
         return None
+    seen = _standing.get(integrations, {}).get(project_id)
+    if seen is not None and _now() - seen < EXISTS_TTL_SECONDS:
+        return project_id
     async with asyncio.timeout(ENSURE_TIMEOUT_SECONDS):
-        return project_id if await integrations.project_exists(project_id) else None
+        exists = await integrations.project_exists(project_id)
+    if not exists:
+        _standing.get(integrations, {}).pop(project_id, None)
+        return None
+    _stands(integrations, project_id)
+    return project_id
 
 
 async def ensure_projects(

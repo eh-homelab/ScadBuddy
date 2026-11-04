@@ -26,6 +26,26 @@ describe('AttachToOrderItem', () => {
     expect(await screen.findByRole('link', { name: 'Open ORD-2026-2' })).toHaveAttribute('href', `/orders/${ORDER_ACCEPTED}?item=${ITEM_APPROVED}`)
   })
 
+  // #5273: the newest page alone once hid every order past it.
+  it('finds an order past the first page, by search or by loading more', async () => {
+    const base = state.orders.find((o) => o.id === ORDER_ACCEPTED)!
+    for (let n = 0; n < 120; n++) {
+      const at = new Date(Date.UTC(2026, 10, 20, 0, n)).toISOString()
+      state.orders.push({ ...base, id: `0e5a3c1e-0000-4000-8000-${String(n).padStart(12, '0')}`, number: `ORD-2026-${1000 + n}`, status: 'draft', created_at: at, updated_at: at })
+    }
+    const { user } = renderPage(<AttachToOrderItem open archiveId={8125} printStatus="completed" onClose={() => {}} />)
+
+    await user.click(await screen.findByRole('button', { name: 'More orders' }))
+    await user.click(await screen.findByRole('combobox', { name: 'Order' }))
+    expect(await screen.findByRole('option', { name: /ORD-2026-2 / })).toBeInTheDocument()
+    await user.keyboard('{Escape}')
+
+    await user.type(screen.getByLabelText('Search orders'), 'ORD-2026-2')
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'More orders' })).not.toBeInTheDocument())
+    await user.click(screen.getByRole('combobox', { name: 'Order' }))
+    expect(await screen.findByRole('option', { name: /ORD-2026-2 / })).toBeInTheDocument()
+  })
+
   it('records a failed print as a failed attempt', async () => {
     const { user } = renderPage(<AttachToOrderItem open archiveId={8124} printStatus="failed" onClose={() => {}} />)
     await user.click(await screen.findByRole('combobox', { name: 'Order' }))

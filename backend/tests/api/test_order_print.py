@@ -18,6 +18,7 @@ import respx
 from fastapi import Response
 from fastapi.testclient import TestClient
 
+import scadbuddy.orders.projects as projects_module
 from scadbuddy.activity.component import ACTIVITY
 from scadbuddy.api.printing import accept_run
 from scadbuddy.bambuddy.runs import PrintRun
@@ -331,11 +332,13 @@ def test_a_retry_finds_the_run_its_request_made(bambuddy: TestClient) -> None:
 
 
 def test_a_deleted_project_is_made_again_and_a_failed_make_is_tried_again(
-    client: TestClient, fake_openscad: str
+    client: TestClient, fake_openscad: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#5263: the item's project was deleted in Bambuddy, and its first make again
     fails (a 500): the operation tries the print again, which makes it and files the
     print under the new one."""
+    # Past the time the accept's projects are taken to stand unasked (#5273).
+    monkeypatch.setattr(projects_module, "EXISTS_TTL_SECONDS", 0.0)
     with respx.mock as router:
         router.route(host="testserver").pass_through()
         two_colours(fake_openscad)
