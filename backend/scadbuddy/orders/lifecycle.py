@@ -1750,6 +1750,8 @@ class Lifecycle:
             settle = ("unknown", 0, "the print ended, but how could not be read", None)
         elif status == "failed":
             settle = ("failed", 0, detail or "the print run failed", "failed")
+            # Only a run that failed before it printed (#5276): a print Bambuddy started
+            # and reported failed (an outcome) was filed under a project that stood.
             run_failed = True
         elif not (status == "succeeded" and progressed and self.store.runs_newest(run_id)):
             # A print of the same output the dialog queued since is that run's, whose
