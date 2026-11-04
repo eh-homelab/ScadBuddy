@@ -13,8 +13,8 @@ import { fetchNotingSignedOut } from '../lib/signedOut'
  * questions, and its attention requests (`request_user_attention`). So the badge
  * means "things waiting for you", not only approvals.
  *
- * The in-app channel; the same read's attention requests (a `tab_disconnected` wait
- * among them) are its `notices`, which `attentionNotifications.ts` raises as OS
+ * The in-app channel; the same read's requests waiting on the user (approvals,
+ * questions and attention requests) are its `notices`, which `attentionNotifications.ts` raises as OS
  * notifications while the page is hidden. Durable sessions' entries are in the same
  * read; one past its timer whose worker has not resolved it yet is `expiring` and not
  * counted.
@@ -50,11 +50,11 @@ export interface PendingCounts {
   runs?: RunWaiting[]
   /** #4813 — the approvals in no session and no flow run, which no feed shows (`ApprovalsWaitingContext`). */
   unattached?: PendingApproval[]
-  /** #815 — the attention requests waiting on the user, by request id: what an OS notification announces. */
+  /** #815 — the requests waiting on the user (approvals, questions, attention requests), by request id: what an OS notification announces. */
   notices?: AttentionNotice[]
 }
 
-/** #815 — an attention request waiting on the user (a `tab_disconnected` wait among them), as a notification shows it. */
+/** #815 — a request waiting on the user (an approval, a question or an attention request), as a notification shows it. */
 export interface AttentionNotice {
   /** The pending-input request id, `question:<id>` or a durable one. */
   id: string

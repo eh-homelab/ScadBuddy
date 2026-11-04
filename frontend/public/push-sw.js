@@ -1,4 +1,5 @@
-/* ScadBuddy's push service worker (#815 §3): shows an attention request pushed by the agent
+/* ScadBuddy's push service worker (#815 §3): shows a pending request (an approval, a question or an
+ * attention request) pushed by the agent
  * (agent/src/notify/dispatcher.ts) when no ScadBuddy tab is in view, closed tabs included.
  * Registered by src/agent/webPush.ts under the scope /push-sw/, so it controls no page and
  * never stands in the way of the app's own fetches (or msw's worker in the mocked build).

@@ -15,7 +15,7 @@ function dismissed(): boolean {
 }
 
 /**
- * #815 — offers OS notifications for attention requests while the browser has not been asked
+ * #815 — offers OS notifications for pending requests while the browser has not been asked
  * yet. The permission prompt opens only from "Turn on", a click, as browsers require; once
  * answered (or "Not now"), the offer is gone.
  */

@@ -1127,7 +1127,8 @@ const commands =
       })
     : undefined
 
-// Web Push (#815 §3, notify/): each attention request pushed once to every subscribed browser,
+// Web Push (#815 §3, notify/): each request waiting on the person (an approval, a question
+// or an attention request) pushed once to every subscribed browser,
 // so a closed tab still alerts. Its keys are sealed under the KEK, so it needs one. A pass
 // runs on each pending-input change and once the database is ready.
 const pushStore = role.http && database && kek.ok ? new PushStore(database.sql, kek.kek) : undefined
