@@ -3,7 +3,7 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Database } from '../src/db.js'
-import { PushDispatcher, type AttentionNotice, type PushDispatcherDeps } from '../src/notify/dispatcher.js'
+import { NotificationDispatcher, type AttentionNotice, type NotificationDispatcherDeps } from '../src/notify/dispatcher.js'
 import { DEFAULT_PUSH_HOSTS } from '../src/notify/pushEgress.js'
 import { PushStore, SubscriptionTakenError } from '../src/notify/pushStore.js'
 import { kekFromBase64 } from '../src/secrets.js'
@@ -93,8 +93,8 @@ describe.skipIf(!TEST_DATABASE_URL)(`web push${TEST_DATABASE_URL ? '' : ` (skipp
   const notice = (id: string): AttentionNotice => ({ id, sessionId: '0b0e2c51-2f0a-4b8e-9c1e-1d6c1e1f2a3b', reason: 'tab_disconnected' })
 
   /** Sends to the fake push service on loopback, which only a test may pin to (`pinEndpoint`). */
-  function dispatcher(store: PushStore, notices: () => AttentionNotice[], extra: Partial<PushDispatcherDeps> = {}) {
-    return new PushDispatcher({
+  function dispatcher(store: PushStore, notices: () => AttentionNotice[], extra: Partial<NotificationDispatcherDeps> = {}) {
+    return new NotificationDispatcher({
       store,
       notices: () => Promise.resolve(notices()),
       subject: 'https://scadbuddy.example',
@@ -107,7 +107,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`web push${TEST_DATABASE_URL ? '' : ` (skipp
 
   /** The real check: no pin, each name resolved by `resolve`. */
   function strict(store: PushStore, resolve: (host: string) => Promise<string[]>, log: (m: string) => void = () => {}) {
-    return new PushDispatcher({
+    return new NotificationDispatcher({
       store,
       notices: () => Promise.resolve([notice('question:1')]),
       subject: 'https://scadbuddy.example',

@@ -5,7 +5,7 @@ import { browserUser } from '../auth/browserSession.js'
 import type { SettingsRepo } from '../credentials.js'
 import { EgressError, type Resolver, systemResolver } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
-import type { PushDispatcher } from '../notify/dispatcher.js'
+import type { NotificationDispatcher } from '../notify/dispatcher.js'
 import { checkPushEndpoint, DEFAULT_PUSH_HOSTS, isHostPattern, PUSH_HOSTS_MAX, pushHostsOf, SETTING_PUSH_HOSTS } from '../notify/pushEgress.js'
 import { type PushStore, SubscriptionTakenError } from '../notify/pushStore.js'
 import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
@@ -32,7 +32,7 @@ export const PUSH_SERVICES_PATH = '/api/v1/ai/settings/push-services'
 
 export type PushRouteDeps = {
   /** Undefined without the database or the KEK: there is nowhere to keep the keys sealed. */
-  push: { store: PushStore; dispatcher: PushDispatcher } | undefined
+  push: { store: PushStore; dispatcher: NotificationDispatcher } | undefined
   /** Where the allowlist is kept; undefined without the database. */
   settings: SettingsRepo | undefined
   ready: () => Promise<boolean>
@@ -44,7 +44,7 @@ export type PushRouteDeps = {
 declare module '../app.js' {
   interface AppDeps {
     /** Web Push (#815, notify/): left out without the database or the KEK. */
-    push?: { store: PushStore; dispatcher: PushDispatcher } | undefined
+    push?: { store: PushStore; dispatcher: NotificationDispatcher } | undefined
   }
 }
 

@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { SettingsRepo } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import { originPolicy } from '../src/http/origins.js'
-import { PushDispatcher } from '../src/notify/dispatcher.js'
+import { NotificationDispatcher } from '../src/notify/dispatcher.js'
 import { DEFAULT_PUSH_HOSTS, SETTING_PUSH_HOSTS } from '../src/notify/pushEgress.js'
 import { PushStore } from '../src/notify/pushStore.js'
 import { PUSH_KEY_PATH, PUSH_SERVICES_PATH, PUSH_SUBSCRIPTION_PATH, registerPushRoutes } from '../src/routes/push.js'
@@ -58,7 +58,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the push routes${TEST_DATABASE_URL ? '' : `
 
   function app(withPush = true) {
     const a = new Hono()
-    const dispatcher = new PushDispatcher({
+    const dispatcher = new NotificationDispatcher({
       store,
       notices: () => Promise.resolve([]),
       subject: 'https://scadbuddy.example',

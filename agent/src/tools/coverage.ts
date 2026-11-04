@@ -470,6 +470,19 @@ export const AGENT_ROUTES: readonly { route: string; tool?: string; reason?: str
       'Which push services the agent may POST to, a person\'s setting in Settings → Assistant → Notifications; ' +
       'an agent must not widen where the service sends requests.',
   })),
+  // Notification channels (#815 §3, routes/notifyChannels.ts).
+  ...[
+    'GET /api/v1/ai/notify/channels',
+    'POST /api/v1/ai/notify/channels',
+    'PUT /api/v1/ai/notify/channels/{id}',
+    'DELETE /api/v1/ai/notify/channels/{id}',
+    'POST /api/v1/ai/notify/channels/{id}/test',
+  ].map((route) => ({
+    route,
+    reason:
+      "Where the assistant's notifications go (ntfy, Home Assistant), set by the person in Settings → Assistant → " +
+      "Notifications; an agent must not choose where the service sends, or read the channels' tokens.",
+  })),
   // Settings → Tools & plugins (#2171).
   ...['GET /api/v1/ai/capabilities', 'GET /api/v1/ai/capabilities/{source}', 'GET /api/v1/ai/capabilities/{source}/items/{item}'].map(
     (route) => ({ route, reason: CAPABILITIES_READ }),

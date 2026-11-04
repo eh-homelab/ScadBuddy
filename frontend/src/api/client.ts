@@ -33,6 +33,8 @@ import type {
   ImageSettings,
   MemorySettings,
   PushServices,
+  NotifyChannel,
+  NotifyChannelInput,
   WorkspaceFile,
   WorkspaceFileList,
   WorkspaceSettings,
@@ -2726,6 +2728,21 @@ export const api = {
 
   putPushServices: (hosts: string[]) =>
     request<PushServices>('/ai/settings/push-services', { method: 'PUT', body: JSON.stringify({ hosts }) }),
+
+  /** #815 — the notification channels (ntfy, Home Assistant), served by the agent service. */
+  listNotifyChannels: () => request<{ channels: NotifyChannel[] }>('/ai/notify/channels'),
+
+  createNotifyChannel: (input: NotifyChannelInput) =>
+    request<NotifyChannel>('/ai/notify/channels', { method: 'POST', body: JSON.stringify(input) }),
+
+  updateNotifyChannel: (id: string, patch: Partial<NotifyChannelInput>) =>
+    request<NotifyChannel>(`/ai/notify/channels/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(patch) }),
+
+  deleteNotifyChannel: (id: string) =>
+    request<void>(`/ai/notify/channels/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  testNotifyChannel: (id: string) =>
+    request<{ ok: boolean; detail?: string }>(`/ai/notify/channels/${encodeURIComponent(id)}/test`, { method: 'POST' }),
 
   /** #2329 — the caps on the assistant's workspace (bytes), served by the agent service. */
   getWorkspaceSettings: () => request<WorkspaceSettings>('/ai/settings/workspace'),
