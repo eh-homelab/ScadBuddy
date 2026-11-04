@@ -338,10 +338,16 @@ async def print_item(
     try:
         run = await start(claim.copies)
     except ApiError as error:
-        # Its project may be one just deleted in Bambuddy (#5276): the retry asks again.
-        await asyncio.to_thread(lifecycle.store.forget_projects_seen, order_id)
         if error.status < 500:
             await asyncio.to_thread(lifecycle.release_print, claim, error.detail)
+            # Its project may be one just deleted in Bambuddy (#5276): the next print,
+            # a new claim, asks again. A 5xx keeps the claim, whose retry keys the run
+            # with the project it recorded, so forgetting there changes nothing.
+            # Best-effort: the refusal is the answer, never this write's failure.
+            try:
+                await asyncio.to_thread(lifecycle.store.forget_projects_seen, order_id)
+            except Exception:
+                logger.warning("could not forget the order's projects", exc_info=True)
         raise
     return await _attached(lifecycle, claim, run)
 

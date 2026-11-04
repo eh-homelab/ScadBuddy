@@ -243,6 +243,37 @@ def test_a_refused_print_start_asks_bambuddy_for_its_projects_again(
     assert asyncio.run(item_project(shop.rows, seam, order.id, item.id)) == 103
 
 
+def test_a_refused_start_releases_its_claim_when_the_forget_fails(
+    shop: Shop, pool: PgPool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#5277 review: forgetting the projects is best-effort, after the release, so a
+    database error there neither keeps the claim nor hides the refusal."""
+    order, item = shop.accepted()
+
+    def fails(order_id: str, *, conn: object = None) -> None:
+        raise RuntimeError("pool exhausted")
+
+    monkeypatch.setattr(shop.rows, "forget_projects_seen", fails)
+    start = Starts(pool, refuse=ApiError(422, "no spool"))
+    with pytest.raises(ApiError) as refused:
+        asyncio.run(
+            print_item(
+                shop.lifecycle,
+                start,
+                start.existing,
+                order.id,
+                item.id,
+                BY,
+                request_id="req-forget-fails",
+                sliced_sha256="a" * 64,
+                sliced_blob_key="quote-a",
+            )
+        )
+    assert refused.value.status == 422
+    assert shop.rows.fulfilments(item.id) == []
+    assert shop.get_item(item).status == "approved"
+
+
 def test_without_bambuddy_nothing_is_asked_or_recorded(shop: Shop) -> None:
     order, item = shop.accepted()
     assert asyncio.run(ensure_projects(shop.rows, NOT_LINKED, order.id)) == []
