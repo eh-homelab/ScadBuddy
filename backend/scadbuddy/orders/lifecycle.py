@@ -1726,7 +1726,8 @@ class Lifecycle:
         `succeeded` with ``copies`` made and the item `printed`, or `failed` (a failed
         or cancelled print) with the item `failed`; one whose end the follow could not
         read (`unknown`) gets its end and stays for a person to settle (``PATCH``). With
-        no outcome, a run that failed fails the attempt with its refusal; one that
+        no outcome, a run that failed fails the attempt with its refusal, and the order's
+        projects are asked of Bambuddy again by the next ensure (#5276); one that
         succeeded and whose print moved (``progressed``, a ``print.progress``) makes a
         `queued` item `printing`, when the run is still its output's newest (a later dialog
         print's progress is that print's). Only an attempt still open (outcome `unknown`, no end)
@@ -1740,6 +1741,7 @@ class Lifecycle:
         status, detail, outcome = self.store.print_state(run_id)
         now = datetime.now(UTC)
         settle: tuple[Outcome, int, str | None, ItemStatus | None] | None = None
+        run_failed = False
         if outcome == "finished":
             settle = ("succeeded", attempt.copies or 0, None, "printed")
         elif outcome in ("failed", "cancelled"):
@@ -1748,6 +1750,7 @@ class Lifecycle:
             settle = ("unknown", 0, "the print ended, but how could not be read", None)
         elif status == "failed":
             settle = ("failed", 0, detail or "the print run failed", "failed")
+            run_failed = True
         elif not (status == "succeeded" and progressed and self.store.runs_newest(run_id)):
             # A print of the same output the dialog queued since is that run's, whose
             # progress is not this attempt's (`bambuddy/outcomes.py` reads the same way).
@@ -1782,6 +1785,10 @@ class Lifecycle:
                     failure_reason=reason,
                     finished_at=now,
                 )
+                if run_failed:
+                    # Its project may be one just deleted in Bambuddy (#5276): the
+                    # retry asks for the order's projects again, not taking them to stand.
+                    self.store.forget_projects_seen(order.id, conn=conn)
                 if item_status is not None and item.status in PRINTING:
                     item = self.store.update_item(conn, item.id, status=item_status)
                 changed.append((item, row.attempt))

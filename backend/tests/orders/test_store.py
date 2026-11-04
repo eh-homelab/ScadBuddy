@@ -242,7 +242,7 @@ def test_order_list_pages_newest_first_by_cursor(rows: OrderStore) -> None:
 
     mine, _ = rows.orders(OrderFilter(customer_id=customer.id), None, 50)
     assert [o.id for o in mine] == [ids[3], ids[1]]
-    quoted, _ = rows.orders(OrderFilter(status="quoted"), None, 50)
+    quoted, _ = rows.orders(OrderFilter(status=["quoted"]), None, 50)
     assert quoted == []
     by_number, _ = rows.orders(OrderFilter(q=made[0].number), None, 50)
     assert [o.id for o in by_number] == [ids[0]]

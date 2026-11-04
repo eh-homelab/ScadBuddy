@@ -8,7 +8,11 @@ queue item carries the project, as any print filed under a project does. Nothing
 deletes a project; one deleted in Bambuddy is made again by the next ensure, and the
 mapping names the new one (#5263). A project made or found there within the last
 ``EXISTS_TTL_SECONDS`` is not asked for again (#5273), so a deletion is seen by the
-first ensure after that. A print's claim records the project its run is keyed
+first ensure after that. When it was is ``order_projects.seen_at`` (#5276), which every
+replica shares, so no replica keeps a cache of its own; a print of the order that fails
+(``Lifecycle.follow_print``, or a start the print path refused, ``print_item``) clears it,
+so the retry asks again rather than filing under a project just deleted there. A print's
+claim records the project its run is keyed
 with, so a retry keys it the same whatever the mapping says since. A cancel keeps the
 mapping too (the spec dropped it): a retried print of a cancelled item must key its run
 as its first try did (``existing_run``), and a reopened order goes on in the projects it
@@ -22,8 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
-import weakref
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
@@ -56,22 +58,6 @@ ENSURE_TIMEOUT_SECONDS = 30.0
 #: (#5273): an accept and the prints after it, or a run of prints, ask once. One deleted
 #: in Bambuddy within it is made again by the first ensure after.
 EXISTS_TTL_SECONDS = 60.0
-
-_now = time.monotonic
-
-#: Per seam (a Bambuddy's ids are its own), each project id and when it was last made or
-#: found there.
-_standing: weakref.WeakKeyDictionary[OrderIntegrations, dict[int, float]] = (
-    weakref.WeakKeyDictionary()
-)
-
-
-def _stands(integrations: OrderIntegrations, project_id: int) -> None:
-    now = _now()
-    seen = _standing.setdefault(integrations, {})
-    for stale in [p for p, at in seen.items() if now - at >= EXISTS_TTL_SECONDS]:
-        del seen[stale]
-    seen[project_id] = now
 
 
 @asynccontextmanager
@@ -112,26 +98,28 @@ async def _locked(store: OrderStore, order_id: str) -> AsyncIterator[None]:
 async def _ensure(integrations: OrderIntegrations, name: str, parent_id: int | None) -> int:
     """One create, bounded: nothing holds the order's lock longer than this."""
     async with asyncio.timeout(ENSURE_TIMEOUT_SECONDS):
-        made = await integrations.ensure_project(name, parent_id)
-    _stands(integrations, made)
-    return made
+        return await integrations.ensure_project(name, parent_id)
 
 
-async def _kept(integrations: OrderIntegrations, project_id: int | None) -> int | None:
-    """``project_id`` while Bambuddy still has it; None for one deleted there (#5263),
-    which the caller makes again. One made or found within ``EXISTS_TTL_SECONDS`` is
-    not asked of Bambuddy again (#5273)."""
-    if project_id is None:
+async def _kept(
+    store: OrderStore,
+    integrations: OrderIntegrations,
+    subject: str,
+    known: tuple[int, bool] | None,
+) -> int | None:
+    """The subject's recorded project while Bambuddy still has it; None for one deleted
+    there (#5263), which the caller makes again. One made or found within
+    ``EXISTS_TTL_SECONDS`` (``known``'s flag) is not asked of Bambuddy again (#5273)."""
+    if known is None:
         return None
-    seen = _standing.get(integrations, {}).get(project_id)
-    if seen is not None and _now() - seen < EXISTS_TTL_SECONDS:
+    project_id, fresh = known
+    if fresh:
         return project_id
     async with asyncio.timeout(ENSURE_TIMEOUT_SECONDS):
         exists = await integrations.project_exists(project_id)
     if not exists:
-        _standing.get(integrations, {}).pop(project_id, None)
         return None
-    _stands(integrations, project_id)
+    await asyncio.to_thread(store.project_seen, subject, project_id)
     return project_id
 
 
@@ -151,12 +139,9 @@ async def ensure_projects(
         order = await asyncio.to_thread(store.order, order_id)
         if order is None:
             return []
-        known = {
-            project.subject: project.project_id
-            for project in await asyncio.to_thread(store.projects, order_id)
-        }
+        known = await asyncio.to_thread(store.projects_seen, order_id, EXISTS_TTL_SECONDS)
         top_subject = order_subject(order_id)
-        top = await _kept(integrations, known.get(top_subject))
+        top = await _kept(store, integrations, top_subject, known.get(top_subject))
         if top is None:
             made = await _ensure(integrations, order.number, None)
             top = await asyncio.to_thread(
@@ -170,7 +155,7 @@ async def ensure_projects(
         )
         for item in wanted:
             subject = item_subject(item.id)
-            if await _kept(integrations, known.get(subject)) is not None:
+            if await _kept(store, integrations, subject, known.get(subject)) is not None:
                 continue
             made = await _ensure(integrations, item_project_name(order, item), top)
             await asyncio.to_thread(store.set_project, order_id, subject, made, subject in known)

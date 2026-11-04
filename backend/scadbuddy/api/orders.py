@@ -324,7 +324,7 @@ def _path(*values: str) -> None:
 async def list_orders(
     request: Request,
     orders: OrdersDep,
-    status_: Annotated[OrderStatus | None, Query(alias="status")] = None,
+    status_: Annotated[list[OrderStatus] | None, Query(alias="status")] = None,
     customer_id: str | None = None,
     q: str | None = None,
     from_: Annotated[datetime | None, Query(alias="from")] = None,
@@ -332,7 +332,8 @@ async def list_orders(
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> OrderPage:
-    """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``."""
+    """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``. ``status``
+    may be repeated, for orders of any of them (#5276)."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
     filters = OrderFilter(status=status_, customer_id=customer_id, q=q, since=from_, until=to)

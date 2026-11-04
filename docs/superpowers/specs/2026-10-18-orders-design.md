@@ -857,8 +857,10 @@ retried print of an item cancelled meanwhile looks for its run by the run's key
 in the projects it had instead of making a second of each name. A project deleted in
 Bambuddy is made again by the next ensure (`project_exists`, false only on a 404), and the
 mapping names the new one (#5263). A project made or found there within the last
-minute (`EXISTS_TTL_SECONDS`, per seam) is not asked for again (#5273), so an accept and
-the prints after it ask once; a deletion is seen by the first ensure past that. A print's claim records the project its run is keyed
+minute (`EXISTS_TTL_SECONDS`, told by `order_projects.seen_at`, which every replica
+shares, #5276) is not asked for again (#5273), so an accept and the prints after it ask
+once; a deletion is seen by the first ensure past that, or by the retry of a print of the
+order that failed (a failed run, or a start the print path refused, clears `seen_at`). A print's claim records the project its run is keyed
 with (`print_project_id`), so a retry keys the run the same whatever the mapping says
 since. A claim from before that recorded none, and its retry looks for the run under no
 project and under the item's current one. One whose project was deleted and made again
@@ -881,7 +883,9 @@ settled it copies `archive_ids`, the archives' earliest start and latest end as 
 (`total_filament_actual_grams`, else `filament_used_grams`). It does not copy the
 outcome: the attempt's is the print path's (`print_outcomes`), read from the same print.
 The times are copied once, told by `archive_copied` (#5273), so one a person corrected
-stands even when the archives give no seconds or grams.
+stands even when the archives give no seconds or grams. An attempt that named archives before that column was
+added is taken as copied (#5276): nothing tells one copied from an archive with neither
+from one never read.
 The copy runs on each `print.outcome` heard (`listen_for_prints`' `on_outcome`) and on
 each `GET …/fulfilments/{f}/archives`, which also lists each archive's `finish_` photos
 and whether it has a timelapse, so a link Bambuddy made late is still copied. `POST

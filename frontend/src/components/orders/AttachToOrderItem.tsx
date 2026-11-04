@@ -13,8 +13,9 @@ import { refusalText } from './refusal'
 
 /** Orders asked for at a time. */
 const PAGE = 100
-/** An accepted order still being made: its items take attempts. */
-const IN_WORK = new Set<Order['status']>(['accepted', 'in_production', 'ready'])
+/** An accepted order still being made: its items take attempts. Filtered by the server
+ * (#5276), so every page holds only these. */
+const IN_WORK: Order['status'][] = ['accepted', 'in_production', 'ready']
 /** An item an attempt may be recorded for (`orders/lifecycle.py` `FULFILLABLE`). */
 const OPEN_ITEM = new Set<OrderItemDetail['status']>(['approved', 'failed', 'queued', 'printing', 'printed'])
 
@@ -43,7 +44,7 @@ export function AttachToOrderItem({ open, archiveId, printStatus, onClose }: { o
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState<{ order: Order; itemId: string } | null>(null)
-  const choices = (found?.orders ?? []).filter((o) => IN_WORK.has(o.status))
+  const choices = [...(found?.orders ?? [])]
   // The order chosen stays offered while a search shows others.
   const chosen = detail.data?.order
   if (chosen && chosen.id === orderId && !choices.some((o) => o.id === chosen.id)) choices.unshift(chosen)
@@ -55,7 +56,7 @@ export function AttachToOrderItem({ open, archiveId, printStatus, onClose }: { o
     setFound(null)
     const timer = setTimeout(
       () => {
-        api.orders({ ...DEFAULT_ORDERS_QUERY, q: search.trim() }, { limit: PAGE }).then(
+        api.orders({ ...DEFAULT_ORDERS_QUERY, q: search.trim() }, { limit: PAGE, statuses: IN_WORK }).then(
           (page) => live && setFound({ orders: page.items, next: page.next_cursor }),
           (err: unknown) => {
             if (!live) return
@@ -77,7 +78,7 @@ export function AttachToOrderItem({ open, archiveId, printStatus, onClose }: { o
     if (!cursor) return
     setMore(true)
     try {
-      const page = await api.orders({ ...DEFAULT_ORDERS_QUERY, q: search.trim() }, { limit: PAGE, cursor })
+      const page = await api.orders({ ...DEFAULT_ORDERS_QUERY, q: search.trim() }, { limit: PAGE, cursor, statuses: IN_WORK })
       // Only onto the list it continues: a search typed meanwhile has its own.
       setFound((prev) => (prev && prev.next === cursor ? { orders: [...prev.orders, ...page.items], next: page.next_cursor } : prev))
     } catch (err) {

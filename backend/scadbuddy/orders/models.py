@@ -233,7 +233,8 @@ class Order(BaseModel):
 class OrderFilter(BaseModel):
     """What ``GET /orders`` narrows by (§4)."""
 
-    status: OrderStatus | None = None
+    #: Any of these (#5276); None or empty is every status.
+    status: list[OrderStatus] | None = None
     customer_id: str | None = None
     #: Matched against the number, the notes and the customer's name.
     q: str | None = None

@@ -744,8 +744,8 @@ class OrderStore:
             where.append(sql.SQL(clause))
             params.extend(values)
 
-        if filters.status is not None:
-            add("o.status = %s", filters.status)
+        if filters.status:
+            add("o.status = ANY(%s)", list(filters.status))
         if filters.customer_id is not None:
             add("o.customer_id = %s", filters.customer_id)
         if filters.q:
@@ -1792,17 +1792,46 @@ class OrderStore:
             ).fetchall()
         return [_project_of(row) for row in rows]
 
+    def projects_seen(self, order_id: str, within_seconds: float) -> dict[str, tuple[int, bool]]:
+        """Each subject's project, and whether it was made or found in Bambuddy within
+        the last ``within_seconds`` (#5276), told by the database's clock, which every
+        replica shares."""
+        with self._read(None) as c:
+            rows = c.execute(
+                "SELECT subject, project_id,"
+                " coalesce(seen_at > now() - make_interval(secs => %s), false) AS fresh"
+                " FROM order_projects WHERE order_id = %s",
+                (within_seconds, order_id),
+            ).fetchall()
+        return {row["subject"]: (row["project_id"], row["fresh"]) for row in rows}
+
+    def project_seen(self, subject: str, project_id: int) -> None:
+        """The subject's project was found in Bambuddy just now."""
+        with self.transaction() as conn:
+            conn.execute(
+                "UPDATE order_projects SET seen_at = now() WHERE subject = %s AND project_id = %s",
+                (subject, project_id),
+            )
+
+    def forget_projects_seen(self, order_id: str, *, conn: Conn | None = None) -> None:
+        """The next ensure asks Bambuddy for each of the order's projects again: a print
+        of the order failed, perhaps because one was deleted there (#5276)."""
+        with self._write(conn) as c:
+            c.execute("UPDATE order_projects SET seen_at = NULL WHERE order_id = %s", (order_id,))
+
     def set_project(
         self, order_id: str, subject: str, project_id: int, replace: bool = False
     ) -> int:
-        """Record a subject's project; one already recorded stands, and is the answer,
-        unless ``replace`` (the recorded one was deleted in Bambuddy, #5263; asked under
-        :meth:`project_lock`)."""
+        """Record a subject's project, made in Bambuddy just now; one already recorded
+        stands, and is the answer, unless ``replace`` (the recorded one was deleted in
+        Bambuddy, #5263; asked under :meth:`project_lock`)."""
         with self.transaction() as conn:
             conn.execute(
-                "INSERT INTO order_projects (subject, order_id, project_id) VALUES (%s, %s, %s)"
+                "INSERT INTO order_projects (subject, order_id, project_id, seen_at)"
+                " VALUES (%s, %s, %s, now())"
                 + (
-                    " ON CONFLICT (subject) DO UPDATE SET project_id = EXCLUDED.project_id"
+                    " ON CONFLICT (subject) DO UPDATE SET project_id = EXCLUDED.project_id,"
+                    " seen_at = EXCLUDED.seen_at"
                     if replace
                     else " ON CONFLICT (subject) DO NOTHING"
                 ),

@@ -279,7 +279,9 @@ export const orderTools: Tool[] = [
     }),
     risk: 'read',
     routes: ['GET /api/v1/orders'],
-    handler: async (query, { backend }) => json(await ok(backend.GET('/api/v1/orders', { params: { query } }), 'list orders')),
+    // The route takes `status` repeated (#5276); the tool names one.
+    handler: async ({ status, ...query }, { backend }) =>
+      json(await ok(backend.GET('/api/v1/orders', { params: { query: { ...query, ...(status ? { status: [status] } : {}) } } }), 'list orders')),
   }),
   defineTool({
     name: 'order_get',
