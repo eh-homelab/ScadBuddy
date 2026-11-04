@@ -2150,8 +2150,10 @@ export const api = {
   /** Back in the pickers, so a new order can name them again. */
   unarchiveCustomer: (id: string) => request<Customer>(`/customers/${seg(id)}/unarchive`, { method: 'POST' }),
   /** Orders, newest first, a page at a time; `cursor` is the last page's `next_cursor`. */
-  orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number } = {}) => {
+  orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number; statuses?: Order['status'][] } = {}) => {
     const search = new URLSearchParams(ordersApiParams(query))
+    // #5276: `status` repeated is orders of any of them, filtered by the server.
+    for (const status of page.statuses ?? []) search.append('status', status)
     if (page.limit !== undefined) search.set('limit', String(page.limit))
     if (page.cursor) search.set('cursor', page.cursor)
     const suffix = search.size > 0 ? `?${search.toString()}` : ''

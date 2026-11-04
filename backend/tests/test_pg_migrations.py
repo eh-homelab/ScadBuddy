@@ -383,3 +383,40 @@ def test_a_flow_version_with_no_commit_keeps_the_script_column_without_failing(
         script = conn.execute("SELECT script FROM workflow_definitions").fetchone()
     assert script == ("x",)
     assert any("workflow_definitions.script kept" in n for n in notices), notices
+
+
+@pytest.mark.requires_postgres
+def test_the_archive_copied_backfill_marks_every_attempt_from_before_it(
+    pg_conninfo: str,
+) -> None:
+    # #5276: the first backfill could not tell an attempt already copied from an archive
+    # with no seconds or grams from one never copied, and marked it not copied, so its
+    # first read after the deploy copied the times again over a correction. Every attempt
+    # naming archives from before that file is taken as copied; one recorded since is
+    # left for its first copy.
+    backfill = _index("order_attempt_archive_copied_backfill")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:backfill])
+        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c', 'C')")
+        conn.execute(
+            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
+            " VALUES ('o', 'ORD-2026-1', 'c', 'USD', '{}')"
+        )
+        conn.execute(
+            "INSERT INTO order_items (id, order_id, position, quantity, title, kind)"
+            " VALUES ('i', 'o', 0, 1, 'Bracket', 'custom')"
+        )
+        conn.execute(
+            "INSERT INTO order_item_fulfilments"
+            " (id, order_item_id, attempt, quantity, outcome, created_by, archive_ids,"
+            "  archive_copied, created_at) VALUES"
+            " ('before', 'i', 1, 1, 'succeeded', '{}', '{81}', false,"
+            "  now() - interval '1 hour'),"
+            " ('none', 'i', 2, 1, 'succeeded', '{}', '{}', false, now() - interval '1 hour'),"
+            " ('since', 'i', 3, 1, 'succeeded', '{}', '{82}', false, now())"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[backfill].id
+        rows = conn.execute(
+            "SELECT id, archive_copied FROM order_item_fulfilments ORDER BY attempt"
+        ).fetchall()
+    assert rows == [("before", True), ("none", False), ("since", False)]

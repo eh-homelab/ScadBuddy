@@ -282,8 +282,9 @@ export const handlers = [
   http.get('/api/v1/orders', ({ request }) => {
     const sp = new URL(request.url).searchParams
     for (const name of sp.keys()) if (!LIST_PARAMS.has(name)) return problem(request, 400, `unknown query parameter '${name}'`, UNKNOWN_PARAMETER)
-    const status = sp.get('status')
-    if (status !== null && !STATUSES.has(status as OrderStatus)) return problem(request, 422, 'status is not an order status')
+    // Repeated, any of them (#5276).
+    const statuses = sp.getAll('status')
+    if (statuses.some((s) => !STATUSES.has(s as OrderStatus))) return problem(request, 422, 'status is not an order status')
     const limit = Number(sp.get('limit') ?? '50')
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) return problem(request, 422, 'limit must be an integer from 1 to 100')
     let after: [string, string] | null = null
@@ -298,7 +299,7 @@ export const handlers = [
     const to = sp.get('to')
     const rows = [...state.orders]
       .sort((a, b) => (a.created_at === b.created_at ? (a.id < b.id ? 1 : -1) : a.created_at < b.created_at ? 1 : -1))
-      .filter((o) => !status || o.status === status)
+      .filter((o) => statuses.length === 0 || statuses.includes(o.status))
       .filter((o) => !customer || o.customer_id === customer)
       .filter((o) => !from || Date.parse(o.created_at) >= Date.parse(from))
       .filter((o) => !to || Date.parse(o.created_at) <= Date.parse(to))

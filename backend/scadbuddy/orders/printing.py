@@ -338,6 +338,8 @@ async def print_item(
     try:
         run = await start(claim.copies)
     except ApiError as error:
+        # Its project may be one just deleted in Bambuddy (#5276): the retry asks again.
+        await asyncio.to_thread(lifecycle.store.forget_projects_seen, order_id)
         if error.status < 500:
             await asyncio.to_thread(lifecycle.release_print, claim, error.detail)
         raise
