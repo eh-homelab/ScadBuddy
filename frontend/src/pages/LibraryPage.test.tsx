@@ -1359,12 +1359,57 @@ describe('LibraryPage file details (#1031)', () => {
     await waitFor(() => expect(screen.queryByTestId('library-file-120')).toBeNull())
   })
 
-  it('opens Move to… from the details', async () => {
+  it('moves the file from its details, and the drawer follows it to its folder', async () => {
     libraryPrints({})
-    const { user } = renderPage(<LibraryPage />, { route: '/library/Spec/MakerWorld/Work?details=121' })
-    const drawer = await screen.findByRole('dialog', { name: 'alex-headphone-hook.3mf' })
+    const { user } = renderPage(
+      <>
+        <LibraryPage />
+        <Where />
+      </>,
+      { route: '/library/Spec/MakerWorld/Work?details=120' },
+    )
+    const drawer = await screen.findByRole('dialog', { name: 'drawer-label.3mf' })
     await user.click(within(drawer).getByRole('button', { name: 'Move to…' }))
-    expect(await screen.findByRole('dialog', { name: /^Move alex-headphone-hook\.3mf to…/ })).toBeInTheDocument()
+    const move = await screen.findByRole('dialog', { name: /^Move drawer-label\.3mf to…/ })
+    await user.click(within(move).getByTestId('library-move-folder-1'))
+    await user.click(within(move).getByTestId('library-move-confirm'))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/MakerWorld\?details=120$/))
+    const after = await screen.findByRole('dialog', { name: 'drawer-label.3mf' })
+    await waitFor(() => expect(within(after).getByTestId('library-details-facts')).toHaveTextContent('MakerWorld'))
+    expect(within(after).getByTestId('library-details-facts')).not.toHaveTextContent('Spec')
+    expect(screen.queryByText(/is not listed here/)).toBeNull()
+    expect(await screen.findByTestId('library-file-120')).toBeInTheDocument()
+  })
+
+  it("opens a listed file's details without reading the listing again (#5322 review)", async () => {
+    libraryPrints({})
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    const open = await screen.findByTestId('library-open-89')
+    const reads = listingAnswers()
+    onTestFinished(reads.stop)
+    await user.click(open)
+    const drawer = await screen.findByRole('dialog', { name: /bag-clip/ })
+    await within(drawer).findByTestId('library-details-prints')
+    // The grid behind it stays, and no second listing is asked for.
+    expect(screen.getByTestId('library-file-89')).toBeInTheDocument()
+    expect(screen.getByTestId('library-file-91')).toBeInTheDocument()
+    expect(reads.count()).toBe(0)
+  })
+
+  it('keeps the details of a file a rename takes out of the search (#5322 review)', async () => {
+    libraryPrints({})
+    const { user } = renderPage(<LibraryPage />, { route: '/library?q=headphone&details=121' })
+    const drawer = await screen.findByRole('dialog', { name: 'alex-headphone-hook.3mf' })
+    await user.click(within(drawer).getByRole('button', { name: 'Rename' }))
+    const rename = await screen.findByRole('dialog', { name: /^Rename/ })
+    const box = within(rename).getByRole('textbox')
+    await user.clear(box)
+    await user.type(box, 'desk-hook')
+    await user.click(within(rename).getByTestId('library-rename-confirm'))
+    const after = await screen.findByRole('dialog', { name: 'desk-hook.3mf' })
+    await waitFor(() => expect(screen.queryByTestId('library-file-121')).toBeNull())
+    expect(within(after).queryByText(/is not listed here/)).toBeNull()
+    expect(within(after).getByTestId('library-details-facts')).toHaveTextContent('Spec / MakerWorld / Work')
   })
 })
 

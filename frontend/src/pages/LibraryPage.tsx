@@ -201,7 +201,19 @@ export function LibraryPage() {
   // folder change until that listing arrives. Comparing with `printParam` here is what
   // makes the held value safe; it never stands in for a link that is not there (#3458).
   const printListed = printParam !== null && seenPrint === printParam
-  const linked = fileParam ?? detailsParam ?? (printListed ? null : printParam)
+  // #1031 — the same for a details link: a file a listing on screen holds (its card
+  // clicked) needs no read of its folder, which would blank the grid behind the drawer.
+  // Once seen it stays seen while its details are open, so a rename or move that takes it
+  // out of view does not send the page after its folder.
+  const [listedDetails, setListedDetails] = useState<number | null>(null)
+  const seenDetails =
+    detailsParam === null
+      ? null
+      : listedDetails === detailsParam || (onScreen?.files ?? []).some((file) => file.id === detailsParam)
+        ? detailsParam
+        : null
+  if (seenDetails !== listedDetails) setListedDetails(seenDetails)
+  const linked = fileParam ?? (seenDetails !== null ? null : detailsParam) ?? (printListed ? null : printParam)
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
   const [picked, setPicked] = useState<LibraryEntry[]>([])
@@ -215,6 +227,8 @@ export function LibraryPage() {
   const [deleted, setDeleted] = useState<Deleted | null>(null)
   const [transfer, setTransfer] = useState<{ mode: TransferMode; files: LibraryEntry[] } | null>(null)
   const [renaming, setRenaming] = useState<LibraryEntry | null>(null)
+  /** #1031 — the open details' file as a rename or move here left it, while no listing holds it. */
+  const [detailsKept, setDetailsKept] = useState<LibraryEntry | null>(null)
   const [done, setDone] = useState<Done | null>(null)
   const [folderAction, setFolderAction] = useState<FolderAction | null>(null)
   const [folderError, setFolderError] = useState<string | null>(null)
@@ -496,6 +510,16 @@ export function LibraryPage() {
       // A ticked file keeps its tick where it went: its folder is what the next move reads.
       setPicked((now) => now.map((file) => (moved.has(file.id) ? { ...file, folder_id: folderId } : file)))
       setDone({ kind: 'move', result, where })
+      // #1031 — the file whose details are open moved: the page and its drawer follow it.
+      const followed = detailsParam === null ? undefined : files.find((file) => file.id === detailsParam)
+      if (followed && moved.has(followed.id)) {
+        setDetailsKept({ ...followed, folder_id: folderId })
+        if (!searching) {
+          const next = new URLSearchParams(search)
+          for (const name of ['by', 'project', 'shown']) next.delete(name)
+          navigate({ pathname: libraryPath(tree ?? [], folderId), search: `?${next.toString()}` }, { replace: true })
+        }
+      }
     } else {
       const result = await api.copyLibraryFiles(files.map((file) => file.id), folderId)
       setDone({ kind: 'copy', result, where })
@@ -508,6 +532,8 @@ export function LibraryPage() {
   async function renameFile(file: LibraryEntry, filename: string) {
     const result = await api.renameLibraryFile(file.id, filename)
     setPicked((now) => now.map((row) => (row.id === file.id ? { ...row, filename: result.filename } : row)))
+    // #1031 — its details keep it by its new name, listed again or not (out of a search).
+    if (file.id === detailsParam) setDetailsKept({ ...file, filename: result.filename })
     setRenaming(null)
     setDeleted(null)
     setDone({ kind: 'rename', result })
@@ -646,7 +672,10 @@ export function LibraryPage() {
   const printing =
     printParam === null ? null : ((onScreen?.files ?? []).find((file) => file.id === printParam) ?? null)
   const detailsFile =
-    detailsParam === null ? null : ((onScreen?.files ?? []).find((file) => file.id === detailsParam) ?? null)
+    detailsParam === null
+      ? null
+      : ((onScreen?.files ?? []).find((file) => file.id === detailsParam) ??
+        (detailsKept?.id === detailsParam ? detailsKept : null))
   const folderId = wanted?.fileId !== undefined ? (listing?.folder_id ?? null) : (wanted?.folderId ?? null)
   const folder = folderId === null ? undefined : tree?.find((row) => row.id === folderId)
   // #3631 — the folder's own subfolders, shown beside its files: a folder of folders is

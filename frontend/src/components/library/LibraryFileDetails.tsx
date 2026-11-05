@@ -23,6 +23,9 @@ const PlateScene = lazy(async () => ({ default: (await import('../print/PlateSce
 /** How many of the file's prints the drawer lists; the Prints page has the rest. */
 const PRINTS_SHOWN = 5
 
+/** The 3D view keeps the file's own colours: none swapped. One map, so it never changes. */
+const NO_COLOURS = new Map<string, string>()
+
 /** jsdom and a browser with WebGL off draw no 3D. */
 function canDraw3d(): boolean {
   return typeof window !== 'undefined' && 'WebGLRenderingContext' in window
@@ -318,7 +321,7 @@ function Details({
                     <PlateScene
                       key={preview}
                       url={api.libraryPreviewGlbUrl(id, preview)}
-                      colors={new Map()}
+                      colors={NO_COLOURS}
                       cutAt={null}
                       onHeight={() => undefined}
                       background={background()}
