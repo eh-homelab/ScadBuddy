@@ -425,7 +425,11 @@ class TagCount(BaseModel):
 class ModelFacets(BaseModel):
     """What the Models page's filters show beside a page of the list (#2290)."""
 
-    total: int = Field(description="Every listed model, whatever the filters")
+    total: int = Field(
+        description="Every listed model, whatever the filters. Only models whose "
+        "`model.json` can be read: unlike an unfiltered `GET /models`'s `X-Total-Count`, "
+        "which counts every template"
+    )
     matched: int = Field(description="How many models the search and filters select")
     tags: list[TagCount] = Field(
         description="Each tag of the selected models, most used first, then by name; "
