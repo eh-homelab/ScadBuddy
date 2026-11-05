@@ -1091,6 +1091,19 @@ class OrderStore:
             raise LookupError(f"no order item {item_id}")
         return _item_of(row)
 
+    def amend_revision_colours(
+        self, conn: Conn, revision_id: str, colours: Sequence[ColourSlot]
+    ) -> Revision:
+        """The revision's colour slots replaced in place: the colours' fill of an item
+        made by hand, which changes no design (``Lifecycle._revise`` with ``amend``)."""
+        row = conn.execute(
+            f"UPDATE order_item_revisions SET colours = %s WHERE id = %s RETURNING {_REVISION}",
+            (Jsonb(_dump(list(colours))), revision_id),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"no revision {revision_id}")
+        return _revision_of(row)
+
     def revision(self, revision_id: str, *, conn: Conn | None = None) -> Revision | None:
         with self._read(conn) as c:
             row = c.execute(

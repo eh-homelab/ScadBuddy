@@ -627,6 +627,57 @@ def _sql_by_function(path: Path) -> Iterator[tuple[str, str]]:
         yield fn.name, "".join(parts)
 
 
+#: The columns that are an item's design (spec 2026-11-02 §4.1).
+DESIGN_COLUMNS = frozenset(
+    {
+        "slug",
+        "commit",
+        "inputs",
+        "libraries",
+        "template_name",
+        "render_key",
+        "colours",
+        "current_revision_id",
+    }
+)
+
+
+def _keys_written(fn: ast.FunctionDef) -> set[str]:
+    """The names a function puts in a dict: literal keys, ``d["k"] = …`` and
+    ``d.update(k=…)``."""
+    keys: set[str] = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Dict):
+            keys |= {
+                k.value
+                for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            }
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+            if isinstance(node.slice, ast.Constant) and isinstance(node.slice.value, str):
+                keys.add(node.slice.value)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "update"
+        ):
+            keys |= {kw.arg for kw in node.keywords if kw.arg is not None}
+    return keys
+
+
+def _updates_order_items(fn: ast.FunctionDef) -> bool:
+    """Whether the function calls ``_update(conn, "order_items", …)``."""
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_update"
+        and len(node.args) > 1
+        and isinstance(node.args[1], ast.Constant)
+        and node.args[1].value == "order_items"
+        for node in ast.walk(fn)
+    )
+
+
 def _callers(path: Path, attr: str) -> set[str]:
     """The functions whose body calls ``<something>.attr(``."""
     return {
@@ -644,13 +695,27 @@ def _callers(path: Path, attr: str) -> set[str]:
 def test_only_the_revision_writer_sets_an_items_design() -> None:
     # Spec §4.1: past insert_item's INSERT, set_design is the one UPDATE of the design
     # columns, and Lifecycle._revise its one caller.
+    store_path = Path(store.__file__)
     store_writers = {
         fn
-        for fn, text in _sql_by_function(Path(store.__file__))
+        for fn, text in _sql_by_function(store_path)
         if re.search(
             r"UPDATE order_items SET[^\"]*\b(slug|commit|inputs|render_key|colours)\b", text
         )
     }
     assert store_writers == {"set_design"}
+    # The generic writer's fields come from dict keys, not SQL text.
+    generic = {
+        fn.name: _keys_written(fn) & DESIGN_COLUMNS
+        for fn in _functions(store_path)
+        if _updates_order_items(fn)
+    }
+    assert generic and not any(generic.values()), generic
     assert {"reference", "colours"}.isdisjoint(inspect.signature(OrderStore.update_item).parameters)
-    assert _callers(Path(lifecycle.__file__), "set_design") == {"_revise"}
+    package = Path(lifecycle.__file__).parents[1]
+    callers = {
+        (str(path.relative_to(package)), name)
+        for path in sorted(package.rglob("*.py"))
+        for name in _callers(path, "set_design")
+    }
+    assert callers == {("orders/lifecycle.py", "_revise")}

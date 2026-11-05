@@ -7,7 +7,8 @@ from __future__ import annotations
 import pytest
 
 from scadbuddy.orders.lifecycle import LifecycleError
-from scadbuddy.orders.models import FilamentInput
+from scadbuddy.orders.models import ColourSlot, FilamentInput
+from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
@@ -168,3 +169,51 @@ def test_a_custom_item_takes_no_approval(shop: Shop) -> None:
     with pytest.raises(LifecycleError) as refused:
         shop.lifecycle.update_item(order.id, custom.id, BY, approval="design_first")
     assert (refused.value.slug, refused.value.unprocessable) == ("approval", True)
+
+
+def test_the_items_own_reference_sent_again_makes_no_revision(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.lifecycle.add_item(order.id, BY, resolved(), output_id="out-1", quantity=1)
+    [first] = shop.rows.revisions(item.id)
+    with shop.rows.transaction() as conn:
+        shop.rows.stamp_revision(conn, first.id, sent_at=NOW)
+    again = shop.lifecycle.update_item(
+        order.id, item.id, BY, reference=resolved(), output_id="out-1"
+    )
+    [first] = shop.rows.revisions(item.id)
+    assert first.answer is None and again.current_revision_id == first.id
+    assert again.output_id == "out-1"
+
+
+def _uncoloured(shop: Shop) -> tuple[str, str]:
+    """An item made by hand with no colour slots, its price accepted."""
+    order = shop.order()
+    bare = ResolvedReference(resolved().reference, [])
+    item = shop.lifecycle.add_item(order.id, BY, bare, output_id=None, quantity=1)
+    assert item.colours == []
+    shop.quoted(order, item)
+    return order.id, item.id
+
+
+def test_the_colours_fill_amends_the_current_revision(shop: Shop) -> None:
+    order_id, item_id = _uncoloured(shop)
+    slots = [ColourSlot(slot=0, colour="#00ff00")]
+    item = shop.lifecycle.update_item(order_id, item_id, BY, output_id="out-9", colours=slots)
+    [rev] = shop.rows.revisions(item_id)
+    assert rev.colours == slots and item.colours == slots and item.current_revision_id == rev.id
+    assert item.status == "approved" and item.output_id == "out-9"
+    assert any(q.accepted for q in shop.rows.quotes(item_id))
+    order = shop.rows.order(order_id)
+    assert order is not None and "revision.amended" in shop.kinds(order)
+
+
+def test_the_colours_fill_leaves_a_sent_revision_unanswered(shop: Shop) -> None:
+    order_id, item_id = _uncoloured(shop)
+    [first] = shop.rows.revisions(item_id)
+    with shop.rows.transaction() as conn:
+        shop.rows.stamp_revision(conn, first.id, sent_at=NOW)
+    shop.lifecycle.update_item(
+        order_id, item_id, BY, colours=[ColourSlot(slot=0, colour="#00ff00")]
+    )
+    [first] = shop.rows.revisions(item_id)
+    assert first.answer is None and first.sent_at is not None

@@ -799,6 +799,7 @@ class Lifecycle:
         colours: Sequence[ColourSlot],
         note: str = "",
         output_id: str | UnsetType | None = UNSET,
+        amend: bool = False,
     ) -> tuple[OrderItem, Revision]:
         """The item's next design revision, and the item's design a copy of it (spec
         2026-11-02 §4.1): the one caller of `OrderStore.set_design`. The newest revision,
@@ -806,7 +807,22 @@ class Lifecycle:
         item's while the reference stays, and clears it when the reference moves: the
         output no longer matches what the item says. Every quote goes stale (§4.3), so
         a `quoted` or `approved` item is `draft` again. The caller checks the item may
-        change and rederives the order."""
+        change and rederives the order.
+
+        With ``amend`` the current revision takes ``colours`` in place (the colours'
+        fill: an item made by hand given the slots its first render made, which changes
+        no design a customer saw): no new revision, nothing superseded, the quotes and
+        the status kept, the audit row `revision.amended`."""
+        if isinstance(output_id, UnsetType):
+            output_id = item.output_id if item.reference == reference else None
+        if amend:
+            assert item.current_revision_id is not None
+            revision = self.store.amend_revision_colours(conn, item.current_revision_id, colours)
+            item = self.store.set_design(conn, item.id, revision, output_id=output_id)
+            self._event(
+                conn, order, by, "revision.amended", item_id=item.id, revision_id=revision.id
+            )
+            return item, revision
         newest = next(reversed(self.store.revisions(item.id, conn=conn)), None)
         superseded = None
         if newest is not None and newest.sent_at is not None and newest.answer is None:
@@ -817,8 +833,6 @@ class Lifecycle:
         revision = self.store.insert_revision(
             conn, item.id, reference=reference, colours=colours, note=note, created_by=by
         )
-        if isinstance(output_id, UnsetType):
-            output_id = item.output_id if item.reference == reference else None
         item = self.store.set_design(conn, item.id, revision, output_id=output_id)
         self.store.unaccept_quotes(conn, item.id)
         if item.status in ("quoted", "approved"):
@@ -1020,17 +1034,18 @@ class Lifecycle:
         """The reference (replaced whole), the quantity and the slots' filaments while
         `draft` or `quoted`, each dropping the accepted quote (Ruling 1; #4250 Ruling 6:
         §5.2's "changing the colours makes the next quote a new row"); title, notes and
-        ``approval`` in any open state. A design change (the reference, a slot's
-        filament, or the colours' fill) is the item's next revision (spec 2026-11-02
-        §4.1, `_revise`); a reference replaced without an ``output_id`` clears the
-        item's: the output it pointed at no longer matches what the item says.
+        ``approval`` in any open state. A design change (a different reference or a
+        slot's filament) is the item's next revision (spec 2026-11-02 §4.1, `_revise`);
+        the item's own reference sent again changes nothing and makes none. A reference
+        changed without an ``output_id`` clears the item's: the output it pointed at no
+        longer matches what the item says.
 
         ``filaments`` (``{slot: filament_id | None}``) repins only when it changes a
         slot: the same filaments sent again write nothing and drop nothing. A slot the
         item lacks, or a filament not in the book or archived, is refused (422).
         ``colours`` gives an item made by hand, which has none, the slots its first
         render made (the quote's run, #4250); it repins nothing, as it changes no slot
-        the item had.
+        the item had, and amends the current revision rather than making one.
 
         A custom item (#4954) takes ``unit_price_minor`` and ``requires_printing``, which
         a model item refuses (422). A new quantity or price on it is priced at once: a
@@ -1083,13 +1098,25 @@ class Lifecycle:
             )
             # The colours' fill: an item with no slots given its first render's.
             filled = not base and bool(slots)
-            design = reference is not None or refiled or filled
-            repins = design or quantity is not None or price is not None
+            designed = reference.reference if reference is not None else item.reference
+            amend = (
+                filled
+                and item.kind != "custom"
+                and designed == item.reference
+                and item.current_revision_id is not None
+            )
+            changed = reference is not None and (
+                item.kind == "custom"
+                or reference.reference != item.reference
+                or slots != item.colours
+            )
+            revised = not amend and (changed or refiled or filled)
+            design = revised or amend
+            repins = revised or quantity is not None or price is not None
             if repins:
                 self._open_for_items(order, "an item's reference, quantity and filaments")
             if price is not None and accept:
                 self._not_on_hold(order)
-            designed = reference.reference if reference is not None else item.reference
             if design and designed is None:
                 raise LifecycleError(
                     "colours", f"item {item_id} has no design to colour", unprocessable=True
@@ -1115,9 +1142,17 @@ class Lifecycle:
             if design:
                 assert designed is not None
                 item, _ = self._revise(
-                    conn, order, item, by, reference=designed, colours=slots, output_id=output_id
+                    conn,
+                    order,
+                    item,
+                    by,
+                    reference=designed,
+                    colours=slots,
+                    output_id=output_id,
+                    amend=amend,
                 )
-            if repins:
+            if repins and not revised:
+                # A revision drops the quotes itself; a quantity or price change here.
                 self.store.unaccept_quotes(conn, item.id)
                 fields["status"] = "draft"
             if fields:
