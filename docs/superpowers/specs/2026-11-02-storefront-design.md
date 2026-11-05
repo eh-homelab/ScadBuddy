@@ -57,7 +57,7 @@ uses now.
 Non-goals (this spec): carrier-rate lookup and label printing; tax by region or a tax
 service; coupons; a customer chat thread (the revision answers are the only channel);
 reviews; several shops on one install; the assistant's flow that turns a design
-request into a model (scadsy's work, §5.4 is its input and output only).
+request into a model (its own work; §4.7 gives its input and output only).
 
 Anti-goals, which make it a failure even if it works:
 
@@ -155,7 +155,7 @@ The owner needs each job's real cost, so a test print is recorded on the order
   `attempted`), `accept_fulfilment` and `unfulfil_item`.
 - `test_print` attachments stay on the revision's subject and may name their attempt
   (`order_attachments.fulfilment_id`, nullable).
-- Job costing reads every attempt, test, failed and production; it is scadsy's separate
+- Job costing reads every attempt, test, failed and production; it is a separate
   spec.
 
 ### 4.5 Approval mode
@@ -186,7 +186,7 @@ operation (`library/media_operations.py`); the order's copy stays.
   note, sent time and answer; "New revision" (a render from the item's customizer or a new
   commit, plus photos), "Send to customer", and the approval mode.
 - Agent tools: `order_item_revision_add` (write), `order_item_revision_send` (outward: it
-  tells the customer), and the revisions in `order_get`. scadsy's request-to-model flow
+  tells the customer), and the revisions in `order_get`. The assistant's request-to-model flow
   ends with `order_item_revision_add`.
 
 ## 5. The public site
