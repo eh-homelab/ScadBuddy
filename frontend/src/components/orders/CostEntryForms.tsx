@@ -75,7 +75,15 @@ export function LogTime({ orderId, itemId, onDone }: Scope) {
     setBusy(true)
     setError(null)
     try {
-      await api.addTimeEntry(orderId, { order_item_id: itemId, kind, minutes: count, note: note.trim(), started_at: startedAt })
+      // A timer's entry names its start, so a retry after a lost reply writes once.
+      await api.addTimeEntry(orderId, {
+        order_item_id: itemId,
+        kind,
+        minutes: count,
+        note: note.trim(),
+        started_at: startedAt,
+        source: startedAt ? `timer:${startedAt}` : null,
+      })
       setMinutes('')
       setNote('')
       onDone()

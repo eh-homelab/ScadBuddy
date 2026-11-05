@@ -326,8 +326,9 @@ export const orderTools: Tool[] = [
     description:
       'Record time spent on an order, or on one of its items with `order_item_id`: `design`, `setup`, ' +
       "`post_processing`, `packing` or `other`, in whole minutes. It copies the shop's labour rate now, so a later " +
-      "change never rewrites it, and one entry replaces the item's default labour in order_costs. Allowed in " +
-      'every order status, closed, cancelled and on hold included.',
+      "change never rewrites it, and one entry replaces the item's default labour in order_costs. With `source` " +
+      'a second call with the same kind and source returns the first entry as it was recorded and writes ' +
+      'nothing. Allowed in every order status, closed, cancelled and on hold included.',
     input: z.object({
       order_id: orderId,
       order_item_id: itemId.optional(),
@@ -335,6 +336,11 @@ export const orderTools: Tool[] = [
       minutes: z.number().int().min(1).max(1_000_000),
       note: z.string().max(1000).default(''),
       started_at: datetime.optional(),
+      source: z
+        .string()
+        .regex(/^[a-z_]+:\S{1,200}$/)
+        .optional()
+        .describe('What wrote it, `<kind>:<id>`, so a retry writes once'),
     }),
     risk: 'write',
     routes: ['POST /api/v1/orders/{order_id}/time-entries'],

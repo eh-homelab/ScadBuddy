@@ -149,7 +149,7 @@ _PAYMENT = "id, order_id, amount_minor, method, reference, received_at, notes, c
 _EVENT = "id, order_id, at, by, kind, detail"
 _TIME_ENTRY = (
     "id, order_id, order_item_id, kind, minutes, rate_minor_per_hour, note, started_at,"
-    " created_by, created_at"
+    " source, created_by, created_at"
 )
 _COST_ENTRY = (
     "id, order_id, order_item_id, kind, amount_minor, note, source, created_by, created_at"
@@ -1853,11 +1853,15 @@ class OrderStore:
         *,
         rate_minor_per_hour: int | None,
         created_by: Actor,
-    ) -> TimeEntry:
+    ) -> tuple[TimeEntry, bool]:
+        """The entry, and whether this call wrote it: an entry with the same order, kind
+        and ``source`` already there is returned as it is."""
         row = conn.execute(
             "INSERT INTO order_time_entries (order_id, order_item_id, kind, minutes,"
-            " rate_minor_per_hour, note, started_at, created_by)"
-            f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_TIME_ENTRY}",
+            " rate_minor_per_hour, note, started_at, source, created_by)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT (order_id, kind, source) WHERE source IS NOT NULL DO NOTHING"
+            f" RETURNING {_TIME_ENTRY}",
             (
                 order_id,
                 body.order_item_id,
@@ -1866,12 +1870,30 @@ class OrderStore:
                 rate_minor_per_hour,
                 body.note,
                 body.started_at,
+                body.source,
                 Jsonb(created_by.model_dump(mode="json")),
             ),
         ).fetchone()
-        assert row is not None
+        if row is None:
+            existing = conn.execute(
+                f"SELECT {_TIME_ENTRY} FROM order_time_entries"
+                " WHERE order_id = %s AND kind = %s AND source = %s",
+                (order_id, body.kind, body.source),
+            ).fetchone()
+            assert existing is not None
+            return TimeEntry.model_validate(existing), False
         conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
-        return TimeEntry.model_validate(row)
+        return TimeEntry.model_validate(row), True
+
+    def item_has_entries(self, conn: Conn, item_id: str) -> bool:
+        """Whether a time or cost entry names the item."""
+        row = conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM order_time_entries WHERE order_item_id = %s)"
+            " OR EXISTS (SELECT 1 FROM order_cost_entries WHERE order_item_id = %s) AS has",
+            (item_id, item_id),
+        ).fetchone()
+        assert row is not None
+        return bool(row["has"])
 
     def delete_time_entry(self, conn: Conn, order_id: str, entry_id: str) -> TimeEntry | None:
         row = conn.execute(

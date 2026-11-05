@@ -451,6 +451,8 @@ CostKind = Literal["assistant", "payment_fee", "material", "other"]
 MAX_ENTRY_MINUTES = 1_000_000
 #: The largest cost entry: `order_cost_entries.amount_minor` is a `bigint`.
 MAX_ENTRY_MINOR = 2**63 - 1
+#: An entry's ``source``: ``<writer>:<id>``.
+ENTRY_SOURCE = r"^[a-z_]+:\S{1,200}$"
 
 
 class TimeEntryInput(BaseModel):
@@ -464,6 +466,9 @@ class TimeEntryInput(BaseModel):
     note: str = Field(default="", max_length=1000)
     #: When the timer started, when a timer wrote it.
     started_at: datetime | None = None
+    #: What wrote it (``timer:<started_at>``): one entry per order, kind and source, so
+    #: a retry whose first reply was lost writes once. None for one typed by hand.
+    source: str | None = Field(default=None, pattern=ENTRY_SOURCE)
 
 
 class TimeEntry(TimeEntryInput):
@@ -487,7 +492,7 @@ class CostEntryInput(BaseModel):
     note: str = Field(default="", max_length=1000)
     #: What wrote it (``ai_session:<id>``, ``payment:<id>``): one entry per order, kind
     #: and source, so a writer that runs twice writes once. None for one by hand.
-    source: str | None = Field(default=None, pattern=r"^[a-z_]+:\S{1,200}$")
+    source: str | None = Field(default=None, pattern=ENTRY_SOURCE)
 
 
 class CostEntry(CostEntryInput):

@@ -25,7 +25,7 @@ def test_a_time_entry_is_recorded_with_its_rate_and_audit_row(shop: Shop) -> Non
     order, item = shop.accepted()
     shop.events.clear()
 
-    entry = shop.lifecycle.add_time_entry(
+    entry, _ = shop.lifecycle.add_time_entry(
         order.id,
         TimeEntryInput(order_item_id=item.id, kind="post_processing", minutes=25, note="sand"),
         BY,
@@ -96,10 +96,39 @@ def test_one_source_is_written_once(shop: Shop) -> None:
     assert shop.kinds(order).count("cost.added") == 1
 
 
+def test_a_timer_entry_retried_is_written_once(shop: Shop) -> None:
+    """A lost reply to "Stop timer" is retried with the same source (#5338's review)."""
+    order, _ = shop.accepted()
+    body = TimeEntryInput(kind="setup", minutes=12, source="timer:2026-11-05T10:00:00Z")
+
+    first, written = shop.lifecycle.add_time_entry(order.id, body, BY, rate_minor_per_hour=0)
+    again, again_written = shop.lifecycle.add_time_entry(order.id, body, BY, rate_minor_per_hour=0)
+
+    assert again == first
+    assert (written, again_written) == (True, False)
+    assert len(shop.rows.time_entries(order.id)) == 1
+    assert shop.kinds(order).count("time.added") == 1
+
+
+def test_an_item_with_entries_is_never_deleted(shop: Shop) -> None:
+    """Its logged time and costs stay on the record: the item is cancelled instead."""
+    order = shop.order()
+    item = shop.item(order)
+    shop.lifecycle.add_cost_entry(
+        order.id, CostEntryInput(order_item_id=item.id, kind="material", amount_minor=80), BY
+    )
+
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.delete_item(order.id, item.id, BY)
+
+    assert refused.value.slug == "item_not_draft"
+    assert [e.order_item_id for e in shop.rows.cost_entries(order.id)] == [item.id]
+
+
 def test_a_removal_is_audited_and_an_unknown_entry_is_not_found(shop: Shop) -> None:
     order, item = shop.accepted()
     other, _ = shop.accepted()
-    entry = shop.lifecycle.add_time_entry(
+    entry, _ = shop.lifecycle.add_time_entry(
         order.id,
         TimeEntryInput(order_item_id=item.id, kind="design", minutes=60),
         BY,

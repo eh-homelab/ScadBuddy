@@ -302,6 +302,8 @@ export const handlers = [
     return created(request, () => {
       const order = lock(String(params.id))
       if (body.order_item_id) itemOf(order, body.order_item_id)
+      const same = body.source && state.timeEntries.find((e) => e.order_id === order.id && e.kind === body.kind && e.source === body.source)
+      if (same) return [same, 200]
       const settings = mockSettings()
       const rate =
         order.currency === settings.orders_currency ? Math.round(Number(settings.pricing_labour_rate_per_hour ?? '0') * 10 ** minorExponent(order.currency)) : null
@@ -313,6 +315,7 @@ export const handlers = [
         minutes: body.minutes,
         note: body.note ?? '',
         started_at: body.started_at ?? null,
+        source: body.source ?? null,
         rate_minor_per_hour: rate,
         created_by: BROWSER,
         created_at: now(),

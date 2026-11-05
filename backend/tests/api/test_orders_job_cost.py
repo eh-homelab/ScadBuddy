@@ -44,6 +44,12 @@ def test_time_entries_copy_the_labour_rate_and_count(client: TestClient) -> None
     kinds = [e["kind"] for e in client.get(f"/api/v1/orders/{order_id}/events").json()]
     assert kinds[-2:] == ["time.added", "time.removed"]
 
+    timer = {"kind": "setup", "minutes": 7, "source": "timer:2026-11-05T10:00:00.000Z"}
+    first = client.post(f"/api/v1/orders/{order_id}/time-entries", json=timer)
+    again = client.post(f"/api/v1/orders/{order_id}/time-entries", json=timer)
+    assert (first.status_code, again.status_code) == (201, 200)
+    assert again.json()["id"] == first.json()["id"]
+
 
 def test_cost_entries_on_a_cancelled_order_and_once_per_source(client: TestClient) -> None:
     order_id, _ = accepted_order(client)

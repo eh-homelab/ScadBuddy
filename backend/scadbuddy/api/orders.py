@@ -799,16 +799,23 @@ async def get_order_costs(
         "In any order status, ended and on hold included. The entry copies the labour rate "
         "in force (`pricing_labour_rate_per_hour`) as `rate_minor_per_hour`, so a later "
         "change never rewrites it; for an order in a currency other than the shop's, no "
-        "rate can be copied and it is null. On the audit line as `time.added`."
+        "rate can be copied and it is null. With a `source` (a timer's `timer:<started_at>`), "
+        "a second write of the same order, kind and source returns the first entry as it "
+        "was recorded and writes nothing (200). On the audit line as `time.added`."
     ),
+    responses={status.HTTP_200_OK: {"model": TimeEntry, "description": "Already recorded"}},
 )
 async def add_time_entry(
-    order_id: str, body: TimeEntryInput, orders: OrdersDep, settings: SettingsStoreDep
+    order_id: str,
+    body: TimeEntryInput,
+    orders: OrdersDep,
+    settings: SettingsStoreDep,
+    response: Response,
 ) -> TimeEntry:
     _path(order_id)
     by = current_actor()
 
-    def add() -> TimeEntry:
+    def add() -> tuple[TimeEntry, bool]:
         order = orders.store.order(order_id)
         if order is None:
             raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
@@ -820,7 +827,10 @@ async def add_time_entry(
         )
         return orders.lifecycle.add_time_entry(order_id, body, by, rate_minor_per_hour=rate)
 
-    return await _run(add)
+    entry, written = await _run(add)
+    if not written:
+        response.status_code = status.HTTP_200_OK
+    return entry
 
 
 @router.delete(

@@ -99,7 +99,8 @@ describe('OrderCosts', () => {
   })
 
   it('stops a timer started earlier into one entry, rounded up to the minute', async () => {
-    window.localStorage.setItem(timerKey(ITEM_APPROVED), new Date(Date.now() - 9.5 * 60_000).toISOString())
+    const started = new Date(Date.now() - 9.5 * 60_000).toISOString()
+    window.localStorage.setItem(timerKey(ITEM_APPROVED), started)
     const { user } = renderPage(<Card />)
     const row = await screen.findByRole('row', { name: /Name Keychain/ })
     await user.click(within(row).getByRole('button', { name: /Name Keychain/ }))
@@ -108,6 +109,8 @@ describe('OrderCosts', () => {
 
     await waitFor(() => expect(state.timeEntries.map((e) => e.minutes)).toEqual([10]))
     expect(state.timeEntries[0]!.started_at).not.toBeNull()
+    // Its start names it, so a retry after a lost reply writes once.
+    expect(state.timeEntries[0]!.source).toBe(`timer:${started}`)
     expect(window.localStorage.getItem(timerKey(ITEM_APPROVED))).toBeNull()
     expect(await screen.findAllByRole('button', { name: 'Start timer' })).not.toHaveLength(0)
   })

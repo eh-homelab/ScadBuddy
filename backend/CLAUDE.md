@@ -557,7 +557,9 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   only through `Lifecycle.add_time_entry`/`remove_time_entry`/`add_cost_entry`/`remove_cost_entry`
   in every order status, ended and on hold included (`time.added`, `cost.removed`, … on the
   audit line); a time entry copies `pricing_labour_rate_per_hour` (null outside the shop's
-  currency), and a cost entry's `source` makes a retried writer write once. `orders/costs.py`
+  currency), and an entry's `source` (a timer's `timer:<started_at>`, a writer's id) makes a
+  retry write once (200 with the first entry). An item with entries is never deleted, only
+  cancelled (`delete_item`, `item_not_draft`). `orders/costs.py`
   `order_costs(..., CostRates)` computes on read each attempt's filament and machine cost
   (`estimated`/`unknown` when a figure is not measured), each item's labour (entries, else
   a default), other costs, `revenue_minor`, margin and `margin_state`, and the order's sums

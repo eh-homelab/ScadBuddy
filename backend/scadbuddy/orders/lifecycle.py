@@ -548,14 +548,18 @@ class Lifecycle:
 
     def add_time_entry(
         self, order_id: str, body: TimeEntryInput, by: Actor, *, rate_minor_per_hour: int | None
-    ) -> TimeEntry:
-        """Time spent, at ``rate_minor_per_hour`` (the labour rate now, copied)."""
+    ) -> tuple[TimeEntry, bool]:
+        """Time spent, at ``rate_minor_per_hour`` (the labour rate now, copied), and
+        whether this call wrote it: a second write of one ``source`` returns the first
+        entry and writes nothing, not even an audit row."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             items = self._entry_item(conn, order, body.order_item_id)
-            entry = self.store.insert_time_entry(
+            entry, written = self.store.insert_time_entry(
                 conn, order.id, body, rate_minor_per_hour=rate_minor_per_hour, created_by=by
             )
+            if not written:
+                return entry, False
             self._event(
                 conn,
                 order,
@@ -567,7 +571,7 @@ class Lifecycle:
                 minutes=entry.minutes,
             )
         self._told(_Change(order, [(item, None) for item in items]))
-        return entry
+        return entry, True
 
     def remove_time_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
         with self.store.transaction() as conn:
@@ -1429,6 +1433,15 @@ class Lifecycle:
                 raise LifecycleError(
                     "item_not_draft",
                     f"item {item_id} has print attempts: cancel it instead"
+                    f" (POST /orders/{order_id}/items/{item_id}/cancel)",
+                    items=[item.id],
+                )
+            if self.store.item_has_entries(conn, item.id):
+                # Logged time and costs are the job's record (#5326): never dropped with
+                # the item, and its delete has no audit row for them.
+                raise LifecycleError(
+                    "item_not_draft",
+                    f"item {item_id} has time or cost entries: remove them or cancel it"
                     f" (POST /orders/{order_id}/items/{item_id}/cancel)",
                     items=[item.id],
                 )
