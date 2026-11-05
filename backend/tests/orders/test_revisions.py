@@ -562,3 +562,33 @@ def test_a_copy_changed_behind_its_revision_is_the_next_revision_before_a_send(
     assert revisions[1].colours[0].colour == "#0000ff"
     assert shop.get_item(item).current_revision_id == revisions[1].id
     assert "revision.repaired" in shop.kinds(order)
+
+
+def test_together_accept_with_a_quote_of_another_quantity_is_stale(shop: Shop) -> None:
+    order, item, rev = _quoted_revision(shop)
+    shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    shop.lifecycle.update_item(order.id, item.id, BY, quantity=5)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.answer_revision(
+            order.id, item.id, rev.id, RevisionAnswerInput(answer="accepted"), BY
+        )
+    assert refused.value.slug == "quote_stale"
+    assert shop.rows.revision(rev.id).answer is None  # type: ignore[union-attr]
+    assert not any(q.accepted for q in shop.rows.quotes(item.id))
+
+
+def test_together_accept_of_a_revision_with_no_quote_is_refused(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.lifecycle.update_item(order.id, item.id, BY, approval="design_first")
+    [rev] = shop.rows.revisions(item.id)
+    attach_render(shop, order, item, rev)
+    shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    # Sent design first, without a quote; the mode is then changed to together.
+    shop.lifecycle.update_item(order.id, item.id, BY, approval="together")
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.answer_revision(
+            order.id, item.id, rev.id, RevisionAnswerInput(answer="accepted"), BY
+        )
+    assert refused.value.slug == "revision_not_quoted"
+    assert shop.rows.revision(rev.id).answer is None  # type: ignore[union-attr]
