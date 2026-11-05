@@ -1463,12 +1463,12 @@ function catalogueFilters(params: URLSearchParams): CatalogueQuery {
   }
 }
 
-/** The 422 `GET /models` and `GET /model-facets` answer for `tag`s past what `TagFilter` takes, as sent. */
+/** The 422 `GET /models` and `GET /model-facets` answer for `tag`s `TagFilter` refuses, as sent: too many, empty or too long. */
 function tooManyTags(params: URLSearchParams) {
   const tags = params.getAll('tag')
-  return tags.length > MAX_TAG_FILTERS || tags.some((tag) => [...tag].length > MAX_TAG_FILTER_CHARS)
+  return tags.length > MAX_TAG_FILTERS || tags.some((tag) => tag === '' || [...tag].length > MAX_TAG_FILTER_CHARS)
     ? HttpResponse.json(
-        { detail: `at most ${MAX_TAG_FILTERS} tags, each at most ${MAX_TAG_FILTER_CHARS} characters` },
+        { detail: `at most ${MAX_TAG_FILTERS} tags, each 1 to ${MAX_TAG_FILTER_CHARS} characters` },
         { status: 422 },
       )
     : undefined
