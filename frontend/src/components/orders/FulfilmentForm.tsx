@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ArchiveCopies } from './ArchiveCopies'
+import { EndAttempt } from './EndAttempt'
 import { refusalText } from './refusal'
 
 const OUTCOMES: FulfilmentInput['outcome'][] = ['succeeded', 'partial', 'failed', 'unknown']
@@ -80,6 +81,7 @@ export function FulfilmentForm({
                   </Button>
                 )
               )}
+              {enabled && <EndAttempt orderId={orderId} itemId={itemId} attempt={attempt} made onChanged={onChanged} />}
               {((attempt.print_run_id && attempt.finished_at) || (!attempt.print_run_id && (attempt.archive_ids ?? []).length > 0)) && <ArchiveCopies orderId={orderId} itemId={itemId} attempt={attempt} onChanged={onChanged} />}
             </li>
           ))}

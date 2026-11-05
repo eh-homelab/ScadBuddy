@@ -936,20 +936,25 @@ export const handlers = [
     }
   }),
   http.patch('/api/v1/orders/:id/items/:item/fulfilments/:f', async ({ request, params }) => {
-    const body = (await request.json()) as FulfilmentInput
+    const body = (await request.json()) as FulfilmentInput & Record<string, unknown>
+    const extra = unknownKeys(request, body, ['quantity', 'outcome', 'failure_reason', 'started_at', 'finished_at', 'notes', 'archive_id'])
+    if (extra) return extra
     return transition(request, () => {
       const order = lock(String(params.id))
       notEnded(order)
-      if (!DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)
+      const test = state.fulfilments.find((f) => f.id === params.f)?.purpose === 'test'
+      // `Lifecycle.update_fulfilment`: a test print's attempt (#5280) is settled on an order
+      // not yet accepted too, for an item in any state, and never moves the item.
+      if (!test && !DERIVED.has(order.status)) throw new Refused('order_not_accepted', `order ${order.number} is ${order.status}, not accepted`)
       notOnHold(order)
       const found = itemOf(order, String(params.item))
       const attempt = state.fulfilments.find((f) => f.id === params.f && f.order_item_id === found.id)
       if (!attempt) throw new Refused('fulfilment_not_found', `no attempt ${String(params.f)} of item ${found.id}`, [], true)
       if (attempt.accepted_at) throw new Refused('fulfilment_accepted', `attempt ${attempt.attempt} is accepted`)
-      if (!FULFILLABLE.has(found.status) && !PRINTING.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
+      if (!test && !FULFILLABLE.has(found.status) && !PRINTING.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
       Object.assign(attempt, { quantity: body.quantity, outcome: body.outcome, failure_reason: body.failure_reason ?? null, started_at: body.started_at ?? null, finished_at: body.finished_at ?? null, notes: body.notes ?? '' })
-      const latest = productionOf(found.id).at(-1)!
-      found.status = after(latest, found.status)
+      const latest = productionOf(found.id).at(-1)
+      if (!test && latest) found.status = after(latest, found.status)
       event(order, 'fulfilment.updated', { item_id: found.id, fulfilment_id: attempt.id, attempt: attempt.attempt, outcome: attempt.outcome })
       rederive(order)
       return attempt
