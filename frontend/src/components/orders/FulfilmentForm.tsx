@@ -7,9 +7,8 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ArchiveCopies } from './ArchiveCopies'
 import { EndAttempt } from './EndAttempt'
+import { OUTCOMES } from './outcomes'
 import { refusalText } from './refusal'
-
-const OUTCOMES: FulfilmentInput['outcome'][] = ['succeeded', 'partial', 'failed', 'unknown']
 
 /**
  * Fulfilment attempts by hand (§6.1, plan Ruling 3): the attempts so far, each accepted

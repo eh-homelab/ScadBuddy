@@ -5,14 +5,16 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { OUTCOMES } from './outcomes'
 import { refusalText } from './refusal'
 
-/** The backend's `Outcome` (`orders/models.py`); `unknown` ends an attempt whose result nobody knows. */
-const OUTCOMES: FulfilmentInput['outcome'][] = ['succeeded', 'partial', 'failed', 'unknown']
 
-/** Whether `attempt` is still open: not accepted, and no end recorded with a known outcome. */
+/** Whether `attempt` can be ended now: not accepted, no outcome and no end recorded, and
+ * not a claimed print still starting (its run not attached yet), which
+ * `Lifecycle.update_fulfilment` refuses as `print_starting`. */
 function attemptOpen(attempt: Fulfilment): boolean {
-  return !attempt.accepted_at && attempt.outcome === 'unknown' && attempt.finished_at === null
+  const starting = attempt.print_request_id != null && attempt.print_run_id == null
+  return !attempt.accepted_at && attempt.outcome === 'unknown' && attempt.finished_at === null && !starting
 }
 
 /** `date` as a `datetime-local` value, in the browser's time zone. */
@@ -43,18 +45,29 @@ export function EndAttempt({
 }) {
   const [open, setOpen] = useState(false)
   const [outcome, setOutcome] = useState<FulfilmentInput['outcome']>('succeeded')
-  const [count, setCount] = useState(String(attempt.copies ?? attempt.quantity))
+  const [count, setCount] = useState('')
   const [reason, setReason] = useState('')
-  const [ended, setEnded] = useState(() => localInput(new Date()))
+  const [ended, setEnded] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const name = `End attempt ${attempt.attempt}`
   const id = `end-${attempt.id}`
 
   if (!attemptOpen(attempt)) return null
+  /** The form starts over each time it opens, and the end time is the time it opens: the
+   * drawer may have been open for hours. */
+  function start() {
+    setOutcome('succeeded')
+    setCount(String(attempt.copies ?? attempt.quantity))
+    setReason(attempt.failure_reason ?? '')
+    setEnded(localInput(new Date()))
+    setError(null)
+    setOpen(true)
+  }
+
   if (!open) {
     return (
-      <Button size="xs" variant="outline" onClick={() => setOpen(true)}>
+      <Button size="xs" variant="outline" onClick={start}>
         {name}
       </Button>
     )
@@ -77,7 +90,9 @@ export function EndAttempt({
       await api.updateFulfilment(orderId, itemId, attempt.id, {
         quantity,
         outcome,
-        failure_reason: outcome === 'failed' && reason.trim() ? reason.trim() : null,
+        // The backend takes a failed outcome with no reason; any other outcome keeps the
+        // reason the attempt has.
+        failure_reason: outcome === 'failed' ? reason.trim() || null : attempt.failure_reason,
         started_at: attempt.started_at,
         finished_at: finished.toISOString(),
         notes: attempt.notes,
@@ -123,7 +138,7 @@ export function EndAttempt({
       )}
       {outcome === 'failed' && (
         <div className="flex flex-col gap-1">
-          <Label htmlFor={`${id}-reason`}>Why it failed</Label>
+          <Label htmlFor={`${id}-reason`}>Why it failed (optional)</Label>
           <Input id={`${id}-reason`} className="w-40" value={reason} onChange={(e) => setReason(e.target.value)} />
         </div>
       )}

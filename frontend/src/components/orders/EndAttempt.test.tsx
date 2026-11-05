@@ -47,7 +47,10 @@ function inFlight(itemId: string, extra: Partial<Fulfilment> = {}): Fulfilment {
 // (`print_in_flight`), so the item drawer ends it by hand: its outcome and end time.
 describe('EndAttempt (#5316)', () => {
   beforeEach(() => resetMockState())
-  afterEach(() => vi.restoreAllMocks())
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
 
   it('ends a production print as failed, and the item prints again', async () => {
     inFlight(ITEM_APPROVED)
@@ -60,7 +63,7 @@ describe('EndAttempt (#5316)', () => {
     await user.click(within(attempts).getByRole('button', { name: 'End attempt 1' }))
     const form = await screen.findByRole('form', { name: 'End attempt 1' })
     await choose(user, within(form).getByRole('combobox', { name: 'Outcome' }), 'failed')
-    await user.type(within(form).getByLabelText('Why it failed'), 'spaghetti')
+    await user.type(within(form).getByLabelText('Why it failed (optional)'), 'spaghetti')
     const made = within(form).getByLabelText('Made')
     await user.clear(made)
     await user.type(made, '0')
@@ -88,7 +91,7 @@ describe('EndAttempt (#5316)', () => {
     await user.click(await screen.findByRole('button', { name: 'End attempt 1' }))
     const form = await screen.findByRole('form', { name: 'End attempt 1' })
     expect(within(form).getByLabelText('Made')).toHaveValue('2')
-    expect(within(form).queryByLabelText('Why it failed')).toBeNull()
+    expect(within(form).queryByLabelText('Why it failed (optional)')).toBeNull()
     await user.click(within(form).getByRole('button', { name: 'Save outcome' }))
     await waitFor(() => expect(state.fulfilments.find((f) => f.id === `f-open-${ITEM_APPROVED}`)!.outcome).toBe('succeeded'))
     expect(state.fulfilments.find((f) => f.id === `f-open-${ITEM_APPROVED}`)!.quantity).toBe(2)
@@ -127,6 +130,57 @@ describe('EndAttempt (#5316)', () => {
     state.fulfilments.find((f) => f.id === `f-open-${ITEM_APPROVED}`)!.accepted_at = '2026-11-04T12:00:00Z'
     await user.click(within(form).getByRole('button', { name: 'Save outcome' }))
     expect(await within(form).findByRole('alert')).toHaveTextContent('is accepted')
+  })
+
+  it('takes the end time when the form opens, not when the drawer rendered', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-11-05T08:00:00'))
+    inFlight(ITEM_APPROVED)
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'queued'
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'in_production'
+    const updated = vi.spyOn(api, 'updateFulfilment')
+    const { user } = render(ORDER_ACCEPTED, ITEM_APPROVED)
+    const button = await screen.findByRole('button', { name: 'End attempt 1' })
+    vi.setSystemTime(new Date('2026-11-05T11:30:00'))
+    await user.click(button)
+    let form = await screen.findByRole('form', { name: 'End attempt 1' })
+    expect(within(form).getByLabelText('Ended at')).toHaveValue('2026-11-05T11:30')
+    // Cancel, then open again later: the time and the choices start over.
+    await choose(user, within(form).getByRole('combobox', { name: 'Outcome' }), 'failed')
+    await user.click(within(form).getByRole('button', { name: 'Cancel' }))
+    vi.setSystemTime(new Date('2026-11-05T13:15:00'))
+    await user.click(screen.getByRole('button', { name: 'End attempt 1' }))
+    form = await screen.findByRole('form', { name: 'End attempt 1' })
+    expect(within(form).getByLabelText('Ended at')).toHaveValue('2026-11-05T13:15')
+    expect(within(form).getByRole('combobox', { name: 'Outcome' })).toHaveTextContent('succeeded')
+    await user.click(within(form).getByRole('button', { name: 'Save outcome' }))
+    await waitFor(() => expect(updated).toHaveBeenCalledTimes(1))
+    expect(updated.mock.calls[0]![3].finished_at).toBe(new Date('2026-11-05T13:15:00').toISOString())
+    vi.useRealTimers()
+  })
+
+  it('keeps the reason an attempt has when it ends other than failed', async () => {
+    inFlight(ITEM_APPROVED, { failure_reason: 'clogged once' })
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'queued'
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'in_production'
+    const updated = vi.spyOn(api, 'updateFulfilment')
+    const { user } = render(ORDER_ACCEPTED, ITEM_APPROVED)
+    await user.click(await screen.findByRole('button', { name: 'End attempt 1' }))
+    const form = await screen.findByRole('form', { name: 'End attempt 1' })
+    await choose(user, within(form).getByRole('combobox', { name: 'Outcome' }), 'partial')
+    await user.click(within(form).getByRole('button', { name: 'Save outcome' }))
+    await waitFor(() => expect(updated).toHaveBeenCalledTimes(1))
+    expect(updated.mock.calls[0]![3].failure_reason).toBe('clogged once')
+  })
+
+  it('offers no end while the claimed print is still starting', async () => {
+    // `Lifecycle.update_fulfilment` refuses `print_starting` for a claim with no run yet.
+    inFlight(ITEM_APPROVED, { print_request_id: 'req-1', print_run_id: null })
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'queued'
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'in_production'
+    render(ORDER_ACCEPTED, ITEM_APPROVED)
+    await screen.findByRole('list', { name: 'Attempts' })
+    expect(screen.queryByRole('button', { name: /^End attempt/ })).toBeNull()
   })
 
   it('offers no end for an attempt already ended or accepted', async () => {
