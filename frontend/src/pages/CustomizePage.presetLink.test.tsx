@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Link, Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
@@ -223,9 +223,14 @@ describe('a link to a preset (#1022)', () => {
       answer()
       vi.useRealTimers()
     })
-    let failed!: () => void
-    const answered = new Promise<void>((resolve) => {
-      failed = resolve
+    // Set once msw has sent the 504: the failure is suppressed, so nothing on screen marks it.
+    let answered = false
+    const onAnswer = ({ request }: { request: Request }) => {
+      if (new URL(request.url).pathname.endsWith('/inputs/migrate')) answered = true
+    }
+    server.events.on('response:mocked', onAnswer)
+    onTestFinished(() => {
+      server.events.removeListener('response:mocked', onAnswer)
     })
     server.use(
       http.get('/api/v1/models/name-keychain', () =>
@@ -233,7 +238,6 @@ describe('a link to a preset (#1022)', () => {
       ),
       http.post('/api/v1/models/:slug/inputs/migrate', async () => {
         await stalled
-        setTimeout(failed, 0)
         return HttpResponse.json({ title: 'Gateway Timeout', status: 504, detail: 'late' }, { status: 504 })
       }),
     )
@@ -243,9 +247,11 @@ describe('a link to a preset (#1022)', () => {
     expect(await screen.findByTestId('preset-link-missing')).toHaveTextContent('did not answer in time')
     // Now the migration fails: the link was given up on, so its inputs are not shown.
     answer()
-    await answered
-    await vi.advanceTimersByTimeAsync(1_000)
-    await new Promise((resolve) => setTimeout(resolve, 200))
+    await waitFor(() => expect(answered).toBe(true))
+    // Let the page take the answer in: the response body, then the migration's `then`.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0)
+    })
     expect(screen.queryByRole('textbox', { name: 'Saved inputs' })).toBeNull()
     expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan')
   })
