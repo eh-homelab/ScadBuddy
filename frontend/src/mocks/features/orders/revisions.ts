@@ -234,12 +234,16 @@ export const handlers = [
       const model = mockModels().find((m) => m.slug === revision.reference.slug)
       if (!model) return problem(request, 409, `template '${revision.reference.slug}' was deleted; restore it first`, PROBLEMS + 'template_deleted', { slug: revision.reference.slug })
       const extension = attachment.media_type.split('/')[1] ?? 'bin'
+      const file = `${attachment.sha256}.${extension}`
+      // A copy of this photo already in the gallery is kept, not added again (#5318).
+      const held = (model.media ?? []).some((m) => m.source_revision_id === revision.id && m.file === file)
+      if (held) return HttpResponse.json(model)
       setMockMedia(model.slug, [
         ...(model.media ?? []),
         {
           id: newId('media'),
           kind: attachment.kind === 'video' ? 'video' : 'image',
-          file: `${attachment.sha256}.${extension}`,
+          file,
           content_type: attachment.media_type,
           caption: attachment.caption,
           size: attachment.size_bytes,

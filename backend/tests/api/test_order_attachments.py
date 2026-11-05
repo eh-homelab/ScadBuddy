@@ -523,6 +523,46 @@ def test_an_accepted_revisions_print_photo_joins_the_models_photos(client: TestC
     assert content.status_code == 200  # the order's copy stays
 
 
+def test_a_second_add_to_model_returns_the_existing_copy(client: TestClient) -> None:
+    """#5318: two clicks, each with a key of its own, give one copy in the gallery."""
+    order, item = shop(client)
+    rev, photo = _revision_photo(client, order, item)
+    _answer(client, order, item, rev)
+    path = f"/api/v1/orders/{order['id']}/attachments/{photo}/to-model"
+
+    first = client.post(path, headers={"Idempotency-Key": "first"})
+    second = client.post(path, headers={"Idempotency-Key": "second"})
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    copies = [m for m in second.json()["media"] if m["source_revision_id"] == rev]
+    assert [m["id"] for m in copies] == [first.json()["media"][-1]["id"]]
+    assert second.json()["media"] == first.json()["media"]
+
+
+def test_another_photo_of_the_same_revision_is_a_new_copy(client: TestClient) -> None:
+    order, item = shop(client)
+    rev, photo = _revision_photo(client, order, item)
+    _answer(client, order, item, rev)
+    base = f"/api/v1/orders/{order['id']}/items/{item['id']}/revisions/{rev}/attachments"
+    other = client.post(
+        base,
+        files={"file": ("u.png", png((120, 80)), "image/png")},
+        data={"role": "test_print"},
+        headers=press(),
+    )
+    assert other.status_code == 200, other.text
+
+    for attachment in (photo, other.json()["id"]):
+        added = client.post(
+            f"/api/v1/orders/{order['id']}/attachments/{attachment}/to-model", headers=press()
+        )
+        assert added.status_code == 200, added.text
+
+    copies = [m for m in added.json()["media"] if m["source_revision_id"] == rev]
+    assert len(copies) == 2
+
+
 def test_a_photo_of_a_revision_not_accepted_stays_on_the_order(client: TestClient) -> None:
     order, item = shop(client)
     _, photo = _revision_photo(client, order, item)
