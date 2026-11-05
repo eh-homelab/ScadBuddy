@@ -179,6 +179,10 @@ export const handlers = [
   http.delete('/api/v1/orders/:id/attachments/:a', ({ request, params }) => {
     try {
       const attachment = found(String(params.id), String(params.a))
+      const revision = state.revisions.find((r) => r.id === attachment.revision_id)
+      if (revision && (revision.sent_at != null || revision.answer != null)) {
+        throw new Refused('revision_sent', `revision ${revision.number} was sent to the customer: its files are the record of what they saw`)
+      }
       const item = state.items.find((i) => i.id === attachment.item_id)
       const delivered = item?.delivered_attachment_id === attachment.id
       if (item && delivered) item.delivered_attachment_id = null
@@ -198,6 +202,7 @@ export const handlers = [
       if (id !== null) {
         const attachment = state.attachments.find((a) => a.id === id)
         if (!attachment || attachment.item_id !== item.id) return fieldProblem(request, 'attachment_id', `attachment ${id} is not attached to this item`)
+        if (attachment.revision_id != null) return fieldProblem(request, 'attachment_id', `attachment ${id} is a revision's file, not the delivered object`)
         if (attachment.kind !== 'image' || !SHOWN_IMAGES.has(attachment.media_type)) {
           return fieldProblem(request, 'attachment_id', `attachment ${id} is not an image a browser shows (PNG, JPEG, WebP, GIF or AVIF), so it cannot stand as the item's picture`)
         }

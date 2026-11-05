@@ -482,7 +482,8 @@ async def patch_attachment(
     description=(
         "A mis-upload (Ruling 6): the attachment goes, recorded on the audit line, and "
         "with it an item's delivered mark when it was this one. Its file is freed once "
-        "nothing else holds the same bytes."
+        "nothing else holds the same bytes. 409 `revision_sent` for a file of a design "
+        "revision sent to the customer or answered: it is the record of what they saw."
     ),
 )
 async def delete_attachment(order_id: str, attachment_id: str, orders: OrdersDep) -> Response:
@@ -502,7 +503,7 @@ async def delete_attachment(order_id: str, attachment_id: str, orders: OrdersDep
     description=(
         "Marks one of the item's own image attachments as what was actually delivered "
         "(the item's picture from then on), or with `null` clears the mark. 422 for an "
-        "attachment that is not one of the item's images."
+        "attachment that is not one of the item's images, or is a design revision's file."
     ),
 )
 async def put_delivered(

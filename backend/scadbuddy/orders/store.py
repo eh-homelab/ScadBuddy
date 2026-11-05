@@ -1538,6 +1538,11 @@ class OrderStore:
             " attempt_item_id = NULL WHERE subject = %s",
             (fulfilment_subject(attempt_id),),
         )
+        # A test print's photo stays its revision's, naming no attempt.
+        conn.execute(
+            "UPDATE order_attachments SET fulfilment_id = NULL WHERE fulfilment_id = %s",
+            (attempt_id,),
+        )
         conn.execute("DELETE FROM order_item_fulfilments WHERE id = %s", (attempt_id,))
 
     def runs_newest(self, run_id: str) -> bool:

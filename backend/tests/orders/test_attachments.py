@@ -19,7 +19,7 @@ from scadbuddy.orders.models import (
 from scadbuddy.orders.store import ATTACHMENT_HOLDER, OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import BY, Shop, resolved
+from tests.orders.test_lifecycle import BY, NOW, Shop, resolved
 
 
 @pytest.mark.parametrize(
@@ -194,3 +194,64 @@ def test_deleting_a_draft_item_removes_its_revisions_files_and_holds(
     assert not holders_of(pool, one.id) and not holders_of(pool, two.id)
     removed = [e for e in shop.rows.events(order.id) if e.kind == "attachment.removed"]
     assert {e.detail["attachment_id"] for e in removed} == {one.id, two.id}
+
+
+@pytest.mark.requires_postgres
+def test_a_released_test_claim_leaves_its_photo_on_the_revision(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    claim = shop.lifecycle.claim_print(
+        order.id,
+        item.id,
+        BY,
+        request_id="trial",
+        sliced_sha256=None,
+        sliced_blob_key=None,
+        revision_id=rev.id,
+    )
+    att = attach_to(shop, order, item, rev, role="test_print", fulfilment_id=claim.id)
+    shop.lifecycle.release_print(claim, "refused")
+    [kept] = shop.rows.attachments(order.id)
+    assert kept.id == att.id and kept.revision_id == rev.id and kept.fulfilment_id is None
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize("answer", [None, "changes_requested"])
+def test_a_file_of_a_sent_revision_stays(shop: Shop, answer: str | None) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    att = attach_to(shop, order, item, rev)
+    with shop.rows.transaction() as conn:
+        shop.rows.stamp_revision(conn, rev.id, sent_at=NOW)
+        if answer is not None:
+            shop.rows.stamp_revision(
+                conn, rev.id, answer="changes_requested", answered_at=NOW, answered_by=BY
+            )
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.remove_attachment(order.id, att.id, BY)
+    assert refused.value.slug == "revision_sent" and not refused.value.unprocessable
+    assert [a.id for a in shop.rows.attachments(order.id)] == [att.id]
+
+
+@pytest.mark.requires_postgres
+def test_an_unsent_revisions_file_is_removed(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    att = attach_to(shop, order, item, rev)
+    shop.lifecycle.remove_attachment(order.id, att.id, BY)
+    assert shop.rows.attachments(order.id) == []
+
+
+@pytest.mark.requires_postgres
+def test_a_revisions_file_is_not_the_delivered_picture(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    att = attach_to(shop, order, item, rev)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.set_delivered(order.id, item.id, att.id, BY)
+    assert (refused.value.slug, refused.value.unprocessable) == ("attachment_id", True)
+    assert shop.get_item(item).delivered_attachment_id is None

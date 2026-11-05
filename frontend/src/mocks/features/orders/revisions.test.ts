@@ -166,6 +166,18 @@ describe('revisions mock (#5280)', () => {
     expect(events.some((e) => e.kind === 'revision.amended')).toBe(true)
   })
 
+  it('keeps a sent revision\'s files, and never marks one delivered', async () => {
+    const { revision } = await ready()
+    const render = (await api.order(ORDER_DRAFT)).attachments.find((a) => a.revision_id === revision.id)!
+    const refusedPicture = await failure(api.setItemDelivered(ORDER_DRAFT, ITEM_DRAFT, render.id))
+    expect(refusedPicture?.status).toBe(422)
+    await api.sendOrderItemRevision(ORDER_DRAFT, ITEM_DRAFT, revision.id)
+    const refused = await failure(api.deleteOrderAttachment(ORDER_DRAFT, render.id))
+    expect(refused?.status).toBe(409)
+    expect(refused?.problem.type).toBe(type('revision_sent'))
+    expect((await api.order(ORDER_DRAFT)).attachments.some((a) => a.id === render.id)).toBe(true)
+  })
+
   it('leaves the revision unanswered when its quote has gone stale', async () => {
     const { revision } = await ready()
     await api.sendOrderItemRevision(ORDER_DRAFT, ITEM_DRAFT, revision.id)

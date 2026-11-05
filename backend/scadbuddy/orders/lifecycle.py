@@ -2663,10 +2663,22 @@ class Lifecycle:
 
     def remove_attachment(self, order_id: str, attachment_id: str, by: Actor) -> None:
         """A mis-upload (Ruling 6): the row goes, and with it its hold on the file and
-        the item's delivered mark when it was this one."""
+        the item's delivered mark when it was this one. A file of a revision sent to the
+        customer, or answered, stays (`revision_sent`): it is the record of what they
+        saw."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             attachment = self._attachment_of(conn, order, attachment_id)
+            if attachment.revision_id is not None:
+                revision = self.store.revision(attachment.revision_id, conn=conn)
+                if revision is not None and (
+                    revision.sent_at is not None or revision.answer is not None
+                ):
+                    raise LifecycleError(
+                        "revision_sent",
+                        f"revision {revision.number} was sent to the customer: its files"
+                        " are the record of what they saw",
+                    )
             item = (
                 None
                 if attachment.item_id is None
@@ -2704,6 +2716,14 @@ class Lifecycle:
                     raise LifecycleError(
                         "attachment_id",
                         f"attachment {attachment_id} is not attached to this item",
+                        unprocessable=True,
+                    )
+                if found[0].revision_id is not None:
+                    # A revision's file shows a design, not what was delivered.
+                    raise LifecycleError(
+                        "attachment_id",
+                        f"attachment {attachment_id} is a revision's file, not the delivered"
+                        " object",
                         unprocessable=True,
                     )
                 if found[0].kind != "image" or found[0].media_type not in SHOWN_IMAGES:
