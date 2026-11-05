@@ -2376,6 +2376,26 @@ export const api = {
     return request<LibraryListing>(`/print/library${suffix}`)
   },
 
+  /**
+   * #2290 — one page of a folder's files, in the listing's order, with the tree. `after`
+   * is the last file id of the page before; `fileId` beside a `folderId` stretches the
+   * first page down to that file. `total` is how many files the folder lists.
+   */
+  listLibraryPage: async (
+    query: { folderId: number | null; all: boolean; fileId?: number },
+    page: { limit: number; after?: number },
+  ): Promise<LibraryListing & { total: number }> => {
+    const search = new URLSearchParams({ limit: String(page.limit) })
+    if (query.folderId !== null) search.set('folder_id', String(query.folderId))
+    if (query.fileId !== undefined) search.set('file_id', String(query.fileId))
+    if (query.all) search.set('all', 'true')
+    if (page.after !== undefined) search.set('after', String(page.after))
+    const response = await send(`${API_BASE}/print/library?${search}`, { headers: { Accept: 'application/json' } })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const listing = (await response.json()) as LibraryListing
+    return { ...listing, total: Number(response.headers.get('X-Total-Count') ?? (listing.files ?? []).length) }
+  },
+
   /** #3630 — library files whose name or folder holds every word, from every folder. */
   searchLibrary: (query: { q: string; all: boolean; fresh?: boolean }, signal?: AbortSignal) => {
     const search = new URLSearchParams({ q: query.q })

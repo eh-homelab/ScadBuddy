@@ -4,12 +4,13 @@ import { useLocation } from 'react-router'
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { api } from '../api/client'
 import { libraryFiles, libraryFolders } from '../mocks/features/library'
+import type { LibraryEntry } from '../api/types'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { sharedInFlight } from '../test/inFlight'
 import { NARROW_QUERY } from '../lib/useMediaQuery'
 import { renderPage } from '../test/utils'
-import { LibraryPage } from './LibraryPage'
+import { LIBRARY_PAGE_SIZE, LibraryPage } from './LibraryPage'
 import type * as TraceAction from '../lib/traceAction'
 
 // Each test's actions only (#2892): `toContain` would otherwise pass on an earlier test's.
@@ -70,6 +71,45 @@ function posted(path: string): { bodies: unknown[]; stop: () => void } {
   return { bodies, stop: () => server.events.removeListener('request:start', listen) }
 }
 
+
+/**
+ * #2290 — a top level of `count` files, paged as the backend pages it: `limit`, `after`
+ * (a 409 when `refuse` says so), the first page stretched to a linked `file_id`.
+ */
+function bigTopLevel(count: number, refuse: () => boolean = () => false) {
+  const files: LibraryEntry[] = Array.from({ length: count }, (_, n) => ({
+    id: 5000 + n,
+    filename: `part-${String(n).padStart(3, '0')}.3mf`,
+    file_type: '3mf',
+    folder_id: null,
+    has_thumbnail: false,
+    print_count: 0,
+    printable: true,
+    sliced: false,
+    is_external: false,
+  }))
+  const asked: URLSearchParams[] = []
+  server.use(
+    http.get('/api/v1/print/library', ({ request }) => {
+      const search = new URL(request.url).searchParams
+      asked.push(search)
+      const after = search.get('after')
+      if (after !== null && refuse()) return HttpResponse.json({ detail: 'no file is listed any more to page after' }, { status: 409 })
+      const start = after === null ? 0 : files.findIndex((file) => file.id === Number(after)) + 1
+      const linked = search.get('file_id')
+      let size = Number(search.get('limit') ?? count)
+      if (after === null && linked !== null) size = Math.max(size, files.findIndex((file) => file.id === Number(linked)) + 1)
+      return HttpResponse.json(
+        { folder_id: null, all: false, folders: libraryFolders, files: files.slice(start, start + size), hidden: 0 },
+        { headers: { 'X-Total-Count': String(count) } },
+      )
+    }),
+  )
+  return { files, asked }
+}
+
+const cardCount = () => screen.getAllByTestId(/^library-file-\d+$/).length
+
 describe('LibraryPage', () => {
   beforeEach(() => {
     resetMockState()
@@ -82,6 +122,71 @@ describe('LibraryPage', () => {
     expect(within(card).getByRole('button', { name: /^Print / })).toBeInTheDocument()
     expect(screen.queryByTestId('library-file-104')).toBeNull()
     expect(screen.getByText(/1 more under Advanced/)).toBeInTheDocument()
+  })
+
+  it('reads a large folder a page at a time, with Load more and the total (#2290)', async () => {
+    bigTopLevel(130)
+    const { user } = renderPage(<><LibraryPage /><Where /></>, { route: '/library' })
+    await screen.findByTestId('library-file-5000')
+    expect(cardCount()).toBe(LIBRARY_PAGE_SIZE)
+    expect(screen.getByTestId('library-shown')).toHaveTextContent(`Showing ${LIBRARY_PAGE_SIZE} of 130`)
+    expect(screen.getByRole('button', { name: /^Select all shown/ })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(cardCount()).toBe(2 * LIBRARY_PAGE_SIZE))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(`shown=${2 * LIBRARY_PAGE_SIZE}`))
+
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(cardCount()).toBe(130))
+    expect(screen.getByTestId('library-shown')).toHaveTextContent('Showing 130 of 130')
+    expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
+    expect(screen.getByRole('button', { name: /^Select all in folder/ })).toBeInTheDocument()
+  })
+
+  it('opens with as many files as the URL says were shown, so Back returns to them (#2290)', async () => {
+    const { asked } = bigTopLevel(130)
+    renderPage(<LibraryPage />, { route: `/library?shown=${LIBRARY_PAGE_SIZE + 30}` })
+    await screen.findByTestId('library-file-5000')
+    expect(cardCount()).toBe(LIBRARY_PAGE_SIZE + 30)
+    expect(asked.at(-1)?.get('limit')).toBe(String(LIBRARY_PAGE_SIZE + 30))
+  })
+
+  it('reads the folder again from the top when the last file shown went away (#2290)', async () => {
+    let refused = false
+    const { asked } = bigTopLevel(130, () => {
+      if (refused) return false
+      refused = true
+      return true
+    })
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-5000')
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+
+    await waitFor(() => expect(asked.filter((search) => !search.has('after')).length).toBe(2))
+    await waitFor(() => expect(cardCount()).toBe(LIBRARY_PAGE_SIZE))
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('lists a linked file far down its folder on the first page (#2290)', async () => {
+    bigTopLevel(130)
+    renderPage(<LibraryPage />, { route: '/library?file=5100' })
+    expect(await screen.findByTestId('library-file-5100')).toBeInTheDocument()
+    expect(cardCount()).toBe(101)
+    expect(screen.queryByText(/is not listed here/)).toBeNull()
+  })
+
+  it('filters the folder tree to the folders named so, with their parents (#2290)', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-folder-1')
+    await user.type(screen.getByRole('searchbox', { name: 'Filter folders' }), 'stor')
+
+    const tree = screen.getByRole('tree', { name: 'Library folders' })
+    expect(within(tree).getByRole('treeitem', { name: 'Storage' })).toBeVisible()
+    expect(within(tree).getByRole('treeitem', { name: 'Supplies' })).toBeInTheDocument()
+    expect(within(tree).queryByRole('treeitem', { name: 'MakerWorld' })).toBeNull()
+
+    await user.clear(screen.getByRole('searchbox', { name: 'Filter folders' }))
+    expect(within(tree).getByRole('treeitem', { name: 'MakerWorld' })).toBeInTheDocument()
   })
 
   it('arranges the files ticked, made by ScadBuddy or not (#1864, #1863)', async () => {
@@ -265,13 +370,15 @@ describe('LibraryPage', () => {
     )
   })
 
-  it('renders a folder of hundreds of files with lazy thumbnails', async () => {
+  it('renders a page of a folder of hundreds of files with lazy thumbnails', async () => {
     const { user, container } = renderPage(<LibraryPage />, { route: '/library' })
     await user.click(await screen.findByTestId('library-folder-9'))
-    await waitFor(() => expect(screen.getAllByTestId(/^library-file-/)).toHaveLength(300))
+    // #2290: a page of them at a time, the total beside.
+    await waitFor(() => expect(screen.getAllByTestId(/^library-file-/)).toHaveLength(LIBRARY_PAGE_SIZE))
+    expect(screen.getByTestId('library-shown')).toHaveTextContent(`Showing ${LIBRARY_PAGE_SIZE} of 300`)
     // The thumbnails are decorative (alt=""): the caption names the file.
     const images = Array.from(container.querySelectorAll('img'))
-    expect(images).toHaveLength(300)
+    expect(images).toHaveLength(LIBRARY_PAGE_SIZE)
     expect(images.every((image) => image.getAttribute('loading') === 'lazy')).toBe(true)
   })
 

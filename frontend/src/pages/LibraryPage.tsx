@@ -121,6 +121,20 @@ function plural(count: number, word: string): string {
  * delete. The library is browsed by folder or by project (`?by=project`,
  * `?project=<id>`), each view linking to the other.
  */
+/** #2290 — how many of a folder's files are read at a time. */
+export const LIBRARY_PAGE_SIZE = 60
+/** The most `?shown=` opens with: the backend's page limit. */
+const MAX_SHOWN = 500
+
+/** How many files `?shown=` asks for: at least a page, at most `MAX_SHOWN`. */
+function shownFrom(params: URLSearchParams): number {
+  const asked = Math.floor(Number(params.get('shown')))
+  return Number.isFinite(asked) ? Math.min(MAX_SHOWN, Math.max(LIBRARY_PAGE_SIZE, asked)) : LIBRARY_PAGE_SIZE
+}
+
+/** A folder's listing as read so far, with how many files the folder lists. */
+type Listed = LibraryListing & { total: number }
+
 export function LibraryPage() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -146,10 +160,19 @@ export function LibraryPage() {
   const foldersId = useId()
   // Where focus goes back once a folder is chosen and the tree folds away (#3315).
   const foldersToggle = useRef<HTMLButtonElement>(null)
-  const [listing, setListing] = useState<LibraryListing | null>(null)
+  const [listing, setListing] = useState<Listed | null>(null)
+  // The listing on screen, for a Load more that lands after a read again replaced it.
+  const listingNow = useRef<Listed | null>(null)
+  useEffect(() => {
+    listingNow.current = listing
+  }, [listing])
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [moreError, setMoreError] = useState<string | null>(null)
+  // #2290 — narrows the folder tree to the folders named so, and their parents.
+  const [folderFilter, setFolderFilter] = useState('')
   // #3633 — each folder's last listing, shown at once when it is opened again while it
   // is read afresh. Emptied by a reload, which follows a change made here.
-  const listed = useRef(new Map<string, LibraryListing>())
+  const listed = useRef(new Map<string, Listed>())
   const listedReload = useRef(0)
   const [results, setResults] = useState<LibrarySearch | null>(null)
   const [searchError, setSearchError] = useState<string | null>(null)
@@ -239,8 +262,12 @@ export function LibraryPage() {
     if (wantedKey !== null) setListing(listed.current.get(`${wantedKey}|${advanced}`) ?? null)
     setSlow(false)
     const slowTimer = window.setTimeout(() => setSlow(true), SLOW_MS)
+    setMoreError(null)
+    // #2290 — as many files as the URL says were shown (Back returns to them), and down
+    // to a linked file at least.
+    const linkedFile = ask.fileId ?? linked ?? undefined
     api
-      .listLibrary({ folderId: ask.folderId, fileId: ask.fileId, all: advanced })
+      .listLibraryPage({ folderId: ask.folderId, fileId: linkedFile, all: advanced }, { limit: shownFrom(search) })
       .then((next) => {
         if (!live) return
         setTree(next.folders ?? [])
@@ -267,7 +294,8 @@ export function LibraryPage() {
       live = false
       window.clearTimeout(slowTimer)
     }
-    // `wanted` and `location.search` are read through `wantedKey` and when the answer lands.
+    // `wanted`, `linked`, `search` and `location.search` are read through `wantedKey` and
+    // when the answer lands.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wantedKey, missing, advanced, reload])
 
@@ -510,6 +538,40 @@ export function LibraryPage() {
     setReload((n) => n + 1)
   }
 
+  /** #2290 — the folder's next page, after the last file shown. */
+  async function loadMore() {
+    const from = listing
+    const last = from?.files?.at(-1)
+    if (!from || !last) return
+    setLoadingMore(true)
+    setMoreError(null)
+    try {
+      const next = await api.listLibraryPage(
+        { folderId: from.folder_id ?? null, all: from.all ?? false },
+        { limit: LIBRARY_PAGE_SIZE, after: last.id },
+      )
+      // A read again (a change made here, Advanced) answered meanwhile: its listing stands.
+      if (listingNow.current !== from) return
+      const grown: Listed = { ...next, files: [...(from.files ?? []), ...(next.files ?? [])] }
+      listed.current.set(`folder:${from.folder_id ?? null}|${from.all ?? false}`, grown)
+      setListing(grown)
+      setSearch(
+        (now) => {
+          const kept = new URLSearchParams(now)
+          kept.set('shown', String((grown.files ?? []).length))
+          return kept
+        },
+        { replace: true },
+      )
+    } catch (cause) {
+      // The last file shown went away: the folder is read again from the top.
+      if (cause instanceof ApiError && cause.status === 409) setReload((n) => n + 1)
+      else setMoreError(cause instanceof ApiError ? cause.detail : 'Could not read more files.')
+    } finally {
+      setLoadingMore(false)
+    }
+  }
+
   /** #3650 — Arrange on a folder's printable files, read afresh. */
   async function arrangeFolder(folder: LibraryFolderView) {
     setFolderError(null)
@@ -589,6 +651,7 @@ export function LibraryPage() {
   const listingShown = !searching && showFiles && listing !== null && (listing.folder_id ?? null) === folderId
   const listedPrintable = listingShown ? files.filter((file) => file.printable) : []
   const unpicked = listedPrintable.filter((file) => !isPicked(file))
+  const moreFiles = listingShown && listing !== null && listing.total > files.length
   const linkedMissing = fileParam !== null && listing !== null && !files.some((file) => file.id === fileParam)
 
   /** #3650 — what a folder's menus offer: on right-click, and on its ⋯ button. */
@@ -656,6 +719,18 @@ export function LibraryPage() {
     onDelete: () => setConfirming([file]),
   })
 
+  const folderFilterBox = (
+    <Input
+      type="search"
+      value={folderFilter}
+      onChange={(event) => setFolderFilter(event.target.value)}
+      placeholder="Filter folders"
+      aria-label="Filter folders"
+      data-testid="library-folder-filter"
+      className="mb-2 h-8"
+    />
+  )
+
   const sidebar = byProject ? (
     <LibraryTree
       folders={projects.map((row) => ({ id: row.id, name: row.name, parent_id: null, depth: 0, file_count: row.files }))}
@@ -666,7 +741,16 @@ export function LibraryPage() {
       rootLabel="All projects"
     />
   ) : (
-    <LibraryTree folders={tree ?? []} selected={folderId} onSelect={selectFolder} wrapRow={folderMenu} />
+    <>
+      {folderFilterBox}
+      <LibraryTree
+        folders={tree ?? []}
+        selected={folderId}
+        onSelect={selectFolder}
+        wrapRow={folderMenu}
+        filter={folderFilter}
+      />
+    </>
   )
 
   return (
@@ -718,16 +802,20 @@ export function LibraryPage() {
                       rootLabel="All projects"
                     />
                   ) : (
-                    <LibraryTree
-                      folders={tree}
-                      selected={folderId}
-                      wrapRow={folderMenu}
-                      onSelect={(id) => {
-                        setFoldersOpen(false)
-                        selectFolder(id)
-                        foldersToggle.current?.focus()
-                      }}
-                    />
+                    <>
+                      {folderFilterBox}
+                      <LibraryTree
+                        folders={tree}
+                        selected={folderId}
+                        wrapRow={folderMenu}
+                        filter={folderFilter}
+                        onSelect={(id) => {
+                          setFoldersOpen(false)
+                          selectFolder(id)
+                          foldersToggle.current?.focus()
+                        }}
+                      />
+                    </>
                   )}
               </CollapsibleContent>
             </Collapsible>
@@ -804,8 +892,9 @@ export function LibraryPage() {
                 })
               }
             >
-              {/* What it adds: this folder's unticked files, whatever is ticked elsewhere. */}
-              Select all in folder ({unpicked.length})
+              {/* What it adds: this folder's unticked files, whatever is ticked elsewhere;
+                  only those read so far while the folder has more (#2290). */}
+              {moreFiles ? 'Select all shown' : 'Select all in folder'} ({unpicked.length})
             </Button>
             {picked.length > 0 && (
               <Button size="sm" variant="ghost" onClick={() => setPicked([])}>
@@ -984,6 +1073,23 @@ export function LibraryPage() {
                   <FileCard key={file.id} file={file} {...cardActions(file)} />
                 ))}
               </CardGrid>
+              {listingShown && listing && listing.total > 0 && (moreFiles || files.length > LIBRARY_PAGE_SIZE) && (
+                <div className="flex flex-wrap items-center gap-3">
+                  <p className="sb-num text-xs text-muted-foreground" data-testid="library-shown">
+                    Showing {files.length} of {listing.total}
+                  </p>
+                  {moreFiles && (
+                    <Button size="sm" variant="outline" disabled={loadingMore} onClick={() => void loadMore()}>
+                      {loadingMore ? 'Loading…' : 'Load more'}
+                    </Button>
+                  )}
+                  {moreError && (
+                    <p role="alert" className="text-xs text-destructive">
+                      {moreError}
+                    </p>
+                  )}
+                </div>
+              )}
             </>
           )}
         </section>

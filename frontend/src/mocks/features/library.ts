@@ -231,13 +231,28 @@ export const handlers = [
     const all = search.get('all') === 'true'
     const here = listedFiles().filter((file) => (file.folder_id ?? null) === folderId)
     const files = all ? here : here.filter((file) => file.file_type?.toLowerCase() === '3mf')
-    return HttpResponse.json({
-      folder_id: folderId,
-      all,
-      folders: listedFolders(),
-      files: files.map((file) => ({ ...file, output_id: mockLibraryOutput(file.id) ?? null })),
-      hidden: here.length - files.length,
-    } satisfies LibraryListing)
+    // #2290 — paged as the backend pages it: `limit`, `after` (a file id; one no longer
+    // listed is a 409), the first page stretched down to a linked `file_id`.
+    const limit = search.get('limit')
+    const after = search.get('after')
+    let start = 0
+    if (after !== null) {
+      start = files.findIndex((file) => file.id === Number(after)) + 1
+      if (start === 0) return problem(409, 'Conflict', `no file '${after}' is listed any more to page after; list again without \`after\``)
+    }
+    let size = limit === null ? files.length : Number(limit)
+    if (after === null && linked !== null) size = Math.max(size, files.findIndex((file) => file.id === Number(linked)) + 1)
+    const page = files.slice(start, start + size)
+    return HttpResponse.json(
+      {
+        folder_id: folderId,
+        all,
+        folders: listedFolders(),
+        files: page.map((file) => ({ ...file, output_id: mockLibraryOutput(file.id) ?? null })),
+        hidden: here.length - files.length,
+      } satisfies LibraryListing,
+      { headers: { 'X-Total-Count': String(files.length) } },
+    )
   }),
 
   /** #2167 — to the mocked trash; Bambuddy skips the file another user added. */

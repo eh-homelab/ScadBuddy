@@ -114,7 +114,9 @@ async def list_library(
         folder_id=folder_id,
         all=show_all,
         folders=folder_views(tree),
-        files=[_entry(row) for row in sorted(shown, key=lambda row: row.filename.casefold())],
+        files=[
+            _entry(row) for row in sorted(shown, key=lambda row: (row.filename.casefold(), row.id))
+        ],
         hidden=len(here) - len(shown),
     )
 
