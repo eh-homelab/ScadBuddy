@@ -39,6 +39,7 @@ import {
   type FolderAction,
 } from '../components/library/LibraryFolderDialogs'
 import { MoreMenu, RowContextMenu, type MenuEntry } from '../components/library/LibraryMenus'
+import { LibraryFileDetails } from '../components/library/LibraryFileDetails'
 import { LibraryTree } from '../components/library/LibraryTree'
 import { BatchPrintDialog } from '../components/BatchPrintDialog'
 import { RenameLibraryFileDialog } from '../components/library/RenameLibraryFileDialog'
@@ -126,6 +127,8 @@ type Listed = LibraryListing & { total: number }
  * `/library/<folder path>` the folder, `?file=<id>` a file highlighted (its folder found
  * when the path names none), `?print=<id>` its print dialog open. Back and forward move
  * between them.
+ * #1031 — a card's thumbnail or name opens the file's details (`?details=<id>`, its
+ * folder found as for `?file=`), with the card's actions.
  * #2167 — Delete on a card, or Delete selected, moves files to Bambuddy's trash after a
  * confirmation; Undo restores them from it.
  * #2670 — a card's actions menu (Rename, Copy to…, Move to…), or Copy and Move selected,
@@ -142,6 +145,8 @@ export function LibraryPage() {
   const segments = folderSegments(location.pathname)
   const fileParam = idParam(search.get('file'))
   const printParam = idParam(search.get('print'))
+  /** #1031 — the file whose details are open. */
+  const detailsParam = idParam(search.get('details'))
   /** #2672 — the batch print open, by id: a reload resumes it. */
   const batchParam = search.get('batch')
   // #3630 — the search, kept in the URL so Back returns to its results.
@@ -196,7 +201,7 @@ export function LibraryPage() {
   // folder change until that listing arrives. Comparing with `printParam` here is what
   // makes the held value safe; it never stands in for a link that is not there (#3458).
   const printListed = printParam !== null && seenPrint === printParam
-  const linked = fileParam ?? (printListed ? null : printParam)
+  const linked = fileParam ?? detailsParam ?? (printListed ? null : printParam)
   const [error, setError] = useState<string | null>(null)
   const [reload, setReload] = useState(0)
   const [picked, setPicked] = useState<LibraryEntry[]>([])
@@ -373,6 +378,7 @@ export function LibraryPage() {
         else next.set('q', text)
         next.delete('file')
         next.delete('print')
+        next.delete('details')
         return next
       },
       { replace: searching },
@@ -392,6 +398,20 @@ export function LibraryPage() {
       navigate(-1)
     } else {
       next.delete('print')
+      setSearch(next, { replace: true })
+    }
+  }
+
+  /** #1031 — opens or closes a file's details, as a URL Back returns from. */
+  function openDetails(file: LibraryEntry | null) {
+    const next = new URLSearchParams(search)
+    if (file) {
+      next.set('details', String(file.id))
+      setSearch(next, { state: { detailsOpened: true } })
+    } else if ((location.state as { detailsOpened?: boolean } | null)?.detailsOpened) {
+      navigate(-1)
+    } else {
+      next.delete('details')
       setSearch(next, { replace: true })
     }
   }
@@ -455,9 +475,13 @@ export function LibraryPage() {
     setPicked((now) => now.filter((file) => !gone.has(file.id)))
     setDone(null)
     setDeleted({ result, restoring: false, restored: null, error: null })
-    if (fileParam !== null && gone.has(fileParam)) {
+    const goneParams = (['file', 'details'] as const).filter((name) => {
+      const id = name === 'file' ? fileParam : detailsParam
+      return id !== null && gone.has(id)
+    })
+    if (goneParams.length > 0) {
       const next = new URLSearchParams(search)
-      next.delete('file')
+      for (const name of goneParams) next.delete(name)
       setSearch(next, { replace: true })
     }
     setReload((n) => n + 1)
@@ -621,6 +645,8 @@ export function LibraryPage() {
   const batchable = picked.filter((file) => file.printable)
   const printing =
     printParam === null ? null : ((onScreen?.files ?? []).find((file) => file.id === printParam) ?? null)
+  const detailsFile =
+    detailsParam === null ? null : ((onScreen?.files ?? []).find((file) => file.id === detailsParam) ?? null)
   const folderId = wanted?.fileId !== undefined ? (listing?.folder_id ?? null) : (wanted?.folderId ?? null)
   const folder = folderId === null ? undefined : tree?.find((row) => row.id === folderId)
   // #3631 — the folder's own subfolders, shown beside its files: a folder of folders is
@@ -712,10 +738,11 @@ export function LibraryPage() {
 
   /** What every card does: the same on a folder's files and on search results. */
   const cardActions = (file: LibraryEntry) => ({
-    highlighted: file.id === fileParam,
+    highlighted: file.id === fileParam || file.id === detailsParam,
     picked: isPicked(file),
     actionsDisabled: tree === null,
     onPick: () => togglePicked(file),
+    onOpen: () => openDetails(file),
     onPrint: () => openPrint(file),
     onRename: () => setRenaming(file),
     onTransfer: (mode: TransferMode) => setTransfer({ mode, files: [file] }),
@@ -753,6 +780,37 @@ export function LibraryPage() {
         wrapRow={folderMenu}
         filter={folderFilter}
       />
+    </>
+  )
+
+  // A file's dialogs. While its details are open they are rendered in the drawer's tree:
+  // Radix's non-modal dialogs (ui/dialog) are outside the modal drawer otherwise, and a
+  // click in one would close it (#1031).
+  const fileDialogs = (
+    <>
+      <PrintPicker
+        open={printing !== null || (printArranged && arranged !== null)}
+        source={
+          printing
+            ? { kind: 'library', file: printing }
+            : printArranged && arranged
+              ? { kind: 'output', output: arranged.output }
+              : undefined
+        }
+        onClose={() => (printing ? openPrint(null) : setPrintArranged(false))}
+        // #3651 — an arranged file opens on the project its sources are all in.
+        content={!printing && printArranged ? arranged?.from : undefined}
+        onRan={() => (printing ? undefined : setArrangedSent(true))}
+      />
+      <DeleteLibraryFilesDialog files={confirming} onClose={() => setConfirming([])} onConfirm={deleteFiles} />
+      <TransferLibraryFilesDialog
+        mode={transfer?.mode ?? 'move'}
+        files={transfer?.files ?? []}
+        folders={tree ?? []}
+        onClose={() => setTransfer(null)}
+        onConfirm={transferFiles}
+      />
+      <RenameLibraryFileDialog file={renaming} onClose={() => setRenaming(null)} onConfirm={renameFile} />
     </>
   )
 
@@ -1097,20 +1155,27 @@ export function LibraryPage() {
           )}
         </section>
 
-        <PrintPicker
-          open={printing !== null || (printArranged && arranged !== null)}
-          source={
-            printing
-              ? { kind: 'library', file: printing }
-              : printArranged && arranged
-                ? { kind: 'output', output: arranged.output }
-                : undefined
-          }
-          onClose={() => (printing ? openPrint(null) : setPrintArranged(false))}
-          // #3651 — an arranged file opens on the project its sources are all in.
-          content={!printing && printArranged ? arranged?.from : undefined}
-          onRan={() => (printing ? undefined : setArrangedSent(true))}
-        />
+        {detailsParam !== null && (
+          <LibraryFileDetails
+            // Keyed: each file's drawer captures its own opener for focus return.
+            key={detailsParam}
+            fileId={detailsParam}
+            file={detailsFile}
+            listed={onScreen !== null}
+            advanced={advanced}
+            folders={tree ?? []}
+            // A search result names its folder by path, which the tree may not hold.
+            folderPath={searching ? ((results?.files ?? []).find((row) => row.id === detailsParam)?.folder_path ?? null) : null}
+            actionsDisabled={tree === null}
+            onClose={() => openDetails(null)}
+            onPrint={(file) => openPrint(file)}
+            onRename={(file) => setRenaming(file)}
+            onTransfer={(file, mode) => setTransfer({ mode, files: [file] })}
+            onDelete={(file) => setConfirming([file])}
+            dialogs={fileDialogs}
+          />
+        )}
+        {detailsParam === null && fileDialogs}
         {batchParam !== null && <BatchPrintDialog key={batchParam} batchId={batchParam} onClose={closeBatch} />}
         <ArrangeDialog
           open={arranging !== null}
@@ -1123,16 +1188,7 @@ export function LibraryPage() {
             setArrangedSent(false)
           }}
         />
-        <DeleteLibraryFilesDialog files={confirming} onClose={() => setConfirming([])} onConfirm={deleteFiles} />
         {deleted && <DeletedToast deleted={deleted} onUndo={() => void undo()} onDismiss={() => setDeleted(null)} />}
-        <TransferLibraryFilesDialog
-          mode={transfer?.mode ?? 'move'}
-          files={transfer?.files ?? []}
-          folders={tree ?? []}
-          onClose={() => setTransfer(null)}
-          onConfirm={transferFiles}
-        />
-        <RenameLibraryFileDialog file={renaming} onClose={() => setRenaming(null)} onConfirm={renameFile} />
         <FolderNameDialog
           action={folderAction}
           folders={tree ?? []}
@@ -1631,6 +1687,8 @@ interface FileCardProps {
   picked: boolean
   actionsDisabled: boolean
   onPick: () => void
+  /** #1031 — opens the file's details. */
+  onOpen: () => void
   onPrint: () => void
   onRename: () => void
   onTransfer: (mode: TransferMode) => void
@@ -1644,6 +1702,7 @@ function FileCard({
   picked,
   actionsDisabled,
   onPick,
+  onOpen,
   onPrint,
   onRename,
   onTransfer,
@@ -1669,20 +1728,29 @@ function FileCard({
           )}
         >
           <div className="relative">
-            {file.has_thumbnail ? (
-              <img
-                src={api.libraryThumbnailUrl(file.id)}
-                alt=""
-                loading="lazy"
-                className="aspect-square w-full rounded-lg bg-muted/50 object-contain"
-              />
-            ) : (
-              <div aria-hidden className="grid aspect-square w-full place-items-center rounded-lg bg-muted/50">
-                <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                  {nameParts(file.filename).extension || 'file'}
+            {/* #1031 — the thumbnail opens the file's details. */}
+            <button
+              type="button"
+              onClick={onOpen}
+              aria-label={`Details of ${file.filename}`}
+              data-testid={`library-open-${file.id}`}
+              className="block w-full cursor-pointer rounded-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+            >
+              {file.has_thumbnail ? (
+                <img
+                  src={api.libraryThumbnailUrl(file.id)}
+                  alt=""
+                  loading="lazy"
+                  className="aspect-square w-full rounded-lg bg-muted/50 object-contain"
+                />
+              ) : (
+                <span aria-hidden className="grid aspect-square w-full place-items-center rounded-lg bg-muted/50">
+                  <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+                    {nameParts(file.filename).extension || 'file'}
+                  </span>
                 </span>
-              </div>
-            )}
+              )}
+            </button>
             <Checkbox
               aria-label={`Select ${file.filename}`}
               checked={picked}
@@ -1690,7 +1758,7 @@ function FileCard({
               className="absolute top-2 left-2 bg-background/90 shadow-sm"
             />
           </div>
-          <FileName file={file} />
+          <FileName file={file} onOpen={onOpen} />
           {where}
           <FileFacts file={file} />
           {file.printable ? (
@@ -1744,7 +1812,7 @@ function FileCard({
  * `.gcode.3mf` are badges, so the part that tells two cards apart is never what is cut.
  * The whole name is its tooltip.
  */
-function FileName({ file }: { file: LibraryEntry }) {
+function FileName({ file, onOpen }: { file: LibraryEntry; onOpen: () => void }) {
   const parts = nameParts(file.filename)
   const shown = shortName(parts.stem)
   const badges = [
@@ -1757,17 +1825,21 @@ function FileName({ file }: { file: LibraryEntry }) {
     <div className="min-w-0">
       <Tooltip>
         <TooltipTrigger asChild>
-          <p
+          {/* #1031 — the name opens the details too; one tab stop, the thumbnail's. */}
+          <button
+            type="button"
+            tabIndex={-1}
+            onClick={onOpen}
             data-testid={`library-name-${file.id}`}
             data-filename={file.filename}
             className={cn(
-              'line-clamp-2 text-sm leading-snug font-medium',
+              'line-clamp-2 w-full cursor-pointer text-left text-sm leading-snug font-medium hover:underline',
               // A cut name fills both lines, so its tail is never what the clamp hides.
               shown === parts.stem ? '[overflow-wrap:anywhere]' : 'break-all',
             )}
           >
             {shown}
-          </p>
+          </button>
         </TooltipTrigger>
         <TooltipContent className="break-all">{file.filename}</TooltipContent>
       </Tooltip>
