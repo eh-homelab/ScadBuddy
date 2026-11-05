@@ -165,4 +165,14 @@ describe('RevisionsPanel (#5280)', () => {
     expect(await screen.findByText(/^Test print, attempt 1: /)).toBeInTheDocument()
     expect(state.items.find((i) => i.id === ITEM_DRAFT)!.status).toBe('draft')
   })
+
+  it('offers no delivered mark on a revision image, and no resend once sent', async () => {
+    const first = revisionsOf(ITEM_DRAFT)[0]!
+    await api.addRevisionAttachment(ORDER_DRAFT, ITEM_DRAFT, first.id, photo('render.png'), { role: 'render' })
+    first.sent_at = '2026-10-19T10:00:00Z'
+    render(ORDER_DRAFT, ITEM_DRAFT)
+    await screen.findByRole('listitem', { name: 'render.png' })
+    expect(screen.queryByRole('button', { name: /delivered/i })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Send to customer' })).toBeDisabled()
+  })
 })

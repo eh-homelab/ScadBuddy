@@ -265,7 +265,7 @@ function RevisionRow({
           {files.map((attachment) => (
             <div key={attachment.id} className="flex min-w-0 flex-col gap-1">
               <ul>
-                <AttachmentCard orderId={order.id} itemId={item.id} attachment={attachment} delivered={false} onChanged={onChanged} />
+                <AttachmentCard orderId={order.id} itemId={null} attachment={attachment} delivered={false} onChanged={onChanged} />
               </ul>
               {photos.some((p) => p.id === attachment.id) && (
                 <Button
@@ -285,7 +285,7 @@ function RevisionRow({
                   Add to model photos
                 </Button>
               )}
-              {added === attachment.id && <span className="text-xs text-muted-foreground">Added to the template's photos.</span>}
+              {added === attachment.id && <span role="status" className="text-xs text-muted-foreground">Added to the template's photos.</span>}
             </div>
           ))}
         </div>
@@ -329,7 +329,7 @@ function RevisionRow({
               </Select>
             )}
             <FilePick label="Add render or photo" onPick={(picked) => void upload(picked)} icon={<PaperclipIcon aria-hidden="true" />} accept="image/*,video/*,application/pdf" multiple />
-            <Button size="sm" disabled={busy || revision.answer !== null} onClick={() => void run(() => api.sendOrderItemRevision(order.id, item.id, revision.id), sendRefusal)}>
+            <Button size="sm" disabled={busy || revision.sent_at !== null || revision.answer !== null} onClick={() => void run(() => api.sendOrderItemRevision(order.id, item.id, revision.id), sendRefusal)}>
               Send to customer
             </Button>
             {revision.sent_at && revision.answer === null && (
