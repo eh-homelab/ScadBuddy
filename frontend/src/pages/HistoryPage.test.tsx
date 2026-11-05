@@ -26,7 +26,7 @@ vi.mock('../lib/traceAction', async (importOriginal) => {
   }
   return { ...actual, traceAction }
 })
-import { HISTORY_PAGE_SIZE, HistoryPage } from './HistoryPage'
+import { HISTORY_PAGE_SIZE, HISTORY_READ, HistoryPage } from './HistoryPage'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
 
 // Each test's actions only (#2892): `toContain` would otherwise pass on an earlier test's.
@@ -1179,6 +1179,87 @@ describe('HistoryPage paging (#2290)', () => {
     await waitFor(() => expect(refused).toBe(true))
     await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${seeded() + 30}`)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('reads a window larger than one read may ask for in chunks, and reads it again (#5289 review)', async () => {
+    noPrints()
+    addPaged(30)
+    const total = seeded() + 30
+    const was = HISTORY_READ.limit
+    HISTORY_READ.limit = 25
+    onTestFinished(() => {
+      HISTORY_READ.limit = was
+    })
+    const limits: number[] = []
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        limits.push(limit)
+        // The backend's 422 past its page limit, here the lowered one.
+        return limit > HISTORY_READ.limit ? problem(422, 'Unprocessable Content', 'limit too large') : undefined
+      }),
+    )
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    onTestFinished(() => {
+      vi.useRealTimers()
+    })
+    const realtime = fakeRealtime({ confirm: false })
+    const { user } = render()
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${total}`)
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findAllByText('Paged 30')
+    // Load more's own read of the window again, and a change from elsewhere.
+    await waitFor(() => expect(realtime.following()).toContain('model:name-keychain'))
+    const before = limits.length
+    await realtime.signal('model:name-keychain', 'output.deleted')
+    await waitFor(() => expect(limits.length).toBeGreaterThan(before))
+    await waitFor(() => expect(screen.getByTestId('outputs').children).toHaveLength(total))
+    expect(Math.max(...limits)).toBeLessThanOrEqual(25)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('says a failed read of the history rather than showing a blank page, and tries again', async () => {
+    noPrints()
+    let broken = true
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', () =>
+        broken ? problem(422, 'Unprocessable Content', 'the history could not be read') : undefined,
+      ),
+    )
+    const { user } = render()
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load the history')
+    broken = false
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }))
+    expect(await row('Reagan')).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('keeps Load more when the answer does not say how many there are', async () => {
+    noPrints()
+    const first = outputs.find((o) => o.slug === 'name-keychain')!
+    server.use(
+      // As many as asked for, and no X-Total-Count.
+      http.get('/api/v1/models/name-keychain/outputs', ({ request }) => {
+        const limit = Number(new URL(request.url).searchParams.get('limit'))
+        return HttpResponse.json(
+          Array.from({ length: limit }, (_, n) => ({ ...first, id: `${'cd'.repeat(15)}${String(n).padStart(2, '0')}`, name: `Headerless ${n}` })),
+        )
+      }),
+    )
+    render()
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE}`)
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument()
+  })
+
+  it('writes the count shown again after a delete, so Back opens with what was on screen', async () => {
+    noPrints()
+    addPaged(30)
+    const { user } = render(`/m/name-keychain/history?shown=${HISTORY_PAGE_SIZE + 5}`)
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE + 5} of ${seeded() + 30}`)
+    await user.click(await menuItem(user, await row('Paged 1'), /^Delete/))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /^Delete/ }))
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(`shown=${HISTORY_PAGE_SIZE + 4}`))
   })
 
   it('counts a deleted output out of the total', async () => {

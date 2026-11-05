@@ -1717,7 +1717,10 @@ export const api = {
     const response = await send(`${API_BASE}/models/${seg(slug)}/outputs?${query}`, { headers: { Accept: 'application/json' } })
     if (!response.ok) throw new ApiError(await readProblem(response))
     const items = (await response.json()) as Output[]
-    return { items, total: Number(response.headers.get('X-Total-Count') ?? items.length) }
+    // Without the header a full page cannot tell its end: `Infinity` keeps Load more.
+    const header = response.headers.get('X-Total-Count')
+    const total = header !== null ? Number(header) : page.limit !== undefined && items.length >= page.limit ? Infinity : items.length
+    return { items, total }
   },
 
   getOutput: (id: string) => request<Output>(`/outputs/${seg(id)}`),

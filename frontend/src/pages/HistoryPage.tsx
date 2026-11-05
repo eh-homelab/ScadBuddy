@@ -52,13 +52,40 @@ import { libraryLabel, pinChange } from '../lib/libraryPins'
 
 /** #2290 — how many outputs a page of the history reads. */
 export const HISTORY_PAGE_SIZE = 20
-/** The most `?shown=` opens with: the backend's page limit. */
-const MAX_SHOWN = 500
+/**
+ * The most outputs one read asks for: the backend's `MAX_PAGE_LIMIT`, past which a
+ * `limit` is a 422. A window larger than this is read in chunks (#5289 review). An
+ * object so a test can lower it.
+ */
+export const HISTORY_READ = { limit: 500 }
 
-/** How many outputs `?shown=` asks for: at least a page, at most `MAX_SHOWN`. */
+/** How many outputs `?shown=` asks for: at least a page. */
 function shownFrom(params: URLSearchParams): number {
   const asked = Math.floor(Number(params.get('shown')))
-  return Number.isFinite(asked) ? Math.min(MAX_SHOWN, Math.max(HISTORY_PAGE_SIZE, asked)) : HISTORY_PAGE_SIZE
+  return Number.isFinite(asked) ? Math.max(HISTORY_PAGE_SIZE, asked) : HISTORY_PAGE_SIZE
+}
+
+/**
+ * The newest `size` outputs of `slug`, read in chunks of at most `HISTORY_READ.limit`
+ * that follow `after`. An output that went away between two chunks (409) starts the
+ * read again from the first; a second 409 is the read's error.
+ */
+async function readWindow(slug: string, size: number, retried = false): Promise<{ items: Output[]; total: number }> {
+  const items: Output[] = []
+  let total = 0
+  try {
+    while (items.length < size) {
+      const limit = Math.min(HISTORY_READ.limit, size - items.length)
+      const page = await api.listOutputsPage(slug, { limit, after: items.at(-1)?.id })
+      items.push(...page.items)
+      total = page.total
+      if (page.items.length < limit) break
+    }
+  } catch (cause) {
+    if (!retried && items.length > 0 && cause instanceof ApiError && cause.status === 409) return readWindow(slug, size, true)
+    throw cause
+  }
+  return { items, total }
 }
 
 export function HistoryPage() {
@@ -77,7 +104,7 @@ export function HistoryPage() {
   const outputsState = useAsync(
     () => {
       if (loaded.current.slug !== slug) loaded.current = { slug, size: HISTORY_PAGE_SIZE }
-      return api.listOutputsPage(slug, { limit: loaded.current.size })
+      return readWindow(slug, loaded.current.size)
     },
     [slug],
     [`model:${slug}`],
@@ -91,10 +118,27 @@ export function HistoryPage() {
   })
   const [more, setMore] = useState<{ loading: boolean; error?: Error }>({ loading: false })
 
+  /** `?shown=` as `count`, replacing the entry, so Back opens with what is on screen. */
+  function keepShown(count: number) {
+    setParams(
+      (before) => {
+        const after = new URLSearchParams(before)
+        after.set('shown', String(count))
+        return after
+      },
+      { replace: true },
+    )
+  }
+
   /** The rows with `change` applied, and the total less `removed`. */
   function edit(change: (items: Output[]) => Output[], removed = 0) {
     const current = rows.current ?? { items: [], total: 0 }
-    outputsState.setData({ items: change(current.items), total: Math.max(0, current.total - removed) })
+    const items = change(current.items)
+    outputsState.setData({ items, total: Math.max(0, current.total - removed) })
+    if (removed > 0 && params.has('shown')) {
+      loaded.current = { slug, size: Math.max(HISTORY_PAGE_SIZE, items.length) }
+      keepShown(loaded.current.size)
+    }
   }
 
   async function loadMore() {
@@ -108,14 +152,7 @@ export function HistoryPage() {
       const items = [...page.items, ...next.items.filter((o) => !page.items.some((p) => p.id === o.id))]
       loaded.current = { slug, size: items.length }
       outputsState.setData({ items, total: next.total }, { supersede: true })
-      setParams(
-        (before) => {
-          const after = new URLSearchParams(before)
-          after.set('shown', String(items.length))
-          return after
-        },
-        { replace: true },
-      )
+      keepShown(items.length)
       setMore({ loading: false })
       // A change elsewhere read while this page loaded was superseded: read the whole
       // window again in the background, so it is not lost until the next change.
@@ -216,6 +253,16 @@ export function HistoryPage() {
 
         {loading && <PageLoading label="Loading history" />}
 
+        {/* A failed read is said, never a blank page; with rows still shown, above them. */}
+        {!loading && outputsState.error && (
+          <Card role="alert" className="mb-2 border-destructive/40 bg-destructive/5 px-4 ring-destructive/30">
+            <p className="text-sm text-destructive">Could not load the history: {outputsState.error.message}</p>
+            <Button type="button" size="sm" variant="outline" className="w-fit" onClick={outputsState.reload}>
+              Try again
+            </Button>
+          </Card>
+        )}
+
         {!loading && list?.length === 0 && (
           <Card className="border border-dashed text-center ring-0">
             <CardHeader>
@@ -314,7 +361,9 @@ export function HistoryPage() {
             {outputsState.data && list.length < outputsState.data.total && (
               <div className="mt-4 flex flex-col items-center gap-2">
                 <p className="text-xs text-muted-foreground">
-                  Showing {list.length} of {outputsState.data.total}
+                  {Number.isFinite(outputsState.data.total)
+                    ? `Showing ${list.length} of ${outputsState.data.total}`
+                    : `Showing ${list.length}`}
                 </p>
                 <Button type="button" variant="outline" onClick={() => void loadMore()} disabled={more.loading}>
                   {more.loading ? 'Loading…' : 'Load more'}

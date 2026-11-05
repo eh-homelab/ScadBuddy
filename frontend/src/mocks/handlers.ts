@@ -3026,6 +3026,8 @@ export const handlers = [
     const query = new URL(request.url).searchParams
     const after = query.get('after')
     const limit = query.get('limit')
+    // The backend's `MAX_PAGE_LIMIT`: a larger `limit` is a 422.
+    if (limit !== null && Number(limit) > 500) return problem(422, 'Unprocessable Content', 'limit may be at most 500')
     let start = 0
     if (after !== null) {
       start = listed.findIndex((o) => o.id === after) + 1
