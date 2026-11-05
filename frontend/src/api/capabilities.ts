@@ -12,6 +12,8 @@ import { aiRequest, type PluginTest } from './aiPlugins'
 
 export type Access = 'off' | 'read' | 'write' | 'outward' | 'on'
 export type ItemKind = 'tool' | 'hook' | 'skill' | 'subagent' | 'builtin'
+/** A ScadBuddy tool's loading (#838, agent `harness/toolSearch.ts`): sent on every request, or found by tool search. */
+export type Loading = 'base' | 'searchable'
 
 const TIERS: readonly Access[] = ['off', 'read', 'write', 'outward']
 const SWITCH: readonly Access[] = ['off', 'on']
@@ -52,6 +54,12 @@ export interface ItemView {
   /** One forced access: only for tools colliding on one name. */
   fixed: { access: Access; reason: string } | null
   reason: string | null
+  /**
+   * A ScadBuddy tool's loading (#838): `base` is sent on every request, `searchable` is found by
+   * tool search and callable by name all the same. `null` (or absent) for every other item.
+   */
+  loading?: Loading | null
+  default_loading?: Loading | null
 }
 
 export type SourceKind = 'builtin' | 'remote' | 'package' | 'package_server'
@@ -107,6 +115,8 @@ export const aiCapabilities = {
   setEnabled: (id: string, enabled: boolean) => aiRequest<SourceView>(sourcePath(id), json('PUT', { enabled })),
   setItem: (id: string, item: string, access: Access) => aiRequest<SourceView>(itemPath(id, item), json('PUT', { access })),
   resetItem: (id: string, item: string) => aiRequest<SourceView>(itemPath(id, item), { method: 'DELETE' }),
+  setLoading: (id: string, item: string, loading: Loading) => aiRequest<SourceView>(`${itemPath(id, item)}/loading`, json('PUT', { loading })),
+  resetLoading: (id: string, item: string) => aiRequest<SourceView>(`${itemPath(id, item)}/loading`, { method: 'DELETE' }),
   details: (id: string, item: string) => aiRequest<ItemDetails>(itemPath(id, item)),
   refresh: (id: string) => aiRequest<RefreshResult>(`${sourcePath(id)}/refresh`, { method: 'POST' }),
 }

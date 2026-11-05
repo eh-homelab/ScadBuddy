@@ -18,7 +18,7 @@ from scadbuddy.orders.store import ATTACHMENT_HOLDER
 from scadbuddy.store.cache import StaleBlobError
 from tests.api.test_customers import create as create_customer
 from tests.api.test_orders import AGENT, create_order
-from tests.api.test_orders_lifecycle import add_item
+from tests.api.test_orders_lifecycle import add_item, quote_and_accept
 from tests.api.test_settings_runtime import _state
 from tests.api.test_versions import SLUG, upload
 from tests.support.operations import press
@@ -43,11 +43,17 @@ def attach(
     filename: str,
     *,
     item_id: str | None = None,
+    fulfilment_id: str | None = None,
     role: str | None = None,
     caption: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> Any:
-    path = f"/api/v1/orders/{order_id}" + (f"/items/{item_id}" if item_id else "") + "/attachments"
+    path = (
+        f"/api/v1/orders/{order_id}"
+        + (f"/items/{item_id}" if item_id else "")
+        + (f"/fulfilments/{fulfilment_id}" if fulfilment_id else "")
+        + "/attachments"
+    )
     form = {
         key: value for key, value in (("role", role), ("caption", caption)) if value is not None
     }
@@ -362,3 +368,29 @@ def test_an_upload_while_the_store_moves_is_told_to_wait(
     answer = attach(client, order["id"], PDF, "brief.pdf")
     assert answer.status_code == 503, answer.text
     assert "not on this store's backend" in answer.json()["detail"]
+
+
+def test_a_file_on_an_attempt(client: TestClient) -> None:
+    """#4251: `POST …/items/{item}/fulfilments/{f}/attachments`, listed under its item."""
+    order, item = shop(client)
+    quote_and_accept(client, order["id"], item["id"])
+    assert client.post(f"/api/v1/orders/{order['id']}/accept").status_code == 200
+    attempt = client.post(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}/fulfilments",
+        json={"quantity": 1, "outcome": "succeeded"},
+    ).json()
+
+    added = attach(
+        client, order["id"], png(), "done.png", item_id=item["id"], fulfilment_id=attempt["id"]
+    )
+
+    assert added.status_code == 200, added.text
+    body = added.json()
+    assert body["subject"] == f"order_item_fulfilment:{attempt['id']}"
+    assert (body["item_id"], body["fulfilment_id"]) == (item["id"], attempt["id"])
+    listed = client.get(f"/api/v1/orders/{order['id']}").json()["attachments"]
+    assert [a["fulfilment_id"] for a in listed] == [attempt["id"]]
+    missing = attach(
+        client, order["id"], png(), "done.png", item_id=item["id"], fulfilment_id="nope"
+    )
+    assert missing.status_code == 404, missing.text

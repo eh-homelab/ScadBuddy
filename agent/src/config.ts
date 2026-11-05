@@ -78,8 +78,8 @@ export type Config = {
   agentRole: AgentRole
   /**
    * SCADBUDDY_AUTH_MODE, the backend's own variable (spec 2026-11-01 §9.1): whether a
-   * request to `/api/v1/ai/*` without a signed-in session is only logged (`observe`) or
-   * not looked at (`off`, the default). `enforce` is refused until it exists (plan phase 8).
+   * request to `/api/v1/ai/*` without a signed-in session is refused (`enforce`), only
+   * logged (`observe`) or not looked at (`off`, the default).
    */
   authMode: AuthMode
 }
@@ -152,9 +152,6 @@ function authMode(value: string | undefined): AuthMode {
   if (value === undefined) return 'off'
   const mode = AUTH_MODES.find((m) => m === value)
   if (!mode) throw new ConfigError(`SCADBUDDY_AUTH_MODE must be off, observe or enforce, not ${JSON.stringify(value)}`)
-  if (mode === 'enforce') {
-    throw new ConfigError('SCADBUDDY_AUTH_MODE=enforce is not available yet (#4975 phase 8); use off or observe')
-  }
   return mode
 }
 

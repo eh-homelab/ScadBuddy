@@ -1,8 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
+import type { ModelSummary } from '../api/types'
 import { toSlides } from '../components/media/slides'
 import { BUILTIN_SLUG, GALLERY_SLUG, media, models } from '../mocks/fixtures'
 import { emitRealtime } from '../mocks/realtime'
@@ -59,6 +60,14 @@ function renderCatalogue(route = '/') {
 
 function names(): string[] {
   return screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent ?? '')
+}
+
+/** An empty catalogue: no models, and facets that count none (#2290). */
+function emptyCatalogue() {
+  server.use(
+    http.get('/api/v1/models', () => HttpResponse.json([], { headers: { 'X-Total-Count': '0' } })),
+    http.get('/api/v1/model-facets', () => HttpResponse.json({ total: 0, matched: 0, tags: [] })),
+  )
 }
 
 describe('CataloguePage filters (#276)', () => {
@@ -153,7 +162,7 @@ describe('CataloguePage filters (#276)', () => {
   })
 
   it('shows no filters over an empty catalogue', async () => {
-    server.use(http.get('/api/v1/models', () => HttpResponse.json([])))
+    emptyCatalogue()
     renderCatalogue()
     await screen.findByRole('heading', { name: 'No models yet' })
     expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
@@ -187,7 +196,7 @@ describe('CataloguePage', () => {
   })
 
   it('points at the models folder when there is nothing to show', async () => {
-    server.use(http.get('/api/v1/models', () => HttpResponse.json([])))
+    emptyCatalogue()
     renderPage(<CataloguePage />)
 
     expect(await screen.findByRole('heading', { name: 'No models yet' })).toBeInTheDocument()
@@ -277,7 +286,7 @@ describe('CataloguePage', () => {
   })
 
   it('offers an import from the empty state too', async () => {
-    server.use(http.get('/api/v1/models', () => HttpResponse.json([])))
+    emptyCatalogue()
     renderPage(<CataloguePage />)
 
     await screen.findByRole('heading', { name: 'No models yet' })
@@ -1054,5 +1063,123 @@ describe('CataloguePage list mode (#278)', () => {
     const builtin = rowOf('Keychain Template')
     expect(within(builtin).getByRole('img', { name: 'Keychain Template' })).toBeInTheDocument()
     expect(within(builtin).queryByRole('button', { name: /^View media/ })).not.toBeInTheDocument()
+  })
+})
+
+describe('CataloguePage pages on the server (#2290)', () => {
+  const many: ModelSummary[] = Array.from({ length: 30 }, (_, n) => ({
+    ...(models[0] as ModelSummary),
+    slug: `model-${String(n).padStart(2, '0')}`,
+    name: `Model ${String(n).padStart(2, '0')}`,
+    upstream: null,
+    upstream_state: null,
+  }))
+
+  /** `GET /models` over `items()` as the backend windows it, recording each query. */
+  function serve(items: () => ModelSummary[], queries: URLSearchParams[] = []) {
+    server.use(
+      http.get('/api/v1/models', ({ request }) => {
+        const query = new URL(request.url).searchParams
+        queries.push(query)
+        const all = items()
+        const after = query.get('after')
+        const start = after === null ? 0 : all.findIndex((m) => m.slug === after) + 1
+        if (after !== null && start === 0) return HttpResponse.json({ detail: 'gone' }, { status: 409 })
+        const limit = query.get('limit')
+        const window = all.slice(start, limit === null ? undefined : start + Number(limit))
+        return HttpResponse.json(window, { headers: { 'X-Total-Count': String(all.length) } })
+      }),
+      http.get('/api/v1/model-facets', () =>
+        HttpResponse.json({ total: items().length, matched: items().length, tags: [] }),
+      ),
+    )
+    return queries
+  }
+
+  const cards = () => document.querySelectorAll('[data-model-card]').length
+
+  it('reads a page, and Load more reads the next after the last model shown', async () => {
+    const queries = serve(() => many)
+    const { user } = renderCatalogue('/?q=model&tag=a&sort=name')
+    await screen.findByRole('link', { name: 'Model 23' })
+    expect(cards()).toBe(24)
+    expect(screen.getByText('Showing 24 of 30')).toBeInTheDocument()
+    expect(queries[0]?.get('q')).toBe('model')
+    expect(queries[0]?.getAll('tag')).toEqual(['a'])
+    expect(queries[0]?.get('sort')).toBe('name')
+    expect(queries[0]?.get('limit')).toBe('24')
+
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findByRole('link', { name: 'Model 29' })
+    expect(cards()).toBe(30)
+    expect(queries.map((q) => q.get('after')).filter(Boolean)).toEqual(['model-23'])
+    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
+  })
+
+  it('reads as many as are shown again when the catalogue changes', async () => {
+    const queries = serve(() => many)
+    const { user } = renderCatalogue()
+    await screen.findByRole('link', { name: 'Model 00' })
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findByRole('link', { name: 'Model 29' })
+    const before = queries.length
+    emitRealtime('model.updated', ['models'], { slug: 'model-00' })
+    await waitFor(() => expect(queries.length).toBeGreaterThan(before))
+    expect(queries.at(-1)?.get('limit')).toBe('30')
+    expect(queries.at(-1)?.has('after')).toBe(false)
+  })
+
+  it('starts again from the first page when the last model shown went away', async () => {
+    let served = many
+    const queries = serve(() => served)
+    const { user } = renderCatalogue()
+    await screen.findByRole('link', { name: 'Model 23' })
+    served = many.filter((m) => m.slug !== 'model-23')
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'Model 23' })).not.toBeInTheDocument())
+    expect(queries.at(-1)?.has('after')).toBe(false)
+    expect(queries.at(-1)?.get('limit')).toBe('24')
+  })
+
+  it('keeps a change whose read was in flight while Load more read (#5286 review)', async () => {
+    let served = many
+    serve(() => served)
+    let slow = false
+    let started = false
+    // Falls through to `serve` once it has waited: the change's read answers after Load more's.
+    server.use(
+      http.get('/api/v1/models', async ({ request }) => {
+        if (!slow || new URL(request.url).searchParams.has('after')) return undefined
+        slow = false
+        started = true
+        await delay(400)
+        return undefined
+      }),
+    )
+    const { user } = renderCatalogue()
+    await screen.findByRole('link', { name: 'Model 23' })
+    served = many.map((m) => (m.slug === 'model-00' ? { ...m, name: 'Renamed 00' } : m))
+    slow = true
+    emitRealtime('model.updated', ['models'], { slug: 'model-00' })
+    await waitFor(() => expect(started).toBe(true))
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findByRole('link', { name: 'Model 29' })
+    expect(await screen.findByRole('link', { name: 'Renamed 00' })).toBeInTheDocument()
+    expect(cards()).toBe(30)
+  })
+
+  it('names an upstream that is not on the page shown', async () => {
+    const copy: ModelSummary = {
+      ...(many[0] as ModelSummary),
+      slug: 'a-copy',
+      name: 'A copy',
+      upstream: { id: 'far-away', path: 'far-away', base: null },
+    }
+    serve(() => [copy])
+    server.use(
+      http.get('/api/v1/models/far-away', () => HttpResponse.json({ ...(many[1] as object), slug: 'far-away', name: 'Far Away' })),
+    )
+    renderCatalogue()
+    await waitFor(() => expect(screen.getByTestId('duplicated-from')).toHaveTextContent('Duplicated from Far Away'))
   })
 })

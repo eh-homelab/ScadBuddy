@@ -111,7 +111,7 @@ def test_anything_but_svg_or_png_is_refused(client: TestClient) -> None:
         headers=press(),
     )
     assert response.status_code == 422
-    assert "only SVG and PNG" in response.json()["detail"]
+    assert "only SVG, PNG, STL, 3MF and OBJ" in response.json()["detail"]
 
 
 def test_an_oversized_file_is_refused(client: TestClient) -> None:
@@ -698,3 +698,40 @@ def test_a_sweep_stopped_while_it_read_its_references_removes_nothing(
         config=SimpleNamespace(asset_sweep_grace=0),
     )
     assert sweep_assets(state, stop) == []  # type: ignore[arg-type]
+
+
+def test_a_mesh_is_uploaded_with_its_shape_and_previewed(client: TestClient) -> None:
+    """#959: an STL, 3MF or OBJ is stored as its triangles, with a picture of it."""
+    import trimesh
+
+    from scadbuddy.meshmodel.ingest import part_mesh_3mf
+
+    box = trimesh.creation.box(extents=(10.0, 20.0, 30.0))
+    obj = "".join(f"v {x} {y} {z}\n" for x, y, z in box.vertices)
+    obj += "".join(f"f {a + 1} {b + 1} {c + 1}\n" for a, b, c in box.faces)
+    for name, data, kind in (
+        ("box.3mf", part_mesh_3mf(box), "3mf"),
+        ("box.obj", obj.encode(), "obj"),
+    ):
+        meta = _upload(client, data, name)
+        assert (meta["kind"], meta["triangles"]) == (kind, 12)
+        assert meta["bounds"] == [-5.0, -10.0, -15.0, 5.0, 10.0, 15.0]
+        base = f"/api/v1/models/{MODEL_SLUG}/assets/{meta['id']}"
+        content = client.get(f"{base}/content")
+        assert content.headers["content-type"] == f"model/{kind}"
+        preview = client.get(f"{base}/preview")
+        assert preview.status_code == 200
+        assert preview.headers["content-type"] == "image/png"
+        assert Image.open(io.BytesIO(preview.content)).size == (256, 256)
+    svg = _upload(client, HEART_SVG)
+    assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{svg['id']}/preview").status_code == 404
+
+
+def test_a_mesh_that_cannot_be_read_is_refused_with_why(client: TestClient) -> None:
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets",
+        files={"file": ("bad.obj", b"v 0 0 0\nv 1 0 0\nf 1 2 3\n", "application/octet-stream")},
+        headers=press(),
+    )
+    assert response.status_code == 422
+    assert "vertex" in response.json()["detail"]

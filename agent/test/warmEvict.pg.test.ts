@@ -3,12 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AccessStore } from '../src/access/store.js'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
+import { TOOL_LOADING_KEY } from '../src/harness/toolSearch.js'
 import { SETTING_RECALL_MAX_QUERY_CHARS } from '../src/memory/hindsight.js'
 import { PluginStore } from '../src/plugins/registry.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { forgetSubject } from '../src/sessions/forget.js'
 import { SETTING_MODEL, SETTING_SESSION_BUDGET_USD, type SessionManager } from '../src/sessions/manager.js'
 import { evictOnNotify, evictsWarmOnWrite, WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
+import { TURN_KEYS } from '../src/sessions/turnSettings.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { agentA, browser, manager, scriptedRunner, tempPaths } from './support/sessions.js'
 import { AGENT_SESSIONS_SKIP, agentSessions } from './support/agentSessions.js'
@@ -38,7 +40,7 @@ describe('evictOnNotify', () => {
 
 describe('evictsWarmOnWrite', () => {
   it('names every Settings key a turn is assembled by, and no other', () => {
-    for (const key of [SETTING_MODEL, SETTING_RECALL_MAX_QUERY_CHARS]) {
+    for (const key of [SETTING_MODEL, SETTING_RECALL_MAX_QUERY_CHARS, ...TURN_KEYS, TOOL_LOADING_KEY]) {
       expect(evictsWarmOnWrite(key), key).toBe(true)
     }
     // The tool-access switches are ai_access rows now; an ai_access write sends its own eviction (#4828).

@@ -30,7 +30,8 @@ class DefinitionSummary(BaseModel):
     id: str
     name: str
     version: int
-    #: The version's commit in `data/flows`; None for one not yet backfilled there.
+    #: The version's commit in `data/flows`; None only on a row written before flows
+    #: were in git that no backfill reached (its script is unread since #5139).
     commit: str | None = None
     #: Seconds an outward call of its runs waits for a decision: None takes the global
     #: setting, 0 is never. A run may override it.
@@ -69,9 +70,7 @@ class Definition(DefinitionSummary):
 
 
 class StoredDefinition(DefinitionSummary):
-    """A version's row: ``script`` only on a row written before flows were in git."""
-
-    script: str | None = None
+    """A version's row; its script is in git at its commit."""
 
 
 class FlowVersion(BaseModel):
@@ -99,17 +98,6 @@ class FlowDiff(BaseModel):
     base: str
     head: str
     patch: str
-
-
-class BackfillRow(BaseModel):
-    """A version written before flows were in git, still to be committed (#2503)."""
-
-    id: str
-    name: str
-    version: int
-    script: str
-    created_by: dict[str, Any]
-    created_at: datetime
 
 
 class Run(BaseModel):

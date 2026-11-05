@@ -788,6 +788,7 @@ const outputsSeed: Omit<Output, 'failed_before_queueing'>[] = [
     job_id: 'b'.repeat(32),
     created_at: '2026-09-21T19:31:00Z',
     has_thumbnail: true,
+    sent_to_bambuddy: true,
     params: {
       name: 'Reagan',
       font: 'Liberation Sans:style=Bold',
@@ -832,6 +833,7 @@ const outputsSeed: Omit<Output, 'failed_before_queueing'>[] = [
     job_id: 'd'.repeat(32),
     created_at: '2026-09-20T11:22:00Z',
     has_thumbnail: false,
+    sent_to_bambuddy: false,
     params: {
       name: 'Nova',
       font: 'Liberation Sans:style=Bold',
@@ -867,6 +869,7 @@ const outputsSeed: Omit<Output, 'failed_before_queueing'>[] = [
     job_id: 'f'.repeat(32),
     created_at: '2026-09-18T09:03:00Z',
     has_thumbnail: false,
+    sent_to_bambuddy: false,
     params: {
       name: 'Workshop',
       font: 'DejaVu Sans:style=Bold',
@@ -1026,7 +1029,7 @@ export const settingsApplies: NonNullable<Settings['applies']> = {
 }
 
 /** `asset_fetch.py` `DEFAULT_ASSET_FETCH_DOMAINS`: what a stored `null` resolves to. */
-export const DEFAULT_ASSET_FETCH_DOMAINS = ['game-icons.net', 'github.com', 'raw.githubusercontent.com', 'openmoji.org']
+export const DEFAULT_ASSET_FETCH_DOMAINS = ['game-icons.net', 'github.com', 'raw.githubusercontent.com', 'openmoji.org', 'api.iconify.design']
 
 export const settings: Settings = {
   ...settingsDefaults,

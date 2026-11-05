@@ -30,6 +30,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -48,8 +49,9 @@ from lxml import etree
 from PIL import Image, UnidentifiedImageError
 from psycopg import Connection
 from psycopg.rows import DictRow
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, DataPaths
 from scadbuddy.library.catalogue import THUMBNAIL_NAME
@@ -59,13 +61,13 @@ from scadbuddy.render.solids import WRAPPER_PREFIX
 
 logger = logging.getLogger(__name__)
 
-AssetKind = Literal["svg", "png"]
+AssetKind = Literal["svg", "png", "stl", "3mf", "obj"]
 
 ASSET_ID_PATTERN = r"^[0-9a-f]{64}$"
 ASSET_ID_RE = re.compile(ASSET_ID_PATTERN)
 #: A stored blob's file name: the id and the kind, nothing else. A write's temporary
 #: file never matches.
-_BLOB_RE = re.compile(r"^([0-9a-f]{64})\.(svg|png)$")
+_BLOB_RE = re.compile(r"^([0-9a-f]{64})\.(svg|png|stl|3mf|obj)$")
 #: The metadata sidecar the file-based store kept beside each blob: a leftover (#591).
 _SIDECAR_RE = re.compile(r"^[0-9a-f]{64}\.json$")
 #: The store's advisory lock, hashed as the preset store hashes its own: held only
@@ -82,15 +84,17 @@ def asset_lock_key(asset_id: str) -> str:
 _LOCK_XACT = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 _LOCK_SESSION = "SELECT pg_advisory_lock(hashtextextended(%s, 0))"
 _UNLOCK_SESSION = "SELECT pg_advisory_unlock(hashtextextended(%s, 0))"
-_SELECT_META = "SELECT id, name, kind, size, width, height FROM assets WHERE id = %s"
+#: Every column `AssetMeta` reads.
+_META_COLUMNS = (
+    "id, name, kind, size, width, height, view_box, path_count, source_url, licence,"
+    " triangles, bounds"
+)
+_SELECT_META = f"SELECT {_META_COLUMNS} FROM assets WHERE id = %s"
 #: The sweep's candidates among the rows: those last used before the cutoff, read
 #: through the `assets_last_used` index.
 STALE_ROWS = "SELECT id FROM assets WHERE last_used_at < %s"
 _ROWS_AMONG = "SELECT id FROM assets WHERE id = ANY(%s)"
-_MARK_USED = (
-    "UPDATE assets SET last_used_at = %s WHERE id = %s"
-    " RETURNING id, name, kind, size, width, height"
-)
+_MARK_USED = f"UPDATE assets SET last_used_at = %s WHERE id = %s RETURNING {_META_COLUMNS}"
 #: Anything in a reference source that could be an asset id. Deliberately looser than
 #: "the value of a `file` parameter": a sweep that keeps an asset it need not is
 #: harmless, one that misses a reference destroys an output's provenance. Matching
@@ -107,7 +111,18 @@ MAX_PNG_PIXELS = 25_000_000
 #: How much of the original file name is kept for display.
 MAX_NAME_CHARS = 200
 
-MEDIA_TYPES: dict[AssetKind, str] = {"svg": "image/svg+xml", "png": "image/png"}
+#: The mesh types are IANA's (https://www.iana.org/assignments/media-types/model/).
+MEDIA_TYPES: dict[AssetKind, str] = {
+    "svg": "image/svg+xml",
+    "png": "image/png",
+    "stl": "model/stl",
+    "3mf": "model/3mf",
+    "obj": "model/obj",
+}
+#: What an `<img>` can show; a mesh's picture is its preview (`meshes.preview_png`).
+IMAGE_KINDS: tuple[AssetKind, ...] = ("svg", "png")
+#: The refusal of anything else, sniffed.
+UNSUPPORTED = "only SVG, PNG, STL, 3MF and OBJ files can be attached"
 
 #: Files in a model's directory that are never offered as samples: the catalogue's
 #: cover image is a PNG beside every model, not a picture for its parameters.
@@ -145,7 +160,7 @@ _UNSAFE_TEXT = re.compile(r"@import|javascript:|expression\(", re.IGNORECASE)
 
 
 class AssetRejectedError(ValueError):
-    """The upload is not an SVG or PNG this store will keep."""
+    """The upload is not an SVG, PNG, STL, 3MF or OBJ this store will keep."""
 
 
 class AssetUnavailableError(ValueError):
@@ -185,6 +200,19 @@ class AssetQuotaError(Exception):
         self.usage = usage
 
 
+class AssetLicence(BaseModel):
+    """The licence a fetch said its file is under (#959), as given: nothing checks it."""
+
+    #: Its SPDX identifier (https://spdx.org/licenses/), e.g. ``CC-BY-4.0``.
+    spdx: str | None = Field(default=None, max_length=100)
+    #: Its name as the source writes it, e.g. ``CC BY 4.0``.
+    name: str | None = Field(default=None, max_length=200)
+    #: Where its text is.
+    url: str | None = Field(default=None, max_length=2048)
+    #: Whom to credit.
+    author: str | None = Field(default=None, max_length=200)
+
+
 class AssetMeta(BaseModel):
     #: The SHA-256 of the stored bytes (after sanitising), hex.
     id: str
@@ -194,6 +222,40 @@ class AssetMeta(BaseModel):
     size: int
     width: int | None = None
     height: int | None = None
+    #: An SVG's ``viewBox``: min-x, min-y, width and height, in its user units (#959).
+    #: ``None`` for a PNG, an SVG without one, and one that is not four numbers with a
+    #: positive size.
+    view_box: list[float] | None = None
+    #: How many ``<path>`` elements an SVG keeps after sanitising (#959).
+    path_count: int | None = None
+    #: The URL a fetched asset came from, without its query (#959); ``None`` for an
+    #: upload. Content stored twice keeps the first source it was given.
+    source_url: str | None = None
+    #: The licence its fetch named (#959).
+    licence: AssetLicence | None = None
+    #: A mesh's triangle count (#959).
+    triangles: int | None = None
+    #: A mesh's bounding box (#959): min x, y, z, then max x, y, z, in its units.
+    bounds: list[float] | None = None
+
+
+def _meta_values(meta: AssetMeta) -> tuple[object, ...]:
+    """``meta`` in :data:`_META_COLUMNS`'s order, for an insert."""
+    licence = None if meta.licence is None else Jsonb(meta.licence.model_dump())
+    return (
+        meta.id,
+        meta.name,
+        meta.kind,
+        meta.size,
+        meta.width,
+        meta.height,
+        meta.view_box,
+        meta.path_count,
+        meta.source_url,
+        licence,
+        meta.triangles,
+        meta.bounds,
+    )
 
 
 def display_name(filename: str | None, kind: AssetKind) -> str:
@@ -278,6 +340,26 @@ def sanitise_svg(data: bytes) -> bytes:
     return cleaned
 
 
+_VIEW_BOX_SPLIT = re.compile(r"[\s,]+")
+
+
+def svg_shape(data: bytes) -> tuple[list[float] | None, int]:
+    """A sanitised SVG's ``viewBox`` and its count of ``<path>`` elements (#959)."""
+    parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
+    root = etree.fromstring(data, parser)
+    paths = sum(1 for element in root.iter() if _local(element.tag) == "path")
+    raw = root.get("viewBox") or ""
+    try:
+        numbers = [float(part) for part in _VIEW_BOX_SPLIT.split(raw.strip()) if part]
+    except ValueError:
+        return None, paths
+    if len(numbers) != 4 or not all(math.isfinite(n) for n in numbers):
+        return None, paths
+    if numbers[2] <= 0 or numbers[3] <= 0:
+        return None, paths
+    return numbers, paths
+
+
 #: In Pillow's ValueErrors for its PNG metadata limits, what tells them from another
 #: ValueError: a text or ICC chunk over ``PngImagePlugin.MAX_TEXT_CHUNK`` once
 #: decompressed (``_safe_zlib_decompress``), and text chunks over ``MAX_TEXT_MEMORY`` in
@@ -346,7 +428,13 @@ def sniff(data: bytes) -> AssetKind:
     head = data[:4096].lstrip(b"\xef\xbb\xbf \t\r\n")
     if head.startswith(b"<") and b"<svg" in data[:65536]:
         return "svg"
-    raise AssetRejectedError("only SVG and PNG files can be attached")
+    # Here, not at the top: the mesh readers import the render, which imports this.
+    from scadbuddy.library.meshes import looks_like_mesh
+
+    mesh = looks_like_mesh(data)
+    if mesh is not None:
+        return mesh
+    raise AssetRejectedError(UNSUPPORTED)
 
 
 class AssetStoreUnavailableError(RuntimeError):
@@ -497,17 +585,40 @@ class AssetStore:
                 raise AssetNotFoundError(asset_id)
         return meta
 
-    def put(self, data: bytes, filename: str | None) -> AssetMeta:
-        """Validate, sanitise and store an upload; the same content is stored once."""
+    def put(
+        self,
+        data: bytes,
+        filename: str | None,
+        *,
+        source_url: str | None = None,
+        licence: AssetLicence | None = None,
+    ) -> AssetMeta:
+        """Validate, sanitise and store an upload; the same content is stored once.
+
+        ``source_url`` and ``licence`` are a fetch's (#959): a later upload of the same
+        content without them keeps the ones stored. The answer is the row as stored."""
         if len(data) > MAX_ASSET_BYTES:
             raise AssetRejectedError(f"the file is larger than {MAX_ASSET_BYTES} bytes")
         kind = sniff(data)
         width: int | None = None
         height: int | None = None
+        view_box: list[float] | None = None
+        path_count: int | None = None
+        triangles: int | None = None
+        bounds: list[float] | None = None
         if kind == "png":
             stored, width, height = normalise_png(data)
-        else:
+        elif kind == "svg":
             stored = sanitise_svg(data)
+            view_box, path_count = svg_shape(stored)
+        else:
+            from scadbuddy.library.meshes import MeshRejectedError, normalise_mesh
+
+            try:
+                mesh = normalise_mesh(kind, data)
+            except MeshRejectedError as error:
+                raise AssetRejectedError(str(error)) from None
+            stored, triangles, bounds = mesh.data, mesh.triangles, mesh.bounds
         meta = AssetMeta(
             id=hashlib.sha256(stored).hexdigest(),
             name=display_name(filename, kind),
@@ -515,6 +626,12 @@ class AssetStore:
             size=len(stored),
             width=width,
             height=height,
+            view_box=view_box,
+            path_count=path_count,
+            source_url=source_url,
+            licence=licence,
+            triangles=triangles,
+            bounds=bounds,
         )
         with self._require().connection() as conn, conn.transaction():
             conn.execute(_LOCK_XACT, (asset_lock_key(meta.id),))
@@ -533,15 +650,20 @@ class AssetStore:
                 self.root.mkdir(parents=True, exist_ok=True)
                 _write_atomically(blob, stored)
             now = datetime.now(UTC)
-            conn.execute(
-                "INSERT INTO assets"
-                " (id, name, kind, size, width, height, created_at, last_used_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+            row = conn.execute(
+                f"INSERT INTO assets ({_META_COLUMNS}, created_at, last_used_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (id) DO UPDATE"
-                " SET name = EXCLUDED.name, last_used_at = EXCLUDED.last_used_at",
-                (meta.id, meta.name, meta.kind, meta.size, meta.width, meta.height, now, now),
-            )
-        return meta
+                " SET name = EXCLUDED.name, last_used_at = EXCLUDED.last_used_at,"
+                " view_box = coalesce(assets.view_box, EXCLUDED.view_box),"
+                " path_count = coalesce(assets.path_count, EXCLUDED.path_count),"
+                " source_url = coalesce(assets.source_url, EXCLUDED.source_url),"
+                " licence = coalesce(assets.licence, EXCLUDED.licence)"
+                f" RETURNING {_META_COLUMNS}",
+                (*_meta_values(meta), now, now),
+            ).fetchone()
+        assert row is not None
+        return AssetMeta.model_validate(row)
 
     def adopt(self, meta: AssetMeta, data: bytes) -> None:
         """Keep an asset fetched from the blob store exactly as it was stored elsewhere.
@@ -559,12 +681,35 @@ class AssetStore:
                 _write_atomically(blob, data)
             now = datetime.now(UTC)
             conn.execute(
-                "INSERT INTO assets"
-                " (id, name, kind, size, width, height, created_at, last_used_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                f"INSERT INTO assets ({_META_COLUMNS}, created_at, last_used_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
                 " ON CONFLICT (id) DO UPDATE SET last_used_at = EXCLUDED.last_used_at",
-                (meta.id, meta.name, meta.kind, meta.size, meta.width, meta.height, now, now),
+                (*_meta_values(meta), now, now),
             )
+
+    def spend_fetch_grant(
+        self, nonce: str, idempotency_key: str | None, expires_at: datetime
+    ) -> bool:
+        """Spend a one-off host grant's nonce (#959, `library/fetch_grants.py`): whether
+        this fetch may use it, the first time, or again under the Idempotency-Key that
+        first spent it (a re-send of the same fetch). Expired rows go as it runs."""
+        with self._require().connection() as conn, conn.transaction():
+            conn.execute("DELETE FROM asset_fetch_grants WHERE expires_at < now()")
+            spent = conn.execute(
+                "INSERT INTO asset_fetch_grants (nonce, idempotency_key, expires_at)"
+                " VALUES (%s, %s, %s) ON CONFLICT (nonce) DO NOTHING RETURNING nonce",
+                (nonce, idempotency_key, expires_at),
+            ).fetchone()
+            if spent is not None:
+                return True
+            row = conn.execute(
+                "SELECT idempotency_key FROM asset_fetch_grants WHERE nonce = %s", (nonce,)
+            ).fetchone()
+        return (
+            row is not None
+            and idempotency_key is not None
+            and row["idempotency_key"] == idempotency_key
+        )
 
     def ids(self) -> list[str]:
         """Every blob this root holds, by id."""

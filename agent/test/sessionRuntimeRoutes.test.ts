@@ -15,6 +15,8 @@ import {
   SETTINGS_CHANNEL,
 } from '../src/sessions/runtimeSettings.js'
 import { WARM_EVICT_CHANNEL } from '../src/sessions/warmEvict.js'
+import { readTurnSettings, SYSTEM_PROMPT_APPEND_MAX, TURN_DEFAULTS } from '../src/sessions/turnSettings.js'
+import { systemAppend } from '../src/sessions/turnShared.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 
 // /api/v1/ai/settings/session-runtime (unified runtime spec 2026-10-13 §13,
@@ -66,17 +68,26 @@ describe.skipIf(!TEST_DATABASE_URL)(`the session runtime settings${TEST_DATABASE
   it('answers the defaults until something is set', async () => {
     const res = await get(app)
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ park_hold_seconds: 300, warm_max_per_replica: 8, warm_idle_seconds: 600, turn_max_seconds: 7200 })
+    expect(await res.json()).toEqual({
+      park_hold_seconds: 300,
+      warm_max_per_replica: 8,
+      warm_idle_seconds: 600,
+      turn_max_seconds: 7200,
+      tool_search: 'auto',
+      system_prompt_base: 'claude_code',
+      system_prompt_append: '',
+      system_prompt_fixed: systemAppend(),
+    })
     expect(RUNTIME_DEFAULTS.warm_max_per_replica).toBe(8)
   })
 
   it('stores a partial body, writes one audit row, and a GET returns it', async () => {
     const res = await put(app, { warm_max_per_replica: 2 })
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ ...RUNTIME_DEFAULTS, warm_max_per_replica: 2 })
+    expect(await res.json()).toEqual({ ...RUNTIME_DEFAULTS, ...TURN_DEFAULTS, system_prompt_fixed: systemAppend(), warm_max_per_replica: 2 })
     expect(await store.get('warm_max_per_replica')).toBe(2)
     expect(await store.get('warm_idle_seconds')).toBeUndefined()
-    expect(await (await get(app)).json()).toEqual({ ...RUNTIME_DEFAULTS, warm_max_per_replica: 2 })
+    expect(await (await get(app)).json()).toEqual({ ...RUNTIME_DEFAULTS, ...TURN_DEFAULTS, system_prompt_fixed: systemAppend(), warm_max_per_replica: 2 })
     const rows = await db.sql<{ kind: string; action: string; actor: string; client_ip: string }[]>`SELECT * FROM ai_audit WHERE kind = 'settings'`
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ action: 'warm_max_per_replica', client_ip: '10.0.0.7' })
@@ -84,7 +95,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`the session runtime settings${TEST_DATABASE
 
   it('writes every key sent, one audit row each', async () => {
     const body = { park_hold_seconds: 60, warm_max_per_replica: 0, warm_idle_seconds: 120, turn_max_seconds: 600 }
-    expect(await (await put(app, body)).json()).toEqual({ ...body })
+    expect(await (await put(app, body)).json()).toEqual({ ...body, ...TURN_DEFAULTS, system_prompt_fixed: systemAppend() })
     expect(await db.sql`SELECT 1 FROM ai_audit WHERE kind = 'settings'`).toHaveLength(4)
   })
 
@@ -118,6 +129,32 @@ describe.skipIf(!TEST_DATABASE_URL)(`the session runtime settings${TEST_DATABASE
       expect(await res.json()).toEqual({ detail: expect.any(String) })
     }
     expect(await db.sql`SELECT 1 FROM ai_settings`).toHaveLength(0)
+  })
+
+  // #5221, #5222: what a turn's Claude Code is spawned with.
+  it('stores tool search and the system prompt, and tells every warm cache to evict', async () => {
+    const body = { tool_search: 'off', system_prompt_base: 'minimal', system_prompt_append: 'Answer in metric units.' }
+    expect(await (await put(app, body)).json()).toMatchObject(body)
+    expect(await readTurnSettings(store)).toEqual(body)
+    await expect.poll(() => evictNotes).toContain('*')
+  })
+
+  it('refuses a tool search or base it does not know, fixed text, and an overlong append, with 422', async () => {
+    for (const body of [
+      { tool_search: 'sometimes' },
+      { system_prompt_base: 'custom' },
+      { system_prompt_append: 'x'.repeat(SYSTEM_PROMPT_APPEND_MAX + 1) },
+      { system_prompt_append: 3 },
+      { system_prompt_fixed: 'no rules' },
+    ]) {
+      expect((await put(app, body)).status, JSON.stringify(body).slice(0, 60)).toBe(422)
+    }
+    expect(await db.sql`SELECT 1 FROM ai_settings`).toHaveLength(0)
+  })
+
+  it('reads a turn setting written by hand that does not parse as its default', async () => {
+    await db.sql`INSERT INTO ai_settings (key, value) VALUES ('tool_search', '"sometimes"'), ('system_prompt_append', '"Be brief."')`
+    expect(await readTurnSettings(store)).toEqual({ ...TURN_DEFAULTS, system_prompt_append: 'Be brief.' })
   })
 
   it('answers 400 to a body that is not JSON', async () => {

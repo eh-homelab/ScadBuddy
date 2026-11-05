@@ -19,6 +19,7 @@ import type {
 } from '../../../api/types'
 import { mockModels, mockOutput, mockSettings } from '../../handlers'
 import { versionIds } from '../../fixtures'
+import { printersState } from '../printers'
 import { byCreated } from '../../../components/orders/price'
 import { BAD_CURSOR, BROWSER, fieldProblem, minorExponent, newId, now, problem, PROBLEMS, Refused, state, UNKNOWN_PARAMETER } from './state'
 
@@ -149,6 +150,7 @@ function detail(order: Order): OrderDetail {
     payments,
     shipments: shipmentsOf(order.id),
     attachments: state.attachments.filter((a) => a.order_id === order.id),
+    projects: state.projects.filter((p) => p.order_id === order.id).map(({ order_id: _order, ...project }) => project),
     totals: { subtotal_minor: subtotal, pending_minor: pending, unpriced_items: unpriced, charges_minor: charged, total_minor: subtotal + charged, paid_minor: paid, balance_minor: subtotal + charged - paid },
   }
 }
@@ -280,8 +282,9 @@ export const handlers = [
   http.get('/api/v1/orders', ({ request }) => {
     const sp = new URL(request.url).searchParams
     for (const name of sp.keys()) if (!LIST_PARAMS.has(name)) return problem(request, 400, `unknown query parameter '${name}'`, UNKNOWN_PARAMETER)
-    const status = sp.get('status')
-    if (status !== null && !STATUSES.has(status as OrderStatus)) return problem(request, 422, 'status is not an order status')
+    // Repeated, any of them (#5276).
+    const statuses = sp.getAll('status')
+    if (statuses.some((s) => !STATUSES.has(s as OrderStatus))) return problem(request, 422, 'status is not an order status')
     const limit = Number(sp.get('limit') ?? '50')
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) return problem(request, 422, 'limit must be an integer from 1 to 100')
     let after: [string, string] | null = null
@@ -296,7 +299,7 @@ export const handlers = [
     const to = sp.get('to')
     const rows = [...state.orders]
       .sort((a, b) => (a.created_at === b.created_at ? (a.id < b.id ? 1 : -1) : a.created_at < b.created_at ? 1 : -1))
-      .filter((o) => !status || o.status === status)
+      .filter((o) => statuses.length === 0 || statuses.includes(o.status))
       .filter((o) => !customer || o.customer_id === customer)
       .filter((o) => !from || Date.parse(o.created_at) >= Date.parse(from))
       .filter((o) => !to || Date.parse(o.created_at) <= Date.parse(to))
@@ -410,6 +413,14 @@ export const handlers = [
         }
       }
       setStatus(order, 'accepted')
+      // #4253 §8.1 — with Bambuddy linked, the order's project and one per item that prints.
+      if (mockSettings().bambuddy_url && !state.projects.some((p) => p.order_id === order.id)) {
+        const top = 900 + state.projects.length
+        state.projects.push({ order_id: order.id, subject: `order:${order.id}`, project_id: top, item_id: null })
+        for (const item of open.filter((i) => i.reference !== null)) {
+          state.projects.push({ order_id: order.id, subject: `order_item:${item.id}`, project_id: 900 + state.projects.length, item_id: item.id })
+        }
+      }
       return order
     }),
   ),
@@ -788,7 +799,7 @@ export const handlers = [
 
   http.post('/api/v1/orders/:id/items/:item/fulfilments', async ({ request, params }) => {
     const body = (await request.json()) as FulfilmentInput & Record<string, unknown>
-    const extra = unknownKeys(request, body, ['quantity', 'outcome', 'failure_reason', 'started_at', 'finished_at', 'notes'])
+    const extra = unknownKeys(request, body, ['quantity', 'outcome', 'failure_reason', 'started_at', 'finished_at', 'notes', 'archive_id'])
     if (extra) return extra
     try {
       const order = lock(String(params.id))
@@ -810,6 +821,7 @@ export const handlers = [
         accepted_at: null,
         created_by: BROWSER,
         created_at: now(),
+        archive_ids: body.archive_id == null ? [] : [body.archive_id],
       }
       state.fulfilments.push(attempt)
       found.status = body.outcome === 'failed' ? 'failed' : 'approved'
@@ -868,7 +880,7 @@ export const handlers = [
     if (!request.headers.get('Idempotency-Key')) {
       return problem(request, 428, 'This request needs an Idempotency-Key header', 'https://scadbuddy.dev/problems/idempotency-key-required')
     }
-    await request.json()
+    const body = (await request.json()) as { printer?: string | null; printer_id?: number | null }
     try {
       const order = lock(String(params.id))
       notEnded(order)
@@ -886,6 +898,10 @@ export const handlers = [
       if (!quote || found.output_id === null) {
         throw new Refused('requote_needed', `item ${found.id} needs a new quote before it prints`, [found.id])
       }
+      // §8.4: the registry printer the run used (`run.printer`), as it was named then. The run
+      // has one only when the body names a row that is still there (`print_run.py`
+      // `_named_printer`): `printer_id` alone, or a row gone since, prints on no registry row.
+      const printer = body.printer == null ? undefined : printersState().find((row) => row.id === body.printer)
       const attempt: Fulfilment = {
         id: newId('f'),
         order_item_id: found.id,
@@ -903,7 +919,10 @@ export const handlers = [
         copies,
         sliced_sha256: quote.sliced_sha256,
         sliced_blob_key: quote.sliced_blob_key,
-        printer: null,
+        printer: printer?.id ?? null,
+        printer_serial: printer?.serial ?? null,
+        printer_name: printer?.name ?? null,
+        bambuddy_printer_id: printer?.bambuddy_printer_id ?? null,
       }
       state.fulfilments.push(attempt)
       found.status = 'queued'

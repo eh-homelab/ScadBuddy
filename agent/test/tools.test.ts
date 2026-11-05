@@ -1936,6 +1936,39 @@ describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () 
     })
   })
 
+  it("fetch_asset names the file's licence on its approval and sends it to be kept (#959)", async () => {
+    const url = 'https://openmoji.org/data/color/svg/1F984.svg'
+    const licence = { spdx: 'CC-BY-SA-4.0', author: 'OpenMoji' }
+    const pending = await runTool(tool('fetch_asset'), { slug: 'box', url, licence }, ctx())
+    expect(firstText(pending)).toMatchObject({
+      summary: `Fetch ${url} (openmoji.org) into model "box" as a file asset, under CC-BY-SA-4.0`,
+    })
+    const bodies: unknown[] = []
+    server.use(
+      http.post(`${BACKEND}/api/v1/models/box/assets/fetch`, async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({ id: 'a'.repeat(64), name: 'u.svg', kind: 'svg', size: 10, source_url: url }, { status: 201 })
+      }),
+    )
+    await runTool({ ...tool('fetch_asset'), gated: false }, { slug: 'box', url, licence }, ctx())
+    expect(bodies).toEqual([{ url, licence }])
+  })
+
+  it('search_icons runs unattended and answers the backend search (#959)', async () => {
+    const queries: string[] = []
+    const icon = { id: 'mdi:unicorn', url: 'https://api.iconify.design/mdi/unicorn.svg', licence: { spdx: 'Apache-2.0' } }
+    server.use(
+      http.get(`${BACKEND}/api/v1/icons/search`, ({ request }) => {
+        queries.push(new URL(request.url).search)
+        return HttpResponse.json({ icons: [icon] })
+      }),
+    )
+    expect(tool('search_icons').risk).toBe('read')
+    const answer = await runTool(tool('search_icons'), { q: ' unicorn ', limit: 5 }, ctx())
+    expect(firstText(answer)).toEqual({ icons: [icon] })
+    expect(queries).toEqual(['?q=unicorn&limit=5'])
+  })
+
   it('fetch_asset is gated, and once approved posts the URL to the backend (#844)', async () => {
     const url = 'https://openmoji.org/data/color/svg/1F984.svg'
     const pending = await runTool(tool('fetch_asset'), { slug: 'box', url }, ctx())
@@ -2151,6 +2184,19 @@ describe('binary results: inline under the cap, a link over it', () => {
     const large = await runTool(tool('get_asset'), args, ctx({ maxInlineBytes: 16 }))
     expect(large.isError).toBeFalsy()
     expect(large.content.map((c) => c.type)).toEqual(['text', 'resource_link', 'text'])
+  })
+
+  it("get_asset with content: a mesh's picture is its preview, never its bytes (#959)", async () => {
+    const asset = 'c'.repeat(64)
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}`, () => HttpResponse.json({ id: asset, kind: 'stl', triangles: 12 })),
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/content`, () => HttpResponse.json({}, { status: 500 })),
+      http.get(`${BACKEND}/api/v1/models/box/assets/${asset}/preview`, () =>
+        new HttpResponse(new Uint8Array(4), { headers: { 'content-type': 'image/png' } }),
+      ),
+    )
+    const answer = await runTool(tool('get_asset'), { slug: 'box', asset_id: asset, include_content: true }, ctx({ maxInlineBytes: 16 }))
+    expect(answer.content.map((c) => c.type)).toEqual(['text', 'text', 'image'])
   })
 })
 
@@ -3223,6 +3269,20 @@ describe('list_models and list_outputs page in the backend (#843)', () => {
     const stale = await runTool(tool('list_models'), { limit: 10, cursor: first.next_cursor }, ctx())
     expect(stale.isError).toBe(true)
     expect(JSON.stringify(stale.content)).toMatch(/stale/)
+  })
+
+  it('list_models passes its search and filters to the backend, and scopes the cursor to them (#2290)', async () => {
+    const queries: URLSearchParams[] = []
+    server.use(http.get(`${BACKEND}/api/v1/models`, windowed(() => models, (m) => m.slug, queries)))
+    const args = { limit: 25, q: 'box lid', tag: ['kitchen', 'box'], origin: 'mine', sort: 'name' }
+    const first = firstText(await runTool(tool('list_models'), args, ctx())) as { next_cursor: string }
+    expect(queries[0]?.get('q')).toBe('box lid')
+    expect(queries[0]?.getAll('tag')).toEqual(['kitchen', 'box'])
+    expect(queries[0]?.get('origin')).toBe('mine')
+    expect(queries[0]?.get('sort')).toBe('name')
+    const other = await runTool(tool('list_models'), { ...args, q: 'bolt', cursor: first.next_cursor }, ctx())
+    expect(other.isError).toBe(true)
+    expect(JSON.stringify(other.content)).toMatch(/another listing/)
   })
 
   it('list_outputs passes the window through for its model, and scopes the cursor to it', async () => {

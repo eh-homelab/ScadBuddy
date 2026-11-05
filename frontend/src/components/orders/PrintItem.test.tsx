@@ -44,6 +44,10 @@ describe('PrintItem', () => {
     const [attempt] = state.fulfilments.filter((f) => f.order_item_id === ITEM_APPROVED)
     expect(attempt).toMatchObject({ outcome: 'unknown', quantity: 0, copies: 2 })
     expect(attempt?.print_run_id).toBeTruthy()
+    // §8.4: the attempt names the printer its run used.
+    expect(attempt?.printer_name).toBeTruthy()
+    const attempts = await screen.findByRole('list', { name: 'Attempts' })
+    expect(await within(attempts).findByText(`on ${attempt!.printer_name}`, { exact: false })).toBeInTheDocument()
     expect(state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status).toBe('in_production')
     // Printing already: no second print is offered.
     await waitFor(() => expect(screen.queryByTestId('print-item')).toBeNull())

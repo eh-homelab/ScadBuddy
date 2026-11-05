@@ -341,7 +341,7 @@ agent's follow a 202.
 | `POST /orders/{id}/reopen`, `POST /orders/{id}/items/{item}/reopen`, `POST /customers/{id}/unarchive` | §3.5's undo and §3.1's: a closed order, a cancelled item, an archived customer back |
 | `POST /orders/{id}/items/{item}/print` (operation `order_item_print`) | §5.4: a print run for the item at its accepted quote's sliced file; the item becomes `queued` |
 | `POST /orders/{id}/items/{item}/fulfilments`, `PATCH …/{fulfilment}` | §6.1: an attempt and its outcome |
-| `POST /orders/{id}/attachments`, `POST /orders/{id}/items/{item}/attachments` (multipart, operation `order_attachment_add`), `GET /orders/{id}/attachments`, `GET …/attachments/{attachment}/content` (`Range`), `GET …/thumbnail`, `PATCH …/{attachment}`, `DELETE …/{attachment}` | §6.2 (#4251): any file on the order or an item; the delete removes the row and its blob ref (a mis-upload), recorded on the audit line. An attempt's own attachments (`…/fulfilments/{f}/attachments`) wait for the print path |
+| `POST /orders/{id}/attachments`, `POST /orders/{id}/items/{item}/attachments`, `POST /orders/{id}/items/{item}/fulfilments/{f}/attachments` (multipart, operation `order_attachment_add`), `GET /orders/{id}/attachments`, `GET …/attachments/{attachment}/content` (`Range`), `GET …/thumbnail`, `PATCH …/{attachment}`, `DELETE …/{attachment}` | §6.2 (#4251): any file on the order, an item or an attempt (listed under its item); the delete removes the row and its blob ref (a mis-upload), recorded on the audit line. |
 | `PUT /orders/{id}/items/{item}/delivered` | §6.2: marks one of the item's own image attachments as what was delivered (`delivered_attachment_id`), or clears it with `null` |
 | `POST /orders/{id}/items/{item}/fulfilments/{f}/accept` | §6.1: the attempt's quantity counts as made; the item becomes `fulfilled` when its attempts cover its quantity |
 | `POST /orders/{id}/shipments`, `PATCH …/{shipment}` | §6.3 |
@@ -512,9 +512,17 @@ an outcome recorded against a newer run of the same output, is settled by hand. 
 is edited in `queued`, `printing` and `printed`, and accepted in `printed` (an accepted
 part leaves the item `approved` for the rest). Not yet: the run slices the item's output
 with the request's choices rather than printing the quote's file itself (with the quote's
-own choices the dialog's slice reuse queues that slice), an accepted `manual` quote's
-attempt records no file, and the per-slot spool fill (`needs_spool_choice`,
-`spool_not_filament`) waits on §8.3's spool-to-filament match.
+own choices the dialog's slice reuse queues that slice), and an accepted `manual` quote's
+attempt records no file. Both need a third `SourceSpec` kind, a pre-sliced file, on both
+queue paths (plan 2026-11-03 "Not in this plan").
+
+**As built, the spools (#4251, plan 2026-11-03 Ruling 4).** `orders/spools.py`, run in
+`order_item_print`'s check, so a refusal writes nothing and the filled plan is recorded with
+the check, which keys a retry's run as its first try's. A slot's filament is matched to
+spools by the spool import's identity (§8.3): material, subtype, brand and `#RRGGBB`,
+upper-cased. The run's printer is the request's `printer_id`, else its registry printer's
+Bambuddy id. A spool named only by its colour's name is never taken. On the native path,
+and for a slot the item names no filament for, the plan stays as the request gave it.
 
 ## 6. Fulfilment and provenance
 
@@ -548,7 +556,13 @@ not read as a print's `print_attachments`.)
 
 **As built (#4251, the order-entry slice, ahead of the print path).** Any file may be
 attached to the order (`order:<id>`) or to a line item (`order_item:<id>`); attempts'
-own attachments (`order_item_fulfilment:<id>`) wait for the print path. The row carries
+own attachments (`order_item_fulfilment:<id>`) came after the print path (plan 2026-11-03
+Ruling 3): `POST …/items/{item}/fulfilments/{f}/attachments`, the row's `attempt_item_id`
+naming the attempt's item so the file is listed under it too (`item_id`, with
+`fulfilment_id`). An archive's copies (§8.2) land on their attempt. A print made outside
+the order's print path is attached from its own page ("Attach to order item"), which
+records an attempt naming its archive (`FulfilmentInput.archive_id`); that attempt copies
+the archive as a print's would. An archive another attempt already has (named, or made by its run) is refused, `archive_claimed`, so no order copies another's print. The rule holds the other way too (#5273): a run's archives leave out one another attempt named before Bambuddy linked it to the run, so it stays the hand attempt's only. The row carries
 `order_id` beside `subject`, so an order's whole list is one index read and
 `OrderDetail.attachments` returns it. `kind` is `image`, `video`, `document` (a PDF) or
 `other`, and it and `media_type` come from the bytes (`orders/attachments.py` `sniff`;
@@ -621,7 +635,17 @@ grams and seconds against actual, the quoted filament cost against the actual gr
 the quote's prices, the attempts that failed and what they consumed. That is "the real
 cost of a specific line item": the sum over its attempts, failures included. Bambuddy's
 own `cost` (F8) is shown alongside when an archive is linked, corrected as
-`api/print_history.py:1119-1151` corrects it, and not used in the sums.
+`bambuddy/costs.py` corrects it (shared with `api/print_history.py`), and not used in the sums.
+
+**As built (#4251, plan 2026-11-03 Rulings 1 and 2).** `orders/costs.py`, read only. Per
+item, the accepted quote's seconds, grams and filament cost come from a `slice` quote's
+plates and `filament` lines, for the item's quantity. Every attempt's `actual_grams` (§8.2)
+is priced at that quote's own price per gram, not at today's book. A `manual` quote prices
+no grams, so that item has actual figures and no filament cost. Bambuddy's cost is the
+seam's `archive_cost` (archive and runs). Its correction moved to `bambuddy/costs.py`,
+which the print page shares. An archive that cannot be read sets `bambuddy_unavailable`
+and fails nothing. The order page shows it in a Cost card once the order is accepted, and
+the agent reads it with `order_costs`.
 
 ## 7. The flow
 
@@ -811,6 +835,37 @@ do today, so Bambuddy's own project page shows the order's tree. A project is ne
 deleted by ScadBuddy on cancel; the mapping is dropped and the project left to its
 owner.
 
+**As built (#4253).** `orders/projects.py` `ensure_projects`, through the seam's
+`ensure_project` (`bambuddy/projects.py` `ensure_project`, with the upload store's
+folderless record, #2263). `POST /orders/{id}/accept` makes the order's project (named
+by its number) and one per item from a template (`ORD-2026-12 · 1 <title>`, nested
+under it) after the accept commits, best effort: the accept answers after 20 s at most
+and stands without them, and an ensure still running then is left to finish, never
+cancelled, so a project Bambuddy made is always recorded. `order_item_print`'s run ensures the item's project again before it claims
+anything, so an accept whose ensure failed is made good, and sets it as the run's
+`project_id` (in place of any project or folder the request named); a Bambuddy failure
+there is a 503 the operation retries, and a print on the native path files under no
+project. The ensures of one order run one at a time under a Postgres advisory lock
+(`OrderStore.project_lock`), taken on a connection of its own rather than the orders row
+pool, so ensures queued on it never starve the holder's reads and writes or any other
+orders request; an accept and a flow's print racing it make each project once. The wait for it is bounded (`lock_timeout`, 120 s), each create under it is bounded
+(30 s), and a task cancelled while its thread waits for the lock leaves no lock held: the
+thread lets go of one it got too late. `OrderDetail.projects` lists them; the order page links the order's project and the
+item drawer the item's. One change from the design: **a cancel keeps the mapping.** A
+retried print of an item cancelled meanwhile looks for its run by the run's key
+(`existing_run`), which the project is part of, and a reopened order (§3.5 Undo) goes on
+in the projects it had instead of making a second of each name. A project deleted in
+Bambuddy is made again by the next ensure (`project_exists`, false only on a 404), and the
+mapping names the new one (#5263). A project made or found there within the last
+minute (`EXISTS_TTL_SECONDS`, told by `order_projects.seen_at`, which every replica
+shares, #5276) is not asked for again (#5273), so an accept and the prints after it ask
+once; a deletion is seen by the first ensure past that, or by the retry of a print of the
+order that failed (a failed run, or a start the print path refused, clears `seen_at`). A print's claim records the project its run is keyed
+with (`print_project_id`), so a retry keys the run the same whatever the mapping says
+since. A claim from before that recorded none, and its retry looks for the run under no
+project and under the item's current one. One whose project was deleted and made again
+before the retry is not found under the old project: that narrow gap is accepted.
+
 ### 8.2 Archives
 
 When an item's print settles, `print_links` (F8) names its archive; the fulfilment
@@ -819,6 +874,32 @@ attempt copies `archive_id`, outcome, times and grams, and offers the archive's
 once through the existing proxies, then ScadBuddy's own blob). Nothing is promoted to
 Bambuddy from an order: the project `Media/` folder copy that `print_attachments`
 makes is that feature's, not this one's.
+
+**As built (#4253).** `orders/archives.py`. A print run queues one item per plate, so an
+attempt has one archive per plate: `OrderStore.run_archives` finds them through
+`print_sends` (by `run_id`) and `print_links` (by queue item). Once the attempt's print
+settled it copies `archive_ids`, the archives' earliest start and latest end as its
+`started_at`/`finished_at`, and `actual_seconds` and `actual_grams` summed
+(`total_filament_actual_grams`, else `filament_used_grams`). It does not copy the
+outcome: the attempt's is the print path's (`print_outcomes`), read from the same print.
+The times are copied once, told by `archive_copied` (#5273), so one a person corrected
+stands even when the archives give no seconds or grams. An attempt that named archives before that column was
+added is taken as copied (#5276): nothing tells one copied from an archive with neither
+from one never read.
+The copy runs on each `print.outcome` heard (`listen_for_prints`' `on_outcome`) and on
+each `GET …/fulfilments/{f}/archives`, which also lists each archive's `finish_` photos
+and whether it has a timelapse, so a link Bambuddy made late is still copied. `POST
+…/archives/{archive_id}/copy` (`{what: finished_photo | timelapse, name?}`) is the
+`order_attempt_copy` operation: the bytes are streamed once through the seam's
+`download_archive_media` into the claim store, up to `media_upload_max_bytes`, kept as
+`attachment-<sha256>` and recorded as an attachment **of the attempt**
+(`order_item_fulfilment:<id>`, listed under its item, #4251), with the role `finished` or
+`timelapse` and the
+caption `Attempt <n>, Bambuddy archive <id>`. The same bytes copied again under the same
+role answer with the attachment already there. An archive with no timelapse is
+`no_timelapse`: pull it off the printer first (`POST /prints/{archive_id}/timelapse/pull`).
+`timelapse_blob_key` is not a column: the timelapse is an attachment like the photo.
+Agent tools `order_attempt_archives` (read) and `order_attempt_copy` (write).
 
 ### 8.3 Spool prices
 
@@ -834,6 +915,13 @@ time, so a quote is the same with Bambuddy down.
 Until #3823's registry, an attempt's `printer` is the Bambuddy printer id and name the
 run used. When the registry lands, the serial is the key and the Bambuddy id is one of
 its paths, as the own-store spec §6 says.
+
+**As built (#4253).** The registry landed first, so an attempt keeps `printer` (the
+registry id its run named, `print_runs.printer`) and, copied from that row when the run is
+attached (`OrderStore.attach_print_run`), `printer_serial`, `printer_name` and
+`bambuddy_printer_id`: a printer renamed, relinked or deleted since leaves the record as
+it printed. An attempt recorded by hand, or a run that named no registry printer, has
+none. The order page shows the name beside the attempt.
 
 ## 9. Pages: generalising template-owned UIs (and why orders is not one)
 

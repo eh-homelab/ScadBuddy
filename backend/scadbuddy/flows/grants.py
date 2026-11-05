@@ -279,8 +279,26 @@ def _same_json(a: Any, b: Any) -> bool:
     return type(a) is type(b) and a == b
 
 
+#: Why a call is outside every grant whatever its rules say (#959).
+NEVER_GRANTED = (
+    "a fetch from a host off the asset allowlist (fetch_asset's allow_host) is never inside "
+    "a grant: a person approves each one"
+)
+
+
+def never_granted(fn: str, tool: str | None, args: dict[str, Any]) -> bool:
+    """Whether the call must reach a person whatever a grant admits (#959): a
+    ``fetch_asset`` that names ``allow_host``, by any server's name for it."""
+    if fn != "tool" or tool is None:
+        return False
+    named = tool == "fetch_asset" or tool.endswith("__fetch_asset")
+    return named and args.get("allow_host") is not None
+
+
 def admits(rule: GrantRule, facts: CallFacts, used: RuleUse) -> str | None:
     """None when `rule` admits the call given what it `used` already; else why not."""
+    if never_granted(facts.fn, facts.tool, facts.args):
+        return NEVER_GRANTED
     if rule.fn != facts.fn:
         return f"not a {rule.fn} rule"
     if rule.fn == "tool" and rule.tool != facts.tool:
@@ -411,6 +429,13 @@ async def match_grant(
 ) -> Verdict:
     """Amendment §3.3: whether the call `request_id` is inside the run's grant, consuming
     its share when it is. A request id already recorded answers its first verdict."""
+    if never_granted(fn, tool, args):
+        # Before any grant is read or consumed: no rule, narrowing or prior use admits
+        # it, and it goes to the person, not the starter session.
+        held = await store.get_run(run_id)
+        return Outside(
+            reason=NEVER_GRANTED, timeout_s=held.approval_timeout_s if held is not None else 0
+        )
     if (prior := await store.grant_use(request_id)) is not None:
         if prior.run_id != run_id or prior.session_id != session_id:
             # Another run's (or another caller's) call: never this one's to repeat.

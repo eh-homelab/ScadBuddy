@@ -286,9 +286,9 @@ def test_the_contract_migration_drops_only_what_the_previous_build_never_names(
     pg_conninfo: str,
 ) -> None:
     # #1142, expand/contract: the pending key and the old watcher's log go; the columns
-    # the previous build still reads and writes stay for a later file.
+    # the previous build still reads and writes stay for a later file (#5139).
     with psycopg.connect(pg_conninfo) as conn:
-        migrate(conn)
+        migrate(conn, MIGRATIONS[: _index("drop_previous_build_columns")])
         columns = conn.execute(
             "SELECT table_name, column_name FROM information_schema.columns"
             " WHERE table_schema = current_schema() AND (table_name, column_name) IN"
@@ -341,3 +341,82 @@ def test_the_contract_migration_ends_the_rows_an_older_build_left_unsettled(
         ("legacy", "failed", {"params": {}}),
         ("ours", "pending", {"params": {}}),
     ]
+
+
+def _contract_columns(conn: psycopg.Connection[tuple[object, ...]]) -> list[tuple[str, str]]:
+    rows = conn.execute(
+        "SELECT table_name, column_name FROM information_schema.columns"
+        " WHERE table_schema = current_schema() AND (table_name, column_name) IN"
+        " (('print_runs', 'heartbeat_at'), ('render_jobs', 'params'),"
+        "  ('workflow_definitions', 'script')) ORDER BY 1"
+    ).fetchall()
+    return [(str(table), str(column)) for table, column in rows]
+
+
+@pytest.mark.requires_postgres
+def test_the_second_contract_step_drops_the_columns_the_previous_build_read(
+    pg_conninfo: str,
+) -> None:
+    # #5139: once no pod of the build before #5124 runs, nothing names them.
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn)
+        assert _contract_columns(conn) == []
+
+
+@pytest.mark.requires_postgres
+def test_a_flow_version_with_no_commit_keeps_the_script_column_without_failing(
+    pg_conninfo: str,
+) -> None:
+    # Its script is the only copy, and migrations run at the API's start: a raise would be
+    # an outage, so the column stays, with a notice, and the rest of the step applies.
+    drop = _index("workflow_definitions_drop_script")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:drop])
+        conn.execute(
+            "INSERT INTO workflow_definitions (id, name, version, script, created_by)"
+            " VALUES ('old', 'swap', 1, 'x', '{}')"
+        )
+        notices: list[str] = []
+        conn.add_notice_handler(lambda diag: notices.append(diag.message_primary or ""))
+        assert migrate(conn) == [m.id for m in MIGRATIONS[drop:]]
+        assert _contract_columns(conn) == [("workflow_definitions", "script")]
+        script = conn.execute("SELECT script FROM workflow_definitions").fetchone()
+    assert script == ("x",)
+    assert any("workflow_definitions.script kept" in n for n in notices), notices
+
+
+@pytest.mark.requires_postgres
+def test_the_archive_copied_backfill_marks_every_attempt_from_before_it(
+    pg_conninfo: str,
+) -> None:
+    # #5276: the first backfill could not tell an attempt already copied from an archive
+    # with no seconds or grams from one never copied, and marked it not copied, so its
+    # first read after the deploy copied the times again over a correction. Every attempt
+    # naming archives from before that file is taken as copied; one recorded since is
+    # left for its first copy.
+    backfill = _index("order_attempt_archive_copied_backfill")
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:backfill])
+        conn.execute("INSERT INTO customers (id, display_name) VALUES ('c', 'C')")
+        conn.execute(
+            "INSERT INTO orders (id, number, customer_id, currency, created_by)"
+            " VALUES ('o', 'ORD-2026-1', 'c', 'USD', '{}')"
+        )
+        conn.execute(
+            "INSERT INTO order_items (id, order_id, position, quantity, title, kind)"
+            " VALUES ('i', 'o', 0, 1, 'Bracket', 'custom')"
+        )
+        conn.execute(
+            "INSERT INTO order_item_fulfilments"
+            " (id, order_item_id, attempt, quantity, outcome, created_by, archive_ids,"
+            "  archive_copied, created_at) VALUES"
+            " ('before', 'i', 1, 1, 'succeeded', '{}', '{81}', false,"
+            "  now() - interval '1 hour'),"
+            " ('none', 'i', 2, 1, 'succeeded', '{}', '{}', false, now() - interval '1 hour'),"
+            " ('since', 'i', 3, 1, 'succeeded', '{}', '{82}', false, now())"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[backfill].id
+        rows = conn.execute(
+            "SELECT id, archive_copied FROM order_item_fulfilments ORDER BY attempt"
+        ).fetchall()
+    assert rows == [("before", True), ("none", False), ("since", False)]

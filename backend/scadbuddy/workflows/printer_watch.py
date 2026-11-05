@@ -15,13 +15,14 @@ The activity's attempts retry without end (`FOLLOW_RETRY`): a printer switched o
 an attempt that fails to connect, then the next. Every `CONTINUE_AFTER`, or when the
 server suggests it, the watch continues as new. The ``stop`` signal ends it (the LAN
 unlink and the printer's delete send it); so does an activity that finds the row gone,
-unlinked, or no KEK to open its access code with. The ``restart`` signal, sent with
-signal-with-start by `restart_watch` (the LAN link), starts the watch when none runs,
-and otherwise ends the current attempt and starts one that reads the row again: a new
-host, code or pin takes effect at once, and a link that follows an unlink keeps the
-watch the unlink's ``stop`` was ending (#4186 review I4). `ensure_watches` is the
-housekeeping prune Schedule's (every 300 s, `housekeeping.PRUNE_SWEEPS`): it starts a
-watch for every LAN-linked row that has none, so a stopped or failed one comes back.
+unlinked, a Bambuddy virtual printer's (#5236), or no KEK to open its access code with.
+The ``restart`` signal, sent with signal-with-start by `restart_watch` (the LAN link),
+starts the watch when none runs, and otherwise ends the current attempt and starts one
+that reads the row again: a new host, code or pin takes effect at once, and a link that
+follows an unlink keeps the watch the unlink's ``stop`` was ending (#4186 review I4).
+`ensure_watches` is the housekeeping prune Schedule's (every 300 s,
+`housekeeping.PRUNE_SWEEPS`): it starts a watch for every LAN-linked row that has none,
+so a stopped or failed one comes back.
 
 An attempt is cancelled with ``WAIT_CANCELLATION_COMPLETED``, and the run waits for it
 before the next one starts (a restart, a continue-as-new) or the run ends, so one

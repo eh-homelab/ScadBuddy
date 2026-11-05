@@ -34,6 +34,7 @@ import {
   type PendingApproval,
 } from '../agent/attention'
 import { useAttentionNotifications } from '../agent/attentionNotifications'
+import { useWebPush } from '../agent/webPush'
 import { useAiAvailability } from '../agent/chat/availability'
 import {
   ASSISTANT_SHORTCUT_ARIA,
@@ -51,6 +52,7 @@ import { panelWasOpen, reloaded, rememberPanelOpen, rememberSession } from './as
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { ActivityBell } from './activity/ActivityBell'
 import { AccountMenu } from './auth/AccountMenu'
+import { SignInRequired } from './auth/SignInRequired'
 import { useApprovalToasts } from '../agent/pendingApprovals'
 import { Toasts } from './ui/Toasts'
 import { Badge } from '@/components/ui/badge'
@@ -216,7 +218,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     setFocusKey((k) => k + 1)
   }, [])
   const openHandled = useCallback(() => setOpenRequest(null), [])
-  // #815 — an OS notification for an attention request that opens while this page is hidden;
+  // #815 — an OS notification for a pending request that opens while this page is hidden;
   // a click opens its session. Not when embedded: a cross-origin frame cannot ask for the permission.
   const notices = attention.counts === null ? null : (attention.counts.notices ?? NO_NOTICES)
   const openNotice = useCallback(
@@ -227,6 +229,8 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
     [openPanel],
   )
   useAttentionNotifications(notices, shown && !embedded, openNotice)
+  // #815 — and with every tab closed, through Web Push; its click opens the session here.
+  useWebPush(shown && !embedded, openNotice)
   const opener = useMemo<AssistantOpener | null>(
     () =>
       shown
@@ -352,6 +356,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport, tabLink 
                 <LiveUpdatesIndicator />
                 <ActivityBell />
                 <AccountMenu />
+                <SignInRequired />
                 {shown && (
                   // Announces the badge (#815): it appears while focus is elsewhere, so the
                   // button's own name changing is not enough. A bare live region, not

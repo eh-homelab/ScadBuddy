@@ -242,21 +242,10 @@ class Settings(BaseSettings):
 
     # SCADBUDDY_AUTH_MODE (#4975, spec 2026-11-01 §9.1): whether a request with no
     # session or credential is served (`off`), served and counted (`observe`, the would-
-    # refuse counter) or refused (`enforce`). `enforce` stops the start until it exists
-    # (plan 2026-11-01 phase 8) rather than promising a gate that is not there. Not a
-    # stored setting: it decides who may write Settings.
+    # refuse counter) or refused (`enforce`). In `enforce` the API refuses to start without
+    # a usable login (`auth/start_check.py`), saying what is missing. Not a stored
+    # setting: it decides who may write Settings.
     auth_mode: AuthMode = "off"
-
-    @field_validator("auth_mode")
-    @classmethod
-    def _auth_mode_implemented(cls, value: AuthMode) -> AuthMode:
-        if value == "enforce":
-            raise ValueError(
-                "SCADBUDDY_AUTH_MODE=enforce is not available yet: this build counts what"
-                " it would refuse but refuses nothing (#4975, plan 2026-11-01 phase 8). Set"
-                " it to observe or off"
-            )
-        return value
 
     # The login's identity provider (#4975, spec 2026-11-01 §9.2): the issuer the browser
     # is sent to and whose tokens are believed, and ScadBuddy's client id there. The

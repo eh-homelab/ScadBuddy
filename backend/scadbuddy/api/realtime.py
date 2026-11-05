@@ -82,8 +82,12 @@ Security
   e.g. the LAN host beside an SSO proxy), or a loopback origin. An allowlist, not
   "Origin equals Host": under DNS rebinding the attacker's page sends its own name
   in both (the same reasoning as ``agent/src/http/origins.ts``). A frame with no
-  ``Origin`` is not from a browser page and is as trusted as a REST call; the
-  backend has no auth today (spec §4.3).
+  ``Origin`` is not from a browser page and is as trusted as a REST call.
+- Signed in (#4975, spec 2026-11-01 §5.4): with ``SCADBUDDY_AUTH_MODE=enforce`` a
+  handshake with no live session is closed before it is accepted (``auth/check.py``).
+  Outside ``off``, a socket opened under a session closes with `SIGNED_OUT` (4401) when
+  the bus carries ``auth.session_revoked`` for it, so the page signs in again rather
+  than reconnecting.
 - Topics are authorised as their REST routes are: everything the UI can GET, it may
   follow.
 - Per-connection caps on topics and on inbound frame rate, and a cap on open sockets
@@ -109,6 +113,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope
 from starlette.types import Send as ASGISend
 
 from scadbuddy.api.deps import HEX_ID_PATTERN, AppState, StateDep
+from scadbuddy.auth.gate import caller_of
+from scadbuddy.auth.models import Person
 from scadbuddy.core.events import (
     ActivityEvent,
     AgentOperationEvent,
@@ -342,8 +348,27 @@ class RateLimit:
 Send = Callable[[dict[str, Any]], Awaitable[None]]
 
 
-async def pump(subscription: Subscription, topics: set[str], send: Send) -> None:
-    """Forward the bus to the socket until the subscription ends.
+#: The close code of a socket whose session was revoked (spec 2026-11-01 §5.4): an
+#: application code (RFC 6455 §7.4.2), so the page signs in rather than reconnecting.
+SIGNED_OUT = 4401
+
+
+def revokes(event: AuthSessionRevoked, session_id: str, principal: str) -> bool:
+    """Whether ``event`` ends the session ``session_id`` (hex SHA-256) of ``principal``:
+    that one, or (no ``session_id``) every one of the principal's."""
+    if event.session_id is not None:
+        return event.session_id == session_id
+    return event.principal == principal
+
+
+async def pump(
+    subscription: Subscription,
+    topics: set[str],
+    send: Send,
+    revoked: Callable[[AuthSessionRevoked], bool] | None = None,
+) -> bool:
+    """Forward the bus to the socket until the subscription ends, or until ``revoked``
+    says an ``auth.session_revoked`` ends the socket's session (then True).
 
     Only events under a followed topic are sent. When the subscription has dropped
     events (it fell ``maxsize`` behind), or the Postgres bus reports a gap in its
@@ -351,6 +376,8 @@ async def pump(subscription: Subscription, topics: set[str], send: Send) -> None
     instead of being left with a gap."""
     dropped = 0
     async for event in subscription:
+        if revoked is not None and isinstance(event, AuthSessionRevoked) and revoked(event):
+            return True
         if subscription.dropped != dropped:
             dropped = subscription.dropped
             await send({"type": "resync"})
@@ -360,6 +387,7 @@ async def pump(subscription: Subscription, topics: set[str], send: Send) -> None
         matched = [topic for topic in topics_of(event) if topic in topics]
         if matched:
             await send(event_frame(event, matched))
+    return False
 
 
 async def _ping(send: Send) -> None:
@@ -576,6 +604,16 @@ async def realtime(websocket: WebSocket, state: StateDep) -> None:
 
 async def _serve(websocket: WebSocket, state: AppState) -> None:
     lock = asyncio.Lock()
+    caller = caller_of(websocket.scope)
+    revoked: Callable[[AuthSessionRevoked], bool] | None = None
+    if state.settings.auth_mode != "off" and isinstance(caller, Person):
+        session_id = caller.session.id_hash.hex()
+        principal = caller.principal
+
+        def revoked(event: AuthSessionRevoked) -> bool:
+            return revokes(event, session_id, principal)
+
+    signed_out = False
 
     async def send(frame: dict[str, Any]) -> None:
         async with lock:
@@ -593,11 +631,18 @@ async def _serve(websocket: WebSocket, state: AppState) -> None:
             # Whichever part ends first ends the session.
             group.cancel_scope.cancel()
 
+        async def follow() -> None:
+            nonlocal signed_out
+            signed_out = await pump(subscription, topics, send, revoked)
+
         checks = _Checks(topics, state.events, send)
         group.start_soon(run, _read(websocket, topics, send, state.events, checks))
         group.start_soon(run, checks.work())
-        group.start_soon(run, pump(subscription, topics, send))
+        group.start_soon(run, follow())
         group.start_soon(run, _ping(send))
+    if signed_out:
+        with contextlib.suppress(WebSocketDisconnect, RuntimeError):
+            await websocket.close(code=SIGNED_OUT, reason="signed out")
 
 
 class EventCursor:

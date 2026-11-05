@@ -49,6 +49,7 @@ from scadbuddy.flows.definitions import (
     FlowHistoryUnavailableError,
     ScriptMissingError,
     UnknownFlowError,
+    UnmigratedFlowError,
 )
 from scadbuddy.flows.forget import forget_run
 from scadbuddy.flows.grants import (
@@ -105,6 +106,7 @@ SCRIPT_PROBLEMS = "https://scadbuddy.dev/problems/flow-script"
 SCRIPT_MISSING = "https://scadbuddy.dev/problems/flow-script-missing"
 FLOW_ARCHIVED = "https://scadbuddy.dev/problems/flow-archived"
 FLOW_DELETED = "https://scadbuddy.dev/problems/flow-deleted"
+FLOW_UNMIGRATED = "https://scadbuddy.dev/problems/flow-unmigrated"
 FLOW_INPUTS = "https://scadbuddy.dev/problems/flow-inputs"
 NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,62}$"
 BROWSER_ONLY = "https://scadbuddy.dev/problems/flow-browser-only"
@@ -351,6 +353,14 @@ def _versioned() -> Iterator[None]:
             status.HTTP_409_CONFLICT,
             "This flow was deleted. Restore one of its versions first.",
             type_=FLOW_DELETED,
+        ) from None
+    except UnmigratedFlowError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "This flow has a version from before flows were kept in git that was never"
+            " moved there. Upgrade through a ScadBuddy release from #2503 to #5124 first,"
+            " whose start moves it, then register again.",
+            type_=FLOW_UNMIGRATED,
         ) from None
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, "No such version of this flow.") from None

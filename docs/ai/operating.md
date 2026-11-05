@@ -255,6 +255,46 @@ main on 2026-11-01:
   8, 0 to 32; 0 makes every turn cold), Warm process idle time (default 600 s) and Longest
   turn (`turn_max_seconds`, default 7200 s). A turn past its longest time ends there; it is
   not placed again, since that could triple its spend.
+- **What a turn's Claude Code is given.** The same section and route set three more values,
+  read as each turn is assembled
+  ([`agent/src/sessions/turnSettings.ts`](../../agent/src/sessions/turnSettings.ts)). Each is
+  part of the warm process's fingerprint, so a change recycles a session's process at its
+  next turn, and a write tells every replica to evict:
+  - `tool_search` (`off`, `auto`, `always`; default `auto`, #5221): `ENABLE_TOOL_SEARCH`
+    (`false`, `auto`, `true`) and Claude Code's `ToolSearch` built-in, at `read`
+    ([`agent/src/harness/toolSearch.ts`](../../agent/src/harness/toolSearch.ts)). With it on,
+    a turn gets a few tools in full (`UPFRONT_TOOLS`, the question tools and Claude Code's
+    core built-ins) and the rest by name, and loads one with ToolSearch. `auto` defers once
+    the deferrable definitions reach 10% of the context, which ScadBuddy's own registry
+    passes alone ([tool search](https://code.claude.com/docs/en/agent-sdk/tool-search.md)).
+    Measured on Claude Code 2.1.310 against the fake endpoint, the first request of a turn
+    with the whole registry went from 334,793 bytes (283 tool definitions) to 47,990. A remote
+    plugin's tools are deferred too: the forwarder marks each `_meta['anthropic/alwaysLoad']:
+    false`, while the server keeps `alwaysLoad: true` so the first turn waits for it.
+  - Each ScadBuddy tool's loading (#838) is set in Settings → Tools & plugins beside its
+    access, not in this section: **Sent every turn** (`base`, `alwaysLoad`) or **Found by
+    search** (`searchable`). `UPFRONT_TOOLS` are `base` by default, every other tool
+    `searchable`; a searchable tool is still callable by name. Off is the tool's access. The
+    loadings are the `ai_settings` key `tool_loading` (only those that differ from the
+    default), written through `PUT`/`DELETE /api/v1/ai/capabilities/:source/items/:item/loading`
+    as audited settings writes; like the keys above, each turn reads them and a write evicts.
+    Only the in-process server's tools (`builtin:scadbuddy`, `builtin:browser`) take one so
+    far: plugin tools are #5239, tool belts #5240.
+  - `system_prompt_base` (`claude_code` or `minimal`; default `claude_code`, #5222): Claude
+    Code's preset (29,033 bytes of `system` on 2.1.310), or the SDK's one-line default with
+    ScadBuddy's text after it (2,400 bytes).
+  - `system_prompt_append` (up to 20,000 characters, default empty): the user's own text. It
+    goes after ScadBuddy's fixed part, which always goes in: the untrusted-data notice
+    ([`agent/src/safety/untrusted.ts`](../../agent/src/safety/untrusted.ts)) and the browser
+    tools guide. `GET` returns that part as `system_prompt_fixed`, and the section shows it.
+    A session whose plugin package names Claude Code built-ins that the session serves also
+    gets the note on those, after the fixed part; it is per turn, so not in
+    `system_prompt_fixed`. The preset is sent with `excludeDynamicSections`, the minimal base
+    before `SYSTEM_PROMPT_DYNAMIC_BOUNDARY`, both with `snapshot: false`, so the prompt is
+    static and its cache is shared across sessions
+    ([modifying system prompts](https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts.md)).
+    On the default base the text is what it was before, but the working directory now
+    reaches the model in the first user message rather than in the system prompt.
 - **Tool calls.** Each tool call of a turn is a `ToolCall` workflow of its own,
   `session-<id>-call-<tool_use_id>`, whose one activity runs the tool on whichever worker
   takes it ([`agent/src/temporal/toolCall.ts`](../../agent/src/temporal/toolCall.ts),
@@ -437,7 +477,7 @@ is `classifyFailure()` in
 | Permanent | 401, 403, 402, a billing or credit message | First confirmed: the agent asks the endpoint once more with that credential (`probeCredential()`, a one-token request on `claude-haiku-4-5`, not the turn's model, so a refusal of that model or of a feature the turn used does not confirm itself). Refused again with a 401, a 402, or a 400/403 that names the key, the organisation or billing (`refusesTheKey()`), the credential becomes `disabled`, with the reason in `last_error`, and is not tried again until someone resets it or saves a new secret for it. Answered, the refusal was about the request (a gateway or WAF refusing one body, say), so the turn ends there with no fallback and nothing recorded. With no clear answer it falls back for this call without being marked. |
 | Rate limited | 429 | The credential is `cooling_down` until the time the endpoint names, then usable again on its own. It is recorded at once with the default 60 s and the turn moves on; Claude Code does not pass the response headers on, so the agent asks the endpoint once more with that credential in the background (`probeCredential()`, a one-token request; a refused one is not billed) and replaces that time with what its 429 names (`retry-after`, then the `anthropic-ratelimit-*-reset` headers). A probe that is answered makes it usable again in 1 s; one refused the same way as above (`refusesTheKey()`) disables it instead. Every probe stops with the turn: when the user stops it, the agent does not wait for a probe still running, and records nothing from it. |
 | Transient | 5xx, 529, network errors | Claude Code retries on the same credential, at most twice when there is another to fall back to (`CLAUDE_CODE_MAX_RETRIES`), then the turn moves on for this call only. The credential is not marked. |
-| Not the credential's | 400 (other than billing), a turn or budget limit | No fallback: the next credential would fail the same way. Through a gateway, Claude Code first sends a refused 400 or 422 once more on the same credential without its `thinking.display` field (and that field's `anthropic-beta` value), so a gateway that refuses only that field still answers the turn, at the cost of one refused request a turn. |
+| Not the credential's | 400 (other than billing), a turn or budget limit | No fallback: the next credential would fail the same way. Through a gateway, Claude Code 2.1.314 first sends a refused 400 or 422 twice more on the same credential: once without the `thinking-token-count` beta, then also without its `thinking.display` field (and that field's `anthropic-beta` value), so a gateway that refuses only those still answers the turn, at the cost of two refused requests a turn. |
 
 No further attempt starts once the turn's `maxTurns` or budget is used up. A turn that
 fails mid-way (after tool calls ran) resumes the session on the next credential with a
@@ -1139,8 +1179,19 @@ activity after its worker died, and `resumeFromRunId`, answer the calls already 
 Every child chat a run starts is recorded (`ai_workflow_children`); an attempt first ends
 (interrupts and marks done) the ones an earlier attempt left open and no journal row names,
 since a worker that died never ran its agents' cleanup (#3395).
-The script is kept in the workspace (`/workspace/_claude/workflows/<name>-wf_<id>.js`),
-which `scriptPath` and `workflow({scriptPath})` read. Its end is Claude Code's
+The script is kept at `_claude/workflows/<name>-wf_<id>.js` in the session's working
+directory, the path the model is told (Claude Code's own Read and Edit reach it there),
+which the turn's write-back records in the workspace; without a working directory, in the
+workspace itself (#5162). `scriptPath` reads the directory's copy first, then the
+workspace's; `workflow({scriptPath})` inside a script runs on any worker and reads the
+workspace's, so it sees a native edit, and a script launched in the same turn, only once
+that turn wrote it back (at a park or its end): until then it fails "no workflow script".
+A copy the write-back refuses (the workspace caps) never reaches the workspace, so a later
+turn on another pod finds no script there, and the model is told to pass it inline. The
+copy is written only to the directory because a workspace copy written mid-turn would win
+over a later edit in that turn (`workspace/directory.ts` `writeBack`). A path relative to
+the directory, one in it (`sessionWorkDir`, the same on every replica), and an earlier
+build's `/workspace/…` are read; no other absolute path. Its end is Claude Code's
 `<task-notification>`, sent as a monitor's events are.
 `PushNotification` is not provided yet, and the session says so. Skill shell injection
 is off (`disableSkillShellExecution`, `harness/options.ts`) except for an allowed
@@ -1629,6 +1680,12 @@ files ([`agent/src/workspace/store.ts`](../../agent/src/workspace/store.ts), too
     files) happens at the turn's end, at an eviction and at a placement, so a turn keeps its
     `.git` or a large intermediate file while it runs. Claude Code's own file tools (§9) and
     a Monitor's command use the directory.
+  - The minute's write-back syncs only the files the workspace already holds (#5140). A new file
+    is offered at the next park or at the turn's end, so a scratch tree that the turn builds and
+    removes again never reaches the workspace. No write-back offers a new file under a
+    `node_modules` or `__pycache__` directory (`SCRATCH`); a pruning write-back removes those
+    files. A file that the workspace already holds there still syncs. `dist`, `build` and
+    `target` are not on the list, because a turn's deliverable can be there.
 - A session's files go with the session (deleting it, or `forgetSubject`, deletes them,
   and forgetting deletes the key that opens its blobs); a fork copies them. A call outside any session (an `/mcp` client, a flow run) uses its
   principal's own workspace, whose files are swept 24 h after their last write (every
@@ -1794,3 +1851,55 @@ refresh token, and they can act only on the repositories the App is installed on
 ([GitHub docs](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/refreshing-user-access-tokens)).
 Set the App's callback URL to the one the card shows, then give its client id and a
 client secret under **Use my own OAuth app**.
+
+## 16. Attention notifications (#815)
+
+When the assistant needs the person, these channels announce it. That covers a
+`request_user_attention` call, a `browser_*` call waiting for its tab, a plain question
+(`AskUserQuestion`, a durable `ask_user`), and a parked call's approval. A `done` summary
+waits for nothing, so it is not announced. The notice names the kind ("The assistant needs
+your approval", "The assistant has a question"), never the question or the call it would
+approve:
+
+- **The badge.** The shell reads `GET /api/v1/ai/pending-input`. It reads again as soon as
+  `GET /api/v1/ai/pending-input/changes` says something changed, and every 15 s
+  regardless. The change stream is fed by `NOTIFY scadbuddy_pending`, which a trigger sends
+  on every write to `ai_pending_input`, `ai_approvals` and `ai_questions`
+  ([`agent/src/gate/changes.ts`](../../agent/src/gate/changes.ts)).
+- **The page's own notification**, while a ScadBuddy tab is open but hidden
+  (`frontend/src/agent/attentionNotifications.ts`).
+- **Web Push**, with every tab closed ([`agent/src/notify/`](../../agent/src/notify/),
+  `frontend/public/push-sw.js`). The page subscribes once the person turns notifications
+  on. The agent pushes each request once to every subscribed browser of someone who may see
+  it. A push carries the request's id, its session's id and its reason, never the message.
+  The VAPID key is made on first use and sealed under the KEK (`ai_push_vapid`).
+  Subscriptions (`ai_push_subscriptions`) are sealed under the KEK too, so Web Push needs
+  `SCADBUDDY_SECRET_KEY_FILE`, and rotation re-wraps both. A subscription's endpoint comes
+  from the browser, so it is checked strictly
+  ([`agent/src/notify/pushEgress.ts`](../../agent/src/notify/pushEgress.ts)), when it is
+  stored and again at every push. It must use https, and its host must be on the push-service
+  allowlist (`push_service_hosts` in `ai_settings`, edited in Settings → Assistant →
+  Notifications). The default list is `fcm.googleapis.com`, `updates.push.services.mozilla.com`,
+  `*.notify.windows.com`, `*.push.apple.com` and `web.push.apple.com`. Every address the host
+  resolves to must be public: never loopback, RFC 1918 or ULA, CGNAT, link-local or multicast.
+  The push connects to the checked address and follows no redirect. An endpoint another person
+  holds is refused, and each person keeps at most five subscriptions (the oldest go). A pass has
+  at most four pushes in flight and stops starting them after 30 s. The pod must be able to
+  reach the allowed push services. The VAPID `sub` is `SCADBUDDY_PUBLIC_URL`.
+- **Notification channels** for when nobody is at a browser
+  ([`agent/src/notify/channels.ts`](../../agent/src/notify/channels.ts), Settings →
+  Assistant → Notifications, `ai_notify_channels`). The two kinds are an
+  [ntfy](https://docs.ntfy.sh/publish/) topic URL (`https://ntfy.sh/<topic>` or a self-hosted
+  server, with an optional access token) and a Home Assistant
+  [notify service](https://www.home-assistant.io/integrations/notify/) (its URL, the service
+  name such as `mobile_app_<device>`, and a long-lived access token, called through
+  `POST /api/services/notify/<service>` of the
+  [REST API](https://developers.home-assistant.io/docs/api/rest/)). Each enabled channel is
+  told of every such request once, with its kind as the title, a fixed line and a link
+  to `SCADBUDDY_PUBLIC_URL/?assistant-session=<id>`. Each token is sealed under the KEK, with
+  the channel's kind and URL in the AAD, so changing the URL drops the token. Only the person
+  sets channels: the routes take the UI's requests only, no tool reaches them, and every write
+  is audited. A channel URL follows the plugin endpoint rule: https anywhere, plain http only to
+  loopback or private addresses, never link-local or a metadata host. It is checked when saved
+  and at every send. Neither kind has been run against a real ntfy server or Home Assistant;
+  the tests use fakes. There is no email or Bambuddy channel.

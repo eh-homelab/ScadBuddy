@@ -475,7 +475,10 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   row (`print_route` `lan`), and `lan_print` saves its rack picks keyed by run and
   `subtask_name` (`rack_nozzle_*`'s `lan_run_id`, `lan_subtask`); the follow's read hooks
   (`Follower.on_read`: `printers/progress.py` `lan_last_print`, `rack/usage.py`
-  `lan_settle_hook`) move the row and settle the picks, `lan_wait` each earlier copy's.
+  `lan_settle_hook`) move the row and settle the picks, `lan_wait` each earlier copy's;
+  first, the printer's watch settles each start's picks as its report ends it, timed to
+  that report (`printers/reports.py` `advance_print`, #5138, #5142). A LAN print keeps
+  `output_last_prints.sent_to_bambuddy`, so the output still says "Send again" (#5143).
   A run of several plates or copies is its own queue (#4541, `workflows/printing.py`
   `_print_lan`): it succeeds at its first start, then `lan_wait` (`printers/print_activities.py`,
   over the watch's `printer_reports`) waits out each print before the next starts, and
@@ -550,7 +553,7 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
 - `backend/scadbuddy/core/gitrepo.py` — `GitRepo`, the hermetic git core (#2503) under
   model history (`library/history.py` `ModelHistory`) and flow scripts
   (`flows/repository.py` `FlowHistory`: `data/flows/<name>/flow.py`, one commit per
-  version; `flows/backfill.py` is the start-time backfill and reconciler;
+  version; `flows/reconcile.py` indexes a commit whose row was never written;
   `flows/history.py` is the Reset preview, not git). Both repositories are shared by
   every replica over NFS, so each writer holds a Postgres lock that carries the last HEAD
   (`library/repo_lock.py`: `models_repo_head`, and `flows_coordinator`'s `flows_repo_head`).
@@ -668,8 +671,9 @@ Without `SCADBUDDY_PIPELINE_IMAGE` a template's pipeline check prints "skipped".
   (`components/orders/FilamentsEditor.tsx`), `PrintPicker`'s `quote` mode with
   `QuoteFilaments` ("Quote from a slice…" in `QuoteEditor`), and the estimate in
   `AddToOrderDialog`; mocks `src/mocks/features/orders/priceBook.ts`.
-  Attachments (#4251, spec §6.2 "As built"): any file on an order or a line item,
-  `order_attachments` (subject `order:<id>` / `order_item:<id>`, typed by its bytes in
+  Attachments (#4251, spec §6.2 "As built"): any file on an order, a line item or a print attempt,
+  `order_attachments` (subject `order:<id>` / `order_item:<id>` / `order_item_fulfilment:<id>`, an attempt's file listed
+  under its item through `attempt_item_id`; `POST …/fulfilments/{f}/attachments`; typed by its bytes in
   `orders/attachments.py` `sniff`; only `orders/models.py` `INLINE` types are served as
   themselves, the rest as downloads; the spec carries the type sets, which
   `attachmentMedia.test.ts` checks the browser's copy against), uploaded through the claim store and the `order_attachment_add` kind (the
@@ -1075,9 +1079,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-10-26@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-11-02@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.10.26). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.11.02). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
   workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI

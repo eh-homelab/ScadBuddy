@@ -3,6 +3,7 @@ import { toolOffReason } from '../access/items.js'
 import type { LiveAccess } from '../access/live.js'
 import { screenedText } from '../browser/origins.js'
 import type { SeamLedger } from './seamLedger.js'
+import { pinnedOutward } from '../tools/pinnedOutward.js'
 
 // The permission seam between the SDK and ScadBuddy's risk tiers (spec §8.1–§8.2,
 // issue #258). Every tool call is mapped to a tier and the tier to a decision:
@@ -145,6 +146,14 @@ export function decide(toolName: string, tierOf: TierResolver, input?: unknown, 
   const own = tierOf(toolName, input) ?? 'outward'
   if (verdict && 'deny' in verdict) return { decision: 'deny', tier: own, reason: verdict.deny }
   if (verdict && 'outward' in verdict) return { decision: 'needs_approval', tier: 'outward', reason: verdict.outward }
+  // Outward by its input (#959), past any resolver's tier or guard's `allow`.
+  if (pinnedOutward(toolName, input)) {
+    return {
+      decision: 'needs_approval',
+      tier: 'outward',
+      reason: `${toolName} asks to fetch from a host off the asset allowlist, which needs a human approval in the ScadBuddy UI.`,
+    }
+  }
   const tier = tierAfter(own, verdict)
   if (tier === 'read' || tier === 'write') {
     return verdict && 'input' in verdict ? { decision: 'allow', tier, input: verdict.input } : { decision: 'allow', tier }

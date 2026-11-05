@@ -32,6 +32,9 @@ import type {
   ModelSetting,
   ImageSettings,
   MemorySettings,
+  PushServices,
+  NotifyChannel,
+  NotifyChannelInput,
   WorkspaceFile,
   WorkspaceFileList,
   WorkspaceSettings,
@@ -41,6 +44,7 @@ import type {
   RenderLimits,
   SessionLimits,
   SessionRuntime,
+  SessionRuntimeUpdate,
   BlankTemplate,
   SessionResource,
   ResourceRef,
@@ -78,6 +82,7 @@ import type {
   BatchChoice,
   PrintBatch,
   BatchQueueProgress,
+  ModelFacets,
   ModelSummary,
   ModelVersion,
   Output,
@@ -194,6 +199,8 @@ import type {
   NativeSpoolCreate,
   NativeSpoolPatch,
   Fulfilment,
+  AttemptArchives,
+  ArchiveCopy,
   FulfilmentInput,
   OrderAttachment,
   OrderAttachmentPatch,
@@ -203,6 +210,7 @@ import type {
   OrderCreate,
   OrderDetail,
   OrderEstimate,
+  OrderCosts,
   OrderEvent,
   OrderItem,
   OrderItemCreate,
@@ -242,6 +250,7 @@ import type {
 } from './aiCredential'
 import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
 import { REQUEST_HEADER } from '../lib/requestHeader'
+import { noteIfSignedOut, noteSignedOut, SIGNED_OUT_PROBLEM } from '../lib/signedOut'
 import { ordersApiParams, type OrdersQuery } from '../lib/ordersQuery'
 import type { PrintFilters } from '../lib/printsQuery'
 import type { DefinitionFile } from '../lib/lsp'
@@ -311,6 +320,22 @@ export class ApiError extends Error {
 export const SETTINGS_SHARE_MS = 5_000
 /** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
 let settingsInFlight: { read: Promise<Settings>; started: number; scope: ReadScope } | undefined
+/** #2290 — the catalogue's search and filters, as `GET /models` and `GET /model-facets` take them. */
+export interface ModelFilters {
+  q: string
+  tags: string[]
+  origin: 'all' | 'builtin' | 'mine'
+  sort: 'updated' | 'name'
+}
+
+function modelFilterParams({ q, tags, origin }: Omit<ModelFilters, 'sort'>): URLSearchParams {
+  const query = new URLSearchParams()
+  if (q.trim()) query.set('q', q.trim())
+  for (const tag of tags) query.append('tag', tag)
+  if (origin !== 'all') query.set('origin', origin)
+  return query
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
@@ -450,7 +475,10 @@ function xhrProblem(xhr: XMLHttpRequest): Problem {
   } catch {
     return withRetryAfter(unansweredProblem(xhr.status, xhr.statusText), xhr.getResponseHeader('Retry-After'))
   }
-  return withRetryAfter(parsedProblem(body, xhr.status, xhr.statusText), xhr.getResponseHeader('Retry-After'))
+  const problem = parsedProblem(body, xhr.status, xhr.statusText)
+  // #4975 phase 8: as `send` notes a fetch's.
+  if (xhr.status === 401 && problem.type === SIGNED_OUT_PROBLEM) noteSignedOut()
+  return withRetryAfter(problem, xhr.getResponseHeader('Retry-After'))
 }
 
 /** `fetch`, with a request that got no answer as an `ApiError`. An abort is passed through. */
@@ -463,6 +491,8 @@ async function send(url: string, init?: RequestInit): Promise<Response> {
   try {
     const response = await fetch(url, init)
     answered(response.headers)
+    // #4975 phase 8: the gate's "sign in" (SCADBUDDY_AUTH_MODE=enforce), noted for the shell.
+    noteIfSignedOut(response)
     return response
   } catch (cause) {
     answered(undefined)
@@ -1162,6 +1192,29 @@ export const api = {
 
   listModels: () => request<ModelSummary[]>('/models'),
 
+  /**
+   * #2290 — one page of the catalogue, searched, filtered and sorted on the server.
+   * `total` is how many models the filters select (`X-Total-Count`).
+   */
+  listModelsPage: async (
+    filters: ModelFilters,
+    page: { limit?: number; after?: string } = {},
+    signal?: AbortSignal,
+  ): Promise<{ items: ModelSummary[]; total: number }> => {
+    const query = modelFilterParams(filters)
+    query.set('sort', filters.sort)
+    if (page.limit !== undefined) query.set('limit', String(page.limit))
+    if (page.after !== undefined) query.set('after', page.after)
+    const response = await send(`${API_BASE}/models?${query}`, { headers: { Accept: 'application/json' }, signal })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const items = (await response.json()) as ModelSummary[]
+    return { items, total: Number(response.headers.get('X-Total-Count') ?? items.length) }
+  },
+
+  /** #2290 — how many models `filters` select, of how many, and their tags' counts. */
+  modelFacets: (filters: Omit<ModelFilters, 'sort'>, signal?: AbortSignal) =>
+    request<ModelFacets>(`/model-facets?${modelFilterParams(filters)}`, { signal }),
+
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
 
   /** #2146 — a library file (or an output) opened as an editable mesh model, named `name`. */
@@ -1427,7 +1480,7 @@ export const api = {
     command<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
 
   /**
-   * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the
+   * #204 — stores an SVG, PNG, STL, 3MF or OBJ for a `// file` parameter (#959). The answer's `id` (the
    * SHA-256 of what the server kept) is the value the render takes.
    */
   uploadAsset: (slug: string, file: File) => {
@@ -1469,6 +1522,10 @@ export const api = {
 
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
+
+  /** A PNG of an uploaded STL, 3MF or OBJ (#959); an image is its own picture. */
+  assetPreviewUrl: (slug: string, id: string) =>
+    `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/preview`,
 
   /**
    * A sample file the template ships beside its source (a `file` parameter's
@@ -2133,8 +2190,10 @@ export const api = {
   /** Back in the pickers, so a new order can name them again. */
   unarchiveCustomer: (id: string) => request<Customer>(`/customers/${seg(id)}/unarchive`, { method: 'POST' }),
   /** Orders, newest first, a page at a time; `cursor` is the last page's `next_cursor`. */
-  orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number } = {}) => {
+  orders: (query: OrdersQuery, page: { cursor?: string | null; limit?: number; statuses?: Order['status'][] } = {}) => {
     const search = new URLSearchParams(ordersApiParams(query))
+    // #5276: `status` repeated is orders of any of them, filtered by the server.
+    for (const status of page.statuses ?? []) search.append('status', status)
     if (page.limit !== undefined) search.set('limit', String(page.limit))
     if (page.cursor) search.set('cursor', page.cursor)
     const suffix = search.size > 0 ? `?${search.toString()}` : ''
@@ -2142,6 +2201,8 @@ export const api = {
   },
   order: (id: string) => request<OrderDetail>(`/orders/${seg(id)}`),
   orderEvents: (id: string) => request<OrderEvent[]>(`/orders/${seg(id)}/events`),
+  /** #4251 §6.4 — the accepted quotes beside the attempts. */
+  orderCosts: (id: string) => request<OrderCosts>(`/orders/${seg(id)}/costs`),
   createOrder: (body: OrderCreate) => request<Order>('/orders', { method: 'POST', body: JSON.stringify(body) }),
   updateOrder: (id: string, body: OrderPatch) =>
     request<Order>(`/orders/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
@@ -2179,9 +2240,11 @@ export const api = {
     file: File,
     fields: { role?: OrderAttachmentRole; caption?: string },
     onProgress?: (fraction: number) => void,
+    /** #4251 — one of the item's attempts. */
+    fulfilmentId?: string | null,
   ): Promise<OrderAttachment> =>
     uploadForm<OrderAttachment>(
-      `/orders/${seg(orderId)}${itemId ? `/items/${seg(itemId)}` : ''}/attachments`,
+      `/orders/${seg(orderId)}${itemId ? `/items/${seg(itemId)}` : ''}${itemId && fulfilmentId ? `/fulfilments/${seg(fulfilmentId)}` : ''}/attachments`,
       () => {
         const body = new FormData()
         body.append('file', file)
@@ -2267,6 +2330,16 @@ export const api = {
     }),
   acceptFulfilment: (orderId: string, itemId: string, fulfilmentId: string) =>
     request<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/accept`, { method: 'POST' }),
+  /** #4253 §8.2 — the attempt's Bambuddy archives and what each offers to copy. */
+  attemptArchives: (orderId: string, itemId: string, fulfilmentId: string) =>
+    request<AttemptArchives>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/archives`),
+  /** #4253 §8.2 — the `order_attempt_copy` operation: an archive's finish photo or timelapse
+   * kept as the item's attachment. */
+  copyArchiveMedia: (orderId: string, itemId: string, fulfilmentId: string, archiveId: number, body: ArchiveCopy) =>
+    command<OrderAttachment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/fulfilments/${seg(fulfilmentId)}/archives/${archiveId}/copy`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   addShipment: (orderId: string, body: ShipmentInput) =>
     request<Shipment>(`/orders/${seg(orderId)}/shipments`, { method: 'POST', body: JSON.stringify(body) }),
   updateShipment: (orderId: string, shipmentId: string, body: ShipmentEdit) =>
@@ -2692,6 +2765,27 @@ export const api = {
       body: JSON.stringify({ recall_max_query_chars: recallMaxQueryChars }),
     }),
 
+  /** #815 — the push services the agent may send Web Push to. */
+  getPushServices: () => request<PushServices>('/ai/settings/push-services'),
+
+  putPushServices: (hosts: string[]) =>
+    request<PushServices>('/ai/settings/push-services', { method: 'PUT', body: JSON.stringify({ hosts }) }),
+
+  /** #815 — the notification channels (ntfy, Home Assistant), served by the agent service. */
+  listNotifyChannels: () => request<{ channels: NotifyChannel[] }>('/ai/notify/channels'),
+
+  createNotifyChannel: (input: NotifyChannelInput) =>
+    request<NotifyChannel>('/ai/notify/channels', { method: 'POST', body: JSON.stringify(input) }),
+
+  updateNotifyChannel: (id: string, patch: Partial<NotifyChannelInput>) =>
+    request<NotifyChannel>(`/ai/notify/channels/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(patch) }),
+
+  deleteNotifyChannel: (id: string) =>
+    request<void>(`/ai/notify/channels/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  testNotifyChannel: (id: string) =>
+    request<{ ok: boolean; detail?: string }>(`/ai/notify/channels/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+
   /** #2329 — the caps on the assistant's workspace (bytes), served by the agent service. */
   getWorkspaceSettings: () => request<WorkspaceSettings>('/ai/settings/workspace'),
 
@@ -2758,7 +2852,7 @@ export const api = {
   /** The park hold, warm process cache and turn limit, served by the agent service. */
   getSessionRuntime: () => request<SessionRuntime>('/ai/settings/session-runtime'),
 
-  putSessionRuntime: (settings: Partial<SessionRuntime>) =>
+  putSessionRuntime: (settings: SessionRuntimeUpdate) =>
     request<SessionRuntime>('/ai/settings/session-runtime', {
       method: 'PUT',
       body: JSON.stringify(settings),

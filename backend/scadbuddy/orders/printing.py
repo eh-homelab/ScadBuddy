@@ -32,8 +32,8 @@ What it does not do yet: print the quote's sliced file itself. A slice quote is 
 records and holds that file, but the run slices the item's output with the request's
 choices, as the dialog's run does; when those are the quote's, the run reuses the
 quote's own background slice (``bambuddy/preview.py``), otherwise it is a slice of the
-same output. A spool chosen per slot from the quote's filaments (``needs_spool_choice``,
-``spool_not_filament``) waits on §8.3's spool-to-filament match.
+same output. Each slot's spool is filled from the item's filaments in the operation's
+check (``orders/spools.py``, #4251): ``needs_spool_choice``, ``spool_not_filament``.
 """
 
 from __future__ import annotations
@@ -229,35 +229,42 @@ def _work(lifecycle: Lifecycle, event: Event) -> Callable[[], Any] | None:
 
 
 def listen_for_prints(
-    events: EventBus, lifecycle: Lifecycle
+    events: EventBus,
+    lifecycle: Lifecycle,
+    on_outcome: Callable[[str], Awaitable[None]] | None = None,
 ) -> Callable[[], Coroutine[Any, Any, None]]:
     """Follow every open print attempt (§5.4): reconciled once now, then on each print
     event heard and each resync, off the listener's thread, as ``flow_triggers/events.py``
     fires its triggers. Every replica hears each event; ``follow_print`` writes under the
-    order's lock and only what is still open, so they record it once. Returns the
-    remover, which stops hearing events and waits for the follows in flight."""
+    order's lock and only what is still open, so they record it once. ``on_outcome`` is
+    then given the run of each print outcome heard (§8.2: the attempt copies its
+    archives). Returns the remover, which stops hearing events and waits for the follows
+    in flight."""
     loop = asyncio.get_running_loop()
     pending: set[asyncio.Task[None]] = set()
     stopped = False
 
-    async def run(work: Callable[[], Any]) -> None:
+    async def run(work: Callable[[], Any], then: str | None) -> None:
         try:
             await asyncio.to_thread(work)
         except Exception:
             logger.exception("could not follow an order item's print")
+        if then is not None and on_outcome is not None:
+            await on_outcome(then)
 
-    def schedule(work: Callable[[], Any]) -> None:
+    def schedule(work: Callable[[], Any], then: str | None = None) -> None:
         if stopped:
             return
-        task = loop.create_task(run(work))
+        task = loop.create_task(run(work, then))
         pending.add(task)
         task.add_done_callback(pending.discard)
 
     def on_event(event: Event) -> None:
         work = _work(lifecycle, event)
         if work is not None:
+            then = event.run_id if isinstance(event, PrintOutcome) else None
             with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(schedule, work)
+                loop.call_soon_threadsafe(schedule, work, then)
 
     remove_listener = events.add_listener(on_event)
     schedule(lambda: reconcile(lifecycle))
@@ -286,6 +293,7 @@ async def print_item(
     request_id: str,
     sliced_sha256: str | None,
     sliced_blob_key: str | None,
+    project_id: int | None = None,
 ) -> Fulfilment:
     """``order_item_print``'s run: the item claimed (``Lifecycle.claim_print``, refused
     as the check would be when the rows moved since), then its print started with the
@@ -307,6 +315,7 @@ async def print_item(
                 request_id=request_id,
                 sliced_sha256=sliced_sha256,
                 sliced_blob_key=sliced_blob_key,
+                project_id=project_id,
             )
         )
     except ClaimRefusedError as error:
@@ -331,6 +340,14 @@ async def print_item(
     except ApiError as error:
         if error.status < 500:
             await asyncio.to_thread(lifecycle.release_print, claim, error.detail)
+            # Its project may be one just deleted in Bambuddy (#5276): the next print,
+            # a new claim, asks again. A 5xx keeps the claim, whose retry keys the run
+            # with the project it recorded, so forgetting there changes nothing.
+            # Best-effort: the refusal is the answer, never this write's failure.
+            try:
+                await asyncio.to_thread(lifecycle.store.forget_projects_seen, order_id)
+            except Exception:
+                logger.warning("could not forget the order's projects", exc_info=True)
         raise
     return await _attached(lifecycle, claim, run)
 

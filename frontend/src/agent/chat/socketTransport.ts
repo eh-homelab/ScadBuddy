@@ -1,4 +1,5 @@
 import { socketUrl } from '../../lib/lsp'
+import { isSignedOut, noteSignedOut, SIGNED_OUT_CLOSE, whenSignedIn } from '../../lib/signedOut'
 import { recheckAiAvailability } from './availability'
 import type { ClientMessage } from './protocol'
 import type { ChatTransport, SendResult, TransportHandlers } from './transport'
@@ -27,6 +28,10 @@ import type { ChatTransport, SendResult, TransportHandlers } from './transport'
  * A passing outage keeps the message, the back-off and both queues, so a decision
  * queued during it still goes first when the agent is back. The agent pings at the
  * WebSocket level (control frames), so nothing extra arrives for the panel to parse.
+ *
+ * Signed out (#4975 phase 8: closed with 4401 when the session is revoked, or refused
+ * while the page knows it is signed out), it says so and waits for the sign-in
+ * (`lib/signedOut.ts`) rather than reconnecting as nobody; the queues wait with it.
  */
 
 export const CHAT_SOCKET_PATH = '/api/v1/ai/chat'
@@ -34,6 +39,8 @@ export const CHAT_SOCKET_PATH = '/api/v1/ai/chat'
 export const MAX_QUEUED = 50
 /** Failed handshakes in a row before the agent's status is asked whether it refuses this page. */
 export const REFUSED_AFTER = 3
+
+export const SIGNED_OUT_MESSAGE = 'Signed out of ScadBuddy. Sign in to reconnect the assistant.'
 
 export const REFUSED_MESSAGE =
   'The assistant keeps refusing the connection. It only accepts ScadBuddy opened at its public ' +
@@ -72,6 +79,7 @@ export function createSocketTransport({
   /** Handshakes that closed before opening, since the last connection that opened. */
   let failedHandshakes = 0
   let timer: ReturnType<typeof setTimeout> | undefined
+  let unwaitSignIn: (() => void) | undefined
   const queue: string[] = []
   const control: string[] = []
 
@@ -98,6 +106,17 @@ export function createSocketTransport({
       if (socket !== ws || closed) return
       socket = undefined
       live = false
+      if (event.code === SIGNED_OUT_CLOSE) noteSignedOut()
+      if (isSignedOut()) {
+        handlers?.onClose?.(SIGNED_OUT_MESSAGE)
+        attempt = 0
+        failedHandshakes = 0
+        unwaitSignIn = whenSignedIn(() => {
+          unwaitSignIn = undefined
+          open()
+        })
+        return
+      }
       if (!opened) failedHandshakes += 1
       handlers?.onClose?.(
         event.code === 1001
@@ -141,6 +160,7 @@ export function createSocketTransport({
       closed = true
       handlers = null
       clearTimeout(timer)
+      unwaitSignIn?.()
       const ws = socket
       socket = undefined
       ws?.close()

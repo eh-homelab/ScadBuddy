@@ -195,9 +195,12 @@ export function questionServer(gate: QuestionGate): McpSdkServerConfigWithInstan
       "always type an answer of their own. For a draft to approve, give it as an option's Markdown `preview`.",
     { questions: QuestionsSchema },
     (args, extra) => askUserHandler(gate, args, extra),
+    // Never deferred behind tool search (harness/toolSearch.ts): a question cannot wait for a search.
+    { alwaysLoad: true },
   )
   const attention = tool(ATTENTION_TOOL_NAME, ATTENTION_DESCRIPTION, ATTENTION_TOOL_SHAPE, (args, extra) =>
     attentionHandler(gate, ATTENTION_TOOL, args, extra),
+    { alwaysLoad: true },
   )
   return { ...createSdkMcpServer({ name: QUESTION_SERVER, tools: [askUser, attention] }), timeout: ASK_USER_TIMEOUT_MS }
 }

@@ -67,6 +67,7 @@ from scadbuddy.auth.check import auth_check
 from scadbuddy.auth.component import AUTH
 from scadbuddy.auth.gate import AuthGate
 from scadbuddy.auth.service_credentials import grant_caller_views
+from scadbuddy.auth.start_check import check_enforce
 from scadbuddy.bambuddy.attachments import sweep_gone_archives
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.errors import NOT_CONFIGURED_PROBLEM
@@ -112,7 +113,11 @@ from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.lifecycle import reap_quote_holds as reap_orphan_quote_holds
 from scadbuddy.print_library.component import PRINT_LIBRARY
 from scadbuddy.print_library.sweep import sweep_library, sweep_print_copies
-from scadbuddy.printers.bambuddy_sync import sync_printers
+from scadbuddy.printers.bambuddy_sync import (
+    boot_adoption_due,
+    sync_printers,
+    sync_virtual_printers,
+)
 from scadbuddy.printers.component import PRINTERS
 from scadbuddy.printers.print_activities import LanActivities, LanDeps
 from scadbuddy.printers.watch import WatchActivities
@@ -790,6 +795,43 @@ async def _sync_bambuddy_printers_logged(state: AppState) -> None:
     await _with_bambuddy(state, sweep)
 
 
+#: How long the boot's virtual-printer pass may take: two Bambuddy lists and an upsert
+#: per virtual printer.
+VP_BOOT_TIMEOUT = 60.0
+
+
+async def _adopt_virtual_rows_logged(state: AppState) -> None:
+    """#5236: the boot's virtual-printer pass. A row made by hand before the sync existed,
+    with a Bambuddy virtual printer's serial, stayed ``physical`` while the full sync was
+    left to the sweeps' Schedule, which prod turns off. So, once per boot and only when
+    `boot_adoption_due`, the sync's virtual-printer part runs: two Bambuddy lists, no
+    access code, no probe. Nothing without a Bambuddy. Bambuddy refusing, unreachable or
+    past `VP_BOOT_TIMEOUT` is one WARNING from this pass (the client logs its own failed
+    request besides); anything else one logged traceback; never raised."""
+    try:
+        registry = state.components.get(PRINTERS)
+        rows = await asyncio.to_thread(registry.store.list)
+        if not boot_adoption_due(rows):
+            return
+        settings = await asyncio.to_thread(state.settings_store.load)
+        async with asyncio.timeout(VP_BOOT_TIMEOUT), client_for(settings) as client:
+            await sync_virtual_printers(registry, client)
+    except ApiError as error:
+        if error.type == NOT_CONFIGURED_PROBLEM:
+            return
+        logger.warning(
+            "could not sync the virtual printers from Bambuddy at start",
+            extra={"status": error.status},
+        )
+    except TimeoutError:
+        logger.warning(
+            "could not sync the virtual printers from Bambuddy at start",
+            extra={"timeout": VP_BOOT_TIMEOUT},
+        )
+    except Exception:
+        logger.exception("could not sync the virtual printers from Bambuddy at start")
+
+
 async def _sweep_print_library_logged(state: AppState) -> None:
     """#3827: the native library's old trash and orphan blobs; nothing on ``bambuddy``."""
     try:
@@ -1328,7 +1370,13 @@ async def _run_print_worker(state: AppState, stop: asyncio.Event) -> None:
     )
     ops = state.components.get(OPERATIONS)
     registry = state.components.get(PRINTERS)
-    watches = WatchActivities(registry.store, registry.reports, state.events)
+    watches = WatchActivities(
+        registry.store,
+        registry.reports,
+        state.events,
+        rack=state.components.get(RACK_USAGE),
+        settle_failed=state.metrics.rack_watch_settle_failed,
+    )
     content = state.store.content
     lan = LanDeps(
         printers=registry.store,
@@ -1681,6 +1729,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await asyncio.to_thread(grant_at_start, state.settings_store.pool)
     # #4975 phase 4: the service credentials, before any caller reads its own.
     await asyncio.to_thread(_grant_and_rotate_at_start, state)
+    # #4975 phase 8 (spec 2026-11-01 §9.1): `enforce` without a usable login stops here.
+    if state.settings.auth_mode == "enforce":
+        auth = state.components.get(AUTH)
+        try:
+            public_url = await asyncio.to_thread(lambda: state.settings_store.load().public_url)
+            await check_enforce(auth, public_url)
+        except BaseException:
+            await asyncio.to_thread(auth.close)
+            await asyncio.to_thread(state.settings_store.close)
+            raise
     # Then what the UI saved (#322), before anything below is sized or started from it.
     snapshot = await asyncio.to_thread(state.settings_store.snapshot)
     apply_runtime(state, snapshot.runtime, booting=True)
@@ -1763,6 +1821,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     unfollow = follow_changes(state)
     unfollow_backfills: Callable[[], Coroutine[Any, Any, None]] | None = None
     attach_now: asyncio.Task[None] | None = None
+    adopt_now: asyncio.Task[None] | None = None
     stop_background = threading.Event()
     components = AsyncExitStack()
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
@@ -1799,6 +1858,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         attach_now = asyncio.create_task(
             _attach_backfills_logged(state, reraise=False, stop=stop_background),
             name="attach backfills",
+        )
+        # #5236: a hand-made row a Bambuddy virtual printer's serial names becomes that
+        # VP's, with the sweeps off too.
+        adopt_now = asyncio.create_task(
+            _adopt_virtual_rows_logged(state), name="adopt virtual printers"
         )
         # Print runs (#1052): the `scadbuddy-print` worker serves the `bambuddy` queue,
         # or this process does when told to (#1060); the upkeep is this process's.
@@ -1842,7 +1906,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await _stop_queue_worker(library, "library", LIBRARY_WORKER_STOP_TIMEOUT)
         if unfollow_backfills is not None:
             await unfollow_backfills()
-        await _join_background(stop_background, backfill, attach_now)
+        await _join_background(stop_background, backfill, attach_now, adopt_now)
         stop_printing.set()
         await _stop_queue_worker(printing, "print")
         await _stop_queue_worker(upkeep, "print upkeep")

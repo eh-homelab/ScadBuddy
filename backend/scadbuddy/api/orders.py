@@ -19,13 +19,14 @@ runtime (``api/components.py``).
 """
 
 import asyncio
+import logging
 import zipfile
 from collections.abc import Callable
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Self
 
-from fastapi import APIRouter, Query, Request, Response, status
+from fastapi import APIRouter, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -53,9 +54,11 @@ from scadbuddy.library.outputs import require_output
 from scadbuddy.library.settings_store import SettingsPatch
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
+from scadbuddy.orders.archives import AttemptArchives, attempt_archives
 from scadbuddy.orders.component import OrdersDep
+from scadbuddy.orders.costs import OrderCosts, order_costs
 from scadbuddy.orders.currency import minor_exponent
-from scadbuddy.orders.integrations import NotLinkedError, not_linked
+from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
     FulfilmentInput,
     LifecycleError,
@@ -78,6 +81,7 @@ from scadbuddy.orders.models import (
     OrderEvent,
     OrderFilter,
     OrderItem,
+    OrderProject,
     OrderStatus,
     Payment,
     PriceBook,
@@ -86,14 +90,17 @@ from scadbuddy.orders.models import (
     Shipment,
     SpoolImport,
 )
-from scadbuddy.orders.operations import ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
+from scadbuddy.orders.operations import ORDER_ATTEMPT_COPY, ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
 from scadbuddy.orders.pricing import estimate_grams, to_minor
 from scadbuddy.orders.printing import print_request_id
 from scadbuddy.orders.problems import PROBLEMS, refused
+from scadbuddy.orders.projects import ensure_projects
 from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
 from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -276,6 +283,9 @@ class OrderDetail(BaseModel):
     totals: OrderTotals
     #: The order's files and its items' (``item_id``), oldest first (§6.2).
     attachments: list[Attachment]
+    #: The Bambuddy projects mirroring the order and its items (§8.1), the order's first;
+    #: empty without Bambuddy, or before the order is accepted.
+    projects: list[OrderProject] = Field(default_factory=list)
 
 
 class OrderPage(BaseModel):
@@ -314,7 +324,7 @@ def _path(*values: str) -> None:
 async def list_orders(
     request: Request,
     orders: OrdersDep,
-    status_: Annotated[OrderStatus | None, Query(alias="status")] = None,
+    status_: Annotated[list[OrderStatus] | None, Query(alias="status")] = None,
     customer_id: str | None = None,
     q: str | None = None,
     from_: Annotated[datetime | None, Query(alias="from")] = None,
@@ -322,7 +332,8 @@ async def list_orders(
     cursor: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> OrderPage:
-    """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``."""
+    """Newest first, a page at a time: pass ``next_cursor`` back as ``cursor``. ``status``
+    may be repeated, for orders of any of them (#5276)."""
     _no_nul(request)
     _unknown(request, LIST_PARAMS)
     filters = OrderFilter(status=status_, customer_id=customer_id, q=q, since=from_, until=to)
@@ -667,6 +678,7 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
             shipments=store.shipments(order.id),
             totals=_totals(items, charges, payments),
             attachments=store.attachments(order.id),
+            projects=store.projects(order.id),
         )
 
     detail = await asyncio.to_thread(read)
@@ -700,11 +712,65 @@ async def order_events(order_id: str, orders: OrdersDep) -> list[OrderEvent]:
     return await asyncio.to_thread(orders.store.events, order_id)
 
 
-@router.post("/{order_id}/accept", response_model=Order, summary="Accept an order")
+@router.get(
+    "/{order_id}/costs",
+    response_model=OrderCosts,
+    summary="The real cost: the accepted quotes beside the attempts",
+    description=(
+        "Per item, its accepted quote's seconds, grams and filament cost for the item's "
+        "quantity beside every attempt's actual seconds and grams, failures included, the "
+        "grams priced at the quote's own price per gram (a `manual` quote prices none). "
+        "With Bambuddy linked, each attempt's `bambuddy_cost` is Bambuddy's cost of its "
+        "archives, corrected for suspect filament readings, shown and never in any sum; "
+        "`bambuddy_unavailable` says some archive could not be read. Nothing is stored."
+    ),
+)
+async def get_order_costs(order_id: str, orders: OrdersDep) -> OrderCosts:
+    _path(order_id)
+    costs = await order_costs(orders.store, orders.integrations, order_id)
+    if costs is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
+    return costs
+
+
+#: How long an accept waits for its Bambuddy projects (§8.1) before answering anyway.
+PROJECTS_WAIT_SECONDS = 20.0
+
+
+@router.post(
+    "/{order_id}/accept",
+    response_model=Order,
+    summary="Accept an order",
+    description=(
+        "With Bambuddy linked, the order then gets a Bambuddy project named by its number, "
+        "and each item that prints one nested under it (`OrderDetail.projects`). That is "
+        "best effort: the accept stands without them, and an item's print makes what is "
+        "missing."
+    ),
+)
 async def accept_order(order_id: str, orders: OrdersDep) -> Order:
     _path(order_id)
     by = current_actor()
-    return await _run(lambda: orders.lifecycle.accept_order(order_id, by))
+    accepted = await _run(lambda: orders.lifecycle.accept_order(order_id, by))
+    # Waited for, never cancelled: a create cut off after Bambuddy made the project would
+    # leave it unrecorded, and the next ensure would make a second of the same name.
+    ensuring = asyncio.create_task(ensure_projects(orders.store, orders.integrations, accepted.id))
+    _ENSURING.add(ensuring)
+    ensuring.add_done_callback(lambda task: _ensured(task, accepted.number))
+    await asyncio.wait({ensuring}, timeout=PROJECTS_WAIT_SECONDS)
+    return accepted
+
+
+#: The accepts' project ensures still running past the wait, kept from the collector.
+_ENSURING: set[asyncio.Task[Any]] = set()
+
+
+def _ensured(task: asyncio.Task[Any], number: str) -> None:
+    _ENSURING.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        logger.warning(
+            "could not make the Bambuddy projects of %s", number, exc_info=task.exception()
+        )
 
 
 @router.post("/{order_id}/cancel", response_model=Order, summary="Cancel an order")
@@ -1121,6 +1187,97 @@ async def update_fulfilment(
     return await _run(
         lambda: orders.lifecycle.update_fulfilment(order_id, item_id, fulfilment_id, body, by)
     )
+
+
+class ArchiveCopy(BaseModel):
+    """What of the archive to copy (§8.2)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    what: ArchiveMedia
+    #: A ``finish_`` photo of the archive (``AttemptArchives``' ``finish_photos``);
+    #: left out, its latest. Only for ``finished_photo``.
+    name: str | None = Field(
+        default=None, max_length=255, pattern=r"^finish_[A-Za-z0-9_-]+\.[a-z]+$"
+    )
+
+    @model_validator(mode="after")
+    def _name_for_a_photo(self) -> Self:
+        if self.name is not None and self.what != "finished_photo":
+            raise ValueError("`name` names a photo: it goes with `finished_photo` only")
+        return self
+
+
+@router.get(
+    "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives",
+    response_model=AttemptArchives,
+    summary="The Bambuddy archives of an attempt's print",
+)
+async def get_attempt_archives(
+    order_id: str, item_id: str, fulfilment_id: str, orders: OrdersDep
+) -> AttemptArchives:
+    """The archives the attempt's print run made in Bambuddy (one per plate, §8.2), with
+    what each offers to copy: its ``finish_`` photos and whether it has a timelapse.
+    Reading them copies what they say onto the attempt once its print settled
+    (``archive_ids``, the printer's times, ``actual_seconds``, ``actual_grams``).
+    ``linked`` is false, with no archives, without Bambuddy; an attempt by hand naming no
+    archive, or one Bambuddy has linked no archive to yet, has none. 404 for an attempt
+    not the item's."""
+    _path(order_id, item_id, fulfilment_id)
+    return await attempt_archives(
+        orders.lifecycle, orders.integrations, order_id, item_id, fulfilment_id
+    )
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/fulfilments/{fulfilment_id}/archives/{archive_id}/copy",
+    response_model=Attachment,
+    summary="Copy an archive's finish photo or timelapse onto the attempt",
+    responses={
+        404: {"description": "No such attempt of the item"},
+        413: {"description": "Larger than the upload limit in Settings"},
+        **OPERATION_RESPONSES,
+    },
+)
+async def copy_archive_media(
+    order_id: str,
+    item_id: str,
+    fulfilment_id: str,
+    archive_id: Annotated[int, Path(ge=1)],
+    body: ArchiveCopy,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Attachment | JSONResponse:
+    """The ``order_attempt_copy`` operation (§8.2, §6.2): the archive's ``finish_``
+    photo (``name``, else its latest) or its timelapse pulled once from Bambuddy and
+    kept as ScadBuddy's own file, an attachment of the attempt (listed under its item)
+    with the role ``finished`` or ``timelapse``; the same bytes again are the attachment
+    already there. Refused
+    with 409: ``not_linked`` (no Bambuddy), ``archive_not_attempts`` (not one of the
+    attempt's prints), ``archive_gone`` (deleted in Bambuddy), ``no_finish_photo``,
+    ``no_timelapse`` (pull it off the printer first, ``POST
+    /prints/{archive_id}/timelapse/pull``). Allowed in any state of the order, as an
+    upload is."""
+    _path(order_id, item_id, fulfilment_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[ORDER_ATTEMPT_COPY],
+        subject=subject_of(item_id),
+        request={
+            "order_id": order_id,
+            "item_id": item_id,
+            "fulfilment_id": fulfilment_id,
+            "archive_id": archive_id,
+            "what": body.what,
+            "name": body.name,
+            # Ruling 12: who added it comes from the author header, never the body.
+            "by": current_actor().model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Attachment)
 
 
 @router.post(

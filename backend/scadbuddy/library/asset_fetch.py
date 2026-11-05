@@ -8,6 +8,12 @@ on the **asset allowlist** (`asset_fetch_domains` in Settings, which only the us
 edits: the agent has no tool for `PUT /settings`). So a redirect off the list is
 refused rather than followed, and the refusal names the host that was refused.
 
+One fetch may also let a host off the list through (#959): ``allow_host``, the URL's own
+host exactly (not its subdomains or its parent), for that fetch only, redirects within
+that host included. The route takes it as ``allow_host`` with a grant (`fetch_grants.py`);
+the agent sends it only
+from a `fetch_asset` call whose approval said so, and the list itself never changes.
+
 What arrives is stored exactly as an upload is (`AssetStore.put`): sniffed rather than
 trusted by its name, an SVG stripped of scripts and external references, a PNG
 re-encoded. The bytes are data; nothing in them is acted on.
@@ -38,13 +44,16 @@ from scadbuddy.library.url_import import (
 #: game-icons.net, openmoji.org and raw.githubusercontent.com answer 200 with
 #: ``image/svg+xml``; a github.com ``/raw/`` link 302s to raw.githubusercontent.com.
 #: Left out: svgrepo.com answers 429 with a "Vercel Security Checkpoint" page,
-#: printables.com 403s, and printables.com and thingiverse.com serve meshes, which the
-#: asset store does not take yet (#959). Each entry also allows its subdomains.
+#: printables.com 403s; thingiverse.com, a mesh host, was not measured. A person adds
+#: a mesh host in Settings. Each entry also allows its subdomains.
+#: api.iconify.design (#959) serves the SVGs `search_icons` finds
+#: (`library/icon_search.py`, measured there).
 DEFAULT_ASSET_FETCH_DOMAINS: Final = (
     "game-icons.net",
     "github.com",
     "raw.githubusercontent.com",
     "openmoji.org",
+    "api.iconify.design",
 )
 
 #: A host name of at least two labels, each a letter-digit-hyphen label, ending in a
@@ -97,29 +106,65 @@ def _refuse(host: str, *, redirected_from: str | None = None) -> AssetFetchRefus
     return AssetFetchRefusedError(
         f"{host}{via} is not on the asset allowlist, so it was not fetched; the user can "
         "add its domain in Settings"
+        # A one-off covers the URL's own host only, never a redirect's.
+        + ("" if via else ", or approve fetching from it once (`allow_host`)")
     )
+
+
+def ascii_host(url: httpx.URL) -> str:
+    """The host a fetch of ``url`` is held to: its IDNA form, lower-cased."""
+    return _ascii_host(url).lower().rstrip(".")
 
 
 def parse_fetch_url(pasted: str) -> httpx.URL:
     """``pasted`` as an https URL with a host. Its refusals quote the URL whole, so the
-    route makes them before an operation could record them (#1054)."""
+    route makes them before an operation could record them (#1054).
+
+    A backslash, a control character or a user name or password is refused (#959):
+    each is where URL parsers disagree on the host, and the host is what the allowlist
+    and an approval hold the fetch to, so it must be the one every parser reads."""
+    stripped = pasted.strip()
+    if _AMBIGUOUS.search(stripped):
+        raise ImportRefusedError(
+            f"{pasted!r} holds a backslash or a control character, which parsers read "
+            "different hosts from; give the plain https URL"
+        )
     try:
-        url = httpx.URL(pasted.strip())
+        url = httpx.URL(stripped)
     except httpx.InvalidURL:
         raise ImportRefusedError(f"{pasted!r} is not a URL") from None
     if url.scheme != "https":
         raise ImportRefusedError(f"only https URLs can be fetched, and {str(url)!r} is not one")
     if not url.host:
         raise ImportRefusedError(f"{pasted!r} names no host")
+    if url.userinfo:
+        raise ImportRefusedError(
+            "the URL names a user or password before its host, which is not fetched; "
+            "give the plain https URL"
+        )
     return url
 
 
+#: What makes a URL's host depend on the parser reading it (#959).
+_AMBIGUOUS = re.compile(r"[\\\x00-\x1f\x7f]")
+
+
 async def fetch_file(
-    pasted: str, *, domains: tuple[str, ...] | list[str], limit: int
+    pasted: str,
+    *,
+    domains: tuple[str, ...] | list[str],
+    limit: int,
+    allow_host: str | None = None,
 ) -> FetchedFile:
-    """Fetch ``pasted`` from an allowlisted host, reading at most ``limit`` bytes."""
+    """Fetch ``pasted`` from an allowlisted host, or ``allow_host`` (an ASCII host name,
+    compared whole), reading at most ``limit`` bytes."""
     url = parse_fetch_url(pasted)
-    if not host_allowed(_ascii_host(url), domains):
+
+    def allowed(hop: httpx.URL) -> bool:
+        host = ascii_host(hop)
+        return host == allow_host or host_allowed(host, domains)
+
+    if not allowed(url):
         raise _refuse(url.host)
     hop = url
 
@@ -127,7 +172,7 @@ async def fetch_file(
         nonlocal hop
         hop = request.url
         # Before the address is looked up: a host off the list is never resolved.
-        if not host_allowed(_ascii_host(request.url), domains):
+        if not allowed(request.url):
             raise _refuse(request.url.host, redirected_from=url.host)
         await _vet_hop(request)
 

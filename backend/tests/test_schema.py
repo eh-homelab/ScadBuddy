@@ -228,6 +228,7 @@ overlay_file = ""; // file:svg,png
 any_file = ""; // file
 mask = "star.png"; // file: png
 model_file = ""; // file:stl
+step_file = ""; // file:step
 note = ""; // files
 depth = 2; // file:svg
 """
@@ -241,6 +242,7 @@ def _file_param_json() -> dict[str, object]:
             {**string, "name": "any_file", "initial": ""},
             {**string, "name": "mask", "initial": "star.png"},
             {**string, "name": "model_file", "initial": ""},
+            {**string, "name": "step_file", "initial": ""},
             {**string, "name": "note", "initial": ""},
             {"name": "depth", "type": "number", "initial": 2.0, "group": "Overlay"},
         ]
@@ -255,8 +257,10 @@ def test_a_file_annotation_types_a_string_parameter_as_file() -> None:
         "overlay_file": "file",
         "any_file": "file",
         "mask": "file",
+        # A mesh is named, never taken by a bare `// file` (#959).
+        "model_file": "file",
         # Names only a kind ScadBuddy cannot store: left a text field.
-        "model_file": "string",
+        "step_file": "string",
         # `// files` is not the annotation.
         "note": "string",
         # Only a string can be a file.
@@ -267,7 +271,8 @@ def test_a_file_annotation_types_a_string_parameter_as_file() -> None:
     assert by_name["any_file"].accept == ["svg", "png"]
     assert by_name["mask"].accept == ["png"]
     assert by_name["mask"].initial == "star.png"
-    assert by_name["model_file"].accept == []
+    assert by_name["model_file"].accept == ["stl"]
+    assert by_name["step_file"].accept == []
     assert by_name["depth"].accept == []
 
 

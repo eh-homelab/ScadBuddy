@@ -3,6 +3,9 @@ import type { ModelSummary } from '../api/types'
 import { models } from '../mocks/fixtures'
 import {
   DEFAULT_QUERY,
+  MAX_SEARCH_CHARS,
+  MAX_TAG_CHARS,
+  MAX_TAGS,
   type CatalogueQuery,
   clearFilters,
   filterModels,
@@ -47,6 +50,15 @@ describe('parseQuery / toParams', () => {
     expect(search).toContain('tag=Tea+%26+Coffee')
     expect(parseQuery(new URLSearchParams(search))).toEqual(full)
     expect(parseQuery(new URLSearchParams(`?${search}`))).toEqual(full)
+  })
+
+  it('keeps a hand-edited URL within what GET /models takes, so it never answers 422 (#5286 review)', () => {
+    const many = Array.from({ length: MAX_TAGS + 5 }, (_, n) => `tag=t${n}`).join('&')
+    const long = 'x'.repeat(MAX_TAG_CHARS + 1)
+    const parsed = parseQuery(new URLSearchParams(`${many}&tag=${long}&q=${'y'.repeat(MAX_SEARCH_CHARS + 9)}`))
+    expect(parsed.tags).toHaveLength(MAX_TAGS)
+    expect(parsed.tags).not.toContain(long)
+    expect(parsed.q).toHaveLength(MAX_SEARCH_CHARS)
   })
 
   it('ignores unknown values and repeated or empty tags', () => {
@@ -107,7 +119,7 @@ describe('filterModels', () => {
     )
   })
 
-  it('sorts by name, in locale order', () => {
+  it('sorts by name', () => {
     expect(slugs(filterModels(models, query({ sort: 'name' })))).toEqual([
       'builtin:maze-puzzle',
       'creme-coaster',
@@ -118,6 +130,24 @@ describe('filterModels', () => {
       'ui-broken',
       'ui-demo',
       'ui-unmigrated',
+    ])
+  })
+
+  it('sorts names as the backend does: code points after folding (#5286 review)', () => {
+    const named = ['Zed', 'a-b', '_under', '2 bolt', 'A b', '10 bolt', 'Éclair'].map((name, n) => ({
+      ...(models[0] as ModelSummary),
+      slug: `e${n}`,
+      name,
+    }))
+    // backend/tests/api/test_list_paging.py::test_models_sort_names_by_folded_code_points
+    expect(filterModels(named, query({ sort: 'name' })).map((m) => m.name)).toEqual([
+      '10 bolt',
+      '2 bolt',
+      '_under',
+      'A b',
+      'a-b',
+      'Éclair',
+      'Zed',
     ])
   })
 
@@ -142,6 +172,12 @@ describe('tagCounts', () => {
       { tag: 'text', count: 1 },
       { tag: 'two-colour', count: 1 },
     ])
+  })
+
+  it('counts tags that fold alike as one, spelled as the first model spells it (#2290)', () => {
+    const first = { ...(models[0] as ModelSummary), slug: 'a', tags: ['Crème'] }
+    const second = { ...(models[0] as ModelSummary), slug: 'b', tags: ['creme', 'CREME'] }
+    expect(tagCounts([first, second])).toEqual([{ tag: 'Crème', count: 2 }])
   })
 
   it('keeps a selected tag no model carries, at zero, so it can be unselected', () => {

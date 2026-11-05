@@ -1,6 +1,8 @@
 import type { AuditContext } from '../audit/log.js'
+import { defaultLoading, loadingOf, parseToolLoadings, TOOL_LOADING_KEY, type ToolLoading, type ToolLoadings, withLoading } from '../harness/toolSearch.js'
 import type { PluginTest } from '../plugins/testConnection.js'
 import type { Access, ItemKind } from './items.js'
+import { BUILTIN_SOURCES } from './model.js'
 
 // The capabilities tree (#2171, spec §4): every source the agent's tools, hooks, skills and
 // subagents come from, each item with its default and its effective access. Providers serve
@@ -45,6 +47,46 @@ export type ItemView = {
   /** One forced access: only for tools colliding on one name. */
   fixed: { access: Access; reason: string } | null
   reason: string | null
+  /**
+   * A ScadBuddy tool's loading (#838, harness/toolSearch.ts): `base` is sent on every request,
+   * `searchable` found by tool search. `null` for every other item. Filled by `Capabilities`.
+   */
+  loading?: ToolLoading | null
+  default_loading?: ToolLoading | null
+}
+
+/** The sources whose tools take a loading: the in-process server's (tools/projections.ts `createHarnessServer`). */
+export const LOADING_SOURCES: ReadonlySet<string> = new Set([BUILTIN_SOURCES.scadbuddy, BUILTIN_SOURCES.browser])
+
+/** Where the stored loadings live (`ai_settings` `tool_loading`); `write` is a compare-and-set against `seen`. */
+export type LoadingStore = {
+  read(): Promise<ToolLoadings>
+  /** Writes `next` if the stored value is still `seen`; whether it wrote. Audited as a settings write. */
+  write(next: ToolLoadings, seen: ToolLoadings, context: AuditContext): Promise<boolean>
+}
+
+/** Whether two loadings name the same tools with the same loading, in any order. */
+export function sameLoadings(a: ToolLoadings, b: ToolLoadings): boolean {
+  const keys = Object.keys(a)
+  return keys.length === Object.keys(b).length && keys.every((k) => Object.hasOwn(b, k) && a[k] === b[k])
+}
+
+type SettingsGet = { get<T>(key: string): Promise<T | undefined> }
+
+/** The loadings in `ai_settings` (credentials.ts SettingsStore): a write is `setMany`'s compare-and-set, audited and evicting. */
+export function settingsLoadingStore(
+  settings: SettingsGet,
+  writer: { setMany(values: Record<string, unknown>, check: (current: SettingsGet) => Promise<boolean>, context: AuditContext): Promise<boolean> },
+): LoadingStore {
+  return {
+    read: async () => parseToolLoadings(await settings.get<unknown>(TOOL_LOADING_KEY)),
+    write: (next, seen, context) =>
+      writer.setMany(
+        { [TOOL_LOADING_KEY]: next },
+        async (current) => sameLoadings(parseToolLoadings(await current.get<unknown>(TOOL_LOADING_KEY)), seen),
+        context,
+      ),
+  }
 }
 
 export type SourceKind = 'builtin' | 'remote' | 'package' | 'package_server'
@@ -126,20 +168,64 @@ function switched(view: SourceView, offBy?: SourceView): SourceView {
   return { ...view, items, children: view.children.map((child) => switched(child, off)) }
 }
 
+/** `view` with each item's loading under `stored` (#838), at every depth. */
+function loaded(view: SourceView, stored: ToolLoadings): SourceView {
+  const takes = LOADING_SOURCES.has(view.id)
+  return {
+    ...view,
+    items: view.items.map((item) =>
+      takes && item.kind === 'tool'
+        ? { ...item, loading: loadingOf(item.id, stored), default_loading: defaultLoading(item.id) }
+        : { ...item, loading: null, default_loading: null },
+    ),
+    children: view.children.map((child) => loaded(child, stored)),
+  }
+}
+
+/** How many times a loading write reads and tries again when another write came between. */
+const LOADING_ATTEMPTS = 3
+
 export class Capabilities {
   private readonly providers: readonly CapabilityProvider[]
+  private readonly loadings: LoadingStore | undefined
 
-  constructor(providers: readonly CapabilityProvider[]) {
+  constructor(providers: readonly CapabilityProvider[], loadings?: LoadingStore) {
     this.providers = providers
+    this.loadings = loadings
   }
 
   async tree(): Promise<SourceView[]> {
-    const lists = await Promise.all(this.providers.map((p) => p.list()))
-    return lists.flat().map((view) => switched(view))
+    const [lists, stored] = await Promise.all([Promise.all(this.providers.map((p) => p.list())), this.storedLoadings()])
+    return lists.flat().map((view) => loaded(switched(view), stored))
+  }
+
+  /**
+   * Sets a ScadBuddy tool's loading (#838); `null` puts it back to its default. Only the
+   * in-process server's tools take one (`LOADING_SOURCES`): 409 for any other item.
+   */
+  async setLoading(id: string, item: string, loading: ToolLoading | null, context: AuditContext): Promise<SourceView> {
+    const { own } = await this.found(id)
+    const view = this.item(own, item)
+    if (!LOADING_SOURCES.has(id) || view.kind !== 'tool') {
+      throw new CapabilityError(`"${item}" in "${id}" has no loading: only ScadBuddy's own tools take base or searchable`, 409)
+    }
+    if (this.loadings === undefined) throw new CapabilityError('tool loadings need the database', 503)
+    for (let attempt = 0; attempt < LOADING_ATTEMPTS; attempt++) {
+      const seen = await this.loadings.read()
+      const next = withLoading(seen, item, loading)
+      if (sameLoadings(next, seen)) return this.source(id)
+      if (await this.loadings.write(next, seen, context)) return this.source(id)
+    }
+    throw new CapabilityError('the tool loadings changed while this was saved; try again', 409)
+  }
+
+  private async storedLoadings(): Promise<ToolLoadings> {
+    return (await this.loadings?.read()) ?? {}
   }
 
   async source(id: string): Promise<SourceView> {
-    return (await this.found(id)).source
+    const [{ source }, stored] = await Promise.all([this.found(id), this.storedLoadings()])
+    return loaded(source, stored)
   }
 
   async setEnabled(id: string, enabled: boolean, context: AuditContext): Promise<SourceView> {
@@ -181,7 +267,7 @@ export class Capabilities {
       throw new CapabilityError(`no item "${item}" in "${id}"`, 404)
     }
     // The item as the tree shows it, its source's switch on it.
-    const shown = (await this.found(id)).source.items.find((i) => i.id === item)
+    const shown = (await this.source(id)).items.find((i) => i.id === item)
     return shown === undefined ? details : { ...details, item: shown }
   }
 
@@ -190,7 +276,7 @@ export class Capabilities {
     if (provider.refresh === undefined) throw new CapabilityError(`"${id}" lists no tools to refresh`, 409)
     const { test } = await provider.refresh(id)
     // The source as the tree shows it after the refresh, its switches folded in.
-    return { test, source: (await this.found(id)).source }
+    return { test, source: await this.source(id) }
   }
 
   private provider(id: string): CapabilityProvider {

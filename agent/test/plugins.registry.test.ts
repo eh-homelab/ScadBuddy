@@ -266,8 +266,24 @@ describe('the forwarder tool policy', () => {
       { name: 'retain' },
       { nope: true },
     ])
-    expect(kept).toEqual([{ name: 'recall' }, { name: 'retain' }])
+    const deferred = { _meta: { 'anthropic/alwaysLoad': false } }
+    expect(kept).toEqual([
+      { name: 'recall', ...deferred },
+      { name: 'retain', ...deferred },
+    ])
     expect([...r.collided]).toEqual(['files_list'])
+  })
+
+  // #5221: run.ts gives the server alwaysLoad, so each tool is deferred by its own _meta.
+  it('marks each kept tool deferred, keeping the rest of its _meta and a loading the server set itself', () => {
+    const kept = filterToolList(route(), [
+      { name: 'recall', _meta: { other: 1 } },
+      { name: 'retain', _meta: { 'anthropic/alwaysLoad': true } },
+    ])
+    expect(kept).toEqual([
+      { name: 'recall', _meta: { other: 1, 'anthropic/alwaysLoad': false } },
+      { name: 'retain', _meta: { 'anthropic/alwaysLoad': true } },
+    ])
   })
 
   it('refuses calls to disabled, colliding, or renamed-into-a-tier tools; lets the rest through', () => {

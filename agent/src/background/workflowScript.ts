@@ -10,6 +10,8 @@ export const WORKFLOW_MAX_AGENTS = 50
 export const WORKFLOW_CONCURRENCY = 4
 /** One parallel()/pipeline() call takes at most this many items, as Claude Code's. */
 export const WORKFLOW_MAX_ITEMS = 4096
+/** A script is at most this many bytes, inline or at its scriptPath. */
+export const WORKFLOW_SCRIPT_MAX = 524_288
 
 export type ScriptPhase = { title: string; detail?: string; model?: string }
 export type ScriptMeta = { name: string; description: string; whenToUse?: string; phases?: ScriptPhase[] }

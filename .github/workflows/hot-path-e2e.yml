@@ -22,7 +22,8 @@
 #
 # #4975 phase 7: the `stack` job also runs `run.sh --auth` on the same two images: the
 # login, behind an https edge and the fake issuer (e2e-stack/compose.auth.yaml), in the
-# Playwright image's Chromium, Firefox and WebKit (frontend/e2e/real-auth.spec.ts).
+# Playwright image's Chromium, Firefox and WebKit (frontend/e2e/real-auth.spec.ts), in
+# `observe` and then, the same app restarted, in `enforce` (#4975 phase 8).
 name: Hot path e2e
 
 on:
@@ -54,7 +55,7 @@ jobs:
           fetch-depth: 1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@v10.3.2
+        uses: astral-sh/setup-uv@v10.3.3
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock

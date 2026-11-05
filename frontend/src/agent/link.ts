@@ -1,4 +1,5 @@
 import { socketUrl } from '../lib/lsp'
+import { isSignedOut, noteSignedOut, SIGNED_OUT_CLOSE, whenSignedIn } from '../lib/signedOut'
 import { parseAgentFrame, tabFrame, type PairingEntry, type TabFrame } from './linkProtocol'
 import { TAB_ID } from './tabId'
 import type { CallResult } from './types'
@@ -23,7 +24,9 @@ import type { CallResult } from './types'
  *
  * It reconnects with back-off when the socket drops, with the same tab id, so a paired
  * agent reaches the tab again once it is back. Calls in flight when it drops are lost; the
- * agent answers them as "disconnected".
+ * agent answers them as "disconnected". Signed out (#4975 phase 8: closed with 4401, or
+ * refused while the page knows it is signed out) it waits for the sign-in instead
+ * (`lib/signedOut.ts`).
  */
 
 export const BRIDGE_SOCKET_PATH = '/api/v1/ai/bridge'
@@ -112,6 +115,7 @@ export function createTabLink({
   let closed = false
   let attempt = 0
   let timer: ReturnType<typeof setTimeout> | undefined
+  let unwaitSignIn: (() => void) | undefined
   let state: TabLinkState = { connected: false, pending: [], paired: [], results: {} }
   const listeners = new Set<() => void>()
   /** The route and tools last reported, so an unchanged state is not sent again. */
@@ -234,11 +238,20 @@ export function createTabLink({
     ws.onmessage = (event: MessageEvent) => {
       if (socket === ws && typeof event.data === 'string') onFrame(event.data)
     }
-    ws.onclose = () => {
+    ws.onclose = (event: CloseEvent) => {
       if (socket !== ws || closed) return
       socket = undefined
       // What was pending may have been answered elsewhere; the next connection says again.
       setState({ connected: false, pending: [], paired: [] })
+      if (event.code === SIGNED_OUT_CLOSE) noteSignedOut()
+      if (isSignedOut()) {
+        attempt = 0
+        unwaitSignIn = whenSignedIn(() => {
+          unwaitSignIn = undefined
+          open()
+        })
+        return
+      }
       const delay = Math.min(maxMs, baseMs * 2 ** attempt) * (0.5 + random() / 2)
       attempt += 1
       timer = setTimeout(open, delay)
@@ -253,6 +266,7 @@ export function createTabLink({
     close() {
       closed = true
       clearTimeout(timer)
+      unwaitSignIn?.()
       unsubscribe?.()
       const ws = socket
       socket = undefined

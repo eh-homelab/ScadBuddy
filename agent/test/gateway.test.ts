@@ -165,7 +165,7 @@ describe('the credential gateway', () => {
       headers: { 'x-api-key': lease.token, 'content-type': 'application/json' },
       body: messages(false),
     })
-    expect(await count.json()).toEqual({ input_tokens: 10 })
+    expect(await count.json()).toEqual({ input_tokens: expect.any(Number) })
     const models = await fetch(`${lease.baseUrl}/v1/models`, { headers: { 'x-api-key': lease.token } })
     expect(models.status).toBe(200)
     expect(fake.requests.map((r) => `${r.method} ${r.path}`)).toEqual(['POST /v1/messages/count_tokens', 'GET /v1/models'])

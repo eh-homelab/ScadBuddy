@@ -120,10 +120,11 @@ on shutdown.
 - **Image:** `ghcr.io/eh-homelab/scadbuddy` is a **public** GHCR package (no pull
   secret needed), built for `linux/amd64` only. It has these tags:
   `main` (latest `main`), `sha-<short>`, and `X.Y.Z` / `X.Y` for releases.
-- **LAN only.** ScadBuddy has **no authentication**. Anyone who can reach it can
-  add, edit and delete models, and send prints using the stored Bambuddy key.
-  Keep it on a trusted network, as you would Bambuddy's slicer sidecar. Do not
-  expose it to the internet.
+- **Sign-in is off by default.** A new install runs with `SCADBUDDY_AUTH_MODE=off`
+  (#4975, D10): anyone who can reach it can add, edit and delete models, and send
+  prints using the stored Bambuddy key. Keep such an install on a trusted network, as
+  you would Bambuddy's slicer sidecar, or switch sign-in on and set the mode to
+  `enforce` ("Signing in" below) before it is reachable by anyone you do not trust.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
   outputs, downloaded fonts and caches. Back up the volume. Settings and saved presets are in the
   database, not in `/data`: back that up too. The Bambuddy API key is stored there as plain text
@@ -338,8 +339,9 @@ on shutdown.
   the jobs table can be read (`scadbuddy_render_store_up`), whether the process's
   `LISTEN` connection is up (`scadbuddy_render_queue_listener_connected`,
   `scadbuddy_render_queue_listener_reconnects_total`), the SLO targets, the upload store's files and bytes against its caps
-  (`scadbuddy_assets_*`), and HTTP requests by route. It is unauthenticated, like the rest of
-  the app. Alert on `scadbuddy_render_project_retries_total` rising, not on its log
+  (`scadbuddy_assets_*`), and HTTP requests by route, and what `enforce` would refuse
+  (`scadbuddy_auth_would_refuse_total`). It is public in every `SCADBUDDY_AUTH_MODE`, as
+  `/healthz` is, so serve it only inside the cluster. Alert on `scadbuddy_render_project_retries_total` rising, not on its log
   line: a job's row write is retried without limit, and the warning is logged only at
   the 12th attempt and every 100th after, hours apart once the backoff is capped.
 
@@ -369,6 +371,63 @@ request's own origin (`Origin` equal to its scheme and `Host`) is also accepted,
 fresh install can be configured; that gives up DNS-rebinding protection until one
 of the two is set. The agent reads the same variable for its own origin check
 (below).
+
+### Signing in (#4975)
+
+ScadBuddy signs people in with its own OpenID Connect login (authorization code flow
+with PKCE, against any OIDC issuer: Authentik, Keycloak, Entra ID, …) and keeps the
+session in a `__Host-scadbuddy_session` cookie (`HttpOnly`, `Secure`,
+`SameSite=Strict`), so it needs an https public URL. The design is
+[the backend auth spec](docs/superpowers/specs/2026-11-01-backend-auth-design.md).
+
+`SCADBUDDY_AUTH_MODE` decides what happens to a request with no session or credential.
+It is read by the API and the agent, set the same on both, and never stored in Settings
+(it decides who may write Settings):
+
+| Mode | What it does |
+|---|---|
+| `off` (the default) | Today's behaviour: nothing is refused. Sign-in works once configured and records the person as the author. |
+| `observe` | Everything is served; what `enforce` would refuse is logged once a minute per class and reason and counted in `scadbuddy_auth_would_refuse_total{class, reason}` on `/metrics`. |
+| `enforce` | Refused: a request with no live session or credential is `401` (`https://scadbuddy.dev/problems/auth/signed-out`), one whose credential does not cover the route `403` (`…/auth/forbidden`), and a socket without a session is closed before it opens. The page sends a signed-out person to sign in and back to the page they were on; inside Bambuddy's frame it asks for a click, since the sign-in is a popup. A socket whose session is revoked closes with `4401`, and the page asks to sign in again rather than reconnecting. |
+
+The login's configuration:
+
+- `SCADBUDDY_AUTH_OIDC_ISSUER`: the issuer URL (https; its
+  `/.well-known/openid-configuration` is read). The deployment's, never a setting.
+- `SCADBUDDY_AUTH_OIDC_CLIENT_ID`: ScadBuddy's client at that issuer, a confidential
+  client whose redirect URI is `<public URL>/api/v1/auth/callback` (Settings → System →
+  Sign-in shows it).
+- `SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK=true` when the issuer is on a private address
+  (inside the cluster or on the LAN). Without it every fetch to the issuer (discovery,
+  keys, token) goes to public addresses only.
+- `SCADBUDDY_SECRET_KEY_FILE` (the KEK): the client secret and the login's own cookie
+  are sealed under it.
+- In **Settings → System → Sign-in**: the client secret, who may sign in (a list of
+  subjects, or a group claim and value; one of them is required), and whether signing
+  out also ends the issuer's session. Switching sign-in on runs discovery first and
+  saves nothing if it fails, so a typo cannot lock anyone out.
+
+**`enforce` refuses to start without a usable login**, and says which part is missing:
+the two variables above, the KEK, the public URL, sign-in switched on with a client
+secret saved for this issuer and client id, a sign-in rule, and the issuer's discovery
+and keys answering at the start. A deploy with a broken login so fails its readiness
+instead of serving a page nobody can sign in to. Configure and test the login in `off`
+or `observe` first.
+
+**Break-glass.** With the issuer down or the login misconfigured, whoever can exec into
+the API's pod signs in without it:
+
+```bash
+kubectl exec deploy/scadbuddy -- python -m scadbuddy.auth.break_glass
+```
+
+prints a sign-in URL with a one-time code (ten minutes, single use). Opening it gives a
+`break_glass` session for an hour, shown with a banner. The other way back is
+`SCADBUDDY_AUTH_MODE=observe` and a rollout.
+
+People mint **personal access tokens** (`sbpat_…`, read or write, with an expiry) in
+Settings for `bambuddy-fs` and other clients of the API; a token reaches the API routes
+but never sign-in, session or credential management.
 
 ## Mounting the library (bambuddy-fs)
 
@@ -403,6 +462,68 @@ other privileged Unix socket into the API container. The editor's language serve
 filter (`backend/scadbuddy/editor/nonet.py`), but that filter still allows `AF_UNIX`:
 the process can connect to any filesystem socket the container can see, and a runtime
 socket would give it root on the node.
+
+### Authentication on the deployment (#4975)
+
+What signing in is and what each `SCADBUDDY_AUTH_MODE` does is under "Signing in"
+above. On the deployment, besides that login's variables (`SCADBUDDY_AUTH_MODE`,
+`SCADBUDDY_AUTH_OIDC_ISSUER`, `SCADBUDDY_AUTH_OIDC_CLIENT_ID`, and
+`SCADBUDDY_AUTH_OIDC_PRIVATE_NETWORK=true` for an issuer inside the cluster), every
+service that calls the API presents a **service credential** (`Authorization: Bearer
+sbsvc_…`): the agent sidecar, the print worker (`--queue bambuddy`) and the flow runs'
+worker (`--queue projects`). Nothing is configured for them: the API issues each
+caller's credential at its start and rotates it on the prune Schedule with an overlap,
+and each caller reads its current one from a view of its own and unseals it with the
+KEK, so **each caller needs `SCADBUDDY_SECRET_KEY_FILE` mounted**. Settings → System →
+Service credentials lists, rotates and revokes them.
+
+**Each caller's own database role (#5210).** Like the render worker's
+`scadbuddy_render` (below), each caller should connect as a role of its own, so it holds
+exactly the tables it touches and its credential's view, never the API's settings
+store or another caller's credential:
+
+| Caller | Role | Its `SCADBUDDY_DATABASE_URL` |
+|---|---|---|
+| render worker | `scadbuddy_render` | `scadbuddy-render.yaml` |
+| print worker | `scadbuddy_print` | `scadbuddy-print.yaml` |
+| flow runs' worker | `scadbuddy_projects` | `scadbuddy-projects.yaml` |
+| agent sidecar | `scadbuddy_agent` | the sidecar in `scadbuddy.yaml` |
+
+Create each role with a password (`CREATE ROLE scadbuddy_print LOGIN PASSWORD '…'`; on
+CNPG a `managed.roles` entry) and point that caller's `SCADBUDDY_DATABASE_URL` at it;
+the API itself stays on the database's owner role. At every start the API grants each
+role that exists exactly its list (`backend/scadbuddy/auth/caller_grants.py`, and the
+render worker's `RENDER_GRANTS`) and its credential's view; a role created after the
+API started is granted on the API's next start. A worker on its own role never
+migrates: it waits until the API has migrated and granted it. The agent's role owns the
+`ai_*` tables it migrates and grants what the API's role and `scadbuddy_projects` read
+of them (`agent/src/db/grants.ts`).
+
+**The rollout** (spec §9.1), each step its own manifest change in
+[eh-homelab/clusters](https://github.com/eh-homelab/clusters):
+
+1. In `off`: set the issuer and client id, register the redirect URI at the issuer,
+   save the client secret and the sign-in rule in Settings → System → Sign-in, and sign
+   in once to check it.
+2. Create the callers' roles, point each caller at its own, mount the KEK in each, and
+   roll them, so every caller presents its credential.
+3. `SCADBUDDY_AUTH_MODE=observe` on the API and the agent sidecar. Nothing is refused;
+   the API counts what `enforce` would refuse in `scadbuddy_auth_would_refuse_total{class,
+   reason}`, and both log it once a minute (`enforce would refuse …`).
+4. Watch the counter until it stops rising for every class and reason across a period in
+   which every caller has run: people in the browser and in Bambuddy's frame, the agent
+   (a chat, a flow run), a print, `bambuddy-fs` with a personal access token. A
+   `no_credential` count on `internal.*` is a worker without its credential; `no_request_header`
+   is a page older than the request header; `author_header` is a caller naming an author
+   it may not.
+5. `SCADBUDDY_AUTH_MODE=enforce` on the API and the agent sidecar. The API refuses to
+   start without a usable login, so a broken login fails the new pod's readiness and the
+   rollout keeps the old pods.
+
+The way back is `SCADBUDDY_AUTH_MODE=observe` and a rollout; with the issuer down, a
+person signs in with the break-glass link
+(`kubectl exec deploy/scadbuddy -- python -m scadbuddy.auth.break_glass`). The default
+for a new install stays `off`.
 
 A deploy that rolls the pod also migrates the database at startup
 (`backend/scadbuddy/migrations/`: `20260928T0630Z_events.sql` adds the `events`
@@ -458,13 +579,18 @@ Both call `deploy.reusable.yml`, which:
    the deploy;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
-   closes an older open one and replaces the branch; this one job carries a
-   concurrency group shared by both paths, so only the branch/PR handling
-   serialises — a release's image wait never holds up a main deploy. GitHub
+   first waits up to 45 minutes for an older open one to land, and closes it and
+   replaces the branch only when it cannot (a failed CI run, a conflict,
+   auto-merge off) or is still open after the wait (#5168: the PR's
+   checks take 15 to 40 minutes, and closing it at every merge kept prod on one
+   build for hours during a run of merges). This one job carries a concurrency
+   group shared by both paths, so only the wait and the branch/PR handling
+   serialise — a release's image wait never holds up a main deploy. GitHub
    keeps one running and one queued job per group and drops the queued one
-   when a third arrives, so the **newest** request always runs; an overtaken
-   deploy is reported (⚠️ on the commit or release) rather than lost, and
-   re-running it deploys that build anyway.
+   when a third arrives, so the **newest** request always runs, and a burst of
+   merges deploys its first and its last build; an overtaken deploy is
+   reported (⚠️ on the commit or release) rather than lost, and re-running it
+   deploys that build anyway.
 
 The clusters ruleset (`CI Summary` + `claude-review`) gates the merge; the
 merge is the deploy. ArgoCD then syncs the `scadbuddy` Application, and
@@ -620,8 +746,19 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   never names, and fails the print runs a pre-#1052 pod left `running` and the renders
   a pre-#1053 API left unsettled, as upgraded. It may roll out beside the previous
   release. `print_runs.heartbeat_at`, `render_jobs.params` and
-  `workflow_definitions.script` stay, unread, until a later release drops them; that one
-  needs this one deployed everywhere first.
+  `workflow_definitions.script` stay, unread, until the release with #5139 drops them
+  (below).
+- **Upgrading past #5139** (the second contract step): deploy the release with #1142
+  (#5124) everywhere first, with no API or worker of an earlier build left running,
+  since an earlier build still reads the columns this one drops. Its migrations drop
+  `print_runs.heartbeat_at` and `render_jobs.params`, and drop
+  `workflow_definitions.script` only when every flow version names a commit. A version
+  without one (an install from before #2503 whose start never moved it into git) keeps
+  the column, and the migration logs a `NOTICE`
+  (`workflow_definitions.script kept: N flow version(s) have no commit…`) instead of
+  failing the start. Such a version reads as missing its script, and its flow takes
+  no new version (409 `flow-unmigrated`) until an upgrade through a release from #2503
+  to #5124 moves it.
 
 ### Bambuddy writes on the `bambuddy` queue (#1052, #1053, #1060)
 
@@ -642,13 +779,14 @@ clusters. It serves `/healthz` (`{"ok": true, "build_id": …, "task_queue": …
   the API's cluster-internal routes (`/api/v1/internal/outputs/…`, and a native library
   file's record, plates and bytes from `/api/v1/internal/library/…`, #3827, where a
   native run's per-print copy is also written, #3818; neither in the OpenAPI schema), at `SCADBUDDY_API_INTERNAL_URL` (the API's Service, e.g.
-  `http://scadbuddy:8080`; never the ingress). Those routes are internal by path only:
-  like the rest of the API they have no auth today, so whoever reaches the API reaches
-  them; once the API gains auth, they need a cluster-internal guard of their own. The
-  agent's workspace blob routes (`/api/v1/internal/workspace-blobs/…`, #4789) are the same:
-  `POST /uploads` is a write path, minting a token for one internal PUT of up to 128 MiB
-  with no workflow or row behind it, and is internal by path only; the same guard must
-  cover it. An output's last print is recorded in
+  `http://scadbuddy:8080`; never the ingress). Each of those route groups takes only the
+  service credential whose scope names it (#4975: the print worker's covers
+  `internal.outputs` and `internal.library`, and nothing else); in `SCADBUDDY_AUTH_MODE=off`
+  and `observe` they still serve anyone who reaches the API, so until `enforce` they are
+  internal by path only. The agent's workspace blob routes
+  (`/api/v1/internal/workspace-blobs/…`, #4789) are the agent's credential's
+  (`internal.workspace`) in the same way: `POST /uploads` is a write path, minting a token
+  for one internal PUT of up to 128 MiB with no workflow or row behind it. An output's last print is recorded in
   Postgres (`output_last_prints`); an older `meta.json`'s last print still reads for an
   output not printed since.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the stored settings, the Bambuddy key
@@ -766,9 +904,12 @@ Agent-written flows run as `ProjectWorkflow`s on the `projects` task queue
   (`<name>/flow.py`), a repository of its own beside `/data/models` on the API's data
   volume, on the same git code (`core/gitrepo.py`). Only the API reads it: a run's
   script goes to the worker as the run's input. `workflow_definitions` keeps a row per
-  version naming its commit, and `workflow_runs` the commit each run ran. The first
-  start after the upgrade backfills the versions Postgres held (`flows/backfill.py`),
-  one commit each with its author and date; it is idempotent, and the log says how many.
+  version naming its commit, and `workflow_runs` the commit each run ran. The builds
+  from #2503 to #5124 backfilled the versions Postgres held into git at start; this one
+  no longer does (#5139), so an install from before #2503 upgrades through one of those
+  first. Until it does, its old versions read as missing their script, their flows
+  take no new version, and the `script` column stays (the migration says so in a
+  notice instead of dropping it; "Upgrading past #5139" above).
 - **`tool`, `agent`, `ask_session`** run on the agent's `agent-tools` queue
   (`SCADBUDDY_TEMPORAL_TASK_QUEUE_AGENT_TOOLS`, read by the API when it starts a run).
 - **Tool tiers come from the agent** (#2704), as its own turns resolve them (the tool's

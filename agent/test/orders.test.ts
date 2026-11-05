@@ -121,6 +121,17 @@ describe('order tools (#4249)', () => {
     await expect(tool('customer_upsert').execute({ archive: true }, ctx())).rejects.toThrow('customer_id')
   })
 
+  it('reads an order’s real cost (#4251 §6.4)', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}/costs`, () =>
+        HttpResponse.json({ order_id: ORDER, currency: 'USD', items: [], bambuddy_unavailable: false }),
+      ),
+    )
+    expect(tool('order_costs').risk).toBe('read')
+    const result = await tool('order_costs').execute({ order_id: ORDER }, ctx())
+    expect(firstText(result)).toEqual({ order_id: ORDER, currency: 'USD', items: [], bambuddy_unavailable: false })
+  })
+
   it('passes the list filters and the cursor through to the backend', async () => {
     let url = ''
     server.use(
@@ -456,6 +467,32 @@ describe('pricing tools (#4250)', () => {
     )
   })
 
+  it("reads an attempt's archives and copies one's finish photo with a key (#4253 §8.2)", async () => {
+    expect([tool('order_attempt_archives').risk, tool('order_attempt_copy').risk]).toEqual(['read', 'write'])
+    const keys: (string | null)[] = []
+    let body: unknown
+    const FILE = { id: 'a1', role: 'finished', kind: 'image' }
+    server.use(
+      http.get(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/fulfilments/f1/archives`, () =>
+        HttpResponse.json({ linked: true, attempt: { id: 'f1' }, archives: [{ archive_id: 81, finish_photos: ['finish_1.jpg'], timelapse: false }] }),
+      ),
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/fulfilments/f1/archives/81/copy`, async ({ request }) => {
+        keys.push(request.headers.get('Idempotency-Key'))
+        body = await request.json()
+        return HttpResponse.json(FILE)
+      }),
+    )
+    const read = await tool('order_attempt_archives').execute({ order_id: ORDER, item_id: ITEM, fulfilment_id: 'f1' }, ctx())
+    expect(firstText(read)).toMatchObject({ linked: true, archives: [{ archive_id: 81 }] })
+    const copied = await tool('order_attempt_copy').execute(
+      { order_id: ORDER, item_id: ITEM, fulfilment_id: 'f1', archive_id: 81, what: 'finished_photo' },
+      ctx(),
+    )
+    expect(firstText(copied)).toEqual(FILE)
+    expect(body).toEqual({ what: 'finished_photo' })
+    expect(keys[0]).toMatch(/^[0-9a-f]{32}$/)
+  })
+
   it('records a typed price in manual mode, and takes exactly one mode', async () => {
     let body: unknown
     server.use(
@@ -635,6 +672,24 @@ describe('order attachment tools (#4722)', () => {
     await tool('order_attach').execute({ order_id: ORDER, ...ref('downloads/x.bin'), filename: 'drawing.pdf' }, c)
     expect(name).toBe('drawing.pdf')
     expect(fields).toEqual({})
+  })
+
+  it('attaches to a fulfilment attempt of an item (#4251)', async () => {
+    const ATTEMPT = 'f0000000-1111-4222-8333-944455556666'
+    let hit = false
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/fulfilments/${ATTEMPT}/attachments`, () => {
+        hit = true
+        return HttpResponse.json({ id: ATTACHMENT, order_id: ORDER, item_id: ITEM, fulfilment_id: ATTEMPT })
+      }),
+    )
+    const { ctx: c, ref } = withWorkspace({ 'done.png': Buffer.from('png bytes') })
+    await tool('order_attach').execute({ order_id: ORDER, item_id: ITEM, fulfilment_id: ATTEMPT, ...ref('done.png') }, c)
+    expect(hit).toBe(true)
+    const { ctx: c2, ref: ref2 } = withWorkspace({ 'done.png': Buffer.from('png bytes') })
+    await expect(tool('order_attach').execute({ order_id: ORDER, fulfilment_id: ATTEMPT, ...ref2('done.png') }, c2)).rejects.toThrow(
+      'item_id',
+    )
   })
 
   it('refuses a file that changed since it was read, before anything is sent', async () => {

@@ -134,6 +134,15 @@ function sessionWriteVerb(method: string, path: string): string | undefined {
   return undefined
 }
 
+/** Which notification channel requests are writes; test sends are not. */
+function notifyVerb(method: string, path: string): string | undefined {
+  if (path.endsWith('/test')) return undefined
+  if (method === 'POST') return 'notify_channel_create'
+  if (method === 'PUT') return 'notify_channel_update'
+  if (method === 'DELETE') return 'notify_channel_delete'
+  return undefined
+}
+
 /** Which plugin requests are writes; connection tests are not. */
 function pluginVerb(method: string, path: string): string | undefined {
   if (path.endsWith('/test')) return undefined
@@ -215,6 +224,8 @@ export function createApp(deps: AppDeps): AgentApp {
     app.use('/api/v1/ai/mcp-tokens/*', auditWrites({ ...writes, kind: 'token', verb: tokenVerb, failuresOnly: true }))
     // Hono's `/*` also matches the bare prefix, so this covers POST /api/v1/ai/plugins too.
     app.use('/api/v1/ai/plugins/*', auditWrites({ ...writes, kind: 'plugin', verb: pluginVerb }))
+    // The notification channels (#815, routes/notifyChannels.ts); a test send is not a write.
+    app.use('/api/v1/ai/notify/*', auditWrites({ ...writes, kind: 'settings', verb: notifyVerb }))
     // Refused or failed raises of a session's budget (#790); a raise that
     // lands is recorded by the manager (sessions/manager.ts raiseBudget).
     app.use('/api/v1/ai/sessions/*', auditWrites({ ...writes, kind: 'settings', verb: budgetVerb, failuresOnly: true }))

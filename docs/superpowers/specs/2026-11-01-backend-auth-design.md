@@ -516,6 +516,14 @@ environment variable, not a stored setting: like `SCADBUDDY_TRUSTED_PROXIES` and
   without a usable login configuration (issuer reachable at start or cached, client id,
   client secret, a sign-in rule), saying which, so a deploy with a broken config fails
   its readiness instead of serving a page no one can sign in to.
+  As built (phase 8, #5199): `auth/start_check.py`, run in the API's lifespan once the
+  schema is migrated. It needs the issuer's discovery and keys answering at the start: a
+  fresh process has nothing cached, and a cache kept across restarts would let a pod
+  start against an issuer that no longer answers. It also names the KEK and the public
+  URL, which the login needs as much. The agent takes `enforce` without a check of its
+  own: it refuses `/api/v1/ai/*` without a live session (a delegated one counts, as in
+  `observe`), with the backend's 401 problem, except the plugin OAuth callback, a
+  cross-site redirect whose own state cookie is its credential.
 
 The order on a deployment: configure the login in Settings (off), sign in and check, roll
 the services that present credentials, switch to `observe`, watch the counter fall to
@@ -579,6 +587,14 @@ It works with the IdP down or the login misconfigured. The other way back is
   "Sign out everywhere" in one browser ending another's session. The socket's 4401 close
   and `enforce`'s refusal are phase 8's (`enforce` stops the start until then), so their
   checks join this spec there.
+  As built (#5199): `run.sh --auth` runs the spec in `observe`, then restarts the same app
+  in `enforce` and runs its enforce tests in each engine: an unauthenticated request
+  refused (401, and `WWW-Authenticate: Bearer` on an internal route), a signed-out page
+  sent to the sign-in and back to its path, and the realtime socket closed with 4401 when
+  "Sign out everywhere" in another browser revokes its session, the page then asking to
+  sign in again. The backend's realtime socket closes on revocation in `observe` and
+  `enforce` alike, as the agent's chat and bridge sockets do (#5217); the language
+  servers' sockets are refused at the handshake but not closed on revocation.
 
 ## 12. Phases (one PR each)
 

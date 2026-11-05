@@ -1,17 +1,19 @@
 import { useEffect, useId, useState } from 'react'
-import { aiCapabilities, type Access, type ItemView, type SourceView } from '../../api/capabilities'
+import { aiCapabilities, type Access, type ItemView, type Loading, type SourceView } from '../../api/capabilities'
 import { ChoiceSelect } from '../settings/form'
 import { Button } from '@/components/ui/button'
 import { Spinner } from '@/components/ui/spinner'
-import { choicesOf, lowers, shownAccess } from './access'
+import { choicesOf, loadingChoices, lowers, shownAccess } from './access'
 import { ItemDetails } from './ItemDetails'
 import { LowerConfirm } from './LowerConfirm'
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 /**
- * One tool, hook, skill or subagent (#2171, spec §4.1): its one access select, the default
- * marked, Reset when a stored access takes effect, and the confirmation a lowering opens.
+ * One tool, hook, skill or subagent (#2171, spec §4.1): its access select, the default
+ * marked, Reset when a stored access takes effect, and the confirmation a lowering opens. A
+ * ScadBuddy tool that is not off also has its loading select (#838): sent every turn, or found
+ * by tool search.
  * Every control is the agent's too (#4208): nothing here is user-only.
  */
 export function ItemRow({
@@ -62,6 +64,13 @@ export function ItemRow({
   // Reset is disabled while it runs and unmounts once it succeeds: focus moves to the select either way.
   const reset = () => void save(() => aiCapabilities.resetItem(source, item.id), focusSelect)
   const apply = (access: Access) => void save(() => aiCapabilities.setItem(source, item.id, access))
+  // A ScadBuddy tool's loading (#838): its default resets, so only what differs is stored.
+  const chooseLoading = (value: string) => {
+    if (busy || value === item.loading) return
+    void save(() =>
+      value === item.default_loading ? aiCapabilities.resetLoading(source, item.id) : aiCapabilities.setLoading(source, item.id, value as Loading),
+    )
+  }
 
   function choose(value: string) {
     // The select stays focusable while a write runs (so focus can come back to it); it ignores choices.
@@ -80,6 +89,7 @@ export function ItemRow({
   const note = item.fixed?.reason ?? item.reason
   // The name holds the visible label (WCAG 2.5.3), and the raw name when it differs.
   const accessName = item.label === item.name ? `Access of ${item.name}` : `Access of ${item.name} (${item.label})`
+  const loadingName = item.label === item.name ? `Loading of ${item.name}` : `Loading of ${item.name} (${item.label})`
 
   return (
     <div className="flex flex-col gap-1.5 py-2">
@@ -98,6 +108,17 @@ export function ItemRow({
               </>
             )}
           </span>
+          {item.loading != null && item.access !== 'off' && (
+            <ChoiceSelect
+              size="sm"
+              className="w-44"
+              aria-label={loadingName}
+              aria-describedby={statusId}
+              value={item.loading}
+              onValueChange={chooseLoading}
+              choices={loadingChoices(item)}
+            />
+          )}
           <ChoiceSelect
             size="sm"
             className="w-48"

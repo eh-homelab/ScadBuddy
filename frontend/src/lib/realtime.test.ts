@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { CHECK_MS, RealtimeClient, readAgain, type Confirmation, type RealtimeSignal } from './realtime'
 import { ReadScope } from './readCursor'
+import { clearSignedOut, isSignedOut, setEnforced } from './signedOut'
 
 /** A WebSocket the test drives: it opens, closes and delivers frames on command. */
 class FakeSocket {
@@ -14,7 +15,7 @@ class FakeSocket {
   sent: unknown[] = []
   onopen: (() => void) | null = null
   onmessage: ((event: { data: string }) => void) | null = null
-  onclose: (() => void) | null = null
+  onclose: ((event?: { code: number }) => void) | null = null
   onerror: (() => void) | null = null
 
   readonly url: string
@@ -37,6 +38,12 @@ class FakeSocket {
   open() {
     this.readyState = FakeSocket.OPEN
     this.onopen?.()
+  }
+
+  /** The server closes it with `code`. */
+  closeWith(code: number) {
+    this.readyState = FakeSocket.CLOSED
+    this.onclose?.({ code })
   }
 
   deliver(frame: object) {
@@ -317,5 +324,36 @@ describe('readAgain (#1039)', () => {
     expect(answer).toBeUndefined()
     await vi.advanceTimersByTimeAsync(1)
     expect(answer).toBe(true)
+  })
+})
+
+describe('RealtimeClient signed out (#4975 phase 8)', () => {
+  it('waits for the sign-in after a 4401 under enforce, then reconnects', () => {
+    setEnforced(true)
+    const realtime = client({ baseMs: 100, maxMs: 400 })
+    realtime.subscribe('models', () => {})
+    last().open()
+    last().closeWith(4401)
+    expect(isSignedOut()).toBe(true)
+    const before = FakeSocket.instances.length
+    vi.advanceTimersByTime(10_000)
+    expect(FakeSocket.instances).toHaveLength(before)
+    clearSignedOut()
+    expect(FakeSocket.instances).toHaveLength(before + 1)
+    last().open()
+    expect(last().sent).toEqual([{ type: 'subscribe', topics: ['models'] }])
+    realtime.close()
+  })
+
+  it('reconnects as before after a 4401 outside enforce', () => {
+    const realtime = client({ baseMs: 100, maxMs: 400 })
+    realtime.subscribe('models', () => {})
+    last().open()
+    last().closeWith(4401)
+    expect(isSignedOut()).toBe(false)
+    const before = FakeSocket.instances.length
+    vi.advanceTimersByTime(100)
+    expect(FakeSocket.instances).toHaveLength(before + 1)
+    realtime.close()
   })
 })

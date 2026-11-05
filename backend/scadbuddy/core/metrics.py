@@ -260,6 +260,13 @@ class Metrics:
             "the next prints wait on the follow queue, unfollowed.",
             registry=r,
         )
+        self.rack_watch_settle_failed = Counter(
+            "scadbuddy_rack_watch_settle_failed",
+            "LAN prints whose rack picks the printer watch could not settle as the printer "
+            "ended them (#5138). Not retried: lan_wait or the run's follow may settle them, "
+            "else they stay pending until PENDING_PICK_MAX_AGE.",
+            registry=r,
+        )
         self.queue_wait = Histogram(
             "scadbuddy_render_queue_wait_seconds",
             "Time from submit until its workflow began the render, by kind.",

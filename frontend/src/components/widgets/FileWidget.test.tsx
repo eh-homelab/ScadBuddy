@@ -75,6 +75,53 @@ describe('file parameter (#204)', () => {
     vi.restoreAllMocks()
   })
 
+  it("shows a fetched file's viewBox, licence and source (#959)", async () => {
+    const id = 'f'.repeat(64)
+    vi.spyOn(api, 'getAsset').mockResolvedValue({
+      id,
+      name: 'unicorn.svg',
+      kind: 'svg',
+      size: 100,
+      view_box: [0, 0, 512, 512],
+      path_count: 3,
+      source_url: 'https://api.iconify.design/game-icons/unicorn.svg',
+      licence: { spdx: 'CC-BY-3.0', author: 'GameIcons' },
+    })
+    setup(id)
+    expect(await screen.findByText('SVG · viewBox 0 0 512 512')).toBeInTheDocument()
+    expect(screen.getByText('CC-BY-3.0 · GameIcons')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Source' })).toHaveAttribute(
+      'href',
+      'https://api.iconify.design/game-icons/unicorn.svg',
+    )
+  })
+
+  it("pictures a mesh by its preview and states its triangles and size (#959)", async () => {
+    const id = 'e'.repeat(64)
+    vi.spyOn(api, 'getAsset').mockResolvedValue({
+      id,
+      name: 'bracket.stl',
+      kind: 'stl',
+      size: 684,
+      triangles: 12,
+      bounds: [-5, -10, -15, 5, 10, 15],
+    })
+    setup(id, { ...param, accept: ['stl', '3mf'] })
+    expect(await screen.findByText('STL · 12 triangles · 10×20×30 mm')).toBeInTheDocument()
+    expect(screen.getByRole('img', { name: 'Preview of bracket.stl' })).toHaveAttribute(
+      'src',
+      api.assetPreviewUrl(SLUG, id),
+    )
+    expect(screen.getByLabelText('Label artwork')).toHaveAttribute('accept', '.stl,model/stl,.3mf,model/3mf')
+  })
+
+  it('shows a mesh sample by its kind, never as a broken image (#959)', () => {
+    setup('', { ...param, accept: ['stl'], samples: ['bracket.stl'] })
+    const sample = screen.getByRole('radio', { name: 'Use sample bracket.stl' })
+    expect(sample.querySelector('img')).toBeNull()
+    expect(sample).toHaveTextContent('stl')
+  })
+
   it('starts empty, naming the kinds it takes', () => {
     setup()
     expect(screen.getByText('Label artwork')).toBeInTheDocument()
@@ -138,7 +185,7 @@ describe('file parameter (#204)', () => {
     )
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
-      'only SVG and PNG files can be attached',
+      'only SVG, PNG, STL, 3MF and OBJ files can be attached',
     )
     expect(onChange).not.toHaveBeenCalled()
   })

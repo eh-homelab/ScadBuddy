@@ -76,15 +76,23 @@ export type MessagesBody = {
   max_tokens?: number
 }
 
+function betas(request: RecordedRequest): string[] {
+  return String(request.headers['anthropic-beta'] ?? '').split(',')
+}
+
 /**
  * Whether a request carried the `thinking-display-updates` beta. Claude Code
- * 2.1.287 sends a request a gateway refused with a 400 once more without it
- * (src/harness/credentialErrors.ts), which is how that re-send is told apart.
+ * 2.1.314 re-sends a request a gateway refused with a 400 without it, after a
+ * first re-send without the token-count beta (`tokenCount`;
+ * src/harness/credentialErrors.ts), which is how the last re-send is told apart.
  */
 export function displayUpdates(request: RecordedRequest): boolean {
-  return String(request.headers['anthropic-beta'] ?? '')
-    .split(',')
-    .includes('thinking-display-updates-2026-08-18')
+  return betas(request).includes('thinking-display-updates-2026-08-18')
+}
+
+/** Whether a request carried the `thinking-token-count` beta, which Claude Code 2.1.314's first re-send of a 400 drops. */
+export function tokenCount(request: RecordedRequest): boolean {
+  return betas(request).includes('thinking-token-count-2026-05-13')
 }
 
 export type FakeAnthropic = {
@@ -195,7 +203,9 @@ export async function startFakeAnthropic(reply: (request: RecordedRequest) => Re
       }
       if (req.method === 'POST' && path === '/v1/messages/count_tokens') {
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ input_tokens: 10 }))
+        // About four bytes a token, so a count is as large as the request: Claude Code's tool
+        // search `auto` defers once the tools it counts this way reach 10% of the context (#5221).
+        res.end(JSON.stringify({ input_tokens: Math.ceil(raw.length / 4) }))
         return
       }
       if (req.method === 'POST' && path === '/v1/messages') {

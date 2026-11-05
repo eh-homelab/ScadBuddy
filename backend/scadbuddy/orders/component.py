@@ -26,6 +26,7 @@ from psycopg_pool import ConnectionPool
 from scadbuddy.api.components import component_dep
 from scadbuddy.core.components import Component, Components, Core, Key
 from scadbuddy.core.pg_keepalive import TCP_KEEPALIVE
+from scadbuddy.orders.archives import mirror_run
 from scadbuddy.orders.integrations import OrderIntegrations, choose
 from scadbuddy.orders.lifecycle import Lifecycle
 from scadbuddy.orders.pricebook import PriceBookReader
@@ -77,7 +78,10 @@ class OrdersComponent:
         """The seam for the running ``bambuddy_url`` (F10, Ruling 7)."""
         url = self.core.settings.bambuddy_url
         if self._integrations is None or self._integrations[0] != url:
-            self._integrations = (url, choose(url, self.core.settings_store))
+            self._integrations = (
+                url,
+                choose(url, self.core.settings_store, self.core.uploads),
+            )
         return self._integrations[1]
 
     @property
@@ -107,7 +111,12 @@ def _build(core: Core, components: Components) -> OrdersComponent:
 @asynccontextmanager
 async def _run(orders: OrdersComponent) -> AsyncIterator[None]:
     # The print path's follow (#4719): an item follows the print its attempt started.
-    remove = listen_for_prints(orders.core.events, orders.lifecycle)
+    # §8.2: a settled print's attempt copies its Bambuddy archives.
+    remove = listen_for_prints(
+        orders.core.events,
+        orders.lifecycle,
+        lambda run_id: mirror_run(orders.lifecycle, orders.integrations, run_id),
+    )
     try:
         yield
     finally:

@@ -12,6 +12,7 @@ import {
   query,
   type SDKUserMessage,
   type SessionStore,
+  SYSTEM_PROMPT_DYNAMIC_BOUNDARY,
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Credential } from '../credentials.js'
 import { credentialGateway, type GatewayLease } from '../gateway/server.js'
@@ -36,6 +37,8 @@ import { ASK_USER_QUESTION, askThroughGate, isQuestionTool, QUESTION_SERVER, typ
 import { assertPluginAllowed, PluginRefusedError } from './plugins.js'
 import { declaresRemoteServers } from '../plugins/packages/mcp.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
+import { TOOL_SEARCH, type ToolSearchMode, toolSearchEnv } from './toolSearch.js'
+import type { SystemPromptBase } from '../sessions/turnSettings.js'
 import type { BrowserGuard } from '../browser/guard.js'
 import type { BuiltInPolicy } from '../plugins/builtInTools.js'
 import type { HarnessPlugin } from '../plugins/forwarder.js'
@@ -43,7 +46,8 @@ import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/regi
 
 // The harness loop (issue #255): one `query()` of the Claude Agent SDK per turn,
 // built on buildQueryOptions() so every query keeps `tools: []` (or only
-// Skill and Agent, with ScadBuddy's own plugin: ownPlugin.ts, #896),
+// Skill and Agent, with ScadBuddy's own plugin: ownPlugin.ts, #896; ToolSearch with
+// tool search on: toolSearch.ts, #5221),
 // `settingSources: []`, `strictMcpConfig` and the service-owned
 // CLAUDE_CONFIG_DIR (spec §4.4). This module adds, per query:
 //
@@ -234,6 +238,17 @@ export type HarnessRun = {
   questionGate?: QuestionGate
   /** Appended to the SDK's default system prompt: route, model, diagnostics (#256). */
   systemPromptAppend?: string
+  /**
+   * Tool search (#5221, harness/toolSearch.ts): `auto` or `always` offers the ToolSearch
+   * built-in, at `read`, and defers the MCP tools not marked `alwaysLoad`; `off` loads every
+   * one upfront. Omitted, a run has no ToolSearch, as before: only a session turn sets it.
+   */
+  toolSearch?: ToolSearchMode
+  /**
+   * What `systemPromptAppend` goes on (#5222): Claude Code's `claude_code` preset (the
+   * default), or `minimal`, the SDK's own one-line prompt with the text after it.
+   */
+  systemPromptBase?: SystemPromptBase
   /** Session id to resume (#300). */
   resume?: string
   /**
@@ -338,6 +353,9 @@ export function remotePluginOptions(
     if (taken.has(plugin.name) || Object.hasOwn(mcpServers, plugin.name)) {
       throw new PluginConfigError(`MCP server name "${plugin.name}" is used twice`)
     }
+    // The forwarder marks each listed tool `_meta['anthropic/alwaysLoad']: false`
+    // (forwarder.ts `filterToolList`, #5221), so with tool search on its tools are
+    // still deferred: the server's `true` keeps only the blocking start.
     mcpServers[plugin.name] = { type: 'http', url: plugin.url, alwaysLoad: true }
     for (const tool of plugin.disabledTools) {
       const name = `${toolPrefix(plugin.name)}${harnessToolName(tool)}`
@@ -345,6 +363,39 @@ export function remotePluginOptions(
     }
   }
   return { mcpServers, disallowedTools }
+}
+
+/**
+ * The SDK's `systemPrompt` for a run's text on `base` (#5222). Only a session turn passes a
+ * text (sessions/turnRunner.ts); a run without one keeps the SDK's own minimal prompt. Both keep the prompt static, so
+ * its cached prefix is shared across sessions
+ * (https://code.claude.com/docs/en/agent-sdk/modifying-system-prompts.md):
+ *
+ * - `claude_code`: the preset with `excludeDynamicSections`, which moves "per-user dynamic
+ *   sections (working directory, auto-memory, git status)" into the first user message
+ *   (sdk.d.ts 0.3.310). So on this base the text is what it was before #5222, but the
+ *   working directory now reaches the model in that message, not in the system prompt;
+ * - `minimal`: the text as a custom prompt. Claude Code still puts the SDK's own line, "You
+ *   are a Claude agent, built on Anthropic's Claude Agent SDK.", first (measured on 2.1.310,
+ *   test/systemPrompt.sdk.test.ts), and the text is all static, so it all goes before
+ *   SYSTEM_PROMPT_DYNAMIC_BOUNDARY: "Blocks before the marker are eligible for cross-session
+ *   prompt caching".
+ *
+ * `snapshot: false`: a recorded prompt would be "reused verbatim on every later request and
+ * `resume`", and "a different `append` ... passed on a later launch of the same session is
+ * ignored until compaction" (sdk.d.ts). The base and the text are Settings a user changes for
+ * the sessions they have, so each process renders them again; the bytes are the same while
+ * the settings are, which keeps the cache.
+ */
+export function systemPromptOf(text: string, base: SystemPromptBase): NonNullable<Options['systemPrompt']> {
+  return base === 'minimal'
+    ? { type: 'custom', prompt: [text, SYSTEM_PROMPT_DYNAMIC_BOUNDARY], snapshot: false }
+    : { type: 'preset', preset: 'claude_code', append: text, excludeDynamicSections: true, snapshot: false }
+}
+
+/** Whether the run offers ToolSearch (#5221). */
+function searches(run: Pick<HarnessRun, 'toolSearch'>): boolean {
+  return run.toolSearch !== undefined && run.toolSearch !== 'off'
 }
 
 /** Whether the run loads any plugin with skills or agents: the own plugin or a package. */
@@ -357,9 +408,10 @@ function loadsPlugins(run: Pick<HarnessRun, 'ownPlugin' | 'pluginPaths' | 'allow
  * then its plugins' tiers, then `run.tierOf`.
  */
 export function harnessTierOf(
-  run: Pick<HarnessRun, 'remotePlugins' | 'tierOf' | 'ownPlugin' | 'pluginPaths' | 'allowedPluginPaths' | 'nativeTools'>,
+  run: Pick<HarnessRun, 'remotePlugins' | 'tierOf' | 'ownPlugin' | 'pluginPaths' | 'allowedPluginPaths' | 'nativeTools' | 'toolSearch'>,
 ): TierResolver {
   const native = new Map((run.nativeTools ?? []).map((t) => [t.name, t.tier]))
+  if (searches(run)) native.set(TOOL_SEARCH, 'read')
   const tiers = run.tierOf ?? (() => undefined)
   const given: TierResolver = native.size ? (toolName, input) => native.get(toolName) ?? tiers(toolName, input) : tiers
   const remote = run.remotePlugins?.length ? pluginTierResolver(run.remotePlugins) : undefined
@@ -461,6 +513,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
       CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: '1',
       ...(run.maxRetries === undefined ? {} : { CLAUDE_CODE_MAX_RETRIES: String(run.maxRetries) }),
+      ...(run.toolSearch === undefined ? {} : { ENABLE_TOOL_SEARCH: toolSearchEnv(run.toolSearch) }),
     },
     mcpServers: { ...local, ...remote.mcpServers },
     maxTurns: run.maxTurns ?? DEFAULT_MAX_TURNS,
@@ -527,6 +580,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       ...(run.allowedPluginPaths?.length ? (run.builtinTools ?? []) : []),
       ...(run.nativeTools ?? []).map((t) => t.name).filter((name) => run.cwd !== undefined || !CONFINED_TOOLS.has(name)),
       ...(run.nestedTools ?? []),
+      ...(searches(run) ? [TOOL_SEARCH] : []),
     ]),
   ]
   if (builtins.length) options.tools = builtins
@@ -553,9 +607,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
       }
     }
   }
-  if (run.systemPromptAppend !== undefined) {
-    options.systemPrompt = { type: 'preset', preset: 'claude_code', append: run.systemPromptAppend }
-  }
+  if (run.systemPromptAppend !== undefined) options.systemPrompt = systemPromptOf(run.systemPromptAppend, run.systemPromptBase ?? 'claude_code')
   let stderr: LineRedactor | undefined
   if (run.stderr) {
     // Line-buffered: a secret split across two chunks is still one line here. The process

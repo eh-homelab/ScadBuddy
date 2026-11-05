@@ -941,6 +941,7 @@ describe('HistoryPage', () => {
             queue_item_id: null,
             plates: [],
             print_route: null,
+            sent_to_bambuddy: false,
           },
         ]),
       ),

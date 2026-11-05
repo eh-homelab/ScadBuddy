@@ -343,6 +343,25 @@ def test_the_lifespan_enters_a_discovered_components_run(
     assert log == ["enter probe", "exit probe"]
 
 
+def test_the_lifespan_runs_the_boot_virtual_printer_pass_and_joins_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
+) -> None:
+    """#5236: the boot starts `_adopt_virtual_rows_logged` beside its other boot passes,
+    and the shutdown waits for it (`_join_background`) before the stores close."""
+    log: list[str] = []
+
+    async def adopt(state: object) -> None:
+        log.append("started")
+        await asyncio.sleep(0.2)
+        log.append("ended")
+
+    monkeypatch.setattr(main, "_adopt_virtual_rows_logged", adopt)
+    app = _lifespan_app(tmp_path, monkeypatch, pg_conninfo)
+    with TestClient(app):
+        pass
+    assert log == ["started", "ended"]
+
+
 def test_a_component_that_raises_on_exit_still_lets_the_core_close(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pg_conninfo: str
 ) -> None:

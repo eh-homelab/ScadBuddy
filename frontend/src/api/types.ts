@@ -11,6 +11,7 @@
  */
 import type { Origin, Owner, SessionStatus } from '../agent/chat/protocol'
 import type { components } from './schema'
+import type { SYSTEM_PROMPT_BASES, TOOL_SEARCH_MODES } from './sessionTurn'
 
 type Schemas = components['schemas']
 
@@ -23,7 +24,7 @@ export type CustomizerSchema = Schemas['CustomizerSchema']
 /** A revision's schema, with that revision's own `ui` declaration (#425). */
 export type RevisionSchema = Schemas['RevisionSchema']
 
-/** #204 — an SVG or PNG uploaded for a `// file` parameter; its `id` is the value. */
+/** #204 — an SVG, PNG, STL, 3MF or OBJ uploaded for a `// file` parameter; its `id` is the value. */
 export type Asset = Schemas['AssetMeta']
 /** #296 — how much the upload store holds, against its caps (0 is no limit). */
 export type AssetUsage = Schemas['AssetUsage']
@@ -46,6 +47,8 @@ export type RevokedSessions = Schemas['RevokedSessions']
 export type RepositoryLag = Schemas['RepositoryLag']
 
 export type ModelSummary = Schemas['ModelRecord']
+/** #2290 — the Models page's filter counts. */
+export type ModelFacets = Schemas['ModelFacets']
 /** #274 — one image or video of a template, in its order; the first is the cover. */
 export type MediaView = Schemas['MediaView']
 export type SourceCheck = Schemas['SourceCheck']
@@ -363,6 +366,10 @@ export type OrderTotals = Schemas['OrderTotals']
 export type OrderPage = Schemas['OrderPage']
 export type Quote = Schemas['Quote']
 export type Fulfilment = Schemas['Fulfilment']
+export type AttemptArchives = Schemas['AttemptArchives']
+export type ArchiveOffer = Schemas['ArchiveOffer']
+export type ArchiveCopy = Schemas['ArchiveCopy']
+export type OrderProject = Schemas['OrderProject']
 /** #4251 — any file on an order or a line item (spec 2026-10-18 §6.2). */
 export type OrderAttachment = Schemas['Attachment']
 export type OrderAttachmentRole = OrderAttachment['role']
@@ -371,6 +378,10 @@ export type Shipment = Schemas['Shipment']
 export type Payment = Schemas['Payment']
 export type OrderCharge = Schemas['Charge']
 export type OrderEvent = Schemas['OrderEvent']
+// #4251 §6.4 — `GET /orders/{id}/costs`.
+export type OrderCosts = Schemas['OrderCosts']
+export type ItemCost = Schemas['ItemCost']
+export type AttemptCost = Schemas['AttemptCost']
 export type AddressSnapshot = Schemas['AddressSnapshot']
 export type OrderCreate = Defaulted<Schemas['OrderCreate'], 'notes' | 'due_at'>
 export type OrderPatch = Partial<Schemas['OrderPatch']>
@@ -559,7 +570,18 @@ export interface SessionRuntime {
   warm_max_per_replica: number
   warm_idle_seconds: number
   turn_max_seconds: number
+  /** Tool search (agent `harness/toolSearch.ts`): off loads every tool upfront; auto defers past 10% of the context; always defers. */
+  tool_search: (typeof TOOL_SEARCH_MODES)[number]
+  /** What the system prompt is built on: Claude Code's preset, or the SDK's minimal default. */
+  system_prompt_base: (typeof SYSTEM_PROMPT_BASES)[number]
+  /** The user's own instructions, after ScadBuddy's fixed part. */
+  system_prompt_append: string
+  /** ScadBuddy's fixed part, read-only: it always goes in, whatever the settings say. */
+  system_prompt_fixed: string
 }
+
+/** What a PUT may change: everything but the read-only fixed part. */
+export type SessionRuntimeUpdate = Partial<Omit<SessionRuntime, 'system_prompt_fixed'>>
 
 /**
  * How many of the assistant's renders run at once (`GET/PUT /api/v1/ai/settings/render-limits`,
@@ -600,6 +622,43 @@ export interface MemorySettings {
   recall_max_query_chars: number
   default: number
   max: number
+}
+
+/**
+ * #815 — the push services the agent may send Web Push to (`GET/PUT
+ * /api/v1/ai/settings/push-services`, agent `src/routes/push.ts`): host names, or `*.` and
+ * one for its subdomains. `default` is the browsers' own services.
+ */
+export interface PushServices {
+  hosts: string[]
+  default: string[]
+}
+
+/**
+ * #815 — a notification channel out of the browser (agent `src/routes/notifyChannels.ts`):
+ * an ntfy topic, or a Home Assistant notify service. The token is never returned.
+ */
+export interface NotifyChannel {
+  id: string
+  kind: 'ntfy' | 'home_assistant'
+  name: string
+  url: string
+  target: string | null
+  enabled: boolean
+  has_token: boolean
+  token_last4: string
+  last_error: string | null
+  last_sent_at: string | null
+}
+
+/** What a new channel is made of; `token` and `target` as each kind needs. */
+export interface NotifyChannelInput {
+  kind: NotifyChannel['kind']
+  name: string
+  url: string
+  target?: string | null
+  token?: string | null
+  enabled?: boolean
 }
 
 /**

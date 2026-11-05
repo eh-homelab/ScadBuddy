@@ -276,6 +276,11 @@ describe.skipIf(cliMissing !== undefined)(
       expect(result).toMatchObject({ subtype: 'success', result: 'Found it.' })
       // forget and files.delete are disabled; files.list/files_list collide, so both are hidden.
       expect(offered()).toEqual(['mcp__my-memory__recall', 'mcp__my-memory__retain'])
+      // With no tool search the forwarder's `_meta['anthropic/alwaysLoad']: false` defers nothing (#5221).
+      const tools = fake.messageCalls()[0]!.body?.tools as { name: string; defer_loading?: boolean }[]
+      const mine = tools.filter((t) => t.name.startsWith('mcp__my-memory__'))
+      expect(mine).toHaveLength(2)
+      expect(mine.every((t) => !t.defer_loading)).toBe(true)
       expect(decisions).toEqual([['mcp__my-memory__recall', { decision: 'allow', tier: 'read' }]])
       expect(mcp.calls).toEqual(['recall:PETG settings'])
       expect(lastContent(fake.messageCalls().at(-1)!)).toContain('remembered: PETG settings')
@@ -289,6 +294,33 @@ describe.skipIf(cliMissing !== undefined)(
       expect(initOf(messages)).toEqual([{ name: 'my-memory', status: 'connected', source: 'dynamic' }])
       expect(JSON.stringify(messages)).not.toContain(PLUGIN_TOKEN)
       expect(stderr.join('\n')).not.toContain(PLUGIN_TOKEN)
+    })
+
+    it('with tool search, the first turn names the plugin tools, defers them, and finds one by ToolSearch (#5221)', async () => {
+      let n = 0
+      script = () => {
+        n += 1
+        if (n === 1) return { toolUse: { name: 'ToolSearch', input: { query: 'select:mcp__my-memory__recall', max_results: 5 } } }
+        if (n === 2) return { toolUse: { name: 'mcp__my-memory__recall', input: { query: 'PETG settings' } } }
+        return { text: 'Found it.' }
+      }
+      const { result } = await collect({
+        paths: { stateDir },
+        credential: gateway(),
+        prompt: 'What do you remember about PETG?',
+        model: 'claude-sonnet-4-5',
+        remotePlugins: forward(plugin(mcp.url)),
+        // A plugin's few tools stay under `auto`'s threshold; `always` defers them whatever their size.
+        toolSearch: 'always',
+      })
+      expect(result).toMatchObject({ subtype: 'success', result: 'Found it.' })
+      const [first, second] = fake.messageCalls()
+      // The server's `alwaysLoad: true` still made the first request wait for it: its tools are named...
+      expect(JSON.stringify(first!.body?.messages)).toContain('mcp__my-memory__recall')
+      // ...and deferred, by the forwarder's per-tool `_meta` (forwarder.ts filterToolList).
+      expect((first!.body?.tools ?? []).map((t) => t.name)).not.toContain('mcp__my-memory__recall')
+      expect(lastContent(second!)).toContain('"tool_reference","tool_name":"mcp__my-memory__recall"')
+      expect(mcp.calls).toEqual(['recall:PETG settings'])
     })
 
     it('denies an outward (unlisted) plugin tool as needing approval; it never reaches the server', async () => {

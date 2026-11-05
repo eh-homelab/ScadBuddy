@@ -26,7 +26,12 @@ export type PreparedAction = {
 
 /** What a confirm found. Only `approved` runs the call, and it has used the approval up. */
 export type Claim =
-  | { status: 'approved'; action: PreparedAction }
+  | {
+      status: 'approved'
+      action: PreparedAction
+      /** Whether a person decided it in the ScadBuddy UI (decider `browser`), not a grant holder (#959). */
+      byPerson?: boolean
+    }
   | { status: 'pending'; action: PreparedAction }
   | { status: 'refused'; reason: string }
 

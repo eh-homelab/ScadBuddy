@@ -24,7 +24,8 @@ services:
         condition: service_healthy
     environment:
       SCADBUDDY_PUBLIC_URL: https://scadbuddy.e2e.test
-      SCADBUDDY_AUTH_MODE: observe
+      # observe, then enforce (auth.sh restarts the app with SB_AUTH_MODE=enforce, #4975 phase 8).
+      SCADBUDDY_AUTH_MODE: ${SB_AUTH_MODE:-observe}
       SCADBUDDY_AUTH_OIDC_ISSUER: https://idp.e2e.test
       SCADBUDDY_AUTH_OIDC_CLIENT_ID: scadbuddy
       # The issuer is on this network, not a public address.
@@ -88,6 +89,7 @@ services:
       E2E_BASE_URL: https://scadbuddy.e2e.test
       E2E_AUTH: "1"
       E2E_AUTH_STATE: /run/e2e
+      E2E_AUTH_MODE: ${SB_AUTH_MODE:-observe}
     volumes:
       - ../frontend:/work
       - ${SB_AUTH_STATE_DIR:?run.sh sets the state directory}:/run/e2e:ro

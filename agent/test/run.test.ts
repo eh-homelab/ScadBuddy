@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { createSdkMcpServer, type SDKMessage, type SDKResultMessage, tool } from '@anthropic-ai/claude-agent-sdk'
+import { createSdkMcpServer, type SDKMessage, type SDKResultMessage, SYSTEM_PROMPT_DYNAMIC_BOUNDARY, tool } from '@anthropic-ai/claude-agent-sdk'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import type { Credential } from '../src/credentials.js'
@@ -59,6 +59,36 @@ describe('buildHarnessOptions', () => {
       ANTHROPIC_BASE_URL: lease.baseUrl,
       ANTHROPIC_AUTH_TOKEN: 'tok',
     })
+  })
+
+  it('offers ToolSearch at read with tool search on, and tells Claude Code the mode (#5221)', () => {
+    const auto = buildHarnessOptions({ ...base, toolSearch: 'auto' })
+    expect(auto.tools).toEqual(['ToolSearch'])
+    expect(auto.env?.ENABLE_TOOL_SEARCH).toBe('auto')
+    expect(harnessTierOf({ toolSearch: 'auto' })('ToolSearch', {})).toBe('read')
+    expect(buildHarnessOptions({ ...base, toolSearch: 'always' }).env?.ENABLE_TOOL_SEARCH).toBe('true')
+    const off = buildHarnessOptions({ ...base, toolSearch: 'off' })
+    expect(off.tools).toEqual([])
+    expect(off.env?.ENABLE_TOOL_SEARCH).toBe('false')
+    expect(harnessTierOf({ toolSearch: 'off' })('ToolSearch', {})).toBeUndefined()
+    // A run that names no mode (a nested query, the connection test) is as before.
+    expect(buildHarnessOptions(base).env?.ENABLE_TOOL_SEARCH).toBeUndefined()
+  })
+
+  it('builds the system prompt on the base asked for, static and rendered each time (#5222)', () => {
+    expect(buildHarnessOptions({ ...base, systemPromptAppend: 'ours' }).systemPrompt).toEqual({
+      type: 'preset',
+      preset: 'claude_code',
+      append: 'ours',
+      excludeDynamicSections: true,
+      snapshot: false,
+    })
+    expect(buildHarnessOptions({ ...base, systemPromptAppend: 'ours', systemPromptBase: 'minimal' }).systemPrompt).toEqual({
+      type: 'custom',
+      prompt: ['ours', SYSTEM_PROMPT_DYNAMIC_BOUNDARY],
+      snapshot: false,
+    })
+    expect(buildHarnessOptions({ ...base, systemPromptBase: 'minimal' }).systemPrompt).toBeUndefined()
   })
 
   it('keeps the least-privilege base, and gives Claude Code a gateway token, never the credential (Step 9.4)', () => {

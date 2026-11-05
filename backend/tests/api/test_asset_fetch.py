@@ -1,4 +1,5 @@
-"""`POST /models/{slug}/assets/fetch`: an SVG or PNG off an allowlisted URL (#844)."""
+"""`POST /models/{slug}/assets/fetch`: an SVG, PNG, STL, 3MF or OBJ off an allowlisted URL
+(#844, #959)."""
 
 from __future__ import annotations
 
@@ -13,6 +14,8 @@ from scadbuddy.api.deps import IMPORT_CONCURRENCY, STATE_ATTR, ImportPermits
 from scadbuddy.api.models import RESOLVER_RETRY_AFTER
 from scadbuddy.library import url_import
 from scadbuddy.library.asset_fetch import DEFAULT_ASSET_FETCH_DOMAINS
+from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.history import GitUnavailableError
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.library.url_import import resolve_host as real_resolve_host
 from tests.conftest import MODEL_SLUG
@@ -106,7 +109,7 @@ def test_content_that_is_not_svg_or_png_is_refused(client: TestClient) -> None:
     response = _fetch(client, ICON_URL)
 
     assert response.status_code == 422
-    assert "only SVG and PNG" in response.json()["detail"]
+    assert "only SVG, PNG, STL, 3MF and OBJ" in response.json()["detail"]
 
 
 def test_a_fetch_needs_a_model(client: TestClient) -> None:
@@ -212,3 +215,90 @@ def test_a_url_that_grows_when_encoded_is_still_answered(client: TestClient) -> 
 
     assert response.status_code == 201, response.text
     assert len(response.json()["source_url"]) > 2048
+
+
+@respx.mock
+def test_a_fetched_asset_keeps_its_source_licence_and_view_box(client: TestClient) -> None:
+    """#959: the asset itself records where it came from and under what licence, so
+    its metadata route says so long after the fetch's answer."""
+    respx.get(url__startswith=ICON_URL).mock(return_value=httpx.Response(200, content=UNICORN_SVG))
+    licence = {
+        "spdx": "CC-BY-SA-4.0",
+        "name": "CC BY-SA 4.0",
+        "url": "https://creativecommons.org/licenses/by-sa/4.0/",
+        "author": "OpenMoji",
+    }
+
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets/fetch",
+        json={"url": ICON_URL + "?token=secret", "licence": licence},
+        headers=press(),
+    )
+
+    assert response.status_code == 201, response.text
+    meta = client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{response.json()['id']}").json()
+    # Never the query, which may carry a token.
+    assert meta["source_url"] == ICON_URL
+    assert meta["licence"] == licence
+    assert (meta["view_box"], meta["path_count"]) == ([0, 0, 24, 24], 1)
+
+
+@respx.mock
+@pytest.mark.requires_git
+def test_a_fetch_from_a_known_catalogue_captures_its_licence_and_credits_it_once(
+    client: TestClient,
+) -> None:
+    """#959: OpenMoji's licence without the caller naming it, and one README line."""
+    respx.get(ICON_URL).mock(return_value=httpx.Response(200, content=UNICORN_SVG))
+
+    first = _fetch(client, ICON_URL)
+
+    assert first.status_code == 201, first.text
+    assert first.json()["credited"] is True
+    assert first.json()["licence"]["spdx"] == "CC-BY-SA-4.0"
+    stored = client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{first.json()['id']}").json()
+    assert stored["licence"]["spdx"] == "CC-BY-SA-4.0"
+    readme = client.get(f"/api/v1/models/{MODEL_SLUG}/readme").text
+    assert "## Credits" in readme
+    assert f"- `1F984.svg` from <{ICON_URL}>, by OpenMoji, under [CC-BY-SA-4.0]" in readme
+    history = client.get(f"/api/v1/models/{MODEL_SLUG}/versions").json()
+    assert history[0]["message"] == "Credit 1F984.svg in the README"
+
+    again = _fetch(client, ICON_URL)
+    assert again.status_code == 201, again.text
+    assert again.json()["credited"] is True
+    assert client.get(f"/api/v1/models/{MODEL_SLUG}/readme").text == readme
+
+
+@respx.mock
+def test_a_fetch_from_elsewhere_is_credited_with_no_licence_stated(client: TestClient) -> None:
+    url = "https://icons.example.org/a.svg"
+    client.put("/api/v1/settings", json={"asset_fetch_domains": ["example.org"]})
+    respx.get(url).mock(return_value=httpx.Response(200, content=UNICORN_SVG))
+
+    response = _fetch(client, url)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["licence"] is None
+    readme = client.get(f"/api/v1/models/{MODEL_SLUG}/readme").text
+    assert f"- `a.svg` from <{url}>, licence not stated" in readme
+
+
+@respx.mock
+def test_a_fetch_is_stored_and_answered_when_the_readme_cannot_be_credited(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#959: with no model history the credit is skipped, never a 500 after the store."""
+
+    def unavailable(*args: object, **kwargs: object) -> None:
+        raise GitUnavailableError("git is not available")
+
+    monkeypatch.setattr(Catalogue, "write_readme", unavailable)
+    respx.get(ICON_URL).mock(return_value=httpx.Response(200, content=UNICORN_SVG))
+
+    response = _fetch(client, ICON_URL)
+
+    assert response.status_code == 201, response.text
+    assert response.json()["credited"] is False
+    asset = client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{response.json()['id']}")
+    assert asset.status_code == 200
