@@ -3,7 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { Link, Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Job } from '../api/types'
-import { keychainSchema } from '../mocks/fixtures'
+import { keychainSchema, models } from '../mocks/fixtures'
 import { mockSettings, setMockPresets, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { selectOption } from '../test/select'
@@ -182,6 +182,47 @@ describe('a link to a preset (#1022)', () => {
     // The defaults render once the link has been given up on.
     await waitFor(() => expect(renders.length).toBeGreaterThan(0), { timeout: 5_000 })
     await waitFor(() => expect(where()).toBe('/m/name-keychain'))
+  })
+
+  it('stops waiting for a migration that never answers, and opens on the defaults', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let answer = () => {}
+    const stalled = new Promise<void>((resolve) => {
+      answer = resolve
+    })
+    onTestFinished(() => {
+      answer()
+      vi.useRealTimers()
+    })
+    const renders = watchRenders()
+    server.use(
+      // A version no stored preset is at, so the linked one has to be migrated.
+      http.get('/api/v1/models/name-keychain', () =>
+        HttpResponse.json({ ...models.find((m) => m.slug === 'name-keychain'), inputs_version: 7 }),
+      ),
+      http.post('/api/v1/models/:slug/inputs/migrate', async () => {
+        await stalled
+        return HttpResponse.json({})
+      }),
+    )
+    render(`/m/name-keychain?preset=${MUM}`)
+    await screen.findByRole('textbox', { name: 'Name on the tag' })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await screen.findByTestId('preset-link-missing')).toHaveTextContent('did not answer in time')
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan')
+    await waitFor(() => expect(renders.length).toBeGreaterThan(0), { timeout: 5_000 })
+  })
+
+  it('applies a link on a reopened output without asking: nothing was edited', async () => {
+    const renders = watchRenders()
+    render(`/m/name-keychain?from=${'c'.repeat(32)}&preset=${MUM}`)
+    const select = await picker()
+    await waitFor(() => expect(select).toHaveTextContent('Mum'))
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Mum')
+    await waitFor(() => expect(renders.length).toBeGreaterThan(0), { timeout: 5_000 })
+    const bodies = await Promise.all(renders)
+    expect(bodies.at(-1)?.inputs.params).toMatchObject({ name: 'Mum' })
   })
 
   it('asks before a link replaces unsaved edits, as a pick does', async () => {

@@ -96,13 +96,23 @@ interface Props {
   onSelected?: (preset: ParamPreset | null) => void
   /**
    * #1022 — a preset a link asks to apply, taken as a pick here is: over unsaved edits
-   * it asks first, and a Cancel calls `onDeclined`. A new object each time.
+   * (with `ask`) it asks first, and a Cancel calls `onDeclined`. A new object each time.
    */
   offered?: OfferedPreset | null
 }
 
 export interface OfferedPreset {
+  /**
+   * Its `inputs` are already migrated to the template's version: the pick runs `migrate`
+   * again, which must pass inputs at the current version through as they are.
+   */
   preset: ParamPreset
+  /**
+   * The user edited the values since the page opened. Without it the values on screen
+   * are what the page opened on (an output reopened, say), which the link replaces.
+   */
+  ask: boolean
+  /** The question was declined, or never answered: the picker went while it asked. */
   onDeclined: () => void
 }
 
@@ -339,7 +349,7 @@ export function PresetPicker({
   const offer = useLatest((next: OfferedPreset) => {
     declineOffer.current?.()
     declineOffer.current = null
-    if (unsaved) {
+    if (next.ask && unsaved) {
       declineOffer.current = next.onDeclined
       setPending(next.preset)
       return
@@ -350,6 +360,15 @@ export function PresetPicker({
   useEffect(() => {
     if (offered) offer.current(offered)
   }, [offered, offer])
+  // Unmounted while it asks (a remount after a template UI's save, the form taking over
+  // from a failed UI): the question is gone, so the link is let go, not left pending.
+  useEffect(
+    () => () => {
+      declineOffer.current?.()
+      declineOffer.current = null
+    },
+    [],
+  )
 
   /** The latest pick: a migration answering after another pick is dropped. */
   const picking = useRef(0)
