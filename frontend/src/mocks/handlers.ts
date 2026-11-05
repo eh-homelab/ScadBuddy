@@ -58,8 +58,8 @@ import type {
   UpstreamState,
   UpstreamStatus,
 } from '../api/types'
-import { editPath } from '../lib/deeplink'
-import { type CatalogueQuery, DEFAULT_QUERY, filterModels, tagCounts } from '../lib/catalogueQuery'
+import { editPath, presetPath } from '../lib/deeplink'
+import { type CatalogueQuery, DEFAULT_QUERY, MAX_TAG_FILTER_CHARS, MAX_TAG_FILTERS, filterModels, tagCounts } from '../lib/catalogueQuery'
 import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
@@ -1360,6 +1360,13 @@ function presetRefusal(
   return undefined
 }
 
+/** #1022 — `api/presets.py` `linked`: the preset's page, absolute under the public URL. */
+function linkedPreset(slug: string, preset: ParamPreset): ParamPreset {
+  const path = presetPath(slug, preset.id)
+  const publicUrl = state.settings.public_url
+  return { ...preset, path, url: publicUrl ? `${publicUrl.replace(/\/$/, '')}${path}` : null }
+}
+
 /** `api/presets.py`'s words for a preset that is gone, and for one the template ships (#357). */
 const PRESET_GONE = 'That preset no longer exists; it may have been deleted elsewhere.'
 const PRESET_READ_ONLY =
@@ -1448,6 +1455,9 @@ function withVersion(inputs: Record<string, unknown>): Record<string, unknown> {
   return { ...inputs, v: inputs['v'] ?? 0 }
 }
 
+/** The most `GET /models` answers in one read (`api/models.py` `MAX_PAGE_LIMIT`). */
+const MAX_PAGE_LIMIT = 500
+
 /** `GET /models`'s search and filters, as the catalogue's own query (#2290). */
 function catalogueFilters(params: URLSearchParams): CatalogueQuery {
   const origin = params.get('origin')
@@ -1458,6 +1468,17 @@ function catalogueFilters(params: URLSearchParams): CatalogueQuery {
     origin: origin === 'builtin' || origin === 'mine' ? origin : 'all',
     sort: params.get('sort') === 'name' ? 'name' : 'updated',
   }
+}
+
+/** The 422 `GET /models` and `GET /model-facets` answer for `tag`s `TagFilter` refuses, as sent: too many, empty or too long. */
+function tooManyTags(params: URLSearchParams) {
+  const tags = params.getAll('tag')
+  return tags.length > MAX_TAG_FILTERS || tags.some((tag) => tag === '' || [...tag].length > MAX_TAG_FILTER_CHARS)
+    ? HttpResponse.json(
+        { detail: `at most ${MAX_TAG_FILTERS} tags, each 1 to ${MAX_TAG_FILTER_CHARS} characters` },
+        { status: 422 },
+      )
+    : undefined
 }
 
 export const handlers = [
@@ -1474,6 +1495,8 @@ export const handlers = [
   http.get(`${base}/models`, ({ request }) => {
     landPreviews()
     const params = new URL(request.url).searchParams
+    const refused = tooManyTags(params)
+    if (refused) return refused
     const filtered = ['q', 'tag', 'origin', 'sort'].some((name) => params.has(name))
     const listed = state.models.map(view)
     const selected = filtered ? filterModels(listed, catalogueFilters(params)) : listed
@@ -1486,12 +1509,18 @@ export const handlers = [
       )
     }
     const limit = params.get('limit')
+    if (limit !== null && !(Number(limit) >= 1 && Number(limit) <= MAX_PAGE_LIMIT)) {
+      return HttpResponse.json({ detail: `limit must be from 1 to ${MAX_PAGE_LIMIT}` }, { status: 422 })
+    }
     const window = selected.slice(start, limit === null ? undefined : start + Number(limit))
     return HttpResponse.json(window, { headers: { 'X-Total-Count': String(selected.length) } })
   }),
 
   http.get(`${base}/model-facets`, ({ request }) => {
-    const query = catalogueFilters(new URL(request.url).searchParams)
+    const params = new URL(request.url).searchParams
+    const refused = tooManyTags(params)
+    if (refused) return refused
+    const query = catalogueFilters(params)
     const listed = state.models.map(view)
     const selected = filterModels(listed, query)
     return HttpResponse.json({
@@ -2493,7 +2522,7 @@ export const handlers = [
   http.get(`${base}/models/:slug/presets`, ({ params }) => {
     const slug = String(params['slug'])
     if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
-    return HttpResponse.json(state.presets[slug] ?? [])
+    return HttpResponse.json((state.presets[slug] ?? []).map((preset) => linkedPreset(slug, preset)))
   }),
 
   http.post(`${base}/models/:slug/presets`, async ({ params, request }) => {
@@ -2524,7 +2553,7 @@ export const handlers = [
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), created]
     await delay(60)
-    return HttpResponse.json(created, { status: 201 })
+    return HttpResponse.json(linkedPreset(slug, created), { status: 201 })
   }),
 
   http.post(`${base}/models/:slug/presets/:id/duplicate`, async ({ params, request }) => {
@@ -2550,7 +2579,7 @@ export const handlers = [
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), copy]
     await delay(60)
-    return HttpResponse.json(copy, { status: 201 })
+    return HttpResponse.json(linkedPreset(slug, copy), { status: 201 })
   }),
 
   http.patch(`${base}/models/:slug/presets/:id`, async ({ params, request }) => {
@@ -2587,7 +2616,7 @@ export const handlers = [
     }
     state.presets[slug] = (state.presets[slug] ?? []).map((p) => (p.id === id ? updated : p))
     await delay(60)
-    return HttpResponse.json(updated)
+    return HttpResponse.json(linkedPreset(slug, updated))
   }),
 
   http.delete(`${base}/models/:slug/presets/:id`, ({ params }) => {
@@ -3017,9 +3046,25 @@ export const handlers = [
     return HttpResponse.json({ inputs: body.inputs, from_version: v, to_version: v })
   }),
 
-  http.get(`${base}/models/:slug/outputs`, ({ params }) =>
-    HttpResponse.json(state.outputs.filter((o) => o.slug === params['slug']).map(settleBackfill)),
-  ),
+  // Newest first, paged as the backend pages it (#843, #2290): `limit`, `after` (an
+  // output id; 409 once it is no longer listed) and the whole count in `X-Total-Count`.
+  http.get(`${base}/models/:slug/outputs`, ({ params, request }) => {
+    const listed = state.outputs
+      .filter((o) => o.slug === params['slug'])
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+    const query = new URL(request.url).searchParams
+    const after = query.get('after')
+    const limit = query.get('limit')
+    // The backend's `MAX_PAGE_LIMIT`: a larger `limit` is a 422.
+    if (limit !== null && Number(limit) > 500) return problem(422, 'Unprocessable Content', 'limit may be at most 500')
+    let start = 0
+    if (after !== null) {
+      start = listed.findIndex((o) => o.id === after) + 1
+      if (start === 0) return problem(409, 'Conflict', `no output '${after}' is listed any more to page after; list again without \`after\``)
+    }
+    const window = listed.slice(start, limit === null ? undefined : start + Number(limit))
+    return HttpResponse.json(window.map(settleBackfill), { headers: { 'X-Total-Count': String(listed.length) } })
+  }),
 
   http.get(`${base}/outputs/:id`, ({ params }) => {
     const output = state.outputs.find((o) => o.id === params['id'])

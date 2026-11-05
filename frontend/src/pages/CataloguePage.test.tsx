@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
@@ -77,7 +77,8 @@ describe('CataloguePage filters (#276)', () => {
 
     await user.type(screen.getByRole('searchbox', { name: 'Search models' }), 'CREME')
     await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('?q=CREME'))
-    expect(names()).toEqual(['Crème Coaster'])
+    // The last list stays on screen while the search's read runs (#2290): wait for its answer.
+    await waitFor(() => expect(names()).toEqual(['Crème Coaster']))
     expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 9')
   })
 
@@ -1112,7 +1113,7 @@ describe('CataloguePage pages on the server (#2290)', () => {
     await user.click(screen.getByRole('button', { name: 'Load more' }))
     await screen.findByRole('link', { name: 'Model 29' })
     expect(cards()).toBe(30)
-    expect(queries.at(-1)?.get('after')).toBe('model-23')
+    expect(queries.map((q) => q.get('after')).filter(Boolean)).toEqual(['model-23'])
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
   })
 
@@ -1139,6 +1140,77 @@ describe('CataloguePage pages on the server (#2290)', () => {
     await waitFor(() => expect(screen.queryByRole('link', { name: 'Model 23' })).not.toBeInTheDocument())
     expect(queries.at(-1)?.has('after')).toBe(false)
     expect(queries.at(-1)?.get('limit')).toBe('24')
+  })
+
+  it('keeps a change whose read was in flight while Load more read (#5286 review)', async () => {
+    let served = many
+    serve(() => served)
+    let slow = false
+    let started = false
+    // Falls through to `serve` once it has waited: the change's read answers after Load more's.
+    server.use(
+      http.get('/api/v1/models', async ({ request }) => {
+        if (!slow || new URL(request.url).searchParams.has('after')) return undefined
+        slow = false
+        started = true
+        await delay(400)
+        return undefined
+      }),
+    )
+    const { user } = renderCatalogue()
+    await screen.findByRole('link', { name: 'Model 23' })
+    served = many.map((m) => (m.slug === 'model-00' ? { ...m, name: 'Renamed 00' } : m))
+    slow = true
+    emitRealtime('model.updated', ['models'], { slug: 'model-00' })
+    await waitFor(() => expect(started).toBe(true))
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findByRole('link', { name: 'Model 29' })
+    expect(await screen.findByRole('link', { name: 'Renamed 00' })).toBeInTheDocument()
+    expect(cards()).toBe(30)
+  })
+
+  it('says so when reading the window again after Load more fails, and keeps the list', async () => {
+    serve(() => many)
+    const { user } = renderCatalogue()
+    await screen.findByRole('link', { name: 'Model 23' })
+    // A change's read, held until Load more has answered; the read made again then fails.
+    let held = 0
+    server.use(
+      http.get('/api/v1/models', async ({ request }) => {
+        if (new URL(request.url).searchParams.has('after')) return undefined
+        held += 1
+        if (held === 1) {
+          await delay(400)
+          return undefined
+        }
+        return HttpResponse.json({ detail: 'limit too large' }, { status: 422 })
+      }),
+    )
+    emitRealtime('model.updated', ['models'], { slug: 'model-00' })
+    await waitFor(() => expect(held).toBe(1))
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(await screen.findByText(/Could not read the models again/)).toBeInTheDocument()
+    expect(cards()).toBe(30)
+  })
+
+  it('shows no models for a tag too long for any model, without asking for them (#5288 review)', async () => {
+    const queries = serve(() => many)
+    const long = 'x'.repeat(401)
+    renderCatalogue(`/?tag=${long}`)
+    expect(await screen.findByRole('heading', { name: 'No models match' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(queries).toEqual([])
+  })
+
+  it('makes one read per Load more when no other read is in flight (#5288 review)', async () => {
+    const queries = serve(() => many)
+    const { user } = renderCatalogue()
+    await screen.findByRole('link', { name: 'Model 23' })
+    const before = queries.length
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findByRole('link', { name: 'Model 29' })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(queries.slice(before).map((q) => q.get('after'))).toEqual(['model-23'])
   })
 
   it('names an upstream that is not on the page shown', async () => {

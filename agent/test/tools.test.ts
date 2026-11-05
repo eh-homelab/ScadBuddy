@@ -1925,6 +1925,33 @@ describe('preset tools carry a description and tags (#327)', () => {
   })
 })
 
+describe('preset tools hand back the link to a preset (#1022)', () => {
+  const MUM = {
+    id: 'p',
+    name: 'Mum',
+    origin: 'mine',
+    params: {},
+    description: '',
+    tags: [],
+    path: '/m/m?preset=p',
+    url: 'https://scad.test/m/m?preset=p',
+  }
+
+  it('says so, and passes the link through from the backend', async () => {
+    for (const name of ['list_presets', 'save_preset', 'update_preset', 'duplicate_preset']) {
+      expect(tool(name).description).toMatch(/`url`.*`path`/)
+    }
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/m/presets`, () => HttpResponse.json([MUM])),
+      http.post(`${BACKEND}/api/v1/models/m/presets`, () => HttpResponse.json(MUM, { status: 201 })),
+    )
+    const listed = await runTool(tool('list_presets'), { slug: 'm' }, ctx())
+    expect(firstText(listed)).toMatchObject({ items: [{ path: MUM.path, url: MUM.url }] })
+    const saved = await runTool(tool('save_preset'), { slug: 'm', name: 'Mum' }, ctx())
+    expect(firstText(saved)).toMatchObject({ path: MUM.path, url: MUM.url })
+  })
+})
+
 describe('tools that make the backend fetch a URL (exfiltration, not SSRF)', () => {
   const CATALOGUE = [{ name: 'BOSL2', url: 'https://github.com/BelfrySCAD/BOSL2', ref: 'v2.0.0', homepage: '', licence: '' }]
 

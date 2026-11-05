@@ -231,13 +231,28 @@ export const handlers = [
     const all = search.get('all') === 'true'
     const here = listedFiles().filter((file) => (file.folder_id ?? null) === folderId)
     const files = all ? here : here.filter((file) => file.file_type?.toLowerCase() === '3mf')
-    return HttpResponse.json({
-      folder_id: folderId,
-      all,
-      folders: listedFolders(),
-      files: files.map((file) => ({ ...file, output_id: mockLibraryOutput(file.id) ?? null })),
-      hidden: here.length - files.length,
-    } satisfies LibraryListing)
+    // #2290 — paged as the backend pages it: `limit`, `after` (a file id; one no longer
+    // listed is a 409), the first page stretched down to a linked `file_id`.
+    const limit = search.get('limit')
+    const after = search.get('after')
+    let start = 0
+    if (after !== null) {
+      start = files.findIndex((file) => file.id === Number(after)) + 1
+      if (start === 0) return problem(409, 'Conflict', `no file '${after}' is listed any more to page after; list again without \`after\``)
+    }
+    let size = limit === null ? files.length : Number(limit)
+    if (after === null && linked !== null) size = Math.max(size, files.findIndex((file) => file.id === Number(linked)) + 1)
+    const page = files.slice(start, start + size)
+    return HttpResponse.json(
+      {
+        folder_id: folderId,
+        all,
+        folders: listedFolders(),
+        files: page.map((file) => ({ ...file, output_id: mockLibraryOutput(file.id) ?? null })),
+        hidden: here.length - files.length,
+      } satisfies LibraryListing,
+      { headers: { 'X-Total-Count': String(files.length) } },
+    )
   }),
 
   /** #2167 — to the mocked trash; Bambuddy skips the file another user added. */
@@ -362,6 +377,17 @@ export const handlers = [
 
   http.get(`${base}/print/library/:id/plates/:index/thumbnail`, () => pngResponse()),
   http.get(`${base}/print/library/:id/thumbnail`, () => pngResponse()),
+  // #1031 — the file itself, always a download, as `get_library_file` serves it.
+  http.get(`${base}/print/library/:id/file`, ({ params }) => {
+    const file = listedFiles().find((row) => row.id === Number(params['id']))
+    if (!file) return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read library file ${params['id']}`)
+    return new HttpResponse(new TextEncoder().encode(`mock ${file.filename}`), {
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename*=utf-8''${encodeURIComponent(file.filename)}`,
+      },
+    })
+  }),
   // #1723 — a plate's mesh, in the file's own colours (the H2C file's green and black).
   http.get(`${base}/print/library/:id/preview.glb`, ({ params, request }) => {
     const colours = Number(params['id']) === H2C_FILE ? ['#3F8E43', '#1A1A1A'] : ['#0047BB', '#FF1493']

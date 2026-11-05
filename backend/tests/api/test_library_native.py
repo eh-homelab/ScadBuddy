@@ -184,6 +184,27 @@ def test_file_id_lists_its_folder(native_client: TestClient, in_folder: NativeFi
     )
 
 
+def test_a_native_folder_is_paged_as_bambuddy_s_is(
+    native_client: TestClient, tmp_path: Path
+) -> None:
+    """#2290: `limit`/`after` page ScadBuddy's own library too, in name order."""
+    folder = _native(native_client).rows.create_folder("Parts", None)
+    made = [
+        _upload(native_client, _three_mf(tmp_path / f"part-{n}.3mf"), folder.id) for n in (2, 0, 1)
+    ]
+    order = [file.id for file in sorted(made, key=lambda file: file.name)]
+
+    first = native_client.get("/api/v1/print/library", params={"folder_id": folder.id, "limit": 2})
+    rest = native_client.get(
+        "/api/v1/print/library",
+        params={"folder_id": folder.id, "limit": 2, "after": order[1]},
+    )
+
+    assert [row["id"] for row in first.json()["files"]] == order[:2]
+    assert [row["id"] for row in rest.json()["files"]] == order[2:]
+    assert first.headers["X-Total-Count"] == rest.headers["X-Total-Count"] == "3"
+
+
 def test_a_bambuddy_range_id_is_404_on_native(native_client: TestClient) -> None:
     assert native_client.get("/api/v1/print/library/42/file").status_code == 404
     assert native_client.get("/api/v1/print/library/42/plates").status_code == 404

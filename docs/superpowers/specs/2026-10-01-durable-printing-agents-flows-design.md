@@ -434,7 +434,7 @@ The rest:
 - Each execution carries §4.2's `ScadbuddyKind = render`, `ScadbuddySubject` (the slug)
   and `ScadbuddyStatus`.
 - `render_key` is the content-keyed exception of §4.2, so there is no `request_id`.
-  `piece_key` keeps deduping openscad runs across jobs (CLAUDE.md: never swap them).
+  `piece_key` keeps deduping openscad runs across jobs (backend/CLAUDE.md: never swap them).
 
 ## 5. Printing on Temporal
 

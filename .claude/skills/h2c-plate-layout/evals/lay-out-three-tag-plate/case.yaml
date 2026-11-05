@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: lay-out-three-tag-plate
+expected_outcome: |
+  Produces cap-keychain-boys4-h2c.3mf, a valid 3MF whose project_settings.config declares the 330x320 printable area and H2C process/printer presets, with all three tag footprints inside x 25..325 and y 0..320 and the wipe tower (60 mm square plus 3 mm brim) inside that area and not overlapping the tags. Reports the tag extents and the tower position in millimetres. States that no-sparse-layers needs 96 mm between the tower and the 4.4 mm-tall tags and says whether the chosen layout meets it (a 3-tag row can: e.g. tags at y ~120..200 and the tower at the front, y ~5..65, or it cannot with the tower beside the row at 18 mm), rather than ignoring the rule.
+context:
+  scaffold_script: place-files.sh

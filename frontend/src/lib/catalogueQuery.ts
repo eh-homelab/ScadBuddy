@@ -33,9 +33,32 @@ function oneOf<T extends string>(value: string | null, allowed: readonly T[], fa
   return allowed.find((option) => option === value) ?? fallback
 }
 
+/**
+ * What `GET /models` takes (`api/models.py` `SearchWords`, `MAX_TAG_FILTERS`,
+ * `MAX_TAG_FILTER_CHARS`). A hand-edited URL past them must not answer 422 (#5286
+ * review). Its tags are kept: every tag is an AND filter, and the route takes four
+ * times a model's own caps (`MAX_TAGS`, `MAX_TAG_CHARS`) and answers no model past
+ * those, so tags past the route's bounds select none either (`unmatchable`), and the
+ * page asks for none. A search past its cap is cut to it, which may select more than
+ * the whole search would.
+ */
+export const MAX_SEARCH_CHARS = 256
+export const MAX_TAGS = 50
+export const MAX_TAG_CHARS = 100
+export const MAX_TAG_FILTERS = 4 * MAX_TAGS
+export const MAX_TAG_FILTER_CHARS = 4 * MAX_TAG_CHARS
+
+/**
+ * Whether `GET /models` would refuse `tags` as sent: more of them than it takes, or one
+ * longer (in code points, as the backend counts). No model can carry them all.
+ */
+export function unmatchable(tags: readonly string[]): boolean {
+  return tags.length > MAX_TAG_FILTERS || tags.some((tag) => [...tag].length > MAX_TAG_FILTER_CHARS)
+}
+
 export function parseQuery(params: URLSearchParams): CatalogueQuery {
   return {
-    q: params.get('q') ?? '',
+    q: (params.get('q') ?? '').slice(0, MAX_SEARCH_CHARS),
     tags: [...new Set(params.getAll('tag').filter((tag) => tag !== ''))],
     origin: oneOf(params.get('origin'), ORIGINS, DEFAULT_QUERY.origin),
     sort: oneOf(params.get('sort'), SORTS, DEFAULT_QUERY.sort),
@@ -59,13 +82,27 @@ export function clearFilters(query: CatalogueQuery): CatalogueQuery {
   return { ...DEFAULT_QUERY, sort: query.sort, view: query.view }
 }
 
-/** Case- and accent-insensitive form of `text`: "Crème" and "creme" fold alike. */
+/**
+ * Case- and accent-insensitive form of `text`: "Crème" and "creme" fold alike. The
+ * browser's own matching only (the mocks, a tag chip): it is not the backend's `fold`
+ * (`api/models.py`, combining class), which no regex matches exactly, so tags go to the
+ * route as typed and the route folds them (#5305 review).
+ */
 export function fold(text: string): string {
   return text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase()
 }
 
-const byName = (a: ModelSummary, b: ModelSummary) =>
-  a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+/**
+ * The folded texts in UTF-16 code-unit order: the backend's order (`api/models.py`
+ * `fold`, code points) for text both folds agree on. They differ on what `casefold`
+ * expands (`ß`, ligatures) and on characters outside the Basic Multilingual Plane.
+ */
+const byFolded = (a: string, b: string) => {
+  const [x, y] = [fold(a), fold(b)]
+  return x < y ? -1 : x > y ? 1 : 0
+}
+
+const byName = (a: ModelSummary, b: ModelSummary) => byFolded(a.name, b.name)
 
 /**
  * The models `query` selects, sorted. Every search word must appear in some field. The
@@ -111,6 +148,6 @@ export function tagCounts(
   return [...counts]
     .map(([key, count]) => ({ tag: spelling.get(key) ?? key, count }))
     .sort(
-      (a, b) => b.count - a.count || a.tag.localeCompare(b.tag, undefined, { sensitivity: 'base' }),
+      (a, b) => b.count - a.count || byFolded(a.tag, b.tag),
     )
 }

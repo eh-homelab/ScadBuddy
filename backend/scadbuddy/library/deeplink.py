@@ -4,11 +4,14 @@ One definition, because three places have to agree on it: the frontend route tha
 resolves it, the 3MF stamped with it, and the Bambuddy library file annotated with
 it. ``public_url`` is the setting Bambuddy's sidebar link already uses — the server
 cannot infer its own external URL from a request behind a proxy.
+
+A preset's link (#1022) lives here too: the app's ``presetPath`` mirrors it.
 """
 
 from __future__ import annotations
 
 import re
+from urllib.parse import quote
 
 EDIT_ROUTE = "/edit"
 #: How the link is introduced wherever it appears as prose — the 3MF's own
@@ -35,6 +38,19 @@ def edit_url(public_url: str | None, output_id: str) -> str | None:
     if not public_url or _UNWRITABLE.search(public_url):
         return None
     return f"{public_url.rstrip('/')}{edit_path(output_id)}"
+
+
+def preset_path(slug: str, preset_id: str) -> str:
+    """#1022: the customizer opened on a preset, as the app's ``modelPath`` plus
+    ``?preset=`` builds it. A built-in's slug carries a colon, encoded as one segment."""
+    return f"/m/{quote(slug, safe='')}?preset={quote(preset_id, safe='')}"
+
+
+def preset_url(public_url: str | None, slug: str, preset_id: str) -> str | None:
+    """``preset_path`` under the public URL; None without one, as ``edit_url``."""
+    if not public_url or _UNWRITABLE.search(public_url):
+        return None
+    return f"{public_url.rstrip('/')}{preset_path(slug, preset_id)}"
 
 
 def merge_edit_note(notes: str | None, link: str) -> str:

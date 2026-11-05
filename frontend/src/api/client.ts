@@ -252,6 +252,7 @@ import type {
   AiCredentialSave,
 } from './aiCredential'
 import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
+import { unmatchable } from '../lib/catalogueQuery'
 import { REQUEST_HEADER } from '../lib/requestHeader'
 import { noteIfSignedOut, noteSignedOut, SIGNED_OUT_PROBLEM } from '../lib/signedOut'
 import { ordersApiParams, type OrdersQuery } from '../lib/ordersQuery'
@@ -323,6 +324,9 @@ export class ApiError extends Error {
 export const SETTINGS_SHARE_MS = 5_000
 /** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
 let settingsInFlight: { read: Promise<Settings>; started: number; scope: ReadScope } | undefined
+/** The most `GET /models` answers in one read (`api/models.py` `MAX_PAGE_LIMIT`). */
+export const MODELS_PAGE_LIMIT = 500
+
 /** #2290 — the catalogue's search and filters, as `GET /models` and `GET /model-facets` take them. */
 export interface ModelFilters {
   q: string
@@ -334,7 +338,8 @@ export interface ModelFilters {
 function modelFilterParams({ q, tags, origin }: Omit<ModelFilters, 'sort'>): URLSearchParams {
   const query = new URLSearchParams()
   if (q.trim()) query.set('q', q.trim())
-  for (const tag of tags) query.append('tag', tag)
+  // As typed: the route folds them, and the browser cannot fold as it does (#5305 review).
+  for (const tag of new Set(tags)) query.append('tag', tag)
   if (origin !== 'all') query.set('origin', origin)
   return query
 }
@@ -1204,6 +1209,8 @@ export const api = {
     page: { limit?: number; after?: string } = {},
     signal?: AbortSignal,
   ): Promise<{ items: ModelSummary[]; total: number }> => {
+    // Tags no model can carry all of select none, and GET /models would refuse them.
+    if (unmatchable(filters.tags)) return { items: [], total: 0 }
     const query = modelFilterParams(filters)
     query.set('sort', filters.sort)
     if (page.limit !== undefined) query.set('limit', String(page.limit))
@@ -1214,9 +1221,50 @@ export const api = {
     return { items, total: Number(response.headers.get('X-Total-Count') ?? items.length) }
   },
 
+  /**
+   * The first `size` models `filters` select, read in pages of at most
+   * `MODELS_PAGE_LIMIT` (the backend's `MAX_PAGE_LIMIT`), each after the last: a window
+   * past the cap asked for in one read answers 422 (#5289 review). A chunk whose `after`
+   * went away (409) reads the window again from the top, once; `signal` stops it
+   * between chunks (#5292 review).
+   */
+  listModelsWindow: async (
+    filters: ModelFilters,
+    size: number,
+    signal?: AbortSignal,
+  ): Promise<{ items: ModelSummary[]; total: number }> => {
+    const read = async (): Promise<{ items: ModelSummary[]; total: number }> => {
+      const items: ModelSummary[] = []
+      let total = 0
+      while (items.length < size) {
+        signal?.throwIfAborted()
+        const limit = Math.min(MODELS_PAGE_LIMIT, size - items.length)
+        const page = await api.listModelsPage(filters, { limit, after: items.at(-1)?.slug }, signal)
+        items.push(...page.items)
+        total = page.total
+        if (page.items.length < limit) break
+      }
+      return { items, total }
+    }
+    try {
+      return await read()
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409) return await read()
+      throw cause
+    }
+  },
+
   /** #2290 — how many models `filters` select, of how many, and their tags' counts. */
-  modelFacets: (filters: Omit<ModelFilters, 'sort'>, signal?: AbortSignal) =>
-    request<ModelFacets>(`/model-facets?${modelFilterParams(filters)}`, { signal }),
+  modelFacets: async (filters: Omit<ModelFilters, 'sort'>, signal?: AbortSignal): Promise<ModelFacets> => {
+    if (!unmatchable(filters.tags)) {
+      return await request<ModelFacets>(`/model-facets?${modelFilterParams(filters)}`, { signal })
+    }
+    // None selected: only the whole catalogue's count is asked for, and each tag is at 0.
+    const every = await request<ModelFacets>(`/model-facets?${modelFilterParams({ ...filters, tags: [] })}`, {
+      signal,
+    })
+    return { total: every.total, matched: 0, tags: [...new Set(filters.tags)].map((tag) => ({ tag, count: 0 })) }
+  },
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
 
@@ -1705,6 +1753,26 @@ export const api = {
     `${API_BASE}/outputs/${seg(outputId)}/files/${encodeURIComponent(name)}`,
 
   listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
+
+  /**
+   * #2290 — one page of a model's outputs, newest first. `after` is the last output id
+   * of the page before; `total` is how many outputs the model has (`X-Total-Count`).
+   */
+  listOutputsPage: async (
+    slug: string,
+    page: { limit?: number; after?: string } = {},
+  ): Promise<{ items: Output[]; total: number }> => {
+    const query = new URLSearchParams()
+    if (page.limit !== undefined) query.set('limit', String(page.limit))
+    if (page.after !== undefined) query.set('after', page.after)
+    const response = await send(`${API_BASE}/models/${seg(slug)}/outputs?${query}`, { headers: { Accept: 'application/json' } })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const items = (await response.json()) as Output[]
+    // Without the header a full page cannot tell its end: `Infinity` keeps Load more.
+    const header = response.headers.get('X-Total-Count')
+    const total = header !== null ? Number(header) : page.limit !== undefined && items.length >= page.limit ? Infinity : items.length
+    return { items, total }
+  },
 
   getOutput: (id: string) => request<Output>(`/outputs/${seg(id)}`),
 
@@ -2399,6 +2467,26 @@ export const api = {
     return request<LibraryListing>(`/print/library${suffix}`)
   },
 
+  /**
+   * #2290 — one page of a folder's files, in the listing's order, with the tree. `after`
+   * is the last file id of the page before; `fileId` beside a `folderId` stretches the
+   * first page down to that file. `total` is how many files the folder lists.
+   */
+  listLibraryPage: async (
+    query: { folderId: number | null; all: boolean; fileId?: number },
+    page: { limit: number; after?: number },
+  ): Promise<LibraryListing & { total: number }> => {
+    const search = new URLSearchParams({ limit: String(page.limit) })
+    if (query.folderId !== null) search.set('folder_id', String(query.folderId))
+    if (query.fileId !== undefined) search.set('file_id', String(query.fileId))
+    if (query.all) search.set('all', 'true')
+    if (page.after !== undefined) search.set('after', String(page.after))
+    const response = await send(`${API_BASE}/print/library?${search}`, { headers: { Accept: 'application/json' } })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const listing = (await response.json()) as LibraryListing
+    return { ...listing, total: Number(response.headers.get('X-Total-Count') ?? (listing.files ?? []).length) }
+  },
+
   /** #3630 — library files whose name or folder holds every word, from every folder. */
   searchLibrary: (query: { q: string; all: boolean; fresh?: boolean }, signal?: AbortSignal) => {
     const search = new URLSearchParams({ q: query.q })
@@ -2458,6 +2546,8 @@ export const api = {
     command<LibraryFolderDeleteResult>(`/print/library/folders/${folderId}/delete`, { method: 'POST' }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
+  /** #1031 — the library file itself, always served as a download. */
+  libraryFileUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/file`,
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
