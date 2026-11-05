@@ -1944,11 +1944,18 @@ describe('preset tools hand back the link to a preset (#1022)', () => {
     server.use(
       http.get(`${BACKEND}/api/v1/models/m/presets`, () => HttpResponse.json([MUM])),
       http.post(`${BACKEND}/api/v1/models/m/presets`, () => HttpResponse.json(MUM, { status: 201 })),
+      http.patch(`${BACKEND}/api/v1/models/m/presets/p`, () => HttpResponse.json(MUM)),
+      http.post(`${BACKEND}/api/v1/models/m/presets/p/duplicate`, () =>
+        HttpResponse.json({ ...MUM, id: 'q', path: '/m/m?preset=q', url: 'https://scad.test/m/m?preset=q' }, { status: 201 })),
     )
     const listed = await runTool(tool('list_presets'), { slug: 'm' }, ctx())
     expect(firstText(listed)).toMatchObject({ items: [{ path: MUM.path, url: MUM.url }] })
     const saved = await runTool(tool('save_preset'), { slug: 'm', name: 'Mum' }, ctx())
     expect(firstText(saved)).toMatchObject({ path: MUM.path, url: MUM.url })
+    const updated = await runTool(tool('update_preset'), { slug: 'm', preset_id: 'p', name: 'Mum' }, ctx())
+    expect(firstText(updated)).toMatchObject({ path: MUM.path, url: MUM.url })
+    const copied = await runTool(tool('duplicate_preset'), { slug: 'm', preset_id: 'p', name: 'Mum 2' }, ctx())
+    expect(firstText(copied)).toMatchObject({ path: '/m/m?preset=q', url: 'https://scad.test/m/m?preset=q' })
   })
 })
 

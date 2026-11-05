@@ -915,3 +915,26 @@ describe('PresetPicker', () => {
     expect(saved[1]?.inputs).not.toHaveProperty('tab')
   })
 })
+
+describe('a preset a link offers (#1022)', () => {
+  const TINY = { id: 'template-tiny', name: 'Tiny', origin: 'template' as const, params: {}, description: '', tags: [] }
+
+  it('lets the link go when the picker goes while it asks', async () => {
+    const onDeclined = vi.fn()
+    const edited = { ...defaultValues(keychainSchema), name: 'Edited' }
+    const view = renderPage(
+      <PresetPicker
+        slug="name-keychain"
+        schema={keychainSchema}
+        values={edited}
+        extra={{}}
+        onApply={() => {}}
+        offered={{ preset: TINY, ask: true, onDeclined }}
+      />,
+    )
+    await screen.findByRole('alertdialog', { name: 'Apply preset Tiny?' })
+    expect(onDeclined).not.toHaveBeenCalled()
+    view.unmount()
+    expect(onDeclined).toHaveBeenCalledTimes(1)
+  })
+})
