@@ -102,7 +102,14 @@ def media_kinds(state: AppState) -> list[OperationKind]:
                     kind="image",
                     extension=request["poster_extension"],
                 )
-            return state.catalogue.add_media(slug, upload, request["caption"], poster)
+            return state.catalogue.add_media(
+                slug,
+                upload,
+                request["caption"],
+                poster,
+                source_commit=request.get("source_commit"),
+                source_revision_id=request.get("source_revision_id"),
+            )
         except ModelNotFoundError:
             raise media_api.no_model(slug) from None
         except TooManyMediaError:

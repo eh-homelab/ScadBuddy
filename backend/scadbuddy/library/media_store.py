@@ -48,7 +48,8 @@ class PostgresMediaStore:
     def items(self, template_id: str) -> list[MediaItem]:
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT id, file, kind, caption, poster FROM template_media"
+                "SELECT id, file, kind, caption, poster, source_commit, source_revision_id"
+                " FROM template_media"
                 " WHERE template_id = %s ORDER BY position",
                 (template_id,),
             ).fetchall()
@@ -61,7 +62,8 @@ class PostgresMediaStore:
             return {}
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT template_id, id, file, kind, caption, poster FROM template_media"
+                "SELECT template_id, id, file, kind, caption, poster, source_commit,"
+                " source_revision_id FROM template_media"
                 " WHERE template_id = ANY(%s) ORDER BY template_id, position",
                 (list(template_ids),),
             ).fetchall()
@@ -78,8 +80,9 @@ class PostgresMediaStore:
             with conn.cursor() as cursor:
                 cursor.executemany(
                     "INSERT INTO template_media"
-                    " (template_id, id, position, file, kind, caption, poster)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    " (template_id, id, position, file, kind, caption, poster,"
+                    " source_commit, source_revision_id)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     [
                         (
                             template_id,
@@ -89,6 +92,8 @@ class PostgresMediaStore:
                             item.kind,
                             item.caption,
                             item.poster,
+                            item.source_commit,
+                            item.source_revision_id,
                         )
                         for index, item in enumerate(items)
                     ],

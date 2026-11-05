@@ -18,6 +18,8 @@ runtime (``api/components.py``).
 """
 
 import asyncio
+import shutil
+import uuid
 from typing import Annotated, Any, get_args
 
 from fastapi import APIRouter, Query, Request, Response, status
@@ -25,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from scadbuddy.api import media as media_api
-from scadbuddy.api.deps import PathsDep, StateDep
+from scadbuddy.api.deps import CatalogueDep, PathsDep, StateDep
 from scadbuddy.api.operations import (
     OPERATION_RESPONSES,
     Claimed,
@@ -35,6 +37,14 @@ from scadbuddy.api.operations import (
     run_operation,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.catalogue import ModelRecord
+from scadbuddy.library.media import (
+    MAX_CAPTION_CHARS,
+    MAX_IMAGE_BYTES,
+    MEDIA_UPLOAD_PREFIX,
+    SNIFF_BYTES,
+    sniff_kind,
+)
 from scadbuddy.operations.claims import ClaimStore, Held
 from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders import attachments
@@ -52,7 +62,7 @@ from scadbuddy.orders.models import (
     OrderItem,
 )
 from scadbuddy.orders.operations import ORDER_ATTACHMENT_ADD
-from scadbuddy.orders.problems import refused
+from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.store import (
     fulfilment_subject,
     item_subject,
@@ -552,3 +562,114 @@ async def add_revision_attachment(
         idempotency_key,
         revision_id=revision_id,
     )
+
+
+@router.post(
+    "/{order_id}/attachments/{attachment_id}/to-model",
+    response_model=ModelRecord,
+    responses={
+        404: {"description": "No such order or attachment"},
+        409: {"description": "The revision is not accepted, or its template was deleted"},
+        413: {"description": "An image larger than a template's photos take"},
+        422: {"description": "Not a test-print photo of a revision, or not a photo or video"},
+        **OPERATION_RESPONSES,
+    },
+    summary="Add a test-print photo to the model's photos",
+    description=(
+        "Copies the photo of a test print of an accepted design revision into the photos "
+        "of the template the revision pins, as its last item, remembering the revision "
+        "and the commit it was made for (`source_revision_id`, `source_commit`). The "
+        "order's own attachment stays."
+    ),
+)
+async def attachment_to_model(
+    order_id: str,
+    attachment_id: str,
+    response: Response,
+    orders: OrdersDep,
+    ops: OperationsDep,
+    paths: PathsDep,
+    state: StateDep,
+    catalogue: CatalogueDep,
+    idempotency_key: IdempotencyKey = None,
+) -> ModelRecord | JSONResponse:
+    attachment, key = await _attachment(orders, order_id, attachment_id)
+    if attachment.role != "test_print" or attachment.revision_id is None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "only the photo of a test print of a design revision joins the model's photos",
+            errors=[{"loc": ["body", "role"], "msg": "not a test-print photo of a revision"}],
+        )
+    revision = await asyncio.to_thread(orders.store.revision, attachment.revision_id)
+    if revision is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"no revision {attachment.revision_id!r} of that photo"
+        )
+    if revision.answer != "accepted":
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "the customer has not accepted this design revision",
+            type_=PROBLEMS + "revision_not_accepted",
+        )
+    slug = revision.reference.slug
+    if not await asyncio.to_thread(catalogue.exists, slug):
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"template {slug!r} was deleted; restore it first",
+            type_=PROBLEMS + "template_deleted",
+            slug=slug,
+        )
+    source = await attachments.blob_path(state.store.blobs, key)
+    if source is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"the file of attachment {attachment_id!r} is gone"
+        )
+    with source.open("rb") as handle:
+        sniffed = sniff_kind(handle.read(SNIFF_BYTES))
+    if sniffed is None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "the file is not a PNG, JPEG or WebP image"
+        )
+    media_kind, extension, _ = sniffed
+    if media_kind == "image" and attachment.size_bytes > MAX_IMAGE_BYTES:
+        raise ApiError(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            f"an image is at most {MAX_IMAGE_BYTES // (1024 * 1024)} MB: images are "
+            "kept in the template's history",
+        )
+    body: dict[str, Any] = {
+        "slug": slug,
+        "file": attachment.sha256,
+        "kind": media_kind,
+        "extension": extension,
+        "poster": None,
+        "poster_extension": None,
+        "caption": attachment.caption[:MAX_CAPTION_CHARS],
+        "source_commit": revision.reference.commit,
+        "source_revision_id": revision.id,
+    }
+    kind_ = ops.kinds["model_media_upload"]
+    claims = ClaimStore(paths.claims)
+    held: list[Held] = []
+    if (
+        await recorded(ops, kind=kind_, subject=slug, request=body, idempotency_key=idempotency_key)
+        is None
+    ):
+
+        def copy() -> Held:
+            # The claim takes the file by moving it in, and the order's blob stays.
+            staged = paths.cache / f"{MEDIA_UPLOAD_PREFIX}{uuid.uuid4().hex}"
+            shutil.copyfile(source, staged)
+            return claims.hold_file(staged, attachment.sha256)
+
+        held.append(await asyncio.to_thread(copy))
+    result = await run_operation(
+        ops,
+        response,
+        kind=kind_,
+        subject=slug,
+        request=body,
+        idempotency_key=idempotency_key,
+        claimed=Claimed(claims, held),
+    )
+    return operation_answer(result, ModelRecord)
