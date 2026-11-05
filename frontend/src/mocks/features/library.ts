@@ -11,6 +11,7 @@ import type {
   LibraryCopyResult,
   LibraryDeleteResult,
   LibraryEntry,
+  LibraryFileEntry,
   LibraryFileObjects,
   LibraryFolder,
   LibraryFolderCreate,
@@ -165,14 +166,17 @@ function pngResponse() {
   return new HttpResponse(bytes, { headers: { 'Content-Type': 'image/png' } })
 }
 
+/** A folder's names from the top, as the backend's `folder_path`. */
+function folderPathOf(id: number | null | undefined): string[] {
+  const folder = listedFolders().find((row) => row.id === id)
+  return folder ? [...folderPathOf(folder.parent_id), folder.name] : []
+}
+
 /** The backend's `search_library` (#3630): every word in the name or the folder path. */
 function searchFiles(query: string, all: boolean): LibrarySearch {
   const words = (text: string) => text.toLowerCase().replace(/[\s_\-.()[\]]+/g, ' ').trim()
   const terms = words(query).split(' ').filter(Boolean)
-  const pathOf = (id: number | null | undefined): string[] => {
-    const folder = listedFolders().find((row) => row.id === id)
-    return folder ? [...pathOf(folder.parent_id), folder.name] : []
-  }
+  const pathOf = folderPathOf
   const matched = terms.length === 0
     ? []
     : listedFiles().filter((file) => {
@@ -216,6 +220,18 @@ export const handlers = [
   http.get(`${base}/print/library/search`, ({ request }) => {
     const search = new URL(request.url).searchParams
     return HttpResponse.json(searchFiles(search.get('q') ?? '', search.get('all') === 'true'))
+  }),
+
+  // #5321 — one file by id, whatever its type, with its folder's path. After `names` and
+  // `search`, which the pattern would otherwise take.
+  http.get(`${base}/print/library/:id`, ({ params }) => {
+    const file = listedFiles().find((row) => row.id === Number(params['id']))
+    if (!file) return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read library file ${params['id']}`)
+    return HttpResponse.json({
+      ...file,
+      output_id: mockLibraryOutput(file.id) ?? null,
+      folder_path: folderPathOf(file.folder_id),
+    } satisfies LibraryFileEntry)
   }),
 
   http.get(`${base}/print/library`, ({ request }) => {

@@ -52,6 +52,7 @@ import type {
   Job,
   CatalogueLibrary,
   DependencyReport,
+  LibraryFileEntry,
   LibraryFileObjects,
   LibraryCopyResult,
   LibraryDeleteResult,
@@ -2503,6 +2504,8 @@ export const api = {
     command<LibraryFolderDeleteResult>(`/print/library/folders/${folderId}/delete`, { method: 'POST' }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
+  /** #5321 — one library file by id, whatever its type, with its folder's path. */
+  getLibraryFile: (fileId: number) => request<LibraryFileEntry>(`/print/library/${fileId}`),
   /** #1031 — the library file itself, always served as a download. */
   libraryFileUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/file`,
 

@@ -448,6 +448,53 @@ def test_a_linked_file_is_on_the_first_page_however_far_down_it_is(client: TestC
 
 
 @respx.mock
+def test_one_file_is_read_by_id_whatever_its_type_with_its_folder_path(
+    client: TestClient,
+) -> None:
+    """#5321: a sliced file, which only Advanced lists, read alone, as the listing gives
+    it, with the path of its folder (Supplies / Storage); an id Bambuddy lacks is a 404."""
+    configure(client)
+    rows = [
+        {
+            "id": 3001,
+            "filename": "box.gcode.3mf",
+            "file_type": "gcode.3mf",
+            "folder_id": 4,
+            "file_size": 10,
+            "print_count": 2,
+            "created_at": "2026-09-28T00:00:00",
+        },
+        {**_folder_rows(1, folder_id=4)[0], "id": 3002},
+    ]
+    listing_routes(rows)
+    respx.get(f"{API}/library/files/3001").mock(
+        return_value=httpx.Response(200, json={**rows[0], "file_hash": None})
+    )
+    respx.get(f"{API}/library/files/3999").mock(
+        return_value=httpx.Response(404, json={"detail": "File not found"})
+    )
+
+    body = client.get("/api/v1/print/library/3001").json()
+
+    assert body == {
+        "id": 3001,
+        "filename": "box.gcode.3mf",
+        "file_type": "gcode.3mf",
+        "folder_id": 4,
+        "has_thumbnail": False,
+        "print_count": 2,
+        "printable": True,
+        "sliced": True,
+        "file_size": 10,
+        "created_at": "2026-09-28T00:00:00Z",
+        "output_id": None,
+        "is_external": False,
+        "folder_path": ["Supplies", "Storage"],
+    }
+    assert client.get("/api/v1/print/library/3999").status_code == 404
+
+
+@respx.mock
 def test_a_library_file_is_laid_out_sliced_and_queued_as_an_output_is(
     client: TestClient,
 ) -> None:

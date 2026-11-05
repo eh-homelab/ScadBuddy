@@ -1218,6 +1218,16 @@ function Back() {
   )
 }
 
+/** Forward, as the browser's. */
+function Forward() {
+  const navigate = useNavigate()
+  return (
+    <button type="button" data-testid="forward" onClick={() => void navigate(1)}>
+      Forward
+    </button>
+  )
+}
+
 describe('LibraryPage file details (#1031)', () => {
   beforeEach(() => {
     resetMockState()
@@ -1326,11 +1336,56 @@ describe('LibraryPage file details (#1031)', () => {
     expect(within(drawer).queryByTestId('library-details-objects')).toBeNull()
   })
 
-  it('says when the linked file is not listed', async () => {
+  it('opens a link to a file only Advanced lists, read by id (#5321)', async () => {
     libraryPrints({})
     renderPage(<LibraryPage />, { route: '/library?details=46' })
+    const drawer = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    const facts = within(drawer).getByTestId('library-details-facts')
+    expect(facts).toHaveTextContent('STL')
+    expect(facts).toHaveTextContent('Supplies / Storage')
+    expect(within(drawer).queryByText(/is not listed here/)).toBeNull()
+  })
+
+  it('says when the linked file is not in the library', async () => {
+    libraryPrints({})
+    renderPage(<LibraryPage />, { route: '/library?details=9999' })
     const drawer = await screen.findByRole('dialog')
-    expect(await within(drawer).findByText(/File #46 is not listed here\. It may be listed under Advanced\./)).toBeInTheDocument()
+    expect(await within(drawer).findByText(/Bambuddy has no such resource/)).toBeInTheDocument()
+  })
+
+  it("forgets a renamed file's kept copy once its details close (#5322 review)", async () => {
+    libraryPrints({})
+    const { user } = renderPage(
+      <>
+        <LibraryPage />
+        <Forward />
+      </>,
+      { route: '/library/Spec/MakerWorld/Work' },
+    )
+    await user.click(await screen.findByTestId('library-open-120'))
+    let drawer = await screen.findByRole('dialog', { name: 'drawer-label.3mf' })
+    await user.click(within(drawer).getByRole('button', { name: 'Rename' }))
+    const rename = await screen.findByRole('dialog', { name: /^Rename/ })
+    await user.clear(within(rename).getByRole('textbox'))
+    await user.type(within(rename).getByRole('textbox'), 'drawer-tag')
+    await user.click(within(rename).getByTestId('library-rename-confirm'))
+    drawer = await screen.findByRole('dialog', { name: 'drawer-tag.3mf' })
+    await user.click(within(drawer).getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+
+    // Moved from its card, with no details open, so the page stays where it is.
+    await user.click(await screen.findByRole('button', { name: 'More actions for drawer-tag.3mf' }))
+    await user.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Move to…' }))
+    const move = await screen.findByRole('dialog', { name: /^Move drawer-tag\.3mf to…/ })
+    await user.click(within(move).getByTestId('library-move-folder-1'))
+    await user.click(within(move).getByTestId('library-move-confirm'))
+    await waitFor(() => expect(screen.queryByTestId('library-file-120')).toBeNull())
+
+    // Forward to its details: the file as it is now, not as the rename left it.
+    fireEvent.click(screen.getByTestId('forward'))
+    drawer = await screen.findByRole('dialog', { name: 'drawer-tag.3mf' })
+    await waitFor(() => expect(within(drawer).getByTestId('library-details-facts')).toHaveTextContent('MakerWorld'))
+    expect(within(drawer).getByTestId('library-details-facts')).not.toHaveTextContent('Work')
   })
 
   it('renames and deletes the file from its details, Delete after a confirmation', async () => {
@@ -1366,7 +1421,7 @@ describe('LibraryPage file details (#1031)', () => {
         <LibraryPage />
         <Where />
       </>,
-      { route: '/library/Spec/MakerWorld/Work?details=120' },
+      { route: '/library/Spec/MakerWorld/Work?file=120&details=120' },
     )
     const drawer = await screen.findByRole('dialog', { name: 'drawer-label.3mf' })
     await user.click(within(drawer).getByRole('button', { name: 'Move to…' }))

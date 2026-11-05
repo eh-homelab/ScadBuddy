@@ -284,6 +284,7 @@ export type LibraryListing = Schemas['LibraryListing']
 /** #2349 — one library file's name by id (`GET /print/library/names`). */
 export type LibraryFileName = Schemas['LibraryFileName']
 export type LibraryEntry = Schemas['LibraryEntry']
+export type LibraryFileEntry = Schemas['LibraryFileEntry']
 export type LibraryFolderView = Schemas['LibraryFolderView']
 export type LibrarySearch = Schemas['LibrarySearch']
 export type LibrarySearchHit = Schemas['LibrarySearchHit']

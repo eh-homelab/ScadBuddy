@@ -823,6 +823,28 @@ export const printTools: Tool[] = [
       ),
   }),
 
+  // #5321 — one file by id, whatever its type, with where it is.
+  defineTool({
+    name: 'get_library_file',
+    label: 'Read a library file',
+    description:
+      "One file of the print library by id, as list_library gives it with `all` (a sliced file or an STL " +
+      "too), plus `folder_path`, its folder's names from the top. `output_id` names the ScadBuddy output " +
+      'it was made from, if any. An id the library does not have is an error.',
+    input: z.object({ file_id: libraryFileId }),
+    risk: 'read',
+    source: 'Bambuddy data (folder and file names) that anyone with access to Bambuddy can write',
+    bambuddyScope: ['Manage Library'],
+    routes: ['GET /api/v1/print/library/{file_id}'],
+    handler: async ({ file_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/print/library/{file_id}', { params: { path: { file_id } } }),
+          'read the library file',
+        ),
+      ),
+  }),
+
   // #2167 — Bambuddy's library writes: a delete to its trash, and the restore that undoes it.
   defineTool({
     name: 'delete_library_files',
