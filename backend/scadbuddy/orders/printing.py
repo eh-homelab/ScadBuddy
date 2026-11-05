@@ -180,13 +180,15 @@ async def print_check(
 
 
 async def test_print_check(
-    store: OrderStore,
+    lifecycle: Lifecycle,
     outputs: OutputsRead,
     blobs: BlobStore,
     order_id: str,
     item_id: str,
     revision_id: str,
     schema_of: Callable[[Reference], Awaitable[CustomizerSchema | None]] | None = None,
+    *,
+    by: Actor,
 ) -> dict[str, Any]:
     """A test print's refusals (storefront spec §4.4), writing nothing: one copy of the
     item's output, on an order accepted or not and an item in any open state. 404 for an
@@ -198,8 +200,17 @@ async def test_print_check(
     revision's render), and ``requote_needed`` when no `slice` quote of the revision
     stands: none, its sliced file gone or another digest, or the output gone or no longer
     the reference's render. A quote that names no revision (recorded before revisions)
-    is the current revision's. What the run needs, as ``print_check`` returns it."""
+    is the current revision's. What the run needs, as ``print_check`` returns it.
+
+    Its one write is the rollout's repair (``Lifecycle.ensure_revision``), first: an item
+    whose copy is not its current revision's is checked against the revision made from
+    the copy."""
+    store = lifecycle.store
     order, item = await _order_and_item(store, order_id, item_id)
+    try:
+        item = await asyncio.to_thread(lifecycle.ensure_revision, order_id, item_id, by)
+    except LifecycleError as error:
+        raise refused(error) from None
     if order.status in ENDED:
         raise _refused(f"order_{order.status}", f"order {order.number} is {order.status}")
     if order.on_hold:

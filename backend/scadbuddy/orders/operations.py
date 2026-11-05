@@ -399,13 +399,14 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
         revision_id = request.get("revision_id")
         if revision_id is not None:
             checked = await test_print_check(
-                orders.store,
+                orders.lifecycle,
                 core.outputs,
                 core.store.blobs,
                 request["order_id"],
                 request["item_id"],
                 revision_id,
                 schema_of=lambda reference: reference_schema(core, reference),
+                by=Actor.model_validate(request["by"]),
             )
         else:
             checked = await print_check(

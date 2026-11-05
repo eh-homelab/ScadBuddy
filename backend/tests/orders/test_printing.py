@@ -893,7 +893,9 @@ def test_the_test_print_check(shop: Shop, pool: PgPool, tmp_path: Path) -> None:
     assert revision is not None
 
     def check(of: str = revision) -> dict[str, Any]:
-        return asyncio.run(check_test_print(shop.rows, outputs, blobs, order.id, item.id, of))
+        return asyncio.run(
+            check_test_print(shop.lifecycle, outputs, blobs, order.id, item.id, of, by=BY)
+        )
 
     # No slice quote of the revision: a manual one prices it, but slices nothing.
     shop.quoted(order, item)
@@ -923,3 +925,29 @@ def test_the_test_print_check(shop: Shop, pool: PgPool, tmp_path: Path) -> None:
     assert _refusal(check) == "revision_not_newest"
     shop.lifecycle.hold(order.id, BY)
     assert _refusal(check) == "order_on_hold"
+
+
+def test_the_test_print_check_repairs_a_copy_changed_behind_its_revision(
+    shop: Shop, tmp_path: Path
+) -> None:
+    """A build before revisions edited the item's colours: the check makes the copy the
+    next revision (it stands though the check refuses), and the revision the browser
+    named is no longer the current one."""
+    blobs = LocalBlobStore(tmp_path / "blobs")
+    order = shop.order()
+    item = _with_output(shop, shop.item(order))
+    first = item.current_revision_id
+    assert first is not None
+    with shop.rows.transaction() as conn:
+        conn.execute(
+            "UPDATE order_items SET colours = %s WHERE id = %s",
+            ('[{"slot": 0, "colour": "#0000ff"}]', item.id),
+        )
+    refusal = _refusal(
+        lambda: asyncio.run(
+            check_test_print(shop.lifecycle, Outputs(item), blobs, order.id, item.id, first, by=BY)
+        )
+    )
+    assert refusal == "revision_not_newest"
+    assert [r.number for r in shop.rows.revisions(item.id)] == [1, 2]
+    assert "revision.repaired" in shop.kinds(order)

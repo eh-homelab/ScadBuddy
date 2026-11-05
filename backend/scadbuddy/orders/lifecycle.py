@@ -803,6 +803,7 @@ class Lifecycle:
         note: str = "",
         output_id: str | UnsetType | None = UNSET,
         amend: bool = False,
+        repair: bool = False,
     ) -> tuple[OrderItem, Revision]:
         """The item's next design revision, and the item's design a copy of it (spec
         2026-11-02 §4.1): the one caller of `OrderStore.set_design`. The newest revision,
@@ -815,7 +816,11 @@ class Lifecycle:
         With ``amend`` the current revision takes ``colours`` in place (the colours'
         fill: an item made by hand given the slots its first render made, which changes
         no design a customer saw): no new revision, nothing superseded, the quotes and
-        the status kept, the audit row `revision.amended`."""
+        the status kept, the audit row `revision.amended`.
+
+        With ``repair`` (`_ensure_revision`) the new revision is the design the item
+        already has: a sent, unanswered one is superseded, but the quotes and the
+        status are kept, and the audit row is `revision.repaired`."""
         if isinstance(output_id, UnsetType):
             output_id = item.output_id if item.reference == reference else None
         if amend:
@@ -837,20 +842,60 @@ class Lifecycle:
             conn, item.id, reference=reference, colours=colours, note=note, created_by=by
         )
         item = self.store.set_design(conn, item.id, revision, output_id=output_id)
-        self.store.unaccept_quotes(conn, item.id)
-        if item.status in ("quoted", "approved"):
-            item = self.store.update_item(conn, item.id, status="draft")
+        if not repair:
+            self.store.unaccept_quotes(conn, item.id)
+            if item.status in ("quoted", "approved"):
+                item = self.store.update_item(conn, item.id, status="draft")
         self._event(
             conn,
             order,
             by,
-            "revision.added",
+            "revision.repaired" if repair else "revision.added",
             item_id=item.id,
             revision_id=revision.id,
             number=revision.number,
             superseded=superseded,
         )
         return item, revision
+
+    def _ensure_revision(self, conn: Conn, order: Order, item: OrderItem, by: Actor) -> OrderItem:
+        """The rollout's repair (spec 2026-11-02 §4.1): an item with a design whose copy
+        is not its current revision's, because a build before revisions wrote it (no
+        current revision) or edited it (a reference or colours its revision lacks), gets
+        its next revision made from the copy (`_revise` with ``repair``). Anything else
+        is returned as it is, writing nothing."""
+        if item.kind == "custom" or item.reference is None:
+            return item
+        if item.current_revision_id is not None:
+            current = self.store.revision(item.current_revision_id, conn=conn)
+            if (
+                current is not None
+                and current.reference == item.reference
+                and current.colours == item.colours
+            ):
+                return item
+        item, _ = self._revise(
+            conn,
+            order,
+            item,
+            by,
+            reference=item.reference,
+            colours=list(item.colours),
+            repair=True,
+        )
+        return item
+
+    def ensure_revision(self, order_id: str, item_id: str, by: Actor) -> OrderItem:
+        """`_ensure_revision` in a transaction of its own, so the repair stands when the
+        call that needed it is refused (a send naming the revision it superseded). Every
+        path that reads the item's current revision runs it first."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            before = self._item_of(conn, order, item_id)
+            item = self._ensure_revision(conn, order, before, by)
+        if item is not before:
+            self._told(_Change(order, [(item, None)]))
+        return item
 
     def add_revision(
         self,
@@ -868,6 +913,7 @@ class Lifecycle:
         for new photos or a new note. ``filaments`` repins its slots as `update_item`'s
         does. A custom item has no design (`item_custom`); a request has none until its
         first revision names one (`item_has_no_design`)."""
+        self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -1068,6 +1114,7 @@ class Lifecycle:
         requires_printing: bool | None = None,
         accept: bool = True,
         approval: Approval | None = None,
+        expected_revision_id: str | None = None,
     ) -> OrderItem:
         """The reference (replaced whole), the quantity and the slots' filaments while
         `draft` or `quoted`, each dropping the accepted quote (Ruling 1; #4250 Ruling 6:
@@ -1092,13 +1139,26 @@ class Lifecycle:
         stays `approved` (refused on hold, as an accepted quote is); without (the
         agent's) the item is `quoted`. A ``reference`` given to it makes it a model item,
         on the normal flow: its quote is dropped as any reference change drops one. A
-        custom item takes no ``approval`` (422): it has no design to approve."""
+        custom item takes no ``approval`` (422): it has no design to approve.
+
+        With ``expected_revision_id`` (the quote's run) it writes nothing once the item's
+        current revision is another (`revision_not_newest`): the caller's work was of a
+        design since replaced."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            if (
+                expected_revision_id is not None
+                and item.current_revision_id != expected_revision_id
+            ):
+                raise LifecycleError(
+                    "revision_not_newest",
+                    f"item {item_id} has a newer revision than the one rendered",
+                    items=[item.id],
+                )
             custom = item.kind == "custom" and reference is None
             for name, value in (
                 ("unit_price_minor", unit_price_minor),
@@ -1308,6 +1368,7 @@ class Lifecycle:
         """A typed price (Ruling 1): one `manual` line, cost = price, quantity the
         item's now; the item is `quoted` (unless already approved on another quote). A
         custom item's price is its own field (#4954): ``item_custom``."""
+        self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -1385,6 +1446,7 @@ class Lifecycle:
         its ref was taken with (``quote_id``, Ruling 3). As a manual quote: the order
         open for items, the item not settled, allowed on hold (it advances nothing). It names
         the revision the run sliced; one since superseded is `revision_not_newest`."""
+        self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -1422,6 +1484,7 @@ class Lifecycle:
         item not cancelled is. A quote of an earlier revision is `quote_stale`, and on a
         `design_first` item the quote's revision must be accepted first
         (`revision_not_accepted`); a custom item has neither."""
+        self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -1501,6 +1564,7 @@ class Lifecycle:
         """Sends the item's newest revision to the customer: it needs a file on its
         subject (`revision_empty`) and, on a `together` item, a quote that names it
         (`revision_not_quoted`). Sent and unanswered already returns it, writing nothing."""
+        self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -1540,6 +1604,7 @@ class Lifecycle:
         `accepted` also accepts the newest quote that names it, in the same transaction."""
         if body.answer == "changes_requested" and not body.note.strip():
             raise LifecycleError("note", "note: say what should change", unprocessable=True)
+        self.ensure_revision(order_id, item_id, by)
         released: list[str] = []
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
@@ -2011,7 +2076,7 @@ class Lifecycle:
             )
         if item.kind == "custom":
             raise LifecycleError("item_custom", f"item {item_id} is a custom item")
-        if item.current_revision_id is None:
+        if item.reference is None:
             raise LifecycleError("item_has_no_design", f"item {item_id} has no design yet")
         self._newest(conn, item, revision_id)
         self._none_in_flight(conn, item)
@@ -2045,6 +2110,7 @@ class Lifecycle:
     ) -> Fulfilment:
         """`claim_print`'s new claim of a test print: the attempt and its file's hold,
         the item left as it is."""
+        self.ensure_revision(order_id, item_id, by)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = self._test_printable(conn, order, item_id, revision_id)

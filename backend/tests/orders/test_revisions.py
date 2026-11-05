@@ -494,3 +494,71 @@ def test_a_slice_quote_of_a_superseded_revision_is_refused(shop: Shop) -> None:
             revision_id=old,
         )
     assert refused.value.slug == "revision_not_newest" and shop.rows.quotes(item.id) == []
+
+
+# -- the rollout's repair (final review finding 2) -----------------------------------------------
+
+
+def _unrevised(shop: Shop) -> tuple[Order, OrderItem]:
+    """An item a build before revisions wrote: a design and no revision."""
+    order = shop.order()
+    ref = resolved()
+    with shop.rows.transaction() as conn:
+        item = shop.rows.insert_item(
+            conn, order.id, reference=ref.reference, colours=ref.colours, output_id=None, quantity=1
+        )
+    assert item.current_revision_id is None
+    return order, item
+
+
+def test_an_unrevised_item_quotes_test_prints_and_takes_a_revision(shop: Shop) -> None:
+    order, item = _unrevised(shop)
+    quote = shop.lifecycle.record_manual_quote(
+        order.id, item.id, ManualQuoteInput(unit_price_minor=500), BY
+    )
+    [first] = shop.rows.revisions(item.id)
+    repaired = shop.get_item(item)
+    assert repaired.current_revision_id == first.id and quote.revision_id == first.id
+    assert first.reference == item.reference and first.colours == item.colours
+    assert "revision.repaired" in shop.kinds(order)
+    claim = shop.lifecycle.claim_print(
+        order.id,
+        item.id,
+        BY,
+        request_id="trial",
+        sliced_sha256=None,
+        sliced_blob_key=None,
+        revision_id=first.id,
+    )
+    assert claim.purpose == "test" and claim.revision_id == first.id
+    shop.lifecycle.release_print(claim, "test")
+    second = shop.lifecycle.add_revision(order.id, item.id, BY, note="thinner")
+    assert second.number == 2 and shop.kinds(order).count("revision.repaired") == 1
+
+
+def test_an_unrevised_item_is_test_printed_without_a_quote_first(shop: Shop) -> None:
+    order, item = _unrevised(shop)
+    repaired = shop.lifecycle.ensure_revision(order.id, item.id, BY)
+    assert repaired.current_revision_id is not None
+    assert shop.lifecycle.ensure_revision(order.id, item.id, BY) == repaired
+    assert shop.kinds(order).count("revision.repaired") == 1
+
+
+def test_a_copy_changed_behind_its_revision_is_the_next_revision_before_a_send(
+    shop: Shop,
+) -> None:
+    order, item, first = _quoted_revision(shop)
+    with shop.rows.transaction() as conn:
+        # A build before revisions edits the item's colours and nothing else.
+        conn.execute(
+            "UPDATE order_items SET colours = %s WHERE id = %s",
+            ('[{"slot": 0, "colour": "#0000ff"}]', item.id),
+        )
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.send_revision(order.id, item.id, first.id, BY)
+    assert refused.value.slug == "revision_not_newest"
+    revisions = shop.rows.revisions(item.id)
+    assert [r.number for r in revisions] == [1, 2]
+    assert revisions[1].colours[0].colour == "#0000ff"
+    assert shop.get_item(item).current_revision_id == revisions[1].id
+    assert "revision.repaired" in shop.kinds(order)
