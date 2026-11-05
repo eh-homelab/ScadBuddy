@@ -176,6 +176,19 @@ describe('revisions mock (#5280)', () => {
     expect(refused?.status).toBe(409)
     expect(refused?.problem.type).toBe(type('revision_sent'))
     expect((await api.order(ORDER_DRAFT)).attachments.some((a) => a.id === render.id)).toBe(true)
+    const reroled = await failure(api.updateOrderAttachment(ORDER_DRAFT, render.id, { role: 'test_print' }))
+    expect(reroled?.status).toBe(409)
+    expect(reroled?.problem.type).toBe(type('revision_sent'))
+    expect((await api.order(ORDER_DRAFT)).attachments.find((a) => a.id === render.id)?.role).toBe('render')
+  })
+
+  it('keeps a render and a test print on a revision', async () => {
+    const file = new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], 'r.png')
+    const upload = await failure(api.addOrderAttachment(ORDER_DRAFT, ITEM_DRAFT, file, { role: 'render' }))
+    expect(upload?.status).toBe(422)
+    const plain = await api.addOrderAttachment(ORDER_DRAFT, ITEM_DRAFT, file, { role: 'finished' })
+    const reroled = await failure(api.updateOrderAttachment(ORDER_DRAFT, plain.id, { role: 'test_print' }))
+    expect(reroled?.status).toBe(422)
   })
 
   it('leaves the revision unanswered when its quote has gone stale', async () => {

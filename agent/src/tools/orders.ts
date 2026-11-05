@@ -35,7 +35,7 @@ const customerId = ID.describe('A customer id, as customer_list returns it')
 const attachmentId = ID.describe("An attachment id, as order_get lists them under `attachments`")
 const attachmentRole = z
   .enum(['reference', 'issue', 'finished', 'packed', 'timelapse', 'render', 'test_print', 'other'])
-  .describe('Why the file is kept')
+  .describe("Why the file is kept; `render` and `test_print` only on a design revision's file")
 const attachmentCaption = z.string().max(1000)
 const money = z.number().int().describe('Integer minor units (cents, pence) in the order\'s currency')
 const datetime = z.string().datetime({ offset: true })

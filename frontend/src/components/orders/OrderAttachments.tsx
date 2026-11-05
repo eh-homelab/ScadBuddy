@@ -235,6 +235,7 @@ export function AttachmentCard({
   attachment,
   delivered,
   attempt,
+  locked = false,
   onChanged,
 }: {
   orderId: string
@@ -243,6 +244,8 @@ export function AttachmentCard({
   delivered: boolean
   /** The number of the attempt it is on, when it is on one. */
   attempt?: number
+  /** A file of a design revision sent to the customer: the record of what they saw, so its role, caption and presence stay. */
+  locked?: boolean
   onChanged: () => void
 }) {
   const [caption, setCaption] = useState(attachment.caption)
@@ -298,6 +301,13 @@ export function AttachmentCard({
             {delivered && <span className="ml-1 font-medium text-primary">· Delivered</span>}
           </span>
           {attempt !== undefined && <span className="text-xs text-muted-foreground">Attempt {attempt}</span>}
+          {locked ? (
+            <span className="text-xs">
+              {ROLE_LABELS[attachment.role]}
+              {attachment.caption && <span className="text-muted-foreground"> · {attachment.caption}</span>}
+            </span>
+          ) : (
+            <>
           <div className="flex gap-1.5">
             <Select value={attachment.role} disabled={busy !== null} onValueChange={(value) => void act('role', () => api.updateOrderAttachment(orderId, attachment.id, { role: value as OrderAttachmentRole }))}>
               <SelectTrigger size="sm" aria-label={`Role of ${attachment.filename}`} className="w-44">
@@ -334,6 +344,8 @@ export function AttachmentCard({
               </Button>
             )}
           </form>
+            </>
+          )}
           <div className="flex flex-wrap items-center gap-1.5">
             {OPENS.has(attachment.media_type) && (
               <Button asChild variant="outline" size="sm">
@@ -373,18 +385,20 @@ export function AttachmentCard({
                 {delivered ? 'Delivered (unmark)' : 'Mark as delivered'}
               </Button>
             )}
-            <Button
-              size="sm"
-              variant="ghost"
-              className="ml-auto text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-              onClick={() => {
-                setError(null)
-                setConfirming(true)
-              }}
-            >
-              <Trash2Icon aria-hidden="true" />
-              Remove
-            </Button>
+            {!locked && (
+              <Button
+                size="sm"
+                variant="ghost"
+                className="ml-auto text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                onClick={() => {
+                  setError(null)
+                  setConfirming(true)
+                }}
+              >
+                <Trash2Icon aria-hidden="true" />
+                Remove
+              </Button>
+            )}
           </div>
           {error && !confirming && (
             <p role="alert" className="text-xs text-warn">

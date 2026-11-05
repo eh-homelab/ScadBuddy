@@ -452,6 +452,9 @@ AttachmentKind = Literal["image", "video", "document", "other"]
 AttachmentRole = Literal[
     "reference", "issue", "finished", "packed", "timelapse", "render", "test_print", "other"
 ]
+#: The roles only a design revision's file takes (storefront spec §4): its ``render``
+#: and the photo of its ``test_print``.
+REVISION_ROLES: frozenset[AttachmentRole] = frozenset({"render", "test_print"})
 #: The longest caption, in characters, as a template's media (``library/media.py``).
 MAX_ATTACHMENT_CAPTION = 1000
 

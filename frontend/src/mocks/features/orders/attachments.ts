@@ -11,6 +11,8 @@ import { BROWSER, fieldProblem, newId, now, problem, Refused, state } from './st
  */
 
 const ROLES = new Set<OrderAttachmentRole>(['reference', 'issue', 'finished', 'packed', 'timelapse', 'render', 'test_print', 'other'])
+// A design revision's own roles, as `REVISION_ROLES` in `orders/models.py`.
+const REVISION_ROLES = new Set<OrderAttachmentRole>(['render', 'test_print'])
 
 /** `orders/attachments.py` `sniff`, over the first bytes. */
 function sniff(head: Uint8Array, name: string): [OrderAttachment['kind'], string] {
@@ -93,7 +95,8 @@ export async function upload(request: Request, orderId: string, itemId: string |
   if (!part || part.bytes.length === 0) return problem(request, 422, 'the upload has no `file` part, or it is empty')
   const file = new Blob([part.bytes])
   const role = text('role').trim() || 'other'
-  if (!ROLES.has(role as OrderAttachmentRole)) return fieldProblem(request, 'role', `role is one of ${[...ROLES].join(', ')}`)
+  const roles = [...ROLES].filter((r) => revisionId || !REVISION_ROLES.has(r))
+  if (!roles.includes(role as OrderAttachmentRole)) return fieldProblem(request, 'role', `role is one of ${roles.join(', ')}`)
   const filename = part.filename?.split(/[\\/]/).pop() || 'file'
   const [kind, mediaType] = sniff(part.bytes.slice(0, 16), filename)
   const attachment: OrderAttachment = {
@@ -117,6 +120,14 @@ export async function upload(request: Request, orderId: string, itemId: string |
   state.files[attachment.id] = file
   event(lock(orderId), 'attachment.added', { attachment_id: attachment.id, item_id: itemId, role: attachment.role })
   return HttpResponse.json(attachment)
+}
+
+/** A file of a revision sent to the customer, or answered, is the record of what they saw. */
+function refuseSentRevision(attachment: OrderAttachment) {
+  const revision = state.revisions.find((r) => r.id === attachment.revision_id)
+  if (revision && (revision.sent_at != null || revision.answer != null)) {
+    throw new Refused('revision_sent', `revision ${revision.number} was sent to the customer: its files are the record of what they saw`)
+  }
 }
 
 function found(orderId: string, id: string): OrderAttachment {
@@ -163,8 +174,15 @@ export const handlers = [
   http.patch('/api/v1/orders/:id/attachments/:a', async ({ request, params }) => {
     const body = (await request.json()) as OrderAttachmentPatch
     if (body.role != null && !ROLES.has(body.role)) return fieldProblem(request, 'role', 'not a role')
+    const target = state.attachments.find((a) => a.id === String(params.a) && a.order_id === String(params.id))
+    if (target && !target.revision_id && body.role != null && REVISION_ROLES.has(body.role)) {
+      return fieldProblem(request, 'role', `a ${body.role} file is a design revision's: attach it to the revision`)
+    }
     return transition(request, () => {
       const attachment = found(String(params.id), String(params.a))
+      if ((body.role != null && body.role !== attachment.role) || (body.caption != null && body.caption !== attachment.caption)) {
+        refuseSentRevision(attachment)
+      }
       if (body.role != null && body.role !== attachment.role) {
         event(lock(String(params.id)), 'attachment.role', { attachment_id: attachment.id, from_role: attachment.role, to: body.role })
         attachment.role = body.role
@@ -179,10 +197,7 @@ export const handlers = [
   http.delete('/api/v1/orders/:id/attachments/:a', ({ request, params }) => {
     try {
       const attachment = found(String(params.id), String(params.a))
-      const revision = state.revisions.find((r) => r.id === attachment.revision_id)
-      if (revision && (revision.sent_at != null || revision.answer != null)) {
-        throw new Refused('revision_sent', `revision ${revision.number} was sent to the customer: its files are the record of what they saw`)
-      }
+      refuseSentRevision(attachment)
       const item = state.items.find((i) => i.id === attachment.item_id)
       const delivered = item?.delivered_attachment_id === attachment.id
       if (item && delivered) item.delivered_attachment_id = null

@@ -286,6 +286,10 @@ def test_caption_and_role_are_edited_and_refusals_are_answered(client: TestClien
     ]
 
     assert attach(client, order["id"], PDF, "x.pdf", role="bogus").status_code == 422
+    # A render and a test print are a design revision's files, never the order's.
+    for role in ("render", "test_print"):
+        assert attach(client, order["id"], PDF, "x.pdf", role=role).status_code == 422
+        assert client.patch(base, json={"role": role}).status_code == 422
     assert attach(client, "no-such-order", PDF, "x.pdf").status_code == 404
     assert attach(client, order["id"], PDF, "x.pdf", item_id="no-such-item").status_code == 404
     empty = client.post(

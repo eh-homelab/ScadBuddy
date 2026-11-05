@@ -265,7 +265,14 @@ function RevisionRow({
           {files.map((attachment) => (
             <div key={attachment.id} className="flex min-w-0 flex-col gap-1">
               <ul>
-                <AttachmentCard orderId={order.id} itemId={null} attachment={attachment} delivered={false} onChanged={onChanged} />
+                <AttachmentCard
+                  orderId={order.id}
+                  itemId={null}
+                  attachment={attachment}
+                  delivered={false}
+                  locked={revision.sent_at != null || revision.answer != null}
+                  onChanged={onChanged}
+                />
               </ul>
               {photos.some((p) => p.id === attachment.id) && (
                 <Button
