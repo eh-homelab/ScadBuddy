@@ -441,7 +441,7 @@
       "id": 33,
       "type": "timeseries",
       "title": "Operation time",
-      "description": "Library operations (the API's own worker): from the operation's record to its end, by kind (#2295): p50 and p95 of those that succeeded, p95 of those that failed. On 2026-10-11 a save (output_create) took ~37 s.",
+      "description": "Library operations (the API's own worker): from the operation's record to its end, by kind (#2295): p50 and p95 of those that succeeded, p95 of those that failed. The print and flow kinds are left out by kind, not job: the API's lost-operation sweep ends their records too. On 2026-10-11 a save (output_create) took ~37 s.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 0, "y": 50, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
@@ -449,19 +449,19 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", job!~\"scadbuddy-(print|projects)\", outcome=\"succeeded\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", outcome=\"succeeded\"}[$__rate_interval]) unless on (kind) group by (kind) (scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"})))",
           "legendFormat": "p50 {{kind}}"
         },
         {
           "refId": "B",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", job!~\"scadbuddy-(print|projects)\", outcome=\"succeeded\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", outcome=\"succeeded\"}[$__rate_interval]) unless on (kind) group by (kind) (scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"})))",
           "legendFormat": "p95 {{kind}}"
         },
         {
           "refId": "C",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", job!~\"scadbuddy-(print|projects)\", outcome=\"failed\"}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", outcome=\"failed\"}[$__rate_interval]) unless on (kind) group by (kind) (scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"})))",
           "legendFormat": "p95 failed {{kind}}"
         }
       ]
@@ -470,7 +470,7 @@
       "id": 34,
       "type": "timeseries",
       "title": "Operations",
-      "description": "Library operations (the API's own worker): operations whose record ended, by kind and outcome (#2295).",
+      "description": "Library operations (the API's own worker): operations whose record ended, by kind and outcome (#2295). The print and flow kinds are left out by kind, not job: the API's lost-operation sweep ends their records too.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 8, "y": 50, "w": 8, "h": 8 },
       "fieldConfig": { "defaults": { "min": 0 }, "overrides": [] },
@@ -478,7 +478,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "sum by (kind, outcome) (increase(scadbuddy_operations_finished_total{namespace=\"$namespace\", job!~\"scadbuddy-(print|projects)\"}[$__rate_interval]))",
+          "expr": "sum by (kind, outcome) (increase(scadbuddy_operations_finished_total{namespace=\"$namespace\"}[$__rate_interval]) unless on (kind) group by (kind) (scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"}))",
           "legendFormat": "{{kind}} {{outcome}}"
         }
       ]

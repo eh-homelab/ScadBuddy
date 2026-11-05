@@ -1537,10 +1537,7 @@ describe('mock GET /models refuses a page past the backend cap (#5289 review)', 
   })
 })
 
-describe('a URL with more tags than MAX_TAGS that fold to MAX_TAGS (#5292 review)', () => {
-  // 51 tags as typed, 50 once folded: the backend counts the list as sent.
-  const tags = [...Array.from({ length: MAX_TAGS }, (_, n) => `t${n}`), 'T0']
-
+describe("the mock refuses the tags TagFilter refuses, as sent (#5309, #5310 reviews)", () => {
   it('refuses an empty tag, as the route does (#5309 review)', async () => {
     const query = new URLSearchParams([['tag', ''], ['sort', 'name']])
     expect((await fetch(`/api/v1/models?${query}`)).status).toBe(422)
@@ -1558,6 +1555,11 @@ describe('a URL with more tags than MAX_TAGS that fold to MAX_TAGS (#5292 review
     const query = new URLSearchParams([...Array.from({ length: MAX_TAG_FILTERS + 1 }, (_, n) => ['tag', `t${n}`]), ['sort', filters.sort]])
     expect((await fetch(`/api/v1/models?${query}`)).status).toBe(422)
   })
+})
+
+describe('a URL with more tags than MAX_TAGS that fold to MAX_TAGS (#5292 review)', () => {
+  // 51 tags as typed, 50 once folded: the backend counts the list as sent.
+  const tags = [...Array.from({ length: MAX_TAGS }, (_, n) => `t${n}`), 'T0']
 
   it('reads the models and the facets without a 422', async () => {
     const filters = { q: '', tags, origin: 'all' as const, sort: 'name' as const }

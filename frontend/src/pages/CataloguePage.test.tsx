@@ -77,7 +77,8 @@ describe('CataloguePage filters (#276)', () => {
 
     await user.type(screen.getByRole('searchbox', { name: 'Search models' }), 'CREME')
     await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('?q=CREME'))
-    expect(names()).toEqual(['Crème Coaster'])
+    // The last list stays on screen while the search's read runs (#2290): wait for its answer.
+    await waitFor(() => expect(names()).toEqual(['Crème Coaster']))
     expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 9')
   })
 
