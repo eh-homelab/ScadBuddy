@@ -1,7 +1,7 @@
 # Service credentials without a database secret
 
-Status: proposed (#5325). Part of the epic #5295; blocks #5298 and #5299. The owner decides
-the questions of §11. Builds on the backend-auth spec (`2026-11-01-backend-auth-design.md`,
+Status: decided (#5325), secure by default; §11 records the decisions. Part of the epic #5295;
+blocks #5298 and #5299. Builds on the backend-auth spec (`2026-11-01-backend-auth-design.md`,
 "the auth spec": §7.1 shape, §7.2 issue and rotation, §8.1 route classes, §13 D4) and on
 `docs/security/trust-boundaries.md` ("the trust page"), which states the rule this spec
 serves.
@@ -22,7 +22,7 @@ from a view that only its own Postgres role may select, and it opens the token w
 KEK (`backend/scadbuddy/auth/service_credentials.py:239-292` `TokenReader`;
 `agent/src/api/serviceCredential.ts:62-82`). When #5298 and #5299 remove each caller's
 database secret, that read stops working. Each caller needs another way to get and renew
-its credential. One choice applies to every caller (trust page, last open question).
+its credential. One choice applies to every caller (the trust page asked this; §11 decides it).
 
 The auth spec chose the database read (§13 D4 (a)) and rejected projected service-account
 tokens (D4 (b)) because they "tie the API to Kubernetes and need a fallback for compose
@@ -359,7 +359,7 @@ grant_type=urn:ietf:params:oauth:grant-type:token-exchange
                   | urn:scadbuddy:params:token-type:bootstrap (outside Kubernetes)
 ```
 
-Answer `200 {"access_token": "sbsvc_…", "token_type": "Bearer", "expires_in": 3600,
+Answer `200 {"access_token": "sbsvc_…", "token_type": "Bearer", "expires_in": 900,
 "scope": "<classes>"}`, or `401` with the auth spec's problem body (§8.2 there).
 
 The CRUD service, for a JWT:
@@ -372,13 +372,14 @@ The CRUD service, for a JWT:
    (`…/credential-id`) (§2.5).
 4. Mints a credential: a row in `service_credentials` as today, with new columns
    `proof` (`legacy` for a sealed 30-day row, `k8s`, `bootstrap`, `inprocess`), `pod_name`, `pod_uid`, and **no sealed
-   copy**. `expires_at` = now + 1 hour.
+   copy**. `expires_at` = now + 15 minutes.
 
 For a bootstrap secret: the SHA-256 of the presented value is compared, in constant time,
 with the hash for each caller that the CRUD service read at start (§7.2).
 
 Rate limit: the route answers at most a few exchanges a minute per caller and pod, so a
-loop cannot fill the table. The value is open (§11 Q5).
+loop cannot fill the table: 6 a minute per pod and 30 a minute per caller, then `429` with
+`Retry-After` (§11 D5).
 
 ### 6.3 Token format and lifetime
 
@@ -386,11 +387,11 @@ loop cannot fill the table. The value is open (§11 Q5).
   at 80%, so after 8 minutes. The caller re-reads the file before each exchange, never
   `subPath` (§2.5).
 - The ScadBuddy credential: today's opaque `sbsvc_<id>.<secret>` (§2.1), so `AuthGate`,
-  `resolve` and the scopes do not change. Lifetime **1 hour**. The caller exchanges again at
-  half-life (30 minutes) and at once on a `401` from any route; on a failed exchange it keeps
+  `resolve` and the scopes do not change. Lifetime **15 minutes** (§11 D4). The caller exchanges again at
+  half-life (7.5 minutes) and at once on a `401` from any route; on a failed exchange it keeps
   the current credential until it expires and retries every 5 s doubling to 60 s.
-- Rows: about one per pod per 30 minutes; 11 caller pods today (§2.4 replicas: render 2,
-  print 1, projects 1, agent worker 3, API 3 sidecars, agent-durable 0) make about 530 rows
+- Rows: about one per pod per 7.5 minutes; 11 caller pods today (§2.4 replicas: render 2,
+  print 1, projects 1, agent worker 3, API 3 sidecars, agent-durable 0) make about 2,100 rows
   a day. `delete_expired` already forgets rows expired more than `older_than` ago
   (`service_credentials.py:193-204`); its default becomes a day for `proof` ≠ `legacy`.
 
@@ -414,8 +415,8 @@ test already fails for an unclassified route (`routes.py:1-7`). Each new CRUD ro
   calls. This keeps the auth spec §7.1's table, which today's code widens (§2.1).
 - `agent` keeps `api`: its tools call almost every public route (`agent/src/tools/coverage.ts`
   requires a tool or an entry for every operation). That is the widest scope, held by the
-  pod with the least trusted code (§3). §11 Q3 asks whether to wait for #779 (the sandbox
-  pod) before `enforce`.
+  pod with the least trusted code (§3). `enforce` does not wait for #779 (the sandbox pod);
+  until #779, no package can switch `Bash` or `PowerShell` on (§11 D3, #5296).
 - `crud.<caller>` classes are disjoint: no caller can call another caller's CRUD routes.
 
 ### 6.5 Revocation
@@ -504,8 +505,8 @@ epic:
 | CRUD service (API) | yes | it seals and opens every stored secret and derives the transfer and run token keys |
 | render | no, if the CRUD routes return the opened render settings it needs (the render key, the Google Fonts key) to the `render` credential | #5298 |
 | print | no, if the CRUD service opens printer access codes for `crud.print` and mints the LAN blob transfer URLs (as it does for the slicer) | #5298 |
-| projects | yes, unless the CRUD service releases a run's unwrapped payload data key to `crud.projects` (a key-release route) | #5298; a design choice, §11 Q6 |
-| agent (sidecar, worker) | yes for the payload codec and workspace sealing, unless the same key release serves `crud.agent`; the Claude credential stays behind the agent's loopback gateway | #5299; §11 Q6 |
+| projects | yes, unless the CRUD service releases a run's unwrapped payload data key to `crud.projects` (a key-release route) | #5342 (§11 D6) |
+| agent (sidecar, worker) | yes for the payload codec and workspace sealing, unless the same key release serves `crud.agent`; the Claude credential stays behind the agent's loopback gateway | #5342 (§11 D6) |
 | agent-durable | no | it runs no worker (trust page gap 7) |
 | slicer | no | unchanged |
 
@@ -517,7 +518,7 @@ one subject's, and each release is a logged request.
 
 | Pod | Gets | For how long after the pod is deleted |
 |---|---|---|
-| render (with template Python until #5296) | a `crud.render` credential and the JWT | the credential: ≤ 1 h, or until revoked by pod; the JWT: refused at once |
+| render (with template Python until #5296) | a `crud.render` credential and the JWT | the credential: ≤ 15 min, or until revoked by pod; the JWT: refused at once |
 | print | `internal.outputs`, `internal.library`, `crud.print` | the same |
 | projects | `flow.host`, `crud.projects`; the KEK until §9 | the same; the KEK until rotated |
 | agent worker | `api`, `internal.workspace`, `crud.agent`; the KEK until §9 | the same; the KEK until rotated |
@@ -525,24 +526,39 @@ one subject's, and each release is a logged request.
 Today the same pods get a database password and the KEK, good until a person rotates them
 (trust page, "What each pod holds").
 
-## 11. Open questions for the owner
+## 11. Decisions
 
-1. Reopen D4: replace the database view with B1 (TokenReview) in-cluster and the bootstrap
-   secret outside it?
-2. Grant the API's ServiceAccount `system:auth-delegator` (cluster-wide `create` on
-   TokenReview and SubjectAccessReview), or prefer B2 (JWKS, no grant, no immediate
-   revocation on pod delete, and `192.168.11.51:6443` reachability untested)?
-3. The agent credential keeps `api` (every public route) in the pod that runs Claude Code:
-   move to `enforce` before or only after #779 (the sandbox pod)?
-4. Lifetimes: the Kubernetes token 600 s and the ScadBuddy credential 1 h, renewed at
-   half-life?
-5. The exchange's rate limit per caller and pod?
-6. A key-release route (the CRUD service hands a subject's unwrapped data key to
-   `crud.projects` and `crud.agent`) so the KEK leaves those pods, or keep the KEK there?
-7. ScadBuddy shares the `bambuddy` namespace with Bambuddy: move it to its own namespace
-   first, so its ServiceAccounts and any later RBAC are not beside Bambuddy's?
-8. The render worker becomes a caller now (its CRUD routes in #5298), before #5296 moves
-   template Python out of its pod?
+Each one takes the more secure option. The cost is stated with it.
+
+1. **D4 is reopened.** In the cluster a caller proves itself with its projected
+   ServiceAccount token, checked by TokenReview (B1). Outside it, compose uses the per-caller
+   bootstrap secret file (§7). The database view goes once every caller exchanges (§8).
+   Cost: the API depends on the Kubernetes API for each exchange.
+2. **TokenReview, not offline JWKS.** The API's ServiceAccount gets `system:auth-delegator`.
+   A deleted pod's token is refused at once, and the pod name and uid are bound to each
+   credential. Cost: one cluster-wide `create` grant on TokenReview and SubjectAccessReview,
+   held by the CRUD service only.
+3. **`enforce` does not wait for #779.** It narrows every caller now. Until #779 lands, no
+   plugin package can switch `Bash` or `PowerShell` on, `allow_refused` or not, so no
+   model-driven shell runs in a pod that holds the agent's credential (#5296). Cost: a
+   package that needs a shell waits for the sandbox pod.
+4. **Lifetimes.** The Kubernetes token lives 600 s, the minimum. The ScadBuddy credential
+   lives 15 minutes and is renewed at half-life, so a stolen one is good for at most
+   15 minutes. Cost: about 2,100 rows a day (§6.3), pruned after a day.
+5. **Rate limit.** 6 exchanges a minute per pod and 30 a minute per caller, then `429` with
+   `Retry-After`. A renewing pod needs about one exchange every 7.5 minutes.
+6. **The KEK goes to the CRUD service only.** A key-release route hands a subject's
+   unwrapped data key to a caller whose scope covers that subject, and logs each release;
+   secrets a caller needs in plaintext (printer access codes, render keys) come from routes
+   for that purpose. Then the KEK leaves every other pod (#5342). Cost: one more route
+   class to scope and audit.
+7. **ScadBuddy moves to its own namespace first** (eh-homelab/clusters#3200), with one
+   ServiceAccount per Deployment and `automountServiceAccountToken: false` on every pod.
+   Its ServiceAccounts and grants then never sit beside Bambuddy's. Cost: one migration of
+   every ScadBuddy object, done before the ServiceAccounts.
+8. **The render worker becomes a caller now** with `crud.render` only, so #5298 can take its
+   database secret away before #5296 moves template Python out. Template code then reaches
+   at most a 15-minute `crud.render` credential, not a database password.
 
 ## 12. What was not verified
 
