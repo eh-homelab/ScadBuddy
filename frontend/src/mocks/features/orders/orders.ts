@@ -67,6 +67,8 @@ export const quotesOf = (itemId: string) => state.quotes.filter((q) => q.order_i
 const attemptsOf = (itemId: string) => state.fulfilments.filter((f) => f.order_item_id === itemId).sort((a, b) => a.attempt - b.attempt)
 /** The attempts that count (#5280): a test print is never one of the item's production. */
 const productionOf = (itemId: string) => attemptsOf(itemId).filter((f) => f.purpose !== 'test')
+/** `OrderStore.print_in_flight`: the item's attempt still open, of either purpose. */
+export const printInFlight = (itemId: string) => attemptsOf(itemId).find((f) => f.print_run_id && f.outcome === 'unknown' && f.finished_at === null)
 const shipmentsOf = (orderId: string) => state.shipments.filter((s) => s.order_id === orderId)
 
 export function lock(orderId: string): Order {
@@ -208,12 +210,8 @@ export function withFilaments(found: OrderItem, filaments: Record<string, string
   return { colours, changed: colours.some((c, i) => c.filament_id !== found.colours[i]?.filament_id) }
 }
 
-/**
- * `Lifecycle._accept_quote`, once the caller has checked the order and the item: a quote of
- * another quantity or of an earlier revision is stale, and a `design_first` item's quote
- * needs its revision accepted (#5280).
- */
-export function acceptQuote(order: Order, found: OrderItem, quote: Quote): OrderItem {
+/** The refusals of `acceptQuote`, for a caller that must know before it writes. */
+export function checkQuote(found: OrderItem, quote: Quote) {
   if (SETTLED.has(found.status)) throw new Refused('item_not_open', `item ${found.id} is ${found.status}`)
   if (quote.quantity !== found.quantity) throw new Refused('quote_stale', `quote ${quote.id} priced ${quote.quantity}, the item is now ${found.quantity}`)
   if (found.kind !== 'custom') {
@@ -227,6 +225,15 @@ export function acceptQuote(order: Order, found: OrderItem, quote: Quote): Order
       }
     }
   }
+}
+
+/**
+ * `Lifecycle._accept_quote`, once the caller has checked the order and the item: a quote of
+ * another quantity or of an earlier revision is stale, and a `design_first` item's quote
+ * needs its revision accepted (#5280).
+ */
+export function acceptQuote(order: Order, found: OrderItem, quote: Quote): OrderItem {
+  checkQuote(found, quote)
   for (const q of quotesOf(found.id)) q.accepted = q.id === quote.id
   found.status = 'approved'
   found.updated_at = now()
@@ -739,7 +746,11 @@ export const handlers = [
       const refiled = body.filaments ? withFilaments(found, body.filaments) : undefined
       // #5280: a different reference, or a slot's filament, is the item's next revision; the
       // item's own reference sent again changes nothing and makes none.
-      const moved = resolved !== undefined && (found.kind === 'custom' || !sameDesign(resolved.reference, found.reference) || (resolved.colours.length > 0 && JSON.stringify(resolved.colours) !== JSON.stringify(found.colours)))
+      // The colours' fill: an item with no slots given its first render's amends the current
+      // revision in place (`Lifecycle.update_item`): no new revision, the quotes and status kept.
+      const filled =
+        resolved !== undefined && found.kind !== 'custom' && found.colours.length === 0 && resolved.colours.length > 0 && found.current_revision_id !== null && sameDesign(resolved.reference, found.reference)
+      const moved = resolved !== undefined && !filled && (found.kind === 'custom' || !sameDesign(resolved.reference, found.reference) || (resolved.colours.length > 0 && JSON.stringify(resolved.colours) !== JSON.stringify(found.colours)))
       const revised = moved || refiled?.changed === true
       const repins = revised || body.quantity != null || price !== null
       if (repins) openForItems(order, "an item's reference, quantity and filaments")
@@ -750,6 +761,12 @@ export const handlers = [
         pushRevision(order, found, reference, refiled?.changed ? refiled.colours : referenceMoved ? resolved!.colours : found.colours, '')
         // An output no longer matches a reference that moved.
         if (referenceMoved && !('output_id' in body)) found.output_id = null
+      }
+      if (filled) {
+        const revision = revisionsOf(found.id).find((r) => r.id === found.current_revision_id)!
+        revision.colours = resolved!.colours
+        found.colours = resolved!.colours
+        event(order, 'revision.amended', { item_id: found.id, revision_id: revision.id })
       }
       if (resolved) {
         found.kind = 'model'
@@ -978,7 +995,9 @@ export const handlers = [
         throw new Refused(SETTLED.has(found.status) ? 'item_not_open' : 'item_not_approved', `item ${found.id} is ${found.status}`, [found.id])
       }
       const attempts = attemptsOf(found.id)
-      const copies = found.quantity - attempts.filter((f) => f.purpose !== 'test').filter((f) => f.outcome === 'succeeded' || f.outcome === 'partial').reduce((sum, f) => sum + f.quantity, 0)
+      const open = printInFlight(found.id)
+      if (open) throw new Refused('print_in_flight', `item ${found.id}'s attempt ${open.attempt} (${open.purpose}) is still printing: settle it first`, [found.id])
+      const copies = found.quantity - productionOf(found.id).filter((f) => f.outcome === 'succeeded' || f.outcome === 'partial').reduce((sum, f) => sum + f.quantity, 0)
       if (copies < 1) throw new Refused('item_made', `item ${found.id}'s attempts made its ${found.quantity} already: accept them`, [found.id])
       const quote = quotesOf(found.id).find((q) => q.accepted)
       if (!quote || found.output_id === null) {

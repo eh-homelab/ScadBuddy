@@ -5,7 +5,7 @@ import { mockModels, setMockMedia } from '../../handlers'
 import { printersState } from '../printers'
 import { upload } from './attachments'
 import type { Resolved } from './orders'
-import { acceptQuote, event, itemOf, lock, notEnded, notOnHold, openForItems, quotesOf, rederive, refused, resolveReference, sameDesign, SETTLED, transition, withFilaments } from './orders'
+import { acceptQuote, checkQuote, event, itemOf, printInFlight, lock, notEnded, notOnHold, openForItems, quotesOf, rederive, refused, resolveReference, sameDesign, SETTLED, transition, withFilaments } from './orders'
 import { BROWSER, fieldProblem, newId, now, problem, PROBLEMS, Refused, revisionsOf, state } from './state'
 
 /**
@@ -152,6 +152,8 @@ export const handlers = [
         openForItems(order, "an item's price")
         notOnHold(order)
       }
+      // Every check that can throw comes first (acceptQuote's too); the stamp follows.
+      if (quote) checkQuote(found, quote)
       revision.answer = body.answer
       revision.answer_note = note
       revision.answered_at = now()
@@ -178,8 +180,8 @@ export const handlers = [
       if (found.kind === 'custom') throw new Refused('item_custom', `item ${found.id} is a custom item`)
       if (found.current_revision_id === null) throw new Refused('item_has_no_design', `item ${found.id} has no design yet`)
       const revision = newestOf(found, String(params.revision))
-      const attempts = state.fulfilments.filter((f) => f.order_item_id === found.id).sort((a, b) => a.attempt - b.attempt)
-      const open = attempts.find((f) => f.print_run_id && f.outcome === 'unknown')
+      const attempts = state.fulfilments.filter((f) => f.order_item_id === found.id)
+      const open = printInFlight(found.id)
       if (open) throw new Refused('print_in_flight', `item ${found.id}'s attempt ${open.attempt} (${open.purpose}) is still printing: settle it first`, [found.id])
       const quote = quotesOf(found.id).filter((q) => q.revision_id === revision.id).sort(byCreated).at(-1)
       if (!quote || found.output_id === null) throw new Refused('requote_needed', `item ${found.id} needs a new quote before it prints`, [found.id])

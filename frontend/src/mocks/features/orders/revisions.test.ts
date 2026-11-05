@@ -3,7 +3,7 @@ import { api, type ApiError } from '../../../api/client'
 import type { PrintRunRequest } from '../../../api/types'
 import { resetMockState } from '../../handlers'
 import { MAZE_SLUG } from '../../fixtures'
-import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, PROBLEMS } from './state'
+import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, OUTPUT_REAGAN, PROBLEMS, state } from './state'
 
 // Design revisions (#5280): the mock answers the lifecycle's rules and refusals as
 // `orders/lifecycle.py` does (`_revise`, `send_revision`, `answer_revision`).
@@ -138,5 +138,41 @@ describe('revisions mock (#5280)', () => {
     await api.answerOrderItemRevision(ORDER_DRAFT, ITEM_DRAFT, revision.id, { answer: 'accepted', note: '' })
     const model = await api.revisionPhotoToModel(ORDER_DRAFT, shot.id)
     expect(model.media?.at(-1)).toMatchObject({ source_revision_id: revision.id })
+  })
+
+  it('refuses a production print while a test print is open', async () => {
+    const [first] = await revisionsOf(ORDER_ACCEPTED, ITEM_APPROVED)
+    await api.testPrintRevision(ORDER_ACCEPTED, ITEM_APPROVED, first!.id, NO_CHOICES)
+    const refused = await failure(api.printItem(ORDER_ACCEPTED, ITEM_APPROVED, NO_CHOICES as never))
+    expect(refused?.status).toBe(409)
+    expect(refused?.problem.type).toBe(type('print_in_flight'))
+  })
+
+  it('fills the colours of an item that has none by amending its revision in place', async () => {
+    const made = await api.addOrderItem(ORDER_DRAFT, { output_id: OUTPUT_REAGAN, quantity: 1 })
+    const quote = await api.quoteOrderItem(ORDER_DRAFT, made.id, { unit_price_minor: 700 })
+    await api.acceptOrderQuote(ORDER_DRAFT, made.id, quote.id)
+    // An item made by hand has no slots until its first render brings them.
+    state.items.find((i) => i.id === made.id)!.colours = []
+    state.revisions.find((r) => r.id === made.current_revision_id)!.colours = []
+    await api.updateOrderItem(ORDER_DRAFT, made.id, { output_id: OUTPUT_REAGAN })
+    const detail = (await api.order(ORDER_DRAFT)).items.find((i) => i.id === made.id)!
+    expect(detail.revisions).toHaveLength(1)
+    expect(detail.revisions[0]!.colours.length).toBeGreaterThan(0)
+    expect(detail.colours).toEqual(detail.revisions[0]!.colours)
+    expect(detail.status).toBe('approved')
+    expect(detail.quotes.find((q) => q.id === quote.id)?.accepted).toBe(true)
+    const events = await api.orderEvents(ORDER_DRAFT)
+    expect(events.some((e) => e.kind === 'revision.amended')).toBe(true)
+  })
+
+  it('leaves the revision unanswered when its quote has gone stale', async () => {
+    const { revision } = await ready()
+    await api.sendOrderItemRevision(ORDER_DRAFT, ITEM_DRAFT, revision.id)
+    await api.updateOrderItem(ORDER_DRAFT, ITEM_DRAFT, { quantity: 5 })
+    const refused = await failure(api.answerOrderItemRevision(ORDER_DRAFT, ITEM_DRAFT, revision.id, { answer: 'accepted', note: '' }))
+    expect(refused?.status).toBe(409)
+    expect(refused?.problem.type).toBe(type('quote_stale'))
+    expect((await revisionsOf(ORDER_DRAFT, ITEM_DRAFT)).at(-1)).toMatchObject({ answer: null, answered_at: null })
   })
 })
