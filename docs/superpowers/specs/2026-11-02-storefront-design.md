@@ -76,7 +76,7 @@ by message.
 ### 4.1 The item's design has one authority
 
 Today an item's `reference` (slug, commit, inputs, libraries, `template_name`,
-`render_key`; `orders/models.py:247-260`) is written by `add_item` and `update_item`.
+`render_key`; `orders/models.py:248-261`) is written by `add_item` and `update_item`.
 From now on **only creating a revision writes it**. `order_item_revisions` holds every
 design an item has had; `order_items.current_revision_id` names the one in force, and the
 item's reference columns are a copy that only `Lifecycle.add_revision` writes, in the
@@ -132,7 +132,8 @@ Rules:
 - A quote's filaments come from its revision. Today the quote run writes the body's
   filaments onto the item through `update_item` (`orders/quote.py`); from now on a quote
   whose filaments differ from the newest revision's first makes a new revision with them,
-  in the quote's check, and is sliced from that one, so a `together` quote never replaces
+  in the run's first write (the check writes nothing, orders spec Ruling 8), and is
+  sliced from that one, so a `together` quote never replaces
   the revision it names **(call)**.
 - In phase 1, before the public site exists, "Send" only stamps `sent_at`; the shop
   passes the revision on by hand and records the customer's answer itself, as an
@@ -148,8 +149,9 @@ The owner needs each job's real cost, so a test print is recorded on the order
 - A test print is a row in `order_item_fulfilments`, the print path's attempts (#4719),
   with a new `purpose` column, `production` (every existing row) or `test`, and
   `revision_id` (required for `test`).
-- `order_item_print` takes `purpose: test` and a revision. It prints that revision's
-  sliced file, from a quote of that revision, so a test print needs a slice quote first.
+- `order_item_print` takes `purpose: test` and a revision. The print path prints the
+  item's output, so only the current revision can be test-printed; an older one is
+  `revision_not_newest`. A test print needs a slice quote of that revision first.
 - A test attempt never needs the order `accepted`, never changes the item's status,
   never counts toward the fulfilled quantity, and is ignored by `derive` (it is not in
   `attempted`), `accept_fulfilment` and `unfulfil_item`.
@@ -177,7 +179,8 @@ recorded with an `Actor` of kind `customer` (§6.4).
 A `test_print` photo on an accepted revision can be added to the model's media with one
 action ("Add to model photos"). `template_media` has no commit (`20260928T0718Z_template_media.sql`); it
 gains `source_commit` and `source_revision_id`, both nullable, so the gallery can say
-which revision a print photo shows. The photo is copied through the existing media upload
+which revision a print photo shows. They travel on `MediaItem`, because the media store
+rewrites a model's rows whole on every edit (`library/media_store.py` `replace`). The photo is copied through the existing media upload
 operation (`library/media_operations.py`); the order's copy stays.
 
 ### 4.7 Back office surfaces
@@ -337,7 +340,10 @@ publishes `order.changed` / `order_item.changed`, as every transition does.
 ### 6.3 Refusals
 
 New `LifecycleError` slugs: `item_has_no_design`, `revision_not_newest`,
-`revision_not_sent`, `revision_answered`, `order_not_submitted`, `order_submitted`
+`revision_not_sent`, `revision_answered`, `revision_empty` (a send with no attachment),
+`revision_not_quoted` (a `together` send or accept with no quote of the revision),
+`revision_not_accepted` (a price accept, or "Add to model photos", before the design is
+accepted), `revision_not_found` (404), `order_not_submitted`, `order_submitted`
 (a write only a draft allows), `deposit_unpaid`, `balance_unpaid` (§8).
 
 ### 6.4 The customer actor
