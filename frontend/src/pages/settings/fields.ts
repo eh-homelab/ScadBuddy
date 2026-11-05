@@ -111,6 +111,29 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     help: 'Multiplies a part\'s enclosed volume for walls, infill and purge in the estimate before a slice, such as 1.15. More than 0.',
     advanced: true,
   },
+  // #5326 — job cost (spec 2026-11-05 §4.3, §4.4, §5), in the shop's currency.
+  {
+    name: 'pricing_labour_rate_per_hour',
+    section: 'orders',
+    label: 'Labour rate per hour',
+    kind: 'text',
+    help: 'What an hour of your time costs a job. Each time entry keeps the rate in force when it was logged, so a change never rewrites past jobs. A decimal amount in the shop\'s currency, such as 25.',
+  },
+  {
+    name: 'orders_thin_margin_percent',
+    section: 'orders',
+    label: 'Thin margin below, percent',
+    kind: 'text',
+    help: 'An order or item whose margin is below this percent of what was charged is marked thin, in amber. Below 0 it is a loss, in red. Such as 15.',
+  },
+  {
+    name: 'pricing_usd_rate',
+    section: 'orders',
+    label: 'One US dollar in the shop\'s currency',
+    kind: 'text',
+    help: 'Converts the assistant\'s spend, which is in US dollars, into a job\'s cost. 1 when the shop prices in US dollars. More than 0.',
+    advanced: true,
+  },
   // #4939 — a native run's plate-clear wait, as Bambuddy's queue's `require_plate_clear`.
   {
     name: 'lan_require_plate_clear',

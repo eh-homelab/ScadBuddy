@@ -6,6 +6,8 @@ import type {
   Fulfilment,
   Order,
   OrderCharge,
+  CostEntry,
+  TimeEntry,
   OrderEvent,
   OrderAttachment,
   OrderItem,
@@ -85,6 +87,9 @@ export type State = {
   /** #4253 §8.1 — `order_projects`: the Bambuddy projects of each order and its items. */
   projects: (OrderProject & { order_id: string })[]
   files: Record<string, Blob>
+  /** #5326 — `order_time_entries` and `order_cost_entries`. */
+  timeEntries: TimeEntry[]
+  costEntries: CostEntry[]
 }
 
 let counter = 0
@@ -371,6 +376,8 @@ function fixtures(): State {
     attachments: [],
     projects: [],
     files: {},
+    timeEntries: [],
+    costEntries: [],
   }
 }
 

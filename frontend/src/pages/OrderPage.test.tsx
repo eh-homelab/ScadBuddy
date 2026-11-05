@@ -44,6 +44,20 @@ describe('OrderPage (#4249)', () => {
     expect(screen.getByRole('heading', { name: 'History' })).toBeInTheDocument()
   })
 
+  it('shows the money view before accept, and a Loss badge in the header (#5326)', async () => {
+    render(ORDER_DRAFT)
+    await screen.findByRole('heading', { name: 'ORD-2026-3' })
+    // Design time and test prints come before an accept: the card is there to log them.
+    const card = await screen.findByRole('region', { name: 'Cost' })
+    expect(within(card).getByRole('form', { name: 'Log time on the order' })).toBeInTheDocument()
+    expect(screen.queryByText('Loss')).toBeNull()
+
+    await api.addCostEntry(ORDER_ACCEPTED, { kind: 'other', amount_minor: 5000 })
+    render(ORDER_ACCEPTED)
+    const heading = await screen.findByRole('heading', { name: 'ORD-2026-2' })
+    expect(await within(heading.parentElement!).findByText('Loss')).toBeInTheDocument()
+  })
+
   it("shows the lifecycle's refusal naming the items in the way", async () => {
     const { user } = render(ORDER_DRAFT)
     await screen.findByRole('heading', { name: 'ORD-2026-3' })

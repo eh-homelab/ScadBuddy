@@ -1033,6 +1033,11 @@ export const settingsDefaults = {
   rough_estimate_factor: '1.15',
   // #4953 — whether a fulfilled line item may be unfulfilled.
   orders_allow_unfulfil: true,
+  // #5326 — job cost: the labour rate a time entry copies, one USD in the shop's currency,
+  // and the thin-margin threshold percent.
+  pricing_labour_rate_per_hour: '0',
+  pricing_usd_rate: '1',
+  orders_thin_margin_percent: '15',
   // #4939 — whether a native run waits for a cleared plate between its prints.
   lan_require_plate_clear: false,
   fonts_catalogue_ttl: 86400,

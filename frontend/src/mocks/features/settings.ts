@@ -62,6 +62,10 @@ const PRICING_DECIMALS = new Set([
   'pricing_labour_per_item',
   'pricing_markup_percent',
   'rough_estimate_factor',
+  // #5326 — job cost.
+  'pricing_labour_rate_per_hour',
+  'pricing_usd_rate',
+  'orders_thin_margin_percent',
 ])
 /** The settings the backend's `StoreNotReadyError` is decided from. */
 const STORE_READINESS = [
@@ -139,7 +143,7 @@ function putSettings(body: Record<string, unknown>) {
     if (PRICING_DECIMALS.has(name)) {
       const text = typeof value === 'string' ? value.trim() : ''
       if (!/^\d+(\.\d+)?$/.test(text)) return refused(name, `Value error, ${envName(name)} must be at least 0`)
-      if (name === 'rough_estimate_factor' && Number(text) <= 0) return refused(name, `Value error, ${envName(name)} must be more than 0`)
+      if ((name === 'rough_estimate_factor' || name === 'pricing_usd_rate') && Number(text) <= 0) return refused(name, `Value error, ${envName(name)} must be more than 0`)
     }
     if (name === 'pricing_rounding' && value !== 'to_minor_unit' && value !== 'to_major') {
       return refused(name, "Input should be 'to_minor_unit' or 'to_major'")
