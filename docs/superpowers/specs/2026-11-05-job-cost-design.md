@@ -1,6 +1,6 @@
 # Job cost: what each job really cost, and the margin it left
 
-Status: draft for the owner's approval. Part of the orders epic (#4248). It builds on the
+Status: approved by the owner on 2026-11-05. Part of the orders epic (#4248). It builds on the
 real-cost read that phase 3 built (#4251, `orders/costs.py`, spec 2026-10-18 §6.4 "As
 built") and on the storefront spec's test-print attempts
 (`2026-11-02-storefront-design.md` §4.4).
@@ -74,7 +74,8 @@ Every attempt in `order_item_fulfilments` for the item, whatever its `purpose`
     quote it printed from: the item's quote whose own `sliced_sha256` equals the
     attempt's (a quote's `sliced_sha256` is its first plate's file, and the attempt
     records that same value), whose plates give grams per unit, times the attempt's
-    `copies`. The figure is marked `estimated`. A
+    `copies` (else its `quantity`, else 1: `copies` is null on a hand-recorded
+    attempt). The figure is marked `estimated`. A
     failed attempt with no actual grams counts its full sliced grams, marked `estimated`
     **(call: overstating a failure's waste is safer than hiding it)**.
   - **No price per gram** (a `manual` quote, no accepted quote yet, or a test attempt of
@@ -82,7 +83,7 @@ Every attempt in `order_item_fulfilments` for the item, whatever its `purpose`
     `cost_per_kg` for the item's colour slots' filaments, weighted by the slots' share of
     the sliced grams when known and equally otherwise, and marked `estimated`.
 - **Machine time.** New: each attempt's seconds (`actual_seconds`, else the matched
-  quote's plate seconds times `copies`, marked `estimated`) times a machine rate. The
+  quote's plate seconds times `copies` (with the same fallback), marked `estimated`) times a machine rate. The
   rate is the quote's own: a slice quote's `machine_time` line amount over its plates'
   hours (the line's label also names it). With no slice quote, or a quote with no
   `machine_time` line, it is today's `pricing_machine_rate_per_hour`, marked
@@ -107,13 +108,16 @@ the entry was written, copied so a later rate change does not rewrite it), `note
 - A new stored setting `pricing_labour_rate_per_hour` (env-seeded like every runtime
   setting, `SCADBUDDY_PRICING_LABOUR_RATE_PER_HOUR`, default `0`, `live`).
 - An item's labour cost is the sum of its entries' `minutes × rate`.
-- **An item with no entries** gets a default labour figure, marked `estimated`: its
+- **An item with no entries** (except a `custom` item, §5) gets a default labour figure, marked `estimated`: its
   accepted quote's `labour` line (as recorded, for the item's quantity), else today's
   `pricing_labour_per_item` times its quantity **(call: so a margin never silently
   leaves labour out; one real entry replaces the default)**.
 - A timer: "Start timer" on an item writes nothing; "Stop" writes one entry with the
   elapsed minutes, rounded up to the minute. The running timer lives in the browser
-  (per viewer, `localStorage`), so an abandoned one costs nothing **(call)**.
+  (per viewer, `localStorage`), so an abandoned one costs nothing **(call)**. It is
+  lost if the browser's storage is cleared, and another device does not see it; the
+  running timer says "on this browser only", and the page offers to log the elapsed
+  time when it finds a timer older than 12 hours.
 - Agent tool `order_time_add` (`write`).
 
 ### 4.4 Other costs: assistant, shipping, payment fees, anything else **(call)**
@@ -126,8 +130,10 @@ order's currency), `note`, `source` (nullable: what wrote it, such as
 replayed webhook, a retried flow) write once.
 
 - **Assistant.** When the assistant works on an item (the request-to-model flow, a later
-  project), the flow writes one `assistant` entry when it finishes, from its sessions'
-  `cost_usd` (agent `ai_sessions`). The order's currency may not be USD: a stored setting
+  project), the agent service itself posts one `assistant` entry when the work finishes,
+  through `POST /orders/{id}/cost-entries` with a service credential, `source`
+  `ai_session:<id>`, with the spend it knows. Nothing in the backend reads the agent's
+  `ai_*` tables (the database-access rule, #5295). The order's currency may not be USD: a stored setting
   `pricing_usd_rate` (one USD in the order currency, default `1`, env-seeded) converts it,
   and the entry's note keeps the USD figure. Until that flow exists, nothing writes these
   entries; the shop can add one by hand.
@@ -154,7 +160,10 @@ cost and margin, and are not spread over items **(call)**.
 
 - **Charged** for an item: its accepted quote's total. With no accepted quote, the item
   has no charged figure and no margin; its cost still shows. A `custom` item (#4954) is
-  charged its price, and its cost is only its time and cost entries.
+  charged its price. Its cost is its print attempts, if it has any (§4.1, priced at the
+  price book and marked `estimated`, since it has no slice quote), its time entries and
+  its cost entries. It takes **no default labour** (§4.3): its manual quote has no labour
+  line, and a custom item is often bought-in or a service **(call)**.
 - **Charged** for an order: the sum of its items' charged figures plus every charge
   except `tax`, each with its stored sign (a discount is already stored negative, so it
   is added, never subtracted again). `tax` is not revenue. The field is named
@@ -211,6 +220,11 @@ price** (not its `unit_cost_minor`, which leaves out labour and setup on a slice
 equals the price on a manual one). If that price would leave a margin below the thin
 threshold (§5), it shows a warning with:
 
+(It deliberately groups by `slug` alone, across commits and inputs: a size or text
+change moves the cost less than test and failed prints do, and narrowing by inputs would
+leave most models with no history **(call)**.)
+
+
 - the average real cost per unit and how many jobs it is from;
 - the main reason: of those jobs' cost parts, the one that most exceeded what their own
   accepted quotes priced for it. Parts the quotes never price (test prints, failed
@@ -243,7 +257,9 @@ A new page, Orders → Profit, `GET /orders/reports/profit?from=&to=&group=model
 - `GET /orders` items gain `margin_percent` and `margin_state`, and the list takes
   `margin_state` as a filter.
 - `POST/DELETE /orders/{id}/time-entries`, `POST/DELETE /orders/{id}/cost-entries`, each
-  an `order_events` audit row, as every order write is.
+  an `order_events` audit row, as every order write is. `POST …/cost-entries` also
+  accepts the agent service's service credential, which is how the `assistant` entry
+  arrives (§4.4).
 - `GET /orders/history/unit-cost?slug=` for §6.3.
 - `GET /orders/reports/profit` for §6.4.
 - Agent tools: `order_costs` (exists, gains the fields), `order_time_add`,
