@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { ApiError, api } from '../api/client'
 import type { ModelPatch, ModelSummary, PrintRunRequest, Settings } from '../api/types'
 import { DEFAULT_NOZZLES } from '../lib/printChoices'
-import { MAX_TAGS } from '../lib/catalogueQuery'
+import { MAX_TAG_FILTERS, MAX_TAGS } from '../lib/catalogueQuery'
 import { verifiedFixDiagnostic } from './analyzers'
 import { setMockAnalyzerDiagnostics } from './features/analyzers'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
@@ -1540,6 +1540,12 @@ describe('mock GET /models refuses a page past the backend cap (#5289 review)', 
 describe('a URL with more tags than MAX_TAGS that fold to MAX_TAGS (#5292 review)', () => {
   // 51 tags as typed, 50 once folded: the backend counts the list as sent.
   const tags = [...Array.from({ length: MAX_TAGS }, (_, n) => `t${n}`), 'T0']
+
+  it('refuses more tags than the route takes, as sent', async () => {
+    const filters = { q: '', tags: [] as string[], origin: 'all' as const, sort: 'name' as const }
+    const query = new URLSearchParams([...Array.from({ length: MAX_TAG_FILTERS + 1 }, (_, n) => ['tag', `t${n}`]), ['sort', filters.sort]])
+    expect((await fetch(`/api/v1/models?${query}`)).status).toBe(422)
+  })
 
   it('reads the models and the facets without a 422', async () => {
     const filters = { q: '', tags, origin: 'all' as const, sort: 'name' as const }
