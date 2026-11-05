@@ -9,7 +9,7 @@ outcome, a route template) -- never a slug, a job id or a raw path.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from typing import Literal, get_args
 
@@ -77,6 +77,13 @@ SLICE_BUCKETS = (5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 162
 #: Up to 120 s (#2293): list routes took 10 to 16 s and a save with its polling ~37 s,
 #: and past the top finite bucket a quantile reads as that bucket.
 HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30, 60, 120)
+#: An operation, from its record to its end (#2295): most answer in a second, a save with
+#: its render ~37 s, a run up to its 5-minute ``RUN_TIMEOUT``, a slice quote 30 minutes.
+OPERATION_BUCKETS = (0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30, 60, 120, 300, 600, 1800)
+
+#: How an operation ended: its record's final status (`operations/store.py`
+#: `OperationStatus`), spelled out here so the metrics never load the operations stack.
+OperationOutcome = Literal["succeeded", "failed"]
 
 #: Which process the metrics are for: the API, or one of `python -m scadbuddy.worker`'s
 #: queues (the render worker, ``--queue bambuddy``, ``--queue projects``).
@@ -96,6 +103,9 @@ _WORKER_COMMON = frozenset(
 )
 #: A worker that starts its event bus listens and prunes the log too.
 _LISTENING = frozenset({"events_received", "events_resyncs", "event_log_pruned"})
+#: A worker that serves operations ends their records (`OperationStore.finish`, #2295).
+#: The 202 past the deadline (`operations_deferred`) is the API's alone.
+_OPERATIONS = frozenset({"operation_duration", "operations_finished"})
 
 #: The attributes each worker role registers (#664): only what that worker sets, so its
 #: /metrics never carries the API's series as constant zeros (`scadbuddy_render_store_up
@@ -120,8 +130,9 @@ ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
     },
     "print": _WORKER_COMMON
     | _LISTENING
+    | _OPERATIONS
     | {"activity_write_failures", "print_follows_running", "rack_watch_settle_failed"},
-    "projects": _WORKER_COMMON | _LISTENING,
+    "projects": _WORKER_COMMON | _LISTENING | _OPERATIONS,
 }
 
 
@@ -370,6 +381,31 @@ class Metrics:
             registry=r,
         )
 
+        # Operations (#1053, #2295): `kind` is a registered `OperationKind`'s name, a
+        # closed set each process pre-creates (`operation_kinds`). Counted where the
+        # record ends (`OperationStore.finish`), in the process whose worker ran it.
+        self.operation_duration = Histogram(
+            "scadbuddy_operation_duration_seconds",
+            "Time from an operation's record to its end, by kind and outcome (succeeded, failed).",
+            ["kind", "outcome"],
+            buckets=OPERATION_BUCKETS,
+            registry=r,
+        )
+        self.operations_finished = Counter(
+            "scadbuddy_operations_finished",
+            "Operations whose record ended, by kind and outcome (succeeded, failed).",
+            ["kind", "outcome"],
+            registry=r,
+        )
+        self.operations_deferred = Counter(
+            "scadbuddy_operations_deferred",
+            "Operation requests not answered within the deadline: a 202 to follow (or a"
+            " 503 still-accepting for a key the follow URL cannot carry), by kind; once"
+            " per request, so a re-send counts again.",
+            ["kind"],
+            registry=r,
+        )
+
         # The content store under the blob store (spec 2026-09-27 §6.2, #426).
         self.store_ops = Counter(
             "scadbuddy_store_operations_total",
@@ -535,6 +571,15 @@ class Metrics:
             for name, value in vars(self).items():
                 if isinstance(value, MetricWrapperBase) and name not in keep:
                     r.unregister(value)
+
+    def operation_kinds(self, kinds: Iterable[str]) -> None:
+        """Make each kind's operation series at zero, as the other labelled series are
+        made above, once the registered kinds are known."""
+        for kind in kinds:
+            self.operations_deferred.labels(kind)
+            for outcome in get_args(OperationOutcome):
+                self.operations_finished.labels(kind, outcome)
+                self.operation_duration.labels(kind, outcome)
 
     @contextmanager
     def stage(self, stage: RenderStage) -> Iterator[None]:

@@ -17,6 +17,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from scadbuddy.bambuddy.runs import PrintRunError
 from scadbuddy.core.events import Event, OperationEvent
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.operations.store import Operation, OperationStore
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.workflows import client as client_module
@@ -111,6 +112,40 @@ async def test_finish_changes_only_a_running_row_and_announces_it_once(
     assert done.status == again.status == "succeeded"
     assert again.result == {"queue_item_id": 7} and again.finished_at is not None
     assert len(events.published) == 2
+
+
+async def test_finish_counts_and_times_each_operation_once_by_kind_and_outcome(
+    jobs: JobProjection,
+) -> None:
+    """#2295: where the record ends, once, whatever retries the finish."""
+    metrics = Metrics()
+    metrics.operation_kinds(["reprint"])
+    store = OperationStore(jobs.pool, metrics=metrics)
+    sample = metrics.registry.get_sample_value
+
+    def finished(outcome: str) -> float | None:
+        return sample(
+            "scadbuddy_operations_finished_total", {"kind": "reprint", "outcome": outcome}
+        )
+
+    def timed(outcome: str) -> float | None:
+        return sample(
+            "scadbuddy_operation_duration_seconds_count", {"kind": "reprint", "outcome": outcome}
+        )
+
+    # Pre-created at zero, so `increase()` and a ratio start from the first scrape.
+    assert finished("succeeded") == finished("failed") == 0
+    await insert(store, "a")
+    await store.finish("a", result={})
+    await store.finish("a", result={})  # a retried finish changes nothing
+    await insert(store, "b", key="k2", run="r2")
+    await store.finish("b", error=FAILED)
+    assert finished("succeeded") == finished("failed") == 1
+    assert timed("succeeded") == timed("failed") == 1
+    took = sample(
+        "scadbuddy_operation_duration_seconds_sum", {"kind": "reprint", "outcome": "succeeded"}
+    )
+    assert took is not None and 0 <= took < 60
 
 
 async def test_get_reads_one_operation(store: OperationStore) -> None:

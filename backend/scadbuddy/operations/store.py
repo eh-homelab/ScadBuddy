@@ -20,6 +20,7 @@ from scadbuddy.core.events import OperationEvent
 from scadbuddy.operations.activity import row_of
 
 if TYPE_CHECKING:
+    from scadbuddy.core.metrics import Metrics
     from scadbuddy.workflows.operation_models import OperationAuthor
 
 OperationStatus = Literal["running", "succeeded", "failed"]
@@ -62,10 +63,13 @@ class OperationStore:
         *,
         events: TransactionalEvents | None = None,
         activity: ActivityIndex | None = None,
+        metrics: Metrics | None = None,
     ) -> None:
         self._pool = pool
         self.events = events
         self.activity = activity
+        #: Where each record that ends is counted and timed (#2295), and the API's 202s.
+        self.metrics = metrics
 
     @property
     def pool(self) -> ConnectionPool[Connection[DictRow]]:
@@ -268,16 +272,30 @@ class OperationStore:
                     op_id,
                 ),
             ).fetchone()
+            ended = None
+            current = None
             if row is not None:
-                op = Operation.model_validate(row)
-                self._announce(conn, op, row)
-                return op
-            current = conn.execute(
-                f"SELECT {_COLUMNS} FROM operations WHERE id = %s", (op_id,)
-            ).fetchone()
+                ended = Operation.model_validate(row)
+                self._announce(conn, ended, row)
+            else:
+                current = conn.execute(
+                    f"SELECT {_COLUMNS} FROM operations WHERE id = %s", (op_id,)
+                ).fetchone()
+        if ended is not None:
+            # Once committed, and only by the write that ended it: a retried finish, or
+            # the lost sweep's after it, finds it ended and counts nothing (#2295).
+            self._count(ended)
+            return ended
         if current is None:
             raise LookupError(f"there is no operation {op_id}")
         return Operation.model_validate(current)
+
+    def _count(self, op: Operation) -> None:
+        if self.metrics is None or op.finished_at is None or op.status == "running":
+            return
+        took = max(0.0, (op.finished_at - op.created_at).total_seconds())
+        self.metrics.operations_finished.labels(op.kind, op.status).inc()
+        self.metrics.operation_duration.labels(op.kind, op.status).observe(took)
 
     def _running_executions(self, older_than: timedelta) -> list[tuple[str, str, str, str]]:
         with self._pool.connection() as conn:
