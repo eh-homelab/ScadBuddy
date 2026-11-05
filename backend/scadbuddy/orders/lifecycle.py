@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from scadbuddy.core.events import EventBus, OrderChanged, OrderItemChanged, emit
 from scadbuddy.orders.models import (
+    REVISION_ROLES,
     SHOWN_IMAGES,
     Actor,
     AddressSnapshot,
@@ -170,6 +171,17 @@ class FulfilmentInput(BaseModel):
     #: page): its facts are copied as a print's are (§8.2). Read when an attempt is
     #: recorded; an edit leaves the attempt's archives as they are.
     archive_id: int | None = Field(default=None, ge=1)
+
+
+def _refuse_revision_role(role: AttachmentRole) -> None:
+    """A `render` or a `test_print` is a design revision's file (storefront spec §4),
+    never an order's, an item's or an attempt's."""
+    if role in REVISION_ROLES:
+        raise LifecycleError(
+            "role",
+            f"a {role} file is a design revision's: attach it to the revision",
+            unprocessable=True,
+        )
 
 
 def _distinct_lines(items: list[ShipmentItem]) -> list[ShipmentItem]:
@@ -2560,6 +2572,8 @@ class Lifecycle:
         holds the blob for it in the same transaction. With ``revision_id`` it is on
         that revision of the item (storefront spec §4): a render, or beside a
         ``fulfilment_id`` the photo of that revision's test print."""
+        if revision_id is None:
+            _refuse_revision_role(role)
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = None if item_id is None else self._item_of(conn, order, item_id)
@@ -2629,10 +2643,18 @@ class Lifecycle:
         self, order_id: str, attachment_id: str, patch: AttachmentPatch, by: Actor
     ) -> Attachment:
         """The caption and the role; a field left out stays. Each change is on the audit
-        line. An image marked delivered keeps its mark whatever its role becomes."""
+        line. An image marked delivered keeps its mark whatever its role becomes. A
+        file of a revision sent to the customer, or answered, keeps both
+        (`revision_sent`), as `remove_attachment`."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             before = self._attachment_of(conn, order, attachment_id)
+            if before.revision_id is None and patch.role is not None:
+                _refuse_revision_role(patch.role)
+            if (patch.role not in (None, before.role)) or (
+                patch.caption not in (None, before.caption)
+            ):
+                self._refuse_sent_revision(conn, before)
             attachment = self.store.update_attachment(
                 conn,
                 before.id,
@@ -2664,6 +2686,17 @@ class Lifecycle:
         self._told(change)
         return attachment
 
+    def _refuse_sent_revision(self, conn: Conn, attachment: Attachment) -> None:
+        if attachment.revision_id is None:
+            return
+        revision = self.store.revision(attachment.revision_id, conn=conn)
+        if revision is not None and (revision.sent_at is not None or revision.answer is not None):
+            raise LifecycleError(
+                "revision_sent",
+                f"revision {revision.number} was sent to the customer: its files"
+                " are the record of what they saw",
+            )
+
     def remove_attachment(self, order_id: str, attachment_id: str, by: Actor) -> None:
         """A mis-upload (Ruling 6): the row goes, and with it its hold on the file and
         the item's delivered mark when it was this one. A file of a revision sent to the
@@ -2672,16 +2705,7 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             attachment = self._attachment_of(conn, order, attachment_id)
-            if attachment.revision_id is not None:
-                revision = self.store.revision(attachment.revision_id, conn=conn)
-                if revision is not None and (
-                    revision.sent_at is not None or revision.answer is not None
-                ):
-                    raise LifecycleError(
-                        "revision_sent",
-                        f"revision {revision.number} was sent to the customer: its files"
-                        " are the record of what they saw",
-                    )
+            self._refuse_sent_revision(conn, attachment)
             item = (
                 None
                 if attachment.item_id is None

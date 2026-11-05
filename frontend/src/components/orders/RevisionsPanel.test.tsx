@@ -128,6 +128,22 @@ describe('RevisionsPanel (#5280)', () => {
     expect(screen.queryByTestId('revisions-panel')).toBeNull()
   })
 
+  it('shows a sent revision\'s files read-only, and an unsent one\'s as editable', async () => {
+    const second = twoRevisions()
+    const [first] = revisionsOf(ITEM_DRAFT)
+    await api.addRevisionAttachment(ORDER_DRAFT, ITEM_DRAFT, first!.id, photo('seen.png'), { role: 'render' })
+    await api.addRevisionAttachment(ORDER_DRAFT, ITEM_DRAFT, second.id, photo('draft.png'), { role: 'render' })
+    render(ORDER_DRAFT, ITEM_DRAFT)
+    const seen = within(await screen.findByRole('group', { name: 'Files of revision 1' }))
+    expect(seen.getByText('seen.png', { exact: false })).toBeInTheDocument()
+    expect(seen.queryByRole('button', { name: 'Remove' })).toBeNull()
+    expect(seen.queryByRole('combobox', { name: 'Role of seen.png' })).toBeNull()
+    expect(seen.queryByRole('textbox', { name: 'Caption for seen.png' })).toBeNull()
+    const draft = within(screen.getByRole('group', { name: 'Files of revision 2' }))
+    expect(draft.getByRole('button', { name: 'Remove' })).toBeInTheDocument()
+    expect(draft.getByRole('textbox', { name: 'Caption for draft.png' })).toBeInTheDocument()
+  })
+
   it('offers add to model photos only on an accepted revision', async () => {
     const first = revisionsOf(ITEM_DRAFT)[0]!
     await api.addRevisionAttachment(ORDER_DRAFT, ITEM_DRAFT, first.id, photo('printed.png'), { role: 'test_print' })

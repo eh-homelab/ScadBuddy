@@ -54,6 +54,7 @@ from scadbuddy.orders.lifecycle import LifecycleError
 from scadbuddy.orders.models import (
     INLINE,
     MAX_ATTACHMENT_CAPTION,
+    REVISION_ROLES,
     THUMBNAILED,
     Attachment,
     AttachmentPatch,
@@ -148,15 +149,17 @@ async def _require(
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no revision {revision_id!r} of that item")
 
 
-def _role(received: media_api.ReceivedUpload) -> str:
+def _role(received: media_api.ReceivedUpload, *, revision: bool) -> str:
+    """The sent role; a `render` or a `test_print` only on a design revision."""
     sent = bytes(received.fields.get("role", b"")).decode("utf-8", "replace").strip()
     if not sent:
         return "other"
-    if sent not in ROLES:
+    roles = ROLES if revision else tuple(r for r in ROLES if r not in REVISION_ROLES)
+    if sent not in roles:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"role is one of {', '.join(ROLES)}",
-            errors=[{"loc": ["body", "role"], "msg": f"not one of {', '.join(ROLES)}"}],
+            f"role is one of {', '.join(roles)}",
+            errors=[{"loc": ["body", "role"], "msg": f"not one of {', '.join(roles)}"}],
         )
     return sent
 
@@ -225,7 +228,7 @@ async def _upload(
             "kind": kind,
             "media_type": media_type,
             "size": received.sizes["file"],
-            "role": _role(received),
+            "role": _role(received, revision=revision_id is not None),
             "caption": _caption(received),
             # Ruling 12: who added it comes from the author header, never the body.
             "by": current_actor().model_dump(mode="json"),
@@ -281,8 +284,9 @@ _UPLOAD_DOC: dict[str, Any] = {
 _UPLOAD_TEXT = (
     "Any file, up to `media_upload_max_bytes` (`GET /settings`), with an optional "
     "`caption` and `role` (`reference`, `issue`, `finished`, `packed`, `timelapse` or "
-    "`other`). What it is (`kind`, `media_type`) comes from its bytes: a photo, a video, "
-    "a PDF, or `other`, which is only ever served as a download. Kept in ScadBuddy's own "
+    "`other`; a design revision's file may also be a `render` or a `test_print`). What "
+    "it is (`kind`, `media_type`) comes from its bytes: a photo, a video, a PDF, or "
+    "`other`, which is only ever served as a download. Kept in ScadBuddy's own "
     "store for as long as the attachment stands. Allowed in any state of the order."
 )
 
@@ -460,6 +464,12 @@ async def get_attachment_thumbnail(
     "/{order_id}/attachments/{attachment_id}",
     response_model=Attachment,
     summary="Caption or re-role an attachment",
+    description=(
+        "A field left out stays; each change is on the audit line. 422 `role` for a "
+        "`render` or a `test_print` outside a design revision. 409 `revision_sent` for a "
+        "file of a design revision sent to the customer or answered: it is the record of "
+        "what they saw."
+    ),
 )
 async def patch_attachment(
     order_id: str, attachment_id: str, body: AttachmentPatch, orders: OrdersDep
@@ -632,7 +642,8 @@ async def attachment_to_model(
         sniffed = sniff_kind(handle.read(SNIFF_BYTES))
     if sniffed is None:
         raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, "the file is not a PNG, JPEG or WebP image"
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "the file is not a PNG, JPEG or WebP image, or an MP4 or WebM video",
         )
     media_kind, extension, _ = sniffed
     limit = state.settings.media_upload_max_bytes

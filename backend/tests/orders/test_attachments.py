@@ -11,6 +11,7 @@ from scadbuddy.orders.models import (
     SHOWN_IMAGES,
     THUMBNAILED,
     Attachment,
+    AttachmentPatch,
     AttachmentRole,
     Order,
     OrderItem,
@@ -233,6 +234,79 @@ def test_a_file_of_a_sent_revision_stays(shop: Shop, answer: str | None) -> None
         shop.lifecycle.remove_attachment(order.id, att.id, BY)
     assert refused.value.slug == "revision_sent" and not refused.value.unprocessable
     assert [a.id for a in shop.rows.attachments(order.id)] == [att.id]
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize(
+    "patch", [AttachmentPatch(role="test_print"), AttachmentPatch(caption="another")]
+)
+def test_a_file_of_a_sent_revision_keeps_its_role_and_caption(
+    shop: Shop, patch: AttachmentPatch
+) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    att = attach_to(shop, order, item, rev)
+    with shop.rows.transaction() as conn:
+        shop.rows.stamp_revision(conn, rev.id, sent_at=NOW)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.edit_attachment(order.id, att.id, patch, BY)
+    assert refused.value.slug == "revision_sent"
+    [kept] = shop.rows.attachments(order.id)
+    assert (kept.role, kept.caption) == ("render", "")
+
+
+@pytest.mark.requires_postgres
+def test_an_unsent_revisions_file_is_re_roled(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    att = attach_to(shop, order, item, rev)
+    edited = shop.lifecycle.edit_attachment(
+        order.id, att.id, AttachmentPatch(role="reference", caption="sketch"), BY
+    )
+    assert (edited.role, edited.caption) == ("reference", "sketch")
+
+
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize("role", ["render", "test_print"])
+def test_only_a_revision_takes_a_revision_role(shop: Shop, role: AttachmentRole) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.add_attachment(
+            order.id,
+            item.id,
+            BY,
+            attachment_id="att-plain",
+            kind="image",
+            role=role,
+            filename="p.png",
+            media_type="image/png",
+            size_bytes=1,
+            sha256="d" * 64,
+            blob_key="attachment-" + "d" * 64,
+            caption="",
+        )
+    assert (refused.value.slug, refused.value.unprocessable) == ("role", True)
+    plain = shop.lifecycle.add_attachment(
+        order.id,
+        item.id,
+        BY,
+        attachment_id="att-plain",
+        kind="image",
+        role="finished",
+        filename="p.png",
+        media_type="image/png",
+        size_bytes=1,
+        sha256="d" * 64,
+        blob_key="attachment-" + "d" * 64,
+        caption="",
+    )
+    with pytest.raises(LifecycleError) as reroled:
+        shop.lifecycle.edit_attachment(order.id, plain.id, AttachmentPatch(role=role), BY)
+    assert (reroled.value.slug, reroled.value.unprocessable) == ("role", True)
+    assert shop.rows.attachments(order.id)[0].role == "finished"
 
 
 @pytest.mark.requires_postgres
