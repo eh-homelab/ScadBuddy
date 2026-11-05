@@ -23,6 +23,7 @@ import httpx
 import psycopg
 import pytest
 from google.protobuf.timestamp_pb2 import Timestamp
+from prometheus_client import Counter, Gauge, Histogram
 from temporalio import workflow
 from temporalio.api.common.v1 import Payload
 from temporalio.api.deployment.v1 import (
@@ -53,7 +54,7 @@ from temporalio.worker import (
 
 from scadbuddy import worker as worker_module
 from scadbuddy.core.config import Config
-from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.metrics import ROLE_SERIES, Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
@@ -245,6 +246,9 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
     # Refreshed per scrape from this process's store (the local one: no cache to size).
     assert samples["scadbuddy_store_render_key_fallback"] == 0
     assert samples["scadbuddy_worker_cache_bytes"] == 0
+    # None of the API's series, whose zeros would fire its alerts (#664).
+    assert "scadbuddy_render_store_up" not in metrics
+    assert not _families(metrics) & API_ONLY
 
 
 # ── the drain after stop ───────────────────────────────────────────────────────
@@ -2042,6 +2046,129 @@ async def test_the_worker_exports_its_cache_size_and_whether_it_holds_the_full_k
     )
     allocated = int(du.stdout.split()[0])
     assert samples["scadbuddy_render_data_bytes"] == allocated >= 100_000
+
+
+def _families(exposition: str) -> set[str]:
+    """The metric families an exposition declares, by their ``# TYPE`` lines (a
+    counter's without its ``_total``)."""
+    return {
+        line.split()[2].removesuffix("_total")
+        for line in exposition.splitlines()
+        if line.startswith("# TYPE ")
+    }
+
+
+#: Series only the API sets (#664): a worker that exported them would show its zeros,
+#: and `scadbuddy_render_store_up 0` fires ScadBuddyRenderStoreUnreadable.
+API_ONLY = {
+    "scadbuddy_render_store_up",
+    "scadbuddy_render_store_info",
+    "scadbuddy_render_store_errors",
+    "scadbuddy_render_queue_depth",
+    "scadbuddy_render_queue_oldest_seconds",
+    "scadbuddy_render_queue_max",
+    "scadbuddy_render_jobs_running",
+    "scadbuddy_render_jobs_submitted",
+    "scadbuddy_render_queue_listener_connected",
+    "scadbuddy_render_settle_failed",
+    "scadbuddy_store_blobs",
+    "scadbuddy_assets_stored",
+    "scadbuddy_trace_relay_batches",
+    "scadbuddy_auth_would_refuse",
+    "scadbuddy_http_requests",
+    "scadbuddy_native_slice_seconds",
+}
+
+#: What each worker sets, so what its /metrics must carry.
+WORKER_OWN = {
+    "render": {
+        "scadbuddy_build_info",
+        "scadbuddy_render_jobs_finished",
+        "scadbuddy_render_duration_seconds",
+        "scadbuddy_render_job_latency_seconds",
+        "scadbuddy_render_queue_wait_seconds",
+        "scadbuddy_render_stage_seconds",
+        "scadbuddy_render_project_retries",
+        "scadbuddy_store_operations",
+        "scadbuddy_worker_cache",
+        "scadbuddy_worker_cache_bytes",
+        "scadbuddy_render_data_bytes",
+        "scadbuddy_store_render_key_fallback",
+        "scadbuddy_events_published",
+        "scadbuddy_event_loop_lag_seconds",
+    },
+    "print": {
+        "scadbuddy_build_info",
+        "scadbuddy_print_follows_running",
+        "scadbuddy_rack_watch_settle_failed",
+        "scadbuddy_events_received",
+        "scadbuddy_event_loop_lag_seconds",
+    },
+    "projects": {
+        "scadbuddy_build_info",
+        "scadbuddy_events_received",
+        "scadbuddy_event_loop_lag_seconds",
+    },
+}
+
+
+@pytest.mark.parametrize("role", ["render", "print", "projects"])
+def test_a_worker_exports_its_own_series_and_none_of_the_apis(role: str) -> None:
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+        revision="abc123",
+    )
+    metrics = worker_module.worker_metrics(settings, cast(MetricsRole, role))
+    exposed = _families(metrics.exposition().decode())
+    assert exposed >= WORKER_OWN[role]
+    assert not exposed & API_ONLY
+    assert 'revision="abc123"' in metrics.exposition().decode()
+    if role != "render":
+        assert "scadbuddy_render_stage_seconds" not in exposed
+        assert "scadbuddy_worker_cache_bytes" not in exposed
+
+
+async def test_the_render_workers_scrape_carries_no_api_series(tmp_path: Path) -> None:
+    """The scrape itself (#664): the store refresh and the SDK series added to it."""
+    local = LocalBlobStore(tmp_path / "blobs")
+    cache = CachedBlobStore(
+        local, cast(ContentStore, SimpleNamespace(name="bambuddy")), max_bytes=0, min_age=0
+    )
+    store = StoreBundle(
+        "bambuddy", cache, None, None, None, None, cast(RenderSettingsSource, _Source())
+    )
+    settings = Settings(
+        data_dir=tmp_path,
+        database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
+    )
+    app = worker_module._health_app(
+        settings, worker_module.worker_metrics(settings, "render"), store, "render"
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://worker") as http:
+        exposition = (await http.get("/metrics")).text
+    exposed = _families(exposition)
+    assert "scadbuddy_render_store_up" not in exposition
+    assert not exposed & API_ONLY
+    assert exposed >= WORKER_OWN["render"]
+
+
+def test_every_role_names_only_metrics_that_exist() -> None:
+    metrics = Metrics()
+    for role, names in ROLE_SERIES.items():
+        for name in names:
+            assert isinstance(getattr(metrics, name, None), Counter | Gauge | Histogram), (
+                role,
+                name,
+            )
+
+
+def test_the_api_exports_every_series() -> None:
+    exposed = _families(Metrics().exposition().decode())
+    assert exposed >= API_ONLY
+    assert exposed >= set().union(*WORKER_OWN.values())
 
 
 async def test_the_data_directory_is_measured_when_the_database_is_down(
