@@ -137,7 +137,7 @@ flowchart LR
   A[agent sidecar + worker<br/>owner role] --> DB
   D[agent-durable<br/>owner role, 0 replicas] --> DB
   API -.reads/writes 8 ai_* tables.-> DB
-  J -.reads 5 ai_* tables.-> DB
+  J -.reads/writes 5 ai_* tables.-> DB
   A -.reads events, workflow_runs; writes blob_refs.-> DB
 ```
 
