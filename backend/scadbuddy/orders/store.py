@@ -29,6 +29,7 @@ from scadbuddy.orders.models import (
     Address,
     AddressInput,
     AddressSnapshot,
+    Approval,
     Attachment,
     AttachmentKind,
     AttachmentRole,
@@ -42,6 +43,8 @@ from scadbuddy.orders.models import (
     FilamentInput,
     FilamentPatch,
     Fulfilment,
+    FulfilmentPurpose,
+    ItemKind,
     ItemStatus,
     Order,
     OrderEvent,
@@ -55,6 +58,8 @@ from scadbuddy.orders.models import (
     QuoteLine,
     QuoteSource,
     Reference,
+    Revision,
+    RevisionAnswer,
     Shipment,
     ShipmentItem,
 )
@@ -116,17 +121,21 @@ _ORDER = (
 _ITEM = (
     "id, order_id, position, status, quantity, title, notes, kind, requires_printing, sku,"
     " slug, commit, inputs, libraries, template_name, render_key, colours, output_id,"
-    " delivered_attachment_id, created_at, updated_at"
+    " delivered_attachment_id, current_revision_id, approval, created_at, updated_at"
+)
+_REVISION = (
+    "id, item_id, number, slug, commit, inputs, libraries, template_name, render_key, colours,"
+    " note, created_at, created_by, sent_at, answer, answer_note, answered_at, answered_by"
 )
 _QUOTE = (
     "id, order_item_id, created_at, source, accepted, sliced_sha256, sliced_blob_key, plates,"
-    " lines, unit_cost_minor, unit_price_minor, quantity, total_minor, created_by"
+    " lines, unit_cost_minor, unit_price_minor, quantity, total_minor, created_by, revision_id"
 )
 _FULFILMENT = (
     "id, order_item_id, attempt, quantity, outcome, failure_reason, started_at, finished_at,"
     " notes, accepted_at, created_by, created_at, print_run_id, sliced_sha256, sliced_blob_key,"
     " printer, copies, print_request_id, printer_serial, printer_name, bambuddy_printer_id,"
-    " archive_ids, actual_seconds, actual_grams"
+    " archive_ids, actual_seconds, actual_grams, purpose, revision_id"
 )
 _SHIPMENT = (
     "id, order_id, carrier, service, tracking, shipped_at, address, cost_minor, notes, created_at"
@@ -136,7 +145,7 @@ _PAYMENT = "id, order_id, amount_minor, method, reference, received_at, notes, c
 _EVENT = "id, order_id, at, by, kind, detail"
 _ATTACHMENT = (
     "id, order_id, subject, kind, role, filename, media_type, size_bytes, sha256, blob_key,"
-    " caption, created_at, created_by, attempt_item_id"
+    " caption, created_at, created_by, attempt_item_id, fulfilment_id"
 )
 
 #: The status timestamps `set_order_status` stamps (§3.2).
@@ -182,9 +191,9 @@ def _item_of(row: DictRow) -> OrderItem:
         kind=row["kind"],
         requires_printing=row["requires_printing"],
         sku=row["sku"],
-        # The table's check keeps a model item's reference columns whole (#4954).
+        # The table's check keeps the reference columns whole or all null (#4954).
         reference=None
-        if row["kind"] == "custom"
+        if row["slug"] is None
         else Reference(
             slug=row["slug"],
             commit=row["commit"],
@@ -196,8 +205,35 @@ def _item_of(row: DictRow) -> OrderItem:
         colours=row["colours"],
         output_id=row["output_id"],
         delivered_attachment_id=row["delivered_attachment_id"],
+        current_revision_id=row["current_revision_id"],
+        approval=row["approval"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _revision_of(row: DictRow) -> Revision:
+    return Revision(
+        id=row["id"],
+        item_id=row["item_id"],
+        number=row["number"],
+        reference=Reference(
+            slug=row["slug"],
+            commit=row["commit"],
+            inputs=row["inputs"],
+            libraries=row["libraries"],
+            template_name=row["template_name"],
+            render_key=row["render_key"],
+        ),
+        colours=row["colours"],
+        note=row["note"],
+        created_at=row["created_at"],
+        created_by=row["created_by"],
+        sent_at=row["sent_at"],
+        answer=row["answer"],
+        answer_note=row["answer_note"],
+        answered_at=row["answered_at"],
+        answered_by=row["answered_by"],
     )
 
 
@@ -228,6 +264,11 @@ def fulfilment_subject(fulfilment_id: str) -> str:
     return f"order_item_fulfilment:{fulfilment_id}"
 
 
+def revision_subject(revision_id: str) -> str:
+    """A design revision's attachment subject (storefront spec §4)."""
+    return f"order_item_revision:{revision_id}"
+
+
 def _project_of(row: DictRow) -> OrderProject:
     kind, _, subject_id = str(row["subject"]).partition(":")
     return OrderProject(
@@ -242,13 +283,15 @@ def _attachment_of(row: DictRow) -> tuple[Attachment, str]:
     subject: str = row["subject"]
     kind, _, subject_id = subject.partition(":")
     attempt = kind == "order_item_fulfilment"
+    revision = kind == "order_item_revision"
     return (
         Attachment(
             id=row["id"],
             order_id=row["order_id"],
             subject=subject,
             item_id=subject_id if kind == "order_item" else row["attempt_item_id"],
-            fulfilment_id=subject_id if attempt else None,
+            fulfilment_id=subject_id if attempt else row["fulfilment_id"],
+            revision_id=subject_id if revision else None,
             kind=row["kind"],
             role=row["role"],
             filename=row["filename"],
@@ -872,34 +915,43 @@ class OrderStore:
         conn: Conn,
         order_id: str,
         *,
-        reference: Reference,
+        kind: ItemKind = "model",
+        reference: Reference | None,
         colours: Sequence[ColourSlot],
         output_id: str | None,
         quantity: int,
         title: str | None = None,
         notes: str = "",
         sku: str | None = None,
+        approval: Approval | None = None,
     ) -> OrderItem:
-        """Appended after the order's items; ``title`` defaults to the template's name."""
+        """Appended after the order's items; ``title`` defaults to the template's name
+        and is required for a ``request`` item, which has no reference yet. ``approval``
+        None picks the kind's default: a request is approved design first."""
+        name = title or (reference.template_name if reference is not None else None)
+        if name is None:
+            raise ValueError("an item without a reference needs a title")
         row = conn.execute(
-            "INSERT INTO order_items (order_id, position, quantity, title, notes, sku, slug,"
-            " commit, inputs, libraries, template_name, render_key, colours, output_id)"
-            " VALUES (%s, (SELECT COALESCE(MAX(position) + 1, 0) FROM order_items"
+            "INSERT INTO order_items (order_id, position, kind, quantity, title, notes, sku,"
+            " approval, slug, commit, inputs, libraries, template_name, render_key, colours,"
+            " output_id) VALUES (%s, (SELECT COALESCE(MAX(position) + 1, 0) FROM order_items"
             " WHERE order_id = %s),"
-            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
+            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_ITEM}",
             (
                 order_id,
                 order_id,
+                kind,
                 quantity,
-                title or reference.template_name,
+                name,
                 notes,
                 sku,
-                reference.slug,
-                reference.commit,
-                Jsonb(reference.inputs),
-                Jsonb(_dump(reference.libraries)),
-                reference.template_name,
-                reference.render_key,
+                approval or ("design_first" if kind == "request" else "together"),
+                None if reference is None else reference.slug,
+                None if reference is None else reference.commit,
+                None if reference is None else Jsonb(reference.inputs),
+                Jsonb(_dump(reference.libraries if reference is not None else [])),
+                None if reference is None else reference.template_name,
+                None if reference is None else reference.render_key,
                 Jsonb(_dump(list(colours))),
                 output_id,
             ),
@@ -948,8 +1000,6 @@ class OrderStore:
         conn: Conn,
         item_id: str,
         *,
-        reference: Reference | UnsetType = UNSET,
-        colours: Sequence[ColourSlot] | UnsetType = UNSET,
         output_id: str | UnsetType | None = UNSET,
         quantity: int | UnsetType = UNSET,
         title: str | UnsetType = UNSET,
@@ -957,9 +1007,10 @@ class OrderStore:
         status: ItemStatus | UnsetType = UNSET,
         sku: str | UnsetType | None = UNSET,
         requires_printing: bool | UnsetType = UNSET,
+        approval: Approval | UnsetType = UNSET,
     ) -> OrderItem:
-        """A ``reference`` makes the item a ``model`` item, a custom one too: a source
-        attached to it (#4954) puts it on the normal flow."""
+        """The item's own fields; its design (reference and colours) is `set_design`'s
+        alone (spec 2026-11-02 §4.1)."""
         fields: dict[str, Any] = {
             "output_id": output_id,
             "quantity": quantity,
@@ -968,29 +1019,131 @@ class OrderStore:
             "status": status,
             "sku": sku,
             "requires_printing": requires_printing,
-            "colours": _jsonb(list(colours) if isinstance(colours, Sequence) else colours),
+            "approval": approval,
         }
-        if isinstance(reference, Reference):
-            fields.update(
-                kind="model",
-                requires_printing=True,
-                slug=reference.slug,
-                commit=reference.commit,
-                inputs=Jsonb(reference.inputs),
-                libraries=Jsonb(_dump(reference.libraries)),
-                template_name=reference.template_name,
-                render_key=reference.render_key,
-            )
         row = _update(conn, "order_items", item_id, fields, _ITEM)
         if row is None:
             raise LookupError(f"no order item {item_id}")
         return _item_of(row)
 
-    def set_item_filaments(
-        self, conn: Conn, item_id: str, colours: Sequence[ColourSlot]
+    def insert_revision(
+        self,
+        conn: Conn,
+        item_id: str,
+        *,
+        reference: Reference,
+        colours: Sequence[ColourSlot],
+        note: str,
+        created_by: Actor,
+    ) -> Revision:
+        """The item's next revision, numbered under the order's lock, which every writer
+        of an item holds."""
+        row = conn.execute(
+            "INSERT INTO order_item_revisions (item_id, number, slug, commit, inputs,"
+            " libraries, template_name, render_key, colours, note, created_by)"
+            " VALUES (%s, (SELECT COALESCE(MAX(number) + 1, 1) FROM order_item_revisions"
+            " WHERE item_id = %s), %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            f" RETURNING {_REVISION}",
+            (
+                item_id,
+                item_id,
+                reference.slug,
+                reference.commit,
+                Jsonb(reference.inputs),
+                Jsonb(_dump(reference.libraries)),
+                reference.template_name,
+                reference.render_key,
+                Jsonb(_dump(list(colours))),
+                note,
+                Jsonb(created_by.model_dump(mode="json")),
+            ),
+        ).fetchone()
+        assert row is not None
+        return _revision_of(row)
+
+    def set_design(
+        self, conn: Conn, item_id: str, revision: Revision, *, output_id: str | None
     ) -> OrderItem:
-        """The item's colour slots with their price-book filaments (§3.3, #4250)."""
-        return self.update_item(conn, item_id, colours=colours)
+        """The item's reference, colours and output as a copy of ``revision``, which it
+        then names as current. A ``custom`` item becomes a ``model`` item (#4954)."""
+        reference = revision.reference
+        row = conn.execute(
+            "UPDATE order_items SET slug = %s, commit = %s, inputs = %s, libraries = %s,"
+            " template_name = %s, render_key = %s, colours = %s, output_id = %s,"
+            " current_revision_id = %s,"
+            " kind = CASE WHEN kind = 'custom' THEN 'model' ELSE kind END,"
+            " requires_printing = CASE WHEN kind = 'custom' THEN true ELSE requires_printing END,"
+            f" updated_at = now() WHERE id = %s RETURNING {_ITEM}",
+            (
+                reference.slug,
+                reference.commit,
+                Jsonb(reference.inputs),
+                Jsonb(_dump(reference.libraries)),
+                reference.template_name,
+                reference.render_key,
+                Jsonb(_dump(revision.colours)),
+                output_id,
+                revision.id,
+                item_id,
+            ),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"no order item {item_id}")
+        return _item_of(row)
+
+    def amend_revision_colours(
+        self, conn: Conn, revision_id: str, colours: Sequence[ColourSlot]
+    ) -> Revision:
+        """The revision's colour slots replaced in place: the colours' fill of an item
+        made by hand, which changes no design (``Lifecycle._revise`` with ``amend``)."""
+        row = conn.execute(
+            f"UPDATE order_item_revisions SET colours = %s WHERE id = %s RETURNING {_REVISION}",
+            (Jsonb(_dump(list(colours))), revision_id),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"no revision {revision_id}")
+        return _revision_of(row)
+
+    def revision(self, revision_id: str, *, conn: Conn | None = None) -> Revision | None:
+        with self._read(conn) as c:
+            row = c.execute(
+                f"SELECT {_REVISION} FROM order_item_revisions WHERE id = %s", (revision_id,)
+            ).fetchone()
+        return None if row is None else _revision_of(row)
+
+    def revisions(self, item_id: str, *, conn: Conn | None = None) -> list[Revision]:
+        with self._read(conn) as c:
+            rows = c.execute(
+                f"SELECT {_REVISION} FROM order_item_revisions WHERE item_id = %s ORDER BY number",
+                (item_id,),
+            ).fetchall()
+        return [_revision_of(r) for r in rows]
+
+    def stamp_revision(
+        self,
+        conn: Conn,
+        revision_id: str,
+        *,
+        sent_at: datetime | UnsetType = UNSET,
+        answer: RevisionAnswer | UnsetType = UNSET,
+        answer_note: str | UnsetType | None = UNSET,
+        answered_at: datetime | UnsetType = UNSET,
+        answered_by: Actor | UnsetType = UNSET,
+    ) -> Revision:
+        """The revision with the fields given set; a field left out stays."""
+        fields: dict[str, Any] = {
+            "sent_at": sent_at,
+            "answer": answer,
+            "answer_note": answer_note,
+            "answered_at": answered_at,
+            "answered_by": answered_by
+            if isinstance(answered_by, UnsetType)
+            else Jsonb(answered_by.model_dump(mode="json")),
+        }
+        row = _update(conn, "order_item_revisions", revision_id, fields, _REVISION, stamp=False)
+        if row is None:
+            raise LookupError(f"no revision {revision_id}")
+        return _revision_of(row)
 
     def delete_draft_item(self, conn: Conn, item_id: str) -> bool:
         """Deletes the item while it is `draft` (Ruling 6, 10); False when it is not."""
@@ -1000,12 +1153,15 @@ class OrderStore:
         return deleted is not None
 
     def item_inputs(self) -> Iterator[dict[str, Any]]:
-        """Every item's ``inputs``, for the asset scan (§3.3): the uploads they name stay."""
+        """Every item's and every revision's ``inputs``, for the asset scan (§3.3): the
+        uploads they name stay."""
         with self._pool.connection() as c:
             # A custom item (#4954) names no inputs, and so no upload.
             for row in c.execute(
                 "SELECT inputs FROM order_items WHERE inputs IS NOT NULL ORDER BY created_at, id"
             ):
+                yield row["inputs"]
+            for row in c.execute("SELECT inputs FROM order_item_revisions ORDER BY created_at, id"):
                 yield row["inputs"]
 
     # -- quotes (§3.4) ----------------------------------------------------------------
@@ -1025,14 +1181,15 @@ class OrderStore:
         sliced_sha256: str | None = None,
         sliced_blob_key: str | None = None,
         quote_id: str | None = None,
+        revision_id: str | None = None,
     ) -> Quote:
         """``quote_id`` when the caller made it first: a slice quote's ref is taken
         under it before the row exists (#4250 Ruling 3)."""
         row = conn.execute(
             "INSERT INTO order_item_quotes (id, order_item_id, source, sliced_sha256,"
             " sliced_blob_key, plates, lines, unit_cost_minor, unit_price_minor, quantity,"
-            " total_minor, created_by) VALUES (COALESCE(%s, gen_random_uuid()::text),"
-            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_QUOTE}",
+            " total_minor, created_by, revision_id) VALUES (COALESCE(%s, gen_random_uuid()::text),"
+            f" %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_QUOTE}",
             (
                 quote_id,
                 item_id,
@@ -1046,6 +1203,7 @@ class OrderStore:
                 quantity,
                 unit_price_minor * quantity,
                 Jsonb(created_by.model_dump(mode="json")),
+                revision_id,
             ),
         ).fetchone()
         assert row is not None
@@ -1161,17 +1319,19 @@ class OrderStore:
         sliced_sha256: str | None = None,
         sliced_blob_key: str | None = None,
         archive_ids: Sequence[int] = (),
+        purpose: FulfilmentPurpose = "production",
+        revision_id: str | None = None,
     ) -> Fulfilment:
         """The item's next attempt; numbered under the order's lock, which every writer
         of an item holds. ``print_request_id`` and the rest are the print path's claim
         (#4719), made before its print starts; ``archive_ids`` the archive a person
-        named (#4251)."""
+        named (#4251). A ``test`` attempt names the ``revision_id`` it printed."""
         row = conn.execute(
             "INSERT INTO order_item_fulfilments (order_item_id, attempt, quantity, outcome,"
             " failure_reason, started_at, finished_at, notes, created_by, print_request_id,"
-            " copies, sliced_sha256, sliced_blob_key, archive_ids)"
+            " copies, sliced_sha256, sliced_blob_key, archive_ids, purpose, revision_id)"
             " VALUES (%s, (SELECT COALESCE(MAX(attempt) + 1, 1) FROM order_item_fulfilments"
-            " WHERE order_item_id = %s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " WHERE order_item_id = %s), %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             f" RETURNING {_FULFILMENT}",
             (
                 item_id,
@@ -1188,6 +1348,8 @@ class OrderStore:
                 sliced_sha256,
                 sliced_blob_key,
                 list(archive_ids),
+                purpose,
+                revision_id,
             ),
         ).fetchone()
         assert row is not None
@@ -1350,6 +1512,19 @@ class OrderStore:
             ).fetchone()
         return row is not None
 
+    def print_in_flight(self, item_id: str, *, conn: Conn | None = None) -> Fulfilment | None:
+        """The item's print attempt still open, of either purpose, if any: claimed for a
+        print (its run attached or not yet), its outcome not yet known and no end
+        recorded, as ``following`` reads an open attempt."""
+        with self._read(conn) as c:
+            row = c.execute(
+                f"SELECT {_FULFILMENT} FROM order_item_fulfilments WHERE order_item_id = %s"
+                " AND print_request_id IS NOT NULL AND outcome = 'unknown'"
+                " AND finished_at IS NULL ORDER BY attempt LIMIT 1",
+                (item_id,),
+            ).fetchone()
+        return None if row is None else Fulfilment.model_validate(row)
+
     def release_print_claim(self, conn: Conn, holder_kind: str, attempt_id: str) -> None:
         """A claim whose print was refused before it started: its row and its hold go,
         in the caller's transaction, as if it was never made. A file attached to it in
@@ -1362,6 +1537,11 @@ class OrderStore:
             "UPDATE order_attachments SET subject = 'order_item:' || attempt_item_id,"
             " attempt_item_id = NULL WHERE subject = %s",
             (fulfilment_subject(attempt_id),),
+        )
+        # A test print's photo stays its revision's, naming no attempt.
+        conn.execute(
+            "UPDATE order_attachments SET fulfilment_id = NULL WHERE fulfilment_id = %s",
+            (attempt_id,),
         )
         conn.execute("DELETE FROM order_item_fulfilments WHERE id = %s", (attempt_id,))
 
@@ -1482,12 +1662,19 @@ class OrderStore:
             ).fetchone()
         return None if row is None else Fulfilment.model_validate(row)
 
-    def fulfilments(self, item_id: str, *, conn: Conn | None = None) -> list[Fulfilment]:
+    def fulfilments(
+        self,
+        item_id: str,
+        *,
+        conn: Conn | None = None,
+        purpose: FulfilmentPurpose | None = "production",
+    ) -> list[Fulfilment]:
+        """The item's attempts; ``purpose`` None is every one, test prints too."""
         with self._read(conn) as c:
             rows = c.execute(
                 f"SELECT {_FULFILMENT} FROM order_item_fulfilments WHERE order_item_id = %s"
-                " ORDER BY attempt",
-                (item_id,),
+                " AND (%s::text IS NULL OR purpose = %s) ORDER BY attempt",
+                (item_id, purpose, purpose),
             ).fetchall()
         return [Fulfilment.model_validate(r) for r in rows]
 
@@ -1654,12 +1841,15 @@ class OrderStore:
         blob_key: str,
         caption: str,
         created_by: Actor,
-        attempt_item_id: str | None = None,
+        subject_item_id: str | None = None,
+        fulfilment_id: str | None = None,
     ) -> Attachment:
         """The row and its hold on ``blob_key`` (Ruling 8), in one transaction: the
         blob was written and touched just before, so the blob sweep's grace keeps it
         until both are committed, and neither is ever there without the other.
-        ``attempt_item_id`` is the item of an attempt's file (``fulfilment_subject``)."""
+        ``subject_item_id`` is the item of an attempt's or a revision's file (the
+        ``attempt_item_id`` column); ``fulfilment_id`` the attempt a revision's test print
+        file belongs to."""
         conn.execute(
             "INSERT INTO blob_refs (key, holder_kind, holder_id) VALUES (%s, %s, %s)"
             " ON CONFLICT DO NOTHING",
@@ -1667,8 +1857,8 @@ class OrderStore:
         )
         row = conn.execute(
             "INSERT INTO order_attachments (id, order_id, subject, kind, role, filename,"
-            " media_type, size_bytes, sha256, blob_key, caption, created_by, attempt_item_id)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+            " media_type, size_bytes, sha256, blob_key, caption, created_by, attempt_item_id,"
+            " fulfilment_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
             f" RETURNING {_ATTACHMENT}",
             (
                 attachment_id,
@@ -1683,7 +1873,8 @@ class OrderStore:
                 blob_key,
                 caption,
                 Jsonb(created_by.model_dump(mode="json")),
-                attempt_item_id,
+                subject_item_id,
+                fulfilment_id,
             ),
         ).fetchone()
         assert row is not None

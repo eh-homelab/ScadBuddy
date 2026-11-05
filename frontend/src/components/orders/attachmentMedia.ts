@@ -10,9 +10,12 @@ export const ROLE_LABELS: Record<OrderAttachmentRole, string> = {
   finished: 'Finished print',
   packed: 'Packed',
   timelapse: 'Timelapse',
+  render: 'Design render',
+  test_print: 'Test print',
   other: 'Other',
 }
-export const ROLES = Object.keys(ROLE_LABELS) as OrderAttachmentRole[]
+/** What a person files a file under; `render` and `test_print` belong to a design revision. */
+export const ROLES = (Object.keys(ROLE_LABELS) as OrderAttachmentRole[]).filter((r) => r !== 'render' && r !== 'test_print')
 /*
  * The three type sets copy `orders/models.py`'s. The spec publishes the backend's on
  * `Attachment.media_type` (`x-inline`, `x-shown-images`, `x-thumbnailed`), and

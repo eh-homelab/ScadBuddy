@@ -189,7 +189,7 @@ export function OrderAttachments({
   )
 }
 
-function FilePick({
+export function FilePick({
   label,
   icon,
   accept,
@@ -229,7 +229,7 @@ function FilePick({
 
 type Busy = 'caption' | 'role' | 'delete' | 'delivered' | 'download'
 
-function AttachmentCard({
+export function AttachmentCard({
   orderId,
   itemId,
   attachment,
@@ -304,7 +304,7 @@ function AttachmentCard({
                 <SelectValue />
               </SelectTrigger>
               <SelectContent position="popper">
-                {ROLES.map((r) => (
+                {(ROLES.some((r) => r === attachment.role) ? ROLES : [attachment.role]).map((r) => (
                   <SelectItem key={r} value={r}>
                     {ROLE_LABELS[r]}
                   </SelectItem>

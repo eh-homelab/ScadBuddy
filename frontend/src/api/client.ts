@@ -222,6 +222,9 @@ import type {
   PolicyUpdate,
   PriceBook,
   Quote,
+  Revision,
+  RevisionAnswerInput,
+  RevisionCreate,
   OrderItemPrintRequest,
   SliceQuoteRequest,
   SpoolImport,
@@ -2322,6 +2325,46 @@ export const api = {
       },
       onProgress,
     ),
+  // -- design revisions (#5280, storefront spec 2026-11-02 §4) -----------------------------
+  addOrderItemRevision: (orderId: string, itemId: string, body: RevisionCreate) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions`, { method: 'POST', body: JSON.stringify(body) }),
+  sendOrderItemRevision: (orderId: string, itemId: string, revisionId: string) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/send`, { method: 'POST' }),
+  answerOrderItemRevision: (orderId: string, itemId: string, revisionId: string, body: RevisionAnswerInput) =>
+    request<Revision>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/answer`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** A file on one revision: its `render`, a `reference`, or (with `fulfilmentId`) the photo of its test print. */
+  addRevisionAttachment: (
+    orderId: string,
+    itemId: string,
+    revisionId: string,
+    file: File,
+    opts: { role: OrderAttachmentRole; caption?: string; fulfilmentId?: string | null },
+    onProgress?: (fraction: number) => void,
+  ): Promise<OrderAttachment> =>
+    uploadForm<OrderAttachment>(
+      `/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/attachments`,
+      () => {
+        const body = new FormData()
+        body.append('file', file)
+        body.append('role', opts.role)
+        if (opts.caption) body.append('caption', opts.caption)
+        if (opts.fulfilmentId) body.append('fulfilment_id', opts.fulfilmentId)
+        return body
+      },
+      onProgress,
+    ),
+  /** A test print of the item's newest revision: one copy, an attempt of purpose `test`. */
+  testPrintRevision: (orderId: string, itemId: string, revisionId: string, body: PrintRunRequest) =>
+    command<Fulfilment>(`/orders/${seg(orderId)}/items/${seg(itemId)}/revisions/${seg(revisionId)}/test-print`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  /** A test-print photo of an accepted revision, copied into its template's photos. */
+  revisionPhotoToModel: (orderId: string, attachmentId: string) =>
+    command<ModelSummary>(`/orders/${seg(orderId)}/attachments/${seg(attachmentId)}/to-model`, { method: 'POST' }),
   updateOrderAttachment: (orderId: string, id: string, body: OrderAttachmentPatch) =>
     request<OrderAttachment>(`/orders/${seg(orderId)}/attachments/${seg(id)}`, { method: 'PATCH', body: JSON.stringify(body) }),
   deleteOrderAttachment: (orderId: string, id: string) =>

@@ -1335,7 +1335,17 @@ class Catalogue:
         added = self.paths.builtin_media_dir(upstream_id)
         for view in listing:
             item = MediaItem.model_validate(
-                view.model_dump(include={"id", "file", "kind", "caption", "poster"})
+                view.model_dump(
+                    include={
+                        "id",
+                        "file",
+                        "kind",
+                        "caption",
+                        "poster",
+                        "source_commit",
+                        "source_revision_id",
+                    }
+                )
             )
             if view.readonly and view.id == LEGACY_ID and view.file == THUMBNAIL_NAME:
                 if len(listing) == 1:
@@ -1739,6 +1749,9 @@ class Catalogue:
         upload: StagedMedia,
         caption: str = "",
         poster: StagedMedia | None = None,
+        *,
+        source_commit: str | None = None,
+        source_revision_id: str | None = None,
     ) -> ModelRecord:
         """Move a staged upload (and its poster) into ``media/`` as the last item,
         as one revision. :class:`TooManyMediaError` at :data:`MAX_MEDIA_ITEMS`.
@@ -1753,6 +1766,8 @@ class Catalogue:
             kind=upload.kind,
             caption=caption,
             poster=f"{item_id}-poster.{poster.extension}" if poster is not None else None,
+            source_commit=source_commit,
+            source_revision_id=source_revision_id,
         )
         if is_builtin(slug):
             return self._overlay_change(

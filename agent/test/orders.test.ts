@@ -742,3 +742,103 @@ describe('order attachment tools (#4722)', () => {
     ).rejects.toThrow('item_id')
   })
 })
+
+describe('design revisions (#5280)', () => {
+  const C = 'a'.repeat(40)
+  const REVISION = '5e0f1a2b-3c4d-4e5f-8a6b-7c8d9e0f1a2b'
+  const ATT = 'ad000000-1111-4222-8333-944455556666'
+  const OPERATION = 'op000000-1111-4222-8333-944455556666'
+
+  function withWorkspace(files: Record<string, Buffer>) {
+    const ws = memoryWorkspace(files, 'image/png')
+    return { ...ws, ctx: { ...ctx(), workspace: ws.workspace } as ToolContext }
+  }
+
+  it('order_item_revision_add posts the reference and note', async () => {
+    let body: unknown
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/revisions`, async ({ request }) => {
+        body = await request.json()
+        return HttpResponse.json({ id: REVISION, status: 'draft' }, { status: 201 })
+      }),
+    )
+    await tool('order_item_revision_add').execute(
+      { order_id: ORDER, item_id: ITEM, reference: { slug: 'demo', commit: C, inputs: {} }, note: 'v2' },
+      ctx(),
+    )
+    expect(body).toEqual({ reference: { slug: 'demo', commit: C, inputs: {} }, note: 'v2' })
+  })
+
+  it('tiers the revision tools', () => {
+    expect(tool('order_item_revision_send').risk).toBe('outward')
+    expect(tool('order_item_revision_add').risk).toBe('write')
+    expect(
+      tool('order_item_revision_send').summarize?.({ order_id: ORDER, item_id: ITEM, revision_id: REVISION } as never),
+    ).toBe(`Send revision ${REVISION} of item ${ITEM} (order ${ORDER}) to the customer`)
+  })
+
+  it('order_item_revision_send posts the send', async () => {
+    let hit = false
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/revisions/${REVISION}/send`, () => {
+        hit = true
+        return HttpResponse.json({ id: REVISION, status: 'sent' })
+      }),
+    )
+    await tool('order_item_revision_send').execute({ order_id: ORDER, item_id: ITEM, revision_id: REVISION }, ctx())
+    expect(hit).toBe(true)
+  })
+
+  it('order_item_print with test_revision_id posts the test print', async () => {
+    let path = ''
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/revisions/${REVISION}/test-print`, ({ request }) => {
+        path = new URL(request.url).pathname
+        return HttpResponse.json({ id: OPERATION, status: 'running' }, { status: 202 })
+      }),
+      http.get(`${BACKEND}/api/v1/operations/${OPERATION}`, () =>
+        HttpResponse.json({ id: OPERATION, status: 'succeeded', result: { id: 'f1' } }),
+      ),
+    )
+    await tool('order_item_print').execute(
+      {
+        order_id: ORDER,
+        item_id: ITEM,
+        test_revision_id: REVISION,
+        printer_id: 1,
+        filament_plan: { slots: [] },
+        choices: { nozzles: [{ size: '0.4' }] },
+      },
+      ctx(),
+    )
+    expect(path).toBe(`/api/v1/orders/${ORDER}/items/${ITEM}/revisions/${REVISION}/test-print`)
+  })
+
+  it('order_attach with revision_id posts to the revision, with the attempt as a field', async () => {
+    let fields: Record<string, string> = {}
+    server.use(
+      http.post(`${BACKEND}/api/v1/orders/${ORDER}/items/${ITEM}/revisions/${REVISION}/attachments`, async ({ request }) => {
+        const form = await request.formData()
+        fields = Object.fromEntries([...form.entries()].filter(([, v]) => typeof v === 'string')) as Record<string, string>
+        return HttpResponse.json({ id: ATT })
+      }),
+    )
+    const bytes = Buffer.from('png bytes')
+    const { ctx: c, ref } = withWorkspace({ 'render.png': bytes })
+    await tool('order_attach').execute(
+      { order_id: ORDER, item_id: ITEM, revision_id: REVISION, fulfilment_id: 'f1', role: 'render', ...ref('render.png') },
+      c,
+    )
+    expect(fields).toEqual({ role: 'render', fulfilment_id: 'f1' })
+    const { ctx: c2, ref: ref2 } = withWorkspace({ 'render.png': bytes })
+    await expect(
+      tool('order_attach').execute({ order_id: ORDER, revision_id: REVISION, ...ref2('render.png') }, c2),
+    ).rejects.toThrow('item_id')
+  })
+
+  it('leaves the answer and to-model to the people', () => {
+    const left = NOT_A_TOOL.map((n) => n.operation)
+    expect(left).toContain('POST /api/v1/orders/{order_id}/items/{item_id}/revisions/{revision_id}/answer')
+    expect(left).toContain('POST /api/v1/orders/{order_id}/attachments/{attachment_id}/to-model')
+  })
+})

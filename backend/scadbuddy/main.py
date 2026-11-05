@@ -38,6 +38,7 @@ from scadbuddy.api import (
     mesh_models,
     metrics,
     models,
+    order_attachments,
     outputs,
     print_attachments,
     telemetry,
@@ -2052,6 +2053,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         mesh_models.MeshUpload,
         library_print.LibraryFileUploadForm,
         print_attachments.AttachmentUpload,
+        order_attachments.RevisionAttachmentUpload,
         outputs.NeedsBackfillProblem,
     )
 

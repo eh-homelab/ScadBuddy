@@ -14,6 +14,8 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from scadbuddy.orders import attachments as attachments_module
+from scadbuddy.orders.component import ORDERS
+from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import ATTACHMENT_HOLDER
 from scadbuddy.store.cache import StaleBlobError
 from tests.api.test_customers import create as create_customer
@@ -21,6 +23,7 @@ from tests.api.test_orders import AGENT, create_order
 from tests.api.test_orders_lifecycle import add_item, quote_and_accept
 from tests.api.test_settings_runtime import _state
 from tests.api.test_versions import SLUG, upload
+from tests.orders.test_lifecycle import BY
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
@@ -394,3 +397,219 @@ def test_a_file_on_an_attempt(client: TestClient) -> None:
         client, order["id"], png(), "done.png", item_id=item["id"], fulfilment_id="nope"
     )
     assert missing.status_code == 404, missing.text
+
+
+def test_a_file_on_a_revision(client: TestClient) -> None:
+    """`POST …/items/{item}/revisions/{r}/attachments`, listed under its item."""
+    order, item = shop(client)
+    revision = client.get(f"/api/v1/orders/{order['id']}").json()["items"][0]["current_revision_id"]
+    path = f"/api/v1/orders/{order['id']}/items/{item['id']}/revisions/{revision}/attachments"
+
+    answer = client.post(
+        path,
+        files={"file": ("t.png", png(), "image/png")},
+        data={"role": "test_print"},
+        headers=press(),
+    )
+
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert body["revision_id"] == revision and body["role"] == "test_print"
+    assert body["subject"] == f"order_item_revision:{revision}" and body["item_id"] == item["id"]
+    missing = client.post(
+        path.replace(revision, "nope"),
+        files={"file": ("t.png", png(), "image/png")},
+        headers=press(),
+    )
+    assert missing.status_code == 404, missing.text
+
+
+def _revision_upload(
+    client: TestClient, order: dict[str, Any], item: dict[str, Any], **fields: str
+) -> Any:
+    detail = client.get(f"/api/v1/orders/{order['id']}").json()
+    revision = detail["items"][0]["current_revision_id"]
+    return client.post(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}/revisions/{revision}/attachments",
+        files={"file": ("t.png", png(), "image/png")},
+        data={"role": "test_print", **fields},
+        headers=press(),
+    )
+
+
+def test_a_revision_file_names_its_test_attempt(client: TestClient) -> None:
+    order, item = shop(client)
+    store = _state(client).components.get(ORDERS).store
+    revision = store.revisions(item["id"])[0]
+    with store.transaction() as conn:
+        test = store.insert_fulfilment(
+            conn,
+            item["id"],
+            quantity=0,
+            outcome="unknown",
+            created_by=BY,
+            purpose="test",
+            revision_id=revision.id,
+        )
+        production = store.insert_fulfilment(
+            conn, item["id"], quantity=1, outcome="succeeded", created_by=BY
+        )
+
+    named = _revision_upload(client, order, item, fulfilment_id=test.id)
+    assert named.status_code == 200, named.text
+    assert named.json()["fulfilment_id"] == test.id
+    assert named.json()["revision_id"] == revision.id
+
+    assert _revision_upload(client, order, item, fulfilment_id="nope").status_code == 404
+    assert _revision_upload(client, order, item, fulfilment_id=production.id).status_code == 404
+
+    blank = _revision_upload(client, order, item, fulfilment_id="  ")
+    assert blank.status_code == 200, blank.text
+    assert blank.json()["fulfilment_id"] is None
+
+
+def test_the_revision_route_declares_its_fulfilment_field(client: TestClient) -> None:
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    assert "fulfilment_id" in schemas["RevisionAttachmentUpload"]["properties"]
+    assert "fulfilment_id" not in schemas["AttachmentUpload"]["properties"]
+
+
+def _revision_photo(
+    client: TestClient, order: dict[str, Any], item: dict[str, Any]
+) -> tuple[str, str]:
+    """A test-print photo on the item's first revision, which is sent (it has a render)."""
+    revision = _state(client).components.get(ORDERS).store.revisions(item["id"])[0]
+    base = f"/api/v1/orders/{order['id']}/items/{item['id']}/revisions/{revision.id}/attachments"
+    render = client.post(
+        base,
+        files={"file": ("r.png", png(), "image/png")},
+        data={"role": "render"},
+        headers=press(),
+    )
+    assert render.status_code == 200, render.text
+    photo = client.post(
+        base,
+        files={"file": ("t.png", png((300, 200)), "image/png")},
+        data={"role": "test_print", "caption": "first try"},
+        headers=press(),
+    )
+    assert photo.status_code == 200, photo.text
+    return revision.id, photo.json()["id"]
+
+
+def _answer(client: TestClient, order: dict[str, Any], item: dict[str, Any], rev: str) -> None:
+    lifecycle = _state(client).components.get(ORDERS).lifecycle
+    lifecycle.update_item(order["id"], item["id"], BY, approval="design_first")
+    lifecycle.send_revision(order["id"], item["id"], rev, BY)
+    lifecycle.answer_revision(
+        order["id"], item["id"], rev, RevisionAnswerInput(answer="accepted"), BY
+    )
+
+
+def test_an_accepted_revisions_print_photo_joins_the_models_photos(client: TestClient) -> None:
+    order, item = shop(client)
+    rev, photo = _revision_photo(client, order, item)
+    _answer(client, order, item, rev)
+    commit = _state(client).components.get(ORDERS).store.revision(rev).reference.commit  # type: ignore[union-attr]
+    path = f"/api/v1/orders/{order['id']}/attachments/{photo}/to-model"
+
+    answer = client.post(path, headers={"Idempotency-Key": "k"})
+
+    assert answer.status_code == 200, answer.text
+    added = answer.json()["media"][-1]
+    assert added["source_commit"] == commit and added["source_revision_id"] == rev
+    assert added["caption"] == "first try" and added["kind"] == "image"
+    content = client.get(f"/api/v1/orders/{order['id']}/attachments/{photo}/content")
+    assert content.status_code == 200  # the order's copy stays
+
+
+def test_a_photo_of_a_revision_not_accepted_stays_on_the_order(client: TestClient) -> None:
+    order, item = shop(client)
+    _, photo = _revision_photo(client, order, item)
+    path = f"/api/v1/orders/{order['id']}/attachments/{photo}/to-model"
+
+    answer = client.post(path, headers=press())
+
+    assert answer.status_code == 409 and answer.json()["type"].endswith("/revision_not_accepted")
+    other = attach(client, order["id"], png(), "x.png", item_id=item["id"])
+    refused = client.post(
+        f"/api/v1/orders/{order['id']}/attachments/{other.json()['id']}/to-model", headers=press()
+    )
+    assert refused.status_code == 422, refused.text
+    missing = client.post(
+        f"/api/v1/orders/{order['id']}/attachments/nope/to-model", headers=press()
+    )
+    assert missing.status_code == 404
+
+
+def _accepted_photo(client: TestClient, data: bytes | None = None) -> tuple[dict[str, Any], str]:
+    order, item = shop(client)
+    rev, photo = _revision_photo(client, order, item)
+    _answer(client, order, item, rev)
+    if data is not None:
+        # Swap the stored photo's bytes for ones the route must refuse.
+        store = _state(client).components.get(ORDERS).store
+        found = store.attachment(photo)
+        assert found is not None
+        blob = _state(client).store.blobs.dir_for(found[1]) / attachments_module.BLOB_FILE
+        blob.write_bytes(data)
+    return order, photo
+
+
+def test_a_deleted_template_keeps_the_photo_on_the_order(client: TestClient) -> None:
+    order, photo = _accepted_photo(client)
+    assert client.delete(f"/api/v1/models/{SLUG}", headers=press()).status_code in (200, 202, 204)
+
+    answer = client.post(
+        f"/api/v1/orders/{order['id']}/attachments/{photo}/to-model", headers=press()
+    )
+
+    assert answer.status_code == 409 and answer.json()["type"].endswith("/template_deleted")
+
+
+def test_a_photo_the_model_cannot_take_is_refused(client: TestClient) -> None:
+    order, photo = _accepted_photo(client, b"not an image at all, just text")
+    path = f"/api/v1/orders/{order['id']}/attachments/{photo}/to-model"
+    assert client.post(path, headers=press()).status_code == 422
+
+
+def test_a_photo_past_the_image_cap_is_413(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order, photo = _accepted_photo(client)
+    monkeypatch.setattr("scadbuddy.api.order_attachments.MAX_IMAGE_BYTES", 10)
+    path = f"/api/v1/orders/{order['id']}/attachments/{photo}/to-model"
+    assert client.post(path, headers=press()).status_code == 413
+
+
+#: The head of an MP4: what `library/media.py` `sniff_kind` takes for a video.
+MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"\x00" * 64
+
+
+def test_a_test_print_video_joins_the_models_photos_without_a_poster(
+    client: TestClient,
+) -> None:
+    order, video = _accepted_photo(client, MP4)
+    path = f"/api/v1/orders/{order['id']}/attachments/{video}/to-model"
+
+    answer = client.post(path, headers=press())
+
+    assert answer.status_code == 200, answer.text
+    added = answer.json()["media"][-1]
+    assert added["kind"] == "video" and added["poster"] is None
+
+
+def test_a_video_past_the_media_upload_limit_is_413(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order, video = _accepted_photo(client, MP4)
+    state = _state(client)
+    monkeypatch.setattr(
+        state, "settings", state.settings.model_copy(update={"media_upload_max_bytes": 10})
+    )
+    path = f"/api/v1/orders/{order['id']}/attachments/{video}/to-model"
+
+    answer = client.post(path, headers=press())
+
+    assert answer.status_code == 413, answer.text
+    assert "media_upload_max_bytes" in answer.json()["detail"]

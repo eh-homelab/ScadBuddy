@@ -366,6 +366,12 @@ export type OrderTotals = Schemas['OrderTotals']
 export type OrderPage = Schemas['OrderPage']
 export type Quote = Schemas['Quote']
 export type Fulfilment = Schemas['Fulfilment']
+/** Storefront phase 1 (#5280, spec 2026-11-02 §4): one design of an item, and how it is approved. */
+export type Revision = Schemas['Revision']
+export type RevisionAnswer = Revision['answer']
+export type Approval = OrderItem['approval']
+export type RevisionCreate = Defaulted<Schemas['RevisionCreate'], 'note'>
+export type RevisionAnswerInput = Defaulted<Schemas['RevisionAnswerInput'], 'note'>
 export type AttemptArchives = Schemas['AttemptArchives']
 export type ArchiveOffer = Schemas['ArchiveOffer']
 export type ArchiveCopy = Schemas['ArchiveCopy']
