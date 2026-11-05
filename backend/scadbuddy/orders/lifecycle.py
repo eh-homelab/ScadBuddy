@@ -2649,8 +2649,17 @@ class Lifecycle:
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             before = self._attachment_of(conn, order, attachment_id)
-            if before.revision_id is None and patch.role is not None:
-                _refuse_revision_role(patch.role)
+            if patch.role not in (None, before.role):
+                if before.revision_id is None:
+                    _refuse_revision_role(patch.role)
+                elif before.role == "render" and patch.role == "test_print":
+                    # A test print's photo may join the model's photos (`attachment_to_model`);
+                    # a render never does.
+                    raise LifecycleError(
+                        "role",
+                        "a render is not the photo of a test print: upload that photo",
+                        unprocessable=True,
+                    )
             if (patch.role not in (None, before.role)) or (
                 patch.caption not in (None, before.caption)
             ):

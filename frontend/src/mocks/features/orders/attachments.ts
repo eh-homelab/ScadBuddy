@@ -175,8 +175,13 @@ export const handlers = [
     const body = (await request.json()) as OrderAttachmentPatch
     if (body.role != null && !ROLES.has(body.role)) return fieldProblem(request, 'role', 'not a role')
     const target = state.attachments.find((a) => a.id === String(params.a) && a.order_id === String(params.id))
-    if (target && !target.revision_id && body.role != null && REVISION_ROLES.has(body.role)) {
-      return fieldProblem(request, 'role', `a ${body.role} file is a design revision's: attach it to the revision`)
+    if (target && body.role != null && body.role !== target.role) {
+      if (!target.revision_id && REVISION_ROLES.has(body.role)) {
+        return fieldProblem(request, 'role', `a ${body.role} file is a design revision's: attach it to the revision`)
+      }
+      if (target.role === 'render' && body.role === 'test_print') {
+        return fieldProblem(request, 'role', 'a render is not the photo of a test print: upload that photo')
+      }
     }
     return transition(request, () => {
       const attachment = found(String(params.id), String(params.a))

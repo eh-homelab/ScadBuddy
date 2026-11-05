@@ -214,6 +214,7 @@ async def _upload(
             if fulfilment_id is not None:
                 _path(fulfilment_id)
                 await _require(orders, order_id, item_id, fulfilment_id)
+        role = _role(received, revision=revision_id is not None)
         filename = attachments.clean_filename(received.filenames.get("file", ""))
         with path.open("rb") as handle:
             kind, media_type = attachments.sniff(handle.read(attachments.SNIFF_BYTES), filename)
@@ -228,7 +229,7 @@ async def _upload(
             "kind": kind,
             "media_type": media_type,
             "size": received.sizes["file"],
-            "role": _role(received, revision=revision_id is not None),
+            "role": role,
             "caption": _caption(received),
             # Ruling 12: who added it comes from the author header, never the body.
             "by": current_actor().model_dump(mode="json"),
@@ -466,7 +467,8 @@ async def get_attachment_thumbnail(
     summary="Caption or re-role an attachment",
     description=(
         "A field left out stays; each change is on the audit line. 422 `role` for a "
-        "`render` or a `test_print` outside a design revision. 409 `revision_sent` for a "
+        "`render` or a `test_print` outside a design revision, or for a `render` re-roled to "
+        "`test_print`. 409 `revision_sent` for a "
         "file of a design revision sent to the customer or answered: it is the record of "
         "what they saw."
     ),
