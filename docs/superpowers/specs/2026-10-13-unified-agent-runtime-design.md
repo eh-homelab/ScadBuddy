@@ -1013,7 +1013,7 @@ plugin pin retire; the list below is otherwise kept as written for the record.*
     pointing here;
   - the parity plan is marked complete or superseded;
   - `docs/ai/operating.md`;
-  - `CLAUDE.md`'s layout bullets for `agent-durable/` and the commands block.
+  - `agent-durable/CLAUDE.md`'s layout bullets for `agent-durable/` and the commands block.
 
 ## 12. Risks, unknowns, follow-ups
 

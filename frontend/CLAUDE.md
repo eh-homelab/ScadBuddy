@@ -1,0 +1,59 @@
+# Frontend — notes for agents
+
+These notes cover `frontend/`; paths are repo-relative; the root `CLAUDE.md` has the repo-wide rules.
+
+## Commands
+Frontend (`frontend/`, Node 24, pnpm via corepack from `packageManager`):
+
+```bash
+cd frontend
+corepack enable
+pnpm install --frozen-lockfile
+pnpm lint && pnpm typecheck && pnpm test && pnpm build
+pnpm exec playwright test         # msw-mocked e2e against `pnpm preview` of the bundle
+```
+
+CI runs the lint, typecheck, unit tests and build in the `frontend` job, and Playwright
+in three `frontend-e2e` jobs of its own (`--shard=N/3`, one worker each);
+`frontend-e2e-split` checks that the three selections add up to the whole `--list` and
+that each shard ran what it selected, as `backend-pytest-split` does.
+`e2e/real-backend.spec.ts` skips unless `E2E_BASE_URL` points at a running container.
+`e2e/real-agent.spec.ts` also needs `E2E_AGENT=1`: a stack whose one origin routes
+`/api/v1/ai/*` to a real agent with a credential pointed at a fake Anthropic endpoint
+(its header lists the script `E2E_AGENT_SCRIPTED=1` expects; `pnpm preview` routes the
+same way, `vite.config.ts`).
+
+
+## Layout
+- `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
+  the mocked e2e run. A new feature's mocks go under `src/mocks/features/`, in
+  `<feature>.ts` or a `<feature>/` folder. Every `.ts` file there except tests is picked
+  up without editing `handlers.ts`, and must export `handlers` (and optionally
+  `reset`) (#508).
+- `frontend/src/lib/tracing.ts` — the browser's OpenTelemetry (#988), a lazy chunk
+  `main.tsx` loads after the first paint; spans leave through `traceScrub.ts` and
+  `relayExporter.ts` to the backend relay `/telemetry/v1/traces`, and stop for the
+  page's life when it answers `X-ScadBuddy-Tracing: off` (`startTracing` then undoes
+  itself, so no `traceparent` is sent; msw always answers off,
+  `src/mocks/features/telemetry.ts`). A user action is `traceAction`
+  (`lib/traceAction.ts`, entry chunk, API only): a request issued after an `await` joins
+  the action's trace only inside its `within`. `traceparent` goes on same-origin
+  requests only. The chunk loads through `loadOptionalChunk` (`lib/staleChunks.ts`), so
+  a blocked one (an error naming `tracing-<hash>.js`, or Safari's naming no URL while it
+  loads) does not trigger the stale-chunk reload; any other chunk's error still does.
+- `frontend/src/template-ui/` — template-owned UIs (#425): `host.ts` (Host API v1 over the page's
+  inputs), `TemplateUi.tsx` (loads `ui/<module>` with `import()`, mounts into a shadow root, and
+  reports a failure through `onFailure`; the Customize page then falls back to the generated form
+  with a banner), `elements.ts` (`sb-param`/`sb-preview`/`sb-generate`, rendered by portal). Inputs are `{params, v, …ui state}` (`backend/scadbuddy/render/inputs.py`);
+  `backend/scadbuddy/api/template_ui.py` serves `ui/**` live and at `/versions/{commit}/`;
+  `api/static.py` `PAGE_CSP` (mirrored in `frontend/page-csp.txt`) is the page's policy.
+  Its one `script-src` hash is `frontend/index.html`'s inline entry-reload handler (#4873):
+  a page whose entry `index-*.js` or CSS 404s mid-rollout reloads, up to 3 times per failed
+  URL, for parse-time tags only (a lazy chunk's CSS is `staleChunks.ts`'s, #4874). Editing
+  that script changes the hash; `src/entryReload.test.ts` names the new one.
+
+## See also
+
+- Real-stack e2e: see `e2e-stack/CLAUDE.md`. Generated API files: see the root `CLAUDE.md`.
+- Backend side of the Orders UI, Activity UI and `LanRunControls`: see `backend/CLAUDE.md` (orders, activity, hot path).
+- Bambuddy iframe facts (`embed.ts`, `useFullscreen.ts`): see the root `CLAUDE.md`.

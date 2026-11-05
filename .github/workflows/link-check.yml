@@ -1,4 +1,4 @@
-# Markdown links in docs/, README.md, CLAUDE.md and every SKILL.md must resolve
+# Markdown links in docs/, README.md, each CLAUDE.md and every SKILL.md must resolve
 # (#1926, from #259). Weekly and on demand only, never on a PR, so an external
 # site going down never blocks a merge; it is not a required check. A failure
 # opens (or leaves open) one issue. Fix the link, or exclude it in the args
@@ -53,6 +53,9 @@ jobs:
             --exclude '^https://github\.com/(orgs/)?WonderForgeLabs([/?#]|$)'
             --exclude '^https?://[^/]*\.internal\.nullreference\.io'
             'docs/**/*.md' README.md CLAUDE.md '**/SKILL.md'
+            backend/CLAUDE.md frontend/CLAUDE.md agent/CLAUDE.md agent-durable/CLAUDE.md
+            tools/go/CLAUDE.md workers/rust/CLAUDE.md e2e-stack/CLAUDE.md models/CLAUDE.md
+            deploy/CLAUDE.md plugins/CLAUDE.md
           fail: true
       - name: Open an issue
         if: failure() && steps.lychee.outcome == 'failure'
@@ -66,4 +69,4 @@ jobs:
             echo "already open"; exit 0
           fi
           gh issue create --title "$title" --label documentation --body \
-            "The weekly link check (\`.github/workflows/link-check.yml\`) found broken links in \`docs/\`, \`README.md\`, \`CLAUDE.md\` or a \`SKILL.md\`: $RUN_URL (the job summary lists them). Fix each link, or exclude it in the workflow's lychee args with a comment giving the reason."
+            "The weekly link check (\`.github/workflows/link-check.yml\`) found broken links in \`docs/\`, \`README.md\`, a \`CLAUDE.md\` or a \`SKILL.md\`: $RUN_URL (the job summary lists them). Fix each link, or exclude it in the workflow's lychee args with a comment giving the reason."
