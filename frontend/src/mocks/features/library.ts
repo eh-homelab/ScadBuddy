@@ -377,6 +377,17 @@ export const handlers = [
 
   http.get(`${base}/print/library/:id/plates/:index/thumbnail`, () => pngResponse()),
   http.get(`${base}/print/library/:id/thumbnail`, () => pngResponse()),
+  // #1031 — the file itself, always a download, as `get_library_file` serves it.
+  http.get(`${base}/print/library/:id/file`, ({ params }) => {
+    const file = listedFiles().find((row) => row.id === Number(params['id']))
+    if (!file) return problem(404, 'Not Found', `Bambuddy has no such resource when asked to read library file ${params['id']}`)
+    return new HttpResponse(new TextEncoder().encode(`mock ${file.filename}`), {
+      headers: {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename*=utf-8''${encodeURIComponent(file.filename)}`,
+      },
+    })
+  }),
   // #1723 — a plate's mesh, in the file's own colours (the H2C file's green and black).
   http.get(`${base}/print/library/:id/preview.glb`, ({ params, request }) => {
     const colours = Number(params['id']) === H2C_FILE ? ['#3F8E43', '#1A1A1A'] : ['#0047BB', '#FF1493']

@@ -2503,6 +2503,8 @@ export const api = {
     command<LibraryFolderDeleteResult>(`/print/library/folders/${folderId}/delete`, { method: 'POST' }),
 
   libraryThumbnailUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/thumbnail`,
+  /** #1031 — the library file itself, always served as a download. */
+  libraryFileUrl: (fileId: number) => `${API_BASE}/print/library/${fileId}/file`,
 
   libraryPlateThumbnailUrl: (fileId: number, index: number) =>
     `${API_BASE}/print/library/${fileId}/plates/${index}/thumbnail`,
