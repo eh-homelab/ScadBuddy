@@ -66,11 +66,11 @@ function Search() {
 }
 
 /** A button that opens `to` in the same router, so the page moves without a remount. */
-function GoTo({ to }: { to: string }) {
+function GoTo({ to, label = 'Go' }: { to: string; label?: string }) {
   const navigate = useNavigate()
   return (
     <button type="button" onClick={() => void navigate(to)}>
-      Go
+      {label}
     </button>
   )
 }
@@ -1268,6 +1268,57 @@ describe('HistoryPage paging (#2290)', () => {
     await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
     expect(screen.getByRole('button', { name: 'Loading…' })).toBeDisabled()
     expect(screen.queryByText(/Could not load more outputs/)).not.toBeInTheDocument()
+  })
+
+  it("drops a Load more answered after a move away and back, built on the page it left (#5306 review)", async () => {
+    noPrints()
+    addPaged(30)
+    const first = outputs.find((o) => o.slug === 'name-keychain')!
+    addMockOutput({ ...first, slug: 'gridfinity-bin', params: {}, id: `${'ef'.repeat(15)}01`, name: 'Bin 1' })
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let answered = false
+    let heldOnce = false
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', async ({ request }) => {
+        if (!new URL(request.url).searchParams.has('after') || heldOnce) return undefined
+        heldOnce = true
+        await held
+        answered = true
+        return undefined
+      }),
+    )
+    const { user } = renderPage(
+      <Routes>
+        <Route
+          path="/m/:slug/history"
+          element={
+            <>
+              <HistoryPage />
+              <GoTo to="/m/gridfinity-bin/history" />
+              <GoTo to="/m/name-keychain/history" label="Back to A" />
+            </>
+          }
+        />
+      </Routes>,
+      { route: '/m/name-keychain/history' },
+    )
+    const total = seeded() + 30
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${total}`)
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findByRole('button', { name: 'Loading…' })
+    await user.click(screen.getByRole('button', { name: 'Go' }))
+    await screen.findByText('Bin 1')
+    await user.click(screen.getByRole('button', { name: 'Back to A' }))
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${total}`)
+    release()
+    await waitFor(() => expect(answered).toBe(true))
+    await act(() => new Promise((resolve) => setTimeout(resolve, 50)))
+    // The late answer from before the move is dropped: still one page, and Load more works.
+    expect(screen.getByText(`Showing ${HISTORY_PAGE_SIZE} of ${total}`)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeEnabled()
   })
 
   it('starts again from the first page when the last output shown went away', async () => {

@@ -122,13 +122,17 @@ export function HistoryPage() {
   // The rows as they are now, for an edit that lands after an await (#2786 review): a
   // rename or a delete answered late must not bring back what changed meanwhile.
   const rows = useRef(outputsState.data)
-  // The slug on screen now, so a Load more answered after a move to another model's
-  // history drops its answer, success or failure, without touching that model's (#5303 review).
-  const slugNow = useRef(slug)
   useEffect(() => {
     rows.current = outputsState.data
-    slugNow.current = slug
   })
+  // Bumped by each Load more and each move to another model's history: an answer whose
+  // token is not the latest drops itself, success or failure, without touching the page.
+  // A token rather than the slug, so a move away and back drops it too, since it was
+  // built on the page it left (#5303, #5306 reviews).
+  const moreRequest = useRef(0)
+  useEffect(() => {
+    moreRequest.current += 1
+  }, [slug])
   const [more, setMore] = useState<{ loading: boolean; error?: Error }>({ loading: false })
   // Another model's history in the same page: its Load more starts afresh (#5289 review).
   const [moreFor, setMoreFor] = useState(slug)
@@ -166,10 +170,11 @@ export function HistoryPage() {
     const page = rows.current
     const last = page?.items.at(-1)
     if (!page || !last) return
+    const mine = ++moreRequest.current
     setMore({ loading: true })
     try {
       const next = await api.listOutputsPage(slug, { limit: HISTORY_PAGE_SIZE, after: last.id })
-      if (slugNow.current !== slug) return
+      if (moreRequest.current !== mine) return
       const items = [...page.items, ...next.items.filter((o) => !page.items.some((p) => p.id === o.id))]
       loaded.current = { slug, size: items.length }
       outputsState.setData({ items, total: next.total }, { supersede: true })
@@ -179,7 +184,7 @@ export function HistoryPage() {
       // window again in the background, so it is not lost until the next change.
       outputsState.refresh()
     } catch (cause) {
-      if (slugNow.current !== slug) return
+      if (moreRequest.current !== mine) return
       // The last output shown went away since: read the window again from the first.
       if (cause instanceof ApiError && cause.status === 409) {
         setMore({ loading: false })

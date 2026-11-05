@@ -71,6 +71,15 @@ describe('LibraryTree while filtering (#5291 review)', () => {
     expect(screen.getByRole('treeitem', { name: 'Supplies' })).toHaveAttribute('aria-expanded', 'true')
   })
 
+  it('opens them all again when the filter goes back to an earlier text (#5306 review)', () => {
+    const { rerender } = render(<LibraryTree folders={folders} selected={null} onSelect={vi.fn()} filter="bins" />)
+    fireEvent.click(screen.getByTestId('library-folder-toggle-4'))
+    expect(screen.getByRole('treeitem', { name: 'Storage Boxes' })).toHaveAttribute('aria-expanded', 'false')
+    rerender(<LibraryTree folders={folders} selected={null} onSelect={vi.fn()} filter="bin" />)
+    rerender(<LibraryTree folders={folders} selected={null} onSelect={vi.fn()} filter="bins" />)
+    expect(screen.getByRole('treeitem', { name: 'Storage Boxes' })).toHaveAttribute('aria-expanded', 'true')
+  })
+
   it('keeps a folder folded when the folders are read again under the same filter (#5303 review)', () => {
     const { rerender } = render(<LibraryTree folders={folders} selected={null} onSelect={vi.fn()} filter="bins" />)
     fireEvent.click(screen.getByTestId('library-folder-toggle-4'))
