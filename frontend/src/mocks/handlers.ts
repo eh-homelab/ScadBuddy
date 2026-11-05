@@ -3017,9 +3017,23 @@ export const handlers = [
     return HttpResponse.json({ inputs: body.inputs, from_version: v, to_version: v })
   }),
 
-  http.get(`${base}/models/:slug/outputs`, ({ params }) =>
-    HttpResponse.json(state.outputs.filter((o) => o.slug === params['slug']).map(settleBackfill)),
-  ),
+  // Newest first, paged as the backend pages it (#843, #2290): `limit`, `after` (an
+  // output id; 409 once it is no longer listed) and the whole count in `X-Total-Count`.
+  http.get(`${base}/models/:slug/outputs`, ({ params, request }) => {
+    const listed = state.outputs
+      .filter((o) => o.slug === params['slug'])
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+    const query = new URL(request.url).searchParams
+    const after = query.get('after')
+    const limit = query.get('limit')
+    let start = 0
+    if (after !== null) {
+      start = listed.findIndex((o) => o.id === after) + 1
+      if (start === 0) return problem(409, 'Conflict', `no output '${after}' is listed any more to page after; list again without \`after\``)
+    }
+    const window = listed.slice(start, limit === null ? undefined : start + Number(limit))
+    return HttpResponse.json(window.map(settleBackfill), { headers: { 'X-Total-Count': String(listed.length) } })
+  }),
 
   http.get(`${base}/outputs/:id`, ({ params }) => {
     const output = state.outputs.find((o) => o.id === params['id'])

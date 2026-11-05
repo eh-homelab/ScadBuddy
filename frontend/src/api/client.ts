@@ -1703,6 +1703,23 @@ export const api = {
 
   listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
 
+  /**
+   * #2290 — one page of a model's outputs, newest first. `after` is the last output id
+   * of the page before; `total` is how many outputs the model has (`X-Total-Count`).
+   */
+  listOutputsPage: async (
+    slug: string,
+    page: { limit?: number; after?: string } = {},
+  ): Promise<{ items: Output[]; total: number }> => {
+    const query = new URLSearchParams()
+    if (page.limit !== undefined) query.set('limit', String(page.limit))
+    if (page.after !== undefined) query.set('after', page.after)
+    const response = await send(`${API_BASE}/models/${seg(slug)}/outputs?${query}`, { headers: { Accept: 'application/json' } })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const items = (await response.json()) as Output[]
+    return { items, total: Number(response.headers.get('X-Total-Count') ?? items.length) }
+  },
+
   getOutput: (id: string) => request<Output>(`/outputs/${seg(id)}`),
 
   /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */

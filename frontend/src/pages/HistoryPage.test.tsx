@@ -26,7 +26,7 @@ vi.mock('../lib/traceAction', async (importOriginal) => {
   }
   return { ...actual, traceAction }
 })
-import { HistoryPage } from './HistoryPage'
+import { HISTORY_PAGE_SIZE, HistoryPage } from './HistoryPage'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
 
 // Each test's actions only (#2892): `toContain` would otherwise pass on an earlier test's.
@@ -50,14 +50,19 @@ async function shownPlates(name: string) {
   )
 }
 
-function render() {
+function render(route = '/m/name-keychain/history') {
   return renderPage(
     <Routes>
-      <Route path="/m/:slug/history" element={<HistoryPage />} />
+      <Route path="/m/:slug/history" element={<><HistoryPage /><Search /></>} />
       <Route path="/edit/:outputId" element={<EditRoute />} />
     </Routes>,
-    { route: '/m/name-keychain/history' },
+    { route },
   )
+}
+
+/** The page's query string, for a test of what it keeps in the URL (#2290). */
+function Search() {
+  return <div data-testid="search">{useLocation().search}</div>
 }
 
 /** Stands in for the deep-link page so the test can read what it was given. */
@@ -1118,5 +1123,71 @@ describe('HistoryPage · libraries an output was rendered with (#1296)', () => {
     expect(libraryLabel(dotscad)).toBe('dotSCAD v3.3 · bb33edf')
     expect(pinChange(dotscad, undefined)).toBeNull()
     expect(pinChange(dotscad, [])).toBe('no longer pinned')
+  })
+})
+
+describe('HistoryPage paging (#2290)', () => {
+  /** `count` more outputs of the keychain, older than every seeded one, named "Paged <n>". */
+  function addPaged(count: number) {
+    const first = outputs.find((o) => o.slug === 'name-keychain')!
+    for (let n = 1; n <= count; n++) {
+      addMockOutput({
+        ...first,
+        id: `${'ab'.repeat(15)}${String(n).padStart(2, '0')}`,
+        name: `Paged ${n}`,
+        created_at: new Date(Date.UTC(2020, 0, 1) - n * 60_000).toISOString(),
+      })
+    }
+  }
+  const seeded = () => outputs.filter((o) => o.slug === 'name-keychain').length
+
+  it('reads a page of outputs, then the next with Load more, keeping the count in the URL', async () => {
+    noPrints()
+    addPaged(30)
+    const total = seeded() + 30
+    const { user } = render()
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${total}`)
+    expect(screen.getByTestId('outputs').children).toHaveLength(HISTORY_PAGE_SIZE)
+    expect(screen.queryByText(`Paged 30`)).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findAllByText('Paged 30')
+    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent(`shown=${total}`))
+  })
+
+  it('opens with as many outputs as the URL says were shown, so Back returns to them', async () => {
+    noPrints()
+    addPaged(30)
+    render(`/m/name-keychain/history?shown=${HISTORY_PAGE_SIZE + 5}`)
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE + 5} of ${seeded() + 30}`)
+  })
+
+  it('starts again from the first page when the last output shown went away', async () => {
+    noPrints()
+    addPaged(30)
+    const { user } = render()
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${seeded() + 30}`)
+    let refused = false
+    server.use(
+      http.get('/api/v1/models/name-keychain/outputs', ({ request }) => {
+        if (refused || !new URL(request.url).searchParams.has('after')) return undefined
+        refused = true
+        return problem(409, 'Conflict', 'no output is listed any more to page after')
+      }),
+    )
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(refused).toBe(true))
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${seeded() + 30}`)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('counts a deleted output out of the total', async () => {
+    noPrints()
+    addPaged(30)
+    const { user } = render()
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE} of ${seeded() + 30}`)
+    await user.click(await menuItem(user, await row('Paged 1'), /^Delete/))
+    await user.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: /^Delete/ }))
+    await screen.findByText(`Showing ${HISTORY_PAGE_SIZE - 1} of ${seeded() + 29}`)
   })
 })
