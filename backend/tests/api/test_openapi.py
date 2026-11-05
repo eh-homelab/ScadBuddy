@@ -137,6 +137,17 @@ def test_each_attachment_upload_body_has_its_own_name(tmp_path: Path) -> None:
     printed = body("/api/v1/prints/{archive_id}/attachments")
     ordered = body("/api/v1/orders/{order_id}/attachments")
     assert (printed, ordered) == ("PrintAttachmentUpload", "OrderAttachmentUpload")
+    # Every route that shares the order upload's `openapi_extra` names its own body too.
+    order = "/api/v1/orders/{order_id}"
+    assert body(f"{order}/items/{{item_id}}/attachments") == "OrderAttachmentUpload"
+    assert (
+        body(f"{order}/items/{{item_id}}/fulfilments/{{fulfilment_id}}/attachments")
+        == "OrderAttachmentUpload"
+    )
+    assert (
+        body(f"{order}/items/{{item_id}}/revisions/{{revision_id}}/attachments")
+        == "RevisionAttachmentUpload"
+    )
     assert set(named[printed]["properties"]) == {"file", "caption"}
     assert set(named[ordered]["properties"]) == {"file", "caption", "role"}
     assert "fulfilment_id" in named["RevisionAttachmentUpload"]["properties"]
