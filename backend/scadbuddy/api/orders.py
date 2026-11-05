@@ -68,6 +68,7 @@ from scadbuddy.orders.lifecycle import (
     ShipmentInput,
 )
 from scadbuddy.orders.models import (
+    Approval,
     Attachment,
     Charge,
     ChargeInput,
@@ -87,6 +88,7 @@ from scadbuddy.orders.models import (
     PriceBook,
     PricingPolicy,
     Quote,
+    Revision,
     Shipment,
     SpoolImport,
 )
@@ -97,6 +99,7 @@ from scadbuddy.orders.problems import PROBLEMS, refused
 from scadbuddy.orders.projects import ensure_projects
 from scadbuddy.orders.quote import SliceQuoteRequest, subject_of
 from scadbuddy.orders.reference import ReferenceError, TemplateDeletedError, resolve_reference
+from scadbuddy.orders.revisions import RevisionAnswerInput, RevisionInput
 from scadbuddy.orders.spool_import import import_spools as import_spools_into
 from scadbuddy.orders.store import UNSET, FilamentExistsError, UnsetType
 
@@ -165,7 +168,9 @@ class ReferenceBody(BaseModel):
 class ItemCreate(ReferenceBody):
     """A ``model`` item (the default) names what to make: ``output_id``, or ``slug``,
     ``commit`` and ``inputs``. A ``custom`` item (#4954) names nothing: it takes a
-    ``title`` and a ``unit_price_minor`` instead, and ``requires_printing``."""
+    ``title`` and a ``unit_price_minor`` instead, and ``requires_printing``. A ``request``
+    item (#5280) is what a customer wants made before any design exists: a ``title``,
+    ``quantity``, ``notes`` and ``sku`` only; its first revision names the design."""
 
     kind: ItemKind = "model"
     output_id: str | None = None
@@ -196,6 +201,24 @@ class ItemCreate(ReferenceBody):
                 raise ValueError("a custom item needs a title")
             if self.unit_price_minor is None:
                 raise ValueError("a custom item needs a unit_price_minor")
+        elif self.kind == "request":
+            named = [
+                name
+                for name in (
+                    "slug",
+                    "commit",
+                    "inputs",
+                    "output_id",
+                    "unit_price_minor",
+                    "requires_printing",
+                    "accept",
+                )
+                if getattr(self, name) is not None
+            ]
+            if named:
+                raise ValueError(f"a request item takes no {', '.join(named)}")
+            if not (self.title or "").strip():
+                raise ValueError("a request item needs a title")
         else:
             named = [
                 name
@@ -230,6 +253,17 @@ class ItemPatch(BaseModel):
     #: Whether a custom item's new price is accepted (true, the default) or left
     #: `quoted` for an `outward` accept (false, the agent's); nothing else reads it.
     accept: bool = True
+    #: Whether the item's design is approved before it is priced (`design_first`) or
+    #: with its quote (`together`), in any open state.
+    approval: Approval | None = None
+
+
+class RevisionCreate(RevisionInput):
+    """A new revision: the shop's note and colours (``RevisionInput``) and, to change the
+    design, a ``reference`` or an ``output_id``, as a line item's patch takes them."""
+
+    reference: ReferenceBody | None = None
+    output_id: str | None = None
 
 
 class PaymentCreate(BaseModel):
@@ -254,6 +288,7 @@ class CancelBody(BaseModel):
 class ItemDetail(OrderItem):
     quotes: list[Quote]
     fulfilments: list[Fulfilment]
+    revisions: list[Revision]
 
 
 class OrderTotals(BaseModel):
@@ -664,7 +699,8 @@ async def get_order(order_id: str, orders: OrdersDep) -> OrderDetail:
             ItemDetail(
                 **item.model_dump(),
                 quotes=store.quotes(item.id),
-                fulfilments=store.fulfilments(item.id),
+                fulfilments=store.fulfilments(item.id, purpose=None),
+                revisions=store.revisions(item.id),
             )
             for item in store.items(order.id)
         ]
@@ -905,7 +941,9 @@ async def add_item(
     against the catalogue and the commit's schema (Ruling 6). A ``custom`` item (#4954)
     is a title, a quantity and a price, its price a `manual` quote: accepted as it is
     saved, so the item is `approved` (409 ``order_on_hold`` on hold), unless ``accept`` is
-    false (the agent's), which leaves it `quoted`."""
+    false (the agent's), which leaves it `quoted`. A ``request`` item (#5280) is a title,
+    a quantity, notes and a sku, approved design first: it has no design until its first
+    revision."""
     _path(order_id)
     if await asyncio.to_thread(orders.store.order, order_id) is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
@@ -924,6 +962,19 @@ async def add_item(
                 sku=body.sku,
                 requires_printing=bool(body.requires_printing),
                 accept=body.accept is not False,
+            )
+        )
+    if body.kind == "request":
+        assert body.title is not None
+        request_title = body.title.strip()
+        return await _run(
+            lambda: orders.lifecycle.add_request_item(
+                order_id,
+                by,
+                title=request_title,
+                quantity=body.quantity,
+                notes=body.notes,
+                sku=body.sku,
             )
         )
     resolved = await _resolved(
@@ -994,6 +1045,7 @@ async def patch_item(
             sku=body.sku if "sku" in given else UNSET,
             requires_printing=body.requires_printing,
             accept=body.accept,
+            approval=body.approval,
         )
     )
 
@@ -1036,6 +1088,109 @@ async def cancel_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderIt
     _path(order_id, item_id)
     by = current_actor()
     return await _run(lambda: orders.lifecycle.cancel_item(order_id, item_id, by))
+
+
+# -- design revisions (#5280, spec 2026-11-02 §4.3) -----------------------------------------
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/revisions",
+    response_model=Revision,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a design revision",
+    description=(
+        "A new design for the item while its order is open: the `reference` or "
+        "`output_id` to change it, or neither to repeat the current one (new photos, a "
+        "new note). 404 `item_not_found`; 409 `item_custom` (a custom item has no "
+        "design), `item_has_no_design` (a request's first revision must name one), "
+        "`item_not_open` and `order_closed`/`order_cancelled`/`order_on_hold`."
+    ),
+)
+async def add_revision(
+    order_id: str,
+    item_id: str,
+    body: RevisionCreate,
+    orders: OrdersDep,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    outputs: OutputsDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    fetcher: FetcherDep,
+) -> Revision:
+    _path(order_id, item_id)
+    given = body.model_fields_set
+    resolved = None
+    if body.reference is not None or ("output_id" in given and body.output_id is not None):
+        resolved = await _resolved(
+            body.reference or ReferenceBody(),
+            body.output_id,
+            catalogue=catalogue,
+            history=history,
+            outputs=outputs,
+            paths=paths,
+            config=config,
+            fetcher=fetcher,
+        )
+    output_id: str | UnsetType | None = body.output_id if "output_id" in given else UNSET
+    by = current_actor()
+    return await _run(
+        lambda: orders.lifecycle.add_revision(
+            order_id,
+            item_id,
+            by,
+            resolved,
+            output_id=output_id,
+            filaments=body.filaments,
+            note=body.note,
+        )
+    )
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/revisions/{revision_id}/send",
+    response_model=Revision,
+    summary="Send a revision to the customer",
+    description=(
+        "Phase 1 stamps `sent_at` only; nothing is delivered to the customer. Sending a "
+        "revision already sent and unanswered returns it. 404 `revision_not_found`; 409 "
+        "`revision_not_newest`, `revision_answered`, `revision_empty` (no file on it), "
+        "`revision_not_quoted` (a `together` item needs a quote that names it), "
+        "`item_not_open` and `order_closed`/`order_cancelled`."
+    ),
+)
+async def send_revision(
+    order_id: str, item_id: str, revision_id: str, orders: OrdersDep
+) -> Revision:
+    _path(order_id, item_id, revision_id)
+    by = current_actor()
+    return await _run(lambda: orders.lifecycle.send_revision(order_id, item_id, revision_id, by))
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/revisions/{revision_id}/answer",
+    response_model=Revision,
+    summary="Record the customer's answer to a revision",
+    description=(
+        "`accepted` or `changes_requested` (which needs a note) on the newest sent "
+        "revision; on a `together` item an acceptance also accepts the quote that names "
+        "it. 404 `revision_not_found`; 409 `revision_not_newest`, `revision_not_sent`, "
+        "`revision_answered`, `revision_not_quoted`, `item_not_open` and "
+        "`order_closed`/`order_cancelled`/`order_on_hold`."
+    ),
+)
+async def answer_revision(
+    order_id: str,
+    item_id: str,
+    revision_id: str,
+    body: RevisionAnswerInput,
+    orders: OrdersDep,
+) -> Revision:
+    _path(order_id, item_id, revision_id)
+    by = current_actor()
+    return await _run(
+        lambda: orders.lifecycle.answer_revision(order_id, item_id, revision_id, body, by)
+    )
 
 
 # -- quotes (§3.4: manual, or from a slice since phase 2) ----------------------------------
