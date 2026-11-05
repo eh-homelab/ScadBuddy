@@ -74,7 +74,9 @@ RENDER_BUCKETS = (0.25, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 240, 480, 900)
 #: A native slice: the slicer queue's wait (up to two hours) and four `slice_plate`
 #: attempts of up to 30 minutes, past `RENDER_BUCKETS`' 15 minutes (Task 14/15 review M3).
 SLICE_BUCKETS = (5, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 16200)
-HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10)
+#: Up to 120 s (#2293): list routes took 10 to 16 s and a save with its polling ~37 s,
+#: and past the top finite bucket a quantile reads as that bucket.
+HTTP_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 15, 30, 60, 120)
 
 #: Which process the metrics are for: the API, or one of `python -m scadbuddy.worker`'s
 #: queues (the render worker, ``--queue bambuddy``, ``--queue projects``).

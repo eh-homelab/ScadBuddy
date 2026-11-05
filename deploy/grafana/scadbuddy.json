@@ -80,7 +80,7 @@
       "id": 20,
       "type": "stat",
       "title": "API mean latency",
-      "description": "Mean API request time over the range (_sum/_count; not capped at the 10 s top bucket). Details: ScadBuddy / API.",
+      "description": "Mean API request time over the range (_sum/_count; not capped by the buckets). Details: ScadBuddy / API.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "x": 0, "y": 1, "w": 4, "h": 4 },
       "fieldConfig": {
