@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from scadbuddy.orders import attachments as attachments_module
+from scadbuddy.orders.component import ORDERS
 from scadbuddy.orders.store import ATTACHMENT_HOLDER
 from scadbuddy.store.cache import StaleBlobError
 from tests.api.test_customers import create as create_customer
@@ -21,6 +22,7 @@ from tests.api.test_orders import AGENT, create_order
 from tests.api.test_orders_lifecycle import add_item, quote_and_accept
 from tests.api.test_settings_runtime import _state
 from tests.api.test_versions import SLUG, upload
+from tests.orders.test_lifecycle import BY
 from tests.support.operations import press
 
 pytestmark = pytest.mark.requires_git
@@ -419,3 +421,53 @@ def test_a_file_on_a_revision(client: TestClient) -> None:
         headers=press(),
     )
     assert missing.status_code == 404, missing.text
+
+
+def _revision_upload(
+    client: TestClient, order: dict[str, Any], item: dict[str, Any], **fields: str
+) -> Any:
+    detail = client.get(f"/api/v1/orders/{order['id']}").json()
+    revision = detail["items"][0]["current_revision_id"]
+    return client.post(
+        f"/api/v1/orders/{order['id']}/items/{item['id']}/revisions/{revision}/attachments",
+        files={"file": ("t.png", png(), "image/png")},
+        data={"role": "test_print", **fields},
+        headers=press(),
+    )
+
+
+def test_a_revision_file_names_its_test_attempt(client: TestClient) -> None:
+    order, item = shop(client)
+    store = _state(client).components.get(ORDERS).store
+    revision = store.revisions(item["id"])[0]
+    with store.transaction() as conn:
+        test = store.insert_fulfilment(
+            conn,
+            item["id"],
+            quantity=0,
+            outcome="unknown",
+            created_by=BY,
+            purpose="test",
+            revision_id=revision.id,
+        )
+        production = store.insert_fulfilment(
+            conn, item["id"], quantity=1, outcome="succeeded", created_by=BY
+        )
+
+    named = _revision_upload(client, order, item, fulfilment_id=test.id)
+    assert named.status_code == 200, named.text
+    assert named.json()["fulfilment_id"] == test.id
+    assert named.json()["revision_id"] == revision.id
+
+    assert _revision_upload(client, order, item, fulfilment_id="nope").status_code == 404
+    assert _revision_upload(client, order, item, fulfilment_id=production.id).status_code == 404
+
+    blank = _revision_upload(client, order, item, fulfilment_id="  ")
+    assert blank.status_code == 200, blank.text
+    assert blank.json()["fulfilment_id"] is None
+
+
+def test_the_revision_route_declares_its_fulfilment_field(client: TestClient) -> None:
+    schemas = client.get("/openapi.json").json()["components"]["schemas"]
+    assert "fulfilment_id" in schemas["RevisionAttachmentUpload"]["properties"]
+    assert "fulfilment_id" not in schemas["AttachmentUpload"]["properties"]

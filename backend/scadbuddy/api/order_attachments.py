@@ -89,6 +89,17 @@ class AttachmentUpload(BaseModel):
     )
 
 
+class RevisionAttachmentUpload(AttachmentUpload):
+    """The multipart body of ``POST …/revisions/{revision}/attachments``."""
+
+    fulfilment_id: str | None = Field(
+        default=None,
+        max_length=MAX_ID_BYTES,
+        description="Only on a revision's route: the test-print attempt of that revision"
+        " the file shows",
+    )
+
+
 class AttachmentList(BaseModel):
     items: list[Attachment]
 
@@ -505,7 +516,19 @@ async def put_delivered(
     " `test_print` (with the attempt it shows as a `fulfilment_id` field, a test attempt of"
     " that revision), or a `reference`. Listed under the item too (`item_id`), with"
     " `revision_id`.",
-    **_UPLOAD_DOC,
+    **{
+        **_UPLOAD_DOC,
+        "openapi_extra": {
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "multipart/form-data": {
+                        "schema": {"$ref": "#/components/schemas/RevisionAttachmentUpload"}
+                    }
+                },
+            }
+        },
+    },
 )
 async def add_revision_attachment(
     order_id: str,
