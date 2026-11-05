@@ -844,7 +844,8 @@ async def remove_time_entry(order_id: str, entry_id: str, orders: OrdersDep) -> 
         "Money the job cost in the order's currency: the assistant's spend, a payment "
         "fee, materials, anything else. Shipping is a shipment's `cost_minor`, never an "
         "entry. In any order status. With a `source`, a second write of the same order, "
-        "kind and source returns the first entry and writes nothing (200). On the audit "
+        "kind and source returns the first entry as it was recorded, whatever this "
+        "call's amount, note or item, and writes nothing (200). On the audit "
         "line as `cost.added`."
     ),
     responses={status.HTTP_200_OK: {"model": CostEntry, "description": "Already recorded"}},

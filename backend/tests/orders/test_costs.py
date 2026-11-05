@@ -179,7 +179,7 @@ def priced_order(
     shop: Shop, policy: PricingPolicy, quantity: int = 1, sha: str = "b" * 64
 ) -> tuple[Order, OrderItem]:
     """An accepted order whose item's accepted slice quote was priced under ``policy``:
-    per unit 600 s and 10 g of a 20-per-kg filament in slot 1."""
+    per unit 600 s and 10 g of a 20-per-kg filament in colour slot 0."""
     order = shop.order()
     item = shop.item(order, quantity=quantity)
     filament = shop.rows.insert_filament(
@@ -189,12 +189,12 @@ def priced_order(
         Plate(
             index=1,
             print_seconds=600,
-            filaments=[PlateFilament(slot=1, used_g=Decimal("10"))],
+            filaments=[PlateFilament(slot=0, used_g=Decimal("10"))],
             blob_key="quote-b",
             sha256=sha,
         )
     ]
-    priced = price(plates, {1: filament}, policy, currency="USD", quantity=quantity)
+    priced = price(plates, {0: filament}, policy, currency="USD", quantity=quantity)
     quote_id = f"qp-{item.id}"
     assert shop.refs is not None
     shop.refs.add("quote-b", QUOTE_HOLDER, quote_id)
@@ -313,6 +313,62 @@ async def test_a_test_print_counts_toward_the_cost(shop: Shop, pool: PgPool) -> 
     # 4 g at the quote's 2 a gram, though the attempt made nothing for the order.
     assert (at.purpose, at.filament_minor) == ("test", 8)
     assert costs.items[0].prints_minor == 8
+
+
+async def test_the_price_book_is_weighted_by_each_colour_slots_grams(
+    shop: Shop, pool: PgPool
+) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    cheap = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour="#111111", cost_per_kg="20")
+    )
+    dear = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour="#222222", cost_per_kg="40")
+    )
+    slots = [
+        ColourSlot(slot=0, colour="#ff0000", filament_id=cheap.id),
+        ColourSlot(slot=1, colour="#00ff00", filament_id=dear.id),
+    ]
+    # A slice quote (never accepted) whose colour slot 0 took 30 g and slot 1 10 g.
+    plates = [
+        Plate(
+            index=1,
+            print_seconds=600,
+            filaments=[
+                PlateFilament(slot=0, used_g=Decimal("30")),
+                PlateFilament(slot=1, used_g=Decimal("10")),
+            ],
+        )
+    ]
+    priced = price(plates, {0: cheap, 1: dear}, PricingPolicy(), currency="USD", quantity=1)
+    shop.lifecycle.record_slice_quote(
+        order.id,
+        item.id,
+        priced,
+        plates,
+        sliced_sha256="c" * 64,
+        sliced_blob_key="quote-c",
+        by=BY,
+        revision_id=shop.get_item(item).current_revision_id or "",
+        quote_id=f"qw-{item.id}",
+    )
+    shop.quoted(order, item)  # the accepted quote is a manual one, pricing no grams
+    order = shop.lifecycle.accept_order(order.id, BY)
+    # The slots' filaments, as the quote's run pins them on the item.
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_items SET colours = %s WHERE id = %s",
+            (Jsonb([s.model_dump() for s in slots]), item.id),
+        )
+    attempt(shop, order, item, "succeeded", 1, 12.0, 92)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    # (20 x 30 + 40 x 10) / 40 = 25 a kilogram; 12 g is 30 cents.
+    assert (at.filament_minor, at.estimated) == (30, ["filament", "machine"])
 
 
 async def test_an_attempt_with_no_source_is_unknown(shop: Shop) -> None:
@@ -459,6 +515,41 @@ async def test_a_custom_item_costs_only_its_entries(shop: Shop) -> None:
     assert line.item_id == item.id
     assert (line.revenue_minor, line.cost_minor, line.labour_default) == (1000, 0, False)
     assert line.margin_state == "ok"
+
+
+async def test_a_custom_items_print_counts_with_no_default_labour(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.lifecycle.add_custom_item(
+        order.id, BY, title="Stand", quantity=1, unit_price_minor=500, requires_printing=True
+    )
+    order = shop.lifecycle.accept_order(order.id, BY)
+    attempt(shop, order, item, "succeeded", 1, 12.0, 93)
+    rates = USD.model_copy(update={"labour_per_item": "9", "machine_rate_per_hour": "36"})
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+
+    assert costs is not None
+    line = costs.items[0]
+    (at,) = line.attempts
+    # 500 s at today's rate, estimated; no colour slot names a filament to price 12 g.
+    assert (at.machine_minor, at.filament_minor, at.unknown) == (500, None, True)
+    assert (line.labour_minor, line.labour_default, line.cost_minor) == (0, False, 500)
+    assert line.unknown == ["prints"]
+
+
+async def test_a_cancelled_item_with_no_cost_has_no_margin_state(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    line = costs.items[0]
+    # Charged nothing and cost nothing: no percent, and no state to tint it.
+    assert (line.revenue_minor, line.margin_minor) == (0, 0)
+    assert (line.margin_percent, line.margin_state) == (None, None)
 
 
 async def test_an_item_with_no_accepted_quote_has_no_margin(shop: Shop) -> None:

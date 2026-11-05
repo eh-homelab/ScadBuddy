@@ -131,7 +131,7 @@ export const RUNTIME_FIELDS: readonly FieldSpec[] = [
     section: 'orders',
     label: 'One US dollar in the shop\'s currency',
     kind: 'text',
-    help: 'Converts the assistant\'s spend, which is in US dollars, into a job\'s cost. 1 when the shop prices in US dollars. More than 0.',
+    help: 'Will convert the assistant\'s spend, which is in US dollars, into a job\'s cost, once the assistant records its spend on a job (#5330); nothing reads it before then. 1 when the shop prices in US dollars. More than 0.',
     advanced: true,
   },
   // #4939 — a native run's plate-clear wait, as Bambuddy's queue's `require_plate_clear`.

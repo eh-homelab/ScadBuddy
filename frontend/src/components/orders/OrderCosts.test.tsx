@@ -44,7 +44,7 @@ describe('OrderCosts', () => {
     const quote = state.quotes.find((q) => q.id === QUOTE_ACCEPTED)!
     Object.assign(quote, {
       source: 'slice',
-      plates: [{ index: 1, print_seconds: 600, filaments: [{ slot: 1, used_g: '10' }] }],
+      plates: [{ index: 1, print_seconds: 600, filaments: [{ slot: 0, used_g: '10' }] }],
       lines: [{ kind: 'filament', label: 'PLA, 10 g', quantity: 1, unit_minor: 20, amount_minor: 20 }],
     })
   })

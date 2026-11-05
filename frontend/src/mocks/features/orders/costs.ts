@@ -45,7 +45,8 @@ class Unit {
       for (const used of plate.filaments) {
         const grams = Number(used.used_g)
         this.grams += grams
-        this.slotGrams[used.slot - 1] = (this.slotGrams[used.slot - 1] ?? 0) + grams
+        // A stored plate's slot is the item's colour slot already (`quote.py` `read_plate`).
+        this.slotGrams[used.slot] = (this.slotGrams[used.slot] ?? 0) + grams
       }
     }
     this.filament = quote.lines.filter((l) => l.kind === 'filament').reduce((sum, l) => sum + l.amount_minor, 0)

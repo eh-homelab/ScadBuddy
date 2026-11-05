@@ -229,12 +229,13 @@ class _Unit:
         plates = [Plate.model_validate(plate) for plate in quote.plates]
         self.seconds = sum(plate.print_seconds for plate in plates)
         self.grams = sum((f.used_g for plate in plates for f in plate.filaments), Decimal(0))
-        #: Grams per colour slot (a sliced slot ``n`` is the item's colour slot ``n - 1``).
+        #: Grams per colour slot: a stored plate's ``slot`` is the item's colour slot
+        #: already (``quote.py`` ``read_plate`` takes the sliced file's 1-based slot down).
         self.slot_grams: dict[int, Decimal] = {}
         for plate in plates:
             for used in plate.filaments:
-                slot = used.slot - 1
-                self.slot_grams[slot] = self.slot_grams.get(slot, Decimal(0)) + used.used_g
+                grams = self.slot_grams.get(used.slot, Decimal(0))
+                self.slot_grams[used.slot] = grams + used.used_g
         self.filament = Decimal(sum(ln.amount_minor for ln in quote.lines if ln.kind == "filament"))
         machine = [ln.amount_minor for ln in quote.lines if ln.kind == "machine_time"]
         #: Minor units a gram and a second, as the quote priced them; None unpriced.
@@ -277,8 +278,18 @@ class _Item:
                     return quote
         return self.accepted
 
+    def weights_of(self, unit: _Unit | None) -> dict[int, Decimal]:
+        """Grams per colour slot to weigh the price book by: the attempt's quote's, else
+        the item's newest slice quote's (a manual quote names none); empty unknown."""
+        if unit is None or not unit.slot_grams:
+            slices = [q for q in self.quotes if q.source == "slice" and q.plates]
+            newest = max(slices, key=lambda q: (q.created_at, q.id), default=None)
+            unit = _unit(newest)
+        return {} if unit is None else unit.slot_grams
+
     def book_per_gram(self, unit: _Unit | None) -> Decimal | None:
-        """The price book's minor units a gram for the item's slots' filaments."""
+        """The price book's minor units a gram for the item's slots' filaments, weighted
+        by the slots' share of the sliced grams when known and equally otherwise."""
         if not self.today:
             return None
         if self._prices is None:
@@ -290,7 +301,8 @@ class _Item:
         prices = self._prices
         if not prices:
             return None
-        weights = {s: (unit.slot_grams.get(s, Decimal(0)) if unit else Decimal(0)) for s in prices}
+        known = self.weights_of(unit)
+        weights = {s: known.get(s, Decimal(0)) for s in prices}
         total = sum(weights.values(), Decimal(0))
         if total <= 0:
             weights = dict.fromkeys(prices, Decimal(1))

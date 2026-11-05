@@ -411,12 +411,26 @@ export function OrderPage() {
           </CardContent>
         </Card>
 
-        {costs.data?.order_id === order.id && (
+        {costs.data?.order_id === order.id ? (
           <Card size="sm">
             <CardContent>
               <OrderCosts costs={costs.data} onChanged={reload} />
             </CardContent>
           </Card>
+        ) : (
+          costs.error && (
+            <Card size="sm">
+              <CardContent className="flex flex-col gap-2" aria-label="Cost">
+                <h2 className="text-sm font-medium">Cost and margin</h2>
+                <p role="alert" className="text-[13px] text-destructive">
+                  The order's cost could not be read: {costs.error.message}
+                </p>
+                <Button size="sm" variant="outline" className="self-start" onClick={() => costs.refresh()}>
+                  Try again
+                </Button>
+              </CardContent>
+            </Card>
+          )
         )}
 
         <section className="flex flex-col gap-1" aria-label="Audit line">

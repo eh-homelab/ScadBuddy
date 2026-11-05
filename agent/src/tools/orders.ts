@@ -354,7 +354,8 @@ export const orderTools: Tool[] = [
       "Record money a job cost, in the order's currency's minor units, on the order or one of its items: " +
       "`assistant` (the assistant's spend), `payment_fee`, `material` (magnets, keyrings, paint) or `other`. " +
       "Shipping is a shipment's cost, never an entry. With `source` (such as `ai_session:<id>`) a second call " +
-      'with the same kind and source returns the first entry and writes nothing. Allowed in every order status.',
+      'with the same kind and source returns the first entry as it was recorded, whatever the amount, note or item ' +
+      'this call names, and writes nothing. Allowed in every order status.',
     input: z.object({
       order_id: orderId,
       order_item_id: itemId.optional(),
