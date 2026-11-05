@@ -15,7 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Spinner } from '@/components/ui/spinner'
 import { Textarea } from '@/components/ui/textarea'
 
-/** The order states in which an item's design and approval can still change. */
+/** The order states in which an item's design can still change; its approval changes in any open one. */
 const OPEN_FOR_EDITS = new Set(['draft', 'quoted'])
 const ENDED = new Set(['closed', 'cancelled'])
 
@@ -93,7 +93,7 @@ export function RevisionsPanel({
           </Label>
           <Select
             value={item.approval}
-            disabled={!OPEN_FOR_EDITS.has(order.status) || busy}
+            disabled={ended || settled || busy}
             onValueChange={(value) => void run(() => api.updateOrderItem(order.id, item.id, { approval: value as Approval }))}
           >
             <SelectTrigger id={`approval-${item.id}`} size="sm" aria-label="Approval" className="w-56">

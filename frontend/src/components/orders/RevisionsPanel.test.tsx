@@ -105,10 +105,20 @@ describe('RevisionsPanel (#5280)', () => {
     await waitFor(() => expect(state.items.find((i) => i.id === ITEM_DRAFT)!.approval).toBe('design_first'))
   })
 
-  it('locks the approval once the order is accepted', async () => {
+  it('sets the approval in any open order, as the backend allows; revising stays locked', async () => {
+    const { user } = render(ORDER_ACCEPTED, ITEM_APPROVED)
+    const select = await screen.findByRole('combobox', { name: 'Approval' })
+    expect(select).toBeEnabled()
+    expect(screen.queryByRole('button', { name: 'New revision' })).toBeNull()
+    const other = state.items.find((i) => i.id === ITEM_APPROVED)!.approval === 'design_first' ? 'Design and price together' : 'Design first'
+    await choose(user, select, other)
+    await waitFor(() => expect(state.items.find((i) => i.id === ITEM_APPROVED)!.approval).toBe(other === 'Design first' ? 'design_first' : 'together'))
+  })
+
+  it('locks the approval for a settled item', async () => {
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'fulfilled'
     render(ORDER_ACCEPTED, ITEM_APPROVED)
     expect(await screen.findByRole('combobox', { name: 'Approval' })).toBeDisabled()
-    expect(screen.queryByRole('button', { name: 'New revision' })).toBeNull()
   })
 
   it('has no revisions panel for a custom item', async () => {
