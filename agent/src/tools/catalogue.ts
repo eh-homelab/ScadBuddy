@@ -35,8 +35,15 @@ export const catalogueTools: Tool[] = [
     label: 'List models',
     description:
       'List the models in the catalogue (bundled templates and user models) with name, slug, tags, ' +
-      'version, origin and upstream state.' + PAGED,
-    input: z.object({ ...pageInput }),
+      'version, origin and upstream state. `q`, `tag`, `origin` and `sort` search and filter the list ' +
+      '(case and accents ignored); `total` then counts what they select.' + PAGED,
+    input: z.object({
+      ...pageInput,
+      q: z.string().max(256).optional().describe('Search words; each must appear in the name, the description or a tag'),
+      tag: z.array(z.string().min(1).max(100)).max(50).optional().describe('Only models carrying every one of these tags'),
+      origin: z.enum(['builtin', 'mine']).optional().describe('Only built-in templates, or only user models'),
+      sort: z.enum(['updated', 'name']).optional().describe("`updated`: newest first; `name`. The catalogue's own order when omitted"),
+    }),
     risk: 'read',
     source:
       'model metadata (names, descriptions, tags) written by model authors or imported from the web',
@@ -45,7 +52,9 @@ export const catalogueTools: Tool[] = [
     // The backend pages (#843): it builds only this page's records, not the catalogue.
     handler: async (args, { backend }) =>
       json(
-        await backendPage(args, (m: { slug: string }) => m.slug, 'list_models', async (query) => {
+        await backendPage(args, (m: { slug: string }) => m.slug, 'list_models', async (page) => {
+          const { q, tag, origin, sort } = args
+          const query = { ...page, q, tag, origin, sort }
           const pending = backend.GET('/api/v1/models', { params: { query } })
           return { items: await ok(pending, 'list models'), total: totalCount((await pending).response) }
         }),

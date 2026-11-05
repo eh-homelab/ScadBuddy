@@ -47,6 +47,8 @@ export type RevokedSessions = Schemas['RevokedSessions']
 export type RepositoryLag = Schemas['RepositoryLag']
 
 export type ModelSummary = Schemas['ModelRecord']
+/** #2290 — the Models page's filter counts. */
+export type ModelFacets = Schemas['ModelFacets']
 /** #274 — one image or video of a template, in its order; the first is the cover. */
 export type MediaView = Schemas['MediaView']
 export type SourceCheck = Schemas['SourceCheck']

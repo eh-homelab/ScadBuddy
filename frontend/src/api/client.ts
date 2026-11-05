@@ -82,6 +82,7 @@ import type {
   BatchChoice,
   PrintBatch,
   BatchQueueProgress,
+  ModelFacets,
   ModelSummary,
   ModelVersion,
   Output,
@@ -319,6 +320,22 @@ export class ApiError extends Error {
 export const SETTINGS_SHARE_MS = 5_000
 /** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
 let settingsInFlight: { read: Promise<Settings>; started: number; scope: ReadScope } | undefined
+/** #2290 — the catalogue's search and filters, as `GET /models` and `GET /model-facets` take them. */
+export interface ModelFilters {
+  q: string
+  tags: string[]
+  origin: 'all' | 'builtin' | 'mine'
+  sort: 'updated' | 'name'
+}
+
+function modelFilterParams({ q, tags, origin }: Omit<ModelFilters, 'sort'>): URLSearchParams {
+  const query = new URLSearchParams()
+  if (q.trim()) query.set('q', q.trim())
+  for (const tag of tags) query.append('tag', tag)
+  if (origin !== 'all') query.set('origin', origin)
+  return query
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await requestWithStatus<T>(path, init)).body
 }
@@ -1174,6 +1191,29 @@ export const api = {
     }),
 
   listModels: () => request<ModelSummary[]>('/models'),
+
+  /**
+   * #2290 — one page of the catalogue, searched, filtered and sorted on the server.
+   * `total` is how many models the filters select (`X-Total-Count`).
+   */
+  listModelsPage: async (
+    filters: ModelFilters,
+    page: { limit?: number; after?: string } = {},
+    signal?: AbortSignal,
+  ): Promise<{ items: ModelSummary[]; total: number }> => {
+    const query = modelFilterParams(filters)
+    query.set('sort', filters.sort)
+    if (page.limit !== undefined) query.set('limit', String(page.limit))
+    if (page.after !== undefined) query.set('after', page.after)
+    const response = await send(`${API_BASE}/models?${query}`, { headers: { Accept: 'application/json' }, signal })
+    if (!response.ok) throw new ApiError(await readProblem(response))
+    const items = (await response.json()) as ModelSummary[]
+    return { items, total: Number(response.headers.get('X-Total-Count') ?? items.length) }
+  },
+
+  /** #2290 — how many models `filters` select, of how many, and their tags' counts. */
+  modelFacets: (filters: Omit<ModelFilters, 'sort'>, signal?: AbortSignal) =>
+    request<ModelFacets>(`/model-facets?${modelFilterParams(filters)}`, { signal }),
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
 
