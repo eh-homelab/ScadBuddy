@@ -1157,6 +1157,52 @@ async def print_item(
     return operation_answer(result, Fulfilment)
 
 
+@router.post(
+    "/{order_id}/items/{item_id}/revisions/{revision_id}/test-print",
+    response_model=Fulfilment,
+    summary="Test-print a revision of an item",
+    responses=OPERATION_RESPONSES,
+)
+async def test_print_item(
+    order_id: str,
+    item_id: str,
+    revision_id: str,
+    body: PrintRunRequest,
+    response: Response,
+    ops: OperationsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Fulfilment | JSONResponse:
+    """A test print of the item's current revision (storefront spec §4.4): the
+    ``order_item_print`` operation as ``POST …/print`` runs it, for one copy, recorded as
+    an attempt of purpose `test` naming the revision. It counts for nothing: the item's
+    status, its made quantity and the order's status stay as they were, and it is never
+    accepted. Allowed on an order not yet accepted and for an item in any open state.
+    Refused before anything starts: 404 for an unknown order, item or revision
+    (``revision_not_found``); 409 ``order_on_hold``, ``order_closed``/``order_cancelled``,
+    ``item_custom``, ``item_has_no_design``, ``item_not_open``, ``revision_not_newest``
+    (only the current revision prints: the print is of the item's output, its render),
+    ``print_request_conflict``, and ``requote_needed`` (no slice quote of the revision,
+    its sliced file gone or no longer the file it priced, or the output gone); and the
+    print run's own refusals, as the print route answers them."""
+    _path(order_id, item_id, revision_id)
+    result = await run_operation(
+        ops,
+        response,
+        kind=ops.kinds[ORDER_ITEM_PRINT],
+        subject=subject_of(item_id),
+        request={
+            "order_id": order_id,
+            "item_id": item_id,
+            "revision_id": revision_id,
+            "request": body.model_dump(mode="json", exclude_unset=True),
+            "request_id": print_request_id(item_id, idempotency_key or ""),
+            "by": current_actor().model_dump(mode="json"),
+        },
+        idempotency_key=idempotency_key,
+    )
+    return operation_answer(result, Fulfilment)
+
+
 # -- fulfilment attempts (§6.1 by hand) ------------------------------------------------------
 
 

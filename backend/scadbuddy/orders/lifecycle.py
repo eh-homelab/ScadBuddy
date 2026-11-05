@@ -44,6 +44,7 @@ from scadbuddy.orders.models import (
     ChargeInput,
     ColourSlot,
     Fulfilment,
+    FulfilmentPurpose,
     ItemStatus,
     Money,
     Order,
@@ -1237,11 +1238,21 @@ class Lifecycle:
         ]
 
     def delete_item(self, order_id: str, item_id: str, by: Actor) -> None:
-        """Only a `draft` item deletes (Ruling 6, 10); else `item_not_draft`, and the
-        caller decides whether to cancel it."""
+        """Only a `draft` item with no print attempt, a test print's too, deletes
+        (Ruling 6, 10); else `item_not_draft`, and the caller decides whether to cancel
+        it."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = self._item_of(conn, order, item_id)
+            if self.store.fulfilments(item.id, conn=conn, purpose=None):
+                # A test print's attempt and the sliced file it holds (storefront spec
+                # §4.4) stay with the record: an item printed once is cancelled.
+                raise LifecycleError(
+                    "item_not_draft",
+                    f"item {item_id} has print attempts: cancel it instead"
+                    f" (POST /orders/{order_id}/items/{item_id}/cancel)",
+                    items=[item.id],
+                )
             # Its files go with it, each on the audit line, and with them their holds
             # on the blobs: nothing could show or remove an item's file once the item
             # is gone. A refusal below rolls this back.
@@ -1579,13 +1590,17 @@ class Lifecycle:
     def _in_production(self, conn: Conn, order_id: str, item_id: str) -> tuple[Order, OrderItem]:
         """The order accepted and not on hold, and the item one of its own."""
         order = self._lock(conn, order_id)
+        self._producing(order)
+        return order, self._item_of(conn, order, item_id)
+
+    def _producing(self, order: Order) -> None:
+        """The order accepted, not ended and not on hold."""
         self._not_ended(order)
         if order.status not in DERIVED:
             raise LifecycleError(
                 "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
             )
         self._not_on_hold(order)
-        return order, self._item_of(conn, order, item_id)
 
     def _fulfillable(self, conn: Conn, order_id: str, item_id: str) -> tuple[Order, OrderItem]:
         order, item = self._in_production(conn, order_id, item_id)
@@ -1663,9 +1678,21 @@ class Lifecycle:
         self._told(_Change(order, changed))
         return attempt
 
-    def _attempt_of(self, conn: Conn, item: OrderItem, fulfilment_id: str) -> Fulfilment:
+    def _attempt_of(
+        self,
+        conn: Conn,
+        item: OrderItem,
+        fulfilment_id: str,
+        purpose: FulfilmentPurpose | None = "production",
+    ) -> Fulfilment:
+        """The item's attempt ``fulfilment_id`` of ``purpose`` (None, either): a test
+        print's attempt is no production attempt, so it is not found there."""
         attempt = self.store.fulfilment(fulfilment_id, conn=conn)
-        if attempt is None or attempt.order_item_id != item.id:
+        if (
+            attempt is None
+            or attempt.order_item_id != item.id
+            or (purpose is not None and attempt.purpose != purpose)
+        ):
             raise LifecycleError(
                 "fulfilment_not_found",
                 f"no attempt {fulfilment_id} of item {item.id}",
@@ -1677,15 +1704,25 @@ class Lifecycle:
         self, order_id: str, item_id: str, fulfilment_id: str, body: FulfilmentInput, by: Actor
     ) -> Fulfilment:
         """An attempt not yet accepted, re-read whole; the item follows the outcome of
-        its latest attempt between `failed` and `approved`."""
+        its latest attempt between `failed` and `approved`. A test print's attempt
+        (storefront spec §4.4) is settled on an order not yet accepted too, and for an
+        item in any state, and never moves the item."""
         with self.store.transaction() as conn:
-            order, item = self._in_production(conn, order_id, item_id)
-            attempt = self._attempt_of(conn, item, fulfilment_id)
+            order = self._lock(conn, order_id)
+            found = self.store.fulfilment(fulfilment_id, conn=conn)
+            test = found is not None and found.purpose == "test"
+            if test:
+                self._not_ended(order)
+                self._not_on_hold(order)
+            else:
+                self._producing(order)
+            item = self._item_of(conn, order, item_id)
+            attempt = self._attempt_of(conn, item, fulfilment_id, purpose=None)
             if attempt.accepted_at is not None:
                 raise LifecycleError(
                     "fulfilment_accepted", f"attempt {attempt.attempt} is accepted"
                 )
-            if item.status not in FULFILLABLE | PRINTING:
+            if not test and item.status not in FULFILLABLE | PRINTING:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             if (
                 attempt.print_request_id is not None
@@ -1707,11 +1744,12 @@ class Lifecycle:
                 finished_at=body.finished_at,
                 notes=body.notes,
             )
-            latest = self.store.fulfilments(item.id, conn=conn)[-1]
-            status = self._after(latest, item.status)
             changed: list[tuple[OrderItem, int | None]] = []
-            if status != item.status:
-                item = self.store.update_item(conn, item.id, status=status)
+            if not test:
+                latest = self.store.fulfilments(item.id, conn=conn)[-1]
+                status = self._after(latest, item.status)
+                if status != item.status:
+                    item = self.store.update_item(conn, item.id, status=status)
             changed.append((item, attempt.attempt))
             self._event(
                 conn,
@@ -1840,6 +1878,7 @@ class Lifecycle:
         sliced_sha256: str | None,
         sliced_blob_key: str | None,
         project_id: int | None = None,
+        revision_id: str | None = None,
     ) -> Fulfilment:
         """Claim the item for one print before it starts (§5.4, #4719): under the order's
         lock, its next attempt, made nothing yet (``quantity`` 0, outcome `unknown`, no
@@ -1857,7 +1896,15 @@ class Lifecycle:
         accepted, not ended, not on hold, the item `approved` or `failed`; and
         ``item_made`` when its attempts made its quantity. A new claim records
         ``project_id``, the Bambuddy project its run is keyed with (#5263), which a retry
-        keys it with again."""
+        keys it with again.
+
+        With ``revision_id`` it is a test print of that revision (storefront spec §4.4):
+        an attempt of purpose `test` naming it, of one copy, that counts for nothing and
+        never moves the item. It is refused only when the order ended or is on hold, the
+        item is settled (``item_not_open``), has no design (``item_custom``,
+        ``item_has_no_design``) or ``revision_id`` is not its current design
+        (``revision_not_found``, ``revision_not_newest``): the item prints the output of
+        its current design, whatever its status, on an order accepted or not."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             existing = self.store.print_claim(request_id, conn=conn)
@@ -1876,14 +1923,20 @@ class Lifecycle:
                 if refusal is None:
                     return existing
                 raise ClaimRefusedError(existing, refusal)
+        if revision_id is not None:
+            return self._claim_test_print(
+                order_id,
+                item_id,
+                by,
+                revision_id,
+                request_id=request_id,
+                sliced_sha256=sliced_sha256,
+                sliced_blob_key=sliced_blob_key,
+                project_id=project_id,
+            )
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
-            self._not_ended(order)
-            if order.status not in DERIVED:
-                raise LifecycleError(
-                    "order_not_accepted", f"order {order.number} is {order.status}, not accepted"
-                )
-            self._not_on_hold(order)
+            self._producing(order)
             item = self._item_of(conn, order, item_id)
             if item.status not in FULFILLABLE:
                 raise LifecycleError(
@@ -1926,8 +1979,76 @@ class Lifecycle:
                 fulfilment_id=attempt.id,
                 attempt=attempt.attempt,
                 copies=copies,
+                purpose=attempt.purpose,
             )
             order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, attempt.attempt)]))
+        return attempt
+
+    def _test_printable(
+        self, conn: Conn, order: Order, item_id: str, revision_id: str
+    ) -> OrderItem:
+        """`claim_print`'s refusals of a test print of ``revision_id``."""
+        self._not_ended(order)
+        self._not_on_hold(order)
+        item = self._item_of(conn, order, item_id)
+        if item.status in SETTLED:
+            raise LifecycleError(
+                "item_not_open", f"item {item_id} is {item.status}", items=[item.id]
+            )
+        if item.kind == "custom":
+            raise LifecycleError("item_custom", f"item {item_id} is a custom item")
+        if item.current_revision_id is None:
+            raise LifecycleError("item_has_no_design", f"item {item_id} has no design yet")
+        self._newest(conn, item, revision_id)
+        return item
+
+    def _claim_test_print(
+        self,
+        order_id: str,
+        item_id: str,
+        by: Actor,
+        revision_id: str,
+        *,
+        request_id: str,
+        sliced_sha256: str | None,
+        sliced_blob_key: str | None,
+        project_id: int | None,
+    ) -> Fulfilment:
+        """`claim_print`'s new claim of a test print: the attempt and its file's hold,
+        the item left as it is."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            item = self._test_printable(conn, order, item_id, revision_id)
+            attempt = self.store.insert_fulfilment(
+                conn,
+                item.id,
+                quantity=0,
+                outcome="unknown",
+                created_by=by,
+                started_at=datetime.now(UTC),
+                print_request_id=request_id,
+                copies=1,
+                sliced_sha256=sliced_sha256,
+                sliced_blob_key=sliced_blob_key,
+                purpose="test",
+                revision_id=revision_id,
+            )
+            self.store.set_claim_project(conn, attempt.id, project_id)
+            if sliced_blob_key is not None:
+                self.store.hold_attempt_file(conn, FULFILMENT_HOLDER, sliced_blob_key, attempt.id)
+            self._event(
+                conn,
+                order,
+                by,
+                "print.claimed",
+                item_id=item.id,
+                fulfilment_id=attempt.id,
+                attempt=attempt.attempt,
+                copies=1,
+                purpose="test",
+                revision_id=revision_id,
+            )
         self._told(_Change(order, [(item, attempt.attempt)]))
         return attempt
 
@@ -2026,13 +2147,25 @@ class Lifecycle:
     ) -> LifecycleError | None:
         """Why a claim with no run may no longer start its print: the order ended or on
         hold since, the item moved off the `queued` the claim made it (a cancel), or the
-        attempt settled by hand."""
+        attempt settled by hand. A test print's claim made the item nothing: it may no
+        longer print once the item settled or its revision is no longer the item's."""
         try:
             self._not_ended(order)
             self._not_on_hold(order)
         except LifecycleError as error:
             return error
-        if item.status != "queued":
+        if claim.purpose == "test":
+            if item.status in SETTLED:
+                return LifecycleError(
+                    "item_not_open", f"item {item.id} is {item.status}", items=[item.id]
+                )
+            if claim.revision_id != item.current_revision_id:
+                return LifecycleError(
+                    "revision_not_newest",
+                    f"the revision attempt {claim.attempt} prints is not item {item.id}'s newest",
+                    items=[item.id],
+                )
+        elif item.status != "queued":
             return LifecycleError(
                 "item_not_open" if item.status in SETTLED else "item_not_approved",
                 f"item {item.id} is {item.status}",
@@ -2050,12 +2183,15 @@ class Lifecycle:
         self, conn: Conn, order: Order, row: Fulfilment, reason: str
     ) -> list[tuple[OrderItem, int | None]]:
         """A claim with no run released in ``conn``: its row and hold, the item back to
-        what its other attempts give it while it is still `queued`, `print.refused`."""
+        what its other attempts give it while it is still `queued` (a test print's claim
+        queued it not, and leaves it), `print.refused`."""
         self.store.release_print_claim(conn, FULFILMENT_HOLDER, row.id)
         item = self.store.item(row.order_item_id, conn=conn)
         assert item is not None
         changed: list[tuple[OrderItem, int | None]] = []
-        if item.status == "queued":
+        if row.purpose == "test":
+            changed.append((item, None))
+        elif item.status == "queued":
             rest = self.store.fulfilments(item.id, conn=conn)
             back: ItemStatus = "failed" if rest and rest[-1].outcome == "failed" else "approved"
             item = self.store.update_item(conn, item.id, status=back)
@@ -2085,8 +2221,9 @@ class Lifecycle:
         print's progress is that print's). Only an attempt still open (outcome `unknown`, no end)
         moves, so a person's edit stands; the item moves only while it is in a print
         state, so a cancel stands. Allowed on hold: it records what the printer did.
-        Its audit rows are written as the person who started the print. The attempt
-        as it now is, or None when nothing moved."""
+        Its audit rows are written as the person who started the print. A test print's
+        attempt (storefront spec §4.4) settles the same way, and the item never follows
+        it. The attempt as it now is, or None when nothing moved."""
         attempt = self.store.print_attempt(run_id)
         if attempt is None or attempt.outcome != "unknown" or attempt.finished_at is not None:
             return None
@@ -2105,7 +2242,10 @@ class Lifecycle:
             # Only a run that failed before it printed (#5276): a print Bambuddy started
             # and reported failed (an outcome) was filed under a project that stood.
             run_failed = True
-        elif not (status == "succeeded" and progressed and self.store.runs_newest(run_id)):
+        elif attempt.purpose == "test" or not (
+            status == "succeeded" and progressed and self.store.runs_newest(run_id)
+        ):
+            # A test print's progress moves no item: it is in no print state for it.
             # A print of the same output the dialog queued since is that run's, whose
             # progress is not this attempt's (`bambuddy/outcomes.py` reads the same way).
             return None
@@ -2143,7 +2283,8 @@ class Lifecycle:
                     # Its project may be one just deleted in Bambuddy (#5276): the
                     # retry asks for the order's projects again, not taking them to stand.
                     self.store.forget_projects_seen(order.id, conn=conn)
-                if item_status is not None and item.status in PRINTING:
+                # A test print's attempt settles alone: the item never follows it.
+                if item_status is not None and item.status in PRINTING and row.purpose != "test":
                     item = self.store.update_item(conn, item.id, status=item_status)
                 changed.append((item, row.attempt))
                 self._event(
@@ -2155,6 +2296,7 @@ class Lifecycle:
                     fulfilment_id=row.id,
                     attempt=row.attempt,
                     outcome=result,
+                    purpose=row.purpose,
                 )
             order = self._rederive(conn, order, by)
         self._told(_Change(order, changed))
