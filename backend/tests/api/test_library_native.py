@@ -34,6 +34,7 @@ from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.library.settings_store import S3Settings
 from scadbuddy.main import create_app
 from scadbuddy.print_library.component import PRINT_LIBRARY
+from scadbuddy.print_library.ids import is_native_id
 from scadbuddy.print_library.native import NativeLibrary
 from scadbuddy.print_library.remote import RemoteLibrary
 from scadbuddy.print_library.store import NativeFile, Unset
@@ -310,7 +311,13 @@ def test_one_native_file_is_read_with_where_it_is(
         "is_external": False,
         "folder_path": ["Dinos"],
     }
-    assert native_client.get("/api/v1/print/library/42").status_code == 404
+    # #5333 review: an id in the native range, so the router's `check_served` lets it
+    # through and the native library's own not-found answers.
+    missing = in_folder.id + 1000
+    assert is_native_id(missing)
+    gone = native_client.get(f"/api/v1/print/library/{missing}")
+    assert gone.status_code == 404
+    assert gone.json()["detail"] == f"library file {missing} not found"
 
 
 # writes (Task 5)
