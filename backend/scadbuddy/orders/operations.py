@@ -586,6 +586,13 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                 raise ApiError(
                     status.HTTP_404_NOT_FOUND, f"no attempt {fulfilment_id!r} of that item"
                 )
+        revision_id = request.get("revision_id")
+        if revision_id is not None:
+            revision = await asyncio.to_thread(store.revision, revision_id)
+            if revision is None or revision.item_id != item_id:
+                raise ApiError(
+                    status.HTTP_404_NOT_FOUND, f"no revision {revision_id!r} of that item"
+                )
         return {}
 
     async def attachment_run(request: dict[str, Any], checked: dict[str, Any]) -> dict[str, Any]:
@@ -628,6 +635,7 @@ def order_kinds(core: Core, components: Components) -> list[OperationKind]:
                     blob_key=key,
                     caption=request["caption"],
                     fulfilment_id=request.get("fulfilment_id"),
+                    revision_id=request.get("revision_id"),
                 )
             )
         except LifecycleError as error:

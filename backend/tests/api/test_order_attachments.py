@@ -394,3 +394,28 @@ def test_a_file_on_an_attempt(client: TestClient) -> None:
         client, order["id"], png(), "done.png", item_id=item["id"], fulfilment_id="nope"
     )
     assert missing.status_code == 404, missing.text
+
+
+def test_a_file_on_a_revision(client: TestClient) -> None:
+    """`POST …/items/{item}/revisions/{r}/attachments`, listed under its item."""
+    order, item = shop(client)
+    revision = client.get(f"/api/v1/orders/{order['id']}").json()["items"][0]["current_revision_id"]
+    path = f"/api/v1/orders/{order['id']}/items/{item['id']}/revisions/{revision}/attachments"
+
+    answer = client.post(
+        path,
+        files={"file": ("t.png", png(), "image/png")},
+        data={"role": "test_print"},
+        headers=press(),
+    )
+
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    assert body["revision_id"] == revision and body["role"] == "test_print"
+    assert body["subject"] == f"order_item_revision:{revision}" and body["item_id"] == item["id"]
+    missing = client.post(
+        path.replace(revision, "nope"),
+        files={"file": ("t.png", png(), "image/png")},
+        headers=press(),
+    )
+    assert missing.status_code == 404, missing.text

@@ -5,7 +5,21 @@ from __future__ import annotations
 import pytest
 
 from scadbuddy.orders.attachments import clean_filename, sniff
-from scadbuddy.orders.models import INLINE, SHOWN_IMAGES, THUMBNAILED
+from scadbuddy.orders.lifecycle import FulfilmentInput, LifecycleError
+from scadbuddy.orders.models import (
+    INLINE,
+    SHOWN_IMAGES,
+    THUMBNAILED,
+    Attachment,
+    AttachmentRole,
+    Order,
+    OrderItem,
+    Revision,
+)
+from scadbuddy.orders.store import ATTACHMENT_HOLDER, OrderStore
+from scadbuddy.store.refs import BlobRefs
+from tests.conftest import PgPool
+from tests.orders.test_lifecycle import BY, Shop, resolved
 
 
 @pytest.mark.parametrize(
@@ -55,3 +69,128 @@ def test_only_sniffed_types_are_inline_and_never_a_page() -> None:
 )
 def test_clean_filename(sent: str, kept: str) -> None:
     assert clean_filename(sent) == kept
+
+
+# -- a revision's files (#5280, storefront spec §4) -----------------------------------------
+
+
+@pytest.fixture
+def shop(rows: OrderStore, pool: PgPool) -> Shop:
+    return Shop(rows, BlobRefs(pool))
+
+
+def attach_to(
+    shop: Shop,
+    order: Order,
+    item: OrderItem,
+    rev: Revision,
+    *,
+    role: AttachmentRole = "render",
+    fulfilment_id: str | None = None,
+    name: str = "r",
+) -> Attachment:
+    sha = (name * 64)[:64].replace("r", "e")
+    return shop.lifecycle.add_attachment(
+        order.id,
+        item.id,
+        BY,
+        attachment_id=f"att-{name}-{rev.id}",
+        kind="image",
+        role=role,
+        filename=f"{name}.png",
+        media_type="image/png",
+        size_bytes=1,
+        sha256=sha,
+        blob_key=f"attachment-{sha}",
+        caption="",
+        fulfilment_id=fulfilment_id,
+        revision_id=rev.id,
+    )
+
+
+def holders_of(pool: PgPool, attachment_id: str) -> list[str]:
+    with pool.connection() as conn:
+        rows = conn.execute(
+            "SELECT key FROM blob_refs WHERE holder_kind = %s AND holder_id = %s",
+            (ATTACHMENT_HOLDER, attachment_id),
+        ).fetchall()
+    return [row["key"] for row in rows]
+
+
+@pytest.mark.requires_postgres
+def test_a_file_on_a_revision_is_listed_under_its_item(shop: Shop, pool: PgPool) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    att = attach_to(shop, order, item, rev)
+    assert att.subject == f"order_item_revision:{rev.id}"
+    assert att.item_id == item.id and att.revision_id == rev.id and att.fulfilment_id is None
+    assert holders_of(pool, att.id) == [f"attachment-{att.sha256}"]
+    assert [a.id for a in shop.rows.attachments(order.id)] == [att.id]
+    added = [e for e in shop.rows.events(order.id) if e.kind == "attachment.added"]
+    assert added[-1].detail["revision_id"] == rev.id
+
+
+@pytest.mark.requires_postgres
+def test_another_items_revision_is_refused(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    other = shop.item(order)
+    [rev] = shop.rows.revisions(other.id)
+    with pytest.raises(LifecycleError) as refused:
+        attach_to(shop, order, item, rev)
+    assert refused.value.slug == "revision_not_found" and refused.value.not_found
+
+
+@pytest.mark.requires_postgres
+def test_a_test_print_photo_names_its_attempt(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    with shop.rows.transaction() as conn:
+        test = shop.rows.insert_fulfilment(
+            conn,
+            item.id,
+            quantity=0,
+            outcome="unknown",
+            created_by=BY,
+            purpose="test",
+            revision_id=rev.id,
+        )
+    att = attach_to(shop, order, item, rev, role="test_print", fulfilment_id=test.id)
+    assert att.fulfilment_id == test.id and att.revision_id == rev.id
+
+
+@pytest.mark.requires_postgres
+def test_a_production_attempt_is_not_a_revisions_print(shop: Shop) -> None:
+    order, item = shop.accepted()
+    [rev] = shop.rows.revisions(item.id)
+    production = shop.lifecycle.record_fulfilment(
+        order.id,
+        item.id,
+        FulfilmentInput(quantity=1, outcome="succeeded"),
+        BY,
+    )
+    with pytest.raises(LifecycleError) as refused:
+        attach_to(shop, order, item, rev, role="test_print", fulfilment_id=production.id)
+    assert refused.value.slug == "fulfilment_not_found"
+
+
+@pytest.mark.requires_postgres
+def test_deleting_a_draft_item_removes_its_revisions_files_and_holds(
+    shop: Shop, pool: PgPool
+) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    item = shop.lifecycle.update_item(order.id, item.id, BY, reference=resolved("other"))
+    first, second = shop.rows.revisions(item.id)
+    one = attach_to(shop, order, item, first, name="a")
+    two = attach_to(shop, order, item, second, name="b")
+    assert holders_of(pool, one.id) and holders_of(pool, two.id)
+
+    shop.lifecycle.delete_item(order.id, item.id, BY)
+
+    assert shop.rows.attachments(order.id) == []
+    assert not holders_of(pool, one.id) and not holders_of(pool, two.id)
+    removed = [e for e in shop.rows.events(order.id) if e.kind == "attachment.removed"]
+    assert {e.detail["attachment_id"] for e in removed} == {one.id, two.id}

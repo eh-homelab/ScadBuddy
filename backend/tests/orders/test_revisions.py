@@ -18,7 +18,7 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.reference import ResolvedReference
 from scadbuddy.orders.revisions import RevisionAnswerInput
-from scadbuddy.orders.store import OrderStore, revision_subject
+from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, NOW, Shop, _priced, _slice_quote, resolved
@@ -232,23 +232,21 @@ def test_the_colours_fill_leaves_a_sent_revision_unanswered(shop: Shop) -> None:
 
 
 def attach_render(shop: Shop, order: Order, item: OrderItem, rev: Revision) -> None:
-    with shop.rows.transaction() as conn:
-        shop.rows.insert_attachment(
-            conn,
-            attachment_id=f"att-{rev.id}",
-            order_id=order.id,
-            subject=revision_subject(rev.id),
-            kind="image",
-            role="render",
-            filename="r.png",
-            media_type="image/png",
-            size_bytes=1,
-            sha256="e" * 64,
-            blob_key=f"attachment-{rev.id}",
-            caption="",
-            created_by=BY,
-            subject_item_id=item.id,
-        )
+    shop.lifecycle.add_attachment(
+        order.id,
+        item.id,
+        BY,
+        attachment_id=f"att-{rev.id}",
+        kind="image",
+        role="render",
+        filename="r.png",
+        media_type="image/png",
+        size_bytes=1,
+        sha256="e" * 64,
+        blob_key=f"attachment-{rev.id}",
+        caption="",
+        revision_id=rev.id,
+    )
 
 
 def _quoted_revision(shop: Shop, approval: str = "together") -> tuple[Order, OrderItem, Revision]:

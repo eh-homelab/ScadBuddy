@@ -53,7 +53,12 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.operations import ORDER_ATTACHMENT_ADD
 from scadbuddy.orders.problems import refused
-from scadbuddy.orders.store import fulfilment_subject, item_subject, order_subject
+from scadbuddy.orders.store import (
+    fulfilment_subject,
+    item_subject,
+    order_subject,
+    revision_subject,
+)
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -71,6 +76,7 @@ INERT = {
 ROLES: tuple[str, ...] = get_args(AttachmentRole)
 #: A role part is one of `ROLES`, so a few bytes.
 MAX_ROLE_BYTES = 32
+MAX_ID_BYTES = 100
 
 
 class AttachmentUpload(BaseModel):
@@ -93,10 +99,14 @@ def _path(*values: str) -> None:
 
 
 async def _require(
-    orders: OrdersDep, order_id: str, item_id: str | None, fulfilment_id: str | None = None
+    orders: OrdersDep,
+    order_id: str,
+    item_id: str | None,
+    fulfilment_id: str | None = None,
+    revision_id: str | None = None,
 ) -> None:
-    """404 before a byte of the upload is read, for an order, item or attempt not
-    there."""
+    """404 before a byte of the upload is read, for an order, item, attempt or
+    revision not there."""
     store = orders.store
     order = await asyncio.to_thread(store.order, order_id)
     if order is None:
@@ -111,6 +121,10 @@ async def _require(
         attempt = await asyncio.to_thread(store.fulfilment, fulfilment_id)
         if attempt is None or attempt.order_item_id != item_id:
             raise ApiError(status.HTTP_404_NOT_FOUND, f"no attempt {fulfilment_id!r} of that item")
+    if revision_id is not None:
+        revision = await asyncio.to_thread(store.revision, revision_id)
+        if revision is None or revision.item_id != item_id:
+            raise ApiError(status.HTTP_404_NOT_FOUND, f"no revision {revision_id!r} of that item")
 
 
 def _role(received: media_api.ReceivedUpload) -> str:
@@ -149,10 +163,14 @@ async def _upload(
     paths: PathsDep,
     idempotency_key: str | None,
     fulfilment_id: str | None = None,
+    revision_id: str | None = None,
 ) -> Attachment | JSONResponse:
-    _path(order_id, *(v for v in (item_id, fulfilment_id) if v is not None))
-    await _require(orders, order_id, item_id, fulfilment_id)
-    received = await media_api.receive_upload(request, paths.cache, fields={"role": MAX_ROLE_BYTES})
+    _path(order_id, *(v for v in (item_id, fulfilment_id, revision_id) if v is not None))
+    await _require(orders, order_id, item_id, fulfilment_id, revision_id)
+    fields = {"role": MAX_ROLE_BYTES}
+    if revision_id is not None:
+        fields["fulfilment_id"] = MAX_ID_BYTES
+    received = await media_api.receive_upload(request, paths.cache, fields=fields)
     claims = ClaimStore(paths.claims)
     held: list[Held] = []
     try:
@@ -164,6 +182,14 @@ async def _upload(
             )
         if "poster" in received.files:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "an attachment takes no poster")
+        if revision_id is not None:
+            # A test print's photo names the attempt, sent as a field after the route's
+            # own 404s, which `_require` could not give before the body was read.
+            sent = bytes(received.fields.get("fulfilment_id", b"")).decode("utf-8", "replace")
+            fulfilment_id = sent.strip() or None
+            if fulfilment_id is not None:
+                _path(fulfilment_id)
+                await _require(orders, order_id, item_id, fulfilment_id)
         filename = attachments.clean_filename(received.filenames.get("file", ""))
         with path.open("rb") as handle:
             kind, media_type = attachments.sniff(handle.read(attachments.SNIFF_BYTES), filename)
@@ -172,6 +198,7 @@ async def _upload(
             "order_id": order_id,
             "item_id": item_id,
             **({} if fulfilment_id is None else {"fulfilment_id": fulfilment_id}),
+            **({} if revision_id is None else {"revision_id": revision_id}),
             "file": digest,
             "filename": filename,
             "kind": kind,
@@ -186,6 +213,8 @@ async def _upload(
         subject = (
             order_subject(order_id)
             if item_id is None
+            else revision_subject(revision_id)
+            if revision_id is not None
             else item_subject(item_id)
             if fulfilment_id is None
             else fulfilment_subject(fulfilment_id)
@@ -466,3 +495,37 @@ async def put_delivered(
         )
     except LifecycleError as error:
         raise refused(error) from None
+
+
+@router.post(
+    "/{order_id}/items/{item_id}/revisions/{revision_id}/attachments",
+    summary="Attach a file to a design revision",
+    description=_UPLOAD_TEXT
+    + " On one revision of the item (storefront spec §4): its `render`, the photo of a"
+    " `test_print` (with the attempt it shows as a `fulfilment_id` field, a test attempt of"
+    " that revision), or a `reference`. Listed under the item too (`item_id`), with"
+    " `revision_id`.",
+    **_UPLOAD_DOC,
+)
+async def add_revision_attachment(
+    order_id: str,
+    item_id: str,
+    revision_id: str,
+    request: Request,
+    response: Response,
+    orders: OrdersDep,
+    ops: OperationsDep,
+    paths: PathsDep,
+    idempotency_key: IdempotencyKey = None,
+) -> Attachment | JSONResponse:
+    return await _upload(
+        order_id,
+        item_id,
+        request,
+        response,
+        orders,
+        ops,
+        paths,
+        idempotency_key,
+        revision_id=revision_id,
+    )

@@ -1256,19 +1256,23 @@ class Lifecycle:
             # Its files go with it, each on the audit line, and with them their holds
             # on the blobs: nothing could show or remove an item's file once the item
             # is gone. A refusal below rolls this back.
-            for attachment in self.store.subject_attachments(item_subject(item.id), conn=conn):
-                self.store.delete_attachment(conn, attachment.id)
-                self._event(
-                    conn,
-                    order,
-                    by,
-                    "attachment.removed",
-                    attachment_id=attachment.id,
-                    item_id=item.id,
-                    filename=attachment.filename,
-                    sha256=attachment.sha256,
-                    was_delivered=item.delivered_attachment_id == attachment.id,
-                )
+            subjects = [item_subject(item.id)] + [
+                revision_subject(r.id) for r in self.store.revisions(item.id, conn=conn)
+            ]
+            for subject in subjects:
+                for attachment in self.store.subject_attachments(subject, conn=conn):
+                    self.store.delete_attachment(conn, attachment.id)
+                    self._event(
+                        conn,
+                        order,
+                        by,
+                        "attachment.removed",
+                        attachment_id=attachment.id,
+                        item_id=item.id,
+                        filename=attachment.filename,
+                        sha256=attachment.sha256,
+                        was_delivered=item.delivered_attachment_id == attachment.id,
+                    )
             if not self.store.delete_draft_item(conn, item.id):
                 raise LifecycleError(
                     "item_not_draft",
@@ -2480,27 +2484,49 @@ class Lifecycle:
         blob_key: str,
         caption: str,
         fulfilment_id: str | None = None,
+        revision_id: str | None = None,
     ) -> Attachment:
         """The row of a file already kept as ``blob_key``, on the order, one of its
         items, or with ``fulfilment_id`` one of that item's attempts (#4251); the store
-        holds the blob for it in the same transaction."""
+        holds the blob for it in the same transaction. With ``revision_id`` it is on
+        that revision of the item (storefront spec §4): a render, or beside a
+        ``fulfilment_id`` the photo of that revision's test print."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             item = None if item_id is None else self._item_of(conn, order, item_id)
-            if fulfilment_id is None:
-                subject = order_subject(order.id) if item is None else item_subject(item.id)
-            else:
+            if revision_id is not None:
+                found = self.store.revision(revision_id, conn=conn)
+                if item is None or found is None or found.item_id != item.id:
+                    raise LifecycleError(
+                        "revision_not_found",
+                        f"no revision {revision_id} of that item",
+                        not_found=True,
+                    )
+                subject = revision_subject(found.id)
+            if fulfilment_id is not None:
                 attempt = self.store.fulfilment(fulfilment_id, conn=conn)
-                if item is None or attempt is None or attempt.order_item_id != item.id:
+                if (
+                    item is None
+                    or attempt is None
+                    or attempt.order_item_id != item.id
+                    or (
+                        revision_id is not None
+                        and (attempt.purpose != "test" or attempt.revision_id != revision_id)
+                    )
+                ):
                     raise LifecycleError(
                         "fulfilment_not_found",
                         f"no attempt {fulfilment_id} of that item",
                         not_found=True,
                     )
-                subject = fulfilment_subject(attempt.id)
+                if revision_id is None:
+                    subject = fulfilment_subject(attempt.id)
+            elif revision_id is None:
+                subject = order_subject(order.id) if item is None else item_subject(item.id)
             attachment = self.store.insert_attachment(
                 conn,
-                subject_item_id=None if fulfilment_id is None else item_id,
+                subject_item_id=None if fulfilment_id is None and revision_id is None else item_id,
+                fulfilment_id=fulfilment_id if revision_id is not None else None,
                 attachment_id=attachment_id,
                 order_id=order.id,
                 subject=subject,
@@ -2522,6 +2548,7 @@ class Lifecycle:
                 attachment_id=attachment.id,
                 item_id=attachment.item_id,
                 fulfilment_id=attachment.fulfilment_id,
+                revision_id=attachment.revision_id,
                 role=attachment.role,
             )
             change = _Change(order)
