@@ -58,13 +58,8 @@ import type {
   UpstreamState,
   UpstreamStatus,
 } from '../api/types'
-<<<<<<< HEAD
-import { editPath } from '../lib/deeplink'
-import { type CatalogueQuery, DEFAULT_QUERY, MAX_TAGS, filterModels, tagCounts } from '../lib/catalogueQuery'
-=======
 import { editPath, presetPath } from '../lib/deeplink'
-import { type CatalogueQuery, DEFAULT_QUERY, filterModels, tagCounts } from '../lib/catalogueQuery'
->>>>>>> c68c92b70 (feat(presets): link directly to a preset with /m/<slug>?preset=<id>)
+import { type CatalogueQuery, DEFAULT_QUERY, MAX_TAGS, filterModels, tagCounts } from '../lib/catalogueQuery'
 import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
