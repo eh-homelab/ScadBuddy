@@ -118,9 +118,11 @@ export function LibraryTree({
   // filter opens them all again, and clearing it gives back what was open before. The
   // folds are kept by the filter's text, not the list's identity, so a read of the tree
   // again while filtering keeps them; only the ids still listed are kept (#5303 review).
+  // Any change of the text drops them, so going back to an earlier text opens all again
+  // (#5306 review).
   const allLeft = useMemo(() => new Set(folders.map((folder) => folder.id)), [folders])
   const [filterFolded, setFilterFolded] = useState<{ of: string; ids: Set<number> } | null>(null)
-  if (!filtering && filterFolded) setFilterFolded(null)
+  if (filterFolded && (!filtering || filterFolded.of !== filter)) setFilterFolded(null)
   const folded = filtering && filterFolded?.of === filter ? filterFolded.ids : null
   const expanded = useMemo(
     () => (!filtering ? opened : folded ? new Set([...allLeft].filter((id) => !folded.has(id))) : allLeft),

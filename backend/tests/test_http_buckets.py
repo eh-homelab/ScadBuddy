@@ -24,5 +24,6 @@ def test_a_slow_request_lands_in_a_bucket_above_10_s() -> None:
 
     assert bucket("10.0") == 0
     assert bucket("15.0") == 1
+    assert bucket("30.0") == 1
     assert bucket("60.0") == 2
     assert bucket("120.0") == 2
