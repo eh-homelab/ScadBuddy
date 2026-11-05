@@ -28,6 +28,7 @@ from scadbuddy.orders.models import (
     PricingPolicy,
     Reference,
 )
+from scadbuddy.orders.problems import PROBLEMS
 from scadbuddy.orders.quote import (
     QuoteError,
     QuoteRun,
@@ -294,6 +295,14 @@ def test_the_check_refuses_a_settled_item(shop: Shop) -> None:
     assert gone.value.status == 404
 
 
+def test_the_check_refuses_a_request_with_no_design(shop: Shop) -> None:
+    request = shop.lifecycle.add_request_item(shop.order.id, BY, title="A dragon", quantity=1)
+    with pytest.raises(ApiError) as refused:
+        quote_check(shop.rows, POLICY, shop.order.id, request.id, shop.request())
+    assert refused.value.status == 409
+    assert refused.value.type == PROBLEMS + "item_has_no_design"
+
+
 def test_the_check_refuses_an_order_that_is_not_open(shop: Shop) -> None:
     quote = shop.lifecycle.record_manual_quote(
         shop.order.id, shop.item.id, ManualQuoteInput(unit_price_minor=100), BY
@@ -556,6 +565,18 @@ async def test_the_run_writes_the_filaments_first(shop: Shop, tmp_path: Path) ->
     assert shop.holders() == {quote.id}
     assert isinstance(run.slicer, FakeSlicer)
     assert run.slicer.subjects == [f"order_item:{shop.item.id}"]
+
+
+async def test_the_runs_new_filaments_are_a_revision_the_quote_names(
+    shop: Shop, tmp_path: Path
+) -> None:
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    quote = await quote_run(
+        run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+    )
+    revisions = shop.rows.revisions(shop.item.id)
+    assert [r.number for r in revisions] == [1, 2]
+    assert quote.revision_id == revisions[1].id
 
 
 async def test_a_recorded_quote_keeps_its_rates(shop: Shop, tmp_path: Path) -> None:

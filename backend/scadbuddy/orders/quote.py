@@ -117,8 +117,16 @@ class QuoteError(ValueError):
 
 def reference_of(item: OrderItem) -> Reference:
     """What the item names to make. A custom item (#4954) names nothing, so there is
-    nothing to render or slice: 409 ``item_custom``, and its price is typed instead."""
+    nothing to render or slice: 409 ``item_custom``, and its price is typed instead. A
+    request has none until its first revision: 409 ``item_has_no_design``."""
     if item.reference is None:
+        if item.kind == "request":
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"item {item.id} is a request with no design yet: add a revision first",
+                type_=PROBLEMS + "item_has_no_design",
+                items=[item.id],
+            )
         raise ApiError(
             status.HTTP_409_CONFLICT,
             f"item {item.id} is a custom item: it has no model to render or slice, so its"
@@ -608,6 +616,9 @@ async def quote_run(
         follow_every=run.follow_every,
         schema=schema,
     )
+    item = await asyncio.to_thread(store.item, item_id)
+    assert item is not None and item.current_revision_id is not None
+    revision_id = item.current_revision_id
     subject = subject_of(item_id)
     sliced = await slice_item(
         run.slicer, output_id, request, subject, follow_every=run.follow_every
@@ -643,10 +654,12 @@ async def quote_run(
                     sliced_sha256=first.sha256 or "",
                     sliced_blob_key=first.blob_key or "",
                     by=by,
+                    revision_id=revision_id,
                     quote_id=quote_id,
                 )
             )
         except LifecycleError as error:
+            await _drop(run.refs, quote_id, held)
             raise refused(error) from None
     except QuoteError as error:
         await _drop(run.refs, quote_id, held)

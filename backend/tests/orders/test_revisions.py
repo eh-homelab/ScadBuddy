@@ -21,7 +21,7 @@ from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import OrderStore, revision_subject
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
-from tests.orders.test_lifecycle import BY, NOW, Shop, resolved
+from tests.orders.test_lifecycle import BY, NOW, Shop, _priced, _slice_quote, resolved
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -422,3 +422,77 @@ def test_a_revision_of_another_item_is_not_found(shop: Shop) -> None:
     with pytest.raises(LifecycleError) as refused:
         shop.lifecycle.send_revision(order.id, item.id, theirs.id, BY)
     assert refused.value.slug == "revision_not_found" and refused.value.not_found
+
+
+# -- requests and the quotes that name their revision (Task 4) ---------------------------------
+
+
+def test_a_request_has_no_design_until_its_first_revision(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.lifecycle.add_request_item(
+        order.id, BY, title="A dragon", quantity=1, notes="green, 10 cm"
+    )
+    assert item.kind == "request" and item.reference is None and item.approval == "design_first"
+    assert any(
+        e.kind == "item.added" and e.detail.get("item_kind") == "request"
+        for e in shop.rows.events(order.id)
+    )
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.record_manual_quote(
+            order.id, item.id, ManualQuoteInput(unit_price_minor=500), BY
+        )
+    assert refused.value.slug == "item_has_no_design"
+    with pytest.raises(LifecycleError) as bare:
+        shop.lifecycle.add_revision(order.id, item.id, BY)
+    assert bare.value.slug == "item_has_no_design"
+    rev = shop.lifecycle.add_revision(order.id, item.id, BY, resolved())
+    item = shop.get_item(item)
+    assert rev.number == 1 and item.kind == "request" and item.reference == rev.reference
+
+
+def test_a_manual_quote_names_the_current_revision(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    quote = shop.lifecycle.record_manual_quote(
+        order.id, item.id, ManualQuoteInput(unit_price_minor=500), BY
+    )
+    assert quote.revision_id == item.current_revision_id
+
+
+def test_a_quote_from_the_previous_build_reads_as_current(shop: Shop, pool: PgPool) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    quote = shop.lifecycle.record_manual_quote(
+        order.id, item.id, ManualQuoteInput(unit_price_minor=500), BY
+    )
+    with pool.connection() as conn:
+        conn.execute("UPDATE order_item_quotes SET revision_id = NULL")
+    assert shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY).status == "approved"
+
+
+def test_a_slice_quote_names_its_revision(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    quote = _slice_quote(shop, order, item)
+    assert quote.revision_id == item.current_revision_id
+
+
+def test_a_slice_quote_of_a_superseded_revision_is_refused(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    old = item.current_revision_id
+    assert old is not None
+    shop.lifecycle.add_revision(order.id, item.id, BY, note="new photos")
+    priced, plates = _priced(shop)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.record_slice_quote(
+            order.id,
+            item.id,
+            priced,
+            plates,
+            sliced_sha256="a" * 64,
+            sliced_blob_key="quote-a",
+            by=BY,
+            revision_id=old,
+        )
+    assert refused.value.slug == "revision_not_newest" and shop.rows.quotes(item.id) == []

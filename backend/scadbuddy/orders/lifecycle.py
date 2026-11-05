@@ -939,6 +939,41 @@ class Lifecycle:
         self._told(_Change(order, [(item, None)]))
         return item
 
+    def add_request_item(
+        self,
+        order_id: str,
+        by: Actor,
+        *,
+        title: str,
+        quantity: int,
+        notes: str = "",
+        sku: str | None = None,
+    ) -> OrderItem:
+        """A request: what a customer wants made, before any design exists. It has no
+        reference, and is approved design first; its first revision (`add_revision`
+        with a resolved reference) gives it one."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            self._open_for_items(order, "the list of items")
+            item = self.store.insert_item(
+                conn,
+                order.id,
+                kind="request",
+                reference=None,
+                colours=[],
+                output_id=None,
+                quantity=quantity,
+                title=title,
+                notes=notes,
+                sku=sku,
+                approval="design_first",
+            )
+            self._event(conn, order, by, "item.added", item_id=item.id, item_kind="request")
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, None)]))
+        return item
+
     def add_custom_item(
         self,
         order_id: str,
@@ -1272,6 +1307,10 @@ class Lifecycle:
                     " (PATCH the item's unit_price_minor)",
                     items=[item.id],
                 )
+            if item.reference is None:
+                raise LifecycleError(
+                    "item_has_no_design", f"item {item_id} has no design yet", items=[item.id]
+                )
             line = QuoteLine(
                 kind="manual",
                 label=body.label,
@@ -1323,12 +1362,14 @@ class Lifecycle:
         sliced_sha256: str,
         sliced_blob_key: str,
         by: Actor,
+        revision_id: str,
         quote_id: str | None = None,
     ) -> Quote:
         """A `slice` quote (#4250, §5.2 step 5) as the ``order_item_quote`` run priced
         it, with the plates it read and the sliced file it read them from, under the id
         its ref was taken with (``quote_id``, Ruling 3). As a manual quote: the order
-        open for items, the item not settled, allowed on hold (it advances nothing)."""
+        open for items, the item not settled, allowed on hold (it advances nothing). It names
+        the revision the run sliced; one since superseded is `revision_not_newest`."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -1336,6 +1377,12 @@ class Lifecycle:
             item = self._item_of(conn, order, item_id)
             if item.status in SETTLED:
                 raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            if revision_id != item.current_revision_id:
+                raise LifecycleError(
+                    "revision_not_newest",
+                    f"item {item_id} has a newer revision than the one sliced",
+                    items=[item.id],
+                )
             quote = self.store.insert_quote(
                 conn,
                 item.id,
@@ -1349,7 +1396,7 @@ class Lifecycle:
                 sliced_sha256=sliced_sha256,
                 sliced_blob_key=sliced_blob_key,
                 quote_id=quote_id,
-                revision_id=item.current_revision_id,
+                revision_id=revision_id,
             )
             change = self._recorded(conn, order, item, quote, by)
         self._told(change)
