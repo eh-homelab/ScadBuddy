@@ -6,11 +6,13 @@ import pkgutil
 import re
 from pathlib import Path
 
-from fastapi import APIRouter
+import pytest
+from fastapi import APIRouter, FastAPI
 from fastapi.routing import APIRoute
+from pydantic import BaseModel
 
 import scadbuddy.api
-from scadbuddy.main import API_PREFIX, ROOT_ROUTE_MODULES
+from scadbuddy.main import API_PREFIX, ROOT_ROUTE_MODULES, _name_in_openapi
 from scadbuddy.tools.export_openapi import export
 
 
@@ -118,3 +120,41 @@ def test_the_view_routes_document_the_camera(tmp_path: Path) -> None:
         assert "+Z" in params["azimuth"]["description"], path
         assert "front" in params["azimuth"]["description"], path
         assert '"maximum": 90' in json.dumps(params["elevation"]["schema"]), path
+
+
+def test_each_attachment_upload_body_has_its_own_name(tmp_path: Path) -> None:
+    """#5317: the print and the order upload bodies were both `AttachmentUpload`, so the
+    spec kept one shape for two routes and the order route lost its `role` part."""
+    schema = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))
+    named = schema["components"]["schemas"]
+    assert "AttachmentUpload" not in named
+
+    def body(path: str) -> str:
+        content = schema["paths"][path]["post"]["requestBody"]["content"]
+        ref: str = content["multipart/form-data"]["schema"]["$ref"]
+        return ref.removeprefix("#/components/schemas/")
+
+    printed = body("/api/v1/prints/{archive_id}/attachments")
+    ordered = body("/api/v1/orders/{order_id}/attachments")
+    assert (printed, ordered) == ("PrintAttachmentUpload", "OrderAttachmentUpload")
+    assert set(named[printed]["properties"]) == {"file", "caption"}
+    assert set(named[ordered]["properties"]) == {"file", "caption", "role"}
+    assert "fulfilment_id" in named["RevisionAttachmentUpload"]["properties"]
+
+
+def test_naming_two_models_with_one_name_is_refused() -> None:
+    """The guard behind #5317: a name already in the spec is never overwritten."""
+
+    class Upload(BaseModel):
+        file: bytes
+
+    first = Upload
+
+    class Upload(BaseModel):  # type: ignore[no-redef]
+        file: bytes
+        role: str
+
+    app = FastAPI()
+    _name_in_openapi(app, first, Upload)
+    with pytest.raises(ValueError, match="Upload"):
+        app.openapi()

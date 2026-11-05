@@ -55,7 +55,7 @@ ACCEPTED = "a PNG, JPEG or WebP photo, or an MP4 or WebM video"
 MAX_STEM = 80
 
 
-class AttachmentUpload(BaseModel):
+class PrintAttachmentUpload(BaseModel):
     """The multipart body of ``POST /prints/{archive_id}/attachments``."""
 
     file: bytes = Field(description=f"The photo or video: {ACCEPTED}")
@@ -97,7 +97,9 @@ async def _require_print(links: PrintLinksDep, archive_id: int) -> None:
         "requestBody": {
             "required": True,
             "content": {
-                "multipart/form-data": {"schema": {"$ref": "#/components/schemas/AttachmentUpload"}}
+                "multipart/form-data": {
+                    "schema": {"$ref": "#/components/schemas/PrintAttachmentUpload"}
+                }
             },
         }
     },
