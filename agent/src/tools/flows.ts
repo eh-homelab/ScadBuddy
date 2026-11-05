@@ -112,7 +112,7 @@ export const flowTools: Tool[] = [
       'dicts; a refusal is an exception in ScadBuddy\'s words, and a denial a ToolApprovalDenied. The script ' +
       'is `import asyncio`, an `async def main()` that awaits host functions, and `asyncio.run(main())`; it may ' +
       'compute for at most a second between host calls. It is type-checked first: a 422 lists `problems` by line. ' +
-      'Registering an existing `name` adds its next version, one commit in its history (list_flow_versions), ' +
+      'Registering an existing `name` adds its next version, one version commit in its history (list_flow_versions), ' +
       'an unchanged script too; a version never changes. `approval_timeout` sets how long its runs wait for ' +
       'approvals (omit for the global setting). With `inputs_schema`, each run takes typed inputs, which the ' +
       "script reads with `inputs()` (a TypedDict `FlowInputs`, defaults filled in); a 422 lists the schema's " +
@@ -120,7 +120,8 @@ export const flowTools: Tool[] = [
       "({kind: 'model.changed', slug, commit}, {kind: 'render.finished', slug, job_id}, or " +
       "{kind: 'print.finished' | 'print.failed', slug, run_id, output_id, printer}; narrow by `kind`), or None. " +
       '`message` and `body` name the version\'s commit; `display_name` and `description` set the flow\'s ' +
-      'details (as update_flow_details does, in a commit of their own after the version\'s).',
+      'details (as update_flow_details does, in a commit of their own after the version\'s); a `details_error` ' +
+      'in the answer means the version was saved but they were not: call update_flow_details, never register again.',
     input: z.object({
       name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, 'lower-case letters, digits and dashes'),
       script: z.string().min(1).max(65_536),

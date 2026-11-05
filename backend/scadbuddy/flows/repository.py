@@ -14,14 +14,16 @@ its slug.
 Every write takes an optional commit message, its subject, and an optional body (#3186);
 without a message the subject says what the write did.
 
-Every version is its own commit: a registration and a restore each make exactly one,
-``--allow-empty`` when the script is unchanged. A commit carries two trailers,
-``ScadBuddy-Flow: <name>`` and ``ScadBuddy-Flow-Version: <definition id>``, after the
-author's (``core/authorship.py``). A version's number is its commit's position
-among the commits with that name's ``ScadBuddy-Flow`` trailer, oldest first, and only
-this module numbers one. :meth:`FlowHistory.register` holds the write lock across the
-reconcile, the commit and the index insert, so two registrations of one name, in one
-process or two, never interleave.
+Every version is its own commit: a registration and a restore each make exactly one
+version commit, ``--allow-empty`` when the script is unchanged. A version commit carries
+two trailers, ``ScadBuddy-Flow: <name>`` and ``ScadBuddy-Flow-Version: <definition id>``,
+after the author's (``core/authorship.py``). A registration that changes the details is
+followed by a details commit of its own, which carries ``ScadBuddy-Flow-Details`` only.
+A version's number is its commit's position among the commits with that name's
+``ScadBuddy-Flow`` and ``ScadBuddy-Flow-Version`` trailers, oldest first, and only this
+module numbers one. :meth:`FlowHistory.register` holds the write lock across the
+reconcile, the version commit, the index insert and the details commit, so two
+registrations of one name, in one process or two, never interleave.
 """
 
 from __future__ import annotations
@@ -58,6 +60,8 @@ DETAILS_TRAILER = "ScadBuddy-Flow-Details"
 DETAILS_FILE = "flow.json"
 #: A trailer line, as git writes the ones ScadBuddy adds.
 _TRAILER_LINE = re.compile(r"^[A-Za-z0-9-]+: ")
+#: The trailers that mark a paragraph as the one ScadBuddy adds to a flow's commits.
+_OWN_TRAILERS = (f"{FLOW_TRAILER}: ", f"{DELETED_TRAILER}: ", f"{DETAILS_TRAILER}: ")
 _GITIGNORE = f"# Written by ScadBuddy.\n{LOCK_NAME}\n"
 _FORMAT = (
     "--format=format:%x1e%H%x1f%aI%x1f%s"
@@ -82,9 +86,16 @@ def details_path(name: str) -> str:
 
 
 def _body_of(raw: str) -> str | None:
-    """A commit's own body: ``%b`` without the trailers paragraph ScadBuddy adds."""
+    """A commit's own body: ``%b`` without the trailers paragraph ScadBuddy adds, the
+    last one, all trailer lines with one of its own among them. A paragraph of the
+    author's that only reads like trailers stays."""
     paragraphs = [p for p in raw.strip().split("\n\n") if p.strip()]
-    if paragraphs and all(_TRAILER_LINE.match(line) for line in paragraphs[-1].splitlines()):
+    lines = paragraphs[-1].splitlines() if paragraphs else []
+    if (
+        lines
+        and all(_TRAILER_LINE.match(line) for line in lines)
+        and any(line.startswith(_OWN_TRAILERS) for line in lines)
+    ):
         paragraphs.pop()
     text = "\n\n".join(paragraphs).strip()
     return text or None
@@ -92,6 +103,17 @@ def _body_of(raw: str) -> str | None:
 
 def _message(message: str | None, default: str) -> str:
     return message if message is not None and message.strip() else default
+
+
+class DetailsNotSavedError(GitError):
+    """A registration's version was committed and indexed, but its details commit
+    failed (#3186): ``flow.json`` is as it was. Never retry the registration for it, which
+    would add one more version; set the details again."""
+
+    def __init__(self, commit: str, version: int, cause: Exception) -> None:
+        super().__init__(f"version {version} was saved, but its details were not saved: {cause}")
+        self.commit = commit
+        self.version = version
 
 
 @dataclass(frozen=True)
@@ -162,7 +184,9 @@ class FlowHistory(GitRepo):
         None), or the script and schema at the commit ``restore``. Under the write lock:
         ``reconcile`` (index what an earlier failed insert left), the commit, then
         ``index(commit, version)``, then, when ``display_name`` or ``description`` changes
-        the flow's details, their own commit (#3186). The version's commit and number."""
+        the flow's details, their own commit (#3186). The version's commit and number;
+        :class:`DetailsNotSavedError` (naming them) when the version was saved but its
+        details commit failed."""
         with self.write_lock():
             if reconcile is not None:
                 reconcile()
@@ -176,7 +200,10 @@ class FlowHistory(GitRepo):
                 message=message,
                 body=body,
             )
-            self._set_details_locked(name, display_name, description)
+            try:
+                self._set_details_locked(name, display_name, description)
+            except (GitError, OSError) as error:
+                raise DetailsNotSavedError(*found, error) from error
             return found
 
     def register_locked(
@@ -283,6 +310,7 @@ class FlowHistory(GitRepo):
         if now == was:
             return None
         path = self.root / details_path(name)
+        before = path.read_bytes() if path.is_file() else None
         if now == FlowDetails():
             path.unlink(missing_ok=True)
         else:
@@ -297,12 +325,22 @@ class FlowHistory(GitRepo):
             )
         else:
             default = f"Describe {name}" if now.description else f"Clear the description of {name}"
-        return self._commit_locked(
-            _message(message, default),
-            details_path(name),
-            trailers=[f"{DETAILS_TRAILER}: {name}"],
-            body=body,
-        )
+        try:
+            return self._commit_locked(
+                _message(message, default),
+                details_path(name),
+                trailers=[f"{DETAILS_TRAILER}: {name}"],
+                body=body,
+            )
+        except (GitError, OSError):
+            # Put the file and the index back as HEAD has them, so the next write
+            # never commits this change by accident.
+            self._run("reset", "-q", "--", details_path(name), check=False)
+            if before is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(before)
+            raise
 
     def delete(
         self,

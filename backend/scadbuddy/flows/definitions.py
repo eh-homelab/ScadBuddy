@@ -27,7 +27,7 @@ from scadbuddy.flows.models import (
     FlowVersion,
 )
 from scadbuddy.flows.reconcile import created_by, reconcile, reconcile_locked
-from scadbuddy.flows.repository import FlowHistory
+from scadbuddy.flows.repository import DetailsNotSavedError, FlowHistory
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 
@@ -94,7 +94,7 @@ class FlowDefinitions:
         display_name: str | None = None,
         description: str | None = None,
     ) -> Definition:
-        """A new version of ``name``: always one commit, an unchanged script too, with
+        """A new version of ``name``: always one version commit, an unchanged script too, with
         its inputs schema beside it (#2483) or none, named by ``message`` and ``body``
         when given. A ``display_name`` or ``description`` that changes the flow's details
         is a commit of its own after it (#3186); None leaves one as it is."""
@@ -237,19 +237,25 @@ class FlowDefinitions:
                 )
             )
 
-        commit, _ = self.history.register(
-            name,
-            version_id,
-            index,
-            script=script,
-            inputs=inputs_schema,
-            restore=restore,
-            reconcile=lambda: self._before_commit(name),
-            message=message,
-            body=body,
-            display_name=display_name,
-            description=description,
-        )
+        details_error: str | None = None
+        try:
+            commit, _ = self.history.register(
+                name,
+                version_id,
+                index,
+                script=script,
+                inputs=inputs_schema,
+                restore=restore,
+                reconcile=lambda: self._before_commit(name),
+                message=message,
+                body=body,
+                display_name=display_name,
+                description=description,
+            )
+        except DetailsNotSavedError as error:
+            # The version is committed and indexed: answer it, never fail it (#3186).
+            logger.warning("a flow version was saved without its details", exc_info=True)
+            commit, details_error = error.commit, str(error)
         return Definition.model_validate(
             {
                 **rows[0].model_dump(),
@@ -257,6 +263,7 @@ class FlowDefinitions:
                 **self._flags(self.states.state(name)),
                 "script": self.history.script_at(name, commit),
                 "inputs_schema": self.history.inputs_at(name, commit),
+                "details_error": details_error,
             }
         )
 

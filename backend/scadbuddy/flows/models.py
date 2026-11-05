@@ -72,6 +72,9 @@ class Definition(DefinitionSummary):
     #: Its typed inputs (#2483): a JSON Schema, `<name>/inputs.json` in its commit.
     #: None for a flow that declares none: its runs take no inputs.
     inputs_schema: dict[str, Any] | None = None
+    #: Only on a registration's answer (#3186): why the display name or description it
+    #: gave was not saved. The version was; set the details again, never register again.
+    details_error: str | None = None
 
 
 class StoredDefinition(DefinitionSummary):

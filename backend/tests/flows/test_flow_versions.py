@@ -17,7 +17,7 @@ from scadbuddy.flows.definitions import (
     UnknownFlowError,
     UnmigratedFlowError,
 )
-from scadbuddy.flows.repository import FlowHistory
+from scadbuddy.flows.repository import DETAILS_TRAILER, FlowHistory
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 from scadbuddy.render.projection import JobProjection
@@ -128,6 +128,29 @@ async def test_restore_is_a_new_version_with_that_versions_script(
     diff = await definitions.diff("swap", two.commit, None)
     assert (diff.base, diff.head) == (one.commit, two.commit)
     assert await definitions.source("swap", one.commit) == ONE
+
+
+async def test_a_failed_details_commit_answers_the_version_saying_so(
+    definitions: FlowDefinitions, store: FlowStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3186: a registration whose details commit fails is still the version it made,
+    with `details_error` saying the details were not saved, so a caller never registers
+    it again for them."""
+    await definitions.start()
+    real = definitions.history._commit_locked
+
+    def failing(message: str, *paths: str, **kwargs: Any) -> str | None:
+        if any(t.startswith(DETAILS_TRAILER) for t in kwargs.get("trailers", ())):
+            raise GitError("could not commit the details")
+        return real(message, *paths, **kwargs)
+
+    monkeypatch.setattr(definitions.history, "_commit_locked", failing)
+    made = await definitions.register(
+        "swap", ONE, BROWSER, approval_timeout_s=None, display_name="Nightly swap"
+    )
+    assert made.version == 1 and made.display_name is None
+    assert made.details_error is not None and "not saved" in made.details_error
+    assert rows(store) == [("swap", 1, made.commit)]
 
 
 async def test_a_failed_insert_leaves_its_commit_which_keeps_its_position(
