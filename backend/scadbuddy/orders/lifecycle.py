@@ -592,15 +592,17 @@ class Lifecycle:
             items = self._entry_item(conn, order, entry.order_item_id)
         self._told(_Change(order, [(item, None) for item in items]))
 
-    def add_cost_entry(self, order_id: str, body: CostEntryInput, by: Actor) -> CostEntry:
-        """Money spent. A second write of one ``source`` returns the first entry and
-        writes nothing, not even an audit row."""
+    def add_cost_entry(
+        self, order_id: str, body: CostEntryInput, by: Actor
+    ) -> tuple[CostEntry, bool]:
+        """Money spent, and whether this call wrote it: a second write of one ``source``
+        returns the first entry and writes nothing, not even an audit row."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             items = self._entry_item(conn, order, body.order_item_id)
             entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
             if not written:
-                return entry
+                return entry, False
             self._event(
                 conn,
                 order,
@@ -612,7 +614,7 @@ class Lifecycle:
                 amount_minor=entry.amount_minor,
             )
         self._told(_Change(order, [(item, None) for item in items]))
-        return entry
+        return entry, True
 
     def remove_cost_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
         with self.store.transaction() as conn:

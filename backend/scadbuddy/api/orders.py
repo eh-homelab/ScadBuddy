@@ -56,7 +56,7 @@ from scadbuddy.operations.component import OperationsDep
 from scadbuddy.orders.actor import current_actor
 from scadbuddy.orders.archives import AttemptArchives, attempt_archives
 from scadbuddy.orders.component import OrdersDep
-from scadbuddy.orders.costs import OrderCosts, order_costs
+from scadbuddy.orders.costs import CostRates, OrderCosts, order_costs
 from scadbuddy.orders.currency import minor_exponent
 from scadbuddy.orders.integrations import ArchiveMedia, NotLinkedError, not_linked
 from scadbuddy.orders.lifecycle import (
@@ -72,6 +72,8 @@ from scadbuddy.orders.models import (
     Attachment,
     Charge,
     ChargeInput,
+    CostEntry,
+    CostEntryInput,
     Filament,
     FilamentInput,
     FilamentPatch,
@@ -91,6 +93,8 @@ from scadbuddy.orders.models import (
     Revision,
     Shipment,
     SpoolImport,
+    TimeEntry,
+    TimeEntryInput,
 )
 from scadbuddy.orders.operations import ORDER_ATTEMPT_COPY, ORDER_ITEM_PRINT, ORDER_ITEM_QUOTE
 from scadbuddy.orders.pricing import estimate_grams, to_minor
@@ -751,22 +755,121 @@ async def order_events(order_id: str, orders: OrdersDep) -> list[OrderEvent]:
 @router.get(
     "/{order_id}/costs",
     response_model=OrderCosts,
-    summary="The real cost: the accepted quotes beside the attempts",
+    summary="The real cost and margin of an order and each of its items",
     description=(
         "Per item, its accepted quote's seconds, grams and filament cost for the item's "
-        "quantity beside every attempt's actual seconds and grams, failures included, the "
-        "grams priced at the quote's own price per gram (a `manual` quote prices none). "
-        "With Bambuddy linked, each attempt's `bambuddy_cost` is Bambuddy's cost of its "
-        "archives, corrected for suspect filament readings, shown and never in any sum; "
-        "`bambuddy_unavailable` says some archive could not be read. Nothing is stored."
+        "quantity beside every attempt, failures included. Each attempt is costed in "
+        "filament and machine time: its actual grams and seconds, else its quote's "
+        "(`estimated` names which), at the quote's own rates, else at the price book and "
+        "today's machine rate (also `estimated`); a figure with no source is left out and "
+        "the attempt is `unknown`. Each item adds its labour (its time entries, else a "
+        "default from its quote or `pricing_labour_per_item`, `labour_default`) and its "
+        "cost entries; the order adds its own entries and its shipments' cost. "
+        "`revenue_minor` is what was charged (an item's accepted quote, 0 once cancelled; "
+        "the order's items plus every charge but tax), and `margin_state` is `loss`, "
+        "`unknown`, `thin` (below `orders_thin_margin_percent`) or `ok`. With Bambuddy "
+        "linked, each attempt's `bambuddy_cost` is Bambuddy's cost of its archives, shown "
+        "and never in any sum; `bambuddy_unavailable` says some archive could not be read. "
+        "Nothing is stored."
     ),
 )
-async def get_order_costs(order_id: str, orders: OrdersDep) -> OrderCosts:
+async def get_order_costs(
+    order_id: str, orders: OrdersDep, settings: SettingsStoreDep
+) -> OrderCosts:
     _path(order_id)
-    costs = await order_costs(orders.store, orders.integrations, order_id)
+    runtime = settings.snapshot().runtime
+    rates = CostRates(
+        shop_currency=runtime.orders_currency,
+        machine_rate_per_hour=runtime.pricing_machine_rate_per_hour,
+        labour_per_item=runtime.pricing_labour_per_item,
+        thin_margin_percent=runtime.orders_thin_margin_percent,
+    )
+    costs = await order_costs(orders.store, orders.integrations, order_id, rates)
     if costs is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no order {order_id!r}")
     return costs
+
+
+@router.post(
+    "/{order_id}/time-entries",
+    response_model=TimeEntry,
+    status_code=status.HTTP_201_CREATED,
+    summary="Log time on an order or one of its items",
+    description=(
+        "In any order status, ended and on hold included. The entry copies the labour rate "
+        "in force (`pricing_labour_rate_per_hour`) as `rate_minor_per_hour`, so a later "
+        "change never rewrites it; for an order in a currency other than the shop's, no "
+        "rate can be copied and it is null. On the audit line as `time.added`."
+    ),
+)
+async def add_time_entry(
+    order_id: str, body: TimeEntryInput, orders: OrdersDep, settings: SettingsStoreDep
+) -> TimeEntry:
+    _path(order_id)
+    by = current_actor()
+
+    def add() -> TimeEntry:
+        order = orders.store.order(order_id)
+        if order is None:
+            raise LifecycleError("order_not_found", f"no order {order_id}", not_found=True)
+        runtime = settings.snapshot().runtime
+        rate = (
+            to_minor(Decimal(runtime.pricing_labour_rate_per_hour), order.currency)
+            if order.currency == runtime.orders_currency
+            else None
+        )
+        return orders.lifecycle.add_time_entry(order_id, body, by, rate_minor_per_hour=rate)
+
+    return await _run(add)
+
+
+@router.delete(
+    "/{order_id}/time-entries/{entry_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a time entry",
+)
+async def remove_time_entry(order_id: str, entry_id: str, orders: OrdersDep) -> Response:
+    _path(order_id, entry_id)
+    by = current_actor()
+    await _run(lambda: orders.lifecycle.remove_time_entry(order_id, entry_id, by))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/{order_id}/cost-entries",
+    response_model=CostEntry,
+    status_code=status.HTTP_201_CREATED,
+    summary="Add a cost to an order or one of its items",
+    description=(
+        "Money the job cost in the order's currency: the assistant's spend, a payment "
+        "fee, materials, anything else. Shipping is a shipment's `cost_minor`, never an "
+        "entry. In any order status. With a `source`, a second write of the same order, "
+        "kind and source returns the first entry and writes nothing (200). On the audit "
+        "line as `cost.added`."
+    ),
+    responses={status.HTTP_200_OK: {"model": CostEntry, "description": "Already recorded"}},
+)
+async def add_cost_entry(
+    order_id: str, body: CostEntryInput, orders: OrdersDep, response: Response
+) -> CostEntry:
+    _path(order_id)
+    by = current_actor()
+    entry, written = await _run(lambda: orders.lifecycle.add_cost_entry(order_id, body, by))
+    if not written:
+        response.status_code = status.HTTP_200_OK
+    return entry
+
+
+@router.delete(
+    "/{order_id}/cost-entries/{entry_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Remove a cost entry",
+)
+async def remove_cost_entry(order_id: str, entry_id: str, orders: OrdersDep) -> Response:
+    _path(order_id, entry_id)
+    by = current_actor()
+    await _run(lambda: orders.lifecycle.remove_cost_entry(order_id, entry_id, by))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 #: How long an accept waits for its Bambuddy projects (§8.1) before answering anyway.

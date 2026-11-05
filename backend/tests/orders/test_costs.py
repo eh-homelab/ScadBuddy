@@ -4,18 +4,35 @@ shown and never summed."""
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
-from scadbuddy.orders.costs import order_costs
+from scadbuddy.orders.costs import CostRates, order_costs
 from scadbuddy.orders.integrations import NOT_LINKED, NotLinkedError
-from scadbuddy.orders.lifecycle import FulfilmentInput
-from scadbuddy.orders.models import Fulfilment, Order, OrderItem
+from scadbuddy.orders.lifecycle import QUOTE_HOLDER, FulfilmentInput, OrderEdit, ShipmentInput
+from scadbuddy.orders.models import (
+    ChargeInput,
+    ColourSlot,
+    CostEntryInput,
+    FilamentInput,
+    Fulfilment,
+    Order,
+    OrderItem,
+    PricingPolicy,
+    ShipmentItem,
+    TimeEntryInput,
+)
+from scadbuddy.orders.pricing import Plate, PlateFilament, price
 from scadbuddy.orders.store import OrderStore
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, Shop, _slice_quote
 
 pytestmark = pytest.mark.requires_postgres
+
+#: The shop's settings: USD, every rate 0.
+USD = CostRates(shop_currency="USD", machine_rate_per_hour="0", labour_per_item="0")
 
 
 class Costs:
@@ -71,7 +88,7 @@ async def test_failed_attempts_count_in_the_actual_cost(shop: Shop) -> None:
     attempt(shop, order, item, "failed", 0, 7.5, 81)
     attempt(shop, order, item, "succeeded", 2, 21.0, 82)
 
-    costs = await order_costs(shop.rows, NOT_LINKED, order.id)
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
 
     assert costs is not None
     (line,) = costs.items
@@ -92,7 +109,7 @@ async def test_bambuddy_cost_is_shown_never_summed(shop: Shop) -> None:
     attempt(shop, order, item, "failed", 0, 7.5, 81)
     attempt(shop, order, item, "succeeded", 2, 21.0, 82)
 
-    costs = await order_costs(shop.rows, Costs({81: 0.4, 82: 1.1}), order.id)
+    costs = await order_costs(shop.rows, Costs({81: 0.4, 82: 1.1}), order.id, USD)
 
     assert costs is not None
     (line,) = costs.items
@@ -105,7 +122,7 @@ async def test_an_unreadable_archive_is_reported_not_raised(shop: Shop) -> None:
     order, item = sliced_order(shop)
     attempt(shop, order, item, "succeeded", 2, 21.0, 82)
 
-    costs = await order_costs(shop.rows, Costs({}), order.id)
+    costs = await order_costs(shop.rows, Costs({}), order.id, USD)
 
     assert costs is not None
     assert costs.bambuddy_unavailable
@@ -122,7 +139,7 @@ async def test_without_bambuddy_nothing_is_asked(shop: Shop) -> None:
         async def archive_cost(self, archive_id: int) -> float | None:
             raise NotLinkedError
 
-    costs = await order_costs(shop.rows, Unlinked({}), order.id)
+    costs = await order_costs(shop.rows, Unlinked({}), order.id, USD)
 
     assert costs is not None and not costs.bambuddy_unavailable
 
@@ -131,7 +148,7 @@ async def test_a_manual_quote_prices_no_grams(shop: Shop) -> None:
     order, item = shop.accepted(quantity=1)
     attempt(shop, order, item, "succeeded", 1, 12.0, 83)
 
-    costs = await order_costs(shop.rows, NOT_LINKED, order.id)
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
 
     assert costs is not None
     (line,) = costs.items
@@ -142,4 +159,315 @@ async def test_a_manual_quote_prices_no_grams(shop: Shop) -> None:
 
 
 async def test_an_unknown_order_is_none(shop: Shop) -> None:
-    assert await order_costs(shop.rows, NOT_LINKED, "nope") is None
+    assert await order_costs(shop.rows, NOT_LINKED, "nope", USD) is None
+
+
+# -- job cost (spec 2026-11-05 §4, §5, #5326) ---------------------------------------------
+
+
+def _set_attempt(pool: PgPool, attempt_id: str, copies: int, sliced_sha256: str) -> None:
+    """The columns the print path writes, set as it would."""
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_item_fulfilments SET copies = %s, sliced_sha256 = %s WHERE id = %s",
+            (copies, sliced_sha256, attempt_id),
+        )
+
+
+def priced_order(
+    shop: Shop, policy: PricingPolicy, quantity: int = 1, sha: str = "b" * 64
+) -> tuple[Order, OrderItem]:
+    """An accepted order whose item's accepted slice quote was priced under ``policy``:
+    per unit 600 s and 10 g of a 20-per-kg filament in slot 1."""
+    order = shop.order()
+    item = shop.item(order, quantity=quantity)
+    filament = shop.rows.insert_filament(
+        FilamentInput(material="PLA", colour=f"#{len(shop.rows.filaments()):06d}", cost_per_kg="20")
+    )
+    plates = [
+        Plate(
+            index=1,
+            print_seconds=600,
+            filaments=[PlateFilament(slot=1, used_g=Decimal("10"))],
+            blob_key="quote-b",
+            sha256=sha,
+        )
+    ]
+    priced = price(plates, {1: filament}, policy, currency="USD", quantity=quantity)
+    quote_id = f"qp-{item.id}"
+    assert shop.refs is not None
+    shop.refs.add("quote-b", QUOTE_HOLDER, quote_id)
+    quote = shop.lifecycle.record_slice_quote(
+        order.id,
+        item.id,
+        priced,
+        plates,
+        sliced_sha256=sha,
+        sliced_blob_key="quote-b",
+        by=BY,
+        quote_id=quote_id,
+    )
+    shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    return shop.lifecycle.accept_order(order.id, BY), shop.get_item(item)
+
+
+def by_hand(shop: Shop, order: Order, item: OrderItem, outcome: str, made: int) -> Fulfilment:
+    return shop.lifecycle.record_fulfilment(
+        order.id,
+        item.id,
+        FulfilmentInput.model_validate({"quantity": made, "outcome": outcome}),
+        BY,
+    )
+
+
+async def test_an_attempt_with_no_grams_is_costed_from_its_quote(shop: Shop) -> None:
+    order, item = sliced_order(shop, quantity=2)
+    # A failed attempt by hand: no archive, no copies, nothing made. One unit's grams.
+    by_hand(shop, order, item, "failed", 0)
+    rates = USD.model_copy(update={"machine_rate_per_hour": "36"})
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    assert (at.grams, at.seconds, at.actual_grams) == (10.0, 600, None)
+    # 10 g at the quote's 2 a gram; 600 s at today's 36 an hour (no machine line).
+    assert (at.filament_minor, at.machine_minor, at.cost_minor) == (20, 600, 620)
+    assert at.estimated == ["grams", "seconds", "filament", "machine"]
+    assert not at.unknown
+    assert costs.items[0].estimated == ["prints", "labour"]
+
+
+async def test_an_attempt_is_costed_from_the_quote_it_printed_and_its_copies(
+    shop: Shop, pool: PgPool
+) -> None:
+    order, item = priced_order(shop, PricingPolicy(machine_rate_per_hour="6"), quantity=3)
+    attempt_ = by_hand(shop, order, item, "succeeded", 3)
+    _set_attempt(pool, attempt_.id, copies=3, sliced_sha256="b" * 64)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    # Three units of 10 g and 600 s: the quote's 2 a gram and its machine line of 100
+    # for 600 s.
+    assert (at.grams, at.seconds) == (30.0, 1800)
+    assert (at.filament_minor, at.machine_minor) == (60, 300)
+    assert at.estimated == ["grams", "seconds", "filament", "machine"]
+
+
+async def test_measured_figures_at_the_quotes_rates_are_not_estimated(shop: Shop) -> None:
+    order, item = priced_order(shop, PricingPolicy(machine_rate_per_hour="6"))
+    attempt(shop, order, item, "succeeded", 1, 12.0, 90)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    # 12 g at 2 a gram; 500 s at 100 per 600 s.
+    assert (at.filament_minor, at.machine_minor, at.estimated) == (24, 83, [])
+
+
+async def test_a_manual_quote_prices_grams_at_the_price_book(shop: Shop) -> None:
+    order, item = shop.accepted(quantity=1)
+    filament = shop.rows.insert_filament(
+        FilamentInput(material="PETG", colour="#00ff00", cost_per_kg="30")
+    )
+    with shop.rows.transaction() as conn:
+        shop.rows.update_item(
+            conn, item.id, colours=[ColourSlot(slot=0, colour="#ff0000", filament_id=filament.id)]
+        )
+    attempt(shop, order, item, "succeeded", 1, 12.0, 83)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    # 12 g at 30 a kilogram: 36 cents; 500 s at today's rate, 0. Both estimated.
+    assert (at.filament_minor, at.machine_minor) == (36, 0)
+    assert at.estimated == ["filament", "machine"]
+    assert costs.items[0].unknown == []
+
+
+async def test_an_attempt_with_no_source_is_unknown(shop: Shop) -> None:
+    order, item = shop.accepted(quantity=1)
+    by_hand(shop, order, item, "succeeded", 1)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    line = costs.items[0]
+    (at,) = line.attempts
+    assert (at.grams, at.seconds, at.cost_minor, at.unknown) == (None, None, 0, True)
+    assert line.unknown == ["prints"]
+    assert line.margin_state == "unknown"
+
+
+async def test_labour_is_the_entries_else_a_default(shop: Shop) -> None:
+    order, item = priced_order(shop, PricingPolicy(labour_per_item="2.50"), quantity=2)
+    rates = USD.model_copy(update={"labour_per_item": "9"})
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+    assert costs is not None
+    line = costs.items[0]
+    # No entries: the accepted quote's labour line, 250 a unit, for two.
+    assert (line.labour_minor, line.labour_default, line.estimated) == (500, True, ["labour"])
+
+    shop.lifecycle.add_time_entry(
+        order.id,
+        TimeEntryInput(order_item_id=item.id, kind="setup", minutes=20),
+        BY,
+        rate_minor_per_hour=3000,
+    )
+    shop.lifecycle.add_time_entry(
+        order.id, TimeEntryInput(kind="packing", minutes=10), BY, rate_minor_per_hour=3000
+    )
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+    assert costs is not None
+    line = costs.items[0]
+    # One real entry replaces the default: 20 minutes at 30.00 an hour.
+    assert (line.labour_minor, line.labour_default, line.estimated) == (1000, False, [])
+    assert [e.minutes for e in line.time_entries] == [20]
+    # The order's own 10 minutes count on the order, not the item.
+    assert [e.minutes for e in costs.time_entries] == [10]
+    assert costs.labour_minor == 1500
+
+
+async def test_a_manual_quote_defaults_labour_to_todays_setting(shop: Shop) -> None:
+    order, _ = shop.accepted(quantity=3)
+    rates = USD.model_copy(update={"labour_per_item": "1.25"})
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+
+    assert costs is not None
+    assert (costs.items[0].labour_minor, costs.items[0].labour_default) == (375, True)
+
+
+async def test_charged_cost_and_margin(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.quoted(order, item)  # charged 1000
+    shop.lifecycle.edit_order(
+        order.id,
+        BY,
+        OrderEdit(
+            charges=[
+                ChargeInput(kind="shipping", label="Post", amount_minor=500),
+                ChargeInput(kind="discount", label="Friend", amount_minor=-100),
+                ChargeInput(kind="tax", label="VAT", amount_minor=200),
+            ]
+        ),
+    )
+    order = shop.lifecycle.accept_order(order.id, BY)
+    shop.lifecycle.add_cost_entry(
+        order.id, CostEntryInput(order_item_id=item.id, kind="material", amount_minor=300), BY
+    )
+    shop.lifecycle.add_cost_entry(order.id, CostEntryInput(kind="payment_fee", amount_minor=50), BY)
+    shop.fulfilled(order, shop.get_item(item))
+    shop.lifecycle.add_shipment(
+        order.id,
+        ShipmentInput(
+            carrier="Post", cost_minor=450, items=[ShipmentItem(order_item_id=item.id, quantity=1)]
+        ),
+        BY,
+    )
+    rates = USD.model_copy(update={"labour_per_item": "1"})
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+
+    assert costs is not None
+    line = costs.items[0]
+    # The attempt by hand has no source (0, unknown); labour 100 by default; 300 material.
+    assert (line.cost_minor, line.revenue_minor, line.margin_minor) == (400, 1000, 600)
+    assert (line.margin_percent, line.margin_state) == (60.0, "unknown")
+    # 1000 + 500 - 100 charged (tax is not revenue); 400 + 50 + 450 shipping in the cost.
+    assert (costs.charges_minor, costs.revenue_minor) == (400, 1400)
+    assert (costs.shipping_minor, costs.other_minor, costs.cost_minor) == (450, 800, 900)
+    assert (costs.margin_minor, costs.margin_percent) == (500, 35.7)
+
+
+async def test_thin_and_loss(shop: Shop) -> None:
+    order, item = shop.accepted(quantity=1)  # charged 1000
+    shop.lifecycle.add_cost_entry(
+        order.id, CostEntryInput(order_item_id=item.id, kind="material", amount_minor=900), BY
+    )
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+    assert costs is not None
+    assert (costs.items[0].margin_percent, costs.items[0].margin_state) == (10.0, "thin")
+    assert costs.margin_state == "thin"
+
+    shop.lifecycle.add_cost_entry(
+        order.id, CostEntryInput(order_item_id=item.id, kind="other", amount_minor=200), BY
+    )
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+    assert costs is not None
+    assert (costs.items[0].margin_minor, costs.items[0].margin_state) == (-100, "loss")
+
+
+async def test_a_cancelled_item_is_charged_nothing_and_its_cost_counts(shop: Shop) -> None:
+    order, item = sliced_order(shop, quantity=1)
+    attempt(shop, order, item, "failed", 0, 7.5, 81)
+    shop.lifecycle.cancel_order(order.id, BY, None)
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    line = costs.items[0]
+    # 7.5 g at 2 a gram; no default labour for what was never made.
+    assert (line.revenue_minor, line.cost_minor, line.labour_minor) == (0, 15, 0)
+    assert (line.margin_minor, line.margin_state) == (-15, "loss")
+    assert (costs.revenue_minor, costs.margin_state) == (0, "loss")
+
+
+async def test_a_custom_item_costs_only_its_entries(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.lifecycle.add_custom_item(
+        order.id, BY, title="Engraving", quantity=2, unit_price_minor=500
+    )
+    rates = USD.model_copy(update={"labour_per_item": "9"})
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+
+    assert costs is not None
+    line = costs.items[0]
+    assert line.item_id == item.id
+    assert (line.revenue_minor, line.cost_minor, line.labour_default) == (1000, 0, False)
+    assert line.margin_state == "ok"
+
+
+async def test_an_item_with_no_accepted_quote_has_no_margin(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.lifecycle.add_time_entry(
+        order.id,
+        TimeEntryInput(order_item_id=item.id, kind="design", minutes=90),
+        BY,
+        rate_minor_per_hour=2000,
+    )
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    line = costs.items[0]
+    assert (line.labour_minor, line.cost_minor) == (3000, 3000)
+    assert (line.revenue_minor, line.margin_minor, line.margin_state) == (None, None, None)
+    assert (costs.revenue_minor, costs.margin_state) == (None, None)
+
+
+async def test_another_currency_leaves_todays_rates_unknown(shop: Shop) -> None:
+    order = shop.lifecycle.create_order(shop.customer.id, BY, currency="EUR")
+    item = shop.item(order)
+    shop.quoted(order, item)
+    order = shop.lifecycle.accept_order(order.id, BY)
+    shop.lifecycle.add_cost_entry(
+        order.id, CostEntryInput(order_item_id=item.id, kind="material", amount_minor=100), BY
+    )
+    rates = USD.model_copy(update={"labour_per_item": "1", "machine_rate_per_hour": "5"})
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, rates)
+
+    assert costs is not None
+    line = costs.items[0]
+    # The entry still counts; today's labour (in USD) does not.
+    assert (line.cost_minor, line.labour_minor, line.unknown) == (100, 0, ["labour"])
+    assert line.margin_state == "unknown"

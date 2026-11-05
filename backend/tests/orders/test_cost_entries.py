@@ -60,7 +60,7 @@ def test_entries_are_allowed_in_every_status(shop: Shop, state: str) -> None:
     shop.lifecycle.add_time_entry(
         order.id, TimeEntryInput(kind="packing", minutes=5), BY, rate_minor_per_hour=None
     )
-    cost = shop.lifecycle.add_cost_entry(
+    cost, _ = shop.lifecycle.add_cost_entry(
         order.id, CostEntryInput(kind="payment_fee", amount_minor=59), BY
     )
     shop.lifecycle.remove_cost_entry(order.id, cost.id, BY)
@@ -87,10 +87,11 @@ def test_one_source_is_written_once(shop: Shop) -> None:
     order, _ = shop.accepted()
     body = CostEntryInput(kind="assistant", amount_minor=120, source="ai_session:s1")
 
-    first = shop.lifecycle.add_cost_entry(order.id, body, BY)
-    again = shop.lifecycle.add_cost_entry(order.id, body, BY)
+    first, written = shop.lifecycle.add_cost_entry(order.id, body, BY)
+    again, again_written = shop.lifecycle.add_cost_entry(order.id, body, BY)
 
     assert again == first
+    assert (written, again_written) == (True, False)
     assert len(shop.rows.cost_entries(order.id)) == 1
     assert shop.kinds(order).count("cost.added") == 1
 
