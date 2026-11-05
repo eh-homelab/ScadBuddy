@@ -1,6 +1,7 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { delay, http, HttpResponse } from 'msw'
 import type { ReactNode } from 'react'
+import { Link } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ModelSummary } from '../api/types'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
@@ -936,5 +937,48 @@ describe('the page slot', () => {
     await waitFor(() => expect(shadow().textContent).toContain('disk full'), { timeout: 5000 })
     expect(posts).toBe(1)
     expect(generate).not.toBeDisabled()
+  })
+})
+
+describe('a preset link while a template UI is on screen (#1022)', () => {
+  it('lets the link go, and renders again, when a save remounts the picker while it asks', async () => {
+    let host: Host | undefined
+    setUiModuleLoader(async () => ({
+      mount: (_root: ShadowRoot, given: Host) => {
+        host = given
+      },
+    }))
+    setMockPresets(UI_DEMO_SLUG, [
+      { id: 'linked', name: 'Linked', origin: 'mine', params: {}, description: '', tags: [] },
+    ])
+    const renders: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/render')) {
+        void request.clone().json().then((body: { inputs: { params: Record<string, unknown> } }) => {
+          renders.push(String(body.inputs.params['name']))
+        })
+      }
+    })
+    renderPage(
+      <>
+        <Link to={`/m/${UI_DEMO_SLUG}?preset=linked`}>Open Linked</Link>
+        <CustomizePage />
+      </>,
+      { route: `/m/${UI_DEMO_SLUG}`, path: '/m/:slug' },
+    )
+    await waitFor(() => expect(host).toBeDefined())
+    await screen.findByRole('combobox', { name: 'Preset' })
+    // An edit, and the link at once: its render cannot go out before the link is answered.
+    act(() => host?.inputs.set({ params: { name: 'Edited' } }))
+    fireEvent.click(screen.getByRole('link', { name: 'Open Linked' }))
+    await screen.findByRole('alertdialog', { name: 'Apply preset Linked?' })
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS + 200))
+    expect(renders).not.toContain('Edited')
+    // The template UI saves a preset, which remounts the picker under the question.
+    await act(async () => {
+      await host!.presets.save('Saved meanwhile')
+    })
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
+    await waitFor(() => expect(renders).toContain('Edited'), { timeout: 5_000 })
   })
 })

@@ -108,8 +108,9 @@ export interface OfferedPreset {
    */
   preset: ParamPreset
   /**
-   * The user edited the values since the page opened. Without it the values on screen
-   * are what the page opened on (an output reopened, say), which the link replaces.
+   * The values changed since the page opened, by an edit or by a preset put on screen.
+   * Without it the values on screen are what the page opened on (an output reopened,
+   * say), which the link replaces without asking.
    */
   ask: boolean
   /** The question was declined, or never answered: the picker went while it asked. */

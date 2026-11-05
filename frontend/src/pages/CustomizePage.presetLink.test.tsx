@@ -213,6 +213,43 @@ describe('a link to a preset (#1022)', () => {
     await waitFor(() => expect(renders.length).toBeGreaterThan(0), { timeout: 5_000 })
   })
 
+  it('keeps a migration it gave up on from showing anything when it fails late', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let answer = () => {}
+    const stalled = new Promise<void>((resolve) => {
+      answer = resolve
+    })
+    onTestFinished(() => {
+      answer()
+      vi.useRealTimers()
+    })
+    let failed!: () => void
+    const answered = new Promise<void>((resolve) => {
+      failed = resolve
+    })
+    server.use(
+      http.get('/api/v1/models/name-keychain', () =>
+        HttpResponse.json({ ...models.find((m) => m.slug === 'name-keychain'), inputs_version: 7 }),
+      ),
+      http.post('/api/v1/models/:slug/inputs/migrate', async () => {
+        await stalled
+        setTimeout(failed, 0)
+        return HttpResponse.json({ title: 'Gateway Timeout', status: 504, detail: 'late' }, { status: 504 })
+      }),
+    )
+    render(`/m/name-keychain?preset=${MUM}`)
+    await screen.findByRole('textbox', { name: 'Name on the tag' })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await screen.findByTestId('preset-link-missing')).toHaveTextContent('did not answer in time')
+    // Now the migration fails: the link was given up on, so its inputs are not shown.
+    answer()
+    await answered
+    await vi.advanceTimersByTimeAsync(1_000)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    expect(screen.queryByRole('textbox', { name: 'Saved inputs' })).toBeNull()
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan')
+  })
+
   it('applies a link on a reopened output without asking: nothing was edited', async () => {
     const renders = watchRenders()
     render(`/m/name-keychain?from=${'c'.repeat(32)}&preset=${MUM}`)

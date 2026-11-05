@@ -551,12 +551,15 @@ export function CustomizePage() {
   // A preset's stored inputs, brought up to the template version before the picker cuts
   // them to the schema (spec §8.2). Current ones (or a version not known yet) pass as
   // they are, at once; ones that cannot be migrated show read-only instead.
+  // `stillWanted` is asked when the answer lands: a link that gave up waiting (#1022) must
+  // not put a late failure's inputs on screen beside the defaults it opened on.
   const migratePreset = useCallback(
-    (saved: JsonObject): JsonObject | Promise<JsonObject | null> => {
+    (saved: JsonObject, stillWanted?: () => boolean): JsonObject | Promise<JsonObject | null> => {
       const v = typeof saved.v === 'number' ? saved.v : 0
       if (inputsVersion === undefined || v === inputsVersion) return saved
       return migrateIfOld(slug, saved, inputsVersion, version).then((outcome) => {
         if (outcome.kind === 'failed') {
+          if (stillWanted && !stillWanted()) return null
           setPresetFailure({ inputs: outcome.inputs, error: outcome.error })
           return null
         }
@@ -642,8 +645,12 @@ export function CustomizePage() {
       // Bounded: no render starts while the link is pending, so a list or a migration
       // that never answers would leave the page with no preview and nothing said.
       let timer: ReturnType<typeof setTimeout> | undefined
+      let gaveUp = false
       const late = new Promise<'late'>((resolve) => {
-        timer = setTimeout(() => resolve('late'), PRESET_LINK_TIMEOUT_MS)
+        timer = setTimeout(() => {
+          gaveUp = true
+          resolve('late')
+        }, PRESET_LINK_TIMEOUT_MS)
       })
       const tooLate = () =>
         missing('The linked preset could not be read: the server did not answer in time. Showing the defaults.')
@@ -663,7 +670,10 @@ export function CustomizePage() {
         const stored = isJsonObject(preset.inputs)
           ? (preset.inputs as JsonObject)
           : joinInputs(preset.params ?? {}, NO_EXTRA)
-        const migrated = await Promise.race([Promise.resolve(migratePreset(stored)), late])
+        const migrated = await Promise.race([
+          Promise.resolve(migratePreset(stored, () => !gaveUp && current())),
+          late,
+        ])
         if (migrated === 'late') return tooLate()
         if (!current()) return
         // One that cannot be migrated is shown read-only by `migratePreset`, as a pick's is.
