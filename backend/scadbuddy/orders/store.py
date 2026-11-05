@@ -151,7 +151,9 @@ _TIME_ENTRY = (
     "id, order_id, order_item_id, kind, minutes, rate_minor_per_hour, note, started_at,"
     " created_by, created_at"
 )
-_COST_ENTRY = "id, order_id, order_item_id, kind, amount_minor, note, source, created_by, created_at"
+_COST_ENTRY = (
+    "id, order_id, order_item_id, kind, amount_minor, note, source, created_by, created_at"
+)
 _ATTACHMENT = (
     "id, order_id, subject, kind, role, filename, media_type, size_bytes, sha256, blob_key,"
     " caption, created_at, created_by, attempt_item_id, fulfilment_id"
