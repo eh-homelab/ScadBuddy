@@ -5,6 +5,7 @@ import type { Approval, Fulfilment, Order, OrderAttachment, OrderAttachmentRole,
 import { timeAgo } from '../../lib/format'
 import { failure } from '../../lib/mediaFiles'
 import { AddItemDialog } from './AddItemDialog'
+import { EndAttempt } from './EndAttempt'
 import { AttachmentCard, FilePick } from './OrderAttachments'
 import { PrintItem } from './PrintItem'
 import { refusalSlug, refusalText } from './refusal'
@@ -300,8 +301,10 @@ function RevisionRow({
       {tests.length > 0 && (
         <ul aria-label={`Test prints of revision ${revision.number}`} className="text-xs text-muted-foreground">
           {tests.map((test) => (
-            <li key={test.id}>
+            <li key={test.id} className="flex flex-wrap items-center gap-2">
               Test print, attempt {test.attempt}: {OUTCOMES[test.outcome]}
+              {/* #5316 — a test print is ended on any order not ended or on hold (`update_fulfilment`). */}
+              {!ENDED.has(order.status) && !order.on_hold && <EndAttempt orderId={order.id} itemId={item.id} attempt={test} made={false} onChanged={onChanged} />}
             </li>
           ))}
         </ul>
