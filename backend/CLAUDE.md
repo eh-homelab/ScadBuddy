@@ -565,7 +565,7 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   `pricing_usd_rate`, `orders_thin_margin_percent` (live). Routes `POST`/`DELETE
   /orders/{id}/time-entries` and `…/cost-entries`; agent `order_time_add`, `order_cost_add`
   (write); the order page's `components/orders/OrderCosts.tsx` and `CostEntryForms.tsx`.
-  Until #5280 every attempt is `production`.
+  Every attempt counts, test prints (#5280) too (`fulfilments(..., purpose=None)`).
   Printing an item (#4719, spec §5.4 "As built"): the `order_item_print` kind
   (`POST /orders/{id}/items/{item}/print`, `library` queue, check `orders/printing.py`
   `print_check`, `requote_needed` when the accepted slice quote's file is gone or changed)

@@ -137,7 +137,7 @@ function itemCost(order: Order, item: OrderItem, time: TimeEntry[], other: CostE
     return {
       fulfilment_id: f.id,
       attempt: f.attempt,
-      purpose: 'production',
+      purpose: f.purpose ?? 'production',
       outcome: f.outcome,
       quantity: f.quantity,
       accepted: f.accepted_at !== null,
@@ -162,7 +162,7 @@ function itemCost(order: Order, item: OrderItem, time: TimeEntry[], other: CostE
   const unknown: Part[] = attempts.some((a) => a.unknown) ? ['prints'] : []
   let [labour, labourUnknown] = entriesLabour(time)
   let labourDefault = false
-  if (!time.length && (item.kind ?? 'model') === 'model' && item.status !== 'cancelled') {
+  if (!time.length && item.kind !== 'custom' && item.status !== 'cancelled') {
     labourDefault = true
     estimated.push('labour')
     const lines = accepted?.lines.filter((l) => l.kind === 'labour') ?? []

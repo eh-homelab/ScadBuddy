@@ -421,7 +421,7 @@ def _item_cost(
 
     labour, labour_unknown = _entries_labour(time)
     labour_default = False
-    if not time and item.kind == "model" and item.status != "cancelled":
+    if not time and item.kind != "custom" and item.status != "cancelled":
         default = reader.default_labour()
         labour_default = True
         estimated.append("labour")

@@ -17,7 +17,7 @@
 - A rate setting needs the order's currency to be the shop's `orders_currency`; otherwise that part is `unknown`.
 - Settings are stored in Postgres and env-seeded (`SCADBUDDY_<FIELD>`), `live`.
 - Migrations are a new timestamped file; nothing else is edited.
-- #5280 has not merged: every attempt is `purpose` `production`; no column is added to `order_item_fulfilments`.
+- #5280 merged during the build: the read passes `purpose=None`, so test prints count; no column is added to `order_item_fulfilments`.
 - Time and cost entries are added and deleted in every order status, on hold included.
 - Every new API operation has an agent tool or a `coverage.ts` entry.
 
@@ -55,7 +55,7 @@
 **Interfaces:**
 - Consumes: Task 1 store reads and settings.
 - Produces: `CostRates(shop_currency: str, machine_rate_per_hour: str, labour_per_item: str, labour_rate_per_hour: str, thin_margin_percent: str)`; `order_costs(store, integrations, order_id, rates: CostRates) -> OrderCosts | None`.
-- `AttemptCost` gains `purpose` (always `production`), `grams`, `seconds`, `machine_minor`, `cost_minor`, `estimated: list[Literal["grams","seconds","filament","machine"]]`, `unknown: bool`.
+- `AttemptCost` gains `purpose` (the attempt's), `grams`, `seconds`, `machine_minor`, `cost_minor`, `estimated: list[Literal["grams","seconds","filament","machine"]]`, `unknown: bool`.
 - `ItemCost` gains `prints_minor`, `machine_minor`, `labour_minor`, `labour_default: bool`, `other_minor`, `cost_minor`, `revenue_minor|None`, `margin_minor|None`, `margin_percent: float|None`, `margin_state: Literal["ok","thin","loss","unknown"]|None`, `estimated: list[str]`, `unknown: list[str]`, `time_entries`, `cost_entries`.
 - `OrderCosts` gains the same sums plus `shipping_minor`, `charges_minor` (non-tax charges), order-level `time_entries`/`cost_entries`, `thin_margin_percent`.
 

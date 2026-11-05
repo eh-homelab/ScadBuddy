@@ -7,6 +7,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from scadbuddy.orders.costs import CostRates, order_costs
 from scadbuddy.orders.integrations import NOT_LINKED, NotLinkedError
@@ -205,6 +206,7 @@ def priced_order(
         sliced_sha256=sha,
         sliced_blob_key="quote-b",
         by=BY,
+        revision_id=shop.get_item(item).current_revision_id or "",
         quote_id=quote_id,
     )
     shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
@@ -268,14 +270,16 @@ async def test_measured_figures_at_the_quotes_rates_are_not_estimated(shop: Shop
     assert (at.filament_minor, at.machine_minor, at.estimated) == (24, 83, [])
 
 
-async def test_a_manual_quote_prices_grams_at_the_price_book(shop: Shop) -> None:
+async def test_a_manual_quote_prices_grams_at_the_price_book(shop: Shop, pool: PgPool) -> None:
     order, item = shop.accepted(quantity=1)
     filament = shop.rows.insert_filament(
         FilamentInput(material="PETG", colour="#00ff00", cost_per_kg="30")
     )
-    with shop.rows.transaction() as conn:
-        shop.rows.update_item(
-            conn, item.id, colours=[ColourSlot(slot=0, colour="#ff0000", filament_id=filament.id)]
+    slots = [ColourSlot(slot=0, colour="#ff0000", filament_id=filament.id)]
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE order_items SET colours = %s WHERE id = %s",
+            (Jsonb([s.model_dump() for s in slots]), item.id),
         )
     attempt(shop, order, item, "succeeded", 1, 12.0, 83)
 
@@ -287,6 +291,28 @@ async def test_a_manual_quote_prices_grams_at_the_price_book(shop: Shop) -> None
     assert (at.filament_minor, at.machine_minor) == (36, 0)
     assert at.estimated == ["filament", "machine"]
     assert costs.items[0].unknown == []
+
+
+async def test_a_test_print_counts_toward_the_cost(shop: Shop, pool: PgPool) -> None:
+    order, item = sliced_order(shop, quantity=1)
+    made = attempt(shop, order, item, "succeeded", 0, 4.0, 91)
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT id FROM order_item_revisions WHERE item_id = %s LIMIT 1", (item.id,)
+        ).fetchone()
+        assert row is not None
+        conn.execute(
+            "UPDATE order_item_fulfilments SET purpose = 'test', revision_id = %s WHERE id = %s",
+            (row["id"], made.id),
+        )
+
+    costs = await order_costs(shop.rows, NOT_LINKED, order.id, USD)
+
+    assert costs is not None
+    (at,) = costs.items[0].attempts
+    # 4 g at the quote's 2 a gram, though the attempt made nothing for the order.
+    assert (at.purpose, at.filament_minor) == ("test", 8)
+    assert costs.items[0].prints_minor == 8
 
 
 async def test_an_attempt_with_no_source_is_unknown(shop: Shop) -> None:
