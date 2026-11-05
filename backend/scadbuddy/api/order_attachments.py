@@ -659,7 +659,11 @@ async def attachment_to_model(
         def copy() -> Held:
             # The claim takes the file by moving it in, and the order's blob stays.
             staged = paths.cache / f"{MEDIA_UPLOAD_PREFIX}{uuid.uuid4().hex}"
-            shutil.copyfile(source, staged)
+            try:
+                shutil.copyfile(source, staged)
+            except BaseException:
+                staged.unlink(missing_ok=True)
+                raise
             return claims.hold_file(staged, attachment.sha256)
 
         held.append(await asyncio.to_thread(copy))

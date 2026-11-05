@@ -1335,7 +1335,17 @@ class Catalogue:
         added = self.paths.builtin_media_dir(upstream_id)
         for view in listing:
             item = MediaItem.model_validate(
-                view.model_dump(include={"id", "file", "kind", "caption", "poster"})
+                view.model_dump(
+                    include={
+                        "id",
+                        "file",
+                        "kind",
+                        "caption",
+                        "poster",
+                        "source_commit",
+                        "source_revision_id",
+                    }
+                )
             )
             if view.readonly and view.id == LEGACY_ID and view.file == THUMBNAIL_NAME:
                 if len(listing) == 1:

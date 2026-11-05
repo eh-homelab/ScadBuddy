@@ -540,3 +540,43 @@ def test_a_photo_of_a_revision_not_accepted_stays_on_the_order(client: TestClien
         f"/api/v1/orders/{order['id']}/attachments/nope/to-model", headers=press()
     )
     assert missing.status_code == 404
+
+
+def _accepted_photo(client: TestClient, data: bytes | None = None) -> tuple[dict[str, Any], str]:
+    order, item = shop(client)
+    rev, photo = _revision_photo(client, order, item)
+    _answer(client, order, item, rev)
+    if data is not None:
+        # Swap the stored photo's bytes for ones the route must refuse.
+        store = _state(client).components.get(ORDERS).store
+        found = store.attachment(photo)
+        assert found is not None
+        blob = _state(client).store.blobs.dir_for(found[1]) / attachments_module.BLOB_FILE
+        blob.write_bytes(data)
+    return order, photo
+
+
+def test_a_deleted_template_keeps_the_photo_on_the_order(client: TestClient) -> None:
+    order, photo = _accepted_photo(client)
+    assert client.delete(f"/api/v1/models/{SLUG}", headers=press()).status_code in (200, 202, 204)
+
+    answer = client.post(
+        f"/api/v1/orders/{order['id']}/attachments/{photo}/to-model", headers=press()
+    )
+
+    assert answer.status_code == 409 and answer.json()["type"].endswith("/template_deleted")
+
+
+def test_a_photo_the_model_cannot_take_is_refused(client: TestClient) -> None:
+    order, photo = _accepted_photo(client, b"not an image at all, just text")
+    path = f"/api/v1/orders/{order['id']}/attachments/{photo}/to-model"
+    assert client.post(path, headers=press()).status_code == 422
+
+
+def test_a_photo_past_the_image_cap_is_413(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order, photo = _accepted_photo(client)
+    monkeypatch.setattr("scadbuddy.api.order_attachments.MAX_IMAGE_BYTES", 10)
+    path = f"/api/v1/orders/{order['id']}/attachments/{photo}/to-model"
+    assert client.post(path, headers=press()).status_code == 413

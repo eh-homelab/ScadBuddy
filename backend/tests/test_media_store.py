@@ -631,3 +631,20 @@ def test_a_media_items_source_survives_a_reorder(store: PostgresMediaStore) -> N
     assert by_id["a"].source_commit == "b" * 40 and by_id["a"].source_revision_id == "rev-1"
     assert by_id["other"].source_commit is None
     assert store.items_for(["demo"])["demo"][1].source_revision_id == "rev-1"
+
+
+@pytest.mark.requires_postgres
+def test_duplicating_a_built_in_keeps_the_source_of_its_added_photos(
+    catalogue: Catalogue, builtin: str
+) -> None:
+    catalogue.add_media(
+        builtin,
+        _stage(catalogue, PNG, "image", "png"),
+        source_commit="c" * 40,
+        source_revision_id="rev-9",
+    )
+
+    copy = catalogue.duplicate(builtin, "mine", "Mine")
+
+    added = copy.media[-1]
+    assert added.source_commit == "c" * 40 and added.source_revision_id == "rev-9"
