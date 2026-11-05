@@ -373,7 +373,9 @@ def test_restoring_a_deleted_flow_brings_back_its_details_at_that_version(
     _, second, _ = register(history, "swap", TWO)
     history.set_details("swap", display_name="New name")
     history.delete("swap", lambda _c: None)
-    assert history.details("swap").display_name is None
+    # Deleted, it reads as it was when it was deleted (the list's archived view).
+    assert not (history.root / "swap").exists()
+    assert history.details("swap").display_name == "New name"
     restored, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=second)
     assert history.details("swap").display_name == "Old name"
     changed = history._out("show", "--name-only", "--format=", restored).split()
@@ -382,6 +384,23 @@ def test_restoring_a_deleted_flow_brings_back_its_details_at_that_version(
     history.delete("swap", lambda _c: None)
     history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=first)
     assert history.details("swap").display_name is None
+
+
+def test_a_versions_diff_never_shows_the_flows_details(history: FlowHistory) -> None:
+    """Details are the flow's, not a version's: a details change between two versions,
+    or brought back by a deleted flow's restore, is no hunk of their diff."""
+    _, first, _ = register(history, "swap", ONE)
+    history.set_details("swap", display_name="Nightly swap")
+    _, second, _ = register(history, "swap", ONE)
+    _, _, patch = history.diff_flow("swap", first, second)
+    assert patch == ""
+    _, third, _ = register(history, "swap", TWO)
+    _, _, patch = history.diff_flow("swap", None, third)
+    assert "flow.py" in patch and "flow.json" not in patch
+    history.delete("swap", lambda _c: None)
+    restored, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=first)
+    _, _, patch = history.diff_flow("swap", None, restored)
+    assert "flow.json" not in patch and "-    return 2" in patch
 
 
 def test_a_display_name_is_one_line_of_printable_text(history: FlowHistory) -> None:

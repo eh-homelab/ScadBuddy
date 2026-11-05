@@ -312,15 +312,17 @@ function ScriptEditor({ flow, onSaved }: { flow: FlowDefinition; onSaved: (saved
     setSaving(true)
     setSaveError(undefined)
     try {
-      onSaved(
-        await api.registerFlow({
-          name: flow.name,
-          script: draft,
-          ...approvalTimeout(flow.approval_timeout_s),
-          ...(parsed.schema ? { inputs_schema: parsed.schema } : {}),
-          ...commitMessage(message, body),
-        }),
-      )
+      const saved = await api.registerFlow({
+        name: flow.name,
+        script: draft,
+        ...approvalTimeout(flow.approval_timeout_s),
+        ...(parsed.schema ? { inputs_schema: parsed.schema } : {}),
+        ...commitMessage(message, body),
+      })
+      // The next save is described afresh, not with this one's message.
+      setMessage('Update script')
+      setBody('')
+      onSaved(saved)
     } catch (caught) {
       const refused = refusedProblems(caught)
       if (refused) setCheckResult({ script: both, problems: refused })

@@ -313,6 +313,9 @@ describe('FlowPage details and commit messages (#3186)', () => {
     expect(await screen.findByRole('heading', { name: 'swap v1' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Edit details' }))
     const dialog = await screen.findByRole('dialog', { name: 'Edit details' })
+    // Each field stops at the length the route takes, so a long one is not refused on Save.
+    expect(within(dialog).getByRole('textbox', { name: 'Display name' })).toHaveAttribute('maxLength', '120')
+    expect(within(dialog).getByRole('textbox', { name: 'Description' })).toHaveAttribute('maxLength', '20000')
     await user.type(within(dialog).getByRole('textbox', { name: 'Display name' }), 'Nightly swap')
     await user.type(within(dialog).getByRole('textbox', { name: 'Description' }), 'Swaps.')
     await user.clear(within(dialog).getByRole('textbox', { name: 'Commit message' }))
@@ -345,6 +348,9 @@ describe('FlowPage details and commit messages (#3186)', () => {
     expect(await within(versions).findByRole('link', { name: /^v2 Sleep first/ })).toBeInTheDocument()
     const compare = screen.getByRole('region', { name: 'Compare versions' })
     expect(within(compare).getByRole('combobox', { name: 'To' })).toHaveTextContent('v2 Sleep first')
+    // The next save starts from the default message again, not this one's.
+    expect(screen.getByRole('textbox', { name: 'Commit message' })).toHaveValue('Update script')
+    expect(screen.getByRole('textbox', { name: 'Commit details (optional)' })).toHaveValue('')
   })
 })
 

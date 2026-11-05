@@ -49,6 +49,7 @@ from scadbuddy.core.gitrepo import (
     GitRepo,
     RepoCoordinator,
     RevisionNotFoundError,
+    _is_control,
 )
 from scadbuddy.flows.inputs import INPUTS_FILE
 
@@ -101,10 +102,6 @@ def _body_of(raw: str) -> str | None:
         paragraphs.pop()
     text = "\n\n".join(paragraphs).strip()
     return text or None
-
-
-def _is_control(character: str) -> bool:
-    return character < " " or "\x7f" <= character <= "\x9f"
 
 
 def _display_name(text: str) -> str | None:
@@ -457,11 +454,16 @@ class FlowHistory(GitRepo):
 
     def details(self, name: str) -> FlowDetails:
         """The flow's display name and description (#3186), from ``<name>/flow.json`` in
-        the tree; none for a flow without one, or one whose file is not an object of
-        strings (named by its slug, as before the file existed)."""
+        the tree, or for a deleted flow as the file was when it was deleted; none for a
+        flow without one, or one whose file is not an object of strings (named by its
+        slug, as before the file existed)."""
         try:
-            found = json.loads((self.root / details_path(name)).read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, ValueError):
+            if (self.root / name).is_dir():
+                raw = (self.root / details_path(name)).read_bytes()
+            else:
+                raw = self._details_when_deleted(name)
+            found = json.loads(raw.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError, GitError, RevisionNotFoundError):
             return FlowDetails()
         if not isinstance(found, dict):
             return FlowDetails()
@@ -471,6 +473,15 @@ class FlowHistory(GitRepo):
             return value if isinstance(value, str) and value.strip() else None
 
         return FlowDetails(display_name=field("display_name"), description=field("description"))
+
+    def _details_when_deleted(self, name: str) -> bytes:
+        """``flow.json`` at the parent of the commit that deleted ``<name>/``;
+        :class:`RevisionNotFoundError` when there is none."""
+        deleted = self.last_commit(name)
+        before = self.parent(deleted) if deleted is not None else None
+        if before is None:
+            raise RevisionNotFoundError(f"{name!r} was never deleted")
+        return self.show(before, details_path(name))
 
     def versions(self, name: str) -> list[FlowCommit]:
         """The flow's versions, newest first."""
@@ -508,7 +519,8 @@ class FlowHistory(GitRepo):
 
     def diff_flow(self, name: str, base: str | None, head: str) -> tuple[str, str, str]:
         """The flow's script from ``base`` (its version before ``head`` when None) to
-        ``head``, as a patch naming ``flow.py``: the base, the head and the patch."""
+        ``head``, as a patch naming ``flow.py``: the base, the head and the patch. The
+        flow's details (``flow.json``) are the flow's, not a version's: no hunk."""
         versions = self.versions(name)
         target = self.version_at(name, head)
         if base is None:
@@ -517,4 +529,8 @@ class FlowHistory(GitRepo):
         else:
             base = self.version_at(name, base).commit
         revisions = self.revision_range(base, target.commit)
-        return revisions.base, revisions.head, self.diff(revisions, name, relative=f"{name}/")
+        return (
+            revisions.base,
+            revisions.head,
+            self.diff(revisions, name, relative=f"{name}/", exclude=[details_path(name)]),
+        )

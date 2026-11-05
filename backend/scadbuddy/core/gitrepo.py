@@ -1015,16 +1015,23 @@ class GitRepo:
         return RevisionRange(resolved_base, resolved_head)
 
     def diff(
-        self, revisions: RevisionRange, path: str | None = None, *, relative: str | None = None
+        self,
+        revisions: RevisionRange,
+        path: str | None = None,
+        *,
+        relative: str | None = None,
+        exclude: Sequence[str] = (),
     ) -> str:
-        """A unified patch across ``revisions``, optionally scoped to one path; with
-        ``relative``, headers name paths relative to that directory."""
+        """A unified patch across ``revisions``, optionally scoped to one path less the
+        ``exclude`` paths; with ``relative``, headers name paths relative to that
+        directory."""
         args = ["diff", "--no-color"]
         if relative is not None:
             args.append(f"--relative={relative}")
         args += [revisions.base, revisions.head]
-        if path is not None:
-            args += ["--", path]
+        if path is not None or exclude:
+            args += ["--", path if path is not None else "."]
+            args += [f":(exclude){excluded}" for excluded in exclude]
         return self._patch(*args)
 
     def diff_files(self, revisions: RevisionRange, path: str | None = None) -> list[FileChange]:

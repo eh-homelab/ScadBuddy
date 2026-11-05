@@ -19,6 +19,8 @@ import { Spinner } from '../ui/spinner'
 
 /** The longest commit subject the backend keeps (`core/gitrepo.py` `MAX_SUBJECT`). */
 const MAX_SUBJECT = 200
+/** The longest description the backend takes (`api/flows.py` `MAX_DESCRIPTION`). */
+const MAX_DESCRIPTION = 20_000
 
 /**
  * #3186 — a save's commit message: its subject and an optional body. Both go into the flow's git history.
@@ -161,6 +163,7 @@ export function EditFlowDetails({
             <Textarea
               id={`${id}-description`}
               rows={5}
+              maxLength={MAX_DESCRIPTION}
               aria-describedby={`${id}-description-help`}
               value={description}
               onChange={(event) => setDescription(event.target.value)}

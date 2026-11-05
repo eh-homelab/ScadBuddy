@@ -150,6 +150,23 @@ async def test_details_of_a_flow_deleted_meanwhile_are_refused_as_deleted(
         await definitions.update_details("swap", display_name="Late", description=None)
 
 
+async def test_a_deleted_flow_is_listed_with_its_details(definitions: FlowDefinitions) -> None:
+    """#3186: the archived list names a deleted flow as it was named when it was
+    deleted, not by its slug alone."""
+    await definitions.start()
+    await definitions.register(
+        "swap",
+        ONE,
+        BROWSER,
+        approval_timeout_s=None,
+        display_name="Nightly swap",
+        description="Swaps the *spools*.",
+    )
+    await definitions.delete("swap", BROWSER)
+    [listed] = [f for f in await definitions.flows(hidden=True) if f.name == "swap"]
+    assert (listed.display_name, listed.description) == ("Nightly swap", "Swaps the *spools*.")
+
+
 async def test_a_failed_details_commit_answers_the_version_saying_so(
     definitions: FlowDefinitions, store: FlowStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
