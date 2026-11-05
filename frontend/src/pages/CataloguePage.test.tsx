@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
@@ -1112,7 +1112,7 @@ describe('CataloguePage pages on the server (#2290)', () => {
     await user.click(screen.getByRole('button', { name: 'Load more' }))
     await screen.findByRole('link', { name: 'Model 29' })
     expect(cards()).toBe(30)
-    expect(queries.at(-1)?.get('after')).toBe('model-23')
+    expect(queries.map((q) => q.get('after')).filter(Boolean)).toEqual(['model-23'])
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
   })
 
@@ -1139,6 +1139,33 @@ describe('CataloguePage pages on the server (#2290)', () => {
     await waitFor(() => expect(screen.queryByRole('link', { name: 'Model 23' })).not.toBeInTheDocument())
     expect(queries.at(-1)?.has('after')).toBe(false)
     expect(queries.at(-1)?.get('limit')).toBe('24')
+  })
+
+  it('keeps a change whose read was in flight while Load more read (#5286 review)', async () => {
+    let served = many
+    serve(() => served)
+    let slow = false
+    let started = false
+    // Falls through to `serve` once it has waited: the change's read answers after Load more's.
+    server.use(
+      http.get('/api/v1/models', async ({ request }) => {
+        if (!slow || new URL(request.url).searchParams.has('after')) return undefined
+        slow = false
+        started = true
+        await delay(400)
+        return undefined
+      }),
+    )
+    const { user } = renderCatalogue()
+    await screen.findByRole('link', { name: 'Model 23' })
+    served = many.map((m) => (m.slug === 'model-00' ? { ...m, name: 'Renamed 00' } : m))
+    slow = true
+    emitRealtime('model.updated', ['models'], { slug: 'model-00' })
+    await waitFor(() => expect(started).toBe(true))
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findByRole('link', { name: 'Model 29' })
+    expect(await screen.findByRole('link', { name: 'Renamed 00' })).toBeInTheDocument()
+    expect(cards()).toBe(30)
   })
 
   it('names an upstream that is not on the page shown', async () => {

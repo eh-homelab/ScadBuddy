@@ -170,6 +170,48 @@ def test_models_sorted_by_name_or_newest_update(client: TestClient) -> None:
     assert [s for s, _ in stamps] == sorted((s for s, _ in stamps), reverse=True)
 
 
+def test_models_sort_names_by_folded_code_points(client: TestClient) -> None:
+    """The name sort is code-point order after folding, which the mocks copy (#5286
+    review): a space before a hyphen, digits one by one, ``_`` before letters."""
+    for slug, name in (
+        ("e1", "Zed"),
+        ("e2", "a-b"),
+        ("e3", "_under"),
+        ("e4", "2 bolt"),
+        ("e5", "A b"),
+        ("e6", "10 bolt"),
+        ("e7", "Éclair"),
+    ):
+        _create(client, slug, name=name)
+    by_name = client.get("/api/v1/models", params={"origin": "mine", "sort": "name"})
+    assert [row["name"] for row in by_name.json()] == [
+        "10 bolt",
+        "2 bolt",
+        "_under",
+        "A b",
+        "a-b",
+        "Éclair",
+        "Zed",
+    ]
+
+
+def test_models_updated_ties_sort_by_name(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Models updated at the same moment are in name order, folded."""
+    _seed_catalogue(client)
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    real = catalogue.list_models
+    moment = datetime(2026, 10, 1, tzinfo=UTC)
+
+    def same_moment(slugs: list[str] | None = None) -> list[object]:
+        return [record.model_copy(update={"updated_at": moment}) for record in real(slugs)]
+
+    monkeypatch.setattr(catalogue, "list_models", same_moment)
+    newest = client.get("/api/v1/models", params={"origin": "mine", "sort": "updated"})
+    assert [row["name"] for row in newest.json()] == ["Bolt", "Crème Box", "Hook", "Spice box"]
+
+
 def test_filtered_models_page_with_limit_and_after(client: TestClient) -> None:
     _seed_catalogue(client)
     params = {"tag": "kitchen", "sort": "name"}

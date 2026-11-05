@@ -33,10 +33,22 @@ function oneOf<T extends string>(value: string | null, allowed: readonly T[], fa
   return allowed.find((option) => option === value) ?? fallback
 }
 
+/**
+ * What `GET /models` takes (`api/models.py` `SearchWords`, `TagFilter`; the catalogue's
+ * `MAX_TAGS`, `MAX_TAG_CHARS`): a hand-edited URL past them is cut to fit rather than
+ * answered 422 (#5286 review). No tag that long can be on a model, so dropping it
+ * changes nothing a filter could match.
+ */
+export const MAX_SEARCH_CHARS = 256
+export const MAX_TAGS = 50
+export const MAX_TAG_CHARS = 100
+
 export function parseQuery(params: URLSearchParams): CatalogueQuery {
   return {
-    q: params.get('q') ?? '',
-    tags: [...new Set(params.getAll('tag').filter((tag) => tag !== ''))],
+    q: (params.get('q') ?? '').slice(0, MAX_SEARCH_CHARS),
+    tags: [
+      ...new Set(params.getAll('tag').filter((tag) => tag !== '' && tag.length <= MAX_TAG_CHARS)),
+    ].slice(0, MAX_TAGS),
     origin: oneOf(params.get('origin'), ORIGINS, DEFAULT_QUERY.origin),
     sort: oneOf(params.get('sort'), SORTS, DEFAULT_QUERY.sort),
     view: oneOf(params.get('view'), VIEWS, DEFAULT_QUERY.view),
@@ -64,8 +76,13 @@ export function fold(text: string): string {
   return text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase()
 }
 
-const byName = (a: ModelSummary, b: ModelSummary) =>
-  a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+/** Code-point order of the folded texts, as the backend sorts (`api/models.py` `fold`). */
+const byFolded = (a: string, b: string) => {
+  const [x, y] = [fold(a), fold(b)]
+  return x < y ? -1 : x > y ? 1 : 0
+}
+
+const byName = (a: ModelSummary, b: ModelSummary) => byFolded(a.name, b.name)
 
 /**
  * The models `query` selects, sorted. Every search word must appear in some field. The
@@ -111,6 +128,6 @@ export function tagCounts(
   return [...counts]
     .map(([key, count]) => ({ tag: spelling.get(key) ?? key, count }))
     .sort(
-      (a, b) => b.count - a.count || a.tag.localeCompare(b.tag, undefined, { sensitivity: 'base' }),
+      (a, b) => b.count - a.count || byFolded(a.tag, b.tag),
     )
 }

@@ -91,6 +91,8 @@ export function CataloguePage() {
       const items = [...page.items, ...next.items.filter((m) => !page.items.some((o) => o.slug === m.slug))]
       loaded.current = { key, size: items.length }
       models.setData({ items, total: next.total }, { supersede: true })
+      // The append drops any read in flight (a change's), so read the window again.
+      models.refresh()
       setMore({ loading: false })
     } catch (cause) {
       // The last model shown went away since: start again from the first page.
