@@ -153,7 +153,7 @@ def _item_costs(store: OrderStore, order_id: str) -> tuple[str, list[ItemCost]] 
         rate = unit[2] / unit[1] if unit is not None and unit[1] > 0 else None
         attempts: list[AttemptCost] = []
         priced: list[Decimal | None] = []
-        for attempt in store.fulfilments(item.id):
+        for attempt in store.fulfilments(item.id, purpose=None):
             grams = None if attempt.actual_grams is None else Decimal(str(attempt.actual_grams))
             filament = None if grams is None or rate is None else grams * rate
             priced.append(filament)

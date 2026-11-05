@@ -19,7 +19,8 @@ from scadbuddy.orders.models import (
     QuoteLine,
     Reference,
 )
-from scadbuddy.orders.store import OrderStore, RowNotOwnedError
+from scadbuddy.orders.store import OrderStore, RowNotOwnedError, revision_subject
+from tests.conftest import PgPool
 
 pytestmark = pytest.mark.requires_postgres
 
@@ -418,3 +419,186 @@ def test_shipments_charges_payments_and_the_audit_line(rows: OrderStore) -> None
     assert rows.events(order.id) == [event]
     assert event.detail == {"from": "draft", "to": "quoted"}
     assert event.by == BROWSER
+
+
+def _item_with_reference(rows: OrderStore, **fields: object) -> tuple[str, str]:
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    order = make_order(rows, customer.id)
+    with rows.transaction() as conn:
+        item = rows.insert_item(
+            conn,
+            order.id,
+            reference=reference(),
+            colours=[ColourSlot(slot=0, colour="#ff0000")],
+            output_id=None,
+            quantity=1,
+            **fields,  # type: ignore[arg-type]
+        )
+    return order.id, item.id
+
+
+def _request_item(rows: OrderStore) -> str:
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    order = make_order(rows, customer.id)
+    with rows.transaction() as conn:
+        item = rows.insert_item(
+            conn,
+            order.id,
+            kind="request",
+            reference=None,
+            colours=[],
+            output_id=None,
+            quantity=1,
+            title="A dragon",
+        )
+    return item.id
+
+
+def test_a_request_item_has_no_reference_until_its_design(rows: OrderStore) -> None:
+    item = rows.item(_request_item(rows))
+    assert item is not None
+    assert item.kind == "request" and item.reference is None and item.approval == "design_first"
+
+
+def test_the_table_refuses_a_half_designed_request(rows: OrderStore, pool: PgPool) -> None:
+    item_id = _request_item(rows)
+    with pytest.raises(psycopg.errors.CheckViolation), rows.transaction() as conn:
+        conn.execute("UPDATE order_items SET slug = 'demo' WHERE id = %s", (item_id,))
+
+
+def test_revisions_are_numbered_per_item(rows: OrderStore) -> None:
+    _, item_id = _item_with_reference(rows)
+    other_id = _request_item(rows)
+    with rows.transaction() as conn:
+        for _ in range(2):
+            rows.insert_revision(
+                conn, item_id, reference=reference(), colours=[], note="", created_by=BROWSER
+            )
+        rows.insert_revision(
+            conn, other_id, reference=reference(), colours=[], note="", created_by=BROWSER
+        )
+    assert [r.number for r in rows.revisions(item_id)] == [1, 2]
+    assert rows.revisions(other_id)[0].number == 1
+
+
+def test_set_design_copies_the_revision_onto_the_item(rows: OrderStore) -> None:
+    item_id = _request_item(rows)
+    colours = [ColourSlot(slot=0, colour="#00ff00")]
+    with rows.transaction() as conn:
+        revision = rows.insert_revision(
+            conn, item_id, reference=reference(), colours=colours, note="v1", created_by=BROWSER
+        )
+        moved = rows.set_design(conn, item_id, revision, output_id=None)
+    assert moved.reference == revision.reference and moved.colours == revision.colours
+    assert moved.current_revision_id == revision.id
+    assert moved.kind == "request"
+    assert rows.revision(revision.id) == revision
+
+
+def test_set_design_makes_a_custom_item_a_model_item(rows: OrderStore) -> None:
+    customer = rows.insert_customer(
+        display_name="Ada", company=None, notes="", tags=[], contacts=[], addresses=[]
+    )
+    order = make_order(rows, customer.id)
+    with rows.transaction() as conn:
+        custom = rows.insert_custom_item(conn, order.id, title="Bracket", quantity=1)
+        revision = rows.insert_revision(
+            conn, custom.id, reference=reference(), colours=[], note="", created_by=BROWSER
+        )
+        moved = rows.set_design(conn, custom.id, revision, output_id=None)
+    assert moved.kind == "model" and moved.requires_printing
+
+
+def test_stamp_revision_sets_only_what_it_is_given(rows: OrderStore) -> None:
+    item_id = _request_item(rows)
+    sent = datetime.now(UTC)
+    with rows.transaction() as conn:
+        revision = rows.insert_revision(
+            conn, item_id, reference=reference(), colours=[], note="", created_by=BROWSER
+        )
+        stamped = rows.stamp_revision(conn, revision.id, sent_at=sent)
+        answered = rows.stamp_revision(
+            conn,
+            revision.id,
+            answer="changes_requested",
+            answer_note="bigger",
+            answered_at=sent,
+            answered_by=BROWSER,
+        )
+    assert stamped.sent_at == sent and stamped.answer is None
+    assert answered.sent_at == sent and answered.answer == "changes_requested"
+    assert answered.answer_note == "bigger" and answered.answered_by == BROWSER
+
+
+def test_fulfilments_leave_out_test_attempts_unless_asked(rows: OrderStore) -> None:
+    _, item_id = _item_with_reference(rows)
+    with rows.transaction() as conn:
+        revision = rows.insert_revision(
+            conn, item_id, reference=reference(), colours=[], note="", created_by=BROWSER
+        )
+        rows.insert_fulfilment(conn, item_id, quantity=1, outcome="succeeded", created_by=BROWSER)
+        rows.insert_fulfilment(
+            conn,
+            item_id,
+            quantity=0,
+            outcome="unknown",
+            created_by=BROWSER,
+            purpose="test",
+            revision_id=revision.id,
+        )
+    assert [a.purpose for a in rows.fulfilments(item_id)] == ["production"]
+    assert [a.purpose for a in rows.fulfilments(item_id, purpose=None)] == [
+        "production",
+        "test",
+    ]
+
+
+def test_a_test_attempt_needs_its_revision(rows: OrderStore) -> None:
+    _, item_id = _item_with_reference(rows)
+    with pytest.raises(psycopg.errors.CheckViolation), rows.transaction() as conn:
+        rows.insert_fulfilment(
+            conn, item_id, quantity=0, outcome="unknown", created_by=BROWSER, purpose="test"
+        )
+
+
+def test_item_inputs_name_every_revisions_inputs(rows: OrderStore) -> None:
+    item_id = _request_item(rows)
+    with rows.transaction() as conn:
+        for asset in ("asset-1", "asset-2"):
+            ref = reference().model_copy(update={"inputs": {"params": {"logo": asset}}})
+            rows.insert_revision(
+                conn, item_id, reference=ref, colours=[], note="", created_by=BROWSER
+            )
+    inputs = list(rows.item_inputs())
+    assert {"params": {"logo": "asset-1"}} in inputs
+    assert {"params": {"logo": "asset-2"}} in inputs
+
+
+def test_a_revision_attachment_names_its_revision_and_item(rows: OrderStore) -> None:
+    order_id, item_id = _item_with_reference(rows)
+    with rows.transaction() as conn:
+        revision = rows.insert_revision(
+            conn, item_id, reference=reference(), colours=[], note="", created_by=BROWSER
+        )
+        attachment = rows.insert_attachment(
+            conn,
+            attachment_id="att1",
+            order_id=order_id,
+            subject=revision_subject(revision.id),
+            kind="image",
+            role="render",
+            filename="r.png",
+            media_type="image/png",
+            size_bytes=1,
+            sha256="d" * 64,
+            blob_key="attachment-" + "d" * 64,
+            caption="",
+            created_by=BROWSER,
+            subject_item_id=item_id,
+        )
+    assert attachment.revision_id == revision.id and attachment.item_id == item_id
+    assert attachment.fulfilment_id is None

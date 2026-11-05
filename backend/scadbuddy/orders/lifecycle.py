@@ -1982,7 +1982,7 @@ class Lifecycle:
                 subject = fulfilment_subject(attempt.id)
             attachment = self.store.insert_attachment(
                 conn,
-                attempt_item_id=None if fulfilment_id is None else item_id,
+                subject_item_id=None if fulfilment_id is None else item_id,
                 attachment_id=attachment_id,
                 order_id=order.id,
                 subject=subject,
