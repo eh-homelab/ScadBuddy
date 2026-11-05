@@ -298,12 +298,14 @@ def test_a_slow_done_command_answers_202_and_is_followed(
         operations_api, "start_command", partial(start_command, deadline=timedelta(seconds=1))
     )
     started = post(client, {"delay": 20}, key=PRESS_4)
+    posts = 1
     # Re-sent with its key until it is recorded, as a client does: a loaded machine
     # may not have written the record within the deadline.
     resend_until = time.monotonic() + 60
     while started.json().get("type") == operations_api.STILL_ACCEPTING_PROBLEM:
         assert time.monotonic() < resend_until, started.text
         started = post(client, {"delay": 20}, key=PRESS_4)
+        posts += 1
     assert started.status_code == 202, started.text
     assert started.json()["repeated"] is False
     location = f"/api/v1/activity/operation:{started.json()['id']}"
@@ -312,8 +314,9 @@ def test_a_slow_done_command_answers_202_and_is_followed(
     assert op["status"] == "succeeded" and op["result"] == {"done": True, "n": 1}
     # Review #1063 r6 4: `repeated` belongs to a route's 202, never to the record.
     assert "repeated" not in op
-    # #2295: each request past the deadline is deferred; the run finishes once.
-    assert _sample(app, "scadbuddy_operations_deferred_total", {"kind": "test"}) >= 1
+    # #2295: each request past the deadline is deferred, once per POST and never on the
+    # follow (#5311 review); the run finishes once.
+    assert _sample(app, "scadbuddy_operations_deferred_total", {"kind": "test"}) == posts
     succeeded = {"kind": "test", "outcome": "succeeded"}
     assert _sample(app, "scadbuddy_operations_finished_total", succeeded) == 1
     # The run slept 20 s, from its record to its end.
