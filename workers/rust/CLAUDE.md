@@ -2,6 +2,13 @@
 
 These notes cover `workers/rust/`; paths are repo-relative; the root `CLAUDE.md` has the repo-wide rules.
 
+## Database access
+
+The rule is in the root CLAUDE.md, "Database access (#5295)". The slicer worker already
+follows it: it holds no database secret and moves bytes only through `TransferUrl`s
+(`crates/sb-transfer`). Keep it so. A new need for data goes through a CRUD route with a
+service credential (#5298), never a database client in a Rust worker.
+
 ## Commands
 Rust workers (`workers/rust/`, one Cargo workspace; the `rust` CI job):
 

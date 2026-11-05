@@ -2,6 +2,24 @@
 
 These notes cover `agent/`; paths are repo-relative; the root CLAUDE.md has the repo-wide rules (migrations, CI, PR conventions, generated API files).
 
+## Database access
+
+The rule is in the root CLAUDE.md, "Database access (#5295)". Today the agent sidecar and
+the agent workers connect as the database owner (`SCADBUDDY_DATABASE_URL`), keep the
+`ai_*` tables, and run SQL on backend tables (`events`, `workflow_runs`,
+`workflow_run_decisions`, `flow_grants`, `flow_grant_uses`, and `blob_refs` through a
+trigger; `backend/scadbuddy/auth/caller_grants.py` `AGENT_GRANTS`). `src/db/grants.ts`
+grants the API's and the projects worker's roles their `ai_*` reads. Claude Code, and any
+plugin package approved with `allow_refused`, runs in the same pod as the owner URL and
+the KEK (`docs/ai/security.md`, "Plugin packages").
+
+Under the rule the agent holds no database secret. Its data (sessions, transcripts,
+approvals, credentials, payload keys) goes behind CRUD routes, the cross-service reads
+become routes, and Claude Code and plugin code run where no database secret exists
+(#5299). Its 8081 routes move to `enforce` (#5297). Never add a backend table read, a new
+`ai_*` grant or a trigger on another service's table; add a CRUD route that requires a
+service credential instead.
+
 ## Commands
 
 Agent service (`agent/`, Node 24, pnpm via corepack; the `agent` CI job):
@@ -144,7 +162,8 @@ opens every one and seals it again byte for byte).
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
-  - Database: the agent owns the `ai_*` tables. Schema changes are new files in
+  - Database: the agent owns the `ai_*` tables (today's state; #5295 moves them behind
+    CRUD routes and takes the agent's database secret away, #5299). Schema changes are new files in
     `src/db/migrations/` (see "Migrations" below; `src/db/migrations.ts` applies them at
     start under advisory lock "SCADAGNT" with `lock_timeout`/`statement_timeout`,
     ledger `ai_migrations` with a sha256 per file: an edited merged file stops the
@@ -224,7 +243,8 @@ opens every one and seals it again byte for byte).
     and its end write back by sha256 (`src/workspace/directory.ts`). The bytes (#4789) are a blob of the backend's content store,
     sealed under a per-file key wrapped under the session's data key (`src/workspace/sealing.ts`,
     `blobs.ts`; backend `api/internal_workspace.py` mints the URLs; a trigger keeps the
-    `blob_refs` holder with the row, which assumes one database and role for both services;
+    `blob_refs` holder with the row, which assumes one database and role for both services,
+    today's state, superseded by #5295;
     `test/workspaceBlobs.backend.e2e.test.ts` runs it against the real API on moto,
     `backend/tests/support/workspace_backend.py`). Only on `store_backend` local do they stay
     in `data`; on any other backend a write that cannot be sealed and stored is refused

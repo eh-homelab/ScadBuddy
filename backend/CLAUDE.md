@@ -7,6 +7,23 @@ These notes cover `backend/`; paths are repo-relative; the root CLAUDE.md has th
 - The frontend side of orders and activity: frontend/CLAUDE.md. The agent's side (tools): agent/CLAUDE.md.
 - The native hot path's real-stack e2e (the recorder pass): e2e-stack/CLAUDE.md. The slicer worker: workers/rust/CLAUDE.md.
 
+## Database access
+
+The rule is in the root CLAUDE.md, "Database access (#5295)". Today the API connects as the
+database owner and runs SQL on the agent's `ai_*` tables. The render, print and projects
+workers each connect as a role of their own, with the grant lists in
+`render/worker_role.py` (`RENDER_GRANTS`) and `auth/caller_grants.py` (`PRINT_GRANTS`,
+`PROJECTS_GRANTS`, and `AGENT_GRANTS` for the agent). Template `pipeline/` Python runs in
+the render worker's pod, and openscad and `openscad-lsp` run in the API's pod.
+
+Under the rule the API becomes the CRUD service: the only process with SQL access, and
+nothing untrusted in its pod. Each worker becomes an HTTP client of it, with a service
+credential, and loses its database secret, role and grant list (#5298). The `ai_*` reads
+become routes (#5299). Every `/api/v1/internal/*` route requires a service credential, and
+the API moves to `enforce` (#5297). Template Python and openscad move to a pod without a
+database secret (#5296). Never add a worker table grant, a cross-service table read or a
+new database client; add a CRUD route that requires a service credential instead.
+
 ## Commands
 
 Backend (`backend/`, Python 3.12, uv). CI runs these inside the Dockerfile's `test`
@@ -118,7 +135,8 @@ Backend schema changes are new files in `backend/scadbuddy/migrations/`
   render worker's own role `scadbuddy_render` may touch, granted by the API at start;
   a change to what the worker reads or writes changes it, and
   `tests/test_render_worker_role.py` renders as that role; the worker never migrates
-  and reads settings only through the `render_settings` view). The legacy in-process queue, its file and Postgres stores
+  and reads settings only through the `render_settings` view; that role is today's state,
+  superseded by #5295, which moves the worker's SQL behind CRUD routes, #5298). The legacy in-process queue, its file and Postgres stores
   and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
   store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
   any more (it stays hidden and git-ignored for volumes that still hold one).
