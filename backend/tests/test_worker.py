@@ -2077,6 +2077,7 @@ API_ONLY = {
     "scadbuddy_auth_would_refuse",
     "scadbuddy_http_requests",
     "scadbuddy_native_slice_seconds",
+    "scadbuddy_operations_deferred",
 }
 
 #: What each worker sets, so what its /metrics must carry.
@@ -2103,11 +2104,15 @@ WORKER_OWN = {
         "scadbuddy_rack_watch_settle_failed",
         "scadbuddy_events_received",
         "scadbuddy_event_loop_lag_seconds",
+        "scadbuddy_operation_duration_seconds",
+        "scadbuddy_operations_finished",
     },
     "projects": {
         "scadbuddy_build_info",
         "scadbuddy_events_received",
         "scadbuddy_event_loop_lag_seconds",
+        "scadbuddy_operation_duration_seconds",
+        "scadbuddy_operations_finished",
     },
 }
 

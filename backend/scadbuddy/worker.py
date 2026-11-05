@@ -1177,7 +1177,8 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
 
     activity = ActivityIndex(pool, events=events, metrics=metrics)
     print_runs = PrintRunStore(pool, events=events, activity=activity)
-    operations = OperationStore(pool, events=events, activity=activity)
+    # This worker ends its kinds' records, so it counts them (#2295).
+    operations = OperationStore(pool, events=events, activity=activity, metrics=metrics)
     kek = settings_kek(settings.secret_key_file)
     printers = PrinterStore(pool, kek, previous_kek=settings_kek(settings.secret_key_previous_file))
     reports = PrinterReportStore(pool)
@@ -1248,6 +1249,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
         printers=printers,
         reports=reports,
     )
+    metrics.operation_kinds(kind.name for kind in kinds)
     printing = PrintActivities(
         PrintDeps(
             settings_store=settings_store,
@@ -1425,18 +1427,21 @@ async def run_projects_worker(
         )
         store = FlowStore(settings_store.pool, events=events)
         queue = settings.temporal_task_queue_projects
+        kinds = {
+            kind.name: kind
+            for kind in flow_kinds(
+                store,
+                keys[0],
+                approval_key(settings),
+                api=lambda: api_client(settings.api_internal_url, credential),
+            )
+        }
+        # This worker ends its kinds' records, so it counts them (#2295).
+        metrics.operation_kinds(kinds)
         decisions = operation_activities(
-            OperationStore(settings_store.pool, events=events),
+            OperationStore(settings_store.pool, events=events, metrics=metrics),
             settings_store,
-            {
-                kind.name: kind
-                for kind in flow_kinds(
-                    store,
-                    keys[0],
-                    approval_key(settings),
-                    api=lambda: api_client(settings.api_internal_url, credential),
-                )
-            },
+            kinds,
         )
         api = api_client(settings.api_internal_url, credential)
         routes = FlowRoutes(api)
