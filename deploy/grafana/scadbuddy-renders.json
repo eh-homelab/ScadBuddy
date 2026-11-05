@@ -449,19 +449,19 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", outcome=\"succeeded\"}[$__rate_interval]) unless on (kind) group by (kind) (scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"})))",
+          "expr": "histogram_quantile(0.5, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", outcome=\"succeeded\"}[$__rate_interval]) unless on (kind) group by (kind) (last_over_time(scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"}[1h]))))",
           "legendFormat": "p50 {{kind}}"
         },
         {
           "refId": "B",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", outcome=\"succeeded\"}[$__rate_interval]) unless on (kind) group by (kind) (scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"})))",
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", outcome=\"succeeded\"}[$__rate_interval]) unless on (kind) group by (kind) (last_over_time(scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"}[1h]))))",
           "legendFormat": "p95 {{kind}}"
         },
         {
           "refId": "C",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", outcome=\"failed\"}[$__rate_interval]) unless on (kind) group by (kind) (scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"})))",
+          "expr": "histogram_quantile(0.95, sum by (le, kind) (rate(scadbuddy_operation_duration_seconds_bucket{namespace=\"$namespace\", outcome=\"failed\"}[$__rate_interval]) unless on (kind) group by (kind) (last_over_time(scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"}[1h]))))",
           "legendFormat": "p95 failed {{kind}}"
         }
       ]
@@ -478,7 +478,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "sum by (kind, outcome) (increase(scadbuddy_operations_finished_total{namespace=\"$namespace\"}[$__rate_interval]) unless on (kind) group by (kind) (scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"}))",
+          "expr": "sum by (kind, outcome) (increase(scadbuddy_operations_finished_total{namespace=\"$namespace\"}[$__rate_interval]) unless on (kind) group by (kind) (last_over_time(scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"}[1h])))",
           "legendFormat": "{{kind}} {{outcome}}"
         }
       ]
@@ -495,7 +495,7 @@
         {
           "refId": "A",
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
-          "expr": "sum by (kind) (increase(scadbuddy_operations_deferred_total{namespace=\"$namespace\"}[$__rate_interval])) unless on (kind) group by (kind) (scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"})",
+          "expr": "sum by (kind) (increase(scadbuddy_operations_deferred_total{namespace=\"$namespace\"}[$__rate_interval])) unless on (kind) group by (kind) (last_over_time(scadbuddy_operations_finished_total{namespace=\"$namespace\", job=~\"scadbuddy-(print|projects)\"}[1h]))",
           "legendFormat": "{{kind}}"
         }
       ]
