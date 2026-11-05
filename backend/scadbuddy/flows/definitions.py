@@ -21,6 +21,7 @@ from scadbuddy.core.gitrepo import GitError, RevisionNotFoundError
 from scadbuddy.flows.models import (
     Definition,
     DefinitionSummary,
+    FlowDetails,
     FlowDiff,
     FlowState,
     FlowVersion,
@@ -88,23 +89,114 @@ class FlowDefinitions:
         *,
         approval_timeout_s: int | None,
         inputs_schema: dict[str, Any] | None = None,
+        message: str | None = None,
+        body: str | None = None,
+        display_name: str | None = None,
+        description: str | None = None,
     ) -> Definition:
         """A new version of ``name``: always one commit, an unchanged script too, with
-        its inputs schema beside it (#2483) or none."""
+        its inputs schema beside it (#2483) or none, named by ``message`` and ``body``
+        when given. A ``display_name`` or ``description`` that changes the flow's details
+        is a commit of its own after it (#3186); None leaves one as it is."""
         return await asyncio.to_thread(
-            self._write, name, author, approval_timeout_s, script, None, inputs_schema
+            self._write,
+            name,
+            author,
+            approval_timeout_s,
+            script,
+            None,
+            inputs_schema,
+            message=message,
+            body=body,
+            display_name=display_name,
+            description=description,
         )
 
-    async def restore(self, name: str, commit: str, author: dict[str, Any]) -> Definition:
+    async def restore(
+        self,
+        name: str,
+        commit: str,
+        author: dict[str, Any],
+        *,
+        message: str | None = None,
+        body: str | None = None,
+    ) -> Definition:
         """A new version of ``name`` with its script at ``commit`` (one of its versions):
-        a new commit and a new row, with that version's approval timeout."""
-        return await asyncio.to_thread(self._restore, name, commit, author)
+        a new commit and a new row, with that version's approval timeout. The flow's
+        details stay as they are (#3186)."""
+        return await asyncio.to_thread(self._restore, name, commit, author, message, body)
 
-    def _restore(self, name: str, commit: str, author: dict[str, Any]) -> Definition:
+    def _restore(
+        self,
+        name: str,
+        commit: str,
+        author: dict[str, Any],
+        message: str | None,
+        body: str | None,
+    ) -> Definition:
         target = self._version(name, commit)
         row = self.store.stored_definition(target.version_id)
         timeout = row.approval_timeout_s if row is not None else None
-        return self._write(name, author, timeout, None, target.commit)
+        return self._write(name, author, timeout, None, target.commit, message=message, body=body)
+
+    async def update_details(
+        self,
+        name: str,
+        *,
+        display_name: str | None,
+        description: str | None,
+        message: str | None = None,
+        body: str | None = None,
+    ) -> FlowDetails:
+        """Change the flow's display name or description (#3186): one commit of
+        ``<name>/flow.json`` under the repository's write lock, none when nothing
+        changed. None leaves a field as it is, an empty string clears it.
+        :class:`UnknownFlowError` for a name with no version, :class:`FlowDeletedError`
+        for a deleted flow."""
+        return await asyncio.to_thread(
+            self._update_details, name, display_name, description, message, body
+        )
+
+    def _update_details(
+        self,
+        name: str,
+        display_name: str | None,
+        description: str | None,
+        message: str | None,
+        body: str | None,
+    ) -> FlowDetails:
+        self._require()
+        if not self.history.versions(name):
+            raise UnknownFlowError(name)
+        if self.states.state(name).deleted_at is not None or not self.history.present(name):
+            raise FlowDeletedError(name)
+        commit = self.history.set_details(
+            name,
+            display_name=display_name,
+            description=description,
+            message=message,
+            body=body,
+        )
+        return self._details(name).model_copy(update={"commit": commit})
+
+    async def details(self, name: str) -> FlowDetails:
+        """The flow's display name and description now (#3186)."""
+        return await asyncio.to_thread(self._details, name)
+
+    def _details(self, name: str) -> FlowDetails:
+        found = self.history.details(name)
+        return FlowDetails(
+            name=name, display_name=found.display_name, description=found.description
+        )
+
+    async def display_names(self, names: set[str]) -> dict[str, str | None]:
+        """Each flow's display name now (#3186), for the runs that name it."""
+        return await asyncio.to_thread(
+            lambda: {name: self.history.details(name).display_name for name in names}
+        )
+
+    def _detail_fields(self, name: str) -> dict[str, Any]:
+        return self._details(name).model_dump(include={"display_name", "description"})
 
     def _before_commit(self, name: str) -> None:
         """Under the write lock, before a registration's or restore's commit: reconcile,
@@ -121,6 +213,11 @@ class FlowDefinitions:
         script: str | None,
         restore: str | None,
         inputs_schema: dict[str, Any] | None = None,
+        *,
+        message: str | None = None,
+        body: str | None = None,
+        display_name: str | None = None,
+        description: str | None = None,
     ) -> Definition:
         self._require()
         version_id = str(uuid.uuid4())
@@ -148,10 +245,15 @@ class FlowDefinitions:
             inputs=inputs_schema,
             restore=restore,
             reconcile=lambda: self._before_commit(name),
+            message=message,
+            body=body,
+            display_name=display_name,
+            description=description,
         )
         return Definition.model_validate(
             {
                 **rows[0].model_dump(),
+                **self._detail_fields(name),
                 **self._flags(self.states.state(name)),
                 "script": self.history.script_at(name, commit),
                 "inputs_schema": self.history.inputs_at(name, commit),
@@ -179,20 +281,33 @@ class FlowDefinitions:
             raise UnknownFlowError(name)
         return self.states.unarchive(name)
 
-    async def delete(self, name: str, by: dict[str, Any]) -> FlowState:
+    async def delete(
+        self,
+        name: str,
+        by: dict[str, Any],
+        *,
+        message: str | None = None,
+        body: str | None = None,
+    ) -> FlowState:
         """Delete ``name`` (#2485): one commit removing ``<name>/``, recorded under the
-        repository's write lock. Its versions' rows and commits stay, so a run still
-        reads the script it ran, and a restore of a version brings it back. A flow
-        deleted already is answered as it is."""
-        return await asyncio.to_thread(self._delete, name, by)
+        repository's write lock, named by ``message`` and ``body`` when given (#3186). Its
+        versions' rows and commits stay, so a run still reads the script it ran, and a
+        restore of a version brings it back. A flow deleted already is answered as it
+        is."""
+        return await asyncio.to_thread(self._delete, name, by, message, body)
 
-    def _delete(self, name: str, by: dict[str, Any]) -> FlowState:
+    def _delete(
+        self, name: str, by: dict[str, Any], message: str | None, body: str | None
+    ) -> FlowState:
         self._require()
         if not self.states.exists(name):
             raise UnknownFlowError(name)
         recorded: list[FlowState] = []
         self.history.delete(
-            name, lambda commit: recorded.append(self.states.mark_deleted(name, by, commit))
+            name,
+            lambda commit: recorded.append(self.states.mark_deleted(name, by, commit)),
+            message=message,
+            body=body,
         )
         return recorded[0]
 
@@ -222,6 +337,7 @@ class FlowDefinitions:
         return Definition.model_validate(
             {
                 **row.model_dump(),
+                **self._detail_fields(row.name),
                 **self._flags(self.states.state(row.name)),
                 "script": script,
                 "inputs_schema": inputs,
@@ -230,8 +346,14 @@ class FlowDefinitions:
 
     async def flows(self, *, hidden: bool = False) -> list[DefinitionSummary]:
         """Each flow at its newest version, by name; archived and deleted ones too when
-        ``hidden`` (#2485)."""
-        return await asyncio.to_thread(self.states.newest, hidden=hidden)
+        ``hidden`` (#2485), each with its display name and description (#3186)."""
+        return await asyncio.to_thread(self._flows, hidden)
+
+    def _flows(self, hidden: bool) -> list[DefinitionSummary]:
+        return [
+            summary.model_copy(update=self._detail_fields(summary.name))
+            for summary in self.states.newest(hidden=hidden)
+        ]
 
     async def versions(self, name: str, *, limit: int) -> list[FlowVersion]:
         """The flow's history, newest first, from git. :class:`UnknownFlowError` for a
@@ -250,6 +372,7 @@ class FlowDefinitions:
                 short=commit.short,
                 version=commit.version,
                 message=commit.message,
+                body=commit.body,
                 created_by=created_by(commit.agent),
                 created_at=commit.date,
                 current=index == 0,

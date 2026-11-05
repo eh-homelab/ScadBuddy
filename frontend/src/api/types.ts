@@ -182,6 +182,11 @@ export type FlowDefinition = Schemas['Definition']
 export type FlowSummary = Schemas['DefinitionSummary']
 /** #2503 — one version of a flow's git history. */
 export type FlowVersion = Schemas['FlowVersion']
+/** #3186 — a flow's display name and description (`flow.json`), and the change of them. */
+export type FlowDetails = Schemas['FlowDetails']
+export type FlowDetailsUpdate = Schemas['DetailsUpdate']
+/** #3186 — what a save is called in the flow's history: its commit message and body. */
+export type FlowCommitMessage = Schemas['CommitMessage']
 /** #2485 — whether a flow is archived or deleted, and by whom. */
 export type FlowState = Schemas['FlowState']
 /** #2487 — the editor's Save body, its check, and what it completes. */

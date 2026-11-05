@@ -1,6 +1,7 @@
 import { screen, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import { RunsWaitingContext, type RunWaiting } from '../../agent/attention'
+import { setFlowDetails } from '../../mocks/features/flows'
 import { renderPage } from '../../test/utils'
 import { RunsWaiting } from './RunsWaiting'
 
@@ -26,6 +27,13 @@ describe('RunsWaiting', () => {
       'tidy waits for you on a call',
     ])
     expect(within(list).getByRole('link', { name: 'swap' })).toHaveAttribute('href', '/workflows/runs/run-1')
+  })
+
+  it("names each run by its flow's display name once the flows are read (#3186)", async () => {
+    setFlowDetails('swap', { display_name: 'Nightly swap' })
+    shown([{ id: 'run-1', name: 'swap', waiting: 1 }])
+    const list = screen.getByRole('list', { name: 'Flow runs waiting for you' })
+    expect(await within(list).findByRole('link', { name: 'Nightly swap' })).toHaveAttribute('href', '/workflows/runs/run-1')
   })
 
   it('shows nothing when no run waits for you, or outside the shell', () => {

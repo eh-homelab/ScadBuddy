@@ -3,6 +3,7 @@ one commit per version, numbered by its position among its flow's commits."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
 import uuid
@@ -199,3 +200,115 @@ def test_inputs_are_committed_with_the_script_and_restored_with_it(history: Flow
     restored, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=first)
     assert history.inputs_at("swap", restored) == INPUTS
     assert history.script_at("swap", restored) == ONE
+
+
+# ── #3186: a display name and description in `flow.json`, and commit messages ──
+
+
+def test_a_registration_takes_its_message_and_body(history: FlowHistory) -> None:
+    commit, _ = history.register(
+        "swap",
+        str(uuid.uuid4()),
+        lambda c, v: None,
+        script=ONE,
+        message="Queue the\nnightly batch",
+        body="Longer notes.\n\nSecond paragraph.",
+    )
+    [version] = history.versions("swap")
+    # The subject is one line; the body keeps its paragraphs, and the trailers stay
+    # trailers (the version is still numbered).
+    assert (version.commit, version.message, version.version) == (
+        commit,
+        "Queue the nightly batch",
+        1,
+    )
+    assert version.body == "Longer notes.\n\nSecond paragraph."
+    second, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, script=TWO)
+    newest = history.versions("swap")[0]
+    assert (newest.commit, newest.message, newest.body) == (second, "Register swap v2", None)
+
+
+def test_a_restore_and_a_delete_take_their_message(history: FlowHistory) -> None:
+    _, first, _ = register(history, "swap", ONE)
+    register(history, "swap", TWO)
+    history.register(
+        "swap", str(uuid.uuid4()), lambda c, v: None, restore=first, message="Back to v1"
+    )
+    assert history.versions("swap")[0].message == "Back to v1"
+    history.delete("swap", lambda _c: None, message="Retire it", body="Superseded by swap2.")
+    [revision] = history.log("swap", limit=1)
+    assert revision.message == "Retire it"
+    assert "Superseded by swap2." in history._out("log", "-1", "--format=%b")
+
+
+def test_details_are_their_own_commit_in_flow_json(history: FlowHistory) -> None:
+    _, first, _ = register(history, "swap", ONE)
+    assert history.details("swap").display_name is None
+    commit = history.set_details(
+        "swap", display_name="Nightly swap", description="# Swap\nIt swaps."
+    )
+    assert commit is not None and commit == history.head()
+    found = json.loads((history.root / "swap" / "flow.json").read_text())
+    assert found == {"display_name": "Nightly swap", "description": "# Swap\nIt swaps."}
+    details = history.details("swap")
+    assert (details.display_name, details.description) == ("Nightly swap", "# Swap\nIt swaps.")
+    [revision] = history.log("swap", limit=1)
+    assert revision.message == "Rename swap to Nightly swap"
+    assert "ScadBuddy-Flow-Details: swap" in history._out("log", "-1", "--format=%(trailers:only)")
+    # Not a version: the history still lists one.
+    assert [v.commit for v in history.versions("swap")] == [first]
+    # An omitted field is unchanged; an unchanged one commits nothing.
+    assert history.set_details("swap", description="Swaps.") is not None
+    assert history.details("swap").display_name == "Nightly swap"
+    assert history.log("swap", limit=1)[0].message == "Describe swap"
+    assert history.set_details("swap", description="Swaps.") is None
+    # A message of its own; an empty value clears the field, and with both cleared the
+    # file goes.
+    history.set_details("swap", display_name="", description="", message="Plain again")
+    assert history.log("swap", limit=1)[0].message == "Plain again"
+    assert not (history.root / "swap" / "flow.json").exists()
+
+
+def test_details_of_a_flow_with_no_version_are_refused(history: FlowHistory) -> None:
+    with pytest.raises(RevisionNotFoundError):
+        history.set_details("nothing", display_name="Nothing")
+
+
+def test_a_new_version_and_a_restore_keep_the_flows_details(history: FlowHistory) -> None:
+    """Details are the flow's, not a version's: a restore of a version from before
+    they were set keeps them."""
+    _, first, _ = register(history, "swap", ONE)
+    history.set_details("swap", display_name="Nightly swap")
+    register(history, "swap", TWO)
+    assert history.details("swap").display_name == "Nightly swap"
+    restored, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=first)
+    assert history.details("swap").display_name == "Nightly swap"
+    assert history.script_at("swap", restored) == ONE
+
+
+def test_a_registration_with_details_commits_them_after_the_version(
+    history: FlowHistory,
+) -> None:
+    commit, version = history.register(
+        "swap",
+        str(uuid.uuid4()),
+        lambda c, v: None,
+        script=ONE,
+        display_name="Nightly swap",
+        description="Swaps.",
+    )
+    assert version == 1 and history.head() != commit
+    messages = [r.message for r in history.log("swap", limit=2)]
+    assert messages == ["Rename swap to Nightly swap", "Register swap v1"]
+    assert "swap/flow.json" not in history._out("show", "--name-only", "--format=", commit)
+    # The same details again commit nothing more.
+    again, _ = history.register(
+        "swap", str(uuid.uuid4()), lambda c, v: None, script=TWO, display_name="Nightly swap"
+    )
+    assert history.head() == again
+
+
+def test_a_damaged_flow_json_reads_as_no_details(history: FlowHistory) -> None:
+    register(history, "swap", ONE)
+    (history.root / "swap" / "flow.json").write_text("not json")
+    assert history.details("swap").display_name is None

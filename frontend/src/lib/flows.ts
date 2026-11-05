@@ -90,6 +90,9 @@ export const flowRunPath = (id: string) => `/workflows/runs/${encodeURIComponent
 
 /** #2350 — the Flows tab, and one flow version's page. */
 export const FLOWS_PATH = '/workflows/flows'
+/** #3186 — what a flow is called: its display name, else its name (the slug, its id). */
+export const flowTitle = (flow: { name: string; display_name?: string | null }) => flow.display_name || flow.name
+
 export const flowPath = (id: string) => `${FLOWS_PATH}/${encodeURIComponent(id)}`
 
 /** The statuses a run has ended in: forgetting one stops nothing. */

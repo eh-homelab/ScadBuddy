@@ -2,7 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { fakeRealtime } from '../lib/realtime.fake'
-import { flowRequests, setFlowDefinitions, setFlowRuns, setFlowState } from '../mocks/features/flows'
+import { flowRequests, setFlowDefinitions, setFlowDetails, setFlowRuns, setFlowState } from '../mocks/features/flows'
 import { renderPage } from '../test/utils'
 import { WorkflowsPage } from './WorkflowsPage'
 
@@ -182,5 +182,40 @@ describe('WorkflowsPage', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('WorkflowsPage display names (#3186)', () => {
+  it('lists a flow by its display name, the slug beside it, and searches both and the description', async () => {
+    setFlowDetails('swap', { display_name: 'Nightly swap', description: 'Swaps the colour of a box.' })
+    const { user } = renderPage(<WorkflowsPage tab="flows" />)
+    const flows = await screen.findByRole('list', { name: 'Flows' })
+    const swap = flowRow('swap')!
+    expect(within(swap).getByRole('link', { name: 'Nightly swap' })).toHaveAttribute('href', '/workflows/flows/def-swap')
+    expect(within(swap).getByText('swap', { selector: 'code' })).toBeInTheDocument()
+    const search = screen.getByRole('searchbox', { name: 'Search flows' })
+    await user.type(search, 'nightly')
+    await waitFor(() => expect(flows.querySelectorAll('[data-flow]')).toHaveLength(1))
+    expect(flowRow('swap')).not.toBeNull()
+    await user.clear(search)
+    await user.type(search, 'COLOUR OF')
+    await waitFor(() => expect(flows.querySelectorAll('[data-flow]')).toHaveLength(1))
+    await user.clear(search)
+    await user.type(search, 'plat')
+    await waitFor(() => expect(flowRow('swap')).toBeNull())
+    expect(flowRow('plates')).not.toBeNull()
+    await user.clear(search)
+    await user.type(search, 'nothing like it')
+    expect(await screen.findByText('No flow matches “nothing like it”.')).toBeInTheDocument()
+  })
+
+  it("names a run by its flow's display name", async () => {
+    setFlowDetails('swap', { display_name: 'Nightly swap' })
+    render()
+    await list()
+    expect(within(row('run-ask')).getByRole('link', { name: 'Nightly swap v1' })).toHaveAttribute(
+      'href',
+      '/workflows/runs/run-ask',
+    )
   })
 })

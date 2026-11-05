@@ -127,7 +127,10 @@ import type {
   FlowDecided,
   FlowProposal,
   FlowRunQueue,
+  FlowCommitMessage,
   FlowDefinition,
+  FlowDetails,
+  FlowDetailsUpdate,
   FlowGrantSpec,
   FlowGrantView,
   FlowHostInterface,
@@ -1081,7 +1084,14 @@ export const api = {
   archiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/archive`, { method: 'POST' }),
   unarchiveFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}/unarchive`, { method: 'POST' }),
   /** #2485 — a commit removing the flow's script; its history keeps every version, and a restore brings it back. */
-  deleteFlow: (name: string) => request<FlowState>(`/workflows/names/${seg(name)}`, { method: 'DELETE' }),
+  deleteFlow: (name: string, message?: FlowCommitMessage) =>
+    request<FlowState>(`/workflows/names/${seg(name)}`, {
+      method: 'DELETE',
+      ...(message ? { body: JSON.stringify(message) } : {}),
+    }),
+  /** #3186 — a flow's display name and description: one commit of `flow.json`, not a version. */
+  updateFlowDetails: (name: string, body: FlowDetailsUpdate) =>
+    request<FlowDetails>(`/workflows/names/${seg(name)}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
   /**
    * One flow's versions, newest first: the one place the page reads them from, its git
@@ -1117,8 +1127,11 @@ export const api = {
     requestText(`/workflows/names/${seg(name)}/versions/${seg(commit)}/source`),
 
   /** A new version with the script at `commit`: a new commit, type-checked first. */
-  restoreFlowVersion: (name: string, commit: string) =>
-    request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, { method: 'POST' }),
+  restoreFlowVersion: (name: string, commit: string, message?: FlowCommitMessage) =>
+    request<FlowDefinition>(`/workflows/names/${seg(name)}/versions/${seg(commit)}/restore`, {
+      method: 'POST',
+      ...(message ? { body: JSON.stringify(message) } : {}),
+    }),
 
   /**
    * A start is keyed per press: a re-send after an answer that never arrived reaches the same run.

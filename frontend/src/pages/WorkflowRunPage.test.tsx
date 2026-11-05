@@ -13,6 +13,7 @@ import {
   setFlowRunStarting,
   childEntries,
   setFlowRunChildren,
+  setFlowDetails,
 } from '../mocks/features/flows'
 import { mockSettings, setMockSettings } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -66,6 +67,12 @@ describe('WorkflowRunPage', () => {
     )
     render('run-done')
     expect(await screen.findByText(/through a schedule, fired/)).toBeInTheDocument()
+  })
+
+  it("heads the run with its flow's display name (#3186)", async () => {
+    setFlowDetails('swap', { display_name: 'Nightly swap' })
+    render('run-ask')
+    expect(await screen.findByRole('link', { name: 'Nightly swap v1' })).toBeInTheDocument()
   })
 
   it('shows no inputs for a run of a flow with none', async () => {

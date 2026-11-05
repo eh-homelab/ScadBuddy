@@ -15,12 +15,14 @@ import {
   flowRunPath,
   FLOWS_PATH,
   flowStateText,
+  flowTitle,
   waitingText,
 } from '../lib/flows'
 import { useAsync } from '../lib/useAsync'
 import { usePollWhileUnavailable } from '../lib/usePollWhileUnavailable'
 import { Badge } from '@/components/ui/badge'
 import { Card } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
@@ -61,6 +63,8 @@ function Loading({ label }: { label: string }) {
  * (`/workflows/flows`) lists every registered flow. #2485 — each can be archived or
  * deleted there; Show archived lists those too, deleted ones with Restore. #2484 — each
  * flow's triggers under it: when one fires next, its last run, and pause or resume.
+ * #3186 — each flow and run by its flow's display name (the slug beside it), and the
+ * Flows list searched by name, display name and description.
  */
 export function WorkflowsPage({ tab = 'runs' }: { tab?: 'runs' | 'flows' }) {
   return (
@@ -123,18 +127,36 @@ function Runs() {
   )
 }
 
+/** #3186 — whether a flow matches a search: its name, display name or description. */
+function matches(flow: FlowSummary, query: string): boolean {
+  const needle = query.trim().toLowerCase()
+  if (!needle) return true
+  return [flow.name, flow.display_name, flow.description].some((text) => text?.toLowerCase().includes(needle))
+}
+
 function Flows() {
   const [archived, setArchived] = useState(false)
+  const [query, setQuery] = useState('')
   const flows = useAsync(() => api.listFlows({ archived }), [archived])
   // One read of every trigger, shown under its flow.
   const triggers = useAsync(() => api.listFlowTriggers(), [])
   const switchId = useId()
   const toggle = (
-    <div className="mb-3 flex w-fit items-center gap-2">
-      <Switch id={switchId} checked={archived} onCheckedChange={setArchived} />
-      <Label htmlFor={switchId} className="font-normal text-muted-foreground">
-        Show archived
-      </Label>
+    <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+      <Input
+        type="search"
+        aria-label="Search flows"
+        placeholder="Search flows"
+        className="h-8 w-full sm:w-64"
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+      />
+      <div className="flex w-fit items-center gap-2">
+        <Switch id={switchId} checked={archived} onCheckedChange={setArchived} />
+        <Label htmlFor={switchId} className="font-normal text-muted-foreground">
+          Show archived
+        </Label>
+      </div>
     </div>
   )
   if (flows.error) {
@@ -156,6 +178,7 @@ function Flows() {
     )
   }
   // `GET /workflows` is each name's newest version, by name.
+  const shown = flows.data.filter((flow) => matches(flow, query))
   return (
     <>
       {toggle}
@@ -165,9 +188,13 @@ function Flows() {
             ? 'No flows registered yet. An assistant registers one with register_flow.'
             : 'No flows registered yet, or every one is archived. An assistant registers one with register_flow.'}
         </Card>
+      ) : shown.length === 0 ? (
+        <Card className="items-center px-4 text-center text-[13px] text-muted-foreground">
+          {`No flow matches “${query.trim()}”.`}
+        </Card>
       ) : (
         <ul aria-label="Flows" className={LIST}>
-          {flows.data.map((latest) => (
+          {shown.map((latest) => (
             <FlowRow
               key={latest.name}
               latest={latest}
@@ -199,8 +226,9 @@ function FlowRow({
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
           <Link to={flowPath(latest.id)} className="text-[13px] font-medium hover:underline">
-            {latest.name}
+            {flowTitle(latest)}
           </Link>
+          {latest.display_name && <code className="font-mono text-[12px] text-muted-foreground">{latest.name}</code>}
           <Badge variant="secondary">latest v{latest.version}</Badge>
           {state && <Badge variant="outline">{latest.deleted_at ? 'Deleted' : 'Archived'}</Badge>}
           <span className="ml-auto text-[12px] text-muted-foreground">{timeAgo(latest.created_at)}</span>
@@ -209,6 +237,9 @@ function FlowRow({
           Registered by {actorText(latest.created_by)}
           {state && `. ${state}, ${timeAgo((latest.deleted_at ?? latest.archived_at)!)}`}
         </p>
+        {latest.description && (
+          <p className="mt-0.5 line-clamp-2 text-[12.5px] text-muted-foreground">{latest.description}</p>
+        )}
         {triggers.length > 0 && (
           <div className="mt-1.5">
             <TriggerList triggers={triggers} onChanged={onChanged} compact />
@@ -234,7 +265,7 @@ function RunRow({ run }: { run: FlowRun }) {
     <li data-run={run.id} className="px-3 py-2.5">
       <div className="flex items-center gap-2">
         <Link to={flowRunPath(run.id)} className="text-[13px] font-medium hover:underline">
-          {run.name} v{run.version}
+          {flowTitle(run)} v{run.version}
         </Link>
         <Badge variant="outline">{FLOW_STATUS_LABEL[run.status]}</Badge>
         <span className="ml-auto text-[12px] text-muted-foreground">{timeAgo(run.created_at)}</span>

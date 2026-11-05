@@ -30,6 +30,11 @@ class DefinitionSummary(BaseModel):
     id: str
     name: str
     version: int
+    #: The flow's display name and Markdown description (#3186), from `<name>/flow.json`
+    #: in `data/flows`: the flow's, not the version's, so every version shows the
+    #: current ones. None when unset; a flow without one is called by its `name`.
+    display_name: str | None = None
+    description: str | None = None
     #: The version's commit in `data/flows`; None only on a row written before flows
     #: were in git that no backfill reached (its script is unread since #5139).
     commit: str | None = None
@@ -82,13 +87,26 @@ class FlowVersion(BaseModel):
     commit: str
     short: str
     version: int
+    #: The commit's subject: the message the save gave, or what it did.
     message: str
+    #: The commit message's body (#3186), without its trailers; None for none.
+    body: str | None = None
     #: Who made it, from the commit's author: `{"kind": "agent", "principal",
     #: "session"}` or `{"kind": "browser"}`.
     created_by: dict[str, Any]
     created_at: datetime
     #: The flow's newest version.
     current: bool = False
+
+
+class FlowDetails(BaseModel):
+    """A flow's display name and description (#3186), as `<name>/flow.json` has them."""
+
+    name: str
+    display_name: str | None = None
+    description: str | None = None
+    #: The commit that changed them; None when nothing changed (or for a read).
+    commit: str | None = None
 
 
 class FlowDiff(BaseModel):
@@ -107,6 +125,8 @@ class Run(BaseModel):
     definition_id: str
     version: int
     name: str
+    #: Its flow's display name now (#3186), None when it has none.
+    display_name: str | None = None
     status: RunStatus
     #: The host calls parked for a person.
     waiting_on: list[FlowWaiting] = []

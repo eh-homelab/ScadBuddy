@@ -24,6 +24,7 @@ import {
   FLOW_STATUS_LABEL,
   flowPath,
   flowRunTopic,
+  flowTitle,
   hopActor,
   hopUntilText,
   isStaleEntry,
@@ -97,7 +98,7 @@ export function WorkflowRunPage() {
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Link to={flowPath(view.data.definition_id)} className="hover:underline">
-                      {view.data.name} v{view.data.version}
+                      {flowTitle(view.data)} v{view.data.version}
                     </Link>
                   </TooltipTrigger>
                   <TooltipContent>The flow version it ran</TooltipContent>

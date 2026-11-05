@@ -5,7 +5,14 @@ A flow's script is source, so it is versioned as the templates' source is: in gi
 the core model history uses (``core/gitrepo.py``), but in a repository of its own, since
 flows are not models. The layout is ``<name>/flow.py``, and ``<name>/inputs.json`` for a
 flow that declares typed inputs (#2483): source, versioned with the script in the same
-commit, never state (an approval timeout stays in Postgres).
+commit, never state (an approval timeout stays in Postgres). ``<name>/flow.json`` holds
+the flow's display name and description (#3186): the flow's, not a version's, so each
+change of them is a commit of its own, carrying ``ScadBuddy-Flow-Details: <name>``, and
+neither a new version nor a restore changes them. A flow without the file is named by
+its slug.
+
+Every write takes an optional commit message, its subject, and an optional body (#3186);
+without a message the subject says what the write did.
 
 Every version is its own commit: a registration and a restore each make exactly one,
 ``--allow-empty`` when the script is unchanged. A commit carries two trailers,
@@ -20,6 +27,7 @@ process or two, never interleave.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -45,6 +53,11 @@ FLOW_TRAILER = "ScadBuddy-Flow"
 VERSION_TRAILER = "ScadBuddy-Flow-Version"
 #: A delete's commit (#2485): it names the flow, but is none of its versions.
 DELETED_TRAILER = "ScadBuddy-Flow-Deleted"
+#: A details change's commit (#3186): it names the flow, but is none of its versions.
+DETAILS_TRAILER = "ScadBuddy-Flow-Details"
+DETAILS_FILE = "flow.json"
+#: A trailer line, as git writes the ones ScadBuddy adds.
+_TRAILER_LINE = re.compile(r"^[A-Za-z0-9-]+: ")
 _GITIGNORE = f"# Written by ScadBuddy.\n{LOCK_NAME}\n"
 _FORMAT = (
     "--format=format:%x1e%H%x1f%aI%x1f%s"
@@ -52,6 +65,7 @@ _FORMAT = (
     f"%x1f%(trailers:key={VERSION_TRAILER},valueonly,separator=%x2c)"
     f"%x1f%(trailers:key={PRINCIPAL_TRAILER},valueonly,separator=%x2c)"
     f"%x1f%(trailers:key={SESSION_TRAILER},valueonly,separator=%x2c)"
+    "%x1f%b"
 )
 
 
@@ -61,6 +75,31 @@ def flow_path(name: str) -> str:
 
 def inputs_path(name: str) -> str:
     return f"{name}/{INPUTS_FILE}"
+
+
+def details_path(name: str) -> str:
+    return f"{name}/{DETAILS_FILE}"
+
+
+def _body_of(raw: str) -> str | None:
+    """A commit's own body: ``%b`` without the trailers paragraph ScadBuddy adds."""
+    paragraphs = [p for p in raw.strip().split("\n\n") if p.strip()]
+    if paragraphs and all(_TRAILER_LINE.match(line) for line in paragraphs[-1].splitlines()):
+        paragraphs.pop()
+    text = "\n\n".join(paragraphs).strip()
+    return text or None
+
+
+def _message(message: str | None, default: str) -> str:
+    return message if message is not None and message.strip() else default
+
+
+@dataclass(frozen=True)
+class FlowDetails:
+    """A flow's display name and description (#3186), from ``<name>/flow.json``."""
+
+    display_name: str | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -76,6 +115,8 @@ class FlowCommit:
     message: str
     #: Who the agent committed it for, when the agent did.
     agent: AgentAuthor | None
+    #: The commit message's body, without its trailers (#3186); None for none.
+    body: str | None = None
 
     @property
     def short(self) -> str:
@@ -112,17 +153,31 @@ class FlowHistory(GitRepo):
         inputs: dict[str, Any] | None = None,
         restore: str | None = None,
         reconcile: Callable[[], object] | None = None,
+        message: str | None = None,
+        body: str | None = None,
+        display_name: str | None = None,
+        description: str | None = None,
     ) -> tuple[str, int]:
         """One new version of ``name``: ``script`` with its ``inputs`` schema (none when
         None), or the script and schema at the commit ``restore``. Under the write lock:
         ``reconcile`` (index what an earlier failed insert left), the commit, then
-        ``index(commit, version)``. The commit and its version number."""
+        ``index(commit, version)``, then, when ``display_name`` or ``description`` changes
+        the flow's details, their own commit (#3186). The version's commit and number."""
         with self.write_lock():
             if reconcile is not None:
                 reconcile()
-            return self.register_locked(
-                name, version_id, index, script=script, inputs=inputs, restore=restore
+            found = self.register_locked(
+                name,
+                version_id,
+                index,
+                script=script,
+                inputs=inputs,
+                restore=restore,
+                message=message,
+                body=body,
             )
+            self._set_details_locked(name, display_name, description)
+            return found
 
     def register_locked(
         self,
@@ -133,17 +188,19 @@ class FlowHistory(GitRepo):
         script: str | None = None,
         inputs: dict[str, Any] | None = None,
         restore: str | None = None,
+        message: str | None = None,
+        body: str | None = None,
     ) -> tuple[str, int]:
         version = len(self.versions(name)) + 1
         trailers = [f"{FLOW_TRAILER}: {name}", f"{VERSION_TRAILER}: {version_id}"]
         if restore is not None:
             target = self.resolve(restore)
-            commit = self._restore_locked(
+            commit = self._restore_version_locked(
                 name,
                 target,
-                f"Restore {name} to {target[:7]}",
+                _message(message, f"Restore {name} to {target[:7]}"),
                 trailers=trailers,
-                allow_empty=True,
+                body=body,
             )
         else:
             assert script is not None
@@ -156,14 +213,105 @@ class FlowHistory(GitRepo):
             else:
                 schema.write_text(json.dumps(inputs, indent=2) + "\n", encoding="utf-8")
             commit = self._commit_locked(
-                f"Register {name} v{version}", name, trailers=trailers, allow_empty=True
+                _message(message, f"Register {name} v{version}"),
+                name,
+                trailers=trailers,
+                allow_empty=True,
+                body=body,
             )
         if commit is None:  # pragma: no cover - an allowed-empty commit always lands
             raise GitError(f"no commit for {name} v{version}")
         index(commit, version)
         return commit, version
 
-    def delete(self, name: str, record: Callable[[str], None]) -> str:
+    def _restore_version_locked(
+        self, name: str, target: str, message: str, *, trailers: list[str], body: str | None
+    ) -> str | None:
+        """``<name>/`` as it was at ``target``, as one commit, keeping the flow's details
+        as they are now (#3186): they are the flow's, not the version's. A deleted flow
+        comes back with the ones it had at ``target``."""
+        present = set(self._files_at(target, name))
+        if not present:
+            raise RevisionNotFoundError(f"{name!r} does not exist at {target}")
+        was_present = self.present(name)
+        details = self.root / details_path(name)
+        kept = details.read_bytes() if details.is_file() else None
+        self._run("checkout", target, "--", name)
+        for tracked in self._tracked(name):
+            if tracked not in present:
+                (self.root / tracked).unlink(missing_ok=True)
+        if was_present:
+            if kept is None:
+                details.unlink(missing_ok=True)
+            else:
+                details.write_bytes(kept)
+        return self._commit_locked(message, name, trailers=trailers, allow_empty=True, body=body)
+
+    def set_details(
+        self,
+        name: str,
+        *,
+        display_name: str | None = None,
+        description: str | None = None,
+        message: str | None = None,
+        body: str | None = None,
+    ) -> str | None:
+        """Change the flow's display name or description (#3186): ``None`` leaves one as
+        it is, an empty string clears it. One commit of its own, under the write lock;
+        None when nothing changed. :class:`RevisionNotFoundError` for a flow with no
+        version, or one not in the tree (deleted)."""
+        with self.write_lock():
+            if not self.versions(name) or not self.present(name):
+                raise RevisionNotFoundError(f"no flow named {name!r}")
+            return self._set_details_locked(name, display_name, description, message, body)
+
+    def _set_details_locked(
+        self,
+        name: str,
+        display_name: str | None,
+        description: str | None,
+        message: str | None = None,
+        body: str | None = None,
+    ) -> str | None:
+        if display_name is None and description is None:
+            return None
+        was = self.details(name)
+        now = FlowDetails(
+            display_name=was.display_name if display_name is None else display_name.strip() or None,
+            description=was.description if description is None else description.strip() or None,
+        )
+        if now == was:
+            return None
+        path = self.root / details_path(name)
+        if now == FlowDetails():
+            path.unlink(missing_ok=True)
+        else:
+            fields = {"display_name": now.display_name, "description": now.description}
+            kept = {key: value for key, value in fields.items() if value is not None}
+            path.write_text(json.dumps(kept, indent=2, ensure_ascii=False) + "\n", "utf-8")
+        if now.display_name != was.display_name:
+            default = (
+                f"Rename {name} to {now.display_name}"
+                if now.display_name
+                else f"Clear the display name of {name}"
+            )
+        else:
+            default = f"Describe {name}" if now.description else f"Clear the description of {name}"
+        return self._commit_locked(
+            _message(message, default),
+            details_path(name),
+            trailers=[f"{DETAILS_TRAILER}: {name}"],
+            body=body,
+        )
+
+    def delete(
+        self,
+        name: str,
+        record: Callable[[str], None],
+        *,
+        message: str | None = None,
+        body: str | None = None,
+    ) -> str:
         """Remove ``<name>/`` as one commit, ``Delete <name>``, carrying
         ``ScadBuddy-Flow-Deleted: <name>`` (#2485). Not a version: its versions stay in
         the history, each script readable at its commit, and a restore of one brings the
@@ -177,7 +325,10 @@ class FlowHistory(GitRepo):
             if self._tracked(name):
                 self._run("rm", "-r", "-q", "--", name)
                 commit = self._commit_locked(
-                    f"Delete {name}", name, trailers=[f"{DELETED_TRAILER}: {name}"]
+                    _message(message, f"Delete {name}"),
+                    name,
+                    trailers=[f"{DELETED_TRAILER}: {name}"],
+                    body=body,
                 )
             if commit is None:
                 commit = self.last_commit(name)
@@ -197,14 +348,14 @@ class FlowHistory(GitRepo):
                 return []
             # Never "no versions": the next registration would number itself v1.
             raise GitError(f"git log failed: {completed.stderr}", str(completed.stderr))
-        found: list[tuple[str, str, str, datetime, str, AgentAuthor | None]] = []
+        found: list[tuple[str, str, str, datetime, str, AgentAuthor | None, str | None]] = []
         for record in completed.stdout.split(_RECORD):
             if not record.strip():
                 continue
             fields = record.split(_FIELD)
-            if len(fields) != 7:  # pragma: no cover - git always emits all seven
+            if len(fields) != 8:  # pragma: no cover - git always emits all eight
                 continue
-            commit, when, subject, name, version_id, principal, session = fields
+            commit, when, subject, name, version_id, principal, session, raw_body = fields
             name, version_id = name.strip(), version_id.strip()
             if not name or not version_id:
                 continue
@@ -214,15 +365,23 @@ class FlowHistory(GitRepo):
                 else None
             )
             found.append(
-                (commit.strip(), name, version_id, datetime.fromisoformat(when), subject, agent)
+                (
+                    commit.strip(),
+                    name,
+                    version_id,
+                    datetime.fromisoformat(when),
+                    subject,
+                    agent,
+                    _body_of(raw_body),
+                )
             )
         counts: dict[str, int] = {}
         for _, name, *_rest in found:
             counts[name] = counts.get(name, 0) + 1
         numbered: list[FlowCommit] = []
-        for commit, name, version_id, date, subject, agent in found:
+        for commit, name, version_id, date, subject, agent, body in found:
             numbered.append(
-                FlowCommit(commit, name, version_id, counts[name], date, subject, agent)
+                FlowCommit(commit, name, version_id, counts[name], date, subject, agent, body)
             )
             counts[name] -= 1
         return numbered
@@ -230,6 +389,23 @@ class FlowHistory(GitRepo):
     def present(self, name: str) -> bool:
         """Whether ``<name>/`` is in the tree: not deleted, as git has it."""
         return bool(self._tracked(name))
+
+    def details(self, name: str) -> FlowDetails:
+        """The flow's display name and description (#3186), from ``<name>/flow.json`` in
+        the tree; none for a flow without one, or one whose file is not an object of
+        strings (named by its slug, as before the file existed)."""
+        try:
+            found = json.loads((self.root / details_path(name)).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            return FlowDetails()
+        if not isinstance(found, dict):
+            return FlowDetails()
+
+        def field(key: str) -> str | None:
+            value = found.get(key)
+            return value if isinstance(value, str) and value.strip() else None
+
+        return FlowDetails(display_name=field("display_name"), description=field("description"))
 
     def versions(self, name: str) -> list[FlowCommit]:
         """The flow's versions, newest first."""

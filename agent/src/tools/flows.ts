@@ -63,6 +63,26 @@ export const runInputs = z
     "The run's inputs by name, as the flow's `inputs_schema` (get_flow) declares them; one left out takes " +
       'its default. Refused (422 with `problems`) when they do not fit, or for a flow with no inputs schema.',
   )
+// #3186: every save takes a commit message, and a flow has a display name and description.
+const commitMessage = {
+  message: z
+    .string()
+    .max(200)
+    .optional()
+    .describe("The commit's subject in the flow's history; a default saying what the save did when omitted"),
+  body: z.string().max(10_000).optional().describe("The commit message's body: longer notes, kept as written"),
+}
+const flowDetails = {
+  display_name: z
+    .string()
+    .max(120)
+    .optional()
+    .describe("Free text shown in place of the flow's name (which stays its id); an empty string clears it"),
+  description: z.string().max(20_000).optional().describe('Markdown; an empty string clears it'),
+}
+const messageBody = ({ message, body }: { message?: string; body?: string }) =>
+  message === undefined && body === undefined ? undefined : { message: message ?? null, body: body ?? null }
+
 export const approvalTimeout = z
   .union([z.number().int().min(10).max(2_592_000), z.literal('never')])
   .describe('Seconds an outward host call waits for a person to approve it before it is denied, or "never"')
@@ -98,12 +118,16 @@ export const flowTools: Tool[] = [
       "script reads with `inputs()` (a TypedDict `FlowInputs`, defaults filled in); a 422 lists the schema's " +
       'problems with `file` inputs.json. `trigger()` returns the event a flow trigger started the run on ' +
       "({kind: 'model.changed', slug, commit}, {kind: 'render.finished', slug, job_id}, or " +
-      "{kind: 'print.finished' | 'print.failed', slug, run_id, output_id, printer}; narrow by `kind`), or None.",
+      "{kind: 'print.finished' | 'print.failed', slug, run_id, output_id, printer}; narrow by `kind`), or None. " +
+      '`message` and `body` name the version\'s commit; `display_name` and `description` set the flow\'s ' +
+      'details (as update_flow_details does, in a commit of their own after the version\'s).',
     input: z.object({
       name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, 'lower-case letters, digits and dashes'),
       script: z.string().min(1).max(65_536),
       approval_timeout: approvalTimeout.optional(),
       inputs_schema: inputsSchema.optional(),
+      ...commitMessage,
+      ...flowDetails,
     }),
     risk: 'write',
     routes: ['POST /api/v1/workflows'],
@@ -130,7 +154,8 @@ export const flowTools: Tool[] = [
     name: 'list_flows',
     label: 'List flows',
     description:
-      'The registered flows, each at its newest version (no script; get_flow has it). Archived and deleted ' +
+      'The registered flows, each at its newest version (no script; get_flow has it), with its ' +
+      '`display_name` and `description` (null when unset: call it by its `name`). Archived and deleted ' +
       'flows only with `include_archived`, each with `archived_at`/`archived_by` or `deleted_at`/`deleted_by`.' +
       PAGED,
     input: z.object({
@@ -188,16 +213,47 @@ export const flowTools: Tool[] = [
       "Delete a flow: one commit removing its script from the flows' git history, which keeps every version. " +
       'Nothing new starts; runs in progress keep running the version they started, and finished runs still ' +
       'show the script they ran. restore_flow_version on one of its versions (list_flow_versions) brings it ' +
-      'back as its next version. Needs a human approval.',
-    input: z.object({ name: flowName }),
+      'back as its next version. Needs a human approval. `message` and `body` name the commit.',
+    input: z.object({ name: flowName, ...commitMessage }),
     risk: 'outward',
     routes: ['DELETE /api/v1/workflows/names/{name}'],
     summarize: ({ name }) => `Delete the flow "${name}" (its history keeps every version)`,
-    handler: async ({ name }, { backend }) =>
+    handler: async ({ name, ...message }, { backend }) =>
       json(
         await ok(
-          backend.DELETE('/api/v1/workflows/names/{name}', { params: { path: { name } } }),
+          backend.DELETE('/api/v1/workflows/names/{name}', {
+            params: { path: { name } },
+            body: messageBody(message),
+          }),
           `delete flow ${name}`,
+        ),
+      ),
+  }),
+
+  defineTool({
+    name: 'update_flow_details',
+    label: "Edit a flow's name or description",
+    description:
+      "Edit a flow's display name (free text shown in place of its `name`, which stays its id) or its Markdown " +
+      "description. Omitted fields are unchanged; an empty string clears one. One commit in the flow's history " +
+      '(`message` and `body` name it), not a new version: every version shows the new details. Answers the ' +
+      'details and the `commit` (null when nothing changed).',
+    input: z.object({ name: flowName, ...flowDetails, ...commitMessage }),
+    risk: 'write',
+    routes: ['PATCH /api/v1/workflows/names/{name}'],
+    handler: async ({ name, display_name, description, message, body }, { backend }) =>
+      json(
+        await ok(
+          backend.PATCH('/api/v1/workflows/names/{name}', {
+            params: { path: { name } },
+            body: {
+              display_name: display_name ?? null,
+              description: description ?? null,
+              message: message ?? null,
+              body: body ?? null,
+            },
+          }),
+          `update details of flow ${name}`,
         ),
       ),
   }),
@@ -205,7 +261,7 @@ export const flowTools: Tool[] = [
   defineTool({
     name: 'get_flow',
     label: 'Read a flow',
-    description: 'One flow version, with its script.',
+    description: "One flow version, with its script and its flow's `display_name` and `description`.",
     input: z.object({ definition_id: definitionId }),
     risk: 'read',
     routes: ['GET /api/v1/workflows/{definition_id}'],
@@ -222,7 +278,7 @@ export const flowTools: Tool[] = [
     name: 'list_flow_versions',
     label: "List a flow's versions",
     description:
-      "A flow's history, newest first, from git: each version's id, commit, version number, message and who " +
+      "A flow's history, newest first, from git: each version's id, commit, version number, message (and body) and who " +
       'made it (a person, or an agent with its principal and session). Pass a version id to get_flow or ' +
       'start_flow_run.' +
       PAGED,
@@ -285,15 +341,17 @@ export const flowTools: Tool[] = [
     description:
       "Restore a flow's script at one of its versions as its newest version: a new commit and version, " +
       'type-checked first, with that version\'s approval timeout (nothing is lost). Runs already started keep ' +
-      'the version they ran.',
-    input: z.object({ name: flowName, commit: flowCommit }),
+      "the version they ran. The flow's display name and description stay as they are; `message` and `body` " +
+      'name the commit.',
+    input: z.object({ name: flowName, commit: flowCommit, ...commitMessage }),
     risk: 'write',
     routes: ['POST /api/v1/workflows/names/{name}/versions/{commit}/restore'],
-    handler: async ({ name, commit }, { backend }) =>
+    handler: async ({ name, commit, ...message }, { backend }) =>
       json(
         await ok(
           backend.POST('/api/v1/workflows/names/{name}/versions/{commit}/restore', {
             params: { path: { name, commit } },
+            body: messageBody(message),
           }),
           `restore flow ${name}@${commit}`,
         ),

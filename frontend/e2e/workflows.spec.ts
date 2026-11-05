@@ -164,10 +164,10 @@ for (const { name, viewport } of [
       await expect(page).toHaveURL(/\/workflows\/flows\/def-swap-2$/)
       await expect(page.getByRole('heading', { name: 'swap v2' })).toBeVisible()
       const versions = page.getByRole('region', { name: 'Versions' })
-      await expect(versions.getByRole('listitem').first()).toContainText('v2 you, in the browser')
+      await expect(versions.getByRole('listitem').first()).toContainText('v2 Update script you, in the browser')
 
       const compare = page.getByRole('region', { name: 'Compare versions' })
-      await expect(compare.getByRole('combobox', { name: 'From' })).toHaveText('v1')
+      await expect(compare.getByRole('combobox', { name: 'From' })).toHaveText(/^v1 /)
       await compare.getByRole('button', { name: 'Compare' }).click()
       await expect(compare.getByRole('heading', { name: 'v1 → v2' })).toBeVisible()
       const diff = page.locator('.monaco-diff-editor')
@@ -197,7 +197,7 @@ for (const { name, viewport } of [
 
       const compare = page.getByRole('region', { name: 'Compare versions' })
       await compare.getByRole('combobox', { name: 'To' }).click()
-      await page.getByRole('option', { name: 'v2' }).click()
+      await page.getByRole('option', { name: /^v2 / }).click()
       await compare.getByRole('button', { name: 'Compare' }).click()
       await expect(compare.getByRole('heading', { name: 'v1 → v2' })).toBeVisible()
       const diff = page.locator('.monaco-diff-editor')
