@@ -1366,8 +1366,6 @@ class Lifecycle:
             self._open_for_items(order, "an item's price")
             self._not_on_hold(order)
             item = self._item_of(conn, order, item_id)
-            if item.status in SETTLED:
-                raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             quote = self.store.quote(quote_id, conn=conn)
             if quote is None or quote.order_item_id != item.id:
                 raise LifecycleError(
@@ -1383,6 +1381,8 @@ class Lifecycle:
         """Accepting ``quote`` once the caller has checked the order and the item: the
         refusals, the row, the audit line, the order rederived and §3.4's release of
         every other quote's sliced file."""
+        if item.status in SETTLED:
+            raise LifecycleError("item_not_open", f"item {item.id} is {item.status}")
         if quote.quantity != item.quantity:
             raise LifecycleError(
                 "quote_stale",
@@ -1443,6 +1443,8 @@ class Lifecycle:
             order = self._lock(conn, order_id)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
+            if item.status in SETTLED:
+                raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             revision = self._newest(conn, item, revision_id)
             if revision.answer is not None:
                 raise LifecycleError(
@@ -1481,6 +1483,8 @@ class Lifecycle:
             order = self._lock(conn, order_id)
             self._not_ended(order)
             item = self._item_of(conn, order, item_id)
+            if item.status in SETTLED:
+                raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
             revision = self._newest(conn, item, revision_id)
             if revision.answer is not None:
                 raise LifecycleError(

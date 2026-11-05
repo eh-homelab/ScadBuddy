@@ -398,3 +398,27 @@ def test_a_hold_refuses_a_together_accept(shop: Shop) -> None:
         )
     assert refused.value.slug == "order_on_hold"
     assert shop.rows.revision(rev.id).answer is None  # type: ignore[union-attr]
+
+
+def test_a_cancelled_item_is_neither_sent_nor_answered(shop: Shop) -> None:
+    order, item, rev = _quoted_revision(shop)
+    shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    shop.lifecycle.cancel_item(order.id, item.id, BY)
+    with pytest.raises(LifecycleError) as answered:
+        shop.lifecycle.answer_revision(
+            order.id, item.id, rev.id, RevisionAnswerInput(answer="accepted"), BY
+        )
+    assert answered.value.slug == "item_not_open"
+    assert shop.rows.revision(rev.id).answer is None  # type: ignore[union-attr]
+    with pytest.raises(LifecycleError) as sent:
+        shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    assert sent.value.slug == "item_not_open"
+
+
+def test_a_revision_of_another_item_is_not_found(shop: Shop) -> None:
+    order, item, _ = _quoted_revision(shop)
+    other = shop.item(order)
+    [theirs] = shop.rows.revisions(other.id)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.send_revision(order.id, item.id, theirs.id, BY)
+    assert refused.value.slug == "revision_not_found" and refused.value.not_found
