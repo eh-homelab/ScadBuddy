@@ -62,10 +62,15 @@ export function CataloguePage() {
   const { sort: _sort, ...facetFilters } = filters
   const facetKey = JSON.stringify(facetFilters)
   const loaded = useRef({ key: filterKey, size: MODELS_PAGE_SIZE })
+  // The window read in flight: a newer one stops it between chunks (#5292 review).
+  const windowRead = useRef<AbortController | undefined>(undefined)
   const models = useAsync(
     () => {
       if (loaded.current.key !== filterKey) loaded.current = { key: filterKey, size: MODELS_PAGE_SIZE }
-      return api.listModelsWindow(filters, loaded.current.size)
+      windowRead.current?.abort()
+      const controller = new AbortController()
+      windowRead.current = controller
+      return api.listModelsWindow(filters, loaded.current.size, controller.signal)
     },
     [filterKey],
     ['models'],

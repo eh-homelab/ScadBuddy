@@ -1975,6 +1975,41 @@ describe('listModelsWindow reads past the backend page cap (#5289 review)', () =
     ])
   })
 
+  it('reads the window again from the top when the last slug of a chunk is gone (409)', async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/v1/models', ({ request }) => {
+        const query = new URL(request.url).searchParams
+        const limit = Number(query.get('limit'))
+        const after = query.get('after')
+        reads += 1
+        // The second read finds its `after` gone once; every later read sees the list.
+        if (after !== null && reads === 2) return HttpResponse.json({ detail: 'gone' }, { status: 409 })
+        const start = after === null ? 0 : all.findIndex((m) => m.slug === after) + 1
+        return HttpResponse.json(all.slice(start, start + limit), { headers: { 'X-Total-Count': String(all.length) } })
+      }),
+    )
+    const window = await api.listModelsWindow(filters, 600)
+    expect(window.items).toHaveLength(600)
+    expect(window.items.map((m) => m.slug)).toEqual(all.slice(0, 600).map((m) => m.slug))
+  })
+
+  it('asks for no further chunk once its signal is aborted', async () => {
+    const controller = new AbortController()
+    const asked: Array<string | null> = []
+    server.use(
+      http.get('/api/v1/models', ({ request }) => {
+        const query = new URL(request.url).searchParams
+        asked.push(query.get('after'))
+        controller.abort()
+        const limit = Number(query.get('limit'))
+        return HttpResponse.json(all.slice(0, limit), { headers: { 'X-Total-Count': String(all.length) } })
+      }),
+    )
+    await expect(api.listModelsWindow(filters, 1100, controller.signal)).rejects.toThrow()
+    expect(asked).toEqual([null])
+  })
+
   it('stops at the end of the list', async () => {
     server.use(
       http.get('/api/v1/models', () =>

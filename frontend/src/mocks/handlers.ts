@@ -59,7 +59,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
-import { type CatalogueQuery, DEFAULT_QUERY, filterModels, tagCounts } from '../lib/catalogueQuery'
+import { type CatalogueQuery, DEFAULT_QUERY, MAX_TAGS, filterModels, tagCounts } from '../lib/catalogueQuery'
 import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
@@ -1463,6 +1463,13 @@ function catalogueFilters(params: URLSearchParams): CatalogueQuery {
   }
 }
 
+/** The 422 `GET /models` and `GET /model-facets` answer for more `tag`s than `TagFilter` takes, as sent. */
+function tooManyTags(params: URLSearchParams) {
+  return params.getAll('tag').length > MAX_TAGS
+    ? HttpResponse.json({ detail: `at most ${MAX_TAGS} tags` }, { status: 422 })
+    : undefined
+}
+
 export const handlers = [
   realtimeHandler,
   // The agent service's plugin routes (#297), under /api/v1/ai.
@@ -1477,6 +1484,8 @@ export const handlers = [
   http.get(`${base}/models`, ({ request }) => {
     landPreviews()
     const params = new URL(request.url).searchParams
+    const refused = tooManyTags(params)
+    if (refused) return refused
     const filtered = ['q', 'tag', 'origin', 'sort'].some((name) => params.has(name))
     const listed = state.models.map(view)
     const selected = filtered ? filterModels(listed, catalogueFilters(params)) : listed
@@ -1489,15 +1498,18 @@ export const handlers = [
       )
     }
     const limit = params.get('limit')
-    if (limit !== null && Number(limit) > MAX_PAGE_LIMIT) {
-      return HttpResponse.json({ detail: `limit may be at most ${MAX_PAGE_LIMIT}` }, { status: 422 })
+    if (limit !== null && !(Number(limit) >= 1 && Number(limit) <= MAX_PAGE_LIMIT)) {
+      return HttpResponse.json({ detail: `limit must be from 1 to ${MAX_PAGE_LIMIT}` }, { status: 422 })
     }
     const window = selected.slice(start, limit === null ? undefined : start + Number(limit))
     return HttpResponse.json(window, { headers: { 'X-Total-Count': String(selected.length) } })
   }),
 
   http.get(`${base}/model-facets`, ({ request }) => {
-    const query = catalogueFilters(new URL(request.url).searchParams)
+    const params = new URL(request.url).searchParams
+    const refused = tooManyTags(params)
+    if (refused) return refused
+    const query = catalogueFilters(params)
     const listed = state.models.map(view)
     const selected = filterModels(listed, query)
     return HttpResponse.json({

@@ -335,7 +335,9 @@ export interface ModelFilters {
 function modelFilterParams({ q, tags, origin }: Omit<ModelFilters, 'sort'>): URLSearchParams {
   const query = new URLSearchParams()
   if (q.trim()) query.set('q', q.trim())
-  for (const tag of tags) query.append('tag', tag)
+  // One spelling of each tag as folded: the backend folds both sides, so the others
+  // select the same models, and its `MAX_TAGS` cap counts the list as sent (#5292 review).
+  for (const tag of new Map(tags.map((tag) => [fold(tag), tag])).values()) query.append('tag', tag)
   if (origin !== 'all') query.set('origin', origin)
   return query
 }
@@ -1220,22 +1222,34 @@ export const api = {
   /**
    * The first `size` models `filters` select, read in pages of at most
    * `MODELS_PAGE_LIMIT` (the backend's `MAX_PAGE_LIMIT`), each after the last: a window
-   * past the cap asked for in one read answers 422 (#5289 review).
+   * past the cap asked for in one read answers 422 (#5289 review). A chunk whose `after`
+   * went away (409) reads the window again from the top, once; `signal` stops it
+   * between chunks (#5292 review).
    */
   listModelsWindow: async (
     filters: ModelFilters,
     size: number,
+    signal?: AbortSignal,
   ): Promise<{ items: ModelSummary[]; total: number }> => {
-    const items: ModelSummary[] = []
-    let total = 0
-    while (items.length < size) {
-      const limit = Math.min(MODELS_PAGE_LIMIT, size - items.length)
-      const page = await api.listModelsPage(filters, { limit, after: items.at(-1)?.slug })
-      items.push(...page.items)
-      total = page.total
-      if (page.items.length < limit) break
+    const read = async (): Promise<{ items: ModelSummary[]; total: number }> => {
+      const items: ModelSummary[] = []
+      let total = 0
+      while (items.length < size) {
+        signal?.throwIfAborted()
+        const limit = Math.min(MODELS_PAGE_LIMIT, size - items.length)
+        const page = await api.listModelsPage(filters, { limit, after: items.at(-1)?.slug }, signal)
+        items.push(...page.items)
+        total = page.total
+        if (page.items.length < limit) break
+      }
+      return { items, total }
     }
-    return { items, total }
+    try {
+      return await read()
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409) return await read()
+      throw cause
+    }
   },
 
   /** #2290 — how many models `filters` select, of how many, and their tags' counts. */
