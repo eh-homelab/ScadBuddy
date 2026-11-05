@@ -659,7 +659,6 @@ async def quote_run(
                 )
             )
         except LifecycleError as error:
-            await _drop(run.refs, quote_id, held)
             raise refused(error) from None
     except QuoteError as error:
         await _drop(run.refs, quote_id, held)

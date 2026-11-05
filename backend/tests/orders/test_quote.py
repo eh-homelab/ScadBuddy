@@ -579,6 +579,27 @@ async def test_the_runs_new_filaments_are_a_revision_the_quote_names(
     assert quote.revision_id == revisions[1].id
 
 
+async def test_a_revision_made_during_the_run_refuses_its_quote(shop: Shop, tmp_path: Path) -> None:
+    """Review Focus 5: the slice is of a design a person has since replaced."""
+    run = run_of(shop, tmp_path, {1: sliced_plate(1, 3600, [12.5, 3.0])})
+    assert isinstance(run.slicer, FakeSlicer)
+    fetch = run.slicer.fetch
+
+    async def revising(sliced: SlicedPlate) -> bytes:
+        shop.lifecycle.add_revision(shop.order.id, shop.item.id, BY, note="new photos")
+        return await fetch(sliced)
+
+    run.slicer.fetch = revising  # type: ignore[method-assign]
+    with pytest.raises(ApiError) as refused:
+        await quote_run(
+            run, shop.order.id, shop.item.id, shop.request(s0=shop.pla, s1=shop.petg), BY
+        )
+    assert refused.value.status == 409
+    assert refused.value.type.endswith("/revision_not_newest")
+    assert shop.rows.quotes(shop.item.id) == []
+    assert shop.holders() == set()
+
+
 async def test_a_recorded_quote_keeps_its_rates(shop: Shop, tmp_path: Path) -> None:
     """Review Focus 2: the book changing afterwards never moves a recorded quote."""
     book = Book()
