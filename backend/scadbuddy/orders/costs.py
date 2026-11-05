@@ -262,6 +262,8 @@ class _Item:
         self.quotes = store.quotes(item.id)
         self.accepted = next((q for q in self.quotes if q.accepted), None)
         self.store = store
+        #: The item's slots' price-book prices per kilogram, read once.
+        self._prices: dict[int, Decimal] | None = None
 
     def today_minor(self, major: str) -> Decimal | None:
         """A setting in major units as minor units; None outside the shop's currency."""
@@ -279,13 +281,13 @@ class _Item:
         """The price book's minor units a gram for the item's slots' filaments."""
         if not self.today:
             return None
-        prices: dict[int, Decimal] = {}
-        for slot in self.item.colours:
-            if slot.filament_id is None:
-                continue
-            record = self.store.filament(slot.filament_id)
-            if record is not None:
-                prices[slot.slot] = Decimal(record.cost_per_kg)
+        if self._prices is None:
+            self._prices = {}
+            for slot in self.item.colours:
+                record = None if slot.filament_id is None else self.store.filament(slot.filament_id)
+                if record is not None:
+                    self._prices[slot.slot] = Decimal(record.cost_per_kg)
+        prices = self._prices
         if not prices:
             return None
         weights = {s: (unit.slot_grams.get(s, Decimal(0)) if unit else Decimal(0)) for s in prices}
