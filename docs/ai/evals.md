@@ -108,7 +108,7 @@ neither spends more budget nor reaches the next run's backend. It is part
 of `pnpm test`, and skips without a Temporal CLI or `SCADBUDDY_TEST_DATABASE_URL`. The
 `agent` job in `ci.yml` has both, so it runs on every PR. A local `pnpm test` without
 them runs no scenario at all (until Step 6.6, `test/evals.test.ts` replayed them on the
-classic harness without either); see CLAUDE.md for the Postgres and Temporal to start.
+classic harness without either); see agent/CLAUDE.md for the Postgres and Temporal to start.
 
 It also runs **negative controls**. These replay a misbehaving model and assert that the
 checks catch it:

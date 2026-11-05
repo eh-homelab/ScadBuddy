@@ -26,7 +26,7 @@ import { defineTool, json, type Tool, type ToolContext, ToolError } from './regi
 // also the harness's (`mcp__scadbuddy__<name>`), and the Messages API allows
 // only `^[a-zA-Z0-9_-]{1,64}$` in a tool name
 // (https://docs.claude.com/en/docs/agents-and-tools/tool-use/implement-tool-use,
-// "name"); Claude Code rewrites any other character to `_` (CLAUDE.md,
+// "name"); Claude Code rewrites any other character to `_` (agent/CLAUDE.md,
 // plugins). So the dot is an underscore: `sessions_list`, and so on.
 //
 // TIERS (spec §8.1). Reads (`sessions_list`, `sessions_get`, `sessions_resources`,

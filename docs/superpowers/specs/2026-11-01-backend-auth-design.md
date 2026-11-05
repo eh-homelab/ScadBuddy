@@ -193,7 +193,7 @@ IdP until it expires (§13 D5).
 - **Lifetime**: an idle timeout, slid at most once a minute so a busy page does not
   write on every request, and an absolute one (§13 D5). Expired and revoked rows go to a
   `housekeeping` sweep on the prune Schedule (a new entry in `SWEEPS`, never a loop in
-  the API, per CLAUDE.md).
+  the API, per backend/CLAUDE.md).
 - **Revocation** writes `revoked_at` and publishes `auth.session_revoked` on the event bus,
   which every replica's sockets hear (§5.4). Settings gets a "Signed-in sessions" list
   with revoke, and "Sign out everywhere".
