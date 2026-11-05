@@ -1448,6 +1448,9 @@ function withVersion(inputs: Record<string, unknown>): Record<string, unknown> {
   return { ...inputs, v: inputs['v'] ?? 0 }
 }
 
+/** The most `GET /models` answers in one read (`api/models.py` `MAX_PAGE_LIMIT`). */
+const MAX_PAGE_LIMIT = 500
+
 /** `GET /models`'s search and filters, as the catalogue's own query (#2290). */
 function catalogueFilters(params: URLSearchParams): CatalogueQuery {
   const origin = params.get('origin')
@@ -1486,6 +1489,9 @@ export const handlers = [
       )
     }
     const limit = params.get('limit')
+    if (limit !== null && Number(limit) > MAX_PAGE_LIMIT) {
+      return HttpResponse.json({ detail: `limit may be at most ${MAX_PAGE_LIMIT}` }, { status: 422 })
+    }
     const window = selected.slice(start, limit === null ? undefined : start + Number(limit))
     return HttpResponse.json(window, { headers: { 'X-Total-Count': String(selected.length) } })
   }),

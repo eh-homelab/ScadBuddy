@@ -1521,3 +1521,11 @@ describe('mock GET /models/{slug}/outputs pages as the backend does (#2290)', ()
     expect((caught as ApiError).status).toBe(409)
   })
 })
+
+describe('mock GET /models refuses a page past the backend cap (#5289 review)', () => {
+  it('answers 422 for limit over 500', async () => {
+    const filters = { q: '', tags: [] as string[], origin: 'all' as const, sort: 'name' as const }
+    const refused = await api.listModelsPage(filters, { limit: 501 }).catch((cause: unknown) => cause)
+    expect((refused as ApiError).status).toBe(422)
+  })
+})

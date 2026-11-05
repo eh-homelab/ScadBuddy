@@ -5,6 +5,7 @@ import { BUILTIN_SLUG, GALLERY_SLUG, media } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import {
   ApiError,
+  MODELS_PAGE_LIMIT,
   BAMBUDDY_UNAVAILABLE,
   COMMAND_RESEND,
   MEDIA_THUMBNAIL_VERSION,
@@ -1943,5 +1944,44 @@ describe('queuePrintBatch (#2951)', () => {
     } finally {
       fetched.mockRestore()
     }
+  })
+})
+
+describe('listModelsWindow reads past the backend page cap (#5289 review)', () => {
+  const filters = { q: '', tags: [], origin: 'all' as const, sort: 'name' as const }
+  const all = Array.from({ length: 1200 }, (_, n) => ({ slug: `m${String(n).padStart(4, '0')}`, name: `M ${n}` }))
+
+  it('reads a window larger than MAX_PAGE_LIMIT in chunks, each after the last', async () => {
+    const asked: Array<[string | null, string | null]> = []
+    server.use(
+      http.get('/api/v1/models', ({ request }) => {
+        const query = new URL(request.url).searchParams
+        const limit = Number(query.get('limit'))
+        asked.push([query.get('limit'), query.get('after')])
+        if (limit > MODELS_PAGE_LIMIT) return HttpResponse.json({ detail: 'limit too large' }, { status: 422 })
+        const after = query.get('after')
+        const start = after === null ? 0 : all.findIndex((m) => m.slug === after) + 1
+        return HttpResponse.json(all.slice(start, start + limit), { headers: { 'X-Total-Count': String(all.length) } })
+      }),
+    )
+    const window = await api.listModelsWindow(filters, 1100)
+    expect(window.items).toHaveLength(1100)
+    expect(window.items.at(-1)?.slug).toBe('m1099')
+    expect(window.total).toBe(1200)
+    expect(asked).toEqual([
+      ['500', null],
+      ['500', 'm0499'],
+      ['100', 'm0999'],
+    ])
+  })
+
+  it('stops at the end of the list', async () => {
+    server.use(
+      http.get('/api/v1/models', () =>
+        HttpResponse.json(all.slice(0, 3), { headers: { 'X-Total-Count': '3' } }),
+      ),
+    )
+    const window = await api.listModelsWindow(filters, 900)
+    expect(window.items).toHaveLength(3)
   })
 })

@@ -299,6 +299,23 @@ it('never lets a read in flight overwrite data set since', async () => {
   expect(result.current.data).toBe('set')
 })
 
+it('says whether a superseding setData dropped a read in flight (#5288 review)', async () => {
+  const { load, resolvers } = deferred<string>()
+  const { result } = renderHook(() => useAsync(load, [], ['m']))
+  await act(async () => resolvers[0]?.('first'))
+  let dropped: boolean | undefined
+  act(() => {
+    dropped = result.current.setData('set', { supersede: true })
+  })
+  expect(dropped).toBe(false)
+  act(() => result.current.refresh())
+  await waitFor(() => expect(resolvers).toHaveLength(2))
+  act(() => {
+    dropped = result.current.setData('again', { supersede: true })
+  })
+  expect(dropped).toBe(true)
+})
+
 it('lets a read in flight replace data set without supersede', async () => {
   const { load, resolvers } = deferred<string>()
   const { result } = renderHook(() => useAsync(load, [], ['m']))

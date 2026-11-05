@@ -12,6 +12,7 @@ import {
   parseQuery,
   tagCounts,
   toParams,
+  unmatchable,
 } from './catalogueQuery'
 
 function query(patch: Partial<CatalogueQuery>): CatalogueQuery {
@@ -52,12 +53,12 @@ describe('parseQuery / toParams', () => {
     expect(parseQuery(new URLSearchParams(`?${search}`))).toEqual(full)
   })
 
-  it('keeps a hand-edited URL within what GET /models takes, so it never answers 422 (#5286 review)', () => {
+  it('keeps every tag of a hand-edited URL, and cuts only the search to what GET /models takes (#5288 review)', () => {
     const many = Array.from({ length: MAX_TAGS + 5 }, (_, n) => `tag=t${n}`).join('&')
     const long = 'x'.repeat(MAX_TAG_CHARS + 1)
     const parsed = parseQuery(new URLSearchParams(`${many}&tag=${long}&q=${'y'.repeat(MAX_SEARCH_CHARS + 9)}`))
-    expect(parsed.tags).toHaveLength(MAX_TAGS)
-    expect(parsed.tags).not.toContain(long)
+    expect(parsed.tags).toHaveLength(MAX_TAGS + 6)
+    expect(parsed.tags).toContain(long)
     expect(parsed.q).toHaveLength(MAX_SEARCH_CHARS)
   })
 
@@ -185,6 +186,19 @@ describe('tagCounts', () => {
     expect(tagCounts(models.slice(0, 1), ['KEYCHAIN'])).not.toContainEqual(
       expect.objectContaining({ tag: 'KEYCHAIN' }),
     )
+  })
+})
+
+describe('unmatchable (#5288 review)', () => {
+  it('is true for tags no model can carry all of: too many, or one too long', () => {
+    expect(unmatchable(Array.from({ length: MAX_TAGS + 1 }, (_, n) => `t${n}`))).toBe(true)
+    expect(unmatchable(['x'.repeat(MAX_TAG_CHARS + 1)])).toBe(true)
+  })
+
+  it('counts tags that fold alike once, and a tag in code points as the backend does', () => {
+    expect(unmatchable([...Array.from({ length: MAX_TAGS }, (_, n) => `t${n}`), 'T0'])).toBe(false)
+    // 60 code points, 120 UTF-16 units: the backend takes it.
+    expect(unmatchable(['😀'.repeat(60)])).toBe(false)
   })
 })
 
