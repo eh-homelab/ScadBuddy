@@ -414,7 +414,7 @@ describe('PresetPicker', () => {
     await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'x')
     expect(screen.getByTestId('preset-modified')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Update preset / })).not.toBeInTheDocument()
-    expect(await presetMenu(user, 'Tiny')).toEqual(['Duplicate preset Tiny'])
+    expect(await presetMenu(user, 'Tiny')).toEqual(['Copy link to preset Tiny', 'Duplicate preset Tiny'])
   })
 
   it('deletes a saved preset after confirming, leaving the values on screen', async () => {

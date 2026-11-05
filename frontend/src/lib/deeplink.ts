@@ -19,6 +19,14 @@ export function modelPath(slug: string, page?: 'source' | 'versions' | 'history'
 }
 
 /**
+ * #1022 — the customizer opened with a preset applied, mirrored from
+ * `scadbuddy/library/deeplink.py` `preset_path`. Preset ids are stable (#326).
+ */
+export function presetPath(slug: string, presetId: string): string {
+  return `${modelPath(slug)}?preset=${encodeURIComponent(presetId)}`
+}
+
+/**
  * #1290 — the editor for one of a model's `.scad` files: `model.scad` is the model's
  * own Edit source page, any other is that page with the file's name after it.
  */

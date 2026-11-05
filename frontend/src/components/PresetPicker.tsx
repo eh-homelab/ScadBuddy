@@ -20,6 +20,8 @@ import {
   presetInputs,
   presetTagsProblem,
 } from '../lib/presets'
+import { copyText } from '../lib/clipboard'
+import { presetPath } from '../lib/deeplink'
 import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { useFillable } from '../agent/useFillable'
@@ -205,6 +207,8 @@ export function PresetPicker({
   const [pending, setPending] = useState<ParamPreset | null>(null)
   /** #358 — an Update would drop the skipped values for good, so it asks first. */
   const [confirmingUpdate, setConfirmingUpdate] = useState(false)
+  /** #1022 — the link Copy link copied, or offered to copy by hand where it could not. */
+  const [copied, setCopied] = useState<{ id: string; url: string; ok: boolean } | null>(null)
 
   /**
    * #357 — the presets changed elsewhere (another tab, the assistant): read them again.
@@ -342,6 +346,16 @@ export function PresetPicker({
     setSkipped(applied.skipped.map((name) => ({ name, value: storedParams[name] as ParamValue })))
     setSettling(true)
     onApply(applied.values, applied.extra)
+  }
+
+  /**
+   * #1022 — copies the link that opens this model with the preset applied: under the
+   * configured public URL when the server has one, else this page's own origin.
+   */
+  async function copyLink() {
+    if (!selected) return
+    const url = selected.url ?? `${window.location.origin}${presetPath(slug, selected.id)}`
+    setCopied({ id: selected.id, url, ok: await copyText(url) })
   }
 
   function openSaveAs() {
@@ -651,6 +665,9 @@ export function PresetPicker({
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-auto min-w-44">
+              <DropdownMenuItem onSelect={() => void copyLink()} aria-label={`Copy link to preset ${selected.name}`}>
+                Copy link
+              </DropdownMenuItem>
               <DropdownMenuItem onSelect={() => setTimeout(openDuplicate, 0)} aria-label={`Duplicate preset ${selected.name}`}>
                 Duplicate
               </DropdownMenuItem>
@@ -675,6 +692,18 @@ export function PresetPicker({
           </DropdownMenu>
         )}
       </div>
+
+      {copied && copied.id === selected?.id && (
+        <p role="status" data-testid="preset-link-copy" className="min-w-0 text-xs text-muted-foreground">
+          {copied.ok ? (
+            'Link copied.'
+          ) : (
+            <>
+              Copy this link: <code className="break-all select-all">{copied.url}</code>
+            </>
+          )}
+        </p>
+      )}
 
       {pinned && (
         <p data-testid="preset-pinned" className="text-xs text-muted-foreground">
