@@ -333,9 +333,11 @@ differs.
 | agent-durable | none: `automountServiceAccountToken: false`, no projected token | — | — |
 | slicer | none, unchanged (transfer tokens) | — | — |
 
-The CRUD service keeps a fixed map from `system:serviceaccount:bambuddy:<name>` to the
-caller name. An unknown ServiceAccount is refused. `default` is never in the map (§2.4: it
-is shared with Bambuddy's pods).
+The CRUD service keeps a fixed map from `system:serviceaccount:<namespace>:<name>` to the
+caller name. The namespace is configuration (`SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE`), not a
+constant: ScadBuddy's own namespace once eh-homelab/clusters#3200 lands (§11 D7). An unknown
+ServiceAccount, or any ServiceAccount of another namespace, is refused. `default` is never in
+the map in any namespace: every pod that names no ServiceAccount runs as it (§2.4).
 
 The sidecar shares the API pod's ServiceAccount. The API container is the CRUD service and
 already holds the database, so the API container being able to act as `agent` is no
@@ -390,8 +392,8 @@ loop cannot fill the table: 6 a minute per pod and 30 a minute per caller, then 
   `resolve` and the scopes do not change. Lifetime **15 minutes** (§11 D4). The caller exchanges again at
   half-life (7.5 minutes) and at once on a `401` from any route; on a failed exchange it keeps
   the current credential until it expires and retries every 5 s doubling to 60 s.
-- Rows: about one per pod per 7.5 minutes; 11 caller pods today (§2.4 replicas: render 2,
-  print 1, projects 1, agent worker 3, API 3 sidecars, agent-durable 0) make about 2,100 rows
+- Rows: about one per pod per 7.5 minutes; 10 caller pods today (§2.4 replicas: render 2,
+  print 1, projects 1, agent worker 3, API 3 sidecars, agent-durable 0) make about 1,900 rows
   a day. `delete_expired` already forgets rows expired more than `older_than` ago
   (`service_credentials.py:193-204`); its default becomes a day for `proof` ≠ `legacy`.
 
@@ -427,8 +429,9 @@ test already fails for an unclassified route (`routes.py:1-7`). Each new CRUD ro
   Settings gets "revoke every credential of this pod" (by `pod_uid`). The pod then holds
   nothing that works.
 - A caller: Settings "suspend caller" refuses its exchanges and revokes its live rows,
-  until resumed. This is new and stored in the `service_credentials` feature, not in the
-  environment.
+  until resumed. This is new: a `service_caller_suspensions` table (`caller` primary key,
+  `suspended_at`, `suspended_by`), written by the CRUD service only and read by the exchange
+  and by `resolve`, never the environment.
 
 ## 7. Outside Kubernetes
 
@@ -464,7 +467,7 @@ directory is set, so a cluster that does not set it has no static secret to stea
   fake backend route.
 - Real TokenReview is never called in CI. The clusters PR is checked on the cluster by a
   one-off `kubectl create token scadbuddy-print --audience scadbuddy` and a call to the
-  route (§8 step 3).
+  route (§8 step 4).
 
 ## 8. Migration, with no downtime
 
@@ -479,15 +482,18 @@ Every step merges with the mode where it is today, and old and new builds run si
    read the view as today**. An exchange that answers `404` (an old API pod during the
    roll) falls back to the view while the caller still has a database URL. Both kinds of
    token resolve through the same `resolve`, so any API pod accepts either.
-2. **Clusters PR.** A ServiceAccount per Deployment (§6.1); `automountServiceAccountToken:
+2. **Namespace move.** ScadBuddy moves to its own namespace (eh-homelab/clusters#3200,
+   §11 D7) and the CRUD service's `SCADBUDDY_SERVICE_ACCOUNT_NAMESPACE` names it. Nothing
+   exchanges yet, so the move changes no credential.
+3. **Clusters PR.** A ServiceAccount per Deployment (§6.1); `automountServiceAccountToken:
    false` on every ScadBuddy pod; the projected volume and `SCADBUDDY_SERVICE_TOKEN_FILE`
    on each caller container; the API pod's ServiceAccount bound to `system:auth-delegator`
    and its own apiserver token mounted in the API container only. Merge after step 1's
-   image is deployed.
-3. **Check.** Settings lists each caller's credentials with `proof = k8s` and a `pod_name`;
+   image is deployed and step 2 is done.
+4. **Check.** Settings lists each caller's credentials with `proof = k8s` and a `pod_name`;
    `scadbuddy_auth_would_refuse_total` stays at zero (auth spec §9.1). Add a counter
    `scadbuddy_service_token_exchanges_total{caller, proof, result}` in `core/metrics.py`.
-4. **Stop the database path.** When every caller exchanges (no `legacy` row used for a
+5. **Stop the database path.** When every caller exchanges (no `legacy` row used for a
    week; `last_used_at` shows it), the API stops minting sealed 30-day rows; a new
    migration drops the views, `grant_caller_views` and the sealed columns' NOT NULL; then a
    later one drops the columns. `TokenReader`'s database path and
@@ -536,15 +542,17 @@ Each one takes the more secure option. The cost is stated with it.
    Cost: the API depends on the Kubernetes API for each exchange.
 2. **TokenReview, not offline JWKS.** The API's ServiceAccount gets `system:auth-delegator`.
    A deleted pod's token is refused at once, and the pod name and uid are bound to each
-   credential. Cost: one cluster-wide `create` grant on TokenReview and SubjectAccessReview,
-   held by the CRUD service only.
+   credential. Cost: one cluster-wide grant, held by the CRUD service only. That the ClusterRole grants
+   `create` on TokenReview and SubjectAccessReview and nothing more is **not verified** here
+   (§2.5, §12); check `kubectl get clusterrole system:auth-delegator -o yaml` before the
+   binding.
 3. **`enforce` does not wait for #779.** It narrows every caller now. Until #779 lands, no
    plugin package can switch `Bash` or `PowerShell` on, `allow_refused` or not, so no
    model-driven shell runs in a pod that holds the agent's credential (#5296). Cost: a
    package that needs a shell waits for the sandbox pod.
 4. **Lifetimes.** The Kubernetes token lives 600 s, the minimum. The ScadBuddy credential
    lives 15 minutes and is renewed at half-life, so a stolen one is good for at most
-   15 minutes. Cost: about 2,100 rows a day (§6.3), pruned after a day.
+   15 minutes. Cost: about 1,900 rows a day (§6.3), pruned after a day.
 5. **Rate limit.** 6 exchanges a minute per pod and 30 a minute per caller, then `429` with
    `Retry-After`. A renewing pod needs about one exchange every 7.5 minutes.
 6. **The KEK goes to the CRUD service only.** A key-release route hands a subject's
