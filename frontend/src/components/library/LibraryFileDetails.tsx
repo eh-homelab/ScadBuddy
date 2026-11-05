@@ -2,7 +2,7 @@ import { lazy, Suspense, useState, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { BoxIcon, DownloadIcon, FolderInputIcon, PencilIcon, PrinterIcon, Trash2Icon } from 'lucide-react'
 import { api, ApiError } from '../../api/client'
-import type { LibraryEntry, LibraryFolderView } from '../../api/types'
+import type { LibraryEntry, LibraryFileEntry, LibraryFolderView } from '../../api/types'
 import { editPath, modelPath } from '../../lib/deeplink'
 import { formatBytes, formatDuration, formatValue, shortId } from '../../lib/format'
 import { libraryPath, libraryPathOf } from '../../lib/libraryPath'
@@ -51,9 +51,8 @@ interface Props {
   fileId: number
   /** The file as the page lists it; null when it is not listed (yet). */
   file: LibraryEntry | null
-  /** Whether the page has read what it lists: null `file` then means "not listed". */
+  /** Whether the page has read what it lists: a null `file` is then read by id. */
   listed: boolean
-  advanced: boolean
   folders: LibraryFolderView[]
   /** A search result's folder, by name, which the tree may not hold. */
   folderPath?: string[] | null
@@ -79,7 +78,6 @@ export function LibraryFileDetails({
   fileId,
   file: listedFile,
   listed,
-  advanced,
   folders,
   folderPath,
   actionsDisabled,
@@ -90,11 +88,24 @@ export function LibraryFileDetails({
   onDelete,
   dialogs,
 }: Props) {
-  // While the page reads its listing again (after a rename, a move), the file last listed
-  // stays on screen.
-  const [last, setLast] = useState(listedFile)
-  if (listedFile && listedFile !== last) setLast(listedFile)
-  const file = listedFile ?? (listed ? null : last)
+  // #5321 — a file no listing on screen holds (one only Advanced lists, or one moved
+  // away) is read alone, by id.
+  const unlisted = listedFile === null && listed
+  const read = useAsync(
+    () => (unlisted ? api.getLibraryFile(fileId) : Promise.resolve(null)),
+    [fileId, unlisted],
+  )
+  const byId = unlisted ? (read.data ?? null) : null
+  // While the page reads its listing again (after a rename, a move, Advanced), the file
+  // last shown, listed or read by id, stays on screen.
+  const [last, setLast] = useState<LibraryEntry | LibraryFileEntry | null>(listedFile)
+  const current = listedFile ?? byId
+  if (current && current !== last) setLast(current)
+  const file = current ?? (unlisted && !read.loading ? null : last)
+  const readError = unlisted && !read.loading ? problem(read.error, `Could not read file #${fileId}.`) : null
+  // Only the read by id names its folder's path itself, as it is now. A copy the page keeps
+  // after a move may carry the path it had (a search hit's), so its folder id says where.
+  const where = folderPath ?? byId?.folder_path ?? null
   return (
     <RecordDrawer
       onClose={onClose}
@@ -128,10 +139,10 @@ export function LibraryFileDetails({
       }
     >
       {file ? (
-        <Details file={file} folders={folders} folderPath={folderPath} />
-      ) : listed ? (
-        <p className="text-sm text-muted-foreground">
-          File #{fileId} is not listed here{advanced ? '.' : '. It may be listed under Advanced.'}
+        <Details file={file} folders={folders} folderPath={where} />
+      ) : readError ? (
+        <p role="alert" className="text-sm text-muted-foreground">
+          {readError}
         </p>
       ) : (
         <div role="status" aria-label="Reading the file" className="space-y-2">

@@ -368,6 +368,14 @@ describe('the library routes', () => {
     await tool('search_library').execute({ query: 'dino', fresh: true }, ctx())
     expect(query).toBe('?q=dino&fresh=true')
   })
+
+  it('get_library_file reads one file by id, any type, with its folder path (#5321)', async () => {
+    const one = { id: FILE, filename: 'box.gcode.3mf', file_type: 'gcode.3mf', sliced: true, folder_path: ['Supplies'] }
+    server.use(http.get(LIB, () => HttpResponse.json(one)))
+    expect(tool('get_library_file').risk).toBe('read')
+    expect(tool('get_library_file').routes).toEqual(['GET /api/v1/print/library/{file_id}'])
+    expect(firstText(await tool('get_library_file').execute({ file_id: FILE }, ctx()))).toEqual(one)
+  })
 })
 
 describe('print_output on a library file', () => {

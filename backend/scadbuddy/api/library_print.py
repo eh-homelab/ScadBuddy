@@ -85,8 +85,10 @@ from scadbuddy.bambuddy.filaments import MAX_PLATES, FilamentOptions
 from scadbuddy.bambuddy.filaments3mf import LocalFilaments
 from scadbuddy.bambuddy.library_listing import (
     LibraryEntry,
+    LibraryFileEntry,
     LibraryListing,
     LibrarySearch,
+    file_entry,
     folder_views,
     list_library,
     search_library,
@@ -401,6 +403,45 @@ async def get_library_search(
     for entry in found.files:
         entry.output_id = made.get(entry.id)
     return found
+
+
+# After `/names` and `/search`: a path parameter declared first would take those words.
+@router.get(
+    "/{file_id}",
+    response_model=LibraryFileEntry,
+    summary="One library file, whatever its type, with its folder's path",
+)
+async def get_library_file_entry(
+    file_id: FileIdPath,
+    store: SettingsStoreDep,
+    uploads: UploadsDep,
+    outputs: OutputsDep,
+    library: PrintLibraryDep,
+) -> LibraryFileEntry:
+    """The file as the listing gives it, with ``all`` (a sliced file or an STL too), plus
+    ``folder_path``, the names of its folder from the top (#5321): what the Library page's
+    details read for a file no listing on screen holds. Read from the file's folder, as a
+    ``file_id`` link to the listing is; a file Bambuddy (or, on ``library_backend=native``,
+    ScadBuddy's own library) does not have is a 404."""
+    native = await library.serving_native()
+    if native is not None:
+        folder_id = (await native.library_file(file_id)).folder_id
+        listing = await list_library(native, folder_id=folder_id, show_all=True)
+        entry = file_entry(listing, file_id)
+        if entry is not None:
+            await _name_native_outputs(native, outputs, [entry])
+    else:
+        async with client_for(store.load()) as client:
+            folder_id = (await client.library_file(file_id)).folder_id
+            listing = await list_library(client, folder_id=folder_id, show_all=True)
+        entry = file_entry(listing, file_id)
+        if entry is not None:
+            made = await live_outputs_for_files(uploads, outputs, [entry.id])
+            entry.output_id = made.get(entry.id)
+    if entry is None:
+        # Moved or deleted between the two reads.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"library file {file_id} is not listed")
+    return entry
 
 
 @router.post(

@@ -14,6 +14,14 @@ type V1PrintLibraryWithFile_ItemRequestBuilder struct {
 	i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.BaseRequestBuilder
 }
 
+// V1PrintLibraryWithFile_ItemRequestBuilderGetRequestConfiguration configuration for the request such as headers, query parameters, and middleware options.
+type V1PrintLibraryWithFile_ItemRequestBuilderGetRequestConfiguration struct {
+	// Request headers
+	Headers *i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestHeaders
+	// Request options
+	Options []i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestOption
+}
+
 // V1PrintLibraryWithFile_ItemRequestBuilderPatchRequestConfiguration configuration for the request such as headers, query parameters, and middleware options.
 type V1PrintLibraryWithFile_ItemRequestBuilderPatchRequestConfiguration struct {
 	// Request headers
@@ -59,6 +67,27 @@ func (m *V1PrintLibraryWithFile_ItemRequestBuilder) Filaments() *V1PrintLibraryI
 // returns a *V1PrintLibraryItemFileRequestBuilder when successful
 func (m *V1PrintLibraryWithFile_ItemRequestBuilder) File() *V1PrintLibraryItemFileRequestBuilder {
 	return NewV1PrintLibraryItemFileRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
+}
+
+// Get the file as the listing gives it, with “all“ (a sliced file or an STL too), plus “folder_path“, the names of its folder from the top (#5321): what the Library page's details read for a file no listing on screen holds. Read from the file's folder, as a “file_id“ link to the listing is; a file Bambuddy (or, on “library_backend=native“, ScadBuddy's own library) does not have is a 404.
+// returns a LibraryFileEntryable when successful
+// returns a HTTPValidationError error when the service returns a 422 status code
+func (m *V1PrintLibraryWithFile_ItemRequestBuilder) Get(ctx context.Context, requestConfiguration *V1PrintLibraryWithFile_ItemRequestBuilderGetRequestConfiguration) (i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryFileEntryable, error) {
+	requestInfo, err := m.ToGetRequestInformation(ctx, requestConfiguration)
+	if err != nil {
+		return nil, err
+	}
+	errorMapping := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.ErrorMappings{
+		"422": i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.CreateHTTPValidationErrorFromDiscriminatorValue,
+	}
+	res, err := m.BaseRequestBuilder.RequestAdapter.Send(ctx, requestInfo, i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.CreateLibraryFileEntryFromDiscriminatorValue, errorMapping)
+	if err != nil {
+		return nil, err
+	}
+	if res == nil {
+		return nil, nil
+	}
+	return res.(i8d9add18fd21ba71f257fafce3c8847e2e76951093179452374b66086efe5942.LibraryFileEntryable), nil
 }
 
 // Objects the objects property
@@ -142,6 +171,18 @@ func (m *V1PrintLibraryWithFile_ItemRequestBuilder) Run() *V1PrintLibraryItemRun
 // returns a *V1PrintLibraryItemThumbnailRequestBuilder when successful
 func (m *V1PrintLibraryWithFile_ItemRequestBuilder) Thumbnail() *V1PrintLibraryItemThumbnailRequestBuilder {
 	return NewV1PrintLibraryItemThumbnailRequestBuilderInternal(m.BaseRequestBuilder.PathParameters, m.BaseRequestBuilder.RequestAdapter)
+}
+
+// ToGetRequestInformation the file as the listing gives it, with “all“ (a sliced file or an STL too), plus “folder_path“, the names of its folder from the top (#5321): what the Library page's details read for a file no listing on screen holds. Read from the file's folder, as a “file_id“ link to the listing is; a file Bambuddy (or, on “library_backend=native“, ScadBuddy's own library) does not have is a 404.
+// returns a *RequestInformation when successful
+func (m *V1PrintLibraryWithFile_ItemRequestBuilder) ToGetRequestInformation(ctx context.Context, requestConfiguration *V1PrintLibraryWithFile_ItemRequestBuilderGetRequestConfiguration) (*i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.RequestInformation, error) {
+	requestInfo := i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.NewRequestInformationWithMethodAndUrlTemplateAndPathParameters(i2ae4187f7daee263371cb1c977df639813ab50ffa529013b7437480d1ec0158f.GET, m.BaseRequestBuilder.UrlTemplate, m.BaseRequestBuilder.PathParameters)
+	if requestConfiguration != nil {
+		requestInfo.Headers.AddAll(requestConfiguration.Headers)
+		requestInfo.AddRequestOptions(requestConfiguration.Options)
+	}
+	requestInfo.Headers.TryAdd("Accept", "application/json")
+	return requestInfo, nil
 }
 
 // ToPatchRequestInformation a partial update through Bambuddy: “filename“, “folder_id“ (“0“ is the top level), or both (#2686).

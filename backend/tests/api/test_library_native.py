@@ -284,6 +284,33 @@ def test_an_entry_names_its_live_output(
     )
     hits = native_client.get("/api/v1/print/library/search", params={"q": "bracket"}).json()
     assert hits["files"][0]["output_id"] == uploaded_with_output.output_id
+    # #5321: and so does the read of the file alone.
+    one = native_client.get(f"/api/v1/print/library/{uploaded_with_output.id}").json()
+    assert one["output_id"] == uploaded_with_output.output_id
+    assert one["folder_path"] == []
+
+
+def test_one_native_file_is_read_with_where_it_is(
+    native_client: TestClient, in_folder: NativeFile
+) -> None:
+    """#5321: one file by id, as the listing gives it, with its folder's path."""
+    body = native_client.get(f"/api/v1/print/library/{in_folder.id}").json()
+    assert body | {"created_at": None} == {
+        "id": in_folder.id,
+        "filename": "bracket.3mf",
+        "file_type": "3mf",
+        "folder_id": in_folder.folder_id,
+        "has_thumbnail": True,
+        "print_count": 0,
+        "printable": True,
+        "sliced": False,
+        "file_size": in_folder.size,
+        "created_at": None,
+        "output_id": None,
+        "is_external": False,
+        "folder_path": ["Dinos"],
+    }
+    assert native_client.get("/api/v1/print/library/42").status_code == 404
 
 
 # writes (Task 5)
