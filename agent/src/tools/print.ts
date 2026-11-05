@@ -7,7 +7,7 @@ import type { BackendClient } from '../api/backend.js'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
 import { type ApprovalNeeds, defineTool, idempotencyKey, image, json, type Tool, type ToolContext, ToolError, toolErrorText } from './registry.js'
-import { page, PAGED, pageInput } from './pagination.js'
+import { backendPage, page, PAGED, pageInput, totalCount } from './pagination.js'
 import { uploadInit, uploadName, withSent, workspaceFile, workspacePathInput, workspaceShaInput } from './workspaceUploads.js'
 import { errorName } from '../telemetry/scrub.js'
 
@@ -775,12 +775,25 @@ export const printTools: Tool[] = [
     source: 'Bambuddy data (folder and file names) that anyone with access to Bambuddy can write',
     bambuddyScope: ['Manage Library'],
     routes: ['GET /api/v1/print/library'],
+    // The backend pages the folder's files (#2290), so only this page's files are read
+    // for the outputs they came from (#5291 review); the tree comes with every page.
     handler: async (args, { backend }) => {
-      const { files, ...listing } = await ok(
-        backend.GET('/api/v1/print/library', { params: { query: { folder_id: args.folder_id, all: args.all } } }),
-        'list the library',
+      let listing = {}
+      const { items, ...rest } = await backendPage(
+        args,
+        (file: { id: number }) => String(file.id),
+        'list_library',
+        async ({ limit, after }) => {
+          const pending = backend.GET('/api/v1/print/library', {
+            params: {
+              query: { folder_id: args.folder_id, all: args.all, limit, ...(after === undefined ? {} : { after: Number(after) }) },
+            },
+          })
+          const { files, ...rest } = await ok(pending, 'list the library')
+          listing = rest
+          return { items: files ?? [], total: totalCount((await pending).response) }
+        },
       )
-      const { items, ...rest } = page(files ?? [], args, (file) => String(file.id), 'list_library')
       return json({ ...listing, files: items, ...rest })
     },
   }),

@@ -101,6 +101,20 @@ function plural(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? '' : 's'}`
 }
 
+/** #2290 — how many of a folder's files are read at a time. */
+export const LIBRARY_PAGE_SIZE = 60
+/** The most `?shown=` opens with: the backend's page limit. */
+const MAX_SHOWN = 500
+
+/** How many files `?shown=` asks for: at least a page, at most `MAX_SHOWN`. */
+function shownFrom(params: URLSearchParams): number {
+  const asked = Math.floor(Number(params.get('shown')))
+  return Number.isFinite(asked) ? Math.min(MAX_SHOWN, Math.max(LIBRARY_PAGE_SIZE, asked)) : LIBRARY_PAGE_SIZE
+}
+
+/** A folder's listing as read so far, with how many files the folder lists. */
+type Listed = LibraryListing & { total: number }
+
 /**
  * #313 — Bambuddy's library by folder. Each unsliced 3MF has Print, which opens the same
  * spool-first dialog an output uses; the file is sliced as it stands in Bambuddy.
@@ -121,20 +135,6 @@ function plural(count: number, word: string): string {
  * delete. The library is browsed by folder or by project (`?by=project`,
  * `?project=<id>`), each view linking to the other.
  */
-/** #2290 — how many of a folder's files are read at a time. */
-export const LIBRARY_PAGE_SIZE = 60
-/** The most `?shown=` opens with: the backend's page limit. */
-const MAX_SHOWN = 500
-
-/** How many files `?shown=` asks for: at least a page, at most `MAX_SHOWN`. */
-function shownFrom(params: URLSearchParams): number {
-  const asked = Math.floor(Number(params.get('shown')))
-  return Number.isFinite(asked) ? Math.min(MAX_SHOWN, Math.max(LIBRARY_PAGE_SIZE, asked)) : LIBRARY_PAGE_SIZE
-}
-
-/** A folder's listing as read so far, with how many files the folder lists. */
-type Listed = LibraryListing & { total: number }
-
 export function LibraryPage() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -553,6 +553,9 @@ export function LibraryPage() {
       // A read again (a change made here, Advanced) answered meanwhile: its listing stands.
       if (listingNow.current !== from) return
       const grown: Listed = { ...next, files: [...(from.files ?? []), ...(next.files ?? [])] }
+      // No file after the last one shown, though the total can still count one added
+      // before it since (#5291 review): Load more goes until the folder is read again.
+      if ((next.files ?? []).length === 0) grown.total = grown.files?.length ?? 0
       listed.current.set(`folder:${from.folder_id ?? null}|${from.all ?? false}`, grown)
       setListing(grown)
       setSearch(
