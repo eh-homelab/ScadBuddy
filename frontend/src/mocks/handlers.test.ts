@@ -1541,6 +1541,12 @@ describe('a URL with more tags than MAX_TAGS that fold to MAX_TAGS (#5292 review
   // 51 tags as typed, 50 once folded: the backend counts the list as sent.
   const tags = [...Array.from({ length: MAX_TAGS }, (_, n) => `t${n}`), 'T0']
 
+  it('refuses an empty tag, as the route does (#5309 review)', async () => {
+    const query = new URLSearchParams([['tag', ''], ['sort', 'name']])
+    expect((await fetch(`/api/v1/models?${query}`)).status).toBe(422)
+    expect((await fetch(`/api/v1/model-facets?${query}`)).status).toBe(422)
+  })
+
   it('refuses a tag longer than the route takes, as the backend does (#5305 review)', async () => {
     const query = new URLSearchParams([['tag', 'x'.repeat(MAX_TAG_FILTER_CHARS + 1)], ['sort', 'name']])
     expect((await fetch(`/api/v1/models?${query}`)).status).toBe(422)
