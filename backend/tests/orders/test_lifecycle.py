@@ -193,6 +193,7 @@ def test_the_happy_path_to_closed(shop: Shop) -> None:
     assert shop.kinds(order) == [
         "order.created",
         "item.added",
+        "revision.added",
         "quote.recorded",
         "quote.accepted",
         "order.status",  # quoted

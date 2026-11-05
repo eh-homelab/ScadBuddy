@@ -1000,8 +1000,6 @@ class OrderStore:
         conn: Conn,
         item_id: str,
         *,
-        reference: Reference | UnsetType = UNSET,
-        colours: Sequence[ColourSlot] | UnsetType = UNSET,
         output_id: str | UnsetType | None = UNSET,
         quantity: int | UnsetType = UNSET,
         title: str | UnsetType = UNSET,
@@ -1011,8 +1009,8 @@ class OrderStore:
         requires_printing: bool | UnsetType = UNSET,
         approval: Approval | UnsetType = UNSET,
     ) -> OrderItem:
-        """A ``reference`` makes the item a ``model`` item, a custom one too: a source
-        attached to it (#4954) puts it on the normal flow."""
+        """The item's own fields; its design (reference and colours) is `set_design`'s
+        alone (spec 2026-11-02 §4.1)."""
         fields: dict[str, Any] = {
             "output_id": output_id,
             "quantity": quantity,
@@ -1022,19 +1020,7 @@ class OrderStore:
             "sku": sku,
             "requires_printing": requires_printing,
             "approval": approval,
-            "colours": _jsonb(list(colours) if isinstance(colours, Sequence) else colours),
         }
-        if isinstance(reference, Reference):
-            fields.update(
-                kind="model",
-                requires_printing=True,
-                slug=reference.slug,
-                commit=reference.commit,
-                inputs=Jsonb(reference.inputs),
-                libraries=Jsonb(_dump(reference.libraries)),
-                template_name=reference.template_name,
-                render_key=reference.render_key,
-            )
         row = _update(conn, "order_items", item_id, fields, _ITEM)
         if row is None:
             raise LookupError(f"no order item {item_id}")
@@ -1145,12 +1131,6 @@ class OrderStore:
         if row is None:
             raise LookupError(f"no revision {revision_id}")
         return _revision_of(row)
-
-    def set_item_filaments(
-        self, conn: Conn, item_id: str, colours: Sequence[ColourSlot]
-    ) -> OrderItem:
-        """The item's colour slots with their price-book filaments (§3.3, #4250)."""
-        return self.update_item(conn, item_id, colours=colours)
 
     def delete_draft_item(self, conn: Conn, item_id: str) -> bool:
         """Deletes the item while it is `draft` (Ruling 6, 10); False when it is not."""

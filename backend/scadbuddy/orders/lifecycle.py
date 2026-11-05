@@ -36,6 +36,7 @@ from scadbuddy.orders.models import (
     SHOWN_IMAGES,
     Actor,
     AddressSnapshot,
+    Approval,
     Attachment,
     AttachmentKind,
     AttachmentPatch,
@@ -52,6 +53,8 @@ from scadbuddy.orders.models import (
     Payment,
     Quote,
     QuoteLine,
+    Reference,
+    Revision,
     Shipment,
     ShipmentItem,
 )
@@ -785,6 +788,100 @@ class Lifecycle:
                 f"order {order.number} is {order.status}: {what} is pinned once accepted",
             )
 
+    def _revise(
+        self,
+        conn: Conn,
+        order: Order,
+        item: OrderItem,
+        by: Actor,
+        *,
+        reference: Reference,
+        colours: Sequence[ColourSlot],
+        note: str = "",
+        output_id: str | UnsetType | None = UNSET,
+    ) -> tuple[OrderItem, Revision]:
+        """The item's next design revision, and the item's design a copy of it (spec
+        2026-11-02 §4.1): the one caller of `OrderStore.set_design`. The newest revision,
+        when it is sent and unanswered, is `superseded`. An unset ``output_id`` keeps the
+        item's while the reference stays, and clears it when the reference moves: the
+        output no longer matches what the item says. Every quote goes stale (§4.3), so
+        a `quoted` or `approved` item is `draft` again. The caller checks the item may
+        change and rederives the order."""
+        newest = next(reversed(self.store.revisions(item.id, conn=conn)), None)
+        superseded = None
+        if newest is not None and newest.sent_at is not None and newest.answer is None:
+            self.store.stamp_revision(
+                conn, newest.id, answer="superseded", answered_at=datetime.now(UTC), answered_by=by
+            )
+            superseded = newest.id
+        revision = self.store.insert_revision(
+            conn, item.id, reference=reference, colours=colours, note=note, created_by=by
+        )
+        if isinstance(output_id, UnsetType):
+            output_id = item.output_id if item.reference == reference else None
+        item = self.store.set_design(conn, item.id, revision, output_id=output_id)
+        self.store.unaccept_quotes(conn, item.id)
+        if item.status in ("quoted", "approved"):
+            item = self.store.update_item(conn, item.id, status="draft")
+        self._event(
+            conn,
+            order,
+            by,
+            "revision.added",
+            item_id=item.id,
+            revision_id=revision.id,
+            number=revision.number,
+            superseded=superseded,
+        )
+        return item, revision
+
+    def add_revision(
+        self,
+        order_id: str,
+        item_id: str,
+        by: Actor,
+        resolved: ResolvedReference | None = None,
+        *,
+        output_id: str | UnsetType | None = UNSET,
+        filaments: Mapping[int, str | None] | None = None,
+        note: str = "",
+    ) -> Revision:
+        """A new design for the item while its order is open (§4.3). Without
+        ``resolved`` it repeats the current revision's reference and colours: a revision
+        for new photos or a new note. ``filaments`` repins its slots as `update_item`'s
+        does. A custom item has no design (`item_custom`); a request has none until its
+        first revision names one (`item_has_no_design`)."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            item = self._item_of(conn, order, item_id)
+            if item.kind == "custom":
+                raise LifecycleError("item_custom", f"item {item_id} is a custom item")
+            if item.status in SETTLED:
+                raise LifecycleError("item_not_open", f"item {item_id} is {item.status}")
+            self._open_for_items(order, "an item's design")
+            if resolved is not None:
+                reference, colours = resolved.reference, list(resolved.colours)
+            elif item.reference is not None:
+                reference, colours = item.reference, list(item.colours)
+            else:
+                raise LifecycleError("item_has_no_design", f"item {item_id} has no design yet")
+            if filaments is not None:
+                colours = self._with_filaments(conn, colours, filaments)
+            item, revision = self._revise(
+                conn,
+                order,
+                item,
+                by,
+                reference=reference,
+                colours=colours,
+                note=note,
+                output_id=output_id,
+            )
+            order = self._rederive(conn, order, by)
+        self._told(_Change(order, [(item, None)]))
+        return revision
+
     def add_item(
         self,
         order_id: str,
@@ -813,6 +910,15 @@ class Lifecycle:
                 sku=sku,
             )
             self._event(conn, order, by, "item.added", item_id=item.id)
+            item, _ = self._revise(
+                conn,
+                order,
+                item,
+                by,
+                reference=resolved.reference,
+                colours=resolved.colours,
+                output_id=output_id,
+            )
             order = self._rederive(conn, order, by)
         self._told(_Change(order, [(item, None)]))
         return item
@@ -909,12 +1015,15 @@ class Lifecycle:
         sku: str | UnsetType | None = UNSET,
         requires_printing: bool | None = None,
         accept: bool = True,
+        approval: Approval | None = None,
     ) -> OrderItem:
         """The reference (replaced whole), the quantity and the slots' filaments while
         `draft` or `quoted`, each dropping the accepted quote (Ruling 1; #4250 Ruling 6:
-        §5.2's "changing the colours makes the next quote a new row"); title and notes in
-        any open state. A reference replaced without an ``output_id`` clears the item's:
-        the output it pointed at no longer matches what the item says.
+        §5.2's "changing the colours makes the next quote a new row"); title, notes and
+        ``approval`` in any open state. A design change (the reference, a slot's
+        filament, or the colours' fill) is the item's next revision (spec 2026-11-02
+        §4.1, `_revise`); a reference replaced without an ``output_id`` clears the
+        item's: the output it pointed at no longer matches what the item says.
 
         ``filaments`` (``{slot: filament_id | None}``) repins only when it changes a
         slot: the same filaments sent again write nothing and drop nothing. A slot the
@@ -929,7 +1038,8 @@ class Lifecycle:
         quote's, or its newest's). With ``accept`` that quote is accepted and the item
         stays `approved` (refused on hold, as an accepted quote is); without (the
         agent's) the item is `quoted`. A ``reference`` given to it makes it a model item,
-        on the normal flow: its quote is dropped as any reference change drops one."""
+        on the normal flow: its quote is dropped as any reference change drops one. A
+        custom item takes no ``approval`` (422): it has no design to approve."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -945,6 +1055,10 @@ class Lifecycle:
                     raise LifecycleError(
                         name, f"{name}: only a custom item takes one", unprocessable=True
                     )
+            if approval is not None and custom:
+                raise LifecycleError(
+                    "approval", "approval: a custom item has no design", unprocessable=True
+                )
             price = None
             if custom:
                 quotes = self.store.quotes(item.id, conn=conn)
@@ -967,19 +1081,21 @@ class Lifecycle:
             refiled = any(
                 slot.slot in before and before[slot.slot] != slot.filament_id for slot in slots
             )
-            repins = reference is not None or quantity is not None or refiled or price is not None
+            # The colours' fill: an item with no slots given its first render's.
+            filled = not base and bool(slots)
+            design = reference is not None or refiled or filled
+            repins = design or quantity is not None or price is not None
             if repins:
                 self._open_for_items(order, "an item's reference, quantity and filaments")
             if price is not None and accept:
                 self._not_on_hold(order)
+            designed = reference.reference if reference is not None else item.reference
+            if design and designed is None:
+                raise LifecycleError(
+                    "colours", f"item {item_id} has no design to colour", unprocessable=True
+                )
             fields: dict[str, Any] = {}
-            if reference is not None:
-                fields.update(reference=reference.reference, colours=slots)
-                if isinstance(output_id, UnsetType):
-                    output_id = None
-            elif slots != item.colours:
-                fields["colours"] = slots
-            if not isinstance(output_id, UnsetType):
+            if not design and not isinstance(output_id, UnsetType):
                 fields["output_id"] = output_id
             if quantity is not None:
                 fields["quantity"] = quantity
@@ -991,13 +1107,21 @@ class Lifecycle:
                 fields["sku"] = sku
             if requires_printing is not None and requires_printing != item.requires_printing:
                 fields["requires_printing"] = requires_printing
-            if not fields and price is None:
+            if approval is not None and approval != item.approval:
+                fields["approval"] = approval
+            if not fields and price is None and not design:
                 # Nothing changes (the item's own filaments sent again): nothing written.
                 return item
+            if design:
+                assert designed is not None
+                item, _ = self._revise(
+                    conn, order, item, by, reference=designed, colours=slots, output_id=output_id
+                )
             if repins:
                 self.store.unaccept_quotes(conn, item.id)
                 fields["status"] = "draft"
-            item = self.store.update_item(conn, item.id, **fields)
+            if fields:
+                item = self.store.update_item(conn, item.id, **fields)
             if price is not None:
                 item = self._custom_price(conn, order, item, price, by, accept=accept)
             self._event(conn, order, by, "item.updated", item_id=item.id, repinned=repins)

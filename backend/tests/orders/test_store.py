@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import ast
+import inspect
+import re
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import psycopg
 import pytest
 
 from scadbuddy.library.libraries import ModelLibrary
+from scadbuddy.orders import lifecycle, store
 from scadbuddy.orders.models import (
     Actor,
     AddressInput,
@@ -602,3 +608,49 @@ def test_a_revision_attachment_names_its_revision_and_item(rows: OrderStore) -> 
         )
     assert attachment.revision_id == revision.id and attachment.item_id == item_id
     assert attachment.fulfilment_id is None
+
+
+def _functions(path: Path) -> Iterator[ast.FunctionDef]:
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.FunctionDef):
+            yield node
+
+
+def _sql_by_function(path: Path) -> Iterator[tuple[str, str]]:
+    """Each function's name with the string constants in its body joined."""
+    for fn in _functions(path):
+        parts = [
+            node.value
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        ]
+        yield fn.name, "".join(parts)
+
+
+def _callers(path: Path, attr: str) -> set[str]:
+    """The functions whose body calls ``<something>.attr(``."""
+    return {
+        fn.name
+        for fn in _functions(path)
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == attr
+            for node in ast.walk(fn)
+        )
+    }
+
+
+def test_only_the_revision_writer_sets_an_items_design() -> None:
+    # Spec §4.1: past insert_item's INSERT, set_design is the one UPDATE of the design
+    # columns, and Lifecycle._revise its one caller.
+    store_writers = {
+        fn
+        for fn, text in _sql_by_function(Path(store.__file__))
+        if re.search(
+            r"UPDATE order_items SET[^\"]*\b(slug|commit|inputs|render_key|colours)\b", text
+        )
+    }
+    assert store_writers == {"set_design"}
+    assert {"reference", "colours"}.isdisjoint(inspect.signature(OrderStore.update_item).parameters)
+    assert _callers(Path(lifecycle.__file__), "set_design") == {"_revise"}
