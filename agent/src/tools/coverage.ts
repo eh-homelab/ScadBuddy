@@ -7,6 +7,10 @@ import type { Operation } from './registry.js'
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
+    operation: "GET /api/v1/model-facets",
+    reason: "The Models page's filter counts beside a page of the list (#2290); list_models takes the same search and filters and says how many they select.",
+  },
+  {
     operation: "GET /api/v1/auth/delegated",
     reason: "A delegation link's sign-in (#4975, spec 2026-11-01 §7.4): opened by the browser the agent drives, the link browser_sign_in_link mints; never a call.",
   },

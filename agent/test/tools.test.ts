@@ -3271,6 +3271,20 @@ describe('list_models and list_outputs page in the backend (#843)', () => {
     expect(JSON.stringify(stale.content)).toMatch(/stale/)
   })
 
+  it('list_models passes its search and filters to the backend, and scopes the cursor to them (#2290)', async () => {
+    const queries: URLSearchParams[] = []
+    server.use(http.get(`${BACKEND}/api/v1/models`, windowed(() => models, (m) => m.slug, queries)))
+    const args = { limit: 25, q: 'box lid', tag: ['kitchen', 'box'], origin: 'mine', sort: 'name' }
+    const first = firstText(await runTool(tool('list_models'), args, ctx())) as { next_cursor: string }
+    expect(queries[0]?.get('q')).toBe('box lid')
+    expect(queries[0]?.getAll('tag')).toEqual(['kitchen', 'box'])
+    expect(queries[0]?.get('origin')).toBe('mine')
+    expect(queries[0]?.get('sort')).toBe('name')
+    const other = await runTool(tool('list_models'), { ...args, q: 'bolt', cursor: first.next_cursor }, ctx())
+    expect(other.isError).toBe(true)
+    expect(JSON.stringify(other.content)).toMatch(/another listing/)
+  })
+
   it('list_outputs passes the window through for its model, and scopes the cursor to it', async () => {
     const queries: URLSearchParams[] = []
     server.use(http.get(`${BACKEND}/api/v1/models/:slug/outputs`, windowed(() => outputs, (o) => o.id, queries)))

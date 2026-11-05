@@ -22,10 +22,14 @@ from tests.support.operations import press
 SOURCE = b"width = 10;\ncube(width);\n"
 
 
-def _create(client: TestClient, slug: str) -> None:
+def _create(
+    client: TestClient, slug: str, *, name: str | None = None, tags: str = "", description: str = ""
+) -> None:
+    data = {"tags": tags, "description": description} | ({"name": name} if name else {})
     response = client.post(
         "/api/v1/models",
         files={"file": (f"{slug}.scad", SOURCE, "application/octet-stream")},
+        data=data,
         headers=press(),
     )
     assert response.status_code == 201, response.text
@@ -110,6 +114,95 @@ def test_models_after_an_unknown_slug_is_a_conflict(client: TestClient) -> None:
     response = client.get("/api/v1/models", params={"after": "gone"})
     assert response.status_code == 409
     assert "gone" in response.json()["detail"]
+
+
+def _seed_catalogue(client: TestClient) -> None:
+    _create(client, "alpha", name="Crème Box", tags="box,kitchen", description="A lidded box")
+    _create(client, "bravo", name="Bolt", tags="hardware", description="An M3 bolt")
+    _create(client, "charlie", name="Spice box", tags="Box,Kitchen,spice")
+    _create(client, "delta", name="Hook", tags="hardware,kitchen")
+
+
+def _slugs(response: object) -> list[str]:
+    return [row["slug"] for row in response.json()]  # type: ignore[attr-defined]
+
+
+def test_models_search_every_word_in_name_description_or_tags(client: TestClient) -> None:
+    """#2290 -- the Models page pages on the server, so its search runs there: every
+    word must appear somewhere, case and accents folded, as the page's own did."""
+    _seed_catalogue(client)
+    found = client.get("/api/v1/models", params={"q": "creme LIDDED", "origin": "mine"})
+    assert found.status_code == 200
+    assert _slugs(found) == ["alpha"]
+    assert found.headers["x-total-count"] == "1"
+    spice = client.get("/api/v1/models", params={"q": "box spice", "origin": "mine"})
+    assert _slugs(spice) == ["charlie"]
+
+
+def test_models_tags_are_all_wanted_and_folded(client: TestClient) -> None:
+    _seed_catalogue(client)
+    both = client.get(
+        "/api/v1/models", params=[("tag", "kitchen"), ("tag", "BOX"), ("sort", "name")]
+    )
+    assert _slugs(both) == ["alpha", "charlie"]
+    assert both.headers["x-total-count"] == "2"
+
+
+def test_models_origin_filter(client: TestClient) -> None:
+    _seed_catalogue(client)
+    every = client.get("/api/v1/models").json()
+    mine = client.get("/api/v1/models", params={"origin": "mine"})
+    assert sorted(_slugs(mine)) == sorted(r["slug"] for r in every if r["origin"] == "mine")
+    builtin = client.get("/api/v1/models", params={"origin": "builtin"})
+    assert all(row["origin"] == "builtin" for row in builtin.json())
+    assert builtin.headers["x-total-count"] == str(
+        sum(1 for r in every if r["origin"] == "builtin")
+    )
+
+
+def test_models_sorted_by_name_or_newest_update(client: TestClient) -> None:
+    _seed_catalogue(client)
+    by_name = client.get("/api/v1/models", params={"origin": "mine", "sort": "name"})
+    assert _slugs(by_name) == ["bravo", "alpha", "delta", "charlie"]
+    newest = client.get("/api/v1/models", params={"origin": "mine", "sort": "updated"})
+    rows = newest.json()
+    stamps = [(row["updated_at"], row["name"].casefold()) for row in rows]
+    assert [s for s, _ in stamps] == sorted((s for s, _ in stamps), reverse=True)
+
+
+def test_filtered_models_page_with_limit_and_after(client: TestClient) -> None:
+    _seed_catalogue(client)
+    params = {"tag": "kitchen", "sort": "name"}
+    first = client.get("/api/v1/models", params={**params, "limit": 2})
+    assert _slugs(first) == ["alpha", "delta"]
+    assert first.headers["x-total-count"] == "3"
+    rest = client.get("/api/v1/models", params={**params, "limit": 2, "after": "delta"})
+    assert _slugs(rest) == ["charlie"]
+    gone = client.get("/api/v1/models", params={**params, "after": "bravo"})
+    assert gone.status_code == 409
+
+
+def test_model_facets_count_tags_over_what_the_filters_select(client: TestClient) -> None:
+    _seed_catalogue(client)
+    every = len(client.get("/api/v1/models").json())
+    facets = client.get(
+        "/api/v1/model-facets", params=[("origin", "mine"), ("tag", "kitchen"), ("tag", "gone")]
+    )
+    assert facets.status_code == 200, facets.text
+    body = facets.json()
+    assert body["total"] == every
+    assert body["matched"] == 0
+    assert body["tags"] == [{"tag": "gone", "count": 0}, {"tag": "kitchen", "count": 0}]
+
+    kitchen = client.get("/api/v1/model-facets", params={"origin": "mine", "tag": "kitchen"}).json()
+    assert kitchen["matched"] == 3
+    # Most used first, then by name; a tag's spelling is the first model's that carries it.
+    assert kitchen["tags"] == [
+        {"tag": "kitchen", "count": 3},
+        {"tag": "box", "count": 2},
+        {"tag": "hardware", "count": 1},
+        {"tag": "spice", "count": 1},
+    ]
 
 
 def test_outputs_page_with_limit_and_after(

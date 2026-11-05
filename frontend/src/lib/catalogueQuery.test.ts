@@ -144,6 +144,12 @@ describe('tagCounts', () => {
     ])
   })
 
+  it('counts tags that fold alike as one, spelled as the first model spells it (#2290)', () => {
+    const first = { ...(models[0] as ModelSummary), slug: 'a', tags: ['Crème'] }
+    const second = { ...(models[0] as ModelSummary), slug: 'b', tags: ['creme', 'CREME'] }
+    expect(tagCounts([first, second])).toEqual([{ tag: 'Crème', count: 2 }])
+  })
+
   it('keeps a selected tag no model carries, at zero, so it can be unselected', () => {
     expect(tagCounts([], ['template'])).toEqual([{ tag: 'template', count: 0 }])
     expect(tagCounts(models.slice(0, 1), ['KEYCHAIN'])).not.toContainEqual(

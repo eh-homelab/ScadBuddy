@@ -1474,3 +1474,31 @@ describe('mock template UI files and outputs, as the backend holds them (#425)',
     ).rejects.toMatchObject({ status: 422 })
   })
 })
+
+describe('mock GET /models and /model-facets search, filter and page as the backend does (#2290)', () => {
+  const filters = { q: '', tags: [] as string[], origin: 'all' as const, sort: 'name' as const }
+
+  it('pages a sorted selection with limit and after, and calls a gone after a conflict', async () => {
+    const every = await api.listModelsPage(filters)
+    expect(every.total).toBe(every.items.length)
+    const names = every.items.map((m) => m.name)
+    expect(names).toEqual([...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' })))
+    const first = await api.listModelsPage(filters, { limit: 2 })
+    expect(first.items.map((m) => m.slug)).toEqual(every.items.slice(0, 2).map((m) => m.slug))
+    expect(first.total).toBe(every.total)
+    const next = await api.listModelsPage(filters, { limit: 2, after: first.items[1]?.slug })
+    expect(next.items.map((m) => m.slug)).toEqual(every.items.slice(2, 4).map((m) => m.slug))
+    const gone = await api.listModelsPage(filters, { after: 'no-such-model' }).catch((cause: unknown) => cause)
+    expect(gone).toBeInstanceOf(ApiError)
+    expect((gone as ApiError).status).toBe(409)
+  })
+
+  it('counts what the filters select, of every model, with their tags', async () => {
+    const all = await api.listModels()
+    const keychains = await api.listModelsPage({ ...filters, tags: ['keychain'] })
+    const facets = await api.modelFacets({ q: '', tags: ['keychain'], origin: 'all' })
+    expect(facets.total).toBe(all.length)
+    expect(facets.matched).toBe(keychains.total)
+    expect(facets.tags).toContainEqual({ tag: 'keychain', count: keychains.total })
+  })
+})

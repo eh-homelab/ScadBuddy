@@ -67,7 +67,10 @@ export function fold(text: string): string {
 const byName = (a: ModelSummary, b: ModelSummary) =>
   a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
 
-/** The models `query` selects, sorted. Every search word must appear in some field. */
+/**
+ * The models `query` selects, sorted. Every search word must appear in some field. The
+ * backend's `GET /models` selects the same (#2290); the mocks answer with this.
+ */
 export function filterModels(models: ModelSummary[], query: CatalogueQuery): ModelSummary[] {
   const words = fold(query.q).split(/\s+/).filter(Boolean)
   const tags = query.tags.map(fold)
@@ -87,21 +90,26 @@ export function filterModels(models: ModelSummary[], query: CatalogueQuery): Mod
 
 /**
  * Every tag in `models` with how many models carry it: most used first, then by name.
- * A `selected` tag none of them carry is listed at zero, so its chip can still be
- * unselected.
+ * Tags that fold alike count as one, spelled as the first model that carries it spells
+ * it. A `selected` tag none of them carry is listed at zero, so its chip can still be
+ * unselected. The backend's `GET /model-facets` counts the same (#2290).
  */
 export function tagCounts(
   models: ModelSummary[],
   selected: string[] = [],
 ): Array<{ tag: string; count: number }> {
+  const spelling = new Map<string, string>()
   const counts = new Map<string, number>()
   for (const model of models) {
-    for (const tag of new Set(model.tags ?? [])) counts.set(tag, (counts.get(tag) ?? 0) + 1)
+    for (const tag of model.tags ?? []) if (!spelling.has(fold(tag))) spelling.set(fold(tag), tag)
+    for (const key of new Set((model.tags ?? []).map(fold))) counts.set(key, (counts.get(key) ?? 0) + 1)
   }
-  const present = new Set([...counts.keys()].map(fold))
-  for (const tag of selected) if (!present.has(fold(tag))) counts.set(tag, 0)
+  for (const tag of selected) {
+    if (!spelling.has(fold(tag))) spelling.set(fold(tag), tag)
+    if (!counts.has(fold(tag))) counts.set(fold(tag), 0)
+  }
   return [...counts]
-    .map(([tag, count]) => ({ tag, count }))
+    .map(([key, count]) => ({ tag: spelling.get(key) ?? key, count }))
     .sort(
       (a, b) => b.count - a.count || a.tag.localeCompare(b.tag, undefined, { sensitivity: 'base' }),
     )

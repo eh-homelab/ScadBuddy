@@ -59,6 +59,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import { type CatalogueQuery, DEFAULT_QUERY, filterModels, tagCounts } from '../lib/catalogueQuery'
 import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { features } from './features'
@@ -1447,6 +1448,18 @@ function withVersion(inputs: Record<string, unknown>): Record<string, unknown> {
   return { ...inputs, v: inputs['v'] ?? 0 }
 }
 
+/** `GET /models`'s search and filters, as the catalogue's own query (#2290). */
+function catalogueFilters(params: URLSearchParams): CatalogueQuery {
+  const origin = params.get('origin')
+  return {
+    ...DEFAULT_QUERY,
+    q: params.get('q') ?? '',
+    tags: params.getAll('tag'),
+    origin: origin === 'builtin' || origin === 'mine' ? origin : 'all',
+    sort: params.get('sort') === 'name' ? 'name' : 'updated',
+  }
+}
+
 export const handlers = [
   realtimeHandler,
   // The agent service's plugin routes (#297), under /api/v1/ai.
@@ -1456,9 +1469,36 @@ export const handlers = [
   ...features.flatMap((feature) => feature.handlers),
   ...mcpOidcHandlers,
 
-  http.get(`${base}/models`, () => {
+  // #2290 — the backend's search, filters, sort and `limit`/`after` window; with none
+  // of them, the whole catalogue in its own order, as before.
+  http.get(`${base}/models`, ({ request }) => {
     landPreviews()
-    return HttpResponse.json(state.models.map(view))
+    const params = new URL(request.url).searchParams
+    const filtered = ['q', 'tag', 'origin', 'sort'].some((name) => params.has(name))
+    const listed = state.models.map(view)
+    const selected = filtered ? filterModels(listed, catalogueFilters(params)) : listed
+    const after = params.get('after')
+    const start = after === null ? 0 : selected.findIndex((model) => model.slug === after) + 1
+    if (after !== null && start === 0) {
+      return HttpResponse.json(
+        { detail: `no model '${after}' is listed any more to page after; list again without \`after\`` },
+        { status: 409 },
+      )
+    }
+    const limit = params.get('limit')
+    const window = selected.slice(start, limit === null ? undefined : start + Number(limit))
+    return HttpResponse.json(window, { headers: { 'X-Total-Count': String(selected.length) } })
+  }),
+
+  http.get(`${base}/model-facets`, ({ request }) => {
+    const query = catalogueFilters(new URL(request.url).searchParams)
+    const listed = state.models.map(view)
+    const selected = filterModels(listed, query)
+    return HttpResponse.json({
+      total: listed.length,
+      matched: selected.length,
+      tags: tagCounts(selected, query.tags),
+    })
   }),
 
   http.post(`${base}/models`, async ({ request }) => {
