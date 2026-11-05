@@ -401,7 +401,7 @@ export const orderTools: Tool[] = [
       'source (no `output_id`, `slug`, `commit` or `inputs`), for design work, a fee, packaging or a part made ' +
       'elsewhere. Its price is recorded, not accepted: the item is quoted until order_item_accept_quote accepts it. ' +
       '`requires_printing` (default ' +
-      'false) marks one that still has to be made. `sku` is the shop\'s stock code, on either kind. ' +
+      'false) marks one that still has to be made. ' +
       '`kind: "request"` adds a design request: a `title` and `notes` only, no source and no price; its first ' +
       'revision (order_item_revision_add) gives it its design. `sku` is the shop\'s stock code, on any kind.',
     input: z.object({
@@ -423,7 +423,7 @@ export const orderTools: Tool[] = [
     risk: 'write',
     routes: ['POST /api/v1/orders/{order_id}/items'],
     title: ({ order_id, slug, output_id, kind, title }) =>
-      `Add ${kind === 'custom' ? (title ?? 'a custom item') : (slug ?? output_id ?? 'an item')} to order ${order_id}`,
+      `Add ${kind === 'custom' || kind === 'request' ? (title ?? `a ${kind} item`) : (slug ?? output_id ?? 'an item')} to order ${order_id}`,
     handler: async ({ order_id, ...body }, { backend }) =>
       json(
         await ok(
@@ -455,12 +455,17 @@ export const orderTools: Tool[] = [
     risk: 'write',
     routes: ['POST /api/v1/orders/{order_id}/items/{item_id}/revisions'],
     title: ({ order_id, item_id }) => `Add a design revision to item ${item_id} of order ${order_id}`,
-    handler: async ({ order_id, item_id, ...fields }, { backend }) =>
+    handler: async ({ order_id, item_id, reference, output_id, filaments, note }, { backend }) =>
       json(
         await ok(
           backend.POST('/api/v1/orders/{order_id}/items/{item_id}/revisions', {
             params: { path: { order_id, item_id } },
-            body: Object.fromEntries(Object.entries(fields).filter(([, v]) => v !== undefined)) as never,
+            body: {
+              note: note ?? '',
+              ...(reference === undefined ? {} : { reference }),
+              ...(output_id === undefined ? {} : { output_id }),
+              ...(filaments === undefined ? {} : { filaments }),
+            },
           }),
           `add a revision to item ${item_id}`,
         ),
@@ -694,7 +699,7 @@ export const orderTools: Tool[] = [
       choices: printChoices,
       test_revision_id: ID.optional().describe(
         "Print this design revision of the item as a test instead (order_item_revision_add makes one): an attempt of " +
-          'purpose `test` that counts for nothing and needs no accepted quote',
+          'purpose `test` that counts for nothing. It needs no accepted quote, but does need a slice quote of that revision (else `requote_needed`)',
       ),
     }),
     risk: 'outward',
