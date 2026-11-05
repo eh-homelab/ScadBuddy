@@ -731,15 +731,64 @@ def test_a_failed_test_print_does_not_fail_the_item(shop: Shop, pool: PgPool) ->
     followed = shop.lifecycle.follow_print(run_id)
     assert followed is not None and followed.outcome == "failed"
     assert shop.get_item(item).status == "approved"
-    # A production print in flight is not moved by a test print beside it.
+    assert shop.get(order).status == "accepted"
+
+
+def _in_flight(call: Any) -> None:
+    with pytest.raises(LifecycleError) as refused:
+        call()
+    assert refused.value.slug == "print_in_flight"
+
+
+def test_one_print_of_an_item_is_in_flight_at_a_time(shop: Shop, pool: PgPool) -> None:
+    """Every print of an item prints its output, whose outcome is recorded against the
+    newest run only: a second print in flight would take the first one's outcome."""
+    order, item = shop.accepted(quantity=2)
+    # A test print while a production print of the item is open.
     production = run_row(pool)
     started(shop, order, item, production)
-    failed = run_row(pool)
-    trial_started(shop, item, failed)
-    settle(pool, failed, "failed")
-    shop.lifecycle.follow_print(failed)
-    assert shop.get_item(item).status == "queued"
-    assert shop.get(order).status == "in_production"
+    _in_flight(lambda: trial_claimed(shop, item, "test-beside"))
+    settle(pool, production, "finished")
+    shop.lifecycle.follow_print(production)
+    shop.lifecycle.accept_fulfilment(order.id, item.id, shop.rows.fulfilments(item.id)[0].id, BY)
+    assert shop.get_item(item).status == "fulfilled"
+
+    order, item = shop.accepted()
+    # A production claim while a test print is open, its run attached or not yet.
+    pending = trial_claimed(shop, item, "test-pending")
+    _in_flight(lambda: claimed(shop, order, item, "production"))
+    # Two test prints: the second is refused.
+    _in_flight(lambda: trial_claimed(shop, item, "test-second"))
+    # A retry of the same request is its own claim, never refused.
+    assert trial_claimed(shop, item, "test-pending") == pending
+    test_run = run_row(pool)
+    shop.lifecycle.attach_print(pending, test_run, None)
+    _in_flight(lambda: claimed(shop, order, item, "production"))
+    settle(pool, test_run, "finished")
+    shop.lifecycle.follow_print(test_run)
+    assert claimed(shop, order, item, "production").purpose == "production"
+    # And a production claim's retry is its own claim, too.
+    assert claimed(shop, order, item, "production").purpose == "production"
+    assert len(shop.rows.fulfilments(item.id)) == 1
+
+
+def test_a_key_is_one_kind_of_print(shop: Shop, pool: PgPool) -> None:
+    """One request id on a production print and on a test print, or on two revisions'
+    test prints, is two requests: neither answers with the other's attempt."""
+    order, item = shop.accepted()
+    production = claimed(shop, order, item, "k")
+    with pytest.raises(LifecycleError) as refused:
+        trial_claimed(shop, item, "k")
+    assert refused.value.slug == "print_request_conflict"
+    shop.lifecycle.release_print(production, "test")
+    trial = trial_claimed(shop, item, "t")
+    with pytest.raises(LifecycleError) as other:
+        claimed(shop, order, item, "t")
+    assert other.value.slug == "print_request_conflict"
+    with pytest.raises(LifecycleError) as revision:
+        trial_claimed(shop, item, "t", revision="another-revision")
+    assert revision.value.slug == "print_request_conflict"
+    assert shop.rows.fulfilments(item.id, purpose=None) == [trial]
 
 
 def test_test_attempts_count_for_nothing(shop: Shop, pool: PgPool) -> None:
@@ -866,6 +915,9 @@ def test_the_test_print_check(shop: Shop, pool: PgPool, tmp_path: Path) -> None:
             "UPDATE order_item_quotes SET revision_id = NULL WHERE order_item_id = %s", (item.id,)
         )
     assert check()["copies"] == 1
+    pending = trial_claimed(shop, item, "pending")
+    assert _refusal(check) == "print_in_flight"
+    shop.lifecycle.release_print(pending, "test")
     assert _refusal(lambda: check("no-such-revision")) == "revision_not_found"
     shop.lifecycle.add_revision(order.id, item.id, BY, note="thinner walls")
     assert _refusal(check) == "revision_not_newest"

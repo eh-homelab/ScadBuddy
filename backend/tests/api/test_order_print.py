@@ -532,4 +532,5 @@ def test_a_test_print_without_a_slice_quote_is_requote_needed(bambuddy: TestClie
         f"{item.path}/revisions/{revision}/test-print", json=body(), headers=press()
     )
     assert answer.status_code == 409 and answer.json()["type"].endswith("/requote_needed")
-    assert item.get()["fulfilments"] == []
+    store = _state(bambuddy).components.get(ORDERS).store
+    assert store.fulfilments(item.item["id"], purpose=None) == []

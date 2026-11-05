@@ -1891,12 +1891,13 @@ class Lifecycle:
         operation) is that claim, and nothing is written, once its run is attached;
         before that, only while it may still print (the order not ended or on hold, the
         item still `queued`, the attempt still open), else ``ClaimRefusedError``, writing
-        nothing. A ``request_id`` another item claimed is
-        ``print_request_conflict``. Refused as a hand-recorded attempt is: the order
-        accepted, not ended, not on hold, the item `approved` or `failed`; and
-        ``item_made`` when its attempts made its quantity. A new claim records
-        ``project_id``, the Bambuddy project its run is keyed with (#5263), which a retry
-        keys it with again.
+        nothing. A ``request_id`` another item claimed, or claimed for a print of another
+        purpose or revision, is ``print_request_conflict``. One print of an item is in
+        flight at a time, of either purpose (``print_in_flight``). Refused as a
+        hand-recorded attempt is: the order accepted, not ended, not on hold, the item
+        `approved` or `failed`; and ``item_made`` when its attempts made its quantity. A
+        new claim records ``project_id``, the Bambuddy project its run is keyed with
+        (#5263), which a retry keys it with again.
 
         With ``revision_id`` it is a test print of that revision (storefront spec §4.4):
         an attempt of purpose `test` naming it, of one copy, that counts for nothing and
@@ -1909,10 +1910,17 @@ class Lifecycle:
             order = self._lock(conn, order_id)
             existing = self.store.print_claim(request_id, conn=conn)
             if existing is not None:
-                if existing.order_item_id != item_id:
+                purpose = "production" if revision_id is None else "test"
+                if (
+                    existing.order_item_id != item_id
+                    or existing.purpose != purpose
+                    or existing.revision_id != revision_id
+                ):
+                    # One key on `/print` and on a revision's `/test-print` is two
+                    # requests: neither answers with the other's attempt.
                     raise LifecycleError(
                         "print_request_conflict",
-                        f"request {request_id} is another item's print",
+                        f"request {request_id} is another item's or another kind of print",
                         items=[item_id],
                     )
                 if existing.print_run_id is not None:
@@ -1944,6 +1952,7 @@ class Lifecycle:
                     f"item {item_id} is {item.status}",
                     items=[item.id],
                 )
+            self._none_in_flight(conn, item)
             attempts = self.store.fulfilments(item.id, conn=conn)
             copies = item.quantity - sum(
                 a.quantity for a in attempts if a.outcome in ("succeeded", "partial")
@@ -2001,7 +2010,22 @@ class Lifecycle:
         if item.current_revision_id is None:
             raise LifecycleError("item_has_no_design", f"item {item_id} has no design yet")
         self._newest(conn, item, revision_id)
+        self._none_in_flight(conn, item)
         return item
+
+    def _none_in_flight(self, conn: Conn, item: OrderItem) -> None:
+        """One print of an item at a time, of either purpose: every print of an item is
+        a print of its output, and a print's outcome is recorded against its subject's
+        newest run only (``bambuddy/outcomes.py``), so a second print in flight would
+        take the first one's outcome."""
+        open_attempt = self.store.print_in_flight(item.id, conn=conn)
+        if open_attempt is not None:
+            raise LifecycleError(
+                "print_in_flight",
+                f"item {item.id}'s attempt {open_attempt.attempt} ({open_attempt.purpose}) is"
+                " still printing: settle it first",
+                items=[item.id],
+            )
 
     def _claim_test_print(
         self,

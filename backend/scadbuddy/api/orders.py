@@ -1132,8 +1132,9 @@ async def print_item(
     for an unknown order or item; 409 ``order_not_accepted``, ``order_on_hold``,
     ``order_closed``/``order_cancelled``, ``item_custom``, ``item_not_open``,
     ``item_not_approved`` (one printing already), ``item_made`` (its attempts made its
-    quantity: accept them), ``print_request_conflict`` (the key's print is another
-    item's), and ``requote_needed`` (no accepted quote, its output gone,
+    quantity: accept them), ``print_in_flight`` (a test print of the item is still
+    open), ``print_request_conflict`` (the key's print is another item's, or the key's
+    test print), and ``requote_needed`` (no accepted quote, its output gone,
     or a slice quote whose sliced file is gone or no longer the file it priced); and the
     print run's own refusals, as the print route answers them."""
     _path(order_id, item_id)
@@ -1181,7 +1182,9 @@ async def test_print_item(
     (``revision_not_found``); 409 ``order_on_hold``, ``order_closed``/``order_cancelled``,
     ``item_custom``, ``item_has_no_design``, ``item_not_open``, ``revision_not_newest``
     (only the current revision prints: the print is of the item's output, its render),
-    ``print_request_conflict``, and ``requote_needed`` (no slice quote of the revision,
+    ``print_in_flight`` (a print of the item, of either purpose, is still open),
+    ``print_request_conflict`` (the key's print is another item's or a production
+    print), and ``requote_needed`` (no slice quote of the revision,
     its sliced file gone or no longer the file it priced, or the output gone); and the
     print run's own refusals, as the print route answers them."""
     _path(order_id, item_id, revision_id)

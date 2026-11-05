@@ -1512,6 +1512,19 @@ class OrderStore:
             ).fetchone()
         return row is not None
 
+    def print_in_flight(self, item_id: str, *, conn: Conn | None = None) -> Fulfilment | None:
+        """The item's print attempt still open, of either purpose, if any: claimed for a
+        print (its run attached or not yet), its outcome not yet known and no end
+        recorded, as ``following`` reads an open attempt."""
+        with self._read(conn) as c:
+            row = c.execute(
+                f"SELECT {_FULFILMENT} FROM order_item_fulfilments WHERE order_item_id = %s"
+                " AND print_request_id IS NOT NULL AND outcome = 'unknown'"
+                " AND finished_at IS NULL ORDER BY attempt LIMIT 1",
+                (item_id,),
+            ).fetchone()
+        return None if row is None else Fulfilment.model_validate(row)
+
     def release_print_claim(self, conn: Conn, holder_kind: str, attempt_id: str) -> None:
         """A claim whose print was refused before it started: its row and its hold go,
         in the caller's transaction, as if it was never made. A file attached to it in

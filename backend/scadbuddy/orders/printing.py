@@ -140,8 +140,9 @@ async def print_check(
     unknown order or item; 409 ``order_<status>`` for an ended order,
     ``order_not_accepted`` before it is accepted, ``order_on_hold``, ``item_custom``,
     ``item_not_open`` for a settled item, ``item_not_approved`` for one not `approved` or
-    `failed` (one already printing among them), ``item_made`` when its attempts made its
-    quantity already, and ``requote_needed`` when the accepted quote no longer stands
+    `failed` (one already printing among them), ``print_in_flight`` while a test print of
+    it is open, ``item_made`` when its attempts made its quantity already, and
+    ``requote_needed`` when the accepted quote no longer stands
     for what would print: no accepted quote, the item's output gone or no longer its
     reference's, or a slice quote whose sliced file is gone or reads to another digest.
     What the run needs: the output, the template, ``copies`` and the quote's file.
@@ -163,6 +164,7 @@ async def print_check(
             f"item {item.id} is {item.status}",
             items=[item.id],
         )
+    await _none_in_flight(store, item)
     attempts = await asyncio.to_thread(store.fulfilments, item.id)
     copies = item.quantity - made(attempts)
     if copies < 1:
@@ -190,7 +192,8 @@ async def test_print_check(
     item's output, on an order accepted or not and an item in any open state. 404 for an
     unknown order, item or revision (``revision_not_found``); 409 ``order_<status>`` for
     an ended order, ``order_on_hold``, ``item_custom`` and ``item_has_no_design``,
-    ``item_not_open`` for a settled item, ``revision_not_newest`` for a revision that is
+    ``item_not_open`` for a settled item, ``print_in_flight`` while a print of the item,
+    of either purpose, is open, ``revision_not_newest`` for a revision that is
     not the item's current one (the print prints the item's output, which is the current
     revision's render), and ``requote_needed`` when no `slice` quote of the revision
     stands: none, its sliced file gone or another digest, or the output gone or no longer
@@ -218,6 +221,9 @@ async def test_print_check(
             " current one prints",
             items=[item.id],
         )
+    await _none_in_flight(store, item)
+    # `store.quotes` is in the order they were made: the newest slice quote of the
+    # revision is the one printed.
     quotes = [
         quote
         for quote in await asyncio.to_thread(store.quotes, item.id)
@@ -227,6 +233,19 @@ async def test_print_check(
     if not quotes:
         raise requote(item, "it has no slice quote of its current revision")
     return await _stands(outputs, blobs, item, reference, quotes[-1], 1, schema_of)
+
+
+async def _none_in_flight(store: OrderStore, item: OrderItem) -> None:
+    """409 ``print_in_flight`` while a print of the item, of either purpose, is still
+    open (``Lifecycle._none_in_flight``)."""
+    open_attempt = await asyncio.to_thread(store.print_in_flight, item.id)
+    if open_attempt is not None:
+        raise _refused(
+            "print_in_flight",
+            f"item {item.id}'s attempt {open_attempt.attempt} ({open_attempt.purpose}) is"
+            " still printing: settle it first",
+            items=[item.id],
+        )
 
 
 async def _order_and_item(
