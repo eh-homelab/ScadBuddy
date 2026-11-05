@@ -580,3 +580,36 @@ def test_a_photo_past_the_image_cap_is_413(
     monkeypatch.setattr("scadbuddy.api.order_attachments.MAX_IMAGE_BYTES", 10)
     path = f"/api/v1/orders/{order['id']}/attachments/{photo}/to-model"
     assert client.post(path, headers=press()).status_code == 413
+
+
+#: The head of an MP4: what `library/media.py` `sniff_kind` takes for a video.
+MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"\x00" * 64
+
+
+def test_a_test_print_video_joins_the_models_photos_without_a_poster(
+    client: TestClient,
+) -> None:
+    order, video = _accepted_photo(client, MP4)
+    path = f"/api/v1/orders/{order['id']}/attachments/{video}/to-model"
+
+    answer = client.post(path, headers=press())
+
+    assert answer.status_code == 200, answer.text
+    added = answer.json()["media"][-1]
+    assert added["kind"] == "video" and added["poster"] is None
+
+
+def test_a_video_past_the_media_upload_limit_is_413(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    order, video = _accepted_photo(client, MP4)
+    state = _state(client)
+    monkeypatch.setattr(
+        state, "settings", state.settings.model_copy(update={"media_upload_max_bytes": 10})
+    )
+    path = f"/api/v1/orders/{order['id']}/attachments/{video}/to-model"
+
+    answer = client.post(path, headers=press())
+
+    assert answer.status_code == 413, answer.text
+    assert "media_upload_max_bytes" in answer.json()["detail"]

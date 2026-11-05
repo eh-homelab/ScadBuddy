@@ -571,7 +571,10 @@ async def add_revision_attachment(
     responses={
         404: {"description": "No such order or attachment"},
         409: {"description": "The revision is not accepted, or its template was deleted"},
-        413: {"description": "An image larger than a template's photos take"},
+        413: {
+            "description": "Larger than a template's photos take, or than the media upload"
+            " limit in Settings"
+        },
         422: {"description": "Not a test-print photo of a revision, or not a photo or video"},
         **OPERATION_RESPONSES,
     },
@@ -632,6 +635,15 @@ async def attachment_to_model(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "the file is not a PNG, JPEG or WebP image"
         )
     media_kind, extension, _ = sniffed
+    limit = state.settings.media_upload_max_bytes
+    if attachment.size_bytes > limit:
+        # The gallery's own upload cap, which a video meets (a photo meets the lower one
+        # below); it may be lower now than when the order's copy was uploaded.
+        raise ApiError(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            f"the file is {attachment.size_bytes} bytes; a template's photos and videos are"
+            f" at most {limit} (media_upload_max_bytes in Settings)",
+        )
     if media_kind == "image" and attachment.size_bytes > MAX_IMAGE_BYTES:
         raise ApiError(
             status.HTTP_413_CONTENT_TOO_LARGE,
