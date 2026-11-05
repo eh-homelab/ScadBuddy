@@ -4,12 +4,21 @@ unanswered one."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
-from scadbuddy.orders.lifecycle import LifecycleError
-from scadbuddy.orders.models import ColourSlot, FilamentInput
+from scadbuddy.orders.lifecycle import LifecycleError, ManualQuoteInput
+from scadbuddy.orders.models import (
+    ColourSlot,
+    FilamentInput,
+    Order,
+    OrderItem,
+    Revision,
+)
 from scadbuddy.orders.reference import ResolvedReference
-from scadbuddy.orders.store import OrderStore
+from scadbuddy.orders.revisions import RevisionAnswerInput
+from scadbuddy.orders.store import OrderStore, revision_subject
 from scadbuddy.store.refs import BlobRefs
 from tests.conftest import PgPool
 from tests.orders.test_lifecycle import BY, NOW, Shop, resolved
@@ -217,3 +226,175 @@ def test_the_colours_fill_leaves_a_sent_revision_unanswered(shop: Shop) -> None:
     )
     [first] = shop.rows.revisions(item_id)
     assert first.answer is None and first.sent_at is not None
+
+
+# -- sent, answered, and the two approval modes (§4.3) ---------------------------------------
+
+
+def attach_render(shop: Shop, order: Order, item: OrderItem, rev: Revision) -> None:
+    with shop.rows.transaction() as conn:
+        shop.rows.insert_attachment(
+            conn,
+            attachment_id=f"att-{rev.id}",
+            order_id=order.id,
+            subject=revision_subject(rev.id),
+            kind="image",
+            role="render",
+            filename="r.png",
+            media_type="image/png",
+            size_bytes=1,
+            sha256="e" * 64,
+            blob_key=f"attachment-{rev.id}",
+            caption="",
+            created_by=BY,
+            subject_item_id=item.id,
+        )
+
+
+def _quoted_revision(shop: Shop, approval: str = "together") -> tuple[Order, OrderItem, Revision]:
+    """An order with one item of ``approval``, a manual quote on revision 1 and a render
+    on it."""
+    order = shop.order()
+    item = shop.item(order)
+    item = shop.lifecycle.update_item(order.id, item.id, BY, approval=approval)  # type: ignore[arg-type]
+    shop.lifecycle.record_manual_quote(
+        order.id, item.id, ManualQuoteInput(unit_price_minor=1000, label="typed"), BY
+    )
+    [rev] = shop.rows.revisions(item.id)
+    attach_render(shop, order, item, rev)
+    return order, shop.get_item(item), rev
+
+
+def test_a_revision_is_sent_with_an_attachment(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    shop.lifecycle.update_item(order.id, item.id, BY, approval="design_first")
+    [rev] = shop.rows.revisions(item.id)
+    with pytest.raises(LifecycleError) as empty:
+        shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    assert empty.value.slug == "revision_empty"
+    attach_render(shop, order, shop.get_item(item), rev)
+    assert shop.lifecycle.send_revision(order.id, item.id, rev.id, BY).sent_at is not None
+    assert "revision.sent" in shop.kinds(order)
+
+
+def test_sending_again_writes_nothing(shop: Shop) -> None:
+    order, item, rev = _quoted_revision(shop)
+    sent = shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    again = shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    assert again.sent_at == sent.sent_at and shop.kinds(order).count("revision.sent") == 1
+
+
+def test_only_the_newest_revision_is_sent_or_answered(shop: Shop) -> None:
+    order, item, first = _quoted_revision(shop)
+    shop.lifecycle.send_revision(order.id, item.id, first.id, BY)
+    shop.lifecycle.add_revision(order.id, item.id, BY, note="again")
+    calls: tuple[Callable[[], object], ...] = (
+        lambda: shop.lifecycle.send_revision(order.id, item.id, first.id, BY),
+        lambda: shop.lifecycle.answer_revision(
+            order.id, item.id, first.id, RevisionAnswerInput(answer="accepted"), BY
+        ),
+    )
+    for call in calls:
+        with pytest.raises(LifecycleError) as refused:
+            call()
+        assert refused.value.slug == "revision_not_newest"
+
+
+def test_an_unsent_revision_is_not_answered(shop: Shop) -> None:
+    order, item, rev = _quoted_revision(shop)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.answer_revision(
+            order.id, item.id, rev.id, RevisionAnswerInput(answer="accepted"), BY
+        )
+    assert refused.value.slug == "revision_not_sent"
+
+
+def test_an_answered_revision_is_not_answered_or_sent_again(shop: Shop) -> None:
+    order, item, rev = _quoted_revision(shop)
+    shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    shop.lifecycle.answer_revision(
+        order.id,
+        item.id,
+        rev.id,
+        RevisionAnswerInput(answer="changes_requested", note="bigger"),
+        BY,
+    )
+    slugs = set()
+    calls: tuple[Callable[[], object], ...] = (
+        lambda: shop.lifecycle.send_revision(order.id, item.id, rev.id, BY),
+        lambda: shop.lifecycle.answer_revision(
+            order.id, item.id, rev.id, RevisionAnswerInput(answer="accepted"), BY
+        ),
+    )
+    for call in calls:
+        with pytest.raises(LifecycleError) as refused:
+            call()
+        slugs.add(refused.value.slug)
+    assert slugs == {"revision_answered"}
+
+
+def test_changes_requested_needs_a_note(shop: Shop) -> None:
+    order, item, rev = _quoted_revision(shop)
+    shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.answer_revision(
+            order.id, item.id, rev.id, RevisionAnswerInput(answer="changes_requested", note=" "), BY
+        )
+    assert refused.value.unprocessable and refused.value.slug == "note"
+
+
+def test_together_accepts_the_revision_and_its_quote(shop: Shop) -> None:
+    order, item, rev = _quoted_revision(shop)
+    shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    shop.lifecycle.answer_revision(
+        order.id, item.id, rev.id, RevisionAnswerInput(answer="accepted", note="Ada said yes"), BY
+    )
+    assert shop.rows.revision(rev.id).answer == "accepted"  # type: ignore[union-attr]
+    assert shop.get_item(item).status == "approved" and shop.get(order).status == "quoted"
+    assert "revision.answered" in shop.kinds(order)
+
+
+def test_together_sends_a_revision_only_with_a_quote(shop: Shop) -> None:
+    order = shop.order()
+    item = shop.item(order)
+    [rev] = shop.rows.revisions(item.id)
+    attach_render(shop, order, item, rev)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    assert refused.value.slug == "revision_not_quoted"
+
+
+def test_design_first_accepts_the_design_then_the_price(shop: Shop) -> None:
+    order, item, rev = _quoted_revision(shop, "design_first")
+    [quote] = shop.rows.quotes(item.id)
+    with pytest.raises(LifecycleError) as early:
+        shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    assert early.value.slug == "revision_not_accepted"
+    shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    shop.lifecycle.answer_revision(
+        order.id, item.id, rev.id, RevisionAnswerInput(answer="accepted"), BY
+    )
+    assert shop.get_item(item).status == "quoted"
+    assert shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY).status == "approved"
+
+
+def test_a_quote_of_an_earlier_revision_is_stale(shop: Shop) -> None:
+    order, item, _ = _quoted_revision(shop)
+    [quote] = shop.rows.quotes(item.id)
+    shop.lifecycle.add_revision(order.id, item.id, BY, note="thinner")
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.accept_quote(order.id, item.id, quote.id, BY)
+    assert refused.value.slug == "quote_stale"
+
+
+def test_a_hold_refuses_a_together_accept(shop: Shop) -> None:
+    order, item, rev = _quoted_revision(shop)
+    shop.lifecycle.send_revision(order.id, item.id, rev.id, BY)
+    shop.lifecycle.hold(order.id, BY)
+    with pytest.raises(LifecycleError) as refused:
+        shop.lifecycle.answer_revision(
+            order.id, item.id, rev.id, RevisionAnswerInput(answer="accepted"), BY
+        )
+    assert refused.value.slug == "order_on_hold"
+    assert shop.rows.revision(rev.id).answer is None  # type: ignore[union-attr]

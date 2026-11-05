@@ -60,6 +60,7 @@ from scadbuddy.orders.models import (
 )
 from scadbuddy.orders.pricing import Plate, Priced
 from scadbuddy.orders.reference import ResolvedReference
+from scadbuddy.orders.revisions import RevisionAnswerInput
 from scadbuddy.orders.store import (
     UNSET,
     Conn,
@@ -69,6 +70,7 @@ from scadbuddy.orders.store import (
     fulfilment_subject,
     item_subject,
     order_subject,
+    revision_subject,
 )
 from scadbuddy.store.refs import BlobRefs
 
@@ -1286,6 +1288,7 @@ class Lifecycle:
                 unit_price_minor=body.unit_price_minor,
                 quantity=item.quantity,
                 created_by=by,
+                revision_id=item.current_revision_id,
             )
             change = self._recorded(conn, order, item, quote, by)
         self._told(change)
@@ -1346,6 +1349,7 @@ class Lifecycle:
                 sliced_sha256=sliced_sha256,
                 sliced_blob_key=sliced_blob_key,
                 quote_id=quote_id,
+                revision_id=item.current_revision_id,
             )
             change = self._recorded(conn, order, item, quote, by)
         self._told(change)
@@ -1353,7 +1357,9 @@ class Lifecycle:
 
     def accept_quote(self, order_id: str, item_id: str, quote_id: str, by: Actor) -> OrderItem:
         """Pins the quote (§3.4): the item is `approved`, the order `quoted` once every
-        item not cancelled is."""
+        item not cancelled is. A quote of an earlier revision is `quote_stale`, and on a
+        `design_first` item the quote's revision must be accepted first
+        (`revision_not_accepted`); a custom item has neither."""
         with self.store.transaction() as conn:
             order = self._lock(conn, order_id)
             self._not_ended(order)
@@ -1367,19 +1373,155 @@ class Lifecycle:
                 raise LifecycleError(
                     "quote_not_found", f"no quote {quote_id} of item {item_id}", not_found=True
                 )
-            if quote.quantity != item.quantity:
-                raise LifecycleError(
-                    "quote_stale",
-                    f"quote {quote_id} priced {quote.quantity}, the item is now {item.quantity}",
-                )
-            self.store.accept_quote(conn, item.id, quote.id)
-            item = self.store.update_item(conn, item.id, status="approved")
-            self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
-            order = self._rederive(conn, order, by)
-            # §3.4: accepting a quote releases every other quote's sliced file.
-            released = [other for other in self._quote_ids(conn, [item.id]) if other != quote.id]
+            order, item, released = self._accept_quote(conn, order, item, quote, by)
         self._told(_Change(order, [(item, None)], released))
         return item
+
+    def _accept_quote(
+        self, conn: Conn, order: Order, item: OrderItem, quote: Quote, by: Actor
+    ) -> tuple[Order, OrderItem, list[str]]:
+        """Accepting ``quote`` once the caller has checked the order and the item: the
+        refusals, the row, the audit line, the order rederived and §3.4's release of
+        every other quote's sliced file."""
+        if quote.quantity != item.quantity:
+            raise LifecycleError(
+                "quote_stale",
+                f"quote {quote.id} priced {quote.quantity}, the item is now {item.quantity}",
+            )
+        if item.kind != "custom":
+            if quote.revision_id is not None and quote.revision_id != item.current_revision_id:
+                raise LifecycleError(
+                    "quote_stale", f"quote {quote.id} prices an earlier revision of the design"
+                )
+            if item.approval == "design_first":
+                revision_id = quote.revision_id or item.current_revision_id
+                revision = (
+                    None if revision_id is None else self.store.revision(revision_id, conn=conn)
+                )
+                if revision is None or revision.answer != "accepted":
+                    raise LifecycleError(
+                        "revision_not_accepted",
+                        f"the customer has not accepted the design of item {item.id}",
+                    )
+        self.store.accept_quote(conn, item.id, quote.id)
+        item = self.store.update_item(conn, item.id, status="approved")
+        self._event(conn, order, by, "quote.accepted", item_id=item.id, quote_id=quote.id)
+        order = self._rederive(conn, order, by)
+        released = [other for other in self._quote_ids(conn, [item.id]) if other != quote.id]
+        return order, item, released
+
+    # -- revisions sent and answered (storefront spec §4.3) -------------------------------
+
+    def _newest(self, conn: Conn, item: OrderItem, revision_id: str) -> Revision:
+        """The item's revision ``revision_id``, which must be its newest: a customer
+        sees and answers only the latest design."""
+        revisions = self.store.revisions(item.id, conn=conn)
+        found = next((r for r in revisions if r.id == revision_id), None)
+        if found is None:
+            raise LifecycleError(
+                "revision_not_found",
+                f"no revision {revision_id} of item {item.id}",
+                not_found=True,
+            )
+        if revisions[-1].id != found.id:
+            raise LifecycleError(
+                "revision_not_newest",
+                f"revision {found.number} of item {item.id} is not its newest",
+            )
+        return found
+
+    def _quote_of(self, conn: Conn, item: OrderItem, revision: Revision) -> Quote | None:
+        """The newest quote that names ``revision``."""
+        named = [q for q in self.store.quotes(item.id, conn=conn) if q.revision_id == revision.id]
+        return named[-1] if named else None
+
+    def send_revision(self, order_id: str, item_id: str, revision_id: str, by: Actor) -> Revision:
+        """Sends the item's newest revision to the customer: it needs a file on its
+        subject (`revision_empty`) and, on a `together` item, a quote that names it
+        (`revision_not_quoted`). Sent and unanswered already returns it, writing nothing."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            item = self._item_of(conn, order, item_id)
+            revision = self._newest(conn, item, revision_id)
+            if revision.answer is not None:
+                raise LifecycleError(
+                    "revision_answered", f"revision {revision.number} is {revision.answer}"
+                )
+            if revision.sent_at is not None:
+                return revision
+            if not self.store.subject_attachments(revision_subject(revision.id), conn=conn):
+                raise LifecycleError(
+                    "revision_empty", f"revision {revision.number} has no file to send"
+                )
+            if item.approval == "together" and self._quote_of(conn, item, revision) is None:
+                raise LifecycleError(
+                    "revision_not_quoted",
+                    f"revision {revision.number} has no quote: this item is approved together",
+                )
+            revision = self.store.stamp_revision(conn, revision.id, sent_at=datetime.now(UTC))
+            self._event(conn, order, by, "revision.sent", item_id=item.id, revision_id=revision.id)
+        self._told(_Change(order, [(item, None)]))
+        return revision
+
+    def answer_revision(
+        self,
+        order_id: str,
+        item_id: str,
+        revision_id: str,
+        body: RevisionAnswerInput,
+        by: Actor,
+    ) -> Revision:
+        """The customer's answer to the newest sent revision. On a `together` item an
+        `accepted` also accepts the newest quote that names it, in the same transaction."""
+        if body.answer == "changes_requested" and not body.note.strip():
+            raise LifecycleError("note", "note: say what should change", unprocessable=True)
+        released: list[str] = []
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            self._not_ended(order)
+            item = self._item_of(conn, order, item_id)
+            revision = self._newest(conn, item, revision_id)
+            if revision.answer is not None:
+                raise LifecycleError(
+                    "revision_answered", f"revision {revision.number} is {revision.answer}"
+                )
+            if revision.sent_at is None:
+                raise LifecycleError(
+                    "revision_not_sent", f"revision {revision.number} was not sent"
+                )
+            quote = None
+            if body.answer == "accepted" and item.approval == "together":
+                quote = self._quote_of(conn, item, revision)
+                if quote is None:
+                    raise LifecycleError(
+                        "revision_not_quoted",
+                        f"revision {revision.number} has no quote: this item is approved together",
+                    )
+                self._open_for_items(order, "an item's price")
+                self._not_on_hold(order)
+            revision = self.store.stamp_revision(
+                conn,
+                revision.id,
+                answer=body.answer,
+                answer_note=body.note,
+                answered_at=datetime.now(UTC),
+                answered_by=by,
+            )
+            self._event(
+                conn,
+                order,
+                by,
+                "revision.answered",
+                item_id=item.id,
+                revision_id=revision.id,
+                answer=body.answer,
+                note=body.note,
+            )
+            if quote is not None:
+                order, item, released = self._accept_quote(conn, order, item, quote, by)
+        self._told(_Change(order, [(item, None)], released))
+        return revision
 
     # -- fulfilment (§6.1 by hand) ---------------------------------------------------------
 
