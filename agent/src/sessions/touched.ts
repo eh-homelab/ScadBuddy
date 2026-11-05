@@ -284,6 +284,7 @@ export const EXTRACTORS: Readonly<Record<string, Extractor>> = {
   archive_flow: () => [],
   unarchive_flow: () => [],
   delete_flow: () => [],
+  update_flow_details: () => [],
   // A run's grant (#2481) is the run's: its page shows who revoked it, and when.
   revoke_flow_grant: () => [],
   // A flow's triggers (#2484) are the flow's: its page lists them, with who made each.

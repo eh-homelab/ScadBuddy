@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hopUntilText } from './flows'
+import { hopUntilText, markdownText } from './flows'
 
 // #2482 — when a hop ends: the time alone today, with the date on any other day.
 describe('hopUntilText', () => {
@@ -16,3 +16,15 @@ describe('hopUntilText', () => {
     expect(hopUntilText(at.toISOString(), now)).not.toBe(at.toLocaleTimeString())
   })
 })
+
+describe('markdownText (#3186)', () => {
+  it('drops the markup and keeps the words, snake_case and arithmetic too', () => {
+    expect(markdownText('_Nightly_ batch of `render_box`, __bold__ and 2 * 3 * 4')).toBe(
+      'Nightly batch of render_box, bold and 2 * 3 * 4',
+    )
+    expect(markdownText('> quoted\n\n1. first\n2. ![alt](x.png) second\n\n```py\nrun()\n```')).toBe(
+      'quoted first alt second run()',
+    )
+  })
+})
+

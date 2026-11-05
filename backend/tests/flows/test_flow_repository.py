@@ -3,16 +3,23 @@ one commit per version, numbered by its position among its flow's commits."""
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from scadbuddy.core.authorship import AGENT_AUTHOR_NAME, AgentAuthor, authored_as
 from scadbuddy.core.gitrepo import LOCK_NAME, GitError, RevisionNotFoundError, git_env
-from scadbuddy.flows.repository import FlowHistory
+from scadbuddy.flows.repository import (
+    DETAILS_TRAILER,
+    DetailsNotSavedError,
+    FlowHistory,
+    FlowNotPresentError,
+)
 
 pytestmark = pytest.mark.requires_git
 
@@ -199,3 +206,222 @@ def test_inputs_are_committed_with_the_script_and_restored_with_it(history: Flow
     restored, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=first)
     assert history.inputs_at("swap", restored) == INPUTS
     assert history.script_at("swap", restored) == ONE
+
+
+# ── #3186: a display name and description in `flow.json`, and commit messages ──
+
+
+def test_a_registration_takes_its_message_and_body(history: FlowHistory) -> None:
+    commit, _ = history.register(
+        "swap",
+        str(uuid.uuid4()),
+        lambda c, v: None,
+        script=ONE,
+        message="Queue the\nnightly batch",
+        body="Longer notes.\n\nSecond paragraph.",
+    )
+    [version] = history.versions("swap")
+    # The subject is one line; the body keeps its paragraphs, and the trailers stay
+    # trailers (the version is still numbered).
+    assert (version.commit, version.message, version.version) == (
+        commit,
+        "Queue the nightly batch",
+        1,
+    )
+    assert version.body == "Longer notes.\n\nSecond paragraph."
+    second, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, script=TWO)
+    newest = history.versions("swap")[0]
+    assert (newest.commit, newest.message, newest.body) == (second, "Register swap v2", None)
+
+
+def test_a_restore_and_a_delete_take_their_message(history: FlowHistory) -> None:
+    _, first, _ = register(history, "swap", ONE)
+    register(history, "swap", TWO)
+    history.register(
+        "swap", str(uuid.uuid4()), lambda c, v: None, restore=first, message="Back to v1"
+    )
+    assert history.versions("swap")[0].message == "Back to v1"
+    history.delete("swap", lambda _c: None, message="Retire it", body="Superseded by swap2.")
+    [revision] = history.log("swap", limit=1)
+    assert revision.message == "Retire it"
+    assert "Superseded by swap2." in history._out("log", "-1", "--format=%b")
+
+
+def test_details_are_their_own_commit_in_flow_json(history: FlowHistory) -> None:
+    _, first, _ = register(history, "swap", ONE)
+    assert history.details("swap").display_name is None
+    commit = history.set_details(
+        "swap", display_name="Nightly swap", description="# Swap\nIt swaps."
+    )
+    assert commit is not None and commit == history.head()
+    found = json.loads((history.root / "swap" / "flow.json").read_text())
+    assert found == {"display_name": "Nightly swap", "description": "# Swap\nIt swaps."}
+    details = history.details("swap")
+    assert (details.display_name, details.description) == ("Nightly swap", "# Swap\nIt swaps.")
+    [revision] = history.log("swap", limit=1)
+    assert revision.message == "Rename swap to Nightly swap"
+    assert "ScadBuddy-Flow-Details: swap" in history._out("log", "-1", "--format=%(trailers:only)")
+    # Not a version: the history still lists one.
+    assert [v.commit for v in history.versions("swap")] == [first]
+    # An omitted field is unchanged; an unchanged one commits nothing.
+    assert history.set_details("swap", description="Swaps.") is not None
+    assert history.details("swap").display_name == "Nightly swap"
+    assert history.log("swap", limit=1)[0].message == "Describe swap"
+    assert history.set_details("swap", description="Swaps.") is None
+    # A message of its own; an empty value clears the field, and with both cleared the
+    # file goes.
+    history.set_details("swap", display_name="", description="", message="Plain again")
+    assert history.log("swap", limit=1)[0].message == "Plain again"
+    assert not (history.root / "swap" / "flow.json").exists()
+
+
+def test_details_of_a_flow_with_no_version_are_refused(history: FlowHistory) -> None:
+    with pytest.raises(RevisionNotFoundError):
+        history.set_details("nothing", display_name="Nothing")
+
+
+def test_a_new_version_and_a_restore_keep_the_flows_details(history: FlowHistory) -> None:
+    """Details are the flow's, not a version's: a restore of a version from before
+    they were set keeps them."""
+    _, first, _ = register(history, "swap", ONE)
+    history.set_details("swap", display_name="Nightly swap")
+    register(history, "swap", TWO)
+    assert history.details("swap").display_name == "Nightly swap"
+    restored, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=first)
+    assert history.details("swap").display_name == "Nightly swap"
+    assert history.script_at("swap", restored) == ONE
+
+
+def test_a_registration_with_details_commits_them_after_the_version(
+    history: FlowHistory,
+) -> None:
+    commit, version = history.register(
+        "swap",
+        str(uuid.uuid4()),
+        lambda c, v: None,
+        script=ONE,
+        display_name="Nightly swap",
+        description="Swaps.",
+    )
+    assert version == 1 and history.head() != commit
+    messages = [r.message for r in history.log("swap", limit=2)]
+    assert messages == ["Rename swap to Nightly swap", "Register swap v1"]
+    assert "swap/flow.json" not in history._out("show", "--name-only", "--format=", commit)
+    # The same details again commit nothing more.
+    again, _ = history.register(
+        "swap", str(uuid.uuid4()), lambda c, v: None, script=TWO, display_name="Nightly swap"
+    )
+    assert history.head() == again
+
+
+def test_a_failed_details_commit_leaves_the_version_and_says_so(
+    history: FlowHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The version is committed and indexed first; a details commit that then fails is
+    rolled back on disk and reported with the version, never as a failed registration
+    (a retry would add one more version)."""
+    register(history, "swap", ONE)
+    history.set_details("swap", display_name="Nightly swap")
+    real = history._commit_locked
+
+    def failing(message: str, *paths: str, **kwargs: Any) -> str | None:
+        if any(t.startswith(DETAILS_TRAILER) for t in kwargs.get("trailers", ())):
+            raise GitError("could not commit the details")
+        return real(message, *paths, **kwargs)
+
+    monkeypatch.setattr(history, "_commit_locked", failing)
+    indexed: list[tuple[str, int]] = []
+    with pytest.raises(DetailsNotSavedError) as caught:
+        history.register(
+            "swap",
+            str(uuid.uuid4()),
+            lambda c, v: indexed.append((c, v)),
+            script=TWO,
+            display_name="Renamed",
+        )
+    assert (caught.value.commit, caught.value.version) == indexed[0]
+    assert indexed[0][1] == 2 and history.head() == indexed[0][0]
+    # The file and the index are as the last details commit left them.
+    assert history.details("swap").display_name == "Nightly swap"
+    assert history._out("status", "--porcelain").strip() == ""
+
+
+def test_a_body_ending_in_a_key_value_paragraph_keeps_it(history: FlowHistory) -> None:
+    """Only the trailers ScadBuddy adds are taken off a body: a paragraph of the
+    person's own that reads like trailers stays."""
+    history.register(
+        "swap",
+        str(uuid.uuid4()),
+        lambda c, v: None,
+        script=ONE,
+        body="Notes.\n\nReviewed-by: Sam\nTicket: 42",
+    )
+    assert history.versions("swap")[0].body == "Notes.\n\nReviewed-by: Sam\nTicket: 42"
+    history.register(
+        "swap", str(uuid.uuid4()), lambda c, v: None, script=TWO, body="Reviewed-by: Sam"
+    )
+    assert history.versions("swap")[0].body == "Reviewed-by: Sam"
+
+
+def test_restoring_a_deleted_flow_brings_back_its_details_at_that_version(
+    history: FlowHistory,
+) -> None:
+    """A deleted flow has no details in the tree: a restore brings back the ones it had
+    at the restored commit, in the version's own commit."""
+    _, first, _ = register(history, "swap", ONE)
+    history.set_details("swap", display_name="Old name")
+    _, second, _ = register(history, "swap", TWO)
+    history.set_details("swap", display_name="New name")
+    history.delete("swap", lambda _c: None)
+    # Deleted, it reads as it was when it was deleted (the list's archived view).
+    assert not (history.root / "swap").exists()
+    assert history.details("swap").display_name == "New name"
+    restored, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=second)
+    assert history.details("swap").display_name == "Old name"
+    changed = history._out("show", "--name-only", "--format=", restored).split()
+    assert "swap/flow.json" in changed
+    # A version from before any details had none, so the flow comes back without.
+    history.delete("swap", lambda _c: None)
+    history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=first)
+    assert history.details("swap").display_name is None
+
+
+def test_a_versions_diff_never_shows_the_flows_details(history: FlowHistory) -> None:
+    """Details are the flow's, not a version's: a details change between two versions,
+    or brought back by a deleted flow's restore, is no hunk of their diff."""
+    _, first, _ = register(history, "swap", ONE)
+    history.set_details("swap", display_name="Nightly swap")
+    _, second, _ = register(history, "swap", ONE)
+    _, _, patch = history.diff_flow("swap", first, second)
+    assert patch == ""
+    _, third, _ = register(history, "swap", TWO)
+    _, _, patch = history.diff_flow("swap", None, third)
+    assert "flow.py" in patch and "flow.json" not in patch
+    history.delete("swap", lambda _c: None)
+    restored, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=first)
+    _, _, patch = history.diff_flow("swap", None, restored)
+    assert "flow.json" not in patch and "-    return 2" in patch
+
+
+def test_a_display_name_is_one_line_of_printable_text(history: FlowHistory) -> None:
+    register(history, "swap", ONE)
+    history.set_details(
+        "swap", display_name="  Nightly\nswap\x1f batch\t ", description="# A\n\nB\x00."
+    )
+    details = history.details("swap")
+    assert details.display_name == "Nightly swap batch"
+    # The description is Markdown: its lines stay, control characters go.
+    assert details.description == "# A\n\nB."
+
+
+def test_details_of_a_deleted_flow_are_refused_as_deleted(history: FlowHistory) -> None:
+    register(history, "swap", ONE)
+    history.delete("swap", lambda _c: None)
+    with pytest.raises(FlowNotPresentError):
+        history.set_details("swap", display_name="Back")
+
+
+def test_a_damaged_flow_json_reads_as_no_details(history: FlowHistory) -> None:
+    register(history, "swap", ONE)
+    (history.root / "swap" / "flow.json").write_text("not json")
+    assert history.details("swap").display_name is None
