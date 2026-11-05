@@ -23,5 +23,7 @@ class RevisionInput(BaseModel):
 class RevisionAnswerInput(BaseModel):
     """The customer's answer to the newest sent revision (`superseded` is never theirs)."""
 
+    model_config = ConfigDict(extra="forbid")
+
     answer: Literal["accepted", "changes_requested"]
     note: str = Field(default="", max_length=4000)
