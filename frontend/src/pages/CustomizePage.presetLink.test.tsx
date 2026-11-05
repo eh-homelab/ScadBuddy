@@ -1,7 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Link, Route, Routes, useLocation } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { Job } from '../api/types'
 import { keychainSchema } from '../mocks/fixtures'
 import { mockSettings, setMockPresets, setMockSettings } from '../mocks/handlers'
@@ -123,6 +123,10 @@ describe('a link to a preset (#1022)', () => {
     await selectOption(user, select, 'No preset')
     await waitFor(() => expect(where()).toBe('/m/name-keychain'))
     await user.click(screen.getByRole('link', { name: 'Open Tiny' }))
+    // With no preset selected the values on screen are no preset's, so it asks, as a
+    // pick of Tiny in the picker would.
+    const asked = await screen.findByRole('alertdialog', { name: 'Apply preset Tiny?' })
+    await user.click(within(asked).getByRole('button', { name: 'Replace my changes' }))
     await waitFor(() => expect(select).toHaveTextContent('Tiny'))
     expect(where()).toBe('/m/name-keychain?preset=template-tiny')
   })
@@ -151,6 +155,60 @@ describe('a link to a preset (#1022)', () => {
     expect(await screen.findByTestId('preset-link-missing')).toHaveTextContent('injected')
     expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan')
   })
+
+  it('stops waiting for presets that never come, and opens on the defaults', async () => {
+    // Real time still passes, so the page's own waits run; the test advances the fakes.
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    let answer = () => {}
+    const stalled = new Promise<void>((resolve) => {
+      answer = resolve
+    })
+    onTestFinished(() => {
+      answer()
+      vi.useRealTimers()
+    })
+    const renders = watchRenders()
+    server.use(
+      http.get('/api/v1/models/:slug/presets', async () => {
+        await stalled
+        return HttpResponse.json([])
+      }),
+    )
+    render(`/m/name-keychain?preset=${MUM}`)
+    await screen.findByRole('textbox', { name: 'Name on the tag' })
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(await screen.findByTestId('preset-link-missing')).toHaveTextContent('did not answer in time')
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan')
+    // The defaults render once the link has been given up on.
+    await waitFor(() => expect(renders.length).toBeGreaterThan(0), { timeout: 5_000 })
+    await waitFor(() => expect(where()).toBe('/m/name-keychain'))
+  })
+
+  it('asks before a link replaces unsaved edits, as a pick does', async () => {
+    const { user } = render(`/m/name-keychain?preset=${MUM}`)
+    const select = await picker()
+    await waitFor(() => expect(select).toHaveTextContent('Mum'))
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.type(name, 'my')
+    await screen.findByTestId('preset-modified')
+
+    await user.click(screen.getByRole('link', { name: 'Open Tiny' }))
+    const asked = await screen.findByRole('alertdialog', { name: 'Apply preset Tiny?' })
+    expect(name).toHaveValue('Mummy')
+    await user.click(within(asked).getByRole('button', { name: 'Cancel' }))
+    // Declined: the edits stay, and the URL names the preset still selected.
+    await waitFor(() => expect(where()).toBe(`/m/name-keychain?preset=${MUM}`))
+    expect(name).toHaveValue('Mummy')
+    expect(select).toHaveTextContent('Mum')
+    expect(screen.queryByTestId('preset-link-missing')).toBeNull()
+
+    await user.click(screen.getByRole('link', { name: 'Open Tiny' }))
+    const again = await screen.findByRole('alertdialog', { name: 'Apply preset Tiny?' })
+    await user.click(within(again).getByRole('button', { name: 'Replace my changes' }))
+    await waitFor(() => expect(select).toHaveTextContent('Tiny'))
+    expect(screen.getByRole('spinbutton', { name: 'Text size value' })).toHaveValue(10)
+    expect(where()).toBe('/m/name-keychain?preset=template-tiny')
+  })
 })
 
 describe('Copy link (#1022)', () => {
@@ -172,6 +230,20 @@ describe('Copy link (#1022)', () => {
       expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/m/name-keychain?preset=${MUM}`),
     )
     expect(await screen.findByText('Link copied.')).toBeInTheDocument()
+  })
+
+  it('takes the status away when the menu next opens', async () => {
+    setMockSettings({ ...mockSettings(), public_url: null })
+    const { user } = render('/m/name-keychain')
+    stubClipboard()
+    const select = await picker()
+    await selectOption(user, select, 'Mum')
+    await user.click(screen.getByRole('button', { name: 'More for preset Mum' }))
+    await user.click(await screen.findByRole('menuitem', { name: 'Copy link to preset Mum' }))
+    expect(await screen.findByText('Link copied.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'More for preset Mum' }))
+    await screen.findByRole('menuitem', { name: 'Copy link to preset Mum' })
+    expect(screen.queryByTestId('preset-link-copy')).toBeNull()
   })
 
   it('uses the configured public URL when one is set', async () => {
