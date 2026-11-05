@@ -394,6 +394,15 @@ class ParamPreset(BaseModel):
     description: str = Field(description="Short Markdown; empty when there is none.")
     tags: list[str]
     updated_at: datetime | None = None
+    path: str | None = Field(
+        default=None,
+        description="#1022: the app's page for this preset, `/m/<slug>?preset=<id>`, which "
+        "opens the customizer with it applied.",
+    )
+    url: str | None = Field(
+        default=None,
+        description="`path` under the configured public URL; null when none is set.",
+    )
 
 
 def _same_name(a: str, b: str) -> bool:

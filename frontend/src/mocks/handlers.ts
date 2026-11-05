@@ -58,7 +58,7 @@ import type {
   UpstreamState,
   UpstreamStatus,
 } from '../api/types'
-import { editPath } from '../lib/deeplink'
+import { editPath, presetPath } from '../lib/deeplink'
 import { type CatalogueQuery, DEFAULT_QUERY, MAX_TAG_FILTER_CHARS, MAX_TAG_FILTERS, filterModels, tagCounts } from '../lib/catalogueQuery'
 import { foldFamily } from '../lib/fonts'
 import { emitRealtime, realtimeHandler } from './realtime'
@@ -1360,6 +1360,13 @@ function presetRefusal(
   return undefined
 }
 
+/** #1022 — `api/presets.py` `linked`: the preset's page, absolute under the public URL. */
+function linkedPreset(slug: string, preset: ParamPreset): ParamPreset {
+  const path = presetPath(slug, preset.id)
+  const publicUrl = state.settings.public_url
+  return { ...preset, path, url: publicUrl ? `${publicUrl.replace(/\/$/, '')}${path}` : null }
+}
+
 /** `api/presets.py`'s words for a preset that is gone, and for one the template ships (#357). */
 const PRESET_GONE = 'That preset no longer exists; it may have been deleted elsewhere.'
 const PRESET_READ_ONLY =
@@ -2515,7 +2522,7 @@ export const handlers = [
   http.get(`${base}/models/:slug/presets`, ({ params }) => {
     const slug = String(params['slug'])
     if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
-    return HttpResponse.json(state.presets[slug] ?? [])
+    return HttpResponse.json((state.presets[slug] ?? []).map((preset) => linkedPreset(slug, preset)))
   }),
 
   http.post(`${base}/models/:slug/presets`, async ({ params, request }) => {
@@ -2546,7 +2553,7 @@ export const handlers = [
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), created]
     await delay(60)
-    return HttpResponse.json(created, { status: 201 })
+    return HttpResponse.json(linkedPreset(slug, created), { status: 201 })
   }),
 
   http.post(`${base}/models/:slug/presets/:id/duplicate`, async ({ params, request }) => {
@@ -2572,7 +2579,7 @@ export const handlers = [
     }
     state.presets[slug] = [...(state.presets[slug] ?? []), copy]
     await delay(60)
-    return HttpResponse.json(copy, { status: 201 })
+    return HttpResponse.json(linkedPreset(slug, copy), { status: 201 })
   }),
 
   http.patch(`${base}/models/:slug/presets/:id`, async ({ params, request }) => {
@@ -2609,7 +2616,7 @@ export const handlers = [
     }
     state.presets[slug] = (state.presets[slug] ?? []).map((p) => (p.id === id ? updated : p))
     await delay(60)
-    return HttpResponse.json(updated)
+    return HttpResponse.json(linkedPreset(slug, updated))
   }),
 
   http.delete(`${base}/models/:slug/presets/:id`, ({ params }) => {

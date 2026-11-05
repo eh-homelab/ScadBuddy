@@ -23,6 +23,10 @@ const jobId = z
   .string()
   .regex(/^[0-9a-f]{32}$/, 'must be a render job id: 32 lowercase hex digits, as render_model returns it')
   .describe('Render job id, as render_model returns it')
+// #1022 — every preset the backend answers with carries its link (api/presets.py `linked`).
+const PRESET_LINK =
+  " Each preset's `url` opens ScadBuddy's customizer with it applied, a link to hand the user; `path` is the same " +
+  'link on ScadBuddy\'s own origin, for when `url` is null (no public URL is set).'
 const presetId = z.string().regex(/^[a-z0-9-]{1,64}$/).describe('Preset id, as list_presets returns it')
 // The bounds of backend/scadbuddy/library/presets.py (#327).
 const presetDescription = z.string().max(2000).describe("What the preset is for, in short Markdown")
@@ -439,7 +443,7 @@ export const customizerTools: Tool[] = [
   defineTool({
     name: 'list_presets',
     label: "List a model's presets",
-    description: "A model's saved parameter presets, including read-only ones a template ships." + PAGED,
+    description: "A model's saved parameter presets, including read-only ones a template ships." + PRESET_LINK + PAGED,
     input: z.object({ slug, ...pageInput }),
     risk: 'read',
     source:
@@ -459,7 +463,7 @@ export const customizerTools: Tool[] = [
   defineTool({
     name: 'save_preset',
     label: 'Save a preset',
-    description: 'Save a parameter set as a named preset of a model, optionally with a description and tags.',
+    description: 'Save a parameter set as a named preset of a model, optionally with a description and tags.' + PRESET_LINK,
     input: z.object({
       slug,
       name: z.string().min(1).max(80),
@@ -486,7 +490,8 @@ export const customizerTools: Tool[] = [
     name: 'update_preset',
     label: 'Edit a preset',
     description:
-      'Rename a preset or replace its values, description or tags. Omitted fields are unchanged; an empty description or tag list clears it.',
+      'Rename a preset or replace its values, description or tags. Omitted fields are unchanged; an empty description or tag list clears it.' +
+      PRESET_LINK,
     input: z.object({
       slug,
       preset_id: presetId,
@@ -513,7 +518,7 @@ export const customizerTools: Tool[] = [
   defineTool({
     name: 'duplicate_preset',
     label: 'Duplicate a preset',
-    description: 'Copy a preset (including a read-only one a template ships) under a new name.',
+    description: 'Copy a preset (including a read-only one a template ships) under a new name.' + PRESET_LINK,
     input: z.object({ slug, preset_id: presetId, name: z.string().min(1).max(80) }),
     risk: 'write',
     routes: ['POST /api/v1/models/{slug}/presets/{preset_id}/duplicate'],
