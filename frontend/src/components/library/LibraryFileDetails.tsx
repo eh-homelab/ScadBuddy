@@ -88,10 +88,6 @@ export function LibraryFileDetails({
   onDelete,
   dialogs,
 }: Props) {
-  // While the page reads its listing again (after a rename, a move), the file last listed
-  // stays on screen.
-  const [last, setLast] = useState<LibraryEntry | LibraryFileEntry | null>(listedFile)
-  if (listedFile && listedFile !== last) setLast(listedFile)
   // #5321 — a file no listing on screen holds (one only Advanced lists, or one moved
   // away) is read alone, by id.
   const unlisted = listedFile === null && listed
@@ -99,10 +95,17 @@ export function LibraryFileDetails({
     () => (unlisted ? api.getLibraryFile(fileId) : Promise.resolve(null)),
     [fileId, unlisted],
   )
-  const file = listedFile ?? (unlisted ? (read.data ?? (read.loading ? last : null)) : last)
+  const byId = unlisted ? (read.data ?? null) : null
+  // While the page reads its listing again (after a rename, a move, Advanced), the file
+  // last shown, listed or read by id, stays on screen.
+  const [last, setLast] = useState<LibraryEntry | LibraryFileEntry | null>(listedFile)
+  const current = listedFile ?? byId
+  if (current && current !== last) setLast(current)
+  const file = current ?? (unlisted && !read.loading ? null : last)
   const readError = unlisted && !read.loading ? problem(read.error, `Could not read file #${fileId}.`) : null
-  // A file read by id names its folder's path itself.
-  const where = folderPath ?? (file && 'folder_path' in file ? ((file as LibraryFileEntry).folder_path ?? null) : null)
+  // Only the read by id names its folder's path itself, as it is now. A copy the page keeps
+  // after a move may carry the path it had (a search hit's), so its folder id says where.
+  const where = folderPath ?? byId?.folder_path ?? null
   return (
     <RecordDrawer
       onClose={onClose}

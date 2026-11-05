@@ -176,12 +176,11 @@ function folderPathOf(id: number | null | undefined): string[] {
 function searchFiles(query: string, all: boolean): LibrarySearch {
   const words = (text: string) => text.toLowerCase().replace(/[\s_\-.()[\]]+/g, ' ').trim()
   const terms = words(query).split(' ').filter(Boolean)
-  const pathOf = folderPathOf
   const matched = terms.length === 0
     ? []
     : listedFiles().filter((file) => {
         const name = words(file.filename)
-        const where = words(pathOf(file.folder_id).join(' '))
+        const where = words(folderPathOf(file.folder_id).join(' '))
         return terms.every((term) => name.includes(term) || where.includes(term))
       })
   const shown = matched.filter((file) => all || file.file_type?.toLowerCase() === '3mf')
@@ -193,7 +192,7 @@ function searchFiles(query: string, all: boolean): LibrarySearch {
     files: shown.slice(0, 100).map((file) => ({
       ...file,
       output_id: mockLibraryOutput(file.id) ?? null,
-      folder_path: pathOf(file.folder_id),
+      folder_path: folderPathOf(file.folder_id),
     })),
     total: shown.length,
     hidden: matched.length - shown.length,

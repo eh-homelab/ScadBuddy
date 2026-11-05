@@ -1346,6 +1346,57 @@ describe('LibraryPage file details (#1031)', () => {
     expect(within(drawer).queryByText(/is not listed here/)).toBeNull()
   })
 
+  it('shows a file read by id in the folder a move from its details took it to (#5333 review)', async () => {
+    libraryPrints({})
+    const { user } = renderPage(
+      <>
+        <LibraryPage />
+        <Where />
+      </>,
+      { route: '/library?details=46' },
+    )
+    const drawer = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    await waitFor(() => expect(within(drawer).getByTestId('library-details-facts')).toHaveTextContent('Supplies / Storage'))
+    await user.click(within(drawer).getByRole('button', { name: 'Move to…' }))
+    const move = await screen.findByRole('dialog', { name: /^Move Desiccant_Box\.stl to…/ })
+    await user.click(within(move).getByTestId('library-move-folder-1'))
+    await user.click(within(move).getByTestId('library-move-confirm'))
+    await waitFor(() => expect(screen.getByTestId('where')).toHaveTextContent(/^\/library\/MakerWorld\?details=46$/))
+    const after = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    await waitFor(() => expect(within(after).getByTestId('library-details-facts')).toHaveTextContent('MakerWorld'))
+    expect(within(after).getByTestId('library-details-facts')).not.toHaveTextContent('Storage')
+  })
+
+  it('shows a search hit a move takes out of the results in its new folder (#5333 review)', async () => {
+    window.localStorage.setItem('scadbuddy.library.advanced', '1')
+    libraryPrints({})
+    const { user } = renderPage(<LibraryPage />, { route: '/library?q=storage&details=46' })
+    const drawer = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    await waitFor(() => expect(within(drawer).getByTestId('library-details-facts')).toHaveTextContent('Supplies / Storage'))
+    await user.click(within(drawer).getByRole('button', { name: 'Move to…' }))
+    const move = await screen.findByRole('dialog', { name: /^Move Desiccant_Box\.stl to…/ })
+    await user.click(within(move).getByTestId('library-move-folder-1'))
+    await user.click(within(move).getByTestId('library-move-confirm'))
+    // It matched "storage" by its folder only: the search no longer finds it.
+    await waitFor(() => expect(screen.queryByTestId('library-file-46')).toBeNull())
+    const after = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    await waitFor(() => expect(within(after).getByTestId('library-details-facts')).toHaveTextContent('MakerWorld'))
+    expect(within(after).getByTestId('library-details-facts')).not.toHaveTextContent('Storage')
+  })
+
+  it('keeps a file read by id on screen while the listing is read again (#5333 review)', async () => {
+    libraryPrints({})
+    renderPage(<LibraryPage />, { route: '/library?details=46' })
+    const drawer = await screen.findByRole('dialog', { name: 'Desiccant_Box.stl' })
+    await within(drawer).findByTestId('library-details-facts')
+    // The next listing never answers: the page has none on screen meanwhile.
+    server.use(http.get('/api/v1/print/library', () => delay('infinite')))
+    fireEvent.click(screen.getByTestId('library-advanced'))
+    await waitFor(() => expect(screen.queryByTestId('library-file-89')).toBeNull())
+    expect(screen.getByRole('dialog', { name: 'Desiccant_Box.stl' })).toBeInTheDocument()
+    expect(within(screen.getByRole('dialog')).getByTestId('library-details-facts')).toHaveTextContent('Supplies / Storage')
+  })
+
   it('says when the linked file is not in the library', async () => {
     libraryPrints({})
     renderPage(<LibraryPage />, { route: '/library?details=9999' })
