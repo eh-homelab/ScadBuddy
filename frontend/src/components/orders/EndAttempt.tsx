@@ -9,12 +9,12 @@ import { OUTCOMES } from './outcomes'
 import { refusalText } from './refusal'
 
 
-/** Whether `attempt` can be ended now: not accepted, no outcome and no end recorded, and
- * not a claimed print still starting (its run not attached yet), which
- * `Lifecycle.update_fulfilment` refuses as `print_starting`. */
+/** Whether `attempt` is still open: not accepted, no outcome and no end recorded. A claim
+ * with no run is open too: after a lost reply or a timed-out start it blocks every later
+ * print until a person ends it. While its print operation still runs, the backend refuses
+ * the end as `print_starting`, and the form shows that refusal. */
 function attemptOpen(attempt: Fulfilment): boolean {
-  const starting = attempt.print_request_id != null && attempt.print_run_id == null
-  return !attempt.accepted_at && attempt.outcome === 'unknown' && attempt.finished_at === null && !starting
+  return !attempt.accepted_at && attempt.outcome === 'unknown' && attempt.finished_at === null
 }
 
 /** `date` as a `datetime-local` value, in the browser's time zone. */
@@ -74,7 +74,8 @@ export function EndAttempt({
   }
 
   async function save() {
-    const quantity = made ? Number(count) : attempt.quantity
+    // `Number('')` is 0: an empty count is an error, not "none made".
+    const quantity = made ? (count.trim() === '' ? NaN : Number(count)) : attempt.quantity
     if (!Number.isInteger(quantity) || quantity < 0) {
       setError('Enter how many were made, 0 or more.')
       return

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../../api/client'
 import type { Fulfilment } from '../../api/types'
 import { resetMockState } from '../../mocks/handlers'
+import { printsStarting } from '../../mocks/features/orders/orders'
 import { ITEM_APPROVED, ITEM_DRAFT, ORDER_ACCEPTED, ORDER_DRAFT, revisionsOf, state } from '../../mocks/features/orders/state'
 import { OrderPage } from '../../pages/OrderPage'
 import { choose } from '../../test/select'
@@ -173,14 +174,46 @@ describe('EndAttempt (#5316)', () => {
     expect(updated.mock.calls[0]![3].failure_reason).toBe('clogged once')
   })
 
-  it('offers no end while the claimed print is still starting', async () => {
-    // `Lifecycle.update_fulfilment` refuses `print_starting` for a claim with no run yet.
+  it('ends a claim whose start ended without a run, which blocks every later print', async () => {
+    // A lost reply or a timed-out start leaves the claim with no run; a person settles it
+    // by hand (backend `test_a_claim_whose_start_ended_is_settled_by_hand`).
     inFlight(ITEM_APPROVED, { print_request_id: 'req-1', print_run_id: null })
     state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'queued'
     state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'in_production'
-    render(ORDER_ACCEPTED, ITEM_APPROVED)
-    await screen.findByRole('list', { name: 'Attempts' })
-    expect(screen.queryByRole('button', { name: /^End attempt/ })).toBeNull()
+    const { user } = render(ORDER_ACCEPTED, ITEM_APPROVED)
+    await user.click(await screen.findByRole('button', { name: 'End attempt 1' }))
+    const form = await screen.findByRole('form', { name: 'End attempt 1' })
+    await choose(user, within(form).getByRole('combobox', { name: 'Outcome' }), 'failed')
+    await user.click(within(form).getByRole('button', { name: 'Save outcome' }))
+    await waitFor(() => expect(state.fulfilments.find((f) => f.id === `f-open-${ITEM_APPROVED}`)!.outcome).toBe('failed'))
+    expect(await screen.findByTestId('print-item')).toHaveTextContent('Print again…')
+  })
+
+  it("shows the backend's print_starting refusal while the claim's print is still starting", async () => {
+    inFlight(ITEM_APPROVED, { print_request_id: 'req-1', print_run_id: null })
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'queued'
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'in_production'
+    printsStarting.add(ITEM_APPROVED)
+    const { user } = render(ORDER_ACCEPTED, ITEM_APPROVED)
+    await user.click(await screen.findByRole('button', { name: 'End attempt 1' }))
+    const form = await screen.findByRole('form', { name: 'End attempt 1' })
+    await user.click(within(form).getByRole('button', { name: 'Save outcome' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('still starting')
+    expect(state.fulfilments.find((f) => f.id === `f-open-${ITEM_APPROVED}`)!.outcome).toBe('unknown')
+  })
+
+  it('refuses an empty count, as an empty end time', async () => {
+    inFlight(ITEM_APPROVED)
+    state.items.find((i) => i.id === ITEM_APPROVED)!.status = 'queued'
+    state.orders.find((o) => o.id === ORDER_ACCEPTED)!.status = 'in_production'
+    const updated = vi.spyOn(api, 'updateFulfilment')
+    const { user } = render(ORDER_ACCEPTED, ITEM_APPROVED)
+    await user.click(await screen.findByRole('button', { name: 'End attempt 1' }))
+    const form = await screen.findByRole('form', { name: 'End attempt 1' })
+    await user.clear(within(form).getByLabelText('Made'))
+    await user.click(within(form).getByRole('button', { name: 'Save outcome' }))
+    expect(await within(form).findByRole('alert')).toHaveTextContent('Enter how many were made, 0 or more.')
+    expect(updated).not.toHaveBeenCalled()
   })
 
   it('offers no end for an attempt already ended or accepted', async () => {
