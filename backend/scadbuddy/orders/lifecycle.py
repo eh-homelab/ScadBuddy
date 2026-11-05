@@ -44,6 +44,8 @@ from scadbuddy.orders.models import (
     AttachmentRole,
     ChargeInput,
     ColourSlot,
+    CostEntry,
+    CostEntryInput,
     Fulfilment,
     FulfilmentPurpose,
     ItemStatus,
@@ -59,6 +61,8 @@ from scadbuddy.orders.models import (
     Revision,
     Shipment,
     ShipmentItem,
+    TimeEntry,
+    TimeEntryInput,
 )
 from scadbuddy.orders.pricing import Plate, Priced
 from scadbuddy.orders.reference import ResolvedReference
@@ -534,6 +538,104 @@ class Lifecycle:
             self._event(conn, order, by, "payment.added", payment_id=payment.id)
         self._told(_Change(order))
         return payment
+
+    # -- time and cost entries (job cost spec 2026-11-05 §4.3-4.5, #5326) ---------------
+    # A record of what the job took, allowed in every status, ended and on hold included:
+    # a fee or a label often arrives after the order moved on. Nothing here moves a status.
+
+    def _entry_item(self, conn: Conn, order: Order, item_id: str | None) -> list[OrderItem]:
+        return [] if item_id is None else [self._item_of(conn, order, item_id)]
+
+    def add_time_entry(
+        self, order_id: str, body: TimeEntryInput, by: Actor, *, rate_minor_per_hour: int | None
+    ) -> TimeEntry:
+        """Time spent, at ``rate_minor_per_hour`` (the labour rate now, copied)."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            items = self._entry_item(conn, order, body.order_item_id)
+            entry = self.store.insert_time_entry(
+                conn, order.id, body, rate_minor_per_hour=rate_minor_per_hour, created_by=by
+            )
+            self._event(
+                conn,
+                order,
+                by,
+                "time.added",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                minutes=entry.minutes,
+            )
+        self._told(_Change(order, [(item, None) for item in items]))
+        return entry
+
+    def remove_time_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            entry = self.store.delete_time_entry(conn, order.id, entry_id)
+            if entry is None:
+                raise LifecycleError(
+                    "time_entry_not_found",
+                    f"no time entry {entry_id} of order {order.number}",
+                    not_found=True,
+                )
+            self._event(
+                conn,
+                order,
+                by,
+                "time.removed",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                minutes=entry.minutes,
+            )
+            items = self._entry_item(conn, order, entry.order_item_id)
+        self._told(_Change(order, [(item, None) for item in items]))
+
+    def add_cost_entry(self, order_id: str, body: CostEntryInput, by: Actor) -> CostEntry:
+        """Money spent. A second write of one ``source`` returns the first entry and
+        writes nothing, not even an audit row."""
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            items = self._entry_item(conn, order, body.order_item_id)
+            entry, written = self.store.insert_cost_entry(conn, order.id, body, created_by=by)
+            if not written:
+                return entry
+            self._event(
+                conn,
+                order,
+                by,
+                "cost.added",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                amount_minor=entry.amount_minor,
+            )
+        self._told(_Change(order, [(item, None) for item in items]))
+        return entry
+
+    def remove_cost_entry(self, order_id: str, entry_id: str, by: Actor) -> None:
+        with self.store.transaction() as conn:
+            order = self._lock(conn, order_id)
+            entry = self.store.delete_cost_entry(conn, order.id, entry_id)
+            if entry is None:
+                raise LifecycleError(
+                    "cost_entry_not_found",
+                    f"no cost entry {entry_id} of order {order.number}",
+                    not_found=True,
+                )
+            self._event(
+                conn,
+                order,
+                by,
+                "cost.removed",
+                entry_id=entry.id,
+                item_id=entry.order_item_id,
+                entry_kind=entry.kind,
+                amount_minor=entry.amount_minor,
+            )
+            items = self._entry_item(conn, order, entry.order_item_id)
+        self._told(_Change(order, [(item, None) for item in items]))
 
     def hold(self, order_id: str, by: Actor) -> Order:
         return self._set_hold(order_id, by, True)

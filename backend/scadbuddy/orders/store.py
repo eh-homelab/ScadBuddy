@@ -38,6 +38,8 @@ from scadbuddy.orders.models import (
     ColourSlot,
     Contact,
     ContactInput,
+    CostEntry,
+    CostEntryInput,
     Customer,
     Filament,
     FilamentInput,
@@ -62,6 +64,8 @@ from scadbuddy.orders.models import (
     RevisionAnswer,
     Shipment,
     ShipmentItem,
+    TimeEntry,
+    TimeEntryInput,
 )
 from scadbuddy.orders.numbers import next_number
 
@@ -143,6 +147,11 @@ _SHIPMENT = (
 _CHARGE = "id, order_id, kind, label, amount_minor, position"
 _PAYMENT = "id, order_id, amount_minor, method, reference, received_at, notes, created_at"
 _EVENT = "id, order_id, at, by, kind, detail"
+_TIME_ENTRY = (
+    "id, order_id, order_item_id, kind, minutes, rate_minor_per_hour, note, started_at,"
+    " created_by, created_at"
+)
+_COST_ENTRY = "id, order_id, order_item_id, kind, amount_minor, note, source, created_by, created_at"
 _ATTACHMENT = (
     "id, order_id, subject, kind, role, filename, media_type, size_bytes, sha256, blob_key,"
     " caption, created_at, created_by, attempt_item_id, fulfilment_id"
@@ -1822,6 +1831,107 @@ class OrderStore:
         assert row is not None
         conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
         return Payment.model_validate(row)
+
+    # -- time and cost entries (job cost spec §4.3, §4.4, #5326) ------------------------
+
+    def time_entries(self, order_id: str, *, conn: Conn | None = None) -> list[TimeEntry]:
+        with self._read(conn) as c:
+            rows = c.execute(
+                f"SELECT {_TIME_ENTRY} FROM order_time_entries WHERE order_id = %s"
+                " ORDER BY created_at, id",
+                (order_id,),
+            ).fetchall()
+        return [TimeEntry.model_validate(r) for r in rows]
+
+    def insert_time_entry(
+        self,
+        conn: Conn,
+        order_id: str,
+        body: TimeEntryInput,
+        *,
+        rate_minor_per_hour: int | None,
+        created_by: Actor,
+    ) -> TimeEntry:
+        row = conn.execute(
+            "INSERT INTO order_time_entries (order_id, order_item_id, kind, minutes,"
+            " rate_minor_per_hour, note, started_at, created_by)"
+            f" VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING {_TIME_ENTRY}",
+            (
+                order_id,
+                body.order_item_id,
+                body.kind,
+                body.minutes,
+                rate_minor_per_hour,
+                body.note,
+                body.started_at,
+                Jsonb(created_by.model_dump(mode="json")),
+            ),
+        ).fetchone()
+        assert row is not None
+        conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
+        return TimeEntry.model_validate(row)
+
+    def delete_time_entry(self, conn: Conn, order_id: str, entry_id: str) -> TimeEntry | None:
+        row = conn.execute(
+            "DELETE FROM order_time_entries WHERE id = %s AND order_id = %s"
+            f" RETURNING {_TIME_ENTRY}",
+            (entry_id, order_id),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
+        return TimeEntry.model_validate(row)
+
+    def cost_entries(self, order_id: str, *, conn: Conn | None = None) -> list[CostEntry]:
+        with self._read(conn) as c:
+            rows = c.execute(
+                f"SELECT {_COST_ENTRY} FROM order_cost_entries WHERE order_id = %s"
+                " ORDER BY created_at, id",
+                (order_id,),
+            ).fetchall()
+        return [CostEntry.model_validate(r) for r in rows]
+
+    def insert_cost_entry(
+        self, conn: Conn, order_id: str, body: CostEntryInput, *, created_by: Actor
+    ) -> tuple[CostEntry, bool]:
+        """The entry, and whether this call wrote it: an entry with the same order, kind
+        and ``source`` already there is returned as it is (§4.4's unique index)."""
+        row = conn.execute(
+            "INSERT INTO order_cost_entries (order_id, order_item_id, kind, amount_minor, note,"
+            " source, created_by) VALUES (%s, %s, %s, %s, %s, %s, %s)"
+            " ON CONFLICT (order_id, kind, source) WHERE source IS NOT NULL DO NOTHING"
+            f" RETURNING {_COST_ENTRY}",
+            (
+                order_id,
+                body.order_item_id,
+                body.kind,
+                body.amount_minor,
+                body.note,
+                body.source,
+                Jsonb(created_by.model_dump(mode="json")),
+            ),
+        ).fetchone()
+        if row is None:
+            existing = conn.execute(
+                f"SELECT {_COST_ENTRY} FROM order_cost_entries"
+                " WHERE order_id = %s AND kind = %s AND source = %s",
+                (order_id, body.kind, body.source),
+            ).fetchone()
+            assert existing is not None
+            return CostEntry.model_validate(existing), False
+        conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
+        return CostEntry.model_validate(row), True
+
+    def delete_cost_entry(self, conn: Conn, order_id: str, entry_id: str) -> CostEntry | None:
+        row = conn.execute(
+            "DELETE FROM order_cost_entries WHERE id = %s AND order_id = %s"
+            f" RETURNING {_COST_ENTRY}",
+            (entry_id, order_id),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute("UPDATE orders SET updated_at = now() WHERE id = %s", (order_id,))
+        return CostEntry.model_validate(row)
 
     # -- attachments (§6.2, #4251) ------------------------------------------------------
 
