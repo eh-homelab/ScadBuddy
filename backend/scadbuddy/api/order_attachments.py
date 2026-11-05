@@ -89,7 +89,7 @@ MAX_ROLE_BYTES = 32
 MAX_ID_BYTES = 100
 
 
-class AttachmentUpload(BaseModel):
+class OrderAttachmentUpload(BaseModel):
     """The multipart body of ``POST /orders/{id}[/items/{item}]/attachments``."""
 
     file: bytes = Field(description="Any file: a photo, a video, a PDF, a drawing, an STL")
@@ -99,7 +99,7 @@ class AttachmentUpload(BaseModel):
     )
 
 
-class RevisionAttachmentUpload(AttachmentUpload):
+class RevisionAttachmentUpload(OrderAttachmentUpload):
     """The multipart body of ``POST …/revisions/{revision}/attachments``."""
 
     fulfilment_id: str | None = Field(
@@ -273,7 +273,9 @@ _UPLOAD_DOC: dict[str, Any] = {
         "requestBody": {
             "required": True,
             "content": {
-                "multipart/form-data": {"schema": {"$ref": "#/components/schemas/AttachmentUpload"}}
+                "multipart/form-data": {
+                    "schema": {"$ref": "#/components/schemas/OrderAttachmentUpload"}
+                }
             },
         }
     },

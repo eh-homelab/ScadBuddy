@@ -471,7 +471,7 @@ def test_a_revision_file_names_its_test_attempt(client: TestClient) -> None:
 def test_the_revision_route_declares_its_fulfilment_field(client: TestClient) -> None:
     schemas = client.get("/openapi.json").json()["components"]["schemas"]
     assert "fulfilment_id" in schemas["RevisionAttachmentUpload"]["properties"]
-    assert "fulfilment_id" not in schemas["AttachmentUpload"]["properties"]
+    assert "fulfilment_id" not in schemas["OrderAttachmentUpload"]["properties"]
 
 
 def _revision_photo(
