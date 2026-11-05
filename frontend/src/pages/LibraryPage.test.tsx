@@ -71,12 +71,12 @@ function posted(path: string): { bodies: unknown[]; stop: () => void } {
   return { bodies, stop: () => server.events.removeListener('request:start', listen) }
 }
 
-
 /**
  * #2290 — a top level of `count` files, paged as the backend pages it: `limit`, `after`
- * (a 409 when `refuse` says so), the first page stretched to a linked `file_id`.
+ * (a 409 when `refuse` says so), the first page stretched to a linked `file_id`. The
+ * answer's `X-Total-Count` is `total`.
  */
-function bigTopLevel(count: number, refuse: () => boolean = () => false) {
+function bigTopLevel(count: number, refuse: () => boolean = () => false, total = count) {
   const files: LibraryEntry[] = Array.from({ length: count }, (_, n) => ({
     id: 5000 + n,
     filename: `part-${String(n).padStart(3, '0')}.3mf`,
@@ -101,7 +101,7 @@ function bigTopLevel(count: number, refuse: () => boolean = () => false) {
       if (after === null && linked !== null) size = Math.max(size, files.findIndex((file) => file.id === Number(linked)) + 1)
       return HttpResponse.json(
         { folder_id: null, all: false, folders: libraryFolders, files: files.slice(start, start + size), hidden: 0 },
-        { headers: { 'X-Total-Count': String(count) } },
+        { headers: { 'X-Total-Count': String(total) } },
       )
     }),
   )
@@ -141,6 +141,18 @@ describe('LibraryPage', () => {
     expect(screen.getByTestId('library-shown')).toHaveTextContent('Showing 130 of 130')
     expect(screen.queryByRole('button', { name: 'Load more' })).toBeNull()
     expect(screen.getByRole('button', { name: /^Select all in folder/ })).toBeInTheDocument()
+  })
+
+  it('drops Load more when a Load more finds no more files, though the total says more (#5291 review)', async () => {
+    // A file added before the cursor since the first page: the total counts it, no page after has it.
+    bigTopLevel(LIBRARY_PAGE_SIZE + 10, undefined, LIBRARY_PAGE_SIZE + 11)
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-file-5000')
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(cardCount()).toBe(LIBRARY_PAGE_SIZE + 10))
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Load more|Loading/ })).toBeNull())
+    expect(cardCount()).toBe(LIBRARY_PAGE_SIZE + 10)
   })
 
   it('opens with as many files as the URL says were shown, so Back returns to them (#2290)', async () => {

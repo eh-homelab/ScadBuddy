@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import type { LibraryFolderView } from '../../api/types'
 import { filterFolders, LibraryTree } from './LibraryTree'
@@ -36,5 +36,38 @@ describe('filterFolders (#2290)', () => {
 
   it('keeps every folder when the filter has no words', () => {
     expect(filterFolders(folders, '  ')).toBe(folders)
+  })
+})
+
+describe('LibraryTree while filtering (#5291 review)', () => {
+  const folders: LibraryFolderView[] = [
+    { id: 3, name: 'Supplies', parent_id: null, depth: 0 },
+    { id: 4, name: 'Storage Boxes', parent_id: 3, depth: 1 },
+    { id: 5, name: 'Bins', parent_id: 4, depth: 2 },
+  ]
+
+  it('opens every folder left, and its chevron and the arrow keys still fold and open them', () => {
+    render(<LibraryTree folders={folders} selected={null} onSelect={vi.fn()} filter="bins" />)
+    const supplies = screen.getByRole('treeitem', { name: 'Supplies' })
+    expect(supplies).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('treeitem', { name: 'Storage Boxes' })).toHaveAttribute('aria-expanded', 'true')
+
+    fireEvent.click(screen.getByTestId('library-folder-toggle-3'))
+    expect(supplies).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.click(screen.getByTestId('library-folder-toggle-3'))
+    expect(supplies).toHaveAttribute('aria-expanded', 'true')
+
+    fireEvent.keyDown(supplies, { key: 'ArrowLeft' })
+    expect(supplies).toHaveAttribute('aria-expanded', 'false')
+    fireEvent.keyDown(supplies, { key: 'ArrowRight' })
+    expect(supplies).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('opens every folder left again when the filter changes', () => {
+    const { rerender } = render(<LibraryTree folders={folders} selected={null} onSelect={vi.fn()} filter="bins" />)
+    fireEvent.click(screen.getByTestId('library-folder-toggle-3'))
+    expect(screen.getByRole('treeitem', { name: 'Supplies' })).toHaveAttribute('aria-expanded', 'false')
+    rerender(<LibraryTree folders={folders} selected={null} onSelect={vi.fn()} filter="box" />)
+    expect(screen.getByRole('treeitem', { name: 'Supplies' })).toHaveAttribute('aria-expanded', 'true')
   })
 })
