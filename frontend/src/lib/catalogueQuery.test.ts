@@ -9,6 +9,7 @@ import {
   type CatalogueQuery,
   clearFilters,
   filterModels,
+  fold,
   parseQuery,
   tagCounts,
   toParams,
@@ -186,6 +187,14 @@ describe('tagCounts', () => {
     expect(tagCounts(models.slice(0, 1), ['KEYCHAIN'])).not.toContainEqual(
       expect.objectContaining({ tag: 'KEYCHAIN' }),
     )
+  })
+})
+
+describe('fold strips combining marks only, as the backend does (#5292 review)', () => {
+  it('keeps spacing marks such as the long vowel mark and the caret', () => {
+    expect(fold('ケース')).not.toBe(fold('ケス'))
+    expect(fold('a^b')).toBe('a^b')
+    expect(fold('Crème')).toBe('creme')
   })
 })
 

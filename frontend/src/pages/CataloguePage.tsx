@@ -62,14 +62,16 @@ export function CataloguePage() {
   const { sort: _sort, ...facetFilters } = filters
   const facetKey = JSON.stringify(facetFilters)
   const loaded = useRef({ key: filterKey, size: MODELS_PAGE_SIZE })
-  // The window read in flight: a newer one stops it between chunks (#5292 review).
-  const windowRead = useRef<AbortController | undefined>(undefined)
+  // The window read in flight and its filters: a read for other filters stops it between
+  // chunks (#5292 review). One for the same filters lets it finish, so a background
+  // refresh that fails cannot cost a key its first answer.
+  const windowRead = useRef<{ key: string; controller: AbortController } | undefined>(undefined)
   const models = useAsync(
     () => {
       if (loaded.current.key !== filterKey) loaded.current = { key: filterKey, size: MODELS_PAGE_SIZE }
-      windowRead.current?.abort()
+      if (windowRead.current?.key !== filterKey) windowRead.current?.controller.abort()
       const controller = new AbortController()
-      windowRead.current = controller
+      windowRead.current = { key: filterKey, controller }
       return api.listModelsWindow(filters, loaded.current.size, controller.signal)
     },
     [filterKey],

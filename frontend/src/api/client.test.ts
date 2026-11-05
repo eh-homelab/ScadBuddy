@@ -2010,6 +2010,34 @@ describe('listModelsWindow reads past the backend page cap (#5289 review)', () =
     expect(asked).toEqual([null])
   })
 
+  it('answers the error of a second 409, after reading again once', async () => {
+    let reads = 0
+    server.use(
+      http.get('/api/v1/models', ({ request }) => {
+        const query = new URL(request.url).searchParams
+        reads += 1
+        if (query.get('after') !== null) return HttpResponse.json({ detail: 'gone' }, { status: 409 })
+        const limit = Number(query.get('limit'))
+        return HttpResponse.json(all.slice(0, limit), { headers: { 'X-Total-Count': String(all.length) } })
+      }),
+    )
+    const caught = await api.listModelsWindow(filters, 600).catch((cause: unknown) => cause)
+    expect((caught as ApiError).status).toBe(409)
+    expect(reads).toBe(4)
+  })
+
+  it('sends tags the backend tells apart, though the old fold took them for one (#5292 review)', async () => {
+    const sent: string[][] = []
+    server.use(
+      http.get('/api/v1/models', ({ request }) => {
+        sent.push(new URL(request.url).searchParams.getAll('tag'))
+        return HttpResponse.json([], { headers: { 'X-Total-Count': '0' } })
+      }),
+    )
+    await api.listModelsPage({ ...filters, tags: ['ケース', 'ケス', 'Box', 'box'] }, { limit: 24 })
+    expect(sent).toEqual([['ケース', 'ケス', 'Box']])
+  })
+
   it('stops at the end of the list', async () => {
     server.use(
       http.get('/api/v1/models', () =>

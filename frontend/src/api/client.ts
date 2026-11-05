@@ -335,9 +335,14 @@ export interface ModelFilters {
 function modelFilterParams({ q, tags, origin }: Omit<ModelFilters, 'sort'>): URLSearchParams {
   const query = new URLSearchParams()
   if (q.trim()) query.set('q', q.trim())
-  // One spelling of each tag as folded: the backend folds both sides, so the others
-  // select the same models, and its `MAX_TAGS` cap counts the list as sent (#5292 review).
-  for (const tag of new Map(tags.map((tag) => [fold(tag), tag])).values()) query.append('tag', tag)
+  // One spelling of each tag as folded (`fold` drops what the backend's does): the
+  // backend folds both sides, so the others select the same models, and its `MAX_TAGS` cap counts the list as sent (#5292 review).
+  const sent = new Set<string>()
+  for (const tag of tags) {
+    if (sent.has(fold(tag))) continue
+    sent.add(fold(tag))
+    query.append('tag', tag)
+  }
   if (origin !== 'all') query.set('origin', origin)
   return query
 }

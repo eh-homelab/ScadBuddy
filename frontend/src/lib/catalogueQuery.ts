@@ -79,9 +79,13 @@ export function clearFilters(query: CatalogueQuery): CatalogueQuery {
   return { ...DEFAULT_QUERY, sort: query.sort, view: query.view }
 }
 
-/** Case- and accent-insensitive form of `text`: "Crème" and "creme" fold alike. */
+/**
+ * Case- and accent-insensitive form of `text`: "Crème" and "creme" fold alike. Only
+ * combining marks go, as the backend's `fold` drops them (`api/models.py`): a spacing
+ * mark such as "ー" or "^" is part of the text (#5292 review).
+ */
 export function fold(text: string): string {
-  return text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase()
+  return text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
 }
 
 /**
