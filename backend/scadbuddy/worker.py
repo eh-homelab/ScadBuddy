@@ -55,7 +55,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY, Config
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.loop_watch import LoopWatch
-from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.metrics import Metrics, MetricsRole
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
@@ -190,6 +190,13 @@ def stored_solid_concurrency(source: RenderSettingsSource) -> Callable[[], Await
     return current
 
 
+def worker_metrics(settings: Settings, role: MetricsRole) -> Metrics:
+    """A worker's metrics: only the series ``role`` sets (#664), its build among them."""
+    metrics = Metrics(role=role)
+    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    return metrics
+
+
 def build_worker_deps(
     settings: Settings, *, stopping: Callable[[], bool] = lambda: False
 ) -> tuple[WorkerDeps, StoreBundle]:
@@ -208,8 +215,7 @@ def build_worker_deps(
         except OSError:
             logger.exception("could not seed library checkouts from the image")
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
-    metrics = Metrics()
-    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    metrics = worker_metrics(settings, "render")
     # The projection's job events go out on the API's bus: `publish_in` writes and
     # NOTIFYs in the row's transaction, so the listener is never started here.
     events = PgNotifyEventBus(
@@ -1137,8 +1143,7 @@ def build_print_deps(settings: Settings) -> PrintWorkerDeps:
             " reads outputs through the API's cluster-internal Service, e.g."
             " http://scadbuddy:8080"
         )
-    metrics = Metrics()
-    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    metrics = worker_metrics(settings, "print")
     events = PgNotifyEventBus(
         settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
     )
@@ -1401,8 +1406,7 @@ async def run_projects_worker(
             " print and arrange call the API's cluster-internal Service, e.g."
             " http://scadbuddy:8080"
         )
-    metrics = Metrics()
-    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    metrics = worker_metrics(settings, "projects")
     events = PgNotifyEventBus(
         settings.database_url, listener=PgListener(settings.database_url), metrics=metrics
     )
