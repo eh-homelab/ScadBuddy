@@ -125,6 +125,56 @@ The CRUD service is the only process with a database secret, and nothing untrust
 its pod. Every other process calls it over HTTP with a short-lived service credential.
 Untrusted code runs in a pod that holds no secret and has no route to Postgres.
 
+Today (each line is a Postgres connection; the dotted ones cross into the other service's
+tables):
+
+```mermaid
+flowchart LR
+  API[API<br/>owner role] --> DB[(Postgres<br/>91 backend + 46 ai_* tables)]
+  R[render worker<br/>scadbuddy_render] --> DB
+  P[print worker<br/>scadbuddy_print] --> DB
+  J[projects worker<br/>scadbuddy_projects] --> DB
+  A[agent sidecar + worker<br/>owner role] --> DB
+  D[agent-durable<br/>owner role, 0 replicas] --> DB
+  API -.reads/writes 8 ai_* tables.-> DB
+  J -.reads 5 ai_* tables.-> DB
+  A -.reads events, workflow_runs; writes blob_refs.-> DB
+```
+
+The target:
+
+```mermaid
+flowchart LR
+  subgraph untrusted[Sandbox pods: no secret, no route to Postgres]
+    T[template Python, openscad]
+    C[Claude Code tools, plugins]
+  end
+  R[render worker] -- HTTP + credential --> CRUD
+  P[print worker] -- HTTP + credential --> CRUD
+  J[projects worker] -- HTTP + credential --> CRUD
+  A[agent services] -- HTTP + credential --> CRUD
+  CRUD[CRUD service<br/>the one database role] --> DB[(Postgres<br/>ingress: CRUD only)]
+```
+
+What changes:
+
+| Process | Today | Target |
+|---|---|---|
+| render worker | 13 tables over SQL; template Python and openscad in the same pod | render jobs, blob refs and assets through CRUD routes; template Python and openscad in a sandbox pod with no secret |
+| print worker | 34 tables over SQL | print runs, outcomes, slices and printer state through CRUD routes (it already reads outputs through `/api/v1/internal/outputs`) |
+| projects worker | 14 tables and 5 `ai_*` tables over SQL | flow runs, decisions, grants and payload keys through CRUD routes |
+| agent services | the owner role; 46 `ai_*` tables and 6 backend tables | sessions, transcripts, approvals and credentials through CRUD routes; Claude Code and plugins in a sandbox pod; no database secret |
+| agent-durable | the owner role, 0 replicas | no database secret |
+| API | reads and writes 8 `ai_*` tables; runs the LSP and openscad | the CRUD service: the only database role, every route authenticated, nothing untrusted in its pod |
+| Postgres | no ingress policy | an ingress policy that admits the CRUD service only |
+
+Open question for #5298 and #5299: each caller reads its service credential from a database
+view of its own today (`backend/scadbuddy/auth/service_credentials.py`). With no database
+secret, a caller needs another way to get it: a Kubernetes Secret that the CRUD service
+writes and the pod mounts, a projected service-account token that the CRUD service
+exchanges for a short-lived credential, or the sealed credential delivered at start. One
+choice applies to every caller.
+
 Do the steps in this order. Split the APIs out first. Lock down the network last, so its
 policies admit only the CRUD service.
 
