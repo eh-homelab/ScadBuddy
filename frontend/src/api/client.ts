@@ -249,6 +249,7 @@ import type {
   AiCredentialSave,
 } from './aiCredential'
 import { apiParams, splitList, type ActivityQuery } from '../lib/activityQuery'
+import { fold, unmatchable } from '../lib/catalogueQuery'
 import { REQUEST_HEADER } from '../lib/requestHeader'
 import { noteIfSignedOut, noteSignedOut, SIGNED_OUT_PROBLEM } from '../lib/signedOut'
 import { ordersApiParams, type OrdersQuery } from '../lib/ordersQuery'
@@ -320,6 +321,9 @@ export class ApiError extends Error {
 export const SETTINGS_SHARE_MS = 5_000
 /** The `GET /settings` in flight, shared by every caller until it answers (#1039). */
 let settingsInFlight: { read: Promise<Settings>; started: number; scope: ReadScope } | undefined
+/** The most `GET /models` answers in one read (`api/models.py` `MAX_PAGE_LIMIT`). */
+export const MODELS_PAGE_LIMIT = 500
+
 /** #2290 — the catalogue's search and filters, as `GET /models` and `GET /model-facets` take them. */
 export interface ModelFilters {
   q: string
@@ -331,7 +335,9 @@ export interface ModelFilters {
 function modelFilterParams({ q, tags, origin }: Omit<ModelFilters, 'sort'>): URLSearchParams {
   const query = new URLSearchParams()
   if (q.trim()) query.set('q', q.trim())
-  for (const tag of tags) query.append('tag', tag)
+  // One spelling of each tag as folded: the backend folds both sides, so the others
+  // select the same models, and its `MAX_TAGS` cap counts the list as sent (#5292 review).
+  for (const tag of new Map(tags.map((tag) => [fold(tag), tag])).values()) query.append('tag', tag)
   if (origin !== 'all') query.set('origin', origin)
   return query
 }
@@ -1201,6 +1207,8 @@ export const api = {
     page: { limit?: number; after?: string } = {},
     signal?: AbortSignal,
   ): Promise<{ items: ModelSummary[]; total: number }> => {
+    // Tags no model can carry all of select none, and GET /models would refuse them.
+    if (unmatchable(filters.tags)) return { items: [], total: 0 }
     const query = modelFilterParams(filters)
     query.set('sort', filters.sort)
     if (page.limit !== undefined) query.set('limit', String(page.limit))
@@ -1211,9 +1219,51 @@ export const api = {
     return { items, total: Number(response.headers.get('X-Total-Count') ?? items.length) }
   },
 
+  /**
+   * The first `size` models `filters` select, read in pages of at most
+   * `MODELS_PAGE_LIMIT` (the backend's `MAX_PAGE_LIMIT`), each after the last: a window
+   * past the cap asked for in one read answers 422 (#5289 review). A chunk whose `after`
+   * went away (409) reads the window again from the top, once; `signal` stops it
+   * between chunks (#5292 review).
+   */
+  listModelsWindow: async (
+    filters: ModelFilters,
+    size: number,
+    signal?: AbortSignal,
+  ): Promise<{ items: ModelSummary[]; total: number }> => {
+    const read = async (): Promise<{ items: ModelSummary[]; total: number }> => {
+      const items: ModelSummary[] = []
+      let total = 0
+      while (items.length < size) {
+        signal?.throwIfAborted()
+        const limit = Math.min(MODELS_PAGE_LIMIT, size - items.length)
+        const page = await api.listModelsPage(filters, { limit, after: items.at(-1)?.slug }, signal)
+        items.push(...page.items)
+        total = page.total
+        if (page.items.length < limit) break
+      }
+      return { items, total }
+    }
+    try {
+      return await read()
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409) return await read()
+      throw cause
+    }
+  },
+
   /** #2290 — how many models `filters` select, of how many, and their tags' counts. */
-  modelFacets: (filters: Omit<ModelFilters, 'sort'>, signal?: AbortSignal) =>
-    request<ModelFacets>(`/model-facets?${modelFilterParams(filters)}`, { signal }),
+  modelFacets: async (filters: Omit<ModelFilters, 'sort'>, signal?: AbortSignal): Promise<ModelFacets> => {
+    if (!unmatchable(filters.tags)) {
+      return await request<ModelFacets>(`/model-facets?${modelFilterParams(filters)}`, { signal })
+    }
+    // None selected: only the whole catalogue's count is asked for, and each tag is at 0.
+    const every = await request<ModelFacets>(`/model-facets?${modelFilterParams({ ...filters, tags: [] })}`, {
+      signal,
+    })
+    const tags = [...new Map(filters.tags.map((tag) => [fold(tag), tag])).values()]
+    return { total: every.total, matched: 0, tags: tags.map((tag) => ({ tag, count: 0 })) }
+  },
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
 

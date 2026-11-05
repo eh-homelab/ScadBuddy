@@ -18,8 +18,9 @@ export interface AsyncState<T> {
   /**
    * Shows `next` in place of the data. With `supersede`, a background read already in flight
    * for the same deps no longer replaces it (an action's own answer is newer than that read).
+   * Answers whether it so dropped a read in flight, which a caller may want to make again.
    */
-  setData: (next: T, options?: { supersede?: boolean }) => void
+  setData: (next: T, options?: { supersede?: boolean }) => boolean
   /**
    * #1039 — for a caller that follows a topic itself: whether that subscription's
    * confirmation means the current key's first read must be made again (`readAgain`).
@@ -86,6 +87,9 @@ export function useAsync<T>(
   })
   /** Bumped by every fetch, so an older answer never replaces a newer one. */
   const sequence = useRef(0)
+  /** The newest `sequence` that has settled: below `sequence`, the newest read is in flight. */
+  const lastSettled = useRef(0)
+
   const topicList = topics.join('\n')
   /** The topics the subscription effect below follows now, or '' when none. */
   const followed = useRef('')
@@ -102,11 +106,13 @@ export function useAsync<T>(
       shownRead.current = { scope, shown: new Promise((resolve) => (shown = resolve)) }
       inReadScope(scope, load)
         .then((data) => {
+          lastSettled.current = Math.max(lastSettled.current, mine)
           const current = !cancelled && sequence.current === mine
           if (current) setSnapshot({ key, data })
           shown(current)
         })
         .catch((cause: unknown) => {
+          lastSettled.current = Math.max(lastSettled.current, mine)
           if (!cancelled && sequence.current === mine) {
             setSnapshot({ key, error: cause instanceof Error ? cause : new Error(String(cause)) })
           }
@@ -179,6 +185,7 @@ export function useAsync<T>(
       void answered.then(settle, settle)
       answered.then(
         (data) => {
+          lastSettled.current = Math.max(lastSettled.current, mine)
           if (!mounted.current || sequence.current !== mine) return
           if (decide && !decide(data)) return
           setSnapshot({ key: at, data })
@@ -186,6 +193,7 @@ export function useAsync<T>(
           if (latest.current.key === at) shownRead.current = { scope, shown: Promise.resolve(true) }
         },
         (cause: unknown) => {
+          lastSettled.current = Math.max(lastSettled.current, mine)
           if (!mounted.current || sequence.current !== mine) return
           const error = cause instanceof Error ? cause : new Error(String(cause))
           // A failed background read keeps what is on screen: the next change reads
@@ -301,8 +309,11 @@ export function useAsync<T>(
     held.current = snapshot.key
   })
   const setData = useCallback((data: T, options?: { supersede?: boolean }) => {
-    if (options?.supersede && held.current === latest.current.key) ++sequence.current
+    const superseding = options?.supersede === true && held.current === latest.current.key
+    const dropped = superseding && sequence.current > lastSettled.current
+    if (superseding) lastSettled.current = ++sequence.current
     setSnapshot((s) => ({ ...s, data, error: undefined }))
+    return dropped
   }, [])
 
   const settled = snapshot.key === key

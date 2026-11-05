@@ -62,10 +62,15 @@ export function CataloguePage() {
   const { sort: _sort, ...facetFilters } = filters
   const facetKey = JSON.stringify(facetFilters)
   const loaded = useRef({ key: filterKey, size: MODELS_PAGE_SIZE })
+  // The window read in flight: a newer one stops it between chunks (#5292 review).
+  const windowRead = useRef<AbortController | undefined>(undefined)
   const models = useAsync(
     () => {
       if (loaded.current.key !== filterKey) loaded.current = { key: filterKey, size: MODELS_PAGE_SIZE }
-      return api.listModelsPage(filters, { limit: loaded.current.size })
+      windowRead.current?.abort()
+      const controller = new AbortController()
+      windowRead.current = controller
+      return api.listModelsWindow(filters, loaded.current.size, controller.signal)
     },
     [filterKey],
     ['models'],
@@ -77,7 +82,8 @@ export function CataloguePage() {
   const counts = useKept(facets.data)
   const shown = page?.items ?? []
   const error = models.error ?? facets.error
-  const [more, setMore] = useState<{ loading: boolean; error?: Error }>({ loading: false })
+  // `key` is the filters the error was for: another search's list does not show it.
+  const [more, setMore] = useState<{ loading: boolean; error?: string; key?: string }>({ loading: false })
   const upstreamNames = useUpstreamNames(shown)
 
   async function loadMore() {
@@ -90,10 +96,13 @@ export function CataloguePage() {
       if (loaded.current.key !== key) return
       const items = [...page.items, ...next.items.filter((m) => !page.items.some((o) => o.slug === m.slug))]
       loaded.current = { key, size: items.length }
-      models.setData({ items, total: next.total }, { supersede: true })
-      // The append drops any read in flight (a change's), so read the window again.
-      models.refresh()
+      const dropped = models.setData({ items, total: next.total }, { supersede: true })
       setMore({ loading: false })
+      // The append dropped a read in flight (a change's), so read the window again.
+      // A read that fails leaves the list as it is, and says so.
+      if (dropped) models.refresh(undefined, () =>
+        setMore({ loading: false, key, error: 'Could not read the models again; the list shown may be out of date.' }),
+      )
     } catch (cause) {
       // The last model shown went away since: start again from the first page.
       if (cause instanceof ApiError && cause.status === 409) {
@@ -102,7 +111,11 @@ export function CataloguePage() {
         models.reload()
         return
       }
-      setMore({ loading: false, error: cause instanceof Error ? cause : new Error(String(cause)) })
+      setMore({
+        loading: false,
+        key,
+        error: `Could not load more models: ${cause instanceof Error ? cause.message : String(cause)}`,
+      })
     }
   }
 
@@ -261,12 +274,13 @@ export function CataloguePage() {
             <Button variant="outline" onClick={() => void loadMore()} disabled={more.loading}>
               {more.loading ? 'Loading…' : 'Load more'}
             </Button>
-            {more.error && (
-              <p role="alert" className="text-sm text-destructive">
-                Could not load more models: {more.error.message}
-              </p>
-            )}
           </div>
+        )}
+
+        {more.error && more.key === filterKey && (
+          <p role="alert" className="mt-2 text-center text-sm text-destructive">
+            {more.error}
+          </p>
         )}
       </div>
 

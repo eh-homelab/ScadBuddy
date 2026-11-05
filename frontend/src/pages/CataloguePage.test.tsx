@@ -1168,6 +1168,50 @@ describe('CataloguePage pages on the server (#2290)', () => {
     expect(cards()).toBe(30)
   })
 
+  it('says so when reading the window again after Load more fails, and keeps the list', async () => {
+    serve(() => many)
+    const { user } = renderCatalogue()
+    await screen.findByRole('link', { name: 'Model 23' })
+    // A change's read, held until Load more has answered; the read made again then fails.
+    let held = 0
+    server.use(
+      http.get('/api/v1/models', async ({ request }) => {
+        if (new URL(request.url).searchParams.has('after')) return undefined
+        held += 1
+        if (held === 1) {
+          await delay(400)
+          return undefined
+        }
+        return HttpResponse.json({ detail: 'limit too large' }, { status: 422 })
+      }),
+    )
+    emitRealtime('model.updated', ['models'], { slug: 'model-00' })
+    await waitFor(() => expect(held).toBe(1))
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    expect(await screen.findByText(/Could not read the models again/)).toBeInTheDocument()
+    expect(cards()).toBe(30)
+  })
+
+  it('shows no models for a tag too long for any model, without asking for them (#5288 review)', async () => {
+    const queries = serve(() => many)
+    const long = 'x'.repeat(101)
+    renderCatalogue(`/?tag=${long}`)
+    expect(await screen.findByRole('heading', { name: 'No models match' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(queries).toEqual([])
+  })
+
+  it('makes one read per Load more when no other read is in flight (#5288 review)', async () => {
+    const queries = serve(() => many)
+    const { user } = renderCatalogue()
+    await screen.findByRole('link', { name: 'Model 23' })
+    const before = queries.length
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await screen.findByRole('link', { name: 'Model 29' })
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(queries.slice(before).map((q) => q.get('after'))).toEqual(['model-23'])
+  })
+
   it('names an upstream that is not on the page shown', async () => {
     const copy: ModelSummary = {
       ...(many[0] as ModelSummary),
