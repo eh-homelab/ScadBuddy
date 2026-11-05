@@ -34,23 +34,26 @@ function oneOf<T extends string>(value: string | null, allowed: readonly T[], fa
 }
 
 /**
- * What `GET /models` takes (`api/models.py` `SearchWords`, `TagFilter`; the catalogue's
- * `MAX_TAGS`, `MAX_TAG_CHARS`, which also cap a model's own tags). A hand-edited URL
- * past them must not answer 422 (#5286 review). Its tags are kept: every tag is an AND
- * filter, so tags past the caps select no model (`unmatchable`), and the page asks for
- * none. A search past its cap is cut to it, which may select more than the whole
- * search would.
+ * What `GET /models` takes (`api/models.py` `SearchWords`, `MAX_TAG_FILTERS`,
+ * `MAX_TAG_FILTER_CHARS`). A hand-edited URL past them must not answer 422 (#5286
+ * review). Its tags are kept: every tag is an AND filter, and the route takes four
+ * times a model's own caps (`MAX_TAGS`, `MAX_TAG_CHARS`) and answers no model past
+ * those, so tags past the route's bounds select none either (`unmatchable`), and the
+ * page asks for none. A search past its cap is cut to it, which may select more than
+ * the whole search would.
  */
 export const MAX_SEARCH_CHARS = 256
 export const MAX_TAGS = 50
 export const MAX_TAG_CHARS = 100
+export const MAX_TAG_FILTERS = 4 * MAX_TAGS
+export const MAX_TAG_FILTER_CHARS = 4 * MAX_TAG_CHARS
 
 /**
- * Whether no model can carry every one of `tags`: more distinct tags than a model may
- * have, or one longer than a model's tag may be (in code points, as the backend counts).
+ * Whether `GET /models` would refuse `tags` as sent: more of them than it takes, or one
+ * longer (in code points, as the backend counts). No model can carry them all.
  */
 export function unmatchable(tags: readonly string[]): boolean {
-  return new Set(tags.map(fold)).size > MAX_TAGS || tags.some((tag) => [...tag].length > MAX_TAG_CHARS)
+  return tags.length > MAX_TAG_FILTERS || tags.some((tag) => [...tag].length > MAX_TAG_FILTER_CHARS)
 }
 
 export function parseQuery(params: URLSearchParams): CatalogueQuery {
@@ -80,12 +83,13 @@ export function clearFilters(query: CatalogueQuery): CatalogueQuery {
 }
 
 /**
- * Case- and accent-insensitive form of `text`: "Crème" and "creme" fold alike. Only
- * combining marks go, as the backend's `fold` drops them (`api/models.py`): a spacing
- * mark such as "ー" or "^" is part of the text (#5292 review).
+ * Case- and accent-insensitive form of `text`: "Crème" and "creme" fold alike. The
+ * browser's own matching only (the mocks, a tag chip): it is not the backend's `fold`
+ * (`api/models.py`, combining class), which no regex matches exactly, so tags go to the
+ * route as typed and the route folds them (#5305 review).
  */
 export function fold(text: string): string {
-  return text.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()
+  return text.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase()
 }
 
 /**

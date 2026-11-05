@@ -2026,7 +2026,7 @@ describe('listModelsWindow reads past the backend page cap (#5289 review)', () =
     expect(reads).toBe(4)
   })
 
-  it('sends tags the backend tells apart, though the old fold took them for one (#5292 review)', async () => {
+  it('sends each tag as typed: the route folds them, as no browser regex can (#5305 review)', async () => {
     const sent: string[][] = []
     server.use(
       http.get('/api/v1/models', ({ request }) => {
@@ -2034,8 +2034,8 @@ describe('listModelsWindow reads past the backend page cap (#5289 review)', () =
         return HttpResponse.json([], { headers: { 'X-Total-Count': '0' } })
       }),
     )
-    await api.listModelsPage({ ...filters, tags: ['ケース', 'ケス', 'Box', 'box'] }, { limit: 24 })
-    expect(sent).toEqual([['ケース', 'ケス', 'Box']])
+    await api.listModelsPage({ ...filters, tags: ['ケース', 'ケス', 'กัน', 'กน', 'Box', 'box', 'box'] }, { limit: 24 })
+    expect(sent).toEqual([['ケース', 'ケス', 'กัน', 'กน', 'Box', 'box']])
   })
 
   it('stops at the end of the list', async () => {

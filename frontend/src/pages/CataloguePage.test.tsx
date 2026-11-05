@@ -1194,7 +1194,7 @@ describe('CataloguePage pages on the server (#2290)', () => {
 
   it('shows no models for a tag too long for any model, without asking for them (#5288 review)', async () => {
     const queries = serve(() => many)
-    const long = 'x'.repeat(101)
+    const long = 'x'.repeat(401)
     renderCatalogue(`/?tag=${long}`)
     expect(await screen.findByRole('heading', { name: 'No models match' })).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
