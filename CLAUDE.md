@@ -283,7 +283,11 @@ The Go and Rust commands and toolchain notes: `tools/go/CLAUDE.md`, `workers/rus
   and raised once; phrasing never blocks. Cosmetic details, phrasing nits, pre-existing
   problems the diff neither causes nor exposes, and checks the review could not run are
   left out of both sections (the last on one `Unverified:` line). Anything the diff
-  causes is in scope wherever it surfaces, unchanged code included. Ported from eh-homelab/clusters#2989 and #3055,
+  causes is in scope wherever it surfaces, unchanged code included. A false statement
+  the diff **adds** blocks too, not only one it leaves stale (#5304 merged a diagram that
+  said "reads" for a grant that also writes, listed twice as Non-blocking). A concrete
+  defect is never hedged down to Non-blocking with "if that matters" (#5303 and #5306
+  did that to user-visible async races). Ported from eh-homelab/clusters#2989 and #3055,
   where those stale comments had been listed as Non-blocking on almost every PR and
   never fixed after merge. A person adding the
   `claude-make-follow-up-issues` label to the PR files every outstanding finding as
