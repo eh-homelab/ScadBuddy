@@ -1103,7 +1103,8 @@ async def cancel_item(order_id: str, item_id: str, orders: OrdersDep) -> OrderIt
         "`output_id` to change it, or neither to repeat the current one (new photos, a "
         "new note). 404 `item_not_found`; 409 `item_custom` (a custom item has no "
         "design), `item_has_no_design` (a request's first revision must name one), "
-        "`item_not_open` and `order_closed`/`order_cancelled`/`order_on_hold`."
+        "`item_not_open`, `item_locked` (the order is accepted) and "
+        "`order_closed`/`order_cancelled`. Allowed on hold: a revision advances nothing."
     ),
 )
 async def add_revision(
