@@ -19,11 +19,11 @@ POST /queue/
 {"printer_id": 1, "library_file_id": <id>, "plate_id": 1,
  "ams_mapping": [7, 14, 15], "use_ams": true,
  "bed_levelling": "on", "flow_cali": "on", "nozzle_offset_cali": "on",
- "vibration_cali": true, "layer_inspect": true, "timelapse": false,
+ "vibration_cali": true, "layer_inspect": true, "timelapse": true,
  "quantity": 1, "require_previous_success": false}
 ```
 
-Answers the item: `id`, `status: pending`, `position`, and the options echoed. The
+Answers the item: `id`, `status: pending`, `position`, and the options echoed. `timelapse: true` is what gives the archive a timelapse for an order attempt to import; off, there is nothing to pull later. The
 tri-state options are `"off" | "on" | "auto"`; on the wire Bambuddy sends each as a
 bool plus an int (`bed_leveling` + `auto_bed_leveling`, `flow_cali` + `extrude_cali_flag`,
 `nozzle_offset_cali` int, dual-nozzle only), the same two-field shape Bambu Studio
