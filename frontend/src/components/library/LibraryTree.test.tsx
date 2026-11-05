@@ -70,4 +70,27 @@ describe('LibraryTree while filtering (#5291 review)', () => {
     rerender(<LibraryTree folders={folders} selected={null} onSelect={vi.fn()} filter="box" />)
     expect(screen.getByRole('treeitem', { name: 'Supplies' })).toHaveAttribute('aria-expanded', 'true')
   })
+
+  it('keeps a folder folded when the folders are read again under the same filter (#5303 review)', () => {
+    const { rerender } = render(<LibraryTree folders={folders} selected={null} onSelect={vi.fn()} filter="bins" />)
+    fireEvent.click(screen.getByTestId('library-folder-toggle-4'))
+    expect(screen.getByRole('treeitem', { name: 'Storage Boxes' })).toHaveAttribute('aria-expanded', 'false')
+    // A rename, move or create elsewhere on the page reads the tree again: a new array.
+    rerender(<LibraryTree folders={folders.map((folder) => ({ ...folder }))} selected={null} onSelect={vi.fn()} filter="bins" />)
+    expect(screen.getByRole('treeitem', { name: 'Storage Boxes' })).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.getByRole('treeitem', { name: 'Supplies' })).toHaveAttribute('aria-expanded', 'true')
+  })
+
+  it('forgets a fold once its folder is gone, so it opens when it comes back (#5303 review)', () => {
+    const { rerender } = render(<LibraryTree folders={folders} selected={null} onSelect={vi.fn()} filter="bins" />)
+    fireEvent.click(screen.getByTestId('library-folder-toggle-4'))
+    const without: LibraryFolderView[] = [folders[0]!, { id: 6, name: 'Old bins', parent_id: 3, depth: 1 }]
+    rerender(<LibraryTree folders={without} selected={null} onSelect={vi.fn()} filter="bins" />)
+    expect(screen.queryByRole('treeitem', { name: 'Storage Boxes' })).not.toBeInTheDocument()
+    // Any fold, so the stored state is written while folder 4 is gone.
+    fireEvent.click(screen.getByTestId('library-folder-toggle-3'))
+    fireEvent.click(screen.getByTestId('library-folder-toggle-3'))
+    rerender(<LibraryTree folders={[...folders, without[1]!]} selected={null} onSelect={vi.fn()} filter="bins" />)
+    expect(screen.getByRole('treeitem', { name: 'Storage Boxes' })).toHaveAttribute('aria-expanded', 'true')
+  })
 })

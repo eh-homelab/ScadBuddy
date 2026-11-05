@@ -21,6 +21,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
+from prometheus_client.metrics import MetricWrapperBase
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 __all__ = [
@@ -96,7 +97,9 @@ _LISTENING = frozenset({"events_received", "events_resyncs", "event_log_pruned"}
 
 #: The attributes each worker role registers (#664): only what that worker sets, so its
 #: /metrics never carries the API's series as constant zeros (`scadbuddy_render_store_up
-#: 0` fires ScadBuddyRenderStoreUnreadable). The API registers every series.
+#: 0` fires ScadBuddyRenderStoreUnreadable). The API registers every series. When a
+#: worker starts setting a ``metrics.<attribute>``, add the attribute to its role here, or
+#: that worker never exports it.
 ROLE_SERIES: dict[MetricsRole, frozenset[str]] = {
     "render": _WORKER_COMMON
     | {
@@ -528,7 +531,7 @@ class Metrics:
         if role != "api":
             keep = ROLE_SERIES[role]
             for name, value in vars(self).items():
-                if isinstance(value, Counter | Gauge | Histogram) and name not in keep:
+                if isinstance(value, MetricWrapperBase) and name not in keep:
                     r.unregister(value)
 
     @contextmanager

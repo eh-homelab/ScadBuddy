@@ -115,10 +115,17 @@ export function LibraryTree({
   const [opened, setExpanded] = useState<Set<number>>(() => new Set())
   // While filtering, every folder left starts open, so each match shows under its
   // parents; the chevrons and ←/→ then fold and open them as usual (#5291 review). A new
-  // filter opens them all again, and clearing it gives back what was open before.
+  // filter opens them all again, and clearing it gives back what was open before. The
+  // folds are kept by the filter's text, not the list's identity, so a read of the tree
+  // again while filtering keeps them; only the ids still listed are kept (#5303 review).
   const allLeft = useMemo(() => new Set(folders.map((folder) => folder.id)), [folders])
-  const [filterOpened, setFilterOpened] = useState<{ of: LibraryFolderView[]; ids: Set<number> } | null>(null)
-  const expanded = filtering ? (filterOpened?.of === folders ? filterOpened.ids : allLeft) : opened
+  const [filterFolded, setFilterFolded] = useState<{ of: string; ids: Set<number> } | null>(null)
+  if (!filtering && filterFolded) setFilterFolded(null)
+  const folded = filtering && filterFolded?.of === filter ? filterFolded.ids : null
+  const expanded = useMemo(
+    () => (!filtering ? opened : folded ? new Set([...allLeft].filter((id) => !folded.has(id))) : allLeft),
+    [filtering, opened, folded, allLeft],
+  )
   // The selected folder and its ancestors open whenever it changes, as a deep link or
   // Back lands on it, so its subfolders show too (#3631); whatever else was opened stays
   // open.
@@ -170,8 +177,10 @@ export function LibraryTree({
       else next.delete(id)
       return next
     }
-    if (filtering) setFilterOpened({ of: folders, ids: flip(expanded) })
-    else setExpanded(flip)
+    if (filtering) {
+      const open = flip(expanded)
+      setFilterFolded({ of: filter, ids: new Set([...allLeft].filter((folder) => !open.has(folder))) })
+    } else setExpanded(flip)
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLElement>, key: Key) {
