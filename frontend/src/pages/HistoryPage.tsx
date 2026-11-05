@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Link, useNavigate, useParams } from 'react-router'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, LibraryCopy, ModelLibrary, Output, PrintSummary } from '../api/types'
@@ -50,22 +50,123 @@ import { useAsync } from '../lib/useAsync'
 import { bambuddyBase, webUrls } from '../lib/bambuddyLinks'
 import { libraryLabel, pinChange } from '../lib/libraryPins'
 
+/** #2290 — how many outputs a page of the history reads. */
+export const HISTORY_PAGE_SIZE = 20
+/**
+ * The most outputs one read asks for: the backend's `MAX_PAGE_LIMIT`, past which a
+ * `limit` is a 422. A window larger than this is read in chunks (#5289 review). An
+ * object so a test can lower it.
+ */
+export const HISTORY_READ = { limit: 500 }
+
+/** How many outputs `?shown=` asks for: at least a page. */
+function shownFrom(params: URLSearchParams): number {
+  const asked = Math.floor(Number(params.get('shown')))
+  return Number.isFinite(asked) ? Math.max(HISTORY_PAGE_SIZE, asked) : HISTORY_PAGE_SIZE
+}
+
+/**
+ * The newest `size` outputs of `slug`, read in chunks of at most `HISTORY_READ.limit`
+ * that follow `after`. An output that went away between two chunks (409) starts the
+ * read again from the first; a second 409 is the read's error.
+ */
+async function readWindow(slug: string, size: number, retried = false): Promise<{ items: Output[]; total: number }> {
+  const items: Output[] = []
+  let total = 0
+  try {
+    while (items.length < size) {
+      const limit = Math.min(HISTORY_READ.limit, size - items.length)
+      const page = await api.listOutputsPage(slug, { limit, after: items.at(-1)?.id })
+      items.push(...page.items)
+      total = page.total
+      if (page.items.length < limit) break
+    }
+  } catch (cause) {
+    if (!retried && items.length > 0 && cause instanceof ApiError && cause.status === 409) return readWindow(slug, size, true)
+    throw cause
+  }
+  return { items, total }
+}
+
 export function HistoryPage() {
   const { slug = '' } = useParams()
   const navigate = useNavigate()
+  const [params, setParams] = useSearchParams()
   const schemaState = useAsync(() => api.getSchema(slug), [slug])
   // #939 — the breadcrumb names the model by its record. The schema's `title` is the
   // .scad file OpenSCAD exported, "model" for every model.
   const modelState = useAsync(() => api.getModel(slug), [slug], [`model:${slug}`])
   // #269 — live: outputs saved or deleted elsewhere show up here. Print progress is
-  // on `print:<output id>`, which this list does not follow.
-  const outputsState = useAsync(() => api.listOutputs(slug), [slug], [`model:${slug}`])
+  // on `print:<output id>`, which this list does not follow. #2290 — the server pages
+  // the list, newest first; a read again reads as many as are shown, so Load more's
+  // pages stay, and `?shown=` keeps that count for Back.
+  const loaded = useRef({ slug, size: shownFrom(params) })
+  const outputsState = useAsync(
+    () => {
+      if (loaded.current.slug !== slug) loaded.current = { slug, size: HISTORY_PAGE_SIZE }
+      return readWindow(slug, loaded.current.size)
+    },
+    [slug],
+    [`model:${slug}`],
+  )
+  const list = outputsState.data?.items
   // The rows as they are now, for an edit that lands after an await (#2786 review): a
   // rename or a delete answered late must not bring back what changed meanwhile.
   const rows = useRef(outputsState.data)
   useEffect(() => {
     rows.current = outputsState.data
   })
+  const [more, setMore] = useState<{ loading: boolean; error?: Error }>({ loading: false })
+
+  /** `?shown=` as `count`, replacing the entry, so Back opens with what is on screen. */
+  function keepShown(count: number) {
+    setParams(
+      (before) => {
+        const after = new URLSearchParams(before)
+        after.set('shown', String(count))
+        return after
+      },
+      { replace: true },
+    )
+  }
+
+  /** The rows with `change` applied, and the total less `removed`. */
+  function edit(change: (items: Output[]) => Output[], removed = 0) {
+    const current = rows.current ?? { items: [], total: 0 }
+    const items = change(current.items)
+    outputsState.setData({ items, total: Math.max(0, current.total - removed) })
+    if (removed > 0 && params.has('shown')) {
+      loaded.current = { slug, size: Math.max(HISTORY_PAGE_SIZE, items.length) }
+      keepShown(loaded.current.size)
+    }
+  }
+
+  async function loadMore() {
+    const page = rows.current
+    const last = page?.items.at(-1)
+    if (!page || !last) return
+    setMore({ loading: true })
+    try {
+      const next = await api.listOutputsPage(slug, { limit: HISTORY_PAGE_SIZE, after: last.id })
+      if (loaded.current.slug !== slug) return
+      const items = [...page.items, ...next.items.filter((o) => !page.items.some((p) => p.id === o.id))]
+      loaded.current = { slug, size: items.length }
+      outputsState.setData({ items, total: next.total }, { supersede: true })
+      keepShown(items.length)
+      setMore({ loading: false })
+      // A change elsewhere read while this page loaded was superseded: read the whole
+      // window again in the background, so it is not lost until the next change.
+      outputsState.refresh()
+    } catch (cause) {
+      // The last output shown went away since: read the window again from the first.
+      if (cause instanceof ApiError && cause.status === 409) {
+        setMore({ loading: false })
+        outputsState.refresh()
+        return
+      }
+      setMore({ loading: false, error: cause instanceof Error ? cause : new Error(String(cause)) })
+    }
+  }
   // #89 — an output records Bambuddy's ids, never a URL, so the base to deep-link them
   // against comes from Settings. Until it answers, the ids still read as plain text.
   const settings = useAsync(() => api.getSettings(), []).data
@@ -100,7 +201,7 @@ export function HistoryPage() {
   const printsState = useAsync(
     () => api.listPrints({ slug }, { limit: 100 }).catch(() => ({ items: [], next_cursor: null })),
     [slug],
-    (outputsState.data ?? []).map((output) => `print:${output.id}`),
+    (list ?? []).map((output) => `print:${output.id}`),
     (signal) => signal === 'resync' || signal.kind !== 'print.progress',
   )
   const lastPrints = new Map<string, PrintSummary>()
@@ -120,7 +221,7 @@ export function HistoryPage() {
     try {
       // A user action of its own in Tempo (#2292), the delete its child.
       await traceAction('delete', { 'scadbuddy.output_id': id }, () => api.deleteOutput(id, deleteInboxCopies))
-      outputsState.setData((rows.current ?? []).filter((o) => o.id !== id))
+      edit((items) => items.filter((o) => o.id !== id), (rows.current?.items ?? []).some((o) => o.id === id) ? 1 : 0)
       setPicked((current) => current.filter((p) => p !== id))
       setConfirmFor(undefined)
     } finally {
@@ -131,9 +232,9 @@ export function HistoryPage() {
   const loading = schemaState.loading || outputsState.loading
   const schema = schemaState.data
   /** #2287 — the arranged result's row as the list has it now: gone once deleted. */
-  const arrangedRow = arrangedOutput ? outputsState.data?.find((o) => o.id === arrangedOutput.id) : undefined
+  const arrangedRow = arrangedOutput ? list?.find((o) => o.id === arrangedOutput.id) : undefined
   /** #4841 — the open preview's record as the list has it now, so a replaced image shows. */
-  const previewShown = previewFor && (outputsState.data?.find((o) => o.id === previewFor.id) ?? previewFor)
+  const previewShown = previewFor && (list?.find((o) => o.id === previewFor.id) ?? previewFor)
 
   return (
     <div className="h-full overflow-y-auto">
@@ -152,7 +253,17 @@ export function HistoryPage() {
 
         {loading && <PageLoading label="Loading history" />}
 
-        {!loading && outputsState.data?.length === 0 && (
+        {/* A failed read is said, never a blank page; with rows still shown, above them. */}
+        {!loading && outputsState.error && (
+          <Card role="alert" className="mb-2 border-destructive/40 bg-destructive/5 px-4 ring-destructive/30">
+            <p className="text-sm text-destructive">Could not load the history: {outputsState.error.message}</p>
+            <Button type="button" size="sm" variant="outline" className="w-fit" onClick={outputsState.reload}>
+              Try again
+            </Button>
+          </Card>
+        )}
+
+        {!loading && list?.length === 0 && (
           <Card className="border border-dashed text-center ring-0">
             <CardHeader>
               <CardTitle>
@@ -168,7 +279,7 @@ export function HistoryPage() {
           </Card>
         )}
 
-        {!loading && schema && outputsState.data && outputsState.data.length > 0 && (
+        {!loading && schema && list && list.length > 0 && (
           <>
             {/* Gone from the list (deleted): nothing to offer a next step for. */}
             {arrangedOutput && arrangedRow && (
@@ -214,7 +325,7 @@ export function HistoryPage() {
               </p>
             )}
             <ul data-testid="outputs" aria-label="Generated outputs" className="space-y-2">
-              {outputsState.data.map((output) => (
+              {list.map((output) => (
                 <OutputRow
                   key={output.id}
                   output={output}
@@ -239,7 +350,7 @@ export function HistoryPage() {
                   }}
                   onPreview={() => setPreviewFor(output)}
                   onRenamed={(renamed) =>
-                    outputsState.setData((rows.current ?? []).map((o) => (o.id === renamed.id ? renamed : o)))
+                    edit((items) => items.map((o) => (o.id === renamed.id ? renamed : o)))
                   }
                   lastPrint={lastPrints.get(output.id)}
                   // Its plates show once, in the next-step card above (#2754 review).
@@ -247,6 +358,23 @@ export function HistoryPage() {
                 />
               ))}
             </ul>
+            {outputsState.data && list.length < outputsState.data.total && (
+              <div className="mt-4 flex flex-col items-center gap-2">
+                <p className="text-xs text-muted-foreground">
+                  {Number.isFinite(outputsState.data.total)
+                    ? `Showing ${list.length} of ${outputsState.data.total}`
+                    : `Showing ${list.length}`}
+                </p>
+                <Button type="button" variant="outline" onClick={() => void loadMore()} disabled={more.loading}>
+                  {more.loading ? 'Loading…' : 'Load more'}
+                </Button>
+                {more.error && (
+                  <p role="alert" className="text-sm text-destructive">
+                    Could not load more outputs: {more.error.message}
+                  </p>
+                )}
+              </div>
+            )}
           </>
         )}
       </div>
@@ -296,7 +424,7 @@ export function HistoryPage() {
       {orderFor && <AddToOrderDialog open outputId={orderFor.id} outputName={orderFor.name} onClose={() => setOrderFor(undefined)} />}
       <ArrangeDialog
         open={arranging}
-        sources={fromOutputs((outputsState.data ?? []).filter((o) => picked.includes(o.id)))}
+        sources={fromOutputs((list ?? []).filter((o) => picked.includes(o.id)))}
         onClose={() => setArranging(false)}
         onArranged={(arranged) => {
           setSkipped(arranged.skipped ?? null)

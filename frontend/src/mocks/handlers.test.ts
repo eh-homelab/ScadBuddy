@@ -1502,3 +1502,22 @@ describe('mock GET /models and /model-facets search, filter and page as the back
     expect(facets.tags).toContainEqual({ tag: 'keychain', count: keychains.total })
   })
 })
+
+describe('mock GET /models/{slug}/outputs pages as the backend does (#2290)', () => {
+  it('answers newest first, a window after an id, and the whole count', async () => {
+    const all = await api.listOutputsPage('name-keychain')
+    expect(all.total).toBe(all.items.length)
+    const created = all.items.map((o) => Date.parse(o.created_at))
+    expect(created).toEqual([...created].sort((a, b) => b - a))
+    const first = await api.listOutputsPage('name-keychain', { limit: 1 })
+    expect(first).toEqual({ items: [all.items[0]], total: all.total })
+    const second = await api.listOutputsPage('name-keychain', { limit: 1, after: all.items[0]!.id })
+    expect(second.items).toEqual(all.items.slice(1, 2))
+  })
+
+  it('refuses to page after an output that is not listed', async () => {
+    const caught = await api.listOutputsPage('name-keychain', { after: 'f'.repeat(32) }).catch((cause: unknown) => cause)
+    expect(caught).toBeInstanceOf(ApiError)
+    expect((caught as ApiError).status).toBe(409)
+  })
+})
