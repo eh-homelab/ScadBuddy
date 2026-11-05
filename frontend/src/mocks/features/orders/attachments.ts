@@ -10,7 +10,7 @@ import { BROWSER, fieldProblem, newId, now, problem, Refused, state } from './st
  * it, served back as it was sent, and an item's image marked as what was delivered.
  */
 
-const ROLES = new Set<OrderAttachmentRole>(['reference', 'issue', 'finished', 'packed', 'timelapse', 'other'])
+const ROLES = new Set<OrderAttachmentRole>(['reference', 'issue', 'finished', 'packed', 'timelapse', 'render', 'test_print', 'other'])
 
 /** `orders/attachments.py` `sniff`, over the first bytes. */
 function sniff(head: Uint8Array, name: string): [OrderAttachment['kind'], string] {
@@ -63,20 +63,32 @@ async function parts(request: Request): Promise<Part[]> {
   return found
 }
 
-async function upload(request: Request, orderId: string, itemId: string | null, fulfilmentId: string | null = null) {
+/**
+ * With `revisionId` (#5280) the file is on that revision of the item: its `render`, a
+ * `reference`, or beside a `fulfilmentId` the photo of that revision's test print.
+ */
+export async function upload(request: Request, orderId: string, itemId: string | null, fulfilmentId: string | null = null, revisionId: string | null = null) {
+  const sent = await parts(request)
+  const text = (name: string) => new TextDecoder().decode(sent.find((p) => p.name === name)?.bytes ?? new Uint8Array())
+  // On a revision's route the attempt it shows is a form field, not a path segment.
+  if (revisionId && !fulfilmentId) fulfilmentId = text('fulfilment_id').trim() || null
   let subject: string
   try {
     const order = lock(orderId)
     if (itemId) itemOf(order, itemId)
-    if (fulfilmentId && !state.fulfilments.some((f) => f.id === fulfilmentId && f.order_item_id === itemId)) {
-      throw new Refused('fulfilment_not_found', `no attempt ${fulfilmentId} of that item`, [], true)
+    if (revisionId && !state.revisions.some((r) => r.id === revisionId && r.item_id === itemId)) {
+      throw new Refused('revision_not_found', `no revision ${revisionId} of that item`, [], true)
     }
-    subject = fulfilmentId ? `order_item_fulfilment:${fulfilmentId}` : itemId ? `order_item:${itemId}` : `order:${orderId}`
+    if (fulfilmentId) {
+      const attempt = state.fulfilments.find((f) => f.id === fulfilmentId && f.order_item_id === itemId)
+      if (!attempt || (revisionId && (attempt.purpose !== 'test' || attempt.revision_id !== revisionId))) {
+        throw new Refused('fulfilment_not_found', `no attempt ${fulfilmentId} of that item`, [], true)
+      }
+    }
+    subject = revisionId ? `order_item_revision:${revisionId}` : fulfilmentId ? `order_item_fulfilment:${fulfilmentId}` : itemId ? `order_item:${itemId}` : `order:${orderId}`
   } catch (error) {
     return refused(request, error)
   }
-  const sent = await parts(request)
-  const text = (name: string) => new TextDecoder().decode(sent.find((p) => p.name === name)?.bytes ?? new Uint8Array())
   const part = sent.find((p) => p.name === 'file')
   if (!part || part.bytes.length === 0) return problem(request, 422, 'the upload has no `file` part, or it is empty')
   const file = new Blob([part.bytes])
@@ -90,6 +102,7 @@ async function upload(request: Request, orderId: string, itemId: string | null, 
     subject,
     item_id: itemId,
     fulfilment_id: fulfilmentId,
+    revision_id: revisionId,
     kind,
     role: role as OrderAttachmentRole,
     filename,
