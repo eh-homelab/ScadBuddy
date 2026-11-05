@@ -13,6 +13,7 @@ from scadbuddy.core.authorship import AgentAuthor, authored_as
 from scadbuddy.core.gitrepo import GitError, git_env
 from scadbuddy.flows.definitions import (
     FlowDefinitions,
+    FlowDeletedError,
     ScriptMissingError,
     UnknownFlowError,
     UnmigratedFlowError,
@@ -128,6 +129,25 @@ async def test_restore_is_a_new_version_with_that_versions_script(
     diff = await definitions.diff("swap", two.commit, None)
     assert (diff.base, diff.head) == (one.commit, two.commit)
     assert await definitions.source("swap", one.commit) == ONE
+
+
+async def test_details_of_a_flow_deleted_meanwhile_are_refused_as_deleted(
+    definitions: FlowDefinitions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#3186: a flow deleted after the check before the lock, before the details' commit
+    under it, is refused as deleted (409 `flow-deleted`), not as an unknown version."""
+    await definitions.start()
+    await definitions.register("swap", ONE, BROWSER, approval_timeout_s=None)
+    history = definitions.history
+    real = history.set_details
+
+    def deleted_first(name: str, **kwargs: Any) -> str | None:
+        history.delete(name, lambda _c: None)
+        return real(name, **kwargs)
+
+    monkeypatch.setattr(history, "set_details", deleted_first)
+    with pytest.raises(FlowDeletedError):
+        await definitions.update_details("swap", display_name="Late", description=None)
 
 
 async def test_a_failed_details_commit_answers_the_version_saying_so(

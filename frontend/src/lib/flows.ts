@@ -90,6 +90,24 @@ export const flowRunPath = (id: string) => `/workflows/runs/${encodeURIComponent
 
 /** #2350 — the Flows tab, and one flow version's page. */
 export const FLOWS_PATH = '/workflows/flows'
+/**
+ * #3186 — a flow's Markdown description as one line of plain text, for a list: the
+ * markup (headings, emphasis, code marks, links' targets, list and quote markers)
+ * dropped, the words kept, every run of blanks one space.
+ */
+export function markdownText(markdown: string): string {
+  return markdown
+    .replace(/^```.*$/gm, '')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+[.)]\s+)/gm, '')
+    .replace(/`([^`]*)`/g, '$1')
+    // Emphasis hugs its words: `2 * 3` and snake_case are not emphasis.
+    .replace(/(\*\*|\*|~~)(?=\S)(.+?)(?<=\S)\1/g, '$2')
+    .replace(/(^|[^\w])(__?)(?=\S)(.+?)(?<=\S)\2(?!\w)/g, '$1$3')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 /** #3186 — what a flow is called: its display name, else its name (the slug, its id). */
 export const flowTitle = (flow: { name: string; display_name?: string | null }) => flow.display_name || flow.name
 

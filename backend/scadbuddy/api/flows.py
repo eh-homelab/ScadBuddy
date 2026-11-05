@@ -483,8 +483,9 @@ async def restore_flow_version(
 ) -> Definition:
     """A new commit with the script as it was at `commit`, and a new version row with
     that version's approval timeout: never a rewrite. Type-checked first, as a
-    registration is. The flow's display name and description stay as they are; the
-    optional body names the commit (#3186)."""
+    registration is. The flow's display name and description stay as they are, except
+    for a deleted flow, which comes back with the ones it had at `commit`, in the
+    version's own commit; the optional body names the commit (#3186)."""
     with _versioned():
         script = await flows.definitions.source(name, commit)
         inputs_schema = await flows.definitions.inputs_schema(name, commit)

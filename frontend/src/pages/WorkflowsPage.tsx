@@ -16,6 +16,7 @@ import {
   FLOWS_PATH,
   flowStateText,
   flowTitle,
+  markdownText,
   waitingText,
 } from '../lib/flows'
 import { useAsync } from '../lib/useAsync'
@@ -238,7 +239,9 @@ function FlowRow({
           {state && `. ${state}, ${timeAgo((latest.deleted_at ?? latest.archived_at)!)}`}
         </p>
         {latest.description && (
-          <p className="mt-0.5 line-clamp-2 text-[12.5px] text-muted-foreground">{latest.description}</p>
+          <p data-testid="flow-description" className="mt-0.5 line-clamp-2 text-[12.5px] text-muted-foreground">
+            {markdownText(latest.description)}
+          </p>
         )}
         {triggers.length > 0 && (
           <div className="mt-1.5">

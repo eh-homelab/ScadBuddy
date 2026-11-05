@@ -121,7 +121,9 @@ export const flowTools: Tool[] = [
       "{kind: 'print.finished' | 'print.failed', slug, run_id, output_id, printer}; narrow by `kind`), or None. " +
       '`message` and `body` name the version\'s commit; `display_name` and `description` set the flow\'s ' +
       'details (as update_flow_details does, in a commit of their own after the version\'s); a `details_error` ' +
-      'in the answer means the version was saved but they were not: call update_flow_details, never register again.',
+      'in the answer means the version was saved but they were not: call update_flow_details, never register again. ' +
+      'Registering a deleted name again starts it with no details (set them again); restore_flow_version on one ' +
+      'of its versions instead brings back the ones it had then.',
     input: z.object({
       name: z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, 'lower-case letters, digits and dashes'),
       script: z.string().min(1).max(65_536),
@@ -342,7 +344,8 @@ export const flowTools: Tool[] = [
     description:
       "Restore a flow's script at one of its versions as its newest version: a new commit and version, " +
       'type-checked first, with that version\'s approval timeout (nothing is lost). Runs already started keep ' +
-      "the version they ran. The flow's display name and description stay as they are; `message` and `body` " +
+      "the version they ran. The flow's display name and description stay as they are, except for a deleted " +
+      'flow, which comes back with the ones it had at that version, in the same commit; `message` and `body` ' +
       'name the commit.',
     input: z.object({ name: flowName, commit: flowCommit, ...commitMessage }),
     risk: 'write',

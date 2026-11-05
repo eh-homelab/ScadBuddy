@@ -8,7 +8,9 @@ flow that declares typed inputs (#2483): source, versioned with the script in th
 commit, never state (an approval timeout stays in Postgres). ``<name>/flow.json`` holds
 the flow's display name and description (#3186): the flow's, not a version's, so each
 change of them is a commit of its own, carrying ``ScadBuddy-Flow-Details: <name>``, and
-neither a new version nor a restore changes them. A flow without the file is named by
+neither a new version nor a restore of a flow in the tree changes them. The one
+exception: restoring a deleted flow brings back the display name and description it had
+at the restored commit, in the version's own commit. A flow without the file is named by
 its slug.
 
 Every write takes an optional commit message, its subject, and an optional body (#3186);
@@ -101,8 +103,30 @@ def _body_of(raw: str) -> str | None:
     return text or None
 
 
+def _is_control(character: str) -> bool:
+    return character < " " or "\x7f" <= character <= "\x9f"
+
+
+def _display_name(text: str) -> str | None:
+    """A display name as stored: one line of printable text, runs of blanks and control
+    characters flattened to one space, as a commit subject is; None for a blank one."""
+    flat = "".join(" " if _is_control(c) else c for c in text)
+    return " ".join(flat.split()) or None
+
+
+def _description(text: str) -> str | None:
+    """A description as stored: Markdown, so its lines stay; other control characters
+    go. None for a blank one."""
+    kept = "".join(c for c in text.replace("\r\n", "\n") if c == "\n" or not _is_control(c))
+    return kept.strip() or None
+
+
 def _message(message: str | None, default: str) -> str:
     return message if message is not None and message.strip() else default
+
+
+class FlowNotPresentError(RevisionNotFoundError):
+    """The flow has versions but is not in the tree: it is deleted (#2485)."""
 
 
 class DetailsNotSavedError(GitError):
@@ -286,10 +310,13 @@ class FlowHistory(GitRepo):
         """Change the flow's display name or description (#3186): ``None`` leaves one as
         it is, an empty string clears it. One commit of its own, under the write lock;
         None when nothing changed. :class:`RevisionNotFoundError` for a flow with no
-        version, or one not in the tree (deleted)."""
+        version, :class:`FlowNotPresentError` for one not in the tree (deleted), both
+        checked under the lock."""
         with self.write_lock():
-            if not self.versions(name) or not self.present(name):
+            if not self.versions(name):
                 raise RevisionNotFoundError(f"no flow named {name!r}")
+            if not self.present(name):
+                raise FlowNotPresentError(f"the flow {name!r} is deleted")
             return self._set_details_locked(name, display_name, description, message, body)
 
     def _set_details_locked(
@@ -304,8 +331,8 @@ class FlowHistory(GitRepo):
             return None
         was = self.details(name)
         now = FlowDetails(
-            display_name=was.display_name if display_name is None else display_name.strip() or None,
-            description=was.description if description is None else description.strip() or None,
+            display_name=was.display_name if display_name is None else _display_name(display_name),
+            description=was.description if description is None else _description(description),
         )
         if now == was:
             return None

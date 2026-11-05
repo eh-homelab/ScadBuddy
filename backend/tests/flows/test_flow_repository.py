@@ -14,7 +14,12 @@ import pytest
 
 from scadbuddy.core.authorship import AGENT_AUTHOR_NAME, AgentAuthor, authored_as
 from scadbuddy.core.gitrepo import LOCK_NAME, GitError, RevisionNotFoundError, git_env
-from scadbuddy.flows.repository import DETAILS_TRAILER, DetailsNotSavedError, FlowHistory
+from scadbuddy.flows.repository import (
+    DETAILS_TRAILER,
+    DetailsNotSavedError,
+    FlowHistory,
+    FlowNotPresentError,
+)
 
 pytestmark = pytest.mark.requires_git
 
@@ -356,6 +361,45 @@ def test_a_body_ending_in_a_key_value_paragraph_keeps_it(history: FlowHistory) -
         "swap", str(uuid.uuid4()), lambda c, v: None, script=TWO, body="Reviewed-by: Sam"
     )
     assert history.versions("swap")[0].body == "Reviewed-by: Sam"
+
+
+def test_restoring_a_deleted_flow_brings_back_its_details_at_that_version(
+    history: FlowHistory,
+) -> None:
+    """A deleted flow has no details in the tree: a restore brings back the ones it had
+    at the restored commit, in the version's own commit."""
+    _, first, _ = register(history, "swap", ONE)
+    history.set_details("swap", display_name="Old name")
+    _, second, _ = register(history, "swap", TWO)
+    history.set_details("swap", display_name="New name")
+    history.delete("swap", lambda _c: None)
+    assert history.details("swap").display_name is None
+    restored, _ = history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=second)
+    assert history.details("swap").display_name == "Old name"
+    changed = history._out("show", "--name-only", "--format=", restored).split()
+    assert "swap/flow.json" in changed
+    # A version from before any details had none, so the flow comes back without.
+    history.delete("swap", lambda _c: None)
+    history.register("swap", str(uuid.uuid4()), lambda c, v: None, restore=first)
+    assert history.details("swap").display_name is None
+
+
+def test_a_display_name_is_one_line_of_printable_text(history: FlowHistory) -> None:
+    register(history, "swap", ONE)
+    history.set_details(
+        "swap", display_name="  Nightly\nswap\x1f batch\t ", description="# A\n\nB\x00."
+    )
+    details = history.details("swap")
+    assert details.display_name == "Nightly swap batch"
+    # The description is Markdown: its lines stay, control characters go.
+    assert details.description == "# A\n\nB."
+
+
+def test_details_of_a_deleted_flow_are_refused_as_deleted(history: FlowHistory) -> None:
+    register(history, "swap", ONE)
+    history.delete("swap", lambda _c: None)
+    with pytest.raises(FlowNotPresentError):
+        history.set_details("swap", display_name="Back")
 
 
 def test_a_damaged_flow_json_reads_as_no_details(history: FlowHistory) -> None:

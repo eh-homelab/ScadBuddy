@@ -27,7 +27,7 @@ from scadbuddy.flows.models import (
     FlowVersion,
 )
 from scadbuddy.flows.reconcile import created_by, reconcile, reconcile_locked
-from scadbuddy.flows.repository import DetailsNotSavedError, FlowHistory
+from scadbuddy.flows.repository import DetailsNotSavedError, FlowHistory, FlowNotPresentError
 from scadbuddy.flows.states import FlowStates
 from scadbuddy.flows.store import FlowStore
 
@@ -123,7 +123,8 @@ class FlowDefinitions:
     ) -> Definition:
         """A new version of ``name`` with its script at ``commit`` (one of its versions):
         a new commit and a new row, with that version's approval timeout. The flow's
-        details stay as they are (#3186)."""
+        details stay as they are (#3186), except for a deleted flow, which comes back with
+        the display name and description it had at ``commit``, in the version's commit."""
         return await asyncio.to_thread(self._restore, name, commit, author, message, body)
 
     def _restore(
@@ -168,15 +169,20 @@ class FlowDefinitions:
         self._require()
         if not self.history.versions(name):
             raise UnknownFlowError(name)
-        if self.states.state(name).deleted_at is not None or not self.history.present(name):
+        if self.states.state(name).deleted_at is not None:
             raise FlowDeletedError(name)
-        commit = self.history.set_details(
-            name,
-            display_name=display_name,
-            description=description,
-            message=message,
-            body=body,
-        )
+        try:
+            # Checks that the flow is in the tree under the write lock, so a delete
+            # that lands first is refused as one.
+            commit = self.history.set_details(
+                name,
+                display_name=display_name,
+                description=description,
+                message=message,
+                body=body,
+            )
+        except FlowNotPresentError:
+            raise FlowDeletedError(name) from None
         return self._details(name).model_copy(update={"commit": commit})
 
     async def details(self, name: str) -> FlowDetails:

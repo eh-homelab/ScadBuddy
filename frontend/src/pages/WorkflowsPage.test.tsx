@@ -209,6 +209,17 @@ describe('WorkflowsPage display names (#3186)', () => {
     expect(await screen.findByText('No flow matches “nothing like it”.')).toBeInTheDocument()
   })
 
+  it("shows a flow's Markdown description in the list as plain text", async () => {
+    setFlowDetails('swap', {
+      display_name: 'Nightly swap',
+      description: '# Swap\n\nSwaps the **colour** of a [box](https://example.com/box), `fast`.\n\n- one\n- two',
+    })
+    renderPage(<WorkflowsPage tab="flows" />)
+    await screen.findByRole('list', { name: 'Flows' })
+    const text = within(flowRow('swap')!).getByTestId('flow-description')
+    expect(text.textContent).toBe('Swap Swaps the colour of a box, fast. one two')
+  })
+
   it("names a run by its flow's display name", async () => {
     setFlowDetails('swap', { display_name: 'Nightly swap' })
     render()
