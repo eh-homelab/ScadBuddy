@@ -551,8 +551,10 @@ export function CustomizePage() {
   // A preset's stored inputs, brought up to the template version before the picker cuts
   // them to the schema (spec §8.2). Current ones (or a version not known yet) pass as
   // they are, at once; ones that cannot be migrated show read-only instead.
-  // `stillWanted` is asked when the answer lands: a link that gave up waiting (#1022) must
-  // not put a late failure's inputs on screen beside the defaults it opened on.
+  // `stillWanted` is asked when a failure lands, and guards only the failure: a link that
+  // gave up waiting (#1022) must not put a late failure's inputs on screen beside the
+  // defaults it opened on. A late success is still returned; the caller must drop it
+  // itself, as the link's `Promise.race` does.
   const migratePreset = useCallback(
     (saved: JsonObject, stillWanted?: () => boolean): JsonObject | Promise<JsonObject | null> => {
       const v = typeof saved.v === 'number' ? saved.v : 0
