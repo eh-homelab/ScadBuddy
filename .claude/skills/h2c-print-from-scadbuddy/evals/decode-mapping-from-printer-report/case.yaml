@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: decode-mapping-from-printer-report
+expected_outcome: |
+  Reads the mapping [259, 770, 771] from the report and decodes it as ams_id*256+slot: slot 1 = AMS-B slot 4, slot 2 = AMS-D slot 3, slot 3 = AMS-D slot 4 (0-based ams ids 1 and 3). States that no entry is 65535 so nothing is unmapped. Lists the queued stages from stg including bed levelling, vibration (XY mech) sweep, flow dynamics calibration and nozzle offset calibration, and notes that a queued stage under auto may be skipped at run time.
+context:
+  scaffold_script: place-files.sh

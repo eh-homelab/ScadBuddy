@@ -1,0 +1,6 @@
+schema_version: "1.1"
+name: explain-unexpected-failure
+expected_outcome: |
+  Identifies the print_sliced_upload activity timing out with 'activity Heartbeat timeout' (retry state maximum attempts reached) as the failure, after slice_run completed successfully (slice_id 214, with its preset key). Explains the blob-store upload stalled, not the slicer. Recommends simply re-running the same print_output (the slice is cached by preset key so it is quick) rather than debugging the slicer or the model, and notes the run id 4b65048d... and that nothing reached the printer.
+context:
+  scaffold_script: place-files.sh
